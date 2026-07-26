@@ -44,8 +44,9 @@ Each ships before the app, stands alone, and survives the app.
 
 | Component | State |
 |---|---|
+| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model), `pl-enzymes` (digestion), `pl-fileio` (`.dna`, GenBank, FASTA), and the `pl` command. **Zero external dependencies**, 501 KB static binary, 66 tests. |
 | [`prototype/dna-reader.html`](prototype/dna-reader.html) | **Usable today.** Opens `.dna`, GenBank and FASTA; draws circular/linear maps; live restriction digest; exports GenBank, FASTA and vector SVG. One file, no install, no network — runs from a USB stick on a locked-down PC. |
-| [`reference/python/dna2gb.py`](reference/python/dna2gb.py) | **Usable today.** Bulk `.dna` → GenBank converter. Verified faithful on 41/41 files. |
+| [`reference/python/dna2gb.py`](reference/python/dna2gb.py) | Bulk `.dna` → GenBank converter. Superseded by `pl convert`, which also preserves sequence case (Biopython does not — see the file's docstring). |
 | [`docs/DNA-FORMAT.md`](docs/DNA-FORMAT.md) | Empirical spec of the `.dna` container. Validated on a 41-file corpus (138 bp → 4.64 Mb). |
 | [`reference/python/snapdna.py`](reference/python/snapdna.py) | Reader + writer, stdlib only. **Byte-exact round-trip on 41/41 files.** |
 | [`reference/python/ab1_probe.py`](reference/python/ab1_probe.py) | ABIF (`.ab1`) chromatogram reader. Parses 374/394 real traces. |
@@ -54,20 +55,33 @@ Each ships before the app, stands alone, and survives the app.
 
 ### Getting your sequences out of `.dna`, today
 
-The lock-in is the file format, and it is already broken. Either route works and
-neither uploads anything:
+The lock-in is the file format, and it is already broken. Nothing here uploads
+anything.
 
 ```bash
-# Bulk: every .dna under a folder, converted to GenBank with features and colours
-pip install biopython
-python reference/python/dna2gb.py "C:/path/to/plasmids/**/*.dna" -o converted/
+cargo build --release
+target/release/pl convert "plasmids/**/*.dna" --to genbank -o converted/
+target/release/pl info    plasmid.dna
+target/release/pl digest  plasmid.dna --unique
+target/release/pl blocks  plasmid.dna      # what the container is made of
 ```
 
-Or open `prototype/dna-reader.html` in a browser, drop a file on it, and press
-**Save GenBank** — no Python, no install, no admin rights.
+No toolchain? Open [`prototype/dna-reader.html`](prototype/dna-reader.html) in a
+browser, drop a file on it, and press **Save GenBank** — no install, no admin
+rights.
 
 GenBank is plain text and is read by ApE, UGENE, Benchling, Biopython and
 SnapGene itself, so converting costs you nothing and un-strands your data.
+
+### Building
+
+`pl-core` has no dependencies, so `cargo build` needs no network. A linker is
+the only external requirement:
+
+- **Linux/macOS** — works out of the box.
+- **Windows** — needs the MSVC linker (Visual Studio Build Tools, "Desktop
+  development with C++") or a MinGW-w64 toolchain. Rust alone is not enough;
+  `rustup` does not ship a linker. Building under WSL works today.
 
 ### What has been proven so far
 
@@ -84,10 +98,25 @@ SnapGene itself, so converting costs you nothing and un-strands your data.
 - `.dna` → GenBank conversion is **faithful on 41/41 files** — sequence,
   topology, feature coordinates, strand, multi-segment joins, colours and
   primer binding sites all verified against the source.
-- The GenBank parser agrees with Biopython on **290 of 293 real files**. All
-  three differences favour this parser: two are annotation-only files where
-  Biopython fabricates a length from the LOCUS header, and several more are
-  SnapGene-exported GenBank that Biopython refuses to parse at all.
+- The Rust reader and the independently written Python reader **agree on 41/41
+  files**, across 79 features and 16.9 Mb of bases. Two implementations of an
+  undocumented format agreeing is evidence; one agreeing with itself is not.
+- **Biopython accepts every GenBank file `pl` writes** (41/41) and reads back
+  matching coordinates, strands and joins. Biopython is the strict foreign
+  parser standing in for ApE, UGENE and Benchling.
+- `pl` **preserves sequence case; Biopython destroys it** in both directions —
+  its GenBank writer lower-cases and its reader upper-cases, verified with
+  Biopython on both ends. Seven contigs in the corpus carry soft-masked bases
+  that only survive the Rust path.
+- GenBank parsing covers **303/303 real files** and 2.26 M features, including
+  three that declare a length but ship no bases, eight standalone annotation
+  tracks with no `ORIGIN` block at all, and one that is 148 bytes of nothing —
+  all classes Biopython either mis-reports or refuses outright.
+- Content sniffing found **20 files whose extension lies**: four SCF and sixteen
+  ZTR chromatograms named `.ab1`. This is why detection never trusts the
+  extension.
+- On the 4.64 Mb *E. coli* genome: **70 ms** to parse and report, **590 ms** for
+  a 50-enzyme digest, 30 MB peak RSS.
 
 ## Try it
 

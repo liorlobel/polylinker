@@ -1,0 +1,13 @@
+[package]
+name = "pl-core"
+description = "Sequence model and coordinate arithmetic for Polylinker. No I/O, no dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately empty. pl-core is the correctness layer; anything that could be
+# wrong about a molecule lives here, and it must stay auditable and buildable
+# with no network access.
+[dependencies]

@@ -38,3 +38,8 @@ prototype/dump_gb_counts.js
 prototype/js_gb_counts.json
 prototype/xcheck_gb.py
 prototype/package.json
+
+# Rust
+/target/
+**/target/
+Cargo.lock

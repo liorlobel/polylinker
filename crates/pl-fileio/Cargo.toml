@@ -1,0 +1,16 @@
+[package]
+name = "pl-fileio"
+description = "Sequence file formats for Polylinker: SnapGene .dna, GenBank, FASTA."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pl-core.workspace = true
+
+# Corpus validation digests real plasmids to check cut/fragment invariants.
+# Not a runtime dependency: formats do not depend on enzymes.
+[dev-dependencies]
+pl-enzymes.workspace = true

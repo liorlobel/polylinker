@@ -1,0 +1,20 @@
+[package]
+name = "pl"
+description = "Polylinker command line: inspect, convert and digest sequence files."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pl"
+path = "src/main.rs"
+
+# No argument-parsing crate. The surface is small, the parsing is twenty lines,
+# and a scientific tool people are asked to trust benefits from a dependency
+# list they can read in one sitting.
+[dependencies]
+pl-core.workspace = true
+pl-enzymes.workspace = true
+pl-fileio.workspace = true

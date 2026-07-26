@@ -41,8 +41,19 @@ def check(dna_path, gb_dir, manifest):
     rec = SeqIO.read(gb, "genbank")
     problems = []
 
+    # Compared case-insensitively because Biopython normalises case at both
+    # ends of a GenBank round-trip, so this harness cannot see case even when
+    # the file is right. That is a limitation of checking a Biopython writer
+    # with a Biopython reader, and it is why the same comparison is also done
+    # against the Rust implementation, which writes ORIGIN itself.
     if str(rec.seq).upper() != doc.sequence.upper():
         problems.append(f"sequence differs ({len(rec.seq)} vs {doc.length} bp)")
+    lower_src = sum(1 for c in doc.sequence if c.islower())
+    lower_out = sum(1 for c in str(rec.seq) if c.islower())
+    if lower_src and not lower_out:
+        problems.append(
+            f"case lost: {lower_src} lowercase base(s) in the source, none after "
+            f"conversion (Biopython limitation -- see dna2gb.py)")
 
     topo = rec.annotations.get("topology", "linear")
     if (topo == "circular") != doc.is_circular:

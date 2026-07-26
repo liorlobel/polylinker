@@ -17,6 +17,20 @@ Usage
 
 Requires Biopython only for writing (pip install biopython). The .dna reading
 is done by snapdna.py, which has no dependencies at all.
+
+Known limitation: sequence case
+-------------------------------
+Biopython's GenBank writer lower-cases the sequence, and its reader upper-cases
+it -- verified with Biopython on both ends of a round-trip, including a
+hand-written mixed-case file. So this converter loses the distinction between
+upper- and lowercase bases, which in practice marks soft-masked or low-coverage
+assembly regions and non-annealing primer tails. Seven contigs in the reference
+corpus carry such bases.
+
+Everything else round-trips faithfully. If case matters to you, use the Rust
+implementation instead, which writes the ORIGIN block itself and preserves it:
+
+    pl convert plasmid.dna --to genbank
 """
 
 from __future__ import annotations

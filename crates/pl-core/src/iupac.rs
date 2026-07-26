@@ -1,0 +1,167 @@
+//! IUPAC nucleotide codes: complementation, matching, and composition.
+//!
+//! Case is preserved throughout. Lowercase is meaningful in this field —
+//! soft-masked or low-coverage assembly bases, non-annealing primer tails —
+//! and silently upper-casing destroys information the user put there.
+//! Matching routines fold case internally instead.
+
+/// Complement a single base, preserving case. Unknown bytes pass through.
+#[inline]
+pub const fn complement(b: u8) -> u8 {
+    match b {
+        b'A' => b'T',
+        b'a' => b't',
+        b'C' => b'G',
+        b'c' => b'g',
+        b'G' => b'C',
+        b'g' => b'c',
+        b'T' => b'A',
+        b't' => b'a',
+        b'U' => b'A',
+        b'u' => b'a',
+        // Ambiguity codes complement within the IUPAC alphabet.
+        b'R' => b'Y',
+        b'r' => b'y', // purine  <-> pyrimidine
+        b'Y' => b'R',
+        b'y' => b'r',
+        b'S' => b'S',
+        b's' => b's', // strong (G/C) is self-complementary
+        b'W' => b'W',
+        b'w' => b'w', // weak   (A/T) is self-complementary
+        b'K' => b'M',
+        b'k' => b'm', // keto   <-> amino
+        b'M' => b'K',
+        b'm' => b'k',
+        b'B' => b'V',
+        b'b' => b'v',
+        b'V' => b'B',
+        b'v' => b'b',
+        b'D' => b'H',
+        b'd' => b'h',
+        b'H' => b'D',
+        b'h' => b'd',
+        b'N' => b'N',
+        b'n' => b'n',
+        other => other,
+    }
+}
+
+/// Reverse complement, preserving case.
+pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter().rev().map(|&b| complement(b)).collect()
+}
+
+/// The set of concrete bases an IUPAC code stands for, as a 4-bit mask
+/// (bit 0 = A, 1 = C, 2 = G, 3 = T). Returns 0 for bytes that are not
+/// nucleotide codes, which makes them match nothing.
+#[inline]
+pub const fn code_mask(b: u8) -> u8 {
+    match b.to_ascii_uppercase() {
+        b'A' => 0b0001,
+        b'C' => 0b0010,
+        b'G' => 0b0100,
+        b'T' | b'U' => 0b1000,
+        b'R' => 0b0101, // A G
+        b'Y' => 0b1010, // C T
+        b'S' => 0b0110, // C G
+        b'W' => 0b1001, // A T
+        b'K' => 0b1100, // G T
+        b'M' => 0b0011, // A C
+        b'B' => 0b1110, // C G T
+        b'D' => 0b1101, // A G T
+        b'H' => 0b1011, // A C T
+        b'V' => 0b0111, // A C G
+        b'N' => 0b1111,
+        _ => 0,
+    }
+}
+
+/// Does a sequence base satisfy a (possibly ambiguous) pattern code?
+///
+/// Asymmetric on purpose: the pattern may be ambiguous, and the subject base
+/// must be one of the bases the pattern allows. A subject `N` therefore does
+/// *not* match a pattern `A` — an unknown base is not evidence of a site.
+#[inline]
+pub const fn matches(pattern: u8, subject: u8) -> bool {
+    let p = code_mask(pattern);
+    let s = code_mask(subject);
+    s != 0 && (s & !p) == 0
+}
+
+/// Composition counts over the four concrete bases plus everything else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Composition {
+    pub a: u64,
+    pub c: u64,
+    pub g: u64,
+    pub t: u64,
+    pub other: u64,
+}
+
+impl Composition {
+    pub fn of(seq: &[u8]) -> Self {
+        let mut c = Composition::default();
+        for &b in seq {
+            match b.to_ascii_uppercase() {
+                b'A' => c.a += 1,
+                b'C' => c.c += 1,
+                b'G' => c.g += 1,
+                b'T' | b'U' => c.t += 1,
+                _ => c.other += 1,
+            }
+        }
+        c
+    }
+
+    /// GC as a percentage of unambiguous bases. `None` when there are none,
+    /// rather than a misleading 0.0.
+    pub fn gc_percent(&self) -> Option<f64> {
+        let n = self.a + self.c + self.g + self.t;
+        if n == 0 {
+            return None;
+        }
+        Some(100.0 * (self.g + self.c) as f64 / n as f64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complement_preserves_case() {
+        assert_eq!(reverse_complement(b"AaCcGgTt"), b"aAcCgGtT".to_vec());
+    }
+
+    #[test]
+    fn ambiguity_codes_complement_correctly() {
+        assert_eq!(reverse_complement(b"RYKMBVDHSWN"), b"NWSDHBVKMRY".to_vec());
+    }
+
+    #[test]
+    fn double_complement_is_identity() {
+        let s = b"AcGtRyKmBvDhSwNn";
+        assert_eq!(reverse_complement(&reverse_complement(s)), s.to_vec());
+    }
+
+    #[test]
+    fn pattern_matching_is_asymmetric() {
+        assert!(matches(b'N', b'A')); // N pattern accepts a concrete A
+        assert!(!matches(b'A', b'N')); // an unknown base is not an A
+        assert!(matches(b'R', b'g')); // case-insensitive, R = A|G
+        assert!(!matches(b'R', b'c'));
+        assert!(!matches(b'A', b'-')); // non-nucleotides match nothing
+    }
+
+    #[test]
+    fn gc_ignores_ambiguous_bases() {
+        let c = Composition::of(b"GGCCAANNNN");
+        assert_eq!(c.other, 4);
+        // 4 of 6 unambiguous bases are G or C. Compared with a tolerance
+        // because the exact bit pattern depends on the order of operations.
+        let gc = c.gc_percent().expect("six unambiguous bases");
+        assert!((gc - 200.0 / 3.0).abs() < 1e-9, "got {gc}");
+        // No unambiguous bases means no answer, not a misleading 0.0.
+        assert_eq!(Composition::of(b"NNNN").gc_percent(), None);
+    }
+}

@@ -1,0 +1,612 @@
+//! `pl` — inspect, convert and digest sequence files.
+//!
+//! Everything is local. No network, no account, no telemetry.
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use pl_fileio::{detect, fasta, genbank, load, snapgene, Format};
+
+const USAGE: &str = "\
+pl -- Polylinker command line
+
+USAGE:
+    pl info    <file>...                 summarise each file
+    pl convert <file>... [options]       convert to GenBank or FASTA
+    pl digest  <file> [--enzyme NAME]    restriction sites
+    pl blocks  <file.dna>                anatomy of a SnapGene container
+
+CONVERT OPTIONS:
+    --to <genbank|gb|fasta|fa>   output format (default: genbank)
+    -o, --outdir <dir>           where to write (default: beside the input)
+    --stdout                     write to stdout instead of files
+
+DIGEST OPTIONS:
+    --enzyme <NAME>              restrict to one enzyme (repeatable)
+    --unique                     only enzymes that cut exactly once
+    --non-cutters                only enzymes that do not cut
+
+GLOBAL:
+    --json                       machine-readable output (info, digest)
+
+Formats are detected from content, never from the file extension.
+";
+
+/// Escape a string for JSON. Hand-written to keep the dependency list readable.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    let (cmd, rest) = args.split_first().unwrap();
+    let result = match cmd.as_str() {
+        "info" => cmd_info(rest),
+        "convert" => cmd_convert(rest),
+        "digest" => cmd_digest(rest),
+        "blocks" => cmd_blocks(rest),
+        "-V" | "--version" => {
+            println!("pl {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        other => Err(format!("unknown command '{other}'\n\n{USAGE}")),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("pl: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Split arguments into positional files and flags.
+struct Args {
+    files: Vec<PathBuf>,
+    flags: Vec<(String, Option<String>)>,
+}
+
+fn parse_args(args: &[String], valued: &[&str]) -> Result<Args, String> {
+    let mut files = Vec::new();
+    let mut flags = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if let Some(name) = a.strip_prefix("--").or_else(|| a.strip_prefix('-')) {
+            let (name, inline) = match name.split_once('=') {
+                Some((n, v)) => (n, Some(v.to_string())),
+                None => (name, None),
+            };
+            let value = if inline.is_some() {
+                inline
+            } else if valued.contains(&name) {
+                i += 1;
+                Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or_else(|| format!("--{name} needs a value"))?,
+                )
+            } else {
+                None
+            };
+            flags.push((name.to_string(), value));
+        } else {
+            files.push(PathBuf::from(a));
+        }
+        i += 1;
+    }
+    Ok(Args { files, flags })
+}
+
+impl Args {
+    fn has(&self, name: &str) -> bool {
+        self.flags.iter().any(|(k, _)| k == name)
+    }
+    fn get(&self, name: &str) -> Option<&str> {
+        self.flags
+            .iter()
+            .find(|(k, _)| k == name)
+            .and_then(|(_, v)| v.as_deref())
+    }
+    fn get_all(&self, name: &str) -> Vec<&str> {
+        self.flags
+            .iter()
+            .filter(|(k, _)| k == name)
+            .filter_map(|(_, v)| v.as_deref())
+            .collect()
+    }
+    fn require_files(&self) -> Result<(), String> {
+        if self.files.is_empty() {
+            Err("no input files".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn read(path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn title_of(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sequence".into())
+}
+
+// ---------------------------------------------------------------------------
+
+fn cmd_info(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &[])?;
+    a.require_files()?;
+
+    if a.has("json") {
+        let mut first = true;
+        println!("[");
+        for path in &a.files {
+            let data = read(path)?;
+            if !first {
+                println!(",");
+            }
+            first = false;
+            match load(&data) {
+                Err(e) => print!(
+                    "  {{{}: {}, {}: {}}}",
+                    json_str("file"),
+                    json_str(&path.display().to_string()),
+                    json_str("error"),
+                    json_str(&e.to_string())
+                ),
+                Ok((mol, fmt)) => {
+                    let sites: usize = mol.primers.iter().map(|p| p.sites.len()).sum();
+                    let lower = mol.seq.iter().filter(|b| b.is_ascii_lowercase()).count();
+                    let feats: Vec<String> = mol
+                        .features
+                        .iter()
+                        .map(|f| {
+                            format!(
+                                "{{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}}}",
+                                json_str("name"),
+                                json_str(&f.name),
+                                json_str("kind"),
+                                json_str(&f.kind),
+                                json_str("start"),
+                                f.start(),
+                                json_str("end"),
+                                f.end(),
+                                json_str("segments"),
+                                f.segments.len(),
+                                json_str("strand"),
+                                json_str(match f.strand {
+                                    pl_core::Strand::Forward => "+",
+                                    pl_core::Strand::Reverse => "-",
+                                    pl_core::Strand::Both => "both",
+                                    pl_core::Strand::Unoriented => "none",
+                                })
+                            )
+                        })
+                        .collect();
+                    print!(
+                        "  {{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: [{}]}}",
+                        json_str("file"), json_str(&path.display().to_string()),
+                        json_str("format"), json_str(fmt.name()),
+                        json_str("bp"), mol.len(),
+                        json_str("declared_bp"), mol.declared_len.unwrap_or(0),
+                        json_str("circular"), mol.topology.is_circular(),
+                        json_str("lowercase"), lower,
+                        json_str("n_primers"), mol.primers.len(),
+                        json_str("n_binding_sites"), sites,
+                        json_str("n_features"), mol.features.len(),
+                        json_str("features"), feats.join(", ")
+                    );
+                }
+            }
+        }
+        println!("\n]");
+        return Ok(());
+    }
+
+    for path in &a.files {
+        let data = read(path)?;
+        match load(&data) {
+            Err(e) => println!("{}\n   ERROR: {e}\n", path.display()),
+            Ok((mol, fmt)) => {
+                println!("{}", path.display());
+                println!("   format     {}", fmt.name());
+                if mol.sequence_absent() {
+                    println!(
+                        "   length     {} bp DECLARED, but this file carries no bases",
+                        mol.span()
+                    );
+                } else {
+                    println!("   length     {} bp", mol.len());
+                }
+                println!("   topology   {}", mol.topology.as_str());
+                match mol.gc_percent() {
+                    Some(gc) => println!("   GC         {gc:.1}%"),
+                    None => println!("   GC         n/a"),
+                }
+                let comp = mol.composition();
+                if comp.other > 0 {
+                    println!("   ambiguous  {} base(s) outside ACGT", comp.other);
+                }
+                let lower = mol.seq.iter().filter(|b| b.is_ascii_lowercase()).count();
+                if lower > 0 {
+                    println!("   lowercase  {lower} base(s) -- masked or low-confidence");
+                }
+                println!("   features   {}", mol.features.len());
+                let sites: usize = mol.primers.iter().map(|p| p.sites.len()).sum();
+                if !mol.primers.is_empty() {
+                    println!(
+                        "   primers    {} ({sites} binding site(s))",
+                        mol.primers.len()
+                    );
+                }
+                if fmt == Format::SnapGene {
+                    if let Ok(doc) = snapgene::parse(&data) {
+                        let total = doc.total_bytes();
+                        let derived = doc.derived_bytes();
+                        if total > 0 && derived > 0 {
+                            println!(
+                                "   container  {total} bytes, {:.0}% regenerable cache",
+                                100.0 * derived as f64 / total as f64
+                            );
+                        }
+                        if doc.history_present {
+                            println!(
+                                "   history    present{}",
+                                if doc.history_compressed {
+                                    " (xz-compressed)"
+                                } else {
+                                    ""
+                                }
+                            );
+                        }
+                    }
+                }
+                println!();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_convert(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["to", "outdir", "o"])?;
+    a.require_files()?;
+
+    let to = a.get("to").unwrap_or("genbank").to_ascii_lowercase();
+    let (ext, is_gb) = match to.as_str() {
+        "genbank" | "gb" | "gbk" => ("gb", true),
+        "fasta" | "fa" | "fna" => ("fa", false),
+        other => return Err(format!("unknown output format '{other}'")),
+    };
+    let outdir = a.get("outdir").or_else(|| a.get("o")).map(PathBuf::from);
+    let to_stdout = a.has("stdout");
+    let date = today();
+
+    // Two inputs can share a basename. Silently overwriting one with the other
+    // is data loss, so collisions get a suffix and are reported.
+    let mut claimed: Vec<PathBuf> = Vec::new();
+    let mut converted = 0usize;
+    let mut renamed = 0usize;
+
+    for path in &a.files {
+        let data = read(path)?;
+        let (mol, _fmt) = load(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        let title = title_of(path);
+        let text = if is_gb {
+            genbank::write(&mol, &title, date)
+        } else {
+            fasta::write(&mol, &title, 70)
+        };
+
+        if to_stdout {
+            print!("{text}");
+            converted += 1;
+            continue;
+        }
+
+        let dir = outdir.clone().unwrap_or_else(|| {
+            path.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+
+        let stem = genbank::locus_name(&title);
+        let mut dest = dir.join(format!("{stem}.{ext}"));
+        if claimed.contains(&dest) {
+            let mut n = 2;
+            loop {
+                let candidate = dir.join(format!("{stem}-{n}.{ext}"));
+                if !claimed.contains(&candidate) {
+                    dest = candidate;
+                    break;
+                }
+                n += 1;
+            }
+            renamed += 1;
+        }
+        claimed.push(dest.clone());
+        std::fs::write(&dest, text).map_err(|e| format!("{}: {e}", dest.display()))?;
+
+        println!(
+            "{:>10} bp  {:>8}  {:>4} feat  {}",
+            mol.span(),
+            mol.topology.as_str(),
+            mol.features.len(),
+            dest.display()
+        );
+        converted += 1;
+    }
+
+    if !to_stdout {
+        eprintln!("\nconverted {converted} file(s)");
+        if renamed > 0 {
+            eprintln!(
+                "{renamed} output name(s) were suffixed because inputs shared a basename -- \
+                 nothing was overwritten"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_digest(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["enzyme"])?;
+    a.require_files()?;
+    let path = &a.files[0];
+    let data = read(path)?;
+    let (mol, _) = load(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+    if mol.seq.is_empty() {
+        return Err(format!("{}: no bases to digest", path.display()));
+    }
+
+    let wanted = a.get_all("enzyme");
+    let mut results = pl_enzymes::digest_all(&mol);
+    if !wanted.is_empty() {
+        results.retain(|d| wanted.iter().any(|w| w.eq_ignore_ascii_case(d.enzyme.name)));
+        if results.is_empty() {
+            return Err(format!(
+                "no such enzyme in the built-in set: {}",
+                wanted.join(", ")
+            ));
+        }
+    }
+    if a.has("unique") {
+        results.retain(|d| d.is_unique_cutter());
+    }
+    if a.has("non-cutters") {
+        results.retain(|d| d.is_non_cutter());
+    }
+
+    if a.has("json") {
+        // Positions are 1-based indices of the base 3' of the nick, matching
+        // Biopython's Restriction module so comparison is a plain equality.
+        let items: Vec<String> = results
+            .iter()
+            .map(|d| {
+                let pos: Vec<String> = d.positions.iter().map(u64::to_string).collect();
+                format!(
+                    "  {{{}: {}, {}: {}, {}: [{}]}}",
+                    json_str("enzyme"),
+                    json_str(d.enzyme.name),
+                    json_str("site"),
+                    json_str(d.enzyme.site),
+                    json_str("positions"),
+                    pos.join(", ")
+                )
+            })
+            .collect();
+        println!(
+            "{{{}: {}, {}: {}, {}: {},\n {}: [\n{}\n ]}}",
+            json_str("file"),
+            json_str(&title_of(path)),
+            json_str("bp"),
+            mol.len(),
+            json_str("circular"),
+            mol.topology.is_circular(),
+            json_str("digests"),
+            items.join(",\n")
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} -- {} bp {}\n",
+        title_of(path),
+        mol.len(),
+        mol.topology.as_str()
+    );
+    println!(
+        "{:<10} {:>5}  {:<28} largest fragments",
+        "enzyme", "cuts", "positions"
+    );
+    for d in &results {
+        if d.positions.is_empty() && !a.has("non-cutters") {
+            continue;
+        }
+        let pos: Vec<String> = d.positions.iter().take(6).map(u64::to_string).collect();
+        let mut shown = pos.join(", ");
+        if d.positions.len() > 6 {
+            shown.push_str(", ...");
+        }
+        let frags = d.fragments(mol.len(), mol.topology);
+        let f: Vec<String> = frags.iter().take(4).map(u64::to_string).collect();
+        println!(
+            "{:<10} {:>5}  {:<28} {}",
+            d.enzyme.name,
+            d.count(),
+            shown,
+            f.join(" / ")
+        );
+    }
+
+    let uniq = results.iter().filter(|d| d.is_unique_cutter()).count();
+    let non = results.iter().filter(|d| d.is_non_cutter()).count();
+    println!(
+        "\n{uniq} unique cutter(s), {non} non-cutter(s), from {} enzymes",
+        results.len()
+    );
+    Ok(())
+}
+
+fn cmd_blocks(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &[])?;
+    a.require_files()?;
+    let path = &a.files[0];
+    let data = read(path)?;
+    if detect(&data) != Some(Format::SnapGene) {
+        return Err(format!("{}: not a SnapGene .dna file", path.display()));
+    }
+    let doc = snapgene::parse(&data).map_err(|e| e.to_string())?;
+    let total = doc.total_bytes().max(1);
+
+    println!(
+        "{}  --  {} bytes in {} blocks\n",
+        title_of(path),
+        doc.total_bytes(),
+        doc.blocks.len()
+    );
+    println!(
+        "{:>4}  {:<20} {:>10} {:>7}",
+        "type", "meaning", "bytes", "share"
+    );
+    for b in &doc.blocks {
+        let meaning = match b.kind {
+            snapgene::block::SEQUENCE => "sequence",
+            snapgene::block::CUTSITE_CACHE => "cut-site cache",
+            snapgene::block::ENZYME_TABLE => "enzyme table",
+            snapgene::block::PRIMERS => "primers",
+            snapgene::block::NOTES => "notes",
+            snapgene::block::HISTORY_TREE => "history tree",
+            snapgene::block::EXTRA_PROPS => "extra properties",
+            snapgene::block::HEADER => "header",
+            snapgene::block::FEATURES => "features",
+            snapgene::block::HISTORY_NODE => "history node",
+            _ => "unknown",
+        };
+        println!(
+            "{:>4}  {:<20} {:>10} {:>6.1}%{}",
+            b.kind,
+            meaning,
+            b.size_on_disk(),
+            100.0 * b.size_on_disk() as f64 / total as f64,
+            if b.is_derived() { "   regenerable" } else { "" }
+        );
+    }
+    let derived = doc.derived_bytes();
+    println!(
+        "\n{:.0}% of this file is a cache of (sequence x enzyme set) and is a pure function \
+         of data held elsewhere in it.",
+        100.0 * derived as f64 / total as f64
+    );
+    Ok(())
+}
+
+/// Local date as `(day, month_index, year)`.
+///
+/// Computed from the system clock without pulling in a date crate: days since
+/// the Unix epoch through the civil-calendar algorithm (Howard Hinnant's
+/// `civil_from_days`). UTC, which is the right choice for a file header.
+fn today() -> (u32, usize, i32) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let z = secs.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (d, (m - 1) as usize, y as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_parse_in_both_spellings() {
+        let a = parse_args(
+            &[
+                "x.dna".into(),
+                "--to".into(),
+                "fasta".into(),
+                "--outdir=out".into(),
+                "--stdout".into(),
+            ],
+            &["to", "outdir"],
+        )
+        .unwrap();
+        assert_eq!(a.files.len(), 1);
+        assert_eq!(a.get("to"), Some("fasta"));
+        assert_eq!(a.get("outdir"), Some("out"));
+        assert!(a.has("stdout"));
+    }
+
+    #[test]
+    fn repeated_flags_all_survive() {
+        let a = parse_args(
+            &[
+                "--enzyme".into(),
+                "EcoRI".into(),
+                "--enzyme".into(),
+                "BamHI".into(),
+            ],
+            &["enzyme"],
+        )
+        .unwrap();
+        assert_eq!(a.get_all("enzyme"), vec!["EcoRI", "BamHI"]);
+    }
+
+    #[test]
+    fn a_valued_flag_without_its_value_is_an_error() {
+        assert!(parse_args(&["--to".into()], &["to"]).is_err());
+    }
+
+    #[test]
+    fn civil_calendar_matches_known_dates() {
+        // Sanity-check the epoch and a leap day via the same algorithm.
+        fn from_secs(secs: i64) -> (u32, usize, i32) {
+            let z = secs.div_euclid(86_400) + 719_468;
+            let era = z.div_euclid(146_097);
+            let doe = z.rem_euclid(146_097);
+            let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+            let y = yoe + era * 400;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+            let m = if mp < 10 { mp + 3 } else { mp - 9 };
+            let y = if m <= 2 { y + 1 } else { y };
+            (d, (m - 1) as usize, y as i32)
+        }
+        assert_eq!(from_secs(0), (1, 0, 1970));
+        assert_eq!(from_secs(951_782_400), (29, 1, 2000)); // 2000-02-29
+        assert_eq!(from_secs(1_774_483_200), (26, 2, 2026)); // 2026-03-26
+    }
+}

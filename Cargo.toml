@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pl-core",
+    "crates/pl-enzymes",
+    "crates/pl-fileio",
+    "bins/pl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/polylinker/polylinker"
+
+[workspace.dependencies]
+pl-core = { path = "crates/pl-core", version = "0.1.0" }
+pl-enzymes = { path = "crates/pl-enzymes", version = "0.1.0" }
+pl-fileio = { path = "crates/pl-fileio", version = "0.1.0" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
