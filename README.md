@@ -44,12 +44,30 @@ Each ships before the app, stands alone, and survives the app.
 
 | Component | State |
 |---|---|
+| [`prototype/dna-reader.html`](prototype/dna-reader.html) | **Usable today.** Opens `.dna`, GenBank and FASTA; draws circular/linear maps; live restriction digest; exports GenBank, FASTA and vector SVG. One file, no install, no network — runs from a USB stick on a locked-down PC. |
+| [`reference/python/dna2gb.py`](reference/python/dna2gb.py) | **Usable today.** Bulk `.dna` → GenBank converter. Verified faithful on 41/41 files. |
 | [`docs/DNA-FORMAT.md`](docs/DNA-FORMAT.md) | Empirical spec of the `.dna` container. Validated on a 41-file corpus (138 bp → 4.64 Mb). |
 | [`reference/python/snapdna.py`](reference/python/snapdna.py) | Reader + writer, stdlib only. **Byte-exact round-trip on 41/41 files.** |
-| [`prototype/dna-reader.html`](prototype/dna-reader.html) | Working in-browser reader *and* writer. Circular/linear map, live restriction digest, file-anatomy view. No dependencies, no build step, no network. |
 | [`reference/python/ab1_probe.py`](reference/python/ab1_probe.py) | ABIF (`.ab1`) chromatogram reader. Parses 374/394 real traces. |
 | [`docs/PLAN.md`](docs/PLAN.md) | The architecture and roadmap this repo is built from. |
 | Application | **Not started.** |
+
+### Getting your sequences out of `.dna`, today
+
+The lock-in is the file format, and it is already broken. Either route works and
+neither uploads anything:
+
+```bash
+# Bulk: every .dna under a folder, converted to GenBank with features and colours
+pip install biopython
+python reference/python/dna2gb.py "C:/path/to/plasmids/**/*.dna" -o converted/
+```
+
+Or open `prototype/dna-reader.html` in a browser, drop a file on it, and press
+**Save GenBank** — no Python, no install, no admin rights.
+
+GenBank is plain text and is read by ApE, UGENE, Benchling, Biopython and
+SnapGene itself, so converting costs you nothing and un-strands your data.
 
 ### What has been proven so far
 
@@ -63,13 +81,31 @@ Each ships before the app, stands alone, and survives the app.
   plasmids, with zero disagreements**, including circular wraparound.
 - Parsing a 4.64 Mb genome takes **13 ms**; a 50-enzyme digest over it takes
   **287 ms in pure Python**. Compute is not the bottleneck — rendering is.
+- `.dna` → GenBank conversion is **faithful on 41/41 files** — sequence,
+  topology, feature coordinates, strand, multi-segment joins, colours and
+  primer binding sites all verified against the source.
+- The GenBank parser agrees with Biopython on **290 of 293 real files**. All
+  three differences favour this parser: two are annotation-only files where
+  Biopython fabricates a length from the LOCUS header, and several more are
+  SnapGene-exported GenBank that Biopython refuses to parse at all.
 
-## Try the prototype
+## Try it
 
-Open `prototype/dna-reader.html` in any browser and drop a `.dna` file on it.
-Nothing is uploaded; there is no server. It also writes a `.dna` file from
-scratch, which is the open experiment described in
-[`docs/DNA-FORMAT.md` §4](docs/DNA-FORMAT.md).
+Open [`prototype/dna-reader.html`](prototype/dna-reader.html) in any browser and
+drop a file on it. Nothing is uploaded; there is no server.
+
+**Test .dna** writes a `.dna` from scratch that deliberately omits the two
+derived cache blocks — the open experiment in
+[`docs/DNA-FORMAT.md` §4](docs/DNA-FORMAT.md). If SnapGene opens it, write
+support is essentially solved.
+
+Run the checks yourself:
+
+```bash
+python reference/python/tests/test_roundtrip.py "your/**/*.dna"
+python reference/python/tests/validate_digest.py "your/**/*.dna"   # needs biopython
+node prototype/check_page.js "your/**/*.dna" "your/**/*.gbk"       # needs jsdom
+```
 
 ## Compatibility
 

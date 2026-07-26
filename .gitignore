@@ -32,3 +32,9 @@ corpus/
 
 # Build/test scratch
 *.log
+node_modules/
+prototype/diag*.js
+prototype/dump_gb_counts.js
+prototype/js_gb_counts.json
+prototype/xcheck_gb.py
+prototype/package.json
