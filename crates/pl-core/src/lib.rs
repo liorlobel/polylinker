@@ -11,9 +11,13 @@
 //! 0-based half-open happens only where an external convention demands it,
 //! and is always spelled out at that site.
 
+pub mod base64;
 pub mod iupac;
+pub mod seguid;
+pub mod sha1;
 
 pub use iupac::{complement, matches, reverse_complement, Composition};
+pub use seguid::{cdseguid, csseguid, ldseguid, lsseguid};
 
 /// Whether the molecule's ends join.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

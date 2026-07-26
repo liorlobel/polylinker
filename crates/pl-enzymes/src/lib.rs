@@ -496,6 +496,69 @@ mod tests {
         assert_eq!(cuts(b"CCCGGG", Topology::Linear, "XmaI"), vec![2]);
     }
 
+    /// The property `docs/PLAN.md` §7.12.3 singles out as "where origin bugs
+    /// live": on a circle there is no privileged starting point, so rotating
+    /// the sequence must move every cut site by the same amount and create or
+    /// destroy none.
+    #[test]
+    fn the_cut_site_set_of_a_circle_is_invariant_under_rotation() {
+        let seqs = [
+            "GAATTCAAAAGGATCCTTTTAAGCTTGGGGCTGCAGCCCC",
+            // A site deliberately straddling the origin: TTC....GAA reads
+            // GAATTC across the join.
+            "TTCGGGGGGGGGGAA",
+            "ACGTACGTACGTACGTACGTACGT",
+            "GGATCCGGATCCGGATCC",
+        ];
+        for seq in seqs {
+            let n = seq.len() as u64;
+            for e in ENZYMES {
+                let base = cut_positions(seq.as_bytes(), Topology::Circular, e);
+                for k in 1..seq.len() {
+                    let rotated = pl_core::seguid::rotate(seq, k as isize);
+                    let got = cut_positions(rotated.as_bytes(), Topology::Circular, e);
+
+                    // A cut at 1-based p in the original sits at
+                    // ((p - 1 - k) mod n) + 1 after rotating k off the front.
+                    let mut want: Vec<u64> = base
+                        .iter()
+                        .map(|&p| (p as i64 - 1 - k as i64).rem_euclid(n as i64) as u64 + 1)
+                        .collect();
+                    want.sort_unstable();
+
+                    assert_eq!(
+                        got,
+                        want,
+                        "{} on {seq:?} rotated by {k}: {} sites became {}",
+                        e.name,
+                        base.len(),
+                        got.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_linear_molecule_is_not_rotation_invariant_and_should_not_be() {
+        // The counterpart to the property above: rotating a linear molecule
+        // changes what it is, so its sites are free to change. If this ever
+        // started passing, circular handling would have leaked into the
+        // linear path.
+        let seq = "TTCGGGGGGGGGGAA";
+        let e = by_name("EcoRI").unwrap();
+        assert!(cut_positions(seq.as_bytes(), Topology::Linear, e).is_empty());
+
+        // Rotating 12 off the front brings the site into the middle:
+        // "GAA" + "TTCGGGGGGGGG" == "GAATTCGGGGGGGGG".
+        let rotated = pl_core::seguid::rotate(seq, 12);
+        assert_eq!(rotated, "GAATTCGGGGGGGGG");
+        assert_eq!(
+            cut_positions(rotated.as_bytes(), Topology::Linear, e),
+            vec![2]
+        );
+    }
+
     #[test]
     fn table_is_sorted_and_free_of_duplicates() {
         let mut names: Vec<_> = ENZYMES.iter().map(|e| e.name).collect();

@@ -382,6 +382,111 @@ fn every_file_is_identified_from_content() {
     }
 }
 
+/// Rotating a real plasmid must not change what molecule it is.
+///
+/// This is the assertion `docs/PLAN.md` §7.12.1 asks for — "every assertion
+/// about a molecule is an assertion about its `cdseguid`" — applied to the one
+/// operation that is guaranteed to be a no-op on a circle. It ties three
+/// separate pieces of machinery together: the reader, `Molecule::rotate`, and
+/// the checksum. A bug in any of them shows up here.
+#[test]
+fn rotating_a_plasmid_preserves_its_identity() {
+    let files = files_with(&["dna"]);
+    if files.is_empty() {
+        return skip("rotating_a_plasmid_preserves_its_identity");
+    }
+
+    let mut checked = 0usize;
+    let mut rotations = 0usize;
+    let mut skipped_ambiguous = 0usize;
+    let mut failures = Vec::new();
+
+    for path in &files {
+        let Ok(raw) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(doc) = snapgene::parse(&raw) else {
+            continue;
+        };
+        let mol = doc.molecule;
+        if !mol.topology.is_circular() || mol.seq.is_empty() || mol.len() > 300_000 {
+            continue;
+        }
+        // SEGUID is defined over unambiguous DNA; anything else is skipped
+        // rather than silently coerced.
+        let seq: String = String::from_utf8_lossy(&mol.seq).to_uppercase();
+        if !seq.chars().all(|c| matches!(c, 'A' | 'C' | 'G' | 'T')) {
+            skipped_ambiguous += 1;
+            continue;
+        }
+        let rc = String::from_utf8_lossy(&pl_core::reverse_complement(seq.as_bytes())).into_owned();
+        let Ok(expected) = pl_core::cdseguid(&seq, &rc) else {
+            skipped_ambiguous += 1;
+            continue;
+        };
+        checked += 1;
+
+        // A handful of rotations, including ones that land mid-feature.
+        let n = mol.len();
+        for frac in [1u64, 7, 3, 2] {
+            let origin = (n / frac).max(1);
+            let mut rotated = mol.clone();
+            if !rotated.rotate(origin) {
+                failures.push(format!("{}: rotate({origin}) refused", path.display()));
+                continue;
+            }
+            rotations += 1;
+
+            if rotated.len() != n {
+                failures.push(format!("{}: rotation changed the length", path.display()));
+                continue;
+            }
+            let rseq: String = String::from_utf8_lossy(&rotated.seq).to_uppercase();
+            let rrc =
+                String::from_utf8_lossy(&pl_core::reverse_complement(rseq.as_bytes())).into_owned();
+            match pl_core::cdseguid(&rseq, &rrc) {
+                Ok(got) if got == expected => {}
+                Ok(got) => failures.push(format!(
+                    "{}: rotating to {origin} changed the checksum\n     was {expected}\n     now {got}",
+                    path.display()
+                )),
+                Err(e) => failures.push(format!("{}: {e}", path.display())),
+            }
+
+            // Annotations must travel with the bases they describe.
+            if rotated.features.len() != mol.features.len() {
+                failures.push(format!("{}: rotation lost features", path.display()));
+            }
+            for f in &rotated.features {
+                if f.end() > n {
+                    failures.push(format!(
+                        "{}: feature '{}' ends at {} past the {n} bp molecule",
+                        path.display(),
+                        f.name,
+                        f.end()
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "rotation identity: {checked} plasmids x {} rotations = {rotations} checks, \
+         {skipped_ambiguous} skipped for ambiguous bases",
+        if checked > 0 {
+            rotations / checked.max(1)
+        } else {
+            0
+        }
+    );
+    assert!(
+        failures.is_empty(),
+        "rotation changed a molecule:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
 #[test]
 fn digest_invariants_hold_on_real_plasmids() {
     let files = files_with(&["dna"]);

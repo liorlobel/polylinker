@@ -44,7 +44,8 @@ Each ships before the app, stands alone, and survives the app.
 
 | Component | State |
 |---|---|
-| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model), `pl-enzymes` (digestion), `pl-fileio` (`.dna`, GenBank, FASTA), `pl-wasm` (browser ABI), and the `pl` command. **Zero external dependencies**, 365 KB static binary, 83 tests. |
+| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model, SEGUID checksums), `pl-enzymes` (digestion), `pl-fileio` (`.dna`, GenBank, FASTA), `pl-wasm` (browser ABI), and the `pl` command. **Zero external dependencies**, 365 KB static binary. |
+| [`bins/pl-gui`](bins/pl-gui) | **The desktop app**, `polylinker.exe`. egui; one static binary, no webview. |
 | `prototype/dna-reader.html` | **Usable today.** The same Rust core compiled to wasm32 and inlined into one HTML file: opens `.dna`, GenBank and FASTA, draws maps, digests, exports GenBank/FASTA/SVG. No install, no network, no account — runs from a USB stick on a locked-down PC. Built by [`tools/build-web.ps1`](tools/build-web.ps1); not committed, because it is 257 KB of base64 that changes every rebuild. |
 | [`reference/python/dna2gb.py`](reference/python/dna2gb.py) | Bulk `.dna` → GenBank converter. Superseded by `pl convert`, which also preserves sequence case (Biopython does not — see the file's docstring). |
 | [`docs/DNA-FORMAT.md`](docs/DNA-FORMAT.md) | Empirical spec of the `.dna` container. Validated on a 41-file corpus (138 bp → 4.64 Mb). |
@@ -60,10 +61,28 @@ anything.
 
 ```bash
 cargo build --release
-target/release/pl convert "plasmids/**/*.dna" --to genbank -o converted/
-target/release/pl info    plasmid.dna
-target/release/pl digest  plasmid.dna --unique
-target/release/pl blocks  plasmid.dna      # what the container is made of
+target/release/pl convert  "plasmids/**/*.dna" --to genbank -o converted/
+target/release/pl info     plasmid.dna
+target/release/pl digest   plasmid.dna --unique
+target/release/pl blocks   plasmid.dna      # what the container is made of
+target/release/pl checksum plasmid.dna      # SEGUID v2 identity
+```
+
+### Why there is a checksum command
+
+A plasmid has no canonical form: rotation, strand choice, annotation order and
+feature-name spelling are all free. So "is this the same molecule?" cannot be
+answered by comparing files, and a GenBank diff produces false failures while
+hiding real ones.
+
+`cdseguid` is invariant under exactly the freedoms a circular duplex has, and
+nothing else. Converting a `.dna` to GenBank and checksumming both gives the
+same answer — which is what makes the conversion *provably* lossless rather than
+merely plausible:
+
+```text
+pACYC184-Ppho-fab2-6his.dna   cdseguid=vdhk71L0TZ6x3sJznO5P3_jLRlw
+pACYC184-Ppho-fa.gb           cdseguid=vdhk71L0TZ6x3sJznO5P3_jLRlw
 ```
 
 No toolchain on the machine that has the files? Build the browser tool once and
@@ -140,6 +159,15 @@ Built and verified natively on Windows (MSVC 14.44, Rust 1.97.1) and on Linux.
 - Content sniffing found **20 files whose extension lies**: four SCF and sixteen
   ZTR chromatograms named `.ab1`. This is why detection never trusts the
   extension.
+- **SEGUID v2 checksums agree exactly with the reference implementation** (the
+  Python `seguid` 0.2.1) on **148/148 sequences across all five forms and
+  14.5 Mb** — generated palindromes, homopolymers, periodic and near-periodic
+  sequences, and real molecules from the corpus.
+- Rotating a real plasmid **preserves its `cdseguid`**, checked over 36
+  rotations of 9 plasmids. The restriction-site set of a circular sequence is
+  invariant under rotation, tested exhaustively over every rotation of several
+  sequences and all 50 enzymes — the property `docs/PLAN.md` calls "where origin
+  bugs live".
 - On the 4.64 Mb *E. coli* genome (a 17.7 MB `.dna`): **70 ms** to parse and
   report and **590 ms** for a 50-enzyme digest on Linux; **103 ms** and
   **1,195 ms** natively on Windows. 30 MB peak RSS.

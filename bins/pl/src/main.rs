@@ -15,6 +15,7 @@ USAGE:
     pl convert <file>... [options]       convert to GenBank or FASTA
     pl digest  <file> [--enzyme NAME]    restriction sites
     pl blocks  <file.dna>                anatomy of a SnapGene container
+    pl checksum <file>...                SEGUID v2 checksums
 
 CONVERT OPTIONS:
     --to <genbank|gb|fasta|fa>   output format (default: genbank)
@@ -63,6 +64,7 @@ fn main() -> ExitCode {
         "convert" => cmd_convert(rest),
         "digest" => cmd_digest(rest),
         "blocks" => cmd_blocks(rest),
+        "checksum" => cmd_checksum(rest),
         "-V" | "--version" => {
             println!("pl {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -521,6 +523,134 @@ fn cmd_blocks(args: &[String]) -> Result<(), String> {
         100.0 * derived as f64 / total as f64
     );
     Ok(())
+}
+
+/// SEGUID v2 checksums for a molecule.
+///
+/// Reports the form whose invariances are the molecule's own: `cdseguid` for a
+/// circular duplex, `ldseguid` for a linear one.
+///
+/// `--stdin-json` takes `[{"label":..,"seq":..}]` and emits all five forms for
+/// each. That mode exists for the cross-check against the reference
+/// implementation, not for interactive use.
+fn cmd_checksum(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &[])?;
+
+    if a.has("stdin-json") {
+        let mut input = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for (label, seq) in parse_label_seq_json(&input)? {
+            let rc =
+                String::from_utf8_lossy(&pl_core::reverse_complement(seq.as_bytes())).into_owned();
+            let f = |r: Result<String, pl_core::seguid::Error>| match r {
+                Ok(v) => json_str(&v),
+                Err(e) => json_str(&format!("ERROR: {e}")),
+            };
+            out.push(format!(
+                "{{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}}}",
+                json_str("label"),
+                json_str(&label),
+                json_str("seguid"),
+                f(pl_core::seguid::seguid(&seq)),
+                json_str("lsseguid"),
+                f(pl_core::lsseguid(&seq)),
+                json_str("csseguid"),
+                f(pl_core::csseguid(&seq)),
+                json_str("ldseguid"),
+                f(pl_core::ldseguid(&seq, &rc)),
+                json_str("cdseguid"),
+                f(pl_core::cdseguid(&seq, &rc)),
+            ));
+        }
+        println!("[{}]", out.join(",\n "));
+        return Ok(());
+    }
+
+    a.require_files()?;
+    for path in &a.files {
+        let data = read(path)?;
+        let (mol, _) = load(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        // SEGUID is defined over unambiguous uppercase DNA. Say what was done
+        // rather than quietly folding case or dropping ambiguity codes: a
+        // checksum is an identity claim, and a silently altered input makes it
+        // a false one.
+        let seq: String = String::from_utf8_lossy(&mol.seq).to_uppercase();
+        println!("{}", title_of(path));
+        if seq.is_empty() {
+            println!("   no sequence to checksum");
+            continue;
+        }
+        if let Some(bad) = seq.chars().find(|c| !matches!(c, 'A' | 'C' | 'G' | 'T')) {
+            println!("   contains {bad:?}; SEGUID is defined over unambiguous DNA only");
+            continue;
+        }
+        let lower = mol.seq.iter().filter(|b| b.is_ascii_lowercase()).count();
+        if lower > 0 {
+            println!("   note: {lower} lowercase base(s) upper-cased for the checksum");
+        }
+        let rc = String::from_utf8_lossy(&pl_core::reverse_complement(seq.as_bytes())).into_owned();
+        let duplex = if mol.topology.is_circular() {
+            pl_core::cdseguid(&seq, &rc)
+        } else {
+            pl_core::ldseguid(&seq, &rc)
+        };
+        match duplex {
+            Ok(v) => println!("   {v}"),
+            Err(e) => println!("   {e}"),
+        }
+        match pl_core::lsseguid(&seq) {
+            Ok(v) => println!("   {v}   (this strand alone)"),
+            Err(e) => println!("   lsseguid: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Minimal reader for `[{"label": "..", "seq": ".."}, ...]`.
+///
+/// Hand-rolled to keep the binary dependency-free. It only has to survive the
+/// cross-check harness's own output, which is generated rather than typed.
+fn parse_label_seq_json(s: &str) -> Result<Vec<(String, String)>, String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut key: Option<String> = None;
+    let (mut label, mut seq) = (None, None);
+    while i < chars.len() {
+        match chars[i] {
+            '"' => {
+                let start = i + 1;
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    if chars[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                let text: String = chars[start..i.min(chars.len())].iter().collect();
+                match key.take() {
+                    Some(k) if k == "label" => label = Some(text),
+                    Some(k) if k == "seq" => seq = Some(text),
+                    Some(_) => {}
+                    None => key = Some(text),
+                }
+            }
+            '}' => {
+                if let (Some(l), Some(q)) = (label.take(), seq.take()) {
+                    out.push((l, q));
+                }
+                key = None;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if out.is_empty() {
+        return Err("no {label, seq} objects found on stdin".into());
+    }
+    Ok(out)
 }
 
 /// Local date as `(day, month_index, year)`.
