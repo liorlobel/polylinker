@@ -59,7 +59,7 @@ Each ships before the app, stands alone, and survives the app.
 - Blocks 2 and 3 — jointly **78% of a typical file** — are regenerable caches
   (an enzyme recognition table and its cut-position index), not user data. A
   writer can omit them.
-- Restriction digest agrees with Biopython on **5,636 cut sites across 34 real
+- Restriction digest agrees with Biopython on **5,587 cut sites across 33 real
   plasmids, with zero disagreements**, including circular wraparound.
 - Parsing a 4.64 Mb genome takes **13 ms**; a 50-enzyme digest over it takes
   **287 ms in pure Python**. Compute is not the bottleneck — rendering is.

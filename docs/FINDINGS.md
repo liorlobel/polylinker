@@ -82,8 +82,8 @@ inside the application.
 
 | Metric | Result |
 |---|---|
-| Plasmids compared | 34 |
-| Cut sites cross-checked | **5,636** |
+| Real plasmids compared | 33 |
+| Cut sites cross-checked | **5,587** |
 | Enzymes disagreeing | **0** |
 
 Includes circular wraparound, which is where naive implementations fail. This is

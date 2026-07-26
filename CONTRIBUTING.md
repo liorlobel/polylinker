@@ -41,7 +41,7 @@ Therefore:
 - **No biology routine is merged without a differential test against an
   established implementation.** Biopython, pydna and NEB's published values are
   the oracles. See `reference/python/tests/validate_digest.py` for the pattern —
-  it cross-checks 5,636 cut sites across 34 real plasmids.
+  it cross-checks 5,587 cut sites across 33 real plasmids.
 - **Prefer property tests over examples** where a property exists. "Rotating a
   circular sequence does not change its restriction-site set" catches a whole
   class of origin-spanning bugs that no example test will.

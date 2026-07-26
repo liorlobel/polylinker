@@ -10,7 +10,8 @@ import sys
 import os
 import glob
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# snapdna lives one level up, in reference/python/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import snapdna  # noqa: E402
 
 from Bio.Seq import Seq                       # noqa: E402

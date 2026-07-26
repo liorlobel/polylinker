@@ -10,9 +10,9 @@ Checks, per file:
 import glob
 import os
 import sys
-import re
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# snapdna lives one level up, in reference/python/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import snapdna  # noqa: E402
 
 IUPAC = set("ACGTRYSWKMBDHVNacgtryswkmbdhvn")
