@@ -487,6 +487,150 @@ fn rotating_a_plasmid_preserves_its_identity() {
     );
 }
 
+/// Edit a real plasmid, then undo everything, and it must be the same molecule.
+///
+/// This is the op log's central claim tested against files nobody wrote for it.
+/// It ties together the reader, the edit operations, feature coordinate
+/// shifting, lazy replay and the checksum: if any one of them loses information,
+/// the `cdseguid` will not come back.
+///
+/// The failure it is really guarding against is silent — a sequence that
+/// survives an edit-and-undo while its annotations end up pointing at the wrong
+/// bases. Comparing the checksum alone would miss that, so features are checked
+/// too.
+#[test]
+fn editing_and_undoing_a_real_plasmid_restores_it_exactly() {
+    let files = files_with(&["dna"]);
+    if files.is_empty() {
+        return skip("editing_and_undoing_a_real_plasmid_restores_it_exactly");
+    }
+
+    let mut checked = 0usize;
+    let mut edits = 0usize;
+    let mut failures = Vec::new();
+
+    for path in &files {
+        let Ok(raw) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(doc) = snapgene::parse(&raw) else {
+            continue;
+        };
+        let mol = doc.molecule;
+        if mol.seq.is_empty() || mol.len() > 300_000 || mol.features.is_empty() {
+            continue;
+        }
+        let seq: String = String::from_utf8_lossy(&mol.seq).to_uppercase();
+        if !seq.chars().all(|c| matches!(c, 'A' | 'C' | 'G' | 'T')) {
+            continue;
+        }
+        let checksum = |m: &pl_core::Molecule| -> Option<String> {
+            let s: String = String::from_utf8_lossy(&m.seq).to_uppercase();
+            let rc =
+                String::from_utf8_lossy(&pl_core::reverse_complement(s.as_bytes())).into_owned();
+            if m.topology.is_circular() {
+                pl_core::cdseguid(&s, &rc).ok()
+            } else {
+                pl_core::ldseguid(&s, &rc).ok()
+            }
+        };
+        let Some(before) = checksum(&mol) else {
+            continue;
+        };
+        let features_before: Vec<(String, u64, u64)> = mol
+            .features
+            .iter()
+            .map(|f| (f.name.clone(), f.start(), f.end()))
+            .collect();
+        checked += 1;
+
+        let n = mol.len();
+        let mut log = pl_core::OpLog::new(mol.clone());
+
+        // A plausible session: insert a linker, delete somewhere else, add a
+        // feature, and — if it is circular — move the origin.
+        let mut program = vec![
+            pl_core::OpKind::InsertAt {
+                at: n / 3,
+                seq: "GAATTCGGATCC".into(),
+            },
+            pl_core::OpKind::DeleteRange {
+                start: n / 2,
+                len: 25,
+            },
+            pl_core::OpKind::SetFeature {
+                index: None,
+                feature: Box::new(pl_core::Feature::new("inserted linker", "misc_feature")),
+            },
+        ];
+        if mol.topology.is_circular() {
+            program.push(pl_core::OpKind::Rotate { origin: n / 4 });
+        }
+
+        let mut applied = 0usize;
+        for kind in program {
+            // SetFeature with no segments is legal but pointless; give it one.
+            let kind = match kind {
+                pl_core::OpKind::SetFeature { index, mut feature } => {
+                    feature.segments.push(pl_core::Segment::new(10, 30));
+                    pl_core::OpKind::SetFeature { index, feature }
+                }
+                other => other,
+            };
+            if log.apply(kind, "corpus-test").is_ok() {
+                applied += 1;
+                edits += 1;
+            }
+        }
+        if applied == 0 {
+            continue;
+        }
+
+        // The edits must have actually changed the molecule, or the test is
+        // asserting nothing.
+        if checksum(log.current()) == Some(before.clone()) {
+            failures.push(format!(
+                "{}: {applied} edits left the checksum unchanged; the test is vacuous",
+                path.display()
+            ));
+            continue;
+        }
+
+        while log.undo().is_ok() {}
+
+        match checksum(log.current()) {
+            Some(after) if after == before => {}
+            Some(after) => failures.push(format!(
+                "{}: undoing {applied} edits did not restore it\n     was {before}\n     now {after}",
+                path.display()
+            )),
+            None => failures.push(format!("{}: unreadable after undo", path.display())),
+        }
+
+        let features_after: Vec<(String, u64, u64)> = log
+            .current()
+            .features
+            .iter()
+            .map(|f| (f.name.clone(), f.start(), f.end()))
+            .collect();
+        if features_after != features_before {
+            failures.push(format!(
+                "{}: {} features before, {} after, and the coordinates differ",
+                path.display(),
+                features_before.len(),
+                features_after.len()
+            ));
+        }
+    }
+
+    eprintln!("op log: {checked} plasmids, {edits} edits applied and undone");
+    assert!(
+        failures.is_empty(),
+        "edit/undo lost information:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
 #[test]
 fn digest_invariants_hold_on_real_plasmids() {
     let files = files_with(&["dna"]);

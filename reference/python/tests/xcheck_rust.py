@@ -81,7 +81,8 @@ def compare(path, rust, doc):
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
-    binary, pattern = sys.argv[1], sys.argv[2]
+    # Absolute: see the note in xcheck_seguid.py.
+    binary, pattern = os.path.abspath(sys.argv[1]), sys.argv[2]
 
     files = sorted(f for f in glob.glob(pattern, recursive=True) if os.path.isfile(f))
     if not files:

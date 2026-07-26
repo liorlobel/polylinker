@@ -13,6 +13,7 @@ Usage:
 """
 
 import json
+import os
 import random
 import subprocess
 import sys
@@ -78,7 +79,8 @@ def pydna_cut(case):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    pl = sys.argv[1]
+    # Absolute: see the note in xcheck_seguid.py.
+    pl = os.path.abspath(sys.argv[1])
     cases = build_cases()
 
     payload = "\n".join(

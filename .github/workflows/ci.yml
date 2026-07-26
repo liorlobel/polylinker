@@ -1,0 +1,137 @@
+name: CI
+
+# Everything in this file has been run by hand at some point. That is exactly
+# the problem it exists to fix: a number nobody re-checks is a number that
+# quietly stops being true.
+#
+# Note what is *not* here: the .dna corpus. Those files are not redistributable
+# (Addgene's terms are noncommercial-only with an anti-scraping clause, and lab
+# files belong to their labs), so the corpus tests skip unless PL_CORPUS points
+# somewhere. Everything below runs on synthetic or committed data.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # eframe needs system libraries on Linux; the other two ship theirs.
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Unit tests
+        run: cargo test --workspace --lib --bins
+
+      - name: Build release
+        run: cargo build --workspace --release
+
+      # The corpus tests are expected to skip here. Running them anyway proves
+      # they skip cleanly rather than failing when PL_CORPUS is unset.
+      - name: Corpus tests (skip without a corpus)
+        run: cargo test -p pl-fileio --test corpus -- --nocapture
+
+  wasm:
+    name: wasm32 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the browser core
+        run: cargo build -p pl-wasm --target wasm32-unknown-unknown --profile wasm
+      - name: Drive the real module
+        run: |
+          cargo build -p pl --release
+          node crates/pl-wasm/tests/drive_wasm.mjs \
+            target/wasm32-unknown-unknown/wasm/pl_wasm.wasm \
+            target/release/pl
+
+  oracles:
+    name: differential tests and benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The whole point of these jobs: our answers are checked against tools
+      # that are not ours.
+      - name: Install the oracles
+        run: pip install biopython seguid pydna
+
+      - name: Build
+        run: cargo build -p pl --release
+
+      - name: SEGUID checksums vs the reference implementation
+        run: python reference/python/tests/xcheck_seguid.py target/release/pl
+
+      - name: Digest fragments and PCR vs pydna
+        run: python reference/python/tests/xcheck_clone.py target/release/pl
+
+      - name: GenBank output is readable by Biopython
+        run: |
+          python - <<'PY'
+          import subprocess, tempfile, os
+          from Bio import SeqIO
+          gb = subprocess.run(
+              ["target/release/pl", "convert", "prototype/demo-construct.gb",
+               "--to", "genbank", "--stdout"],
+              capture_output=True, text=True, check=True).stdout
+          with tempfile.NamedTemporaryFile("w", suffix=".gb", delete=False,
+                                           encoding="utf-8", newline="\n") as fh:
+              fh.write(gb); path = fh.name
+          rec = SeqIO.read(path, "genbank")
+          os.unlink(path)
+          print(f"biopython read it back: {len(rec.seq)} bp, {len(rec.features)} features")
+          assert len(rec.seq) == 3180, len(rec.seq)
+          PY
+
+      # The benchmark is committed, synthetic and CC0, so it runs anywhere.
+      # A regression that drops the score fails the build.
+      - name: polylinker-bench
+        run: |
+          python bench/run.py bench/polylinker-bench.json \
+            -- target/release/pl bench-adapter | tee /tmp/bench.txt
+          grep -q "     0      5    176" /tmp/bench.txt \
+            || { echo "::error::bench score changed — update the expected line if intended"; exit 1; }
+
+      - name: The benchmark regenerates identically
+        run: |
+          python bench/generate.py > /tmp/regen.json
+          diff -q bench/polylinker-bench.json /tmp/regen.json \
+            || { echo "::error::generate.py is no longer deterministic"; exit 1; }

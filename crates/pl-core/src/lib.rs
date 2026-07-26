@@ -13,10 +13,12 @@
 
 pub mod base64;
 pub mod iupac;
+pub mod oplog;
 pub mod seguid;
 pub mod sha1;
 
 pub use iupac::{complement, matches, reverse_complement, Composition};
+pub use oplog::{OpKind, OpLog};
 pub use seguid::{cdseguid, csseguid, ldseguid, lsseguid};
 
 /// Whether the molecule's ends join.

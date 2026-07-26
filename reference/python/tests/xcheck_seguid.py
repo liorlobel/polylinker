@@ -84,7 +84,11 @@ def corpus_sequences(pattern, pl):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    pl = sys.argv[1]
+    # Absolute, because Windows' subprocess will not resolve a relative
+    # executable path given with forward slashes — it fails with a bare
+    # FileNotFoundError that looks like the script is broken rather than the
+    # path. Caught by the CI gate on its first run.
+    pl = os.path.abspath(sys.argv[1])
     pattern = sys.argv[2] if len(sys.argv) > 2 else None
 
     cases = generate()
