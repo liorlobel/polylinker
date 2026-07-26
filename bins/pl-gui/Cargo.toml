@@ -1,0 +1,32 @@
+[package]
+name = "pl-gui"
+description = "Polylinker desktop application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "polylinker"
+path = "src/main.rs"
+
+[dependencies]
+pl-core.workspace = true
+pl-enzymes.workspace = true
+pl-fileio.workspace = true
+
+# The GUI is the one place dependencies are accepted: it is distribution, not
+# logic. The correctness crates above still have none, and everything this
+# binary decides about a molecule it asks them.
+#
+# glow (OpenGL) rather than wgpu: one renderer, a smaller tree, and no Vulkan or
+# DX12 driver surface on lab machines that are frequently ancient.
+eframe = { version = "0.35", default-features = false, features = [
+    "accesskit",      # screen-reader support; not optional in a tool people rely on
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+rfd = "0.17"

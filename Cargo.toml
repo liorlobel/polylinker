@@ -6,6 +6,7 @@ members = [
     "crates/pl-fileio",
     "crates/pl-wasm",
     "bins/pl",
+    "bins/pl-gui",
 ]
 
 [workspace.package]
