@@ -65,6 +65,7 @@ fn main() -> ExitCode {
         "digest" => cmd_digest(rest),
         "blocks" => cmd_blocks(rest),
         "checksum" => cmd_checksum(rest),
+        "bench-adapter" => cmd_bench_adapter(rest),
         "-V" | "--version" => {
             println!("pl {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -603,6 +604,99 @@ fn cmd_checksum(args: &[String]) -> Result<(), String> {
         match pl_core::lsseguid(&seq) {
             Ok(v) => println!("   {v}   (this strand alone)"),
             Err(e) => println!("   lsseguid: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// The polylinker-bench adapter.
+///
+/// The bench is meant to be run against any tool, so the interface it asks of a
+/// tool is deliberately the smallest thing that works: tab-separated lines in,
+/// tab-separated lines out, no JSON parser required on this side. Anyone
+/// wanting to score SnapGene, Benchling or UGENE writes the same twenty lines.
+///
+/// ```text
+/// pl bench-adapter --capabilities        -> the operations this tool answers
+/// pl bench-adapter                       -> reads cases on stdin, answers on stdout
+/// ```
+///
+/// Each input line is `id \t operation \t topology \t sequence [\t key=value]...`
+/// and each output line is `id \t key=value...`, or `id \t unsupported` for a
+/// case this tool cannot attempt. Saying *unsupported* is a first-class answer:
+/// a benchmark that lets a tool quietly skip what it cannot do measures nothing.
+fn cmd_bench_adapter(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &[])?;
+
+    if a.has("capabilities") {
+        // Deliberately short. pcr and assembly are not implemented, and the
+        // published pass rate should show that rather than hide it.
+        println!("identity");
+        println!("digest");
+        return Ok(());
+    }
+
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map_err(|e| e.to_string())?;
+
+    for line in input.lines() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 4 {
+            continue;
+        }
+        let (id, operation, topology, seq) = (f[0], f[1], f[2], f[3]);
+        let params: Vec<(&str, &str)> = f[4..].iter().filter_map(|kv| kv.split_once('=')).collect();
+        let param = |k: &str| params.iter().find(|(pk, _)| *pk == k).map(|(_, v)| *v);
+
+        let circular = topology == "circular";
+        let upper = seq.to_ascii_uppercase();
+
+        match operation {
+            "identity" => {
+                let rc = String::from_utf8_lossy(&pl_core::reverse_complement(upper.as_bytes()))
+                    .into_owned();
+                if circular {
+                    match pl_core::cdseguid(&upper, &rc) {
+                        Ok(v) => println!("{id}\tcdseguid={v}"),
+                        Err(e) => println!("{id}\terror={e}"),
+                    }
+                } else {
+                    let ld = pl_core::ldseguid(&upper, &rc);
+                    let ls = pl_core::lsseguid(&upper);
+                    match (ld, ls) {
+                        (Ok(d), Ok(s)) => println!("{id}\tldseguid={d}\tlsseguid={s}"),
+                        (Err(e), _) | (_, Err(e)) => println!("{id}\terror={e}"),
+                    }
+                }
+            }
+            "digest" => {
+                let Some(name) = param("enzyme") else {
+                    println!("{id}\terror=no enzyme given");
+                    continue;
+                };
+                match pl_enzymes::by_name(name) {
+                    None => println!("{id}\tunsupported"),
+                    Some(e) => {
+                        let topo = if circular {
+                            pl_core::Topology::Circular
+                        } else {
+                            pl_core::Topology::Linear
+                        };
+                        let pos = pl_enzymes::cut_positions(upper.as_bytes(), topo, e);
+                        let list: Vec<String> = pos.iter().map(u64::to_string).collect();
+                        println!(
+                            "{id}\tcut_positions={}\tcut_count={}",
+                            list.join(","),
+                            pos.len()
+                        );
+                    }
+                }
+            }
+            _ => println!("{id}\tunsupported"),
         }
     }
     Ok(())

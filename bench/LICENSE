@@ -1,0 +1,16 @@
+CC0 1.0 Universal
+
+The polylinker-bench data set (bench/polylinker-bench.json) and the scripts that
+generate and run it are dedicated to the public domain.
+
+To the extent possible under law, the authors have waived all copyright and
+related or neighbouring rights to this work. You may copy, modify, distribute
+and use it, including for commercial purposes, without asking permission.
+
+Full text: https://creativecommons.org/publicdomain/zero/1.0/legalcode
+
+This waiver applies to the benchmark only. The rest of this repository is
+licensed under Apache-2.0 -- see ../LICENSE.
+
+The sequences in the data set are synthetic, generated from a fixed seed. No
+third-party sequence data is included or redistributed.

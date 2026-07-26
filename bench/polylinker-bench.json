@@ -1,0 +1,3771 @@
+{
+ "name": "polylinker-bench",
+ "version": "0.1.0",
+ "licence": "CC0-1.0",
+ "description": "A truth set for plasmid operations. Every expected value is produced by an independent tool, never by Polylinker. All sequences are synthetic and redistributable.",
+ "oracles": {
+  "identity": "seguid 0.2.1",
+  "digest": "Biopython 1.87 (Bio.Restriction)",
+  "pcr": "pydna 5.5.16",
+  "assembly": "pydna 5.5.16"
+ },
+ "conventions": {
+  "cut_positions": "1-based index of the base immediately 3' of the nick on the top strand, as Bio.Restriction reports it",
+  "coordinates": "1-based inclusive",
+  "checksums": "SEGUID v2 long form, including the prefix"
+ },
+ "hazard_tiers": {
+  "1": "silent, expensive, hard to notice at the bench",
+  "2": "wrong but caught quickly",
+  "3": "approximate by nature"
+ },
+ "counts": {
+  "identity": 42,
+  "digest": 123,
+  "pcr": 6,
+  "assembly": 5
+ },
+ "cases": [
+  {
+   "id": "identity/circular-random-1kb",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "cdseguid of a circular duplex",
+   "input": {
+    "topology": "circular",
+    "sequence": "ATGCCGATGACTAACCACCCATACGCCTAAGTGAAGGGAATAAACTTTTGTCTAATAAGGTCGTGCTCTCGAGCTCCAGTGCTTAGCGAGAGATCGAGCCTTCTCGATCAAATAGGACGCGAATCGAACGGGGAACTTCCGTTTATGTTGCACCAGTAGGCGAGTAATCTAGGCCTTTACCGATTTGAAGGAGGCGTCAGACCCCTGAAGCAAGCTAAGAGACAGATACGCGATCACATTAAATAACCTCTCCGCTCGTGTGCCTGATCGCGGCCGGAACGTTATAGGGTAATCTTAACTTCCTTATCGGGCGGGCGTATTCGTTTTGCTCCGTCGACCCGTGCGGTGGTCTAGTCTATGCGAGACCCATGCCTTCTACCTTGCGATCCCGCGATTCGTGGATATTGTCTGGTCAGCCATAACAGATTCGCTTACTATGTGCTTCCATTCATGGCGCTGGCCACCCCTGCCTTAAAGGGCCCTTGTCCACGTCTAGTTAGATACGCAGAGTACTGCGGGCTCAACAGTCCATGCGCGTGCGTATTTTACGGCCTCCGTACGGGTGGACGGCCGGTACCTGATCATACTGTTGGCATTTCTTAGACTAGGTAAGCCAGGTGAGAAGTCGCGCAACATAGAACCTATGCCAGAATATGTCTGTTAAGGCTCTTTATCGGGCGCGTTCTAAATCCAACGTGATCTAGAACGAGCCGAGGAAAAGGTGCTATCGGACCGCCCGCACACGAATGAGTACGCTTTTTTTGGACTACAGCTCCTCACCTTGTGGTCGCTACCTGTCATAATGAACGGATGAAAGTCAATTCTAGCTGTGATTGACTGCCAGTTATATTCATTGTAAAGACTGCAGATGCTACATCAACGGATATCATCTGTTACCTTAGTACCCATACGCTGATAGAAATACACTACTTCGTCTTAAATATACTAAATCCCTTGCGCCTAACGCATACCTCAATCCACAGCTCCCCTAAAGTCGTTG"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=7T81pXCcoIIN4bZApfqb91m1RVw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-random-1kb-rot1",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 1; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TGCCGATGACTAACCACCCATACGCCTAAGTGAAGGGAATAAACTTTTGTCTAATAAGGTCGTGCTCTCGAGCTCCAGTGCTTAGCGAGAGATCGAGCCTTCTCGATCAAATAGGACGCGAATCGAACGGGGAACTTCCGTTTATGTTGCACCAGTAGGCGAGTAATCTAGGCCTTTACCGATTTGAAGGAGGCGTCAGACCCCTGAAGCAAGCTAAGAGACAGATACGCGATCACATTAAATAACCTCTCCGCTCGTGTGCCTGATCGCGGCCGGAACGTTATAGGGTAATCTTAACTTCCTTATCGGGCGGGCGTATTCGTTTTGCTCCGTCGACCCGTGCGGTGGTCTAGTCTATGCGAGACCCATGCCTTCTACCTTGCGATCCCGCGATTCGTGGATATTGTCTGGTCAGCCATAACAGATTCGCTTACTATGTGCTTCCATTCATGGCGCTGGCCACCCCTGCCTTAAAGGGCCCTTGTCCACGTCTAGTTAGATACGCAGAGTACTGCGGGCTCAACAGTCCATGCGCGTGCGTATTTTACGGCCTCCGTACGGGTGGACGGCCGGTACCTGATCATACTGTTGGCATTTCTTAGACTAGGTAAGCCAGGTGAGAAGTCGCGCAACATAGAACCTATGCCAGAATATGTCTGTTAAGGCTCTTTATCGGGCGCGTTCTAAATCCAACGTGATCTAGAACGAGCCGAGGAAAAGGTGCTATCGGACCGCCCGCACACGAATGAGTACGCTTTTTTTGGACTACAGCTCCTCACCTTGTGGTCGCTACCTGTCATAATGAACGGATGAAAGTCAATTCTAGCTGTGATTGACTGCCAGTTATATTCATTGTAAAGACTGCAGATGCTACATCAACGGATATCATCTGTTACCTTAGTACCCATACGCTGATAGAAATACACTACTTCGTCTTAAATATACTAAATCCCTTGCGCCTAACGCATACCTCAATCCACAGCTCCCCTAAAGTCGTTGA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=7T81pXCcoIIN4bZApfqb91m1RVw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-random-1kb-rot333",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 333; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TCGACCCGTGCGGTGGTCTAGTCTATGCGAGACCCATGCCTTCTACCTTGCGATCCCGCGATTCGTGGATATTGTCTGGTCAGCCATAACAGATTCGCTTACTATGTGCTTCCATTCATGGCGCTGGCCACCCCTGCCTTAAAGGGCCCTTGTCCACGTCTAGTTAGATACGCAGAGTACTGCGGGCTCAACAGTCCATGCGCGTGCGTATTTTACGGCCTCCGTACGGGTGGACGGCCGGTACCTGATCATACTGTTGGCATTTCTTAGACTAGGTAAGCCAGGTGAGAAGTCGCGCAACATAGAACCTATGCCAGAATATGTCTGTTAAGGCTCTTTATCGGGCGCGTTCTAAATCCAACGTGATCTAGAACGAGCCGAGGAAAAGGTGCTATCGGACCGCCCGCACACGAATGAGTACGCTTTTTTTGGACTACAGCTCCTCACCTTGTGGTCGCTACCTGTCATAATGAACGGATGAAAGTCAATTCTAGCTGTGATTGACTGCCAGTTATATTCATTGTAAAGACTGCAGATGCTACATCAACGGATATCATCTGTTACCTTAGTACCCATACGCTGATAGAAATACACTACTTCGTCTTAAATATACTAAATCCCTTGCGCCTAACGCATACCTCAATCCACAGCTCCCCTAAAGTCGTTGATGCCGATGACTAACCACCCATACGCCTAAGTGAAGGGAATAAACTTTTGTCTAATAAGGTCGTGCTCTCGAGCTCCAGTGCTTAGCGAGAGATCGAGCCTTCTCGATCAAATAGGACGCGAATCGAACGGGGAACTTCCGTTTATGTTGCACCAGTAGGCGAGTAATCTAGGCCTTTACCGATTTGAAGGAGGCGTCAGACCCCTGAAGCAAGCTAAGAGACAGATACGCGATCACATTAAATAACCTCTCCGCTCGTGTGCCTGATCGCGGCCGGAACGTTATAGGGTAATCTTAACTTCCTTATCGGGCGGGCGTATTCGTTTTGCTCCG"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=7T81pXCcoIIN4bZApfqb91m1RVw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-random-1kb-rot999",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 999; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "GATGCCGATGACTAACCACCCATACGCCTAAGTGAAGGGAATAAACTTTTGTCTAATAAGGTCGTGCTCTCGAGCTCCAGTGCTTAGCGAGAGATCGAGCCTTCTCGATCAAATAGGACGCGAATCGAACGGGGAACTTCCGTTTATGTTGCACCAGTAGGCGAGTAATCTAGGCCTTTACCGATTTGAAGGAGGCGTCAGACCCCTGAAGCAAGCTAAGAGACAGATACGCGATCACATTAAATAACCTCTCCGCTCGTGTGCCTGATCGCGGCCGGAACGTTATAGGGTAATCTTAACTTCCTTATCGGGCGGGCGTATTCGTTTTGCTCCGTCGACCCGTGCGGTGGTCTAGTCTATGCGAGACCCATGCCTTCTACCTTGCGATCCCGCGATTCGTGGATATTGTCTGGTCAGCCATAACAGATTCGCTTACTATGTGCTTCCATTCATGGCGCTGGCCACCCCTGCCTTAAAGGGCCCTTGTCCACGTCTAGTTAGATACGCAGAGTACTGCGGGCTCAACAGTCCATGCGCGTGCGTATTTTACGGCCTCCGTACGGGTGGACGGCCGGTACCTGATCATACTGTTGGCATTTCTTAGACTAGGTAAGCCAGGTGAGAAGTCGCGCAACATAGAACCTATGCCAGAATATGTCTGTTAAGGCTCTTTATCGGGCGCGTTCTAAATCCAACGTGATCTAGAACGAGCCGAGGAAAAGGTGCTATCGGACCGCCCGCACACGAATGAGTACGCTTTTTTTGGACTACAGCTCCTCACCTTGTGGTCGCTACCTGTCATAATGAACGGATGAAAGTCAATTCTAGCTGTGATTGACTGCCAGTTATATTCATTGTAAAGACTGCAGATGCTACATCAACGGATATCATCTGTTACCTTAGTACCCATACGCTGATAGAAATACACTACTTCGTCTTAAATATACTAAATCCCTTGCGCCTAACGCATACCTCAATCCACAGCTCCCCTAAAGTCGTT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=7T81pXCcoIIN4bZApfqb91m1RVw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-random-1kb-revcomp",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule read from the other strand",
+   "input": {
+    "topology": "circular",
+    "sequence": "CAACGACTTTAGGGGAGCTGTGGATTGAGGTATGCGTTAGGCGCAAGGGATTTAGTATATTTAAGACGAAGTAGTGTATTTCTATCAGCGTATGGGTACTAAGGTAACAGATGATATCCGTTGATGTAGCATCTGCAGTCTTTACAATGAATATAACTGGCAGTCAATCACAGCTAGAATTGACTTTCATCCGTTCATTATGACAGGTAGCGACCACAAGGTGAGGAGCTGTAGTCCAAAAAAAGCGTACTCATTCGTGTGCGGGCGGTCCGATAGCACCTTTTCCTCGGCTCGTTCTAGATCACGTTGGATTTAGAACGCGCCCGATAAAGAGCCTTAACAGACATATTCTGGCATAGGTTCTATGTTGCGCGACTTCTCACCTGGCTTACCTAGTCTAAGAAATGCCAACAGTATGATCAGGTACCGGCCGTCCACCCGTACGGAGGCCGTAAAATACGCACGCGCATGGACTGTTGAGCCCGCAGTACTCTGCGTATCTAACTAGACGTGGACAAGGGCCCTTTAAGGCAGGGGTGGCCAGCGCCATGAATGGAAGCACATAGTAAGCGAATCTGTTATGGCTGACCAGACAATATCCACGAATCGCGGGATCGCAAGGTAGAAGGCATGGGTCTCGCATAGACTAGACCACCGCACGGGTCGACGGAGCAAAACGAATACGCCCGCCCGATAAGGAAGTTAAGATTACCCTATAACGTTCCGGCCGCGATCAGGCACACGAGCGGAGAGGTTATTTAATGTGATCGCGTATCTGTCTCTTAGCTTGCTTCAGGGGTCTGACGCCTCCTTCAAATCGGTAAAGGCCTAGATTACTCGCCTACTGGTGCAACATAAACGGAAGTTCCCCGTTCGATTCGCGTCCTATTTGATCGAGAAGGCTCGATCTCTCGCTAAGCACTGGAGCTCGAGAGCACGACCTTATTAGACAAAAGTTTATTCCCTTCACTTAGGCGTATGGGTGGTTAGTCATCGGCAT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=7T81pXCcoIIN4bZApfqb91m1RVw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/linear-random-1kb",
+   "operation": "identity",
+   "hazard_tier": 2,
+   "description": "ldseguid of the same sequence taken as linear",
+   "input": {
+    "topology": "linear",
+    "sequence": "ATGCCGATGACTAACCACCCATACGCCTAAGTGAAGGGAATAAACTTTTGTCTAATAAGGTCGTGCTCTCGAGCTCCAGTGCTTAGCGAGAGATCGAGCCTTCTCGATCAAATAGGACGCGAATCGAACGGGGAACTTCCGTTTATGTTGCACCAGTAGGCGAGTAATCTAGGCCTTTACCGATTTGAAGGAGGCGTCAGACCCCTGAAGCAAGCTAAGAGACAGATACGCGATCACATTAAATAACCTCTCCGCTCGTGTGCCTGATCGCGGCCGGAACGTTATAGGGTAATCTTAACTTCCTTATCGGGCGGGCGTATTCGTTTTGCTCCGTCGACCCGTGCGGTGGTCTAGTCTATGCGAGACCCATGCCTTCTACCTTGCGATCCCGCGATTCGTGGATATTGTCTGGTCAGCCATAACAGATTCGCTTACTATGTGCTTCCATTCATGGCGCTGGCCACCCCTGCCTTAAAGGGCCCTTGTCCACGTCTAGTTAGATACGCAGAGTACTGCGGGCTCAACAGTCCATGCGCGTGCGTATTTTACGGCCTCCGTACGGGTGGACGGCCGGTACCTGATCATACTGTTGGCATTTCTTAGACTAGGTAAGCCAGGTGAGAAGTCGCGCAACATAGAACCTATGCCAGAATATGTCTGTTAAGGCTCTTTATCGGGCGCGTTCTAAATCCAACGTGATCTAGAACGAGCCGAGGAAAAGGTGCTATCGGACCGCCCGCACACGAATGAGTACGCTTTTTTTGGACTACAGCTCCTCACCTTGTGGTCGCTACCTGTCATAATGAACGGATGAAAGTCAATTCTAGCTGTGATTGACTGCCAGTTATATTCATTGTAAAGACTGCAGATGCTACATCAACGGATATCATCTGTTACCTTAGTACCCATACGCTGATAGAAATACACTACTTCGTCTTAAATATACTAAATCCCTTGCGCCTAACGCATACCTCAATCCACAGCTCCCCTAAAGTCGTTG"
+   },
+   "params": {},
+   "expect": {
+    "ldseguid": "ldseguid=AJf2g22FtAb1CutdkYRfZABLkkA",
+    "lsseguid": "lsseguid=H7Wy1jJrzwWkGbyQ1nrYnbsRhkI"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-random-137",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "cdseguid of a circular duplex",
+   "input": {
+    "topology": "circular",
+    "sequence": "ATGTTCCCGTCAGCACGTCGAGGGCTGGAATCACCTTTTCACAGTTAAACGTTCTGGCACGGTCGGAGGCTTATGAGCCTACCTTTTTAGAGCGTTGTGTCAATTTACCTGAATCGCTGCAAGATAATACGACATCA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=4sq0BBzgrUUP4m6nJQpl14MGS00"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-random-137-rot1",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 1; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TGTTCCCGTCAGCACGTCGAGGGCTGGAATCACCTTTTCACAGTTAAACGTTCTGGCACGGTCGGAGGCTTATGAGCCTACCTTTTTAGAGCGTTGTGTCAATTTACCTGAATCGCTGCAAGATAATACGACATCAA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=4sq0BBzgrUUP4m6nJQpl14MGS00"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-random-137-rot45",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 45; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAACGTTCTGGCACGGTCGGAGGCTTATGAGCCTACCTTTTTAGAGCGTTGTGTCAATTTACCTGAATCGCTGCAAGATAATACGACATCAATGTTCCCGTCAGCACGTCGAGGGCTGGAATCACCTTTTCACAGT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=4sq0BBzgrUUP4m6nJQpl14MGS00"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-random-137-rot136",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 136; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "AATGTTCCCGTCAGCACGTCGAGGGCTGGAATCACCTTTTCACAGTTAAACGTTCTGGCACGGTCGGAGGCTTATGAGCCTACCTTTTTAGAGCGTTGTGTCAATTTACCTGAATCGCTGCAAGATAATACGACATC"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=4sq0BBzgrUUP4m6nJQpl14MGS00"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-random-137-revcomp",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule read from the other strand",
+   "input": {
+    "topology": "circular",
+    "sequence": "TGATGTCGTATTATCTTGCAGCGATTCAGGTAAATTGACACAACGCTCTAAAAAGGTAGGCTCATAAGCCTCCGACCGTGCCAGAACGTTTAACTGTGAAAAGGTGATTCCAGCCCTCGACGTGCTGACGGGAACAT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=4sq0BBzgrUUP4m6nJQpl14MGS00"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/linear-random-137",
+   "operation": "identity",
+   "hazard_tier": 2,
+   "description": "ldseguid of the same sequence taken as linear",
+   "input": {
+    "topology": "linear",
+    "sequence": "ATGTTCCCGTCAGCACGTCGAGGGCTGGAATCACCTTTTCACAGTTAAACGTTCTGGCACGGTCGGAGGCTTATGAGCCTACCTTTTTAGAGCGTTGTGTCAATTTACCTGAATCGCTGCAAGATAATACGACATCA"
+   },
+   "params": {},
+   "expect": {
+    "ldseguid": "ldseguid=SomwBR4j1RO2V_2pEjqyibVQ-n8",
+    "lsseguid": "lsseguid=SzcpMyfLoB1-1MgFVCtD7SG0qSQ"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-palindromic",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "cdseguid of a circular duplex",
+   "input": {
+    "topology": "circular",
+    "sequence": "GAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTC"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=GDCFBZk-ej5ktEVjglfq5H5XyEo"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-palindromic-rot1",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 1; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "AATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCG"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=GDCFBZk-ej5ktEVjglfq5H5XyEo"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-palindromic-rot24",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 24; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "GAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTC"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=GDCFBZk-ej5ktEVjglfq5H5XyEo"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-palindromic-rot71",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 71; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "CGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=GDCFBZk-ej5ktEVjglfq5H5XyEo"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-palindromic-revcomp",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule read from the other strand",
+   "input": {
+    "topology": "circular",
+    "sequence": "GAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTC"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=GDCFBZk-ej5ktEVjglfq5H5XyEo"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/linear-palindromic",
+   "operation": "identity",
+   "hazard_tier": 2,
+   "description": "ldseguid of the same sequence taken as linear",
+   "input": {
+    "topology": "linear",
+    "sequence": "GAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTCGAATTC"
+   },
+   "params": {},
+   "expect": {
+    "ldseguid": "ldseguid=dYdN3Qm_IG5gLt8orz0Nd4RlVzk",
+    "lsseguid": "lsseguid=AO5ktPlrNubNPeDKRffXhQgL8ig"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-homopolymer-run",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "cdseguid of a circular duplex",
+   "input": {
+    "topology": "circular",
+    "sequence": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATCGGGAGGGCAACATTCAGAGTGACCGTTCAACCCATATTTTCGGCTTCCCTTTATGCGG"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=hoSTUaQonzgKfWlS7wodCcBFEno"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-homopolymer-run-rot1",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 1; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATCGGGAGGGCAACATTCAGAGTGACCGTTCAACCCATATTTTCGGCTTCCCTTTATGCGGA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=hoSTUaQonzgKfWlS7wodCcBFEno"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-homopolymer-run-rot33",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 33; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "AAAAAAATCGGGAGGGCAACATTCAGAGTGACCGTTCAACCCATATTTTCGGCTTCCCTTTATGCGGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=hoSTUaQonzgKfWlS7wodCcBFEno"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-homopolymer-run-rot99",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 99; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATCGGGAGGGCAACATTCAGAGTGACCGTTCAACCCATATTTTCGGCTTCCCTTTATGCG"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=hoSTUaQonzgKfWlS7wodCcBFEno"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-homopolymer-run-revcomp",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule read from the other strand",
+   "input": {
+    "topology": "circular",
+    "sequence": "CCGCATAAAGGGAAGCCGAAAATATGGGTTGAACGGTCACTCTGAATGTTGCCCTCCCGATTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=hoSTUaQonzgKfWlS7wodCcBFEno"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/linear-homopolymer-run",
+   "operation": "identity",
+   "hazard_tier": 2,
+   "description": "ldseguid of the same sequence taken as linear",
+   "input": {
+    "topology": "linear",
+    "sequence": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATCGGGAGGGCAACATTCAGAGTGACCGTTCAACCCATATTTTCGGCTTCCCTTTATGCGG"
+   },
+   "params": {},
+   "expect": {
+    "ldseguid": "ldseguid=hoSTUaQonzgKfWlS7wodCcBFEno",
+    "lsseguid": "lsseguid=Jy538tlX-7OZyL0M5o9iWWZJkrc"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-periodic",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "cdseguid of a circular duplex",
+   "input": {
+    "topology": "circular",
+    "sequence": "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=rKsa8gQwF_hbRvO2n4GKtQOkxj8"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-periodic-rot1",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 1; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=rKsa8gQwF_hbRvO2n4GKtQOkxj8"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-periodic-rot53",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 53; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=rKsa8gQwF_hbRvO2n4GKtQOkxj8"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-periodic-rot159",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 159; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "GATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATC"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=rKsa8gQwF_hbRvO2n4GKtQOkxj8"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-periodic-revcomp",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule read from the other strand",
+   "input": {
+    "topology": "circular",
+    "sequence": "CGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGAT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=rKsa8gQwF_hbRvO2n4GKtQOkxj8"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/linear-periodic",
+   "operation": "identity",
+   "hazard_tier": 2,
+   "description": "ldseguid of the same sequence taken as linear",
+   "input": {
+    "topology": "linear",
+    "sequence": "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"
+   },
+   "params": {},
+   "expect": {
+    "ldseguid": "ldseguid=rKsa8gQwF_hbRvO2n4GKtQOkxj8",
+    "lsseguid": "lsseguid=jw5zUxga1EnktAyhZ8zI9BUSrBw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-near-periodic",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "cdseguid of a circular duplex",
+   "input": {
+    "topology": "circular",
+    "sequence": "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=jZN3ZWFFAxpG3Ugz5Y3NrjJGNAY"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-near-periodic-rot1",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 1; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCAA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=jZN3ZWFFAxpG3Ugz5Y3NrjJGNAY"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-near-periodic-rot53",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 53; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCAATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=jZN3ZWFFAxpG3Ugz5Y3NrjJGNAY"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-near-periodic-rot159",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 159; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "AATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATC"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=jZN3ZWFFAxpG3Ugz5Y3NrjJGNAY"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-near-periodic-revcomp",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule read from the other strand",
+   "input": {
+    "topology": "circular",
+    "sequence": "TGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGAT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=jZN3ZWFFAxpG3Ugz5Y3NrjJGNAY"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/linear-near-periodic",
+   "operation": "identity",
+   "hazard_tier": 2,
+   "description": "ldseguid of the same sequence taken as linear",
+   "input": {
+    "topology": "linear",
+    "sequence": "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCA"
+   },
+   "params": {},
+   "expect": {
+    "ldseguid": "ldseguid=tUY1a3cyLoT_Zs71_mBBPX9VYvs",
+    "lsseguid": "lsseguid=CAEpyIpP-e7JCAmCwXtsRUmHjiA"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-at-rich",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "cdseguid of a circular duplex",
+   "input": {
+    "topology": "circular",
+    "sequence": "ATATTATATATATATTAATAAATTATATTAATTATTATTTAATTATTTAAATTTTTAATATAATATAATATATTTATTAAATATTAAATTATAAAATTATTATAATTATATTTTATTTTATAAAAAATATTATTTTTATTATAAAATAAATTATTATATTAATTTATTTTATAAAAATTTTAAATAAAATTAAAATTTAT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=Jbxu1GCxuDojAf4rHBrgLK9BBPw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-at-rich-rot1",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 1; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TATTATATATATATTAATAAATTATATTAATTATTATTTAATTATTTAAATTTTTAATATAATATAATATATTTATTAAATATTAAATTATAAAATTATTATAATTATATTTTATTTTATAAAAAATATTATTTTTATTATAAAATAAATTATTATATTAATTTATTTTATAAAAATTTTAAATAAAATTAAAATTTATA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=Jbxu1GCxuDojAf4rHBrgLK9BBPw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-at-rich-rot66",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 66; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "AATATATTTATTAAATATTAAATTATAAAATTATTATAATTATATTTTATTTTATAAAAAATATTATTTTTATTATAAAATAAATTATTATATTAATTTATTTTATAAAAATTTTAAATAAAATTAAAATTTATATATTATATATATATTAATAAATTATATTAATTATTATTTAATTATTTAAATTTTTAATATAATAT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=Jbxu1GCxuDojAf4rHBrgLK9BBPw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-at-rich-rot199",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule rotated by 199; cdseguid must not change",
+   "input": {
+    "topology": "circular",
+    "sequence": "TATATTATATATATATTAATAAATTATATTAATTATTATTTAATTATTTAAATTTTTAATATAATATAATATATTTATTAAATATTAAATTATAAAATTATTATAATTATATTTTATTTTATAAAAAATATTATTTTTATTATAAAATAAATTATTATATTAATTTATTTTATAAAAATTTTAAATAAAATTAAAATTTA"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=Jbxu1GCxuDojAf4rHBrgLK9BBPw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/circular-at-rich-revcomp",
+   "operation": "identity",
+   "hazard_tier": 1,
+   "description": "the same molecule read from the other strand",
+   "input": {
+    "topology": "circular",
+    "sequence": "ATAAATTTTAATTTTATTTAAAATTTTTATAAAATAAATTAATATAATAATTTATTTTATAATAAAAATAATATTTTTTATAAAATAAAATATAATTATAATAATTTTATAATTTAATATTTAATAAATATATTATATTATATTAAAAATTTAAATAATTAAATAATAATTAATATAATTTATTAATATATATATAATAT"
+   },
+   "params": {},
+   "expect": {
+    "cdseguid": "cdseguid=Jbxu1GCxuDojAf4rHBrgLK9BBPw"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "identity/linear-at-rich",
+   "operation": "identity",
+   "hazard_tier": 2,
+   "description": "ldseguid of the same sequence taken as linear",
+   "input": {
+    "topology": "linear",
+    "sequence": "ATATTATATATATATTAATAAATTATATTAATTATTATTTAATTATTTAAATTTTTAATATAATATAATATATTTATTAAATATTAAATTATAAAATTATTATAATTATATTTTATTTTATAAAAAATATTATTTTTATTATAAAATAAATTATTATATTAATTTATTTTATAAAAATTTTAAATAAAATTAAAATTTAT"
+   },
+   "params": {},
+   "expect": {
+    "ldseguid": "ldseguid=DWP7yQ_YzYHuHkzMiQTu5YWTF1Y",
+    "lsseguid": "lsseguid=yR46O5CUJZHcLd8G6am_1DIkNlI"
+   },
+   "oracle": {
+    "tool": "seguid",
+    "version": "0.2.1"
+   }
+  },
+  {
+   "id": "digest/mcs-EcoRI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [
+     514,
+     602
+    ],
+    "cut_count": 2
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-EcoRI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [
+     514,
+     602
+    ],
+    "cut_count": 2
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-BamHI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [
+     623
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-BamHI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [
+     623
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-HindIII-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "HindIII on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [
+     653
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-HindIII-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "HindIII on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [
+     653
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-NotI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-NotI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-XhoI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "XhoI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "XhoI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-XhoI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "XhoI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "XhoI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-SalI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "SalI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "SalI"
+   },
+   "expect": {
+    "cut_positions": [
+     635,
+     1157
+    ],
+    "cut_count": 2
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-SalI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "SalI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "SalI"
+   },
+   "expect": {
+    "cut_positions": [
+     635,
+     1157
+    ],
+    "cut_count": 2
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-PstI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PstI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "PstI"
+   },
+   "expect": {
+    "cut_positions": [
+     645
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-PstI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PstI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "PstI"
+   },
+   "expect": {
+    "cut_positions": [
+     645
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-SmaI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "SmaI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "SmaI"
+   },
+   "expect": {
+    "cut_positions": [
+     620
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-SmaI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "SmaI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "SmaI"
+   },
+   "expect": {
+    "cut_positions": [
+     620
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-XmaI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "XmaI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "XmaI"
+   },
+   "expect": {
+    "cut_positions": [
+     618
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-XmaI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "XmaI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "XmaI"
+   },
+   "expect": {
+    "cut_positions": [
+     618
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-KpnI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "KpnI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "KpnI"
+   },
+   "expect": {
+    "cut_positions": [
+     618
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-KpnI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "KpnI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "KpnI"
+   },
+   "expect": {
+    "cut_positions": [
+     618
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-SacI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "SacI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "SacI"
+   },
+   "expect": {
+    "cut_positions": [
+     612
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-SacI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "SacI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "SacI"
+   },
+   "expect": {
+    "cut_positions": [
+     612
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-NcoI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NcoI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "NcoI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-NcoI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NcoI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "NcoI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-NdeI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NdeI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "NdeI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-NdeI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NdeI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "NdeI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-SpeI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "SpeI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "SpeI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-SpeI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "SpeI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "SpeI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-XbaI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "XbaI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "XbaI"
+   },
+   "expect": {
+    "cut_positions": [
+     528,
+     629,
+     1084
+    ],
+    "cut_count": 3
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-XbaI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "XbaI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "XbaI"
+   },
+   "expect": {
+    "cut_positions": [
+     528,
+     629,
+     1084
+    ],
+    "cut_count": 3
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-EcoRV-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRV on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "EcoRV"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-EcoRV-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRV on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "EcoRV"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-DraI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "DraI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "DraI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-DraI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "DraI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "DraI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-PvuII-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PvuII on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "PvuII"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-PvuII-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PvuII on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "PvuII"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-AscI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-AscI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-PacI-circular",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PacI on a circular construct carrying a standard MCS",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/mcs-PacI-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PacI on a linear construct carrying a standard MCS",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAGATTGGGATACCAGATCAAGCGCTAGCTCATTTGACATCCTTCATGAGCCTGGTTTGCGCGTGGCCAGTCGTCCCCCCTACAGTCAAGCTCGTTGCACAAGTGAGACTTCGTATGTTCAATGGCGTCAATTACTGACGCGAACGAGAAGTGGATCTTACTGAACATGTATCTCTGCATTTCGAAAGGACCCCGACCAAGTGGGACAAGACTCCCAGTCCGTTCGGGACGACGTTTGCTAAAGTAGCGACCATGTGGCCTTGGTAGAGAACTGAGACAACCTCCTCTTACTGGGACTATATTCGAAGTGGCACCTCGGCGCGTTACTAATAGTCGAGACTACGAATGCCACTTAGCAAAACCCGATTTATATGTCGCGAAACGTTTTCTTTGGGGACTCCTATTTGCTAGCCTTCCTGTAGTGAAGCATAATCGCATTGTAGACTCCTAATCGAGACCTTGAAATAAAGAATAGGGCCACGGAACTCAGACATATCTGCCTCTGAAGGGAGAATTCCGCGTTGATCTAGAGATCAGCCTAACTTAGAAGGGCAATCGTTAAAGGCGGCGCATACAGGCAACCTTATAGGTCAAGGGTGGAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTTTCGATGATTAGACCCCCTACCCTGATCCTGTGGCTCCGAGACTGTGACCTCTACAATCCAGTTGGGTTGGTCCTCATGGAAGTTAATGTTAGAACGCTCTCTTGAGACCGGCACTAAGTTCCGGCATCGCCGATGCATAGGTGGGTGCCCCGGCAAAGTGAAATCACATGGACGACACGCGCCGTCCACGTTCTTCAAGCCTAAGTGGGGCTCGCTCCACGGTCTATTAGTCGCAAAACATCTTCTCGCAAGGTGGACGAACTCGAACCTTTCCGCGCTCACTGCGGCTGGCTGATGTGGCCTTCCGTTATCGATAGATTTCATAGGAACAGGGCTAACATTGGGGGATACCAGGTTGGCACTCTGTCGGTGGAGTTCAGATACCTGTTACGTGGTTGTACCGCAAGCGGGCGCAACAGGGCAGGTCTAGAAGTGTTGACAAGTATGAATCAAATGAATATTGCTCTAAGGCGTCACAAGCTGTTTTTACATCAGGAGGTCGACGGACTTGGCTAGGTTTATGTCGCCTGACATTCGACCCAAACGTTCCCCATTACACGCCCTGGGGCTTGTGTCCAATAGTCACGATCCGGATGGGCG"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split1",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI site split 1/5 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "AATTCTCGGTCATCTGGGGTTATAGGATCGTATAAAACGAATGAACAGGCGTTAAGGGGGTTTTCGACCCAGTTTGAAGGTGTTGAGAATCTGGAGCCTTCATACCTCATCCGTACGCCACTTTGGTCAGCGCTTGGCGCGCTCGCATAGCATCCAAGAAAGGCTTATCTCAAGTGGTAAGCTTCTCGCTACTGCCCCGGCCCAGCCGGCCCGTGGGTCCCAATGAAGGCCGATGGTTGTAAGGATTAAATCCCTCATATCTGGGCACAATCGGACCGAGTTACCAAGAACTACAACGCTCATCGG"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [
+     1
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split1-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "AATTCTCGGTCATCTGGGGTTATAGGATCGTATAAAACGAATGAACAGGCGTTAAGGGGGTTTTCGACCCAGTTTGAAGGTGTTGAGAATCTGGAGCCTTCATACCTCATCCGTACGCCACTTTGGTCAGCGCTTGGCGCGCTCGCATAGCATCCAAGAAAGGCTTATCTCAAGTGGTAAGCTTCTCGCTACTGCCCCGGCCCAGCCGGCCCGTGGGTCCCAATGAAGGCCGATGGTTGTAAGGATTAAATCCCTCATATCTGGGCACAATCGGACCGAGTTACCAAGAACTACAACGCTCATCGG"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split2",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI site split 2/4 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "ATTCTTTACTCTTCTACATATAGAAGATGGGTATGTGCTCGATGACCCATCAGCGCAAGTCCCCGTCAACCTGCGCCGGACCCCAATATTCACCAAATCGGTCATTGCTTCGTGTTTTCAACATCTTAGAACCCGTAGAGTGGGAAAACGAACTTAGTATTACCGCTTTCTATTGTTAATAGTTGTACAGTTAAAACTTGATGTTGTTTGAAGATCAATTTAGTGTAATGGACACGTGTTACGCCTAATAGTATGGCCATTGCAGTAGCCTCGCGCTGTAGCTAGTACAAAACACCCCTATAGCGA"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [
+     306
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split2-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "ATTCTTTACTCTTCTACATATAGAAGATGGGTATGTGCTCGATGACCCATCAGCGCAAGTCCCCGTCAACCTGCGCCGGACCCCAATATTCACCAAATCGGTCATTGCTTCGTGTTTTCAACATCTTAGAACCCGTAGAGTGGGAAAACGAACTTAGTATTACCGCTTTCTATTGTTAATAGTTGTACAGTTAAAACTTGATGTTGTTTGAAGATCAATTTAGTGTAATGGACACGTGTTACGCCTAATAGTATGGCCATTGCAGTAGCCTCGCGCTGTAGCTAGTACAAAACACCCCTATAGCGA"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split3",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI site split 3/3 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "TTCGTTTGTTAGCCTGGAAAGGGTAAGACGCCTACTTTAATCGAATCTCTCTTGCACTCATTCTGGATCAGATACCGATTTATCCTTCAATAGTATGACGACAATATAATTCCCTATGATATTACCTGCGACGCTTACGGTAACGAGATGTAACCGCTATAGGCGCCATGCTTTCTGTACCTCGGTCGAAATTCATGAGGGTCTACAGGATGCAGTAATCAACGTAGCTGTCTATCAAGAGAATATTTGCACAATAGTTCCAGCACGTAATACAGAGCCGTCTAACCATCCTACTCGAAAGAAGAA"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [
+     305
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split3-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "TTCGTTTGTTAGCCTGGAAAGGGTAAGACGCCTACTTTAATCGAATCTCTCTTGCACTCATTCTGGATCAGATACCGATTTATCCTTCAATAGTATGACGACAATATAATTCCCTATGATATTACCTGCGACGCTTACGGTAACGAGATGTAACCGCTATAGGCGCCATGCTTTCTGTACCTCGGTCGAAATTCATGAGGGTCTACAGGATGCAGTAATCAACGTAGCTGTCTATCAAGAGAATATTTGCACAATAGTTCCAGCACGTAATACAGAGCCGTCTAACCATCCTACTCGAAAGAAGAA"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split4",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI site split 4/2 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "TCGCAATTAGGGCTATGGGGGTGACGGTTAATGCCTTCATTGGCGCGAGCAACGCTACACCACATACCAGAATGTACAACGTACGACTTTCTCAAACTTAGTTTGCGGGCAACCGATCTAACCCGTGAATAATCAGTGTGAGCTGAGATATACTCCGCGTTTGGGCGGCAAGTATGTTCGCCGCTGCTTCACTGGGTGTGTTACCCATCGTCCCCAAGGAAAGAAGGAATGAACCCCGAGCTCCCTGTGATAAGATTGCATGGTTACGCAAATCAGAGCTGTAGCCGAGCCGACATCTACGCGAAT"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [
+     304
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split4-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "TCGCAATTAGGGCTATGGGGGTGACGGTTAATGCCTTCATTGGCGCGAGCAACGCTACACCACATACCAGAATGTACAACGTACGACTTTCTCAAACTTAGTTTGCGGGCAACCGATCTAACCCGTGAATAATCAGTGTGAGCTGAGATATACTCCGCGTTTGGGCGGCAAGTATGTTCGCCGCTGCTTCACTGGGTGTGTTACCCATCGTCCCCAAGGAAAGAAGGAATGAACCCCGAGCTCCCTGTGATAAGATTGCATGGTTACGCAAATCAGAGCTGTAGCCGAGCCGACATCTACGCGAAT"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split5",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI site split 5/1 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CTCTTAGGACATGGATAGTAGCCTAAGACCTTCCAGAACTTTTAAAGCACCACCGCAGATGGCACAGAGTCAGACTCGACTTGGTAACTAAGAAAACAATCACTTACAATCACATGGGCAAGTTACTGTGAGAGAGCCGGGACTCGTGCTTTACAAGTCATTTCCAGCGGTGCAACTGTGGCACCTACGCAGTAATTGCTCGTGGGATGCTACTCACCCCGTCAGGACTGATACGACTGGCACCAGAGATAGTCAGGGTCTTGGCGCGCGTTCGAGTTGTGACTGTTAACTTGCGGCTCGTGAATT"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [
+     303
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-EcoRI-split5-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CTCTTAGGACATGGATAGTAGCCTAAGACCTTCCAGAACTTTTAAAGCACCACCGCAGATGGCACAGAGTCAGACTCGACTTGGTAACTAAGAAAACAATCACTTACAATCACATGGGCAAGTTACTGTGAGAGAGCCGGGACTCGTGCTTTACAAGTCATTTCCAGCGGTGCAACTGTGGCACCTACGCAGTAATTGCTCGTGGGATGCTACTCACCCCGTCAGGACTGATACGACTGGCACCAGAGATAGTCAGGGTCTTGGCGCGCGTTCGAGTTGTGACTGTTAACTTGCGGCTCGTGAATT"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split1",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI site split 1/5 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "GATCCCATACTTCGTTGATTCCACCCGGGTGCGACGCTTGCTGTCTTACCGGTGGCTTATTCCCCCCCCTGATGGGGCCGTCCTCAAATATTTAACTCCTCATGCCTTATACATACGAACTTTGTTGAGGGAGAGAAACGCGGTTGGTAGATCGGGCCCATCACTACACAGCAAGCTGCACCCTTGAGGCCCACAGGTAAACGGGACAGCTCCTGCTTTGATTTCCGACGTTCAAATATACGGACAGAGTACAACACGCTTTAGCTACTACCGGTACCTCGGCCAGCGTCATGATACTAGAAAAAG"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [
+     1
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split1-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "GATCCCATACTTCGTTGATTCCACCCGGGTGCGACGCTTGCTGTCTTACCGGTGGCTTATTCCCCCCCCTGATGGGGCCGTCCTCAAATATTTAACTCCTCATGCCTTATACATACGAACTTTGTTGAGGGAGAGAAACGCGGTTGGTAGATCGGGCCCATCACTACACAGCAAGCTGCACCCTTGAGGCCCACAGGTAAACGGGACAGCTCCTGCTTTGATTTCCGACGTTCAAATATACGGACAGAGTACAACACGCTTTAGCTACTACCGGTACCTCGGCCAGCGTCATGATACTAGAAAAAG"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split2",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI site split 2/4 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "ATCCGTGATTTGGAGTAGGTTACCACTCTCAAAGCGTCATCCTCACATAAAATGTGCCAGCTCGCTTGACGTTACGGTCTAGAGTTCGCACACACGTATATTGCACCCCCGACTCGTTCTATAGCAAAAAACGGGGCTACATCAGCTGCCAGTCATTCTCGGCTGCCAAAACGTCGCACGCTGGGATAGGATTGGTCTCCCTTTTCGTCCGACGTTACAACCCGAACCATTCTTCCATGGCTGTAGTCAATCTCGATTCCACCCTTGGAGTCACTCCGGCATGAACTGAGCCTTTTCTTAAGCGGG"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [
+     306
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split2-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "ATCCGTGATTTGGAGTAGGTTACCACTCTCAAAGCGTCATCCTCACATAAAATGTGCCAGCTCGCTTGACGTTACGGTCTAGAGTTCGCACACACGTATATTGCACCCCCGACTCGTTCTATAGCAAAAAACGGGGCTACATCAGCTGCCAGTCATTCTCGGCTGCCAAAACGTCGCACGCTGGGATAGGATTGGTCTCCCTTTTCGTCCGACGTTACAACCCGAACCATTCTTCCATGGCTGTAGTCAATCTCGATTCCACCCTTGGAGTCACTCCGGCATGAACTGAGCCTTTTCTTAAGCGGG"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split3",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI site split 3/3 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "TCCAACTATTTCTAAAGTTACTAAAGCTATTGACCGTGTTTTATGCTGCCACAACGTGTATGCGATATCATTTCTTATTTGGTTCTGGTCCCCTTGATTCGCGGTTAGGTAGCGGTAAAATCCACAATTGTTTGGATTCCCACAAAGGGATCTTATATTTCTCTTCTGGGGATGGGAAGGCGTCTGCGGAGGCATTGCTTACCCGTATACTCGATATTGGGCAACATCCGTTCCGGTTGAGGATTGATTGGCGTGTGTTCACTTGATAGTTGGCAGTCAGCAAGTCTTTGCCTGTAGCAAGCTGGA"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [
+     305
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split3-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "TCCAACTATTTCTAAAGTTACTAAAGCTATTGACCGTGTTTTATGCTGCCACAACGTGTATGCGATATCATTTCTTATTTGGTTCTGGTCCCCTTGATTCGCGGTTAGGTAGCGGTAAAATCCACAATTGTTTGGATTCCCACAAAGGGATCTTATATTTCTCTTCTGGGGATGGGAAGGCGTCTGCGGAGGCATTGCTTACCCGTATACTCGATATTGGGCAACATCCGTTCCGGTTGAGGATTGATTGGCGTGTGTTCACTTGATAGTTGGCAGTCAGCAAGTCTTTGCCTGTAGCAAGCTGGA"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split4",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI site split 4/2 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CCGTGACTTTAGAGGTCTAATGCTGATGGACTATGCTCGGCCTGACGCTGGACTATGAATCCATGCCCGGGTGTCGTCACGTGCCGTTAGGATCTCACCGTCGATCCTCTCACCGCGACCTAAGTCTCGGACCGTAAGGTCTCGCCTTTCAGGGATTTCTAGAATCCTCAGCCTGCAAGGCAGAACTCAGTCCTGCCGGGTGGCCAGGGCCATATGACAGCGAATCCAATATAGGGGTCCAACAGATGCTATGTTCCTGAAGCGGTTCTCACATATTATCTTTTTTGGCCTCAGTTGATGCGGGAT"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [
+     304
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split4-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CCGTGACTTTAGAGGTCTAATGCTGATGGACTATGCTCGGCCTGACGCTGGACTATGAATCCATGCCCGGGTGTCGTCACGTGCCGTTAGGATCTCACCGTCGATCCTCTCACCGCGACCTAAGTCTCGGACCGTAAGGTCTCGCCTTTCAGGGATTTCTAGAATCCTCAGCCTGCAAGGCAGAACTCAGTCCTGCCGGGTGGCCAGGGCCATATGACAGCGAATCCAATATAGGGGTCCAACAGATGCTATGTTCCTGAAGCGGTTCTCACATATTATCTTTTTTGGCCTCAGTTGATGCGGGAT"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split5",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI site split 5/1 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CGACAGAAGCCGAAAAAAGATTTTGCTTCCCCGCAAGGAGGAGTCTTCAGAGTCTGGAGGGGTTACCAAGAATTTATCAGTTTTGATTGCAGTCTGTCTAACTTTTCAACCACAATCTGGGTTCCTCGCATAAGTTATCCGATCGATATTTGAGGGGCGACTTCGTCTTGAACAAGCTTAGGAAGAACGCTATAATTGGTATCTACCATGGAAAGTTATACGCACGAATTTTCCCCCGAAGATGTCACCGGTACCGCCTGTGTCTGTGCCGACATAGCTCTAATATGGGTAACAAGCTATTGGATC"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [
+     303
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-BamHI-split5-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CGACAGAAGCCGAAAAAAGATTTTGCTTCCCCGCAAGGAGGAGTCTTCAGAGTCTGGAGGGGTTACCAAGAATTTATCAGTTTTGATTGCAGTCTGTCTAACTTTTCAACCACAATCTGGGTTCCTCGCATAAGTTATCCGATCGATATTTGAGGGGCGACTTCGTCTTGAACAAGCTTAGGAAGAACGCTATAATTGGTATCTACCATGGAAAGTTATACGCACGAATTTTCCCCCGAAGATGTCACCGGTACCGCCTGTGTCTGTGCCGACATAGCTCTAATATGGGTAACAAGCTATTGGATC"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split1",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "HindIII site split 1/5 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "AGCTTTAGTAGTAAAGCGGCCCCTTTCATGACGGCCAGTGTTACAAGTAAGAACAATGAATAATGTGATCGCTAATAGTCTCTCTTCAAAAAGTCCTGCGGAGACTGGTATACAACTGTCGCTACCGCCGTCTCACGCATAGAAGGTGAAGCCAGAGAGACCGACTTTCCCTAAGTAAGGTTCTACTCGACACCTCTCTGTGAAAGGCCCCGAAGCCAGTTCGCGGGATGCGCAAAACTCAGATAATGTGAAGGTGGTAGGTACGGCTCCCAAATTCGAGACGAATTCAGCGTGTATATCGAGGGA"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [
+     1
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split1-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "AGCTTTAGTAGTAAAGCGGCCCCTTTCATGACGGCCAGTGTTACAAGTAAGAACAATGAATAATGTGATCGCTAATAGTCTCTCTTCAAAAAGTCCTGCGGAGACTGGTATACAACTGTCGCTACCGCCGTCTCACGCATAGAAGGTGAAGCCAGAGAGACCGACTTTCCCTAAGTAAGGTTCTACTCGACACCTCTCTGTGAAAGGCCCCGAAGCCAGTTCGCGGGATGCGCAAAACTCAGATAATGTGAAGGTGGTAGGTACGGCTCCCAAATTCGAGACGAATTCAGCGTGTATATCGAGGGA"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split2",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "HindIII site split 2/4 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "GCTTCGATATAGTCCGTCATACTACAGCATGGGTAAAGCGCGACTAGTGACTTTACATAACCATTGAGTGAACTCGGCCAGCAAGAGCTAATGACTCTTAGTCTCGAAGTTCACGCATCTTGGGAGTCCTGGATATTGTTCAATGGTTTCAATTACGGACCGAACAGGCAGTATCGGCATGTAAGCCGACATATGTGTGCTATGGCCACTCCGTACAATACATCCATCGACGCTGCGCGATTTGCGGACTCGGAACCTCGATCCGCCGGGCGTGAGGTAGCACCAGCGTCGGGTTCTCACAGGCAA"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [
+     306
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split2-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "GCTTCGATATAGTCCGTCATACTACAGCATGGGTAAAGCGCGACTAGTGACTTTACATAACCATTGAGTGAACTCGGCCAGCAAGAGCTAATGACTCTTAGTCTCGAAGTTCACGCATCTTGGGAGTCCTGGATATTGTTCAATGGTTTCAATTACGGACCGAACAGGCAGTATCGGCATGTAAGCCGACATATGTGTGCTATGGCCACTCCGTACAATACATCCATCGACGCTGCGCGATTTGCGGACTCGGAACCTCGATCCGCCGGGCGTGAGGTAGCACCAGCGTCGGGTTCTCACAGGCAA"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split3",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "HindIII site split 3/3 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CTTTCGCGATTGACACTGACACGAGGGTCTGAGGACCCTACTCGGCCAGGGCTGTCTAACTTTACTCAAGTATAAGATCAGTTCAATCACGTGCTGCCCGTCGAAAGCTACGCAAACCTTATATATGAGGTTGTGTTAGCTTTGGCCATGACTTTCCGCGCCGATATAACCCGCCATAGTAGGCCTCGACATCCAATAATAGCTTTGCGCTGGCTTGTACATGAAAAACGAGCGACACACCTACTGTTTCTGTCTCTGGTGTTCTGTGGAGACTGATGGAAAGGAAGGGATGTGCCTCGGGCGAAG"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [
+     305
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split3-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CTTTCGCGATTGACACTGACACGAGGGTCTGAGGACCCTACTCGGCCAGGGCTGTCTAACTTTACTCAAGTATAAGATCAGTTCAATCACGTGCTGCCCGTCGAAAGCTACGCAAACCTTATATATGAGGTTGTGTTAGCTTTGGCCATGACTTTCCGCGCCGATATAACCCGCCATAGTAGGCCTCGACATCCAATAATAGCTTTGCGCTGGCTTGTACATGAAAAACGAGCGACACACCTACTGTTTCTGTCTCTGGTGTTCTGTGGAGACTGATGGAAAGGAAGGGATGTGCCTCGGGCGAAG"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split4",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "HindIII site split 4/2 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "TTAATGGTGAGCTACTTCATCTCCCGACTAACGAGCTTTGCCCATCAGTTACTTTAGCAATAGTCCATGATTCTTGATCGCTTGCCGCGCACAAATGTACTGCCGTCCCGTAATTTTGTATCAAAGACGCTCCAGCCCCTGCCAAGCACTGAGGAATGGCACTATGCCGTACTAGAGGGCGTCTTAGGGGTCCACTCCGGTTTTCCATAACTACAGGGGCGGATGCATCCTAGATGGCCGCCTAGGAACTATTGGGTAGCGAAATTGTGCTTGGTCGTTATAATTAGAAGCAACGCCGCTTTAAGC"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [
+     304
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split4-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "TTAATGGTGAGCTACTTCATCTCCCGACTAACGAGCTTTGCCCATCAGTTACTTTAGCAATAGTCCATGATTCTTGATCGCTTGCCGCGCACAAATGTACTGCCGTCCCGTAATTTTGTATCAAAGACGCTCCAGCCCCTGCCAAGCACTGAGGAATGGCACTATGCCGTACTAGAGGGCGTCTTAGGGGTCCACTCCGGTTTTCCATAACTACAGGGGCGGATGCATCCTAGATGGCCGCCTAGGAACTATTGGGTAGCGAAATTGTGCTTGGTCGTTATAATTAGAAGCAACGCCGCTTTAAGC"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split5",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "HindIII site split 5/1 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "TGTAGAGTGGGGGGCTGAGAGAGCGAGCTAAAAATTTCCACATGAACCTTCCGTATTTATATCCAGTAAGAAGGAACTCCGGTTAGACCAGTCGTTAACTTCGTCAGTATGTAACCAATGGGTTGAGTGTACATACTGTCGGCTGAAGGGGGTGACAACAACCACGACGTGACAGGTAAGAGTAGGCTTCCCTGCGTGTTTTTGTTCGTCTGTGCGCTACAAACGTTTTCATGGTGGCATAAGGCGGATCCGCGCTACTCACGTAGCGCTTGGAGCTACTATGTACCCTTCATGGTCTTACAAGCT"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [
+     303
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-HindIII-split5-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "TGTAGAGTGGGGGGCTGAGAGAGCGAGCTAAAAATTTCCACATGAACCTTCCGTATTTATATCCAGTAAGAAGGAACTCCGGTTAGACCAGTCGTTAACTTCGTCAGTATGTAACCAATGGGTTGAGTGTACATACTGTCGGCTGAAGGGGGTGACAACAACCACGACGTGACAGGTAAGAGTAGGCTTCCCTGCGTGTTTTTGTTCGTCTGTGCGCTACAAACGTTTTCATGGTGGCATAAGGCGGATCCGCGCTACTCACGTAGCGCTTGGAGCTACTATGTACCCTTCATGGTCTTACAAGCT"
+   },
+   "params": {
+    "enzyme": "HindIII"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split1",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI site split 1/7 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CGGCCGCTCAGTCCAGAAATCTCAACTCACGTACCAGGGATCCCCTCGGCGTGGAGCTCTACACGTAACGCCCCGGTCATCCGTGCACATTGGGGATACTCTCAAGGAGCTGGCGCCACTAAAGCACGCTCACTTTGATTCCGAGTTAGTGAATGACCCAACCCCCGTGGTTATTCGTTTCGATGCTTAAAGATATGGCAGAGTTCTCAAGGCAAGGCCACGCCAGCTGTACACCTCGACCTTAAAGCCCTTCGGACAGGTTATCCATTAATCAATGTCAAGGACCTCGTATGGTTCTCGTTTTACCG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [
+     2
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split1-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CGGCCGCTCAGTCCAGAAATCTCAACTCACGTACCAGGGATCCCCTCGGCGTGGAGCTCTACACGTAACGCCCCGGTCATCCGTGCACATTGGGGATACTCTCAAGGAGCTGGCGCCACTAAAGCACGCTCACTTTGATTCCGAGTTAGTGAATGACCCAACCCCCGTGGTTATTCGTTTCGATGCTTAAAGATATGGCAGAGTTCTCAAGGCAAGGCCACGCCAGCTGTACACCTCGACCTTAAAGCCCTTCGGACAGGTTATCCATTAATCAATGTCAAGGACCTCGTATGGTTCTCGTTTTACCG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split2",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI site split 2/6 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "GGCCGCCAAGCGGACACTACCCCGCAGTGAAGGTTGACTTGAAGTCCCGAGTGCCCGGTACCACTATAAGAAACTCGGCGTCGACGCAGTCCCAACAGATCGGTTAGCCATGAGCCTCATTTTCGGAGCGCACCCCCGCTAGCGAGGCGGCCAGCCTGGGTGTCTAATGTATGCCGGCCTTGACCAAATTGATAGTAGCGATCAATTCGCAGTGGCCGGCCTCTGTTCATGCTTAAAGGGCATTTCGTTGCTAAGCGATGTGTGACGTCATAATATTGAGGCAACGGGTGTCATCGATTGCCCCCGGC"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [
+     1
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split2-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "GGCCGCCAAGCGGACACTACCCCGCAGTGAAGGTTGACTTGAAGTCCCGAGTGCCCGGTACCACTATAAGAAACTCGGCGTCGACGCAGTCCCAACAGATCGGTTAGCCATGAGCCTCATTTTCGGAGCGCACCCCCGCTAGCGAGGCGGCCAGCCTGGGTGTCTAATGTATGCCGGCCTTGACCAAATTGATAGTAGCGATCAATTCGCAGTGGCCGGCCTCTGTTCATGCTTAAAGGGCATTTCGTTGCTAAGCGATGTGTGACGTCATAATATTGAGGCAACGGGTGTCATCGATTGCCCCCGGC"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split3",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI site split 3/5 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "GCCGCGGTTCTCGCGGGAAGCCGAGCCCGGGTATCAGGTGCATAGCCACTCAGTTTAGTCGAACAAATAAAGTCTAGATTGATGATATCTTAAGCGCATTGATAATTTTCTCGTGTGGTCCTATGCACCACTGTTAACGTATGTAAATTACCTGCGGACGGAAGCACTGCAGATTACATTGCTAGTTTATAAGCCATTCCTCCTGTCATATGCGTAGGAGGTTGTCCATACGGTAAGCCCTTGCTGCGAACTTTACCCCCGCCATAGTCTGGTTCCGAAGGCTGAAGGTAACACTCTATGGACTCGCG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [
+     308
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split3-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "GCCGCGGTTCTCGCGGGAAGCCGAGCCCGGGTATCAGGTGCATAGCCACTCAGTTTAGTCGAACAAATAAAGTCTAGATTGATGATATCTTAAGCGCATTGATAATTTTCTCGTGTGGTCCTATGCACCACTGTTAACGTATGTAAATTACCTGCGGACGGAAGCACTGCAGATTACATTGCTAGTTTATAAGCCATTCCTCCTGTCATATGCGTAGGAGGTTGTCCATACGGTAAGCCCTTGCTGCGAACTTTACCCCCGCCATAGTCTGGTTCCGAAGGCTGAAGGTAACACTCTATGGACTCGCG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split4",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI site split 4/4 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CCGCGCTAGCGTCGCGATTATCTTTTTCTACCGGGTAGGCGCAACGATAGGTGCCTCGCCCGCCCAGTATGTCTATAAAACGCACGGACATGCTGATCTTCGCTCTGCAGTACACCTATCGACTTCGTTCCCCCAAGGCCAAATTGAAGTAGATCTAACATTCAGTTTCTCCGGCGACCGGACTAGGCGTTCGCCTTTGACCGACCGTGTAAGCAATGACCGCGTACACGTCTGGAGGTTAAACTTTTCTCACGCCGACCGGCAGAGTCAACACTACAGTTAGCTCCTTGCTTGTCTTTTCTATGCGG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [
+     307
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split4-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CCGCGCTAGCGTCGCGATTATCTTTTTCTACCGGGTAGGCGCAACGATAGGTGCCTCGCCCGCCCAGTATGTCTATAAAACGCACGGACATGCTGATCTTCGCTCTGCAGTACACCTATCGACTTCGTTCCCCCAAGGCCAAATTGAAGTAGATCTAACATTCAGTTTCTCCGGCGACCGGACTAGGCGTTCGCCTTTGACCGACCGTGTAAGCAATGACCGCGTACACGTCTGGAGGTTAAACTTTTCTCACGCCGACCGGCAGAGTCAACACTACAGTTAGCTCCTTGCTTGTCTTTTCTATGCGG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split5",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI site split 5/3 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CGCCGGGGGGAAGTACGAGGAGAATGGCTACTCGTTCACCAATAGGAGTTACTAATAGTGAGTTTCCCTTGAGCGCTGTTCGGACCTGTGCGAAAGGATACAGCTCTAGAGTGGAGATTTGCAGGTTAAAATCACAATCAGATGGGTATAATGAGATGTCAATGGGCGAAATTTGTAACACGGTGACCCGCGGAAGCTGCTTTCAATTAAACTTGTGAGATTTGATAAATCAGTATCGCCTTAGTGGCATTCATCCTGTTCATAATCCCCGATGAGCTTGGGGCAGACATTCACCAGGGATATGCGGC"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [
+     306
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split5-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CGCCGGGGGGAAGTACGAGGAGAATGGCTACTCGTTCACCAATAGGAGTTACTAATAGTGAGTTTCCCTTGAGCGCTGTTCGGACCTGTGCGAAAGGATACAGCTCTAGAGTGGAGATTTGCAGGTTAAAATCACAATCAGATGGGTATAATGAGATGTCAATGGGCGAAATTTGTAACACGGTGACCCGCGGAAGCTGCTTTCAATTAAACTTGTGAGATTTGATAAATCAGTATCGCCTTAGTGGCATTCATCCTGTTCATAATCCCCGATGAGCTTGGGGCAGACATTCACCAGGGATATGCGGC"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split6",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI site split 6/2 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "GCCAGGTAGTTATCGGATCTCATGTCGACGAAAGACGAAGTACCTTCGCCAGTCACCTGGAGAGAAGGAAAATAGCCTAACCATAGAAGGGGTCACCGCGAGAGCCGGGGCAAGACGAGATAAACACACCACATGAAGATACCATCGTCGCGGCATATACAAGGTACGCCACACAACTGTGTTTCCGGACGACGTCCAACATGGTATAGCGGTTCCAAACTCGAAACTAGCAAGAGTGCGGCAAACACCTAGAGTGGGGTTCTAAAGGCACAACAATGTTAGAAATGATTCGGTAGTAAGGCGCGGCC"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [
+     305
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split6-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "GCCAGGTAGTTATCGGATCTCATGTCGACGAAAGACGAAGTACCTTCGCCAGTCACCTGGAGAGAAGGAAAATAGCCTAACCATAGAAGGGGTCACCGCGAGAGCCGGGGCAAGACGAGATAAACACACCACATGAAGATACCATCGTCGCGGCATATACAAGGTACGCCACACAACTGTGTTTCCGGACGACGTCCAACATGGTATAGCGGTTCCAAACTCGAAACTAGCAAGAGTGCGGCAAACACCTAGAGTGGGGTTCTAAAGGCACAACAATGTTAGAAATGATTCGGTAGTAAGGCGCGGCC"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split7",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI site split 7/1 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CTCAGTCGGGTCAGATAGAGTCCGGGGGGCTCTACGGTATTTGGTGGCCACGAGTTATCTGACCGTCGCGCGTTGGGCAAGACGGTAGGGGGCGTTGTCCGTATTGCAGCGGTCTTGCGCTTTGGAAGTCCTAATGTCGTGCTACGGCGCCCAGCCCTGCTTCCGATCTCCAAACACAAATCGTACTTCAGGCTAGACAAGGGATAAAAACTGCAAGTGTCACTTAGCACCCTCAGTTTAGTGCCCCCATGTCCAAAGGTTGCCTGATTGGAATCACGGTGCCCATGGATACAAACGCGTTGCGGCCG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [
+     304
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-NotI-split7-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CTCAGTCGGGTCAGATAGAGTCCGGGGGGCTCTACGGTATTTGGTGGCCACGAGTTATCTGACCGTCGCGCGTTGGGCAAGACGGTAGGGGGCGTTGTCCGTATTGCAGCGGTCTTGCGCTTTGGAAGTCCTAATGTCGTGCTACGGCGCCCAGCCCTGCTTCCGATCTCCAAACACAAATCGTACTTCAGGCTAGACAAGGGATAAAAACTGCAAGTGTCACTTAGCACCCTCAGTTTAGTGCCCCCATGTCCAAAGGTTGCCTGATTGGAATCACGGTGCCCATGGATACAAACGCGTTGCGGCCG"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split1",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI site split 1/7 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "GCGCGCCTTATCCTATAGCGTCCCTAGAACAGCATCTGCGCTTCTGTGCTGACCGTTTGCTCTATACGAGCCGCTTCGAACGTAGATCACTAATAAGCACATCAGTGGTTTACAACCTAAGTCAGGGTTCTCTGTGGAGTGCGAACCAACCGAACGGTCAACCTAGCCGAAATTTCGCATCCGGTGCCTCATAACGAGAATCCAGCTCGGCACGTAATAACTTTCAGAATCCATTTCGTAAGTTCCTATTTAACGTTCGACTCCAGGATGCATCGTGGATACTCGCACCTACCATATATTGTCTCGGG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [
+     2
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split1-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "GCGCGCCTTATCCTATAGCGTCCCTAGAACAGCATCTGCGCTTCTGTGCTGACCGTTTGCTCTATACGAGCCGCTTCGAACGTAGATCACTAATAAGCACATCAGTGGTTTACAACCTAAGTCAGGGTTCTCTGTGGAGTGCGAACCAACCGAACGGTCAACCTAGCCGAAATTTCGCATCCGGTGCCTCATAACGAGAATCCAGCTCGGCACGTAATAACTTTCAGAATCCATTTCGTAAGTTCCTATTTAACGTTCGACTCCAGGATGCATCGTGGATACTCGCACCTACCATATATTGTCTCGGG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split2",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI site split 2/6 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CGCGCCCCATCGGGGCAGCATGCACGCATACCACTGACTTATGCAATTTATTAACGCAAACAATATGGGCCCAAAGTCGGTACCCTAGGGTCTGATCGCCTGACGGCAATACTCACTATTCGGGCTCAATACAGTGAATACTAAAGGACTTCCGCCTAAAGTGCGCATAGTACTTTAACCCGGTCATTCTGTTCAAACTTCTGTGTCTCCGTCGAGTGGCACCTCTTTATCCCCCGCCTTATAGGAAGGGGTCTCGAGGTGTTTATGAGGACGTCCCGTGCGCGGGGCCGACCCCTTGAAGTCACCGG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [
+     1
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split2-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CGCGCCCCATCGGGGCAGCATGCACGCATACCACTGACTTATGCAATTTATTAACGCAAACAATATGGGCCCAAAGTCGGTACCCTAGGGTCTGATCGCCTGACGGCAATACTCACTATTCGGGCTCAATACAGTGAATACTAAAGGACTTCCGCCTAAAGTGCGCATAGTACTTTAACCCGGTCATTCTGTTCAAACTTCTGTGTCTCCGTCGAGTGGCACCTCTTTATCCCCCGCCTTATAGGAAGGGGTCTCGAGGTGTTTATGAGGACGTCCCGTGCGCGGGGCCGACCCCTTGAAGTCACCGG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split3",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI site split 3/5 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "GCGCCGAGTCCCTCTTATTTATGAGGTATGGGATCAGATTCATAAATAGCTCAACTGTCCGCGGGGGCCCGCAGGTGTCCCAAAGCCACTAACACGTCGCCAAATGGTTTTCTCCATTCAGCGCTGGAACAGTGCTATGGCGTGTTGTTTTTGCTTGAAGTAATTACGCATGGTATCACCTTAATTTGCTCGCCGCTTGCGCCCTATGGTCACGGAAGTCCCTTAGCGGGGGTCGAGTCCCTAGCAGTTGAAAAGCTGCGTGCCGTGACTTTCTGTGTCTGCTATGTGCGTCGTGAGGTTAGGTTGGC"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [
+     308
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split3-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "GCGCCGAGTCCCTCTTATTTATGAGGTATGGGATCAGATTCATAAATAGCTCAACTGTCCGCGGGGGCCCGCAGGTGTCCCAAAGCCACTAACACGTCGCCAAATGGTTTTCTCCATTCAGCGCTGGAACAGTGCTATGGCGTGTTGTTTTTGCTTGAAGTAATTACGCATGGTATCACCTTAATTTGCTCGCCGCTTGCGCCCTATGGTCACGGAAGTCCCTTAGCGGGGGTCGAGTCCCTAGCAGTTGAAAAGCTGCGTGCCGTGACTTTCTGTGTCTGCTATGTGCGTCGTGAGGTTAGGTTGGC"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split4",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI site split 4/4 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CGCCTATATATTGCACAGCTCGACCCGTAGGATTATCCCCGGGAACCTGAGTCCTGGCAACATTATATATAGGTTCCCCCGTCACGTAGTATCACCGCGCCATATTAACCAACTCGCACAATGTTGGGGTATGCTAAGGTGGCGGTTACATAGCACGTGTTAATCGTAATAACAGGTATGTTCGTTTGGATCCTTATGTTCGGATGGCGACTCAAAGGGTACAGAGGCGTGGGTGCGAGCGCCATGTCGGCAGTCTTTCGGGGGACGGAGGAAACTACATTGACCTGGCTCCGATACACCATAGGGCG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [
+     307
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split4-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CGCCTATATATTGCACAGCTCGACCCGTAGGATTATCCCCGGGAACCTGAGTCCTGGCAACATTATATATAGGTTCCCCCGTCACGTAGTATCACCGCGCCATATTAACCAACTCGCACAATGTTGGGGTATGCTAAGGTGGCGGTTACATAGCACGTGTTAATCGTAATAACAGGTATGTTCGTTTGGATCCTTATGTTCGGATGGCGACTCAAAGGGTACAGAGGCGTGGGTGCGAGCGCCATGTCGGCAGTCTTTCGGGGGACGGAGGAAACTACATTGACCTGGCTCCGATACACCATAGGGCG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split5",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI site split 5/3 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "GCCATGAGGTTAGACAAGACCACCTTCGCGGCGTCGCCCACGATACACCTCTACAGTGACGGTGAACGTGACTCCTGGGGCTATCGTGCATCAGCAACCCGGATGGTCGTTGCTTCGACGCGTGGCCGGAAAGAACAGGATGAGACAAGCTTCTTTGCTTACATTTCCCACGGGGTTTGATTGTTATTGCTTGGACCTGCGGCCGCGTTGGTTCGATAGGCCTCTATTGCGACTGCTGCCTTAGTGCCTGTGTCCTACCGGTGATTGCATTAACAGCGGCTATAGGGATCGGCCTTTTCCTGTGGCGC"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [
+     306
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split5-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "GCCATGAGGTTAGACAAGACCACCTTCGCGGCGTCGCCCACGATACACCTCTACAGTGACGGTGAACGTGACTCCTGGGGCTATCGTGCATCAGCAACCCGGATGGTCGTTGCTTCGACGCGTGGCCGGAAAGAACAGGATGAGACAAGCTTCTTTGCTTACATTTCCCACGGGGTTTGATTGTTATTGCTTGGACCTGCGGCCGCGTTGGTTCGATAGGCCTCTATTGCGACTGCTGCCTTAGTGCCTGTGTCCTACCGGTGATTGCATTAACAGCGGCTATAGGGATCGGCCTTTTCCTGTGGCGC"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split6",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI site split 6/2 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CCTCGCAATTCAAAACCGACGATGCGCACGAGTCAATGTACAGAATGAGTACGGTAGGAGTCGCATATAATTCTGATAGTCGGAAGCTTGCGAAACTCTTTATAGACATGCTATTCGGTACTAAAGCTTAGTGGCGACCTCCCAACCGCCAATGACTTGCAGAACTTTCGCTACATTGAGGGCGTACCGATATTAAGGTATTATCGCTGGATGTCTTGTGGCATTGTTTGCCGTGACGTTGGGATGGGTAATGGATACGCGCTGCGAGCTGCGGTACGCACAATCAGTATTAATAGATTCCGGGCGCG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [
+     305
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split6-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CCTCGCAATTCAAAACCGACGATGCGCACGAGTCAATGTACAGAATGAGTACGGTAGGAGTCGCATATAATTCTGATAGTCGGAAGCTTGCGAAACTCTTTATAGACATGCTATTCGGTACTAAAGCTTAGTGGCGACCTCCCAACCGCCAATGACTTGCAGAACTTTCGCTACATTGAGGGCGTACCGATATTAAGGTATTATCGCTGGATGTCTTGTGGCATTGTTTGCCGTGACGTTGGGATGGGTAATGGATACGCGCTGCGAGCTGCGGTACGCACAATCAGTATTAATAGATTCCGGGCGCG"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split7",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI site split 7/1 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "CAGCAGGAATTAGGTTGAAGTTCTATGCTCCAGCGACGTTTATGCATCCGTAATGTGTCGGCTGCTTACCAAATTTTGGGCGGGGCCCGAGGAAGTAAGTAATGGATGCAAACGACCCAATGTCCAGAAGGCTTGGAGGCGTCGCTGGGAATCTCGACCCTGTATAAAATGCTGCCCCCCTTTTATTCGAAGCTAAAGGCTATTCACGTTTCCCCGGGATGTTCTTAAATGGCTCCGGCAAACGAAGAGCGTTAACAACGCTATGGGAATGACACACCGGCTCTCGGCGAGTTCTGATTGCGGCGCGC"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [
+     304
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-AscI-split7-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "CAGCAGGAATTAGGTTGAAGTTCTATGCTCCAGCGACGTTTATGCATCCGTAATGTGTCGGCTGCTTACCAAATTTTGGGCGGGGCCCGAGGAAGTAAGTAATGGATGCAAACGACCCAATGTCCAGAAGGCTTGGAGGCGTCGCTGGGAATCTCGACCCTGTATAAAATGCTGCCCCCCTTTTATTCGAAGCTAAAGGCTATTCACGTTTCCCCGGGATGTTCTTAAATGGCTCCGGCAAACGAAGAGCGTTAACAACGCTATGGGAATGACACACCGGCTCTCGGCGAGTTCTGATTGCGGCGCGC"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split1",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PacI site split 1/7 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAATTAAGAACTAACCTCGGAGTGTCCGCTATTTTTAAGGCGTATGTGCGTATTGAAAGCCGACTCAGTAATGGCAACTCCGTCACCGGTGGCGACTCTTCCGGTCGGTACCCATCTTCATAGTCTGCCGGGCTACGTGGTATGGGGACTCGGTCAAACAATAATCAGATTAGTACGTTCTTAGATCACTTAATTCTTCATAGAACCACGAGCAGTCGAACGATCGGGTCCATAGTGCATCCAATCTCTGGCAGCGTGTAGTGACTACATACCTGGGCCACGCCGGATCTTCATCATCCCACCTACCT"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [
+     5
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split1-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAATTAAGAACTAACCTCGGAGTGTCCGCTATTTTTAAGGCGTATGTGCGTATTGAAAGCCGACTCAGTAATGGCAACTCCGTCACCGGTGGCGACTCTTCCGGTCGGTACCCATCTTCATAGTCTGCCGGGCTACGTGGTATGGGGACTCGGTCAAACAATAATCAGATTAGTACGTTCTTAGATCACTTAATTCTTCATAGAACCACGAGCAGTCGAACGATCGGGTCCATAGTGCATCCAATCTCTGGCAGCGTGTAGTGACTACATACCTGGGCCACGCCGGATCTTCATCATCCCACCTACCT"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split2",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PacI site split 2/6 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "AATTAACGGATATTGGTTAGCCGCCTTCTCGTATTATAGCACATGCTTAGAAGTAAGCACCGACCAGCTTTATTTTACTCACCTGTCTAGAAGATCTAAATATTGGTCGCTAGAAGACCGTAGCGTGTACTGTGCCTGCCGAGTAAACATATTGGGACACTCTACGTAATGAACTTCACGGACATTGGAAATAGGAAGGGGTTTAGACGCGTTTAGAACTTCGCACGTATTGCTGCACAGTCTTATCACCTGTGGTCTAGGCTGGAAGTCTTACCCCGGTAAACGTTGTATACGCGGTACACGTATTT"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [
+     4
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split2-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "AATTAACGGATATTGGTTAGCCGCCTTCTCGTATTATAGCACATGCTTAGAAGTAAGCACCGACCAGCTTTATTTTACTCACCTGTCTAGAAGATCTAAATATTGGTCGCTAGAAGACCGTAGCGTGTACTGTGCCTGCCGAGTAAACATATTGGGACACTCTACGTAATGAACTTCACGGACATTGGAAATAGGAAGGGGTTTAGACGCGTTTAGAACTTCGCACGTATTGCTGCACAGTCTTATCACCTGTGGTCTAGGCTGGAAGTCTTACCCCGGTAAACGTTGTATACGCGGTACACGTATTT"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split3",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PacI site split 3/5 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "ATTAATTGATAGGATGAACGGCGGCTACAAGATTATCCCTTCGCCAGGGGGGTATACTACCTAATTCTTGCGGAGAATTGGGTGGAGGAACAACGTAACCAACCAGTCGCCAGCTTTATGGTTTGAGTCGCTGTTCTTAACTTTAGCCTCCTTCTCGGGCATCGGGAAAGGATTTTTTTAGCTAGTTCCCCCTCGGACACGAGCCCTGGGGGTTTTACGCAGTAGTACCTCGGGATATAGCAAAGCGACGCTACCCCGTCGATGCAGGGGATCTTGTGATAATGAGGTACGCAGACACCGGATATTTA"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [
+     3
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split3-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "ATTAATTGATAGGATGAACGGCGGCTACAAGATTATCCCTTCGCCAGGGGGGTATACTACCTAATTCTTGCGGAGAATTGGGTGGAGGAACAACGTAACCAACCAGTCGCCAGCTTTATGGTTTGAGTCGCTGTTCTTAACTTTAGCCTCCTTCTCGGGCATCGGGAAAGGATTTTTTTAGCTAGTTCCCCCTCGGACACGAGCCCTGGGGGTTTTACGCAGTAGTACCTCGGGATATAGCAAAGCGACGCTACCCCGTCGATGCAGGGGATCTTGTGATAATGAGGTACGCAGACACCGGATATTTA"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split4",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PacI site split 4/4 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "TTAATGGATTTCGAAGCACAGTATGAACGAATTTCGTGATGTCCTTACCGGTTGGGGGAAATGTGCGTAAGCGCTTTCAGAATATGCACATCAAGAACCATTGCCGGAATGTTGGGCGGTTTAGCTCAGATGTTGGAACCTGATAGTCCGCAGCCCCAACTAGTACACCCTTAATCGTCGTGTAATTCGTTGTCAATGAGACGCAGTATTATTCGTCAGTTCCAGGCAAGGTAAACGATAGCGCTCGTCATGGTTGTGTTGTGGTGGGCACGCGCCACCGGGAACGGGGACCAGGAAAACTTGTTTAA"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [
+     2
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split4-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "TTAATGGATTTCGAAGCACAGTATGAACGAATTTCGTGATGTCCTTACCGGTTGGGGGAAATGTGCGTAAGCGCTTTCAGAATATGCACATCAAGAACCATTGCCGGAATGTTGGGCGGTTTAGCTCAGATGTTGGAACCTGATAGTCCGCAGCCCCAACTAGTACACCCTTAATCGTCGTGTAATTCGTTGTCAATGAGACGCAGTATTATTCGTCAGTTCCAGGCAAGGTAAACGATAGCGCTCGTCATGGTTGTGTTGTGGTGGGCACGCGCCACCGGGAACGGGGACCAGGAAAACTTGTTTAA"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split5",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PacI site split 5/3 across the origin; circular has 2 site(s), linear has 1",
+   "input": {
+    "topology": "circular",
+    "sequence": "TAAATCATTGAGGAGTATCAGGGAAGTTAATTAAGGTTCTCAAGTCCTTAACATCAGCGCGCCAGATATTAGCGTGCGGTAAAGAAGATTTTACCTGCCAATTTCAGCTGGCTTGTCAGAGGTAACTGGAGTGGCATGGCCTTGCCTGGTGACTTTTGGGACCCGTAGCGACGTGTAGGAAACTCCGAAACACCCTGTGAGAGTTCACATTTAAGCTATCGAGCCACCCGCCGGTCATCCGCACGAAAAATCGGCTTGCGGGCCCTAATTGGTAGGCTTAAGCAGCCCCCGGTAGAATAGTAATTAAT"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [
+     1,
+     32
+    ],
+    "cut_count": 2
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split5-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "TAAATCATTGAGGAGTATCAGGGAAGTTAATTAAGGTTCTCAAGTCCTTAACATCAGCGCGCCAGATATTAGCGTGCGGTAAAGAAGATTTTACCTGCCAATTTCAGCTGGCTTGTCAGAGGTAACTGGAGTGGCATGGCCTTGCCTGGTGACTTTTGGGACCCGTAGCGACGTGTAGGAAACTCCGAAACACCCTGTGAGAGTTCACATTTAAGCTATCGAGCCACCCGCCGGTCATCCGCACGAAAAATCGGCTTGCGGGCCCTAATTGGTAGGCTTAAGCAGCCCCCGGTAGAATAGTAATTAAT"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [
+     32
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split6",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PacI site split 6/2 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "AATTCGCGAGGCATGAGGGAAGGGGGAATAGATAATAAAGAATGCAGTTTTGCTTCCACGTTTGACACTGTTAATATTGTCCCGTTGTATTACAAAAAGCTCACGCCATCTTGCCCCCAGACGATCTGTTTCTTCGAACCGTGTAGACAGTCAGCTTGTAGTGCCGACCGAAAGGCCAAGCGTATCTCAACTAACCCGTGATACTGGCCGATTTTGCCGGTAGTAGTCAGGACAACAGTTTGAGTCGTTTGTCTAATGGCGAGCGAAACCGGCGAGCTCAGGGCTTGGCCGAAGTAGAGTGCTTAATT"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [
+     308
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split6-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "AATTCGCGAGGCATGAGGGAAGGGGGAATAGATAATAAAGAATGCAGTTTTGCTTCCACGTTTGACACTGTTAATATTGTCCCGTTGTATTACAAAAAGCTCACGCCATCTTGCCCCCAGACGATCTGTTTCTTCGAACCGTGTAGACAGTCAGCTTGTAGTGCCGACCGAAAGGCCAAGCGTATCTCAACTAACCCGTGATACTGGCCGATTTTGCCGGTAGTAGTCAGGACAACAGTTTGAGTCGTTTGTCTAATGGCGAGCGAAACCGGCGAGCTCAGGGCTTGGCCGAAGTAGAGTGCTTAATT"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split7",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "PacI site split 7/1 across the origin; circular has 1 site(s), linear has 0",
+   "input": {
+    "topology": "circular",
+    "sequence": "AGCCATGGTATAGTGTAACAACCGAAAGCAAGGCTCCGACACCCCGCCTACGTCTCAGAGCTTCCATTGTTAACCACGATTAAAAAGTCCGCTGTAGGTAGTGCAATGTTTTGGTCCTCTTTCTCAACGGGAGCCGAGAATAACTTGAATACCAGATTTATAACCTCTCAAGACGTGTCCGAGGATGCTTCCCTGGACAACAATTTATCTCAGGTCAAGTGACAAGAGTCTACGGCAACAGTATAGTTATTATTGAAATGAAGATCACCCCAGGCAGTTTTCTCATTGTTAGAGTTAGGGGTTAATTA"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [
+     307
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/origin-PacI-split7-linear",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "the same sequence taken as linear: the site must NOT be found",
+   "input": {
+    "topology": "linear",
+    "sequence": "AGCCATGGTATAGTGTAACAACCGAAAGCAAGGCTCCGACACCCCGCCTACGTCTCAGAGCTTCCATTGTTAACCACGATTAAAAAGTCCGCTGTAGGTAGTGCAATGTTTTGGTCCTCTTTCTCAACGGGAGCCGAGAATAACTTGAATACCAGATTTATAACCTCTCAAGACGTGTCCGAGGATGCTTCCCTGGACAACAATTTATCTCAGGTCAAGTGACAAGAGTCTACGGCAACAGTATAGTTATTATTGAAATGAAGATCACCCCAGGCAGTTTTCTCATTGTTAGAGTTAGGGGTTAATTA"
+   },
+   "params": {
+    "enzyme": "PacI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/isoschizomer-SmaI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "SmaI and its isoschizomer share CCCGGG but cut differently",
+   "input": {
+    "topology": "linear",
+    "sequence": "AAAACCCGGGTTTT"
+   },
+   "params": {
+    "enzyme": "SmaI"
+   },
+   "expect": {
+    "cut_positions": [
+     8
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/isoschizomer-XmaI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "XmaI and its isoschizomer share CCCGGG but cut differently",
+   "input": {
+    "topology": "linear",
+    "sequence": "AAAACCCGGGTTTT"
+   },
+   "params": {
+    "enzyme": "XmaI"
+   },
+   "expect": {
+    "cut_positions": [
+     6
+    ],
+    "cut_count": 1
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/tandem-EcoRI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI on tandem sites",
+   "input": {
+    "topology": "linear",
+    "sequence": "AAAGAATTCGAATTCGAATTCGAATTCAAA"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [
+     5,
+     11,
+     17,
+     23
+    ],
+    "cut_count": 4
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/tandem-BamHI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI on tandem sites",
+   "input": {
+    "topology": "linear",
+    "sequence": "AAAGAATTCGAATTCGAATTCGAATTCAAA"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/adjacent-EcoRI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI on adjacent sites",
+   "input": {
+    "topology": "linear",
+    "sequence": "AAAGAATTCGAATTCAAA"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [
+     5,
+     11
+    ],
+    "cut_count": 2
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/adjacent-BamHI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI on adjacent sites",
+   "input": {
+    "topology": "linear",
+    "sequence": "AAAGAATTCGAATTCAAA"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/overlapping-dam-EcoRI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI on overlapping-dam sites",
+   "input": {
+    "topology": "linear",
+    "sequence": "AAAGGATCCGGATCCAAA"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/overlapping-dam-BamHI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "BamHI on overlapping-dam sites",
+   "input": {
+    "topology": "linear",
+    "sequence": "AAAGGATCCGGATCCAAA"
+   },
+   "params": {
+    "enzyme": "BamHI"
+   },
+   "expect": {
+    "cut_positions": [
+     5,
+     11
+    ],
+    "cut_count": 2
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/noncutter-EcoRI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "EcoRI does not cut this sequence; the answer is zero, not an error",
+   "input": {
+    "topology": "circular",
+    "sequence": "AAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTT"
+   },
+   "params": {
+    "enzyme": "EcoRI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/noncutter-NotI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "NotI does not cut this sequence; the answer is zero, not an error",
+   "input": {
+    "topology": "circular",
+    "sequence": "AAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTT"
+   },
+   "params": {
+    "enzyme": "NotI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "digest/noncutter-AscI",
+   "operation": "digest",
+   "hazard_tier": 1,
+   "description": "AscI does not cut this sequence; the answer is zero, not an error",
+   "input": {
+    "topology": "circular",
+    "sequence": "AAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTTAAAATTTT"
+   },
+   "params": {
+    "enzyme": "AscI"
+   },
+   "expect": {
+    "cut_positions": [],
+    "cut_count": 0
+   },
+   "oracle": {
+    "tool": "biopython",
+    "version": "1.87"
+   }
+  },
+  {
+   "id": "pcr/linear-template-0",
+   "operation": "pcr",
+   "hazard_tier": 2,
+   "description": "amplify an internal region of a linear template with exact-match primers",
+   "input": {
+    "topology": "linear",
+    "sequence": "TTACTGCTATTATACGTTCAAGGGAAACGTTTCAGTCAGCAATTAAGACTGTATGAAGCAACCAGTCCGCTGTGGACTCCAATACTGATTAGGGTCGAGGTTCCCCCGATAACCACTCAACTTACCCTGGCCTTGAGAACCGTAGGATGTTAGGCGCTCTCGTATCATCACCTCTCCATTGGGGTTGCGTCAGGCGAGGCATCCGAAAATAAGCTAGAAAACCGCCGTGGAACGCTTTTATTATCAAAGGCGCCACGGGATCACCTGTGATTTGCCGAAACTCACGTGTATTTAATTAGTTCAAAAGGAACATGATTTCAGGAAATGAATGAGTCCACGCAAAGTATTCCGTATATCCCGCCTCATTCTGATCACGTAAAAAGTCCTGGTGGGCCCGGGTTTACCGTTCACCCTCAGTGCCTTGGTAGAATTATAGGCTCGTCTACATCGCCCCTAGTGGATACCCTTGGATATCGTCCGGCGGTGAGCACGTTGATTGGCGGAGTCATCTGATATAGCAGTATGGATCACAGATCTCTGTTATCACGAGAAATGAACAAACAGATTCACCAACTCAATGGTTCGGTTGGCTATAGGAGTAATTACAAAGTAATATCGCACAGCCTCCACGGCGGATGTTGGGCGCCTGCTTGTCCGGGCAGGGCCGTTATCAGGATAATACGGACCCCTGGAGTATAATGTGTGTAGGTTTCCTGATCTATTGGTCCTTAACACGATTCTACCATATTAGACTTGGCCTCTCTGTTACTGGTAACATGGGGGTCCCAAAACCTTAACAT"
+   },
+   "params": {
+    "forward_primer": "TTCCCCCGATAACCACTCAACT",
+    "reverse_primer": "ACCCGGGCCCACCAGGACTTTT"
+   },
+   "expect": {
+    "product_length": 300,
+    "ldseguid": "ldseguid=hoLlF29EC1hsplIIC5-8dXS85ys"
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "pcr/linear-template-1",
+   "operation": "pcr",
+   "hazard_tier": 2,
+   "description": "amplify an internal region of a linear template with exact-match primers",
+   "input": {
+    "topology": "linear",
+    "sequence": "CCCGTAGTATTGATGAGTACATATCCAAATTTAGGCCGGGTGCATCACGAGTTAATAAGCAGTGAGTTATAGACCACGCACTGCGGTATGCTCAAGGACATTGCACGTCAATAGTCCTTTGTGCTGCTCAGTCCGCTATGGCCCTCAGGAGCTCGGGCGTTGGGCTGGCCACCACGGCGGATTGCTAGCGTCGCATCTAGGGTAGTCCTAACTCTCTGACCGCTATCATCCTGCGTACTGTCGCACTGACTGGTTTGTATCCGGCTTCTAGTCGGTAGGGCAGCTCTGCGACAAGAATCCATGTTCTCACAGACTCTACCCCGTCGCTCACATGCGCGGTACCAGTAGCACTATCCGATTCGCTTTGGGTGGGTAATTTGACAGGGCAGCTATACGTTATGTTAGTGACATTATCGAGGGTGGGATATCTTTCACGTGACGGTCATAGAAGATTACTCCCCGGTAATTCCTAATATCGCCACACAGATGTCCATAGTTTAGGTACCATGGATCTGCTTGATTTCAACTAACCGAATGAGCTACGTTGCCTACCCATATGCCTTACGATTCGGAACCCGGTTCGTGCACGGAGTCCCGATCTGTTCCCCCGGCGCACCCGCCACGCATTACCACTCGTCGGACAACATGAAACTCGTTCTTAGGATATCTGAGATGGACCCCCGGAGGAAATTCTAGTGGTCAGTTAACACGTTTCAGTTGGTAGAGATTTTTTCAGATCTGGCGCCCCAGCGTACCTGTGCCTCTTCGCTGGTGAGGAATTGGCGAGCTTTTTAGTTTCC"
+   },
+   "params": {
+    "forward_primer": "GCCCTCAGGAGCTCGGGCGTTG",
+    "reverse_primer": "GTCACGTGAAAGATATCCCACC"
+   },
+   "expect": {
+    "product_length": 300,
+    "ldseguid": "ldseguid=1_JbHJx7hMxANXkEtHrpcIiq7ps"
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "pcr/linear-template-2",
+   "operation": "pcr",
+   "hazard_tier": 2,
+   "description": "amplify an internal region of a linear template with exact-match primers",
+   "input": {
+    "topology": "linear",
+    "sequence": "GTTCGCGTTGCTAATGTCGATGGACTATTGCCCCGCTTGGTGTCTGTAGGTACGCAAAATTATGAGTCAGTTAAACCTCTGCCTATGTGAAACGGTAGGACGAGTTCTGGCGGTCTATGATACGAGTAAACCTAAGCACCCCCTAGACGACGGGCTCTTCGCGTAGGTGTCATGTCAGTTTCGGCATTTAAATTTCTGTAACTATTCGGACCAGCTAGGAGTAGCTTTTCAGGATATAGTTCGACCTCTTATGATCTACAAATTTGTTAGCCGCACATAGTTAGTTGCACTTGCTCTCTATTGGGTCCGGGGCATCTTGCTTGTGTGTGATCGTGCTTACCTGCCTAACATGCGGGTCCTATATCGATGTAAAAGCACATCTCGCCACCCCTCAAGGGCGCCGACGTTTATCAACTTAGCCAGGGTCTTAAATCTCGCTTTCTAGGCCGAAATCGAGGAAATGCCAGGCGTGTGTAGATAGAGCGCGTCGTTGGCAGTGTGTGCCACCGGCTGAATTGGGGATCGCGGCGGCTGACTCTAAGGATTTCCGTGTGGAAGAACTACTGACTGCGCTCACTATTCCTGGTACGCCATAGGGCATCCTACGAGGAGCAGAATCCGTCTCCACTAGTCATCGGTTTTATGTCAGCATTTTTTCCACGAATGAACATCCCTTCATCGGCGAAGCCCATGTGCAAGAAATTCTGCTTGACACTAGATCGGGCCGGGGCCGGTACCCGGGGGCCTTTCTTGTGAGCGCACCAAATATTTCGGTTGGCGTACTCAATGGCTTACTGCGG"
+   },
+   "params": {
+    "forward_primer": "TCGGCATTTAAATTTCTGTAAC",
+    "reverse_primer": "TATCTACACACGCCTGGCATTT"
+   },
+   "expect": {
+    "product_length": 300,
+    "ldseguid": "ldseguid=ZuFui2EFrzYyR0Ckmt1f0n3baBY"
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "pcr/linear-template-3",
+   "operation": "pcr",
+   "hazard_tier": 2,
+   "description": "amplify an internal region of a linear template with exact-match primers",
+   "input": {
+    "topology": "linear",
+    "sequence": "TATGTCAATGGCGGGAGACACACGTAAATAACTAGACGGTGCCATTGGCAACGCCGATAGAAGACGGTGCATACCCGTCCGCTTCGGTATGACCACGCGGTTCGGACAAATCTACGGAATCAAAAGAGTCTAGGGATTATGAAATTTGGCCCGACGTGCTTGTTACTTTCGAGTAATATTTGGTTTGCTTTCACCACTTACTGAAGATCTATAACGGGTTCAACTATACAATTTAGTTGTGCGGACACATCGCCCCCTCGCCGTGCCTAGCACGGGGCTAGTGCTGCCGGTACTTACATGGAATGGCGGTCAGGTTTGAGGCACAGGGCAGAGGGCCTACTGTACAAACCACTTTCACCTAAATACGTACGGTGCATGTTGACAGTGCTAAACAAGAGTCCTCGCCGGAGATGCCGAGTGCAACGCGATCTACTTGTAGAGACGTGACTTTTGTCAGCCCATCCGATTGGTCTCTATCTGTATTGTACCCGTAGACACCTATGGCATTATAAGTGATTATGAGTCCCCGATGCAATCACCTGTTACTGAGCAGGTTGTAATTCGGACGACCAGACCCAAGCGCCCTGAATCCTCAAGGATGCTTCGCACCGATAGGGTAATGATGATGAACCTTTGTACCCAGAGCGCCACCAGAGCTAACGTCATCATATCAACGGCCCGAACGTCCCAGCGATCTACACGGATAGGCGAGGACCAAGCCCTATCACGGCAAACCACTAGCTAACGAACGATCCGACGAAAAAAATCGGATGGATAATCAAGAGATTTCGACCTCCGTG"
+   },
+   "params": {
+    "forward_primer": "CAACTATACAATTTAGTTGTGC",
+    "reverse_primer": "ATAATCACTTATAATGCCATAG"
+   },
+   "expect": {
+    "product_length": 300,
+    "ldseguid": "ldseguid=7OdpqlE3B_35CTB3FlDug-97vw8"
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "pcr/linear-template-4",
+   "operation": "pcr",
+   "hazard_tier": 2,
+   "description": "amplify an internal region of a linear template with exact-match primers",
+   "input": {
+    "topology": "linear",
+    "sequence": "TTAGGGAGCACTTTGTCCTGATTGAGTTGGTGCAAAGGAAGACAGGTAGCCGTCACCAGGGTCAATACGAATATCGGCTTGGTCAACAAGTGAAGGTTATACGCAAATCGATCCAAATAGATTCCGCAATCATTCGGAGGGAAGTTTTACGCATGCTACACGCCGCGGCCCTAATTGAGTAAATGGTCCCAACACGCTTTATTTCACATCACACCGGGTGATGATGGCTTTAACGCCACATCGATCTCTACAACGCCGAGCTAGGTTGGATGGATGGACGGCATCCTAGGACGATCCATTCCAATCAATCCAAGGGTAGAAGACGGACTCGTTGTTAGTCATTATTGATATAGGATAGATATTTCTGCCGCCCCAGCGAGCATACGACGCTGAATATACGATTTGACTGATTTGTAACCCCTCGCTGAGACTATGCGTTGGACGTTGACTTAGCCCGAAACCTGGGTGCTCAGACAGATGGTTGGTCATCCGCACGCACCTGAAATGGCAATGAGAGCTGTTGTGGTATTGAGGTAAGTAATGAATAAGCGTTGGTCGGCCAAGCAGTAAACTTTTTTGTGGTTAATTCTCGCTACGTTTGGTGGAAATCTGTAGGAACCGCTTGACCGATCTGAAAGCCGCACAAGAACACTTGAGAGTCTTGGAACATACATTAGCAGTCGCGGATTCCATTGACCGTTTCCATGATCACGTGAAGTCGTGTACGCAAGTGAGATGCCCGTTTACGCTCCGATGGCAAGGACAGGCATTAATACTTAGTTGCCAATCGCAAGTCGATA"
+   },
+   "params": {
+    "forward_primer": "CTAGGTTGGATGGATGGACGGC",
+    "reverse_primer": "GCCGACCAACGCTTATTCATTA"
+   },
+   "expect": {
+    "product_length": 300,
+    "ldseguid": "ldseguid=Ms9qu7V-Er5szDieVKJq76VEuBY"
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "pcr/linear-template-5",
+   "operation": "pcr",
+   "hazard_tier": 2,
+   "description": "amplify an internal region of a linear template with exact-match primers",
+   "input": {
+    "topology": "linear",
+    "sequence": "CCCTTGGCGCCGCTGGGAAGACCGCCTCTTAGGAAAGCCGTTTTGCGATGGTTCACGTCTGGAGCAAACGTGGTTTGCCCGAAGCTGCAACGGTTCGATCACTTCGGACTATTTCCCAAAGAGTGGAGAGCTTTAAGTGCGATGCCCGATTTGACGAGTTTGCTGTGACTCAACCCATTGACTAGGAGAAAACAAACTGCCCCTCAAGGTGCTGTCATTACACGAATTTCAAGCAGCGCCACCCAGGTACTAATTCGATGTTCTGCGGGAGTATGACATCACGGGGGTTCCGGCGTAACGTGACACGTGGCTGTTAGGATTGCTCAGTGCAGTAATCAACGGGACCTCCTCCTTGCGGCACTACACGAGAAAAATTGGTCTTTTTTCACGGACAAACGTAAAGGGGGATTCTCGTTCCACCACTAGTGGGGGTGTCTCTTCTAAACGCAGGACCTTGTTAACAAGAGCAGGAAATTGGTCATCCAACGCCGGGTTCCGTCTTTTTGTCTAGCTTTGGGTACACGCCATTAGCGTATCATCTTATAGCATAGACATCGAATTGTCATACTCGCTAAGTGTCTACGGTCCAACTTAAGTTGGGCTATAGTCTCTATGATAATACCTTTTGACCGAGCCTGATTCCAGGGCTGGGTGCGAGCGCGCCCTAGTCTGAGCATGGTCACCTGCGGCGTTTGGTACCGCGGCAGAATTGCTCGCACATCGGGGGACAAGAAAGATCCGTCTGTCGCAAGAGCTACCGACATACAATAGGTGGAAGTCTCCCCGGCTTCTCTCGTGCT"
+   },
+   "params": {
+    "forward_primer": "TGACACGTGGCTGTTAGGATTG",
+    "reverse_primer": "CCAACTTAAGTTGGACCGTAGA"
+   },
+   "expect": {
+    "product_length": 300,
+    "ldseguid": "ldseguid=p1gN9VCx9IYhSJ9ushqcvd0cRf4"
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "assembly/gibson-two-fragment-0",
+   "operation": "assembly",
+   "hazard_tier": 1,
+   "description": "circularise two fragments sharing 30 bp terminal homology at both ends",
+   "input": {
+    "fragments": [
+     "CTAATTACCTTAATTCACCGAAAATTCGCAGTCAATTACGTCAGCGATGAAGCGTCTTGCTAACTCATAAGTGTATCACATTCACCCGAGGCTTGTTGATGAGAAGTTTACCAGCGATGCCAAGGCCTCGGGTCGTACCATACAGACCCAAATCCAAGGTGAAGATTGTTGCAGCATTAGTGAGGCATCCAGTGCAGTCAATGTACGACTTAGTAACATTTCAGTTTCCTAGGTGCAGTCGTAGACTCGTCCGATCTCCC",
+     "AGGTGCAGTCGTAGACTCGTCCGATCTCCCCTCTCTGTTTGTTAGATAAAAAGAGCTCCGACATGTGCGTCTCAACCCTGTAGCATATACACAGTCCCGCGTGGGATTAGGAGCATATTCATCAAGCCCCCTGGTCGTTCAAACTTGGTTTTAACATGAGCAACCGCCCACGAGATCCAGAGGGCCGCTCCGTTACGCTTCTGCGAAAATTCGGGCAAAGATACCCGCAAGGCTTGATTGCCTGTTAGGTGGCTACCCCTCATTGAACTACCGGACAGCACTAATTACCTTAATTCACCGAAAATTCGCA"
+    ],
+    "topology": "circular"
+   },
+   "params": {
+    "method": "homologous",
+    "min_homology": 25
+   },
+   "expect": {
+    "cdseguid": "cdseguid=EWOkte_Qw7ijshMRo98yF36LFSE",
+    "length": 510
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "assembly/gibson-two-fragment-1",
+   "operation": "assembly",
+   "hazard_tier": 1,
+   "description": "circularise two fragments sharing 30 bp terminal homology at both ends",
+   "input": {
+    "fragments": [
+     "GCTGGGCGAGGAGGTAATTAGCGGAAGAGTCCCCTTCTATTACAGAGTTGACTATCCTAGTACACGAGCCGTGGTTGCTTTGCTTCCTGTGGGCTCCGGGGTGCTCACCGACTTTGTGAGACCTGACGGCTTTATGGATATAAGCTGAAAGCGACCCTCAGTGTTTACTAAGGGGTGGGCATATTATCCACAAGGCAACCAATAATTCAGACGATCTAAAGTCTCCACAATTGTCCAGCCACAGCAATCACAAACTGAAG",
+     "TTGTCCAGCCACAGCAATCACAAACTGAAGCGTAGGAGTCATATGTTATACAGACCACTTCCACGGTGATAAATAACACATACCTGTATGATAACCCCGCTTTCACTTACATACTCAATGTGGGCTCATATCGCACTGGGTATGCCCCGCTTACGACTTGCGCTCTCGTACCTTATTTACCATTGTCTACGCCTAACCCACAAGTAGAAACGCGCGGGCAACGTAGTATGTCCACTGCGCCCTTCCCCAGAGTCAGTTTCGATTCCAGAGACTAATAACGGCTGGGCGAGGAGGTAATTAGCGGAAGAGT"
+    ],
+    "topology": "circular"
+   },
+   "params": {
+    "method": "homologous",
+    "min_homology": 25
+   },
+   "expect": {
+    "cdseguid": "cdseguid=t0v-zUCA4alJcTtuYVf_CzacUN8",
+    "length": 510
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "assembly/gibson-two-fragment-2",
+   "operation": "assembly",
+   "hazard_tier": 1,
+   "description": "circularise two fragments sharing 30 bp terminal homology at both ends",
+   "input": {
+    "fragments": [
+     "TCCGCCTGTCGCGTGAAAAGACGGGTCAGCCGGTTTACCAATCTCTGGGCGACGGGCGTTTCGTCGGCGATTGCTGCTTTACGTACTTCATCCACCTGTTTAGTTCCTGCTGCGACAACCGATGTGCTAACTAATTAGACGAATGCATCTGTTAGGCTGTACGCCTCAGGAGGAATTAGATGTCGCTGCGTTGAACGCCTAAACTCGAAGGCGCACGATATGCACCCGATCGAGCCGAGGCTCCTGGGGATTGCGCGTAG",
+     "CGAGCCGAGGCTCCTGGGGATTGCGCGTAGTTGGTAACTTCCCTCAGGGGCAGCCGCTTGGATTACCCGGATCTCTCGTAAATCCACGGCTTGAAGTCACGCTTGTGTTTTAGTGGCAATGGGCGAACGGCCATAAGGTGGGTTATACTTCGAGTATTTTGCCTGTAACCTATGGGGCCTGTCCTATATACGTTCATTGGGTCTTTCAGAACAGACTCCTCAAGCTGTCGTAGAATGTTCGCGAGTGTCTACTATGCCAGGCAACAGGCCTATAAGATGGTCCGCCTGTCGCGTGAAAAGACGGGTCAGC"
+    ],
+    "topology": "circular"
+   },
+   "params": {
+    "method": "homologous",
+    "min_homology": 25
+   },
+   "expect": {
+    "cdseguid": "cdseguid=ZvWOXmxmYUXl9UBK55gF3ONkh60",
+    "length": 510
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "assembly/gibson-two-fragment-3",
+   "operation": "assembly",
+   "hazard_tier": 1,
+   "description": "circularise two fragments sharing 30 bp terminal homology at both ends",
+   "input": {
+    "fragments": [
+     "TCAGACACCCCCTAACCATGTCGAGGTGCTGTCAAGGTATAACTCCCCTTCGGGCCTAGCAGCATGCTTTCATGAGCGAGAAGGACTTTAACTGCTTAACCAACTACGAGAGGCGCCCGCATGCGTGGATGCCAGAGATGACACAAAGGACGTTTGTGATGCGACTCTGCAGTAGCATCTATCTGAGCCGTTTCGCAAACACCTGTGTACGGAGGTATTGGTACTAACCATGGAGCATTAACGGTGTCGGGCAACTCTTT",
+     "TGGAGCATTAACGGTGTCGGGCAACTCTTTTCGAAACCTTATCCTCAGCGCTGTGCCCTCTGGACTCGCTATCTTAGTGATCTAGCGATCCATTTTCGACACGGTCGCTGTTTGTGATGTGAACTGGATGTATAATGGGAGGTGAATTCCTAGGGTCTATCTGTCTCATCGACTGGTTCCGTGGCTGGATGGGACCTGGCGTAACACATTAGACGTCCCGGAACTATGTTACGCTCGAAATGCTAGCATGCCAAAGGAAGTAGAGATATGCAGGCTCACGTCAGACACCCCCTAACCATGTCGAGGTGCT"
+    ],
+    "topology": "circular"
+   },
+   "params": {
+    "method": "homologous",
+    "min_homology": 25
+   },
+   "expect": {
+    "cdseguid": "cdseguid=JW9fx16DkqdmG_C9SeYNmyVzxwk",
+    "length": 510
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  },
+  {
+   "id": "assembly/gibson-two-fragment-4",
+   "operation": "assembly",
+   "hazard_tier": 1,
+   "description": "circularise two fragments sharing 30 bp terminal homology at both ends",
+   "input": {
+    "fragments": [
+     "GAGCAGTCTAATTGCATACATCGCCACCGAGTTCAGACCCTTCTTAGATGAGGCCCGACCAAGGTCGAACGTGTTTACACTCGTAATAGATCTAAGGGGTTCTCAGTCTCGTCCACAAGGTTTTAGCGACGGCTACCCTAGGCTTCACGTGTGCTGGAGAAATGACAACGCCCCCGTGGGAACAGTTAGGAAATGTTCATGCATGTTACCTCAAAATCGGTTCAGAATGTTGCCGGCAGGTCACGGTTTTCGCGTCTGAC",
+     "TGCCGGCAGGTCACGGTTTTCGCGTCTGACAAGTGACCCATCCACTAAAAATACCGGTCCCAACCCTTGTATCGACAGAGTCTGATCCGCCGCGACTGCTCCTTGTAGAAGCTTCATTGAAATCGGGATTGAACCAGTCCCGCGTTCGATCGCGAATCAAGGTTCCGTAAAAGAATACGAGTGATCTCTGCTAAGGGAATGACACTGAGACTCGGCGCCACCGCACCCCAGGTGCACTCTTGAATGTATCCGCCACGTTACCTGATAGTACTACTCATCCGAGCAGTCTAATTGCATACATCGCCACCGA"
+    ],
+    "topology": "circular"
+   },
+   "params": {
+    "method": "homologous",
+    "min_homology": 25
+   },
+   "expect": {
+    "cdseguid": "cdseguid=3AVIu10dBaVdKBF1odUmYynkUZM",
+    "length": 510
+   },
+   "oracle": {
+    "tool": "pydna",
+    "version": "5.5.16"
+   }
+  }
+ ]
+}
