@@ -200,6 +200,15 @@ pub enum OpError {
     NoSuchFeature {
         index: usize,
     },
+    /// The operation would have left the molecule describing itself
+    /// incorrectly.
+    ///
+    /// Because coordinates here are `{start, end}` rather than
+    /// `{start, length}`, an edit *can* produce a feature that points outside
+    /// the sequence or ends before it starts. `docs/PLAN.md` §5.3.1 makes that
+    /// an accepted cost, paid back here: an operation that would corrupt the
+    /// annotations is refused rather than recorded.
+    WouldCorrupt(Vec<crate::Invalid>),
     /// Nothing to undo or redo.
     AtEnd,
 }
@@ -212,6 +221,19 @@ impl std::fmt::Display for OpError {
             }
             OpError::NotCircular => write!(f, "only a circular molecule can be rotated"),
             OpError::NoSuchFeature { index } => write!(f, "there is no feature {index}"),
+            OpError::WouldCorrupt(v) => {
+                write!(f, "that would leave the molecule inconsistent: ")?;
+                for (i, x) in v.iter().take(3).enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{x}")?;
+                }
+                if v.len() > 3 {
+                    write!(f, "; and {} more", v.len() - 3)?;
+                }
+                Ok(())
+            }
             OpError::AtEnd => write!(f, "nothing further in that direction"),
         }
     }
@@ -239,7 +261,7 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
             let idx = (*at - 1) as usize;
             let k = seq.len() as u64;
             mol.seq.splice(idx..idx, seq.bytes());
-            shift_features(mol, *at, k as i64);
+            remap_annotations(mol, *at, 0, k);
         }
         OpKind::DeleteRange { start, len } => {
             if *start < 1 || *len == 0 || start + len - 1 > n {
@@ -252,7 +274,7 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
             let a = (*start - 1) as usize;
             let b = a + *len as usize;
             mol.seq.drain(a..b);
-            shift_features(mol, *start, -(*len as i64));
+            remap_annotations(mol, *start, *len, 0);
         }
         OpKind::ReplaceRange { start, len, seq } => {
             if *start < 1 || start + len - 1 > n {
@@ -265,7 +287,7 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
             let a = (*start - 1) as usize;
             let b = a + *len as usize;
             mol.seq.splice(a..b, seq.bytes());
-            shift_features(mol, *start, seq.len() as i64 - *len as i64);
+            remap_annotations(mol, *start, *len, seq.len() as u64);
         }
         OpKind::SetTopology(t) => mol.topology = *t,
         OpKind::Rotate { origin } => {
@@ -329,29 +351,77 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Move every feature coordinate at or after `from` by `delta`.
+/// Remap annotations across an edit that replaced `old_len` bases at `start`
+/// with `new_len` bases.
 ///
-/// A segment that spanned the edited region grows or shrinks with it; one
-/// entirely before it is untouched.
-fn shift_features(mol: &mut Molecule, from: u64, delta: i64) {
-    let adjust = |p: u64| -> u64 {
-        if p < from {
-            p
+/// Insertion is `old_len == 0`, deletion is `new_len == 0`.
+///
+/// Three cases, and the third is the one that matters:
+///
+/// - entirely before the edit: unchanged
+/// - entirely after: shifted by the size difference
+/// - **overlapping**: truncated to what survives — and if *nothing* survives,
+///   the segment is dropped, and a feature left with no segments is removed.
+///
+/// That last rule is deliberate. Clamping a wiped-out feature to the edit site
+/// instead would leave a one-base `AmpR` sitting in the file: valid, plausible
+/// at a glance, and false. Deleting the bases a feature describes deletes the
+/// feature.
+fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64) {
+    let old_end = start + old_len; // one past the edited region
+    let delta = new_len as i64 - old_len as i64;
+
+    // Returns None when the coordinate fell inside a region that no longer
+    // exists and there is nothing to anchor it to.
+    let map_start = |p: u64| -> Option<u64> {
+        if p < start {
+            Some(p)
+        } else if p >= old_end {
+            Some((p as i64 + delta) as u64)
+        } else if new_len > 0 {
+            Some(start)
         } else {
-            (p as i64 + delta).max(from as i64 - 1).max(0) as u64
+            None
         }
     };
+    let map_end = |p: u64| -> Option<u64> {
+        if p < start {
+            Some(p)
+        } else if p >= old_end {
+            Some((p as i64 + delta) as u64)
+        } else if new_len > 0 {
+            Some(start + new_len - 1)
+        } else {
+            None
+        }
+    };
+
+    let remap = |s_start: &mut u64, s_end: &mut u64| -> bool {
+        // A segment straddling the edit keeps whichever ends survive.
+        let a = map_start(*s_start).or_else(|| {
+            (*s_end >= old_end)
+                .then(|| (start as i64 + delta.min(0)) as u64)
+                .map(|_| start)
+        });
+        let b = map_end(*s_end).or_else(|| (*s_start < start).then_some(start - 1));
+        match (a, b) {
+            (Some(a), Some(b)) if b >= a && a >= 1 => {
+                *s_start = a;
+                *s_end = b;
+                true
+            }
+            _ => false,
+        }
+    };
+
     for f in &mut mol.features {
-        for s in &mut f.segments {
-            s.start = adjust(s.start);
-            s.end = adjust(s.end);
-        }
+        f.segments.retain_mut(|s| remap(&mut s.start, &mut s.end));
     }
+    // A feature with nothing left to point at is not a feature.
+    mol.features.retain(|f| !f.segments.is_empty());
+
     for p in &mut mol.primers {
-        for s in &mut p.sites {
-            s.start = adjust(s.start);
-            s.end = adjust(s.end);
-        }
+        p.sites.retain_mut(|s| remap(&mut s.start, &mut s.end));
     }
 }
 
@@ -418,6 +488,19 @@ impl OpLog {
         // Try it on a copy first, so a rejected operation leaves no trace.
         let mut next = self.current.clone();
         apply(&mut next, &kind)?;
+
+        // ...and refuse it if the result would not describe itself correctly.
+        // Only *new* problems count: a file that arrived with a bad coordinate
+        // should still be editable, and blaming the user's edit for the
+        // importer's mess would be both wrong and infuriating.
+        let before = self.current.validate();
+        let after = next.validate();
+        if after.len() > before.len() {
+            let fresh: Vec<_> = after.into_iter().filter(|x| !before.contains(x)).collect();
+            if !fresh.is_empty() {
+                return Err(OpError::WouldCorrupt(fresh));
+            }
+        }
 
         let id = derive_id(self.cursor, &kind);
         if !self.by_id.contains_key(&id) {
@@ -777,6 +860,98 @@ mod tests {
         assert_eq!(log.current().seq, before);
         assert_eq!(log.all_ops().len(), 0, "a refused edit is not history");
         assert_eq!(log.depth(), 0);
+    }
+
+    #[test]
+    fn deleting_the_bases_a_feature_describes_deletes_the_feature() {
+        // Not "collapse it to a one-base stub". A 1 bp AmpR is valid, looks
+        // plausible, and is false — worse than no feature at all.
+        let mut log = OpLog::new(with_feature("AAAACCCCGGGGTTTT", 13, 16));
+        assert_eq!(log.current().features.len(), 1);
+        log.apply(OpKind::DeleteRange { start: 13, len: 4 }, "t")
+            .unwrap();
+        assert_eq!(log.current().seq, b"AAAACCCCGGGG".to_vec());
+        assert!(
+            log.current().features.is_empty(),
+            "the feature had nothing left to point at"
+        );
+        assert!(log.current().is_valid());
+
+        // ...and undo brings it back, because nothing is ever discarded.
+        log.undo().unwrap();
+        assert_eq!(log.current().features.len(), 1);
+        assert_eq!(
+            (
+                log.current().features[0].start(),
+                log.current().features[0].end()
+            ),
+            (13, 16)
+        );
+    }
+
+    #[test]
+    fn a_partly_deleted_feature_is_truncated_to_what_survives() {
+        // The feature covers CCCCGGGG; remove its last four bases.
+        let mut log = OpLog::new(with_feature("AAAACCCCGGGGTTTT", 5, 12));
+        log.apply(OpKind::DeleteRange { start: 9, len: 4 }, "t")
+            .unwrap();
+        let f = &log.current().features[0];
+        assert_eq!((f.start(), f.end()), (5, 8), "the surviving half is kept");
+        let s = &log.current().seq;
+        assert_eq!(&s[(f.start() - 1) as usize..f.end() as usize], b"CCCC");
+        assert!(log.current().is_valid());
+    }
+
+    #[test]
+    fn every_edit_leaves_a_self_consistent_molecule() {
+        // The guarantee that replaces "invalid states are unrepresentable".
+        let mut log = OpLog::new(with_feature("AAAACCCCGGGGTTTT", 5, 12));
+        for kind in [
+            OpKind::InsertAt {
+                at: 1,
+                seq: "TT".into(),
+            },
+            OpKind::DeleteRange { start: 3, len: 6 },
+            OpKind::ReplaceRange {
+                start: 2,
+                len: 4,
+                seq: "GG".into(),
+            },
+            OpKind::SetTopology(Topology::Circular),
+            OpKind::ReverseComplement,
+        ] {
+            if log.apply(kind.clone(), "t").is_ok() {
+                assert!(
+                    log.current().is_valid(),
+                    "{} left {:?}",
+                    kind.describe(),
+                    log.current().validate()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_that_arrived_broken_can_still_be_edited() {
+        // Only *new* problems block an edit. Refusing to let someone touch a
+        // file because its importer left a bad coordinate would blame the user
+        // for someone else's bug.
+        let mut m = mol("AAAACCCC", false);
+        let mut f = Feature::new("already wrong", "misc_feature");
+        f.segments.push(Segment::new(4, 2)); // inverted on arrival
+        m.features.push(f);
+        assert!(!m.is_valid());
+
+        let mut log = OpLog::new(m);
+        log.apply(
+            OpKind::InsertAt {
+                at: 1,
+                seq: "TT".into(),
+            },
+            "t",
+        )
+        .expect("a pre-existing problem must not block an unrelated edit");
+        assert_eq!(log.current().seq, b"TTAAAACCCC".to_vec());
     }
 
     #[test]

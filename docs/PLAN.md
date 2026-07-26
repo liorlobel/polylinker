@@ -356,6 +356,36 @@ Conversion happens only at the format boundary, in exactly four functions, each 
 - GFF3/BED ↔ internal (GFF3 1-based inclusive, BED 0-based half-open — two different conventions in adjacent code paths, a classic bug site)
 - ABIF ↔ internal
 
+> **AMENDMENT (2026-07-26) — the implementation uses 1-based inclusive
+> `{start, end}`, not `{start, length}`. Decided, not drifted.**
+>
+> The argument above still stands on its merits and is not being disputed. It
+> was overruled for one reason the original text does not weigh: **both formats
+> this tool actually reads are already 1-based inclusive.** SnapGene's
+> `<Segment range="a-b">` and GenBank's `4500..5000` are the same convention,
+> so choosing it internally makes two of the four boundary conversions the
+> *identity function*. §5.3.1 asks for the conversions to be confined to four
+> places; this reduces two of them to nothing at all, and an off-by-one cannot
+> hide in a function that does not exist.
+>
+> Origin-spanning intervals, the case that motivates `{start, length}`, are
+> represented the way both source formats represent them: as a feature with two
+> segments. That machinery is needed regardless — GenBank `join()` exists for
+> introns and fusions, not only for the origin — so the wrapping case reuses it
+> rather than requiring a second mechanism.
+>
+> **What this costs, stated plainly.** `{start, length}` makes an invalid
+> interval *unrepresentable*. `{start, end}` does not: `end < start`, `start == 0`
+> and `end > len` are all constructible. That safety is not free and is not
+> obtained by choosing the other convention here — so it is bought explicitly
+> with [`Molecule::validate`], which every reader and every operation runs
+> against. Rotation is likewise a remap rather than one line of modular
+> arithmetic, and is covered by the rotation-identity property test on real
+> plasmids.
+>
+> Reopen this only with evidence: a coordinate bug that the other
+> representation would have made impossible.
+
 **5.3.2 Sequence storage.** Plain `Vec<u8>` ASCII. Not bit-packed. A 200 kb BAC is 200 kB; bit-packing saves nothing that matters and breaks IUPAC ambiguity codes, which a plasmid editor needs constantly. Reconsider only if profiling says so.
 
 **5.3.3 Annotation provenance is not optional metadata — it is the product.** Every auto-annotated feature carries the database version that produced it. Two collaborators with different database versions will otherwise get different annotations for the same file and will blame the tool. Stamped `db_version` also makes the annotation reproducible and therefore citable in a methods section, which is the differentiator over SnapGene's closed, undocumented, complained-about-as-duplicated library.

@@ -363,11 +363,17 @@ fn parse_primers(x: &str) -> Vec<Primer> {
                     }
                     if let (Some(p), Some(loc)) = (cur.as_mut(), Event::attr(&attrs, "location")) {
                         if let Some((a, b)) = loc.split_once('-') {
-                            if let (Ok(start), Ok(end)) = (a.trim().parse(), b.trim().parse()) {
+                            if let (Ok(start), Ok(end)) =
+                                (a.trim().parse::<u64>(), b.trim().parse::<u64>())
+                            {
                                 let rev = Event::attr(&attrs, "boundStrand") == Some("1");
                                 p.sites.push(BindingSite {
-                                    start,
-                                    end,
+                                    // NOT a typo, and not the same as Segment
+                                    // above: `location` is 0-based inclusive
+                                    // while `range` is 1-based inclusive. See
+                                    // `binding_sites_are_zero_based_unlike_segments`.
+                                    start: start + 1,
+                                    end: end + 1,
                                     strand: if rev {
                                         Strand::Reverse
                                     } else {
@@ -581,6 +587,45 @@ mod tests {
         );
         assert_eq!(p[0].sites[0].tm, Some(55.3));
         assert_eq!(p[0].sites[0].strand, Strand::Forward);
+    }
+
+    /// The one place `.dna` contradicts itself, so the one place worth a test
+    /// that spells out *why*.
+    ///
+    /// `<Segment range="a-b">` is 1-based inclusive; `<BindingSite
+    /// location="a-b">` is **0-based** inclusive. Both live in the same file,
+    /// both look like `"a-b"`, and reading them the same way is wrong by one
+    /// base for every primer.
+    ///
+    /// Established empirically rather than assumed: across the corpus, segment
+    /// starts are never 0 and segment ends reach exactly `len`, while 32 of 32
+    /// unambiguous binding sites reproduce their own recorded `annealedBases`
+    /// only when read 0-based. See `docs/DNA-FORMAT.md`.
+    ///
+    /// This is invisible to a round-trip test — the writer re-emits the
+    /// original block, so an off-by-one on read cancels on write.
+    #[test]
+    fn binding_sites_are_zero_based_unlike_segments() {
+        // A 17 bp primer annealing to the very first bases of the molecule.
+        // 0-based inclusive "0-16" is 17 bases starting at the first one.
+        let p = parse_primers(
+            r#"<Primers><Primer name="M13F" sequence="GTAAAACGACGGCCAGT">
+                 <BindingSite location="0-16" boundStrand="0"/>
+               </Primer></Primers>"#,
+        );
+        assert_eq!(
+            (p[0].sites[0].start, p[0].sites[0].end),
+            (1, 17),
+            "location=\"0-16\" is the first 17 bases, i.e. 1..=17 for us"
+        );
+        assert_eq!(p[0].sites[0].end - p[0].sites[0].start + 1, 17);
+
+        // The identical-looking attribute on a Segment is taken at face value.
+        let f = parse_features(
+            r#"<Features><Feature name="x" type="CDS">
+                 <Segment range="1-17"/></Feature></Features>"#,
+        );
+        assert_eq!((f[0].segments[0].start, f[0].segments[0].end), (1, 17));
     }
 
     #[test]

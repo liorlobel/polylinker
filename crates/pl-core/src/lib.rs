@@ -184,6 +184,41 @@ pub struct Methylation {
     pub ecoki: bool,
 }
 
+/// A coordinate that does not describe anything real.
+///
+/// See [`Molecule::validate`] for why these are possible at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Invalid {
+    /// `end < start`. In this model a span that crosses the origin is written
+    /// as two segments, so an inverted one is a mistake rather than a wrap.
+    Inverted { what: String, start: u64, end: u64 },
+    /// Coordinates are 1-based, so there is no position 0.
+    ZeroStart { what: String },
+    /// The coordinate is past the end of the molecule.
+    PastEnd { what: String, end: u64, len: u64 },
+    /// A feature that annotates nowhere.
+    FeatureWithoutSegments { index: usize, name: String },
+}
+
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Invalid::Inverted { what, start, end } => {
+                write!(f, "{what}: {start}..{end} ends before it starts")
+            }
+            Invalid::ZeroStart { what } => {
+                write!(f, "{what}: starts at 0, but coordinates are 1-based")
+            }
+            Invalid::PastEnd { what, end, len } => {
+                write!(f, "{what}: ends at {end}, past the {len} bp molecule")
+            }
+            Invalid::FeatureWithoutSegments { index, name } => {
+                write!(f, "feature {index} '{name}': has no segments")
+            }
+        }
+    }
+}
+
 /// A nucleic-acid molecule with its annotations.
 #[derive(Debug, Clone, Default)]
 pub struct Molecule {
@@ -283,6 +318,88 @@ impl Molecule {
         Some(v)
     }
 
+    /// Check every coordinate against the molecule it describes.
+    ///
+    /// This exists because of a deliberate trade recorded in `docs/PLAN.md`
+    /// §5.3.1. Coordinates here are 1-based inclusive `{start, end}`, chosen so
+    /// that conversion to and from GenBank and the SnapGene container is the
+    /// identity. The cost is that an invalid interval is *constructible* —
+    /// `end < start`, `start == 0`, `end` past the sequence — where the
+    /// alternative `{start, length}` representation would have made it
+    /// unrepresentable. That safety has to be bought back explicitly, and this
+    /// is where it is bought.
+    ///
+    /// Note what is *not* an error: a feature made of several segments. That is
+    /// how both source formats express an intron, a fusion, and a span crossing
+    /// the origin.
+    pub fn validate(&self) -> Vec<Invalid> {
+        let mut out = Vec::new();
+        // Annotations are checked against the span they annotate, which for a
+        // file carrying no bases is the length it declares.
+        let n = self.annotation_span();
+
+        for (i, f) in self.features.iter().enumerate() {
+            if f.segments.is_empty() {
+                out.push(Invalid::FeatureWithoutSegments {
+                    index: i,
+                    name: f.name.clone(),
+                });
+                continue;
+            }
+            for (j, s) in f.segments.iter().enumerate() {
+                if s.start == 0 {
+                    out.push(Invalid::ZeroStart {
+                        what: format!("feature {i} '{}' segment {j}", f.name),
+                    });
+                }
+                if s.end < s.start {
+                    out.push(Invalid::Inverted {
+                        what: format!("feature {i} '{}' segment {j}", f.name),
+                        start: s.start,
+                        end: s.end,
+                    });
+                }
+                if n > 0 && s.end > n {
+                    out.push(Invalid::PastEnd {
+                        what: format!("feature {i} '{}' segment {j}", f.name),
+                        end: s.end,
+                        len: n,
+                    });
+                }
+            }
+        }
+
+        for (i, p) in self.primers.iter().enumerate() {
+            for (j, s) in p.sites.iter().enumerate() {
+                if s.start == 0 {
+                    out.push(Invalid::ZeroStart {
+                        what: format!("primer {i} '{}' site {j}", p.name),
+                    });
+                }
+                if s.end < s.start {
+                    out.push(Invalid::Inverted {
+                        what: format!("primer {i} '{}' site {j}", p.name),
+                        start: s.start,
+                        end: s.end,
+                    });
+                }
+                if n > 0 && s.end > n {
+                    out.push(Invalid::PastEnd {
+                        what: format!("primer {i} '{}' site {j}", p.name),
+                        end: s.end,
+                        len: n,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// True when nothing in [`validate`](Self::validate) objects.
+    pub fn is_valid(&self) -> bool {
+        self.validate().is_empty()
+    }
+
     /// Rotate a circular molecule so that 1-based position `origin` becomes 1,
     /// moving every annotation with it. No-op on a linear molecule.
     pub fn rotate(&mut self, origin: u64) -> bool {
@@ -369,6 +486,112 @@ mod tests {
         let segs = &m.features[0].segments;
         assert_eq!((segs[0].start, segs[0].end), (11, 12));
         assert_eq!((segs[1].start, segs[1].end), (13, 14));
+    }
+
+    #[test]
+    fn validate_accepts_a_sound_molecule() {
+        let mut m = Molecule {
+            seq: b"ACGTACGTACGT".to_vec(),
+            ..Default::default()
+        };
+        let mut f = Feature::new("ok", "CDS");
+        f.segments.push(Segment::new(1, 6));
+        f.segments.push(Segment::new(9, 12)); // a join, which is fine
+        m.features.push(f);
+        assert!(m.is_valid(), "{:?}", m.validate());
+    }
+
+    #[test]
+    fn validate_catches_what_the_other_representation_would_have_prevented() {
+        // Each of these is impossible to express as {start, length} mod L, and
+        // constructible here. That trade is recorded in PLAN 5.3.1.
+        let base = Molecule {
+            seq: b"ACGTACGTACGT".to_vec(),
+            ..Default::default()
+        };
+
+        let mut inverted = base.clone();
+        let mut f = Feature::new("backwards", "CDS");
+        f.segments.push(Segment::new(9, 4));
+        inverted.features.push(f);
+        assert!(matches!(
+            inverted.validate().as_slice(),
+            [Invalid::Inverted {
+                start: 9,
+                end: 4,
+                ..
+            }]
+        ));
+
+        let mut zero = base.clone();
+        let mut f = Feature::new("zero", "CDS");
+        f.segments.push(Segment::new(0, 4));
+        zero.features.push(f);
+        assert!(matches!(
+            zero.validate().as_slice(),
+            [Invalid::ZeroStart { .. }]
+        ));
+
+        let mut past = base.clone();
+        let mut f = Feature::new("past", "CDS");
+        f.segments.push(Segment::new(4, 999));
+        past.features.push(f);
+        assert!(matches!(
+            past.validate().as_slice(),
+            [Invalid::PastEnd {
+                end: 999,
+                len: 12,
+                ..
+            }]
+        ));
+
+        let mut empty = base.clone();
+        empty.features.push(Feature::new("nowhere", "CDS"));
+        assert!(matches!(
+            empty.validate().as_slice(),
+            [Invalid::FeatureWithoutSegments { .. }]
+        ));
+    }
+
+    #[test]
+    fn an_annotation_only_file_is_checked_against_its_declared_span() {
+        // No bases, so there is nothing to compare against except the length
+        // the file claims. A feature inside that span is fine.
+        let mut m = Molecule {
+            declared_len: Some(1000),
+            ..Default::default()
+        };
+        let mut f = Feature::new("gene", "CDS");
+        f.segments.push(Segment::new(100, 400));
+        m.features.push(f);
+        assert!(m.is_valid(), "{:?}", m.validate());
+
+        let mut past = m.clone();
+        past.features[0].segments[0].end = 2000;
+        assert!(!past.is_valid());
+    }
+
+    #[test]
+    fn primer_sites_are_checked_too() {
+        let mut m = Molecule {
+            seq: b"ACGTACGTACGT".to_vec(),
+            ..Default::default()
+        };
+        m.primers.push(Primer {
+            name: "p".into(),
+            seq: "ACGT".into(),
+            description: String::new(),
+            sites: vec![BindingSite {
+                start: 10,
+                end: 3,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+        });
+        assert!(matches!(
+            m.validate().as_slice(),
+            [Invalid::Inverted { .. }]
+        ));
     }
 
     #[test]

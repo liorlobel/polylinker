@@ -181,7 +181,9 @@ Plain UTF-8 XML.
 </Features>
 ```
 
-- **Coordinates are 1-based and inclusive**, written `start-end`.
+- **Segment coordinates are 1-based and inclusive**, written `start-end`.
+  Do not generalise this to the rest of the file — `<BindingSite location>` in
+  block 5 uses the *same syntax* with a *different origin*. See §6.1.
 - A feature owns **one or more `<Segment>`s**, which is how joins, exon
   structures and origin-spanning features are represented. Any data model that
   assumes one interval per feature will lose information.
@@ -214,7 +216,40 @@ Plain UTF-8 XML.
 </Primers>
 ```
 
-Two things here are worth more than the rest of the format combined:
+### 6.1 `location` is 0-based — unlike `range`
+
+**The single most dangerous detail in this format.** `<Segment range="a-b">` is
+1-based inclusive. `<BindingSite location="a-b">` is **0-based** inclusive. They
+share a syntax, sit in the same document, and mean different things.
+
+The evidence, gathered over 344 files rather than assumed:
+
+| attribute | smallest start seen | ends exactly at `len` | start codon under 1-based | under 0-based |
+|---|---|---|---|---|
+| `Segment range` | 1 | yes (4×) | 21 | 1 |
+| `BindingSite location` | 0 | — | 0 | 32 |
+
+The binding-site column needs no inference at all, because the format checks
+itself: each site records the `annealedBases` it claims to cover. Slicing the
+sequence 0-based reproduces that string; slicing it 1-based does not, in 32 of
+32 unambiguous cases. Segments answer to biology instead — read 1-based, 21
+translated forward CDSs begin with `ATG` and 18 end on a stop codon; read
+0-based, one does.
+
+Two traps follow:
+
+- A reader that treats both alike is wrong by one base for **every primer**, and
+  right about every feature — so the bug looks like a primer-specific mystery
+  rather than a coordinate convention.
+- It **survives round-trip testing invisibly**. A writer that re-emits the
+  original block (as ours does) cancels the error on the way out, so byte-exact
+  reproduction proves nothing here. Only comparing coordinates against the
+  sequence catches it. This one was found by validating annotations against the
+  bases they claim to describe, on real files.
+
+`<Component hybridizedRange>` follows `location`, not `range`.
+
+Two further things here are worth more than the rest of the format combined:
 
 1. **`<HybridizationParams>` documents the binding-site search parameters**
    directly — minimum contiguous match of 10, mismatches allowed, minimum Tm

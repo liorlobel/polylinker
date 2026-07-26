@@ -631,6 +631,99 @@ fn editing_and_undoing_a_real_plasmid_restores_it_exactly() {
     );
 }
 
+/// Does the wild actually contain the coordinates our model permits but should
+/// not have?
+///
+/// `docs/PLAN.md` §5.3.1 (as amended) accepts that `{start, end}` can express
+/// an interval that describes nothing — inverted, zero-based, past the end.
+/// The question that decides how strict readers should be is empirical: do real
+/// files contain them?
+///
+/// This reports rather than asserting a count, because the answer is a property
+/// of other people's software and will drift. It fails only if a file we wrote
+/// ourselves is invalid, which would be our bug.
+#[test]
+fn survey_real_files_for_coordinates_that_describe_nothing() {
+    let files = files_with(&["dna", "gb", "gbk", "genbank"]);
+    if files.is_empty() {
+        return skip("survey_real_files_for_coordinates_that_describe_nothing");
+    }
+
+    let mut checked = 0usize;
+    let mut clean = 0usize;
+    let mut by_kind: std::collections::BTreeMap<&str, usize> = Default::default();
+    let mut examples: Vec<String> = Vec::new();
+    let mut round_trip_failures = Vec::new();
+
+    for path in &files {
+        let Ok(raw) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok((mol, _fmt)) = pl_fileio::load(&raw) else {
+            continue;
+        };
+        checked += 1;
+        let problems = mol.validate();
+        if problems.is_empty() {
+            clean += 1;
+        } else {
+            for p in &problems {
+                let k = match p {
+                    pl_core::Invalid::Inverted { .. } => "inverted",
+                    pl_core::Invalid::ZeroStart { .. } => "zero start",
+                    pl_core::Invalid::PastEnd { .. } => "past the end",
+                    pl_core::Invalid::FeatureWithoutSegments { .. } => "no segments",
+                };
+                *by_kind.entry(k).or_default() += 1;
+            }
+            if examples.len() < 6 {
+                examples.push(format!(
+                    "{}: {}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    problems[0]
+                ));
+            }
+        }
+
+        // Whatever the input contained, anything *we* write must be sound.
+        let title = path.file_name().unwrap().to_string_lossy().to_string();
+        let gb = genbank::write(&mol, &title, (26, 6, 2026));
+        let ours = genbank::parse(&gb);
+        let ours_problems = ours.validate();
+        // Only new problems are ours; a bad coordinate on the way in is
+        // allowed to survive the trip.
+        if ours_problems.len() > problems.len() {
+            round_trip_failures.push(format!(
+                "{}: we introduced {} problem(s): {}",
+                path.display(),
+                ours_problems.len() - problems.len(),
+                ours_problems
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+    }
+
+    eprintln!("coordinate survey: {clean}/{checked} files fully sound");
+    if by_kind.is_empty() {
+        eprintln!("  no invalid coordinates found in the wild");
+    } else {
+        for (k, n) in &by_kind {
+            eprintln!("  {n:>6}  {k}");
+        }
+        for e in &examples {
+            eprintln!("    e.g. {e}");
+        }
+    }
+    assert!(
+        round_trip_failures.is_empty(),
+        "our own writer produced invalid coordinates:\n  {}",
+        round_trip_failures.join("\n  ")
+    );
+}
+
 #[test]
 fn digest_invariants_hold_on_real_plasmids() {
     let files = files_with(&["dna"]);
