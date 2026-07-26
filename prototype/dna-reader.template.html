@@ -315,602 +315,201 @@
 <div id="drop"><div class="inner">Drop a .dna file to open it</div></div>
 
 <script>
-"use strict";
-
 /* =====================================================================
-   1. Container codec
+   1. The core, compiled to WebAssembly
+
+   Everything that decides what a molecule *is* — the SnapGene `.dna`
+   container, GenBank, FASTA, restriction digestion — lives in the Rust
+   crates and is compiled to wasm32. This page contains no parser.
+
+   There used to be a second implementation here, in JavaScript. Two
+   implementations of an undocumented binary format means two things to keep
+   correct, and only one of them had a test suite. The Rust one is checked
+   byte-for-byte against a real corpus and against Biopython; this page now
+   runs exactly that code.
+
+   The module is inlined below as base64 so this stays a single file that
+   works over file:// with no network and no install — the whole point of the
+   thing. It declares zero imports.
+
+   {{BUILD_STAMP}}
    ===================================================================== */
 
+const WASM_BASE64 = "{{WASM_BASE64}}";
+
+let W = null;                 // wasm exports, once initialised
+let ENZYMES = [];             // [name, site] pairs, published by the core
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+const READY = (async () => {
+  const module = await WebAssembly.compile(base64ToBytes(WASM_BASE64));
+  const instance = await WebAssembly.instantiate(module, {});
+  W = instance.exports;
+  if (W.pl_abi_version() !== 1) {
+    throw new Error(`core ABI ${W.pl_abi_version()}, this page expects 1 — rebuild with tools/build-web.ps1`);
+  }
+  W.pl_enzymes_json();
+  ENZYMES = coreJson().map(e => [e.name, e.site]);
+})();
+
+/* ---- the ABI ----------------------------------------------------------
+   Results are left in a buffer inside the module rather than returned. Any
+   call may grow wasm memory, which detaches every existing view, so each
+   helper creates its own afresh. That is the one sharp edge here, and the
+   reason no view is ever cached.                                        */
+
+const mem = () => new Uint8Array(W.memory.buffer);
+
+function coreOut() {
+  const ptr = W.pl_out_ptr();
+  const len = W.pl_out_len();
+  return mem().slice(ptr, ptr + len);
+}
+const coreText = () => new TextDecoder().decode(coreOut());
+const coreJson = () => JSON.parse(coreText());
+
+/** Bases as a string, without going through UTF-8. */
+function coreSequence() {
+  W.pl_sequence();
+  const bytes = coreOut();
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 32768) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+  }
+  return s;
+}
+
+function withBytes(bytes, fn) {
+  const ptr = W.pl_alloc(bytes.length);
+  mem().set(bytes, ptr);
+  try {
+    return fn(ptr, bytes.length);
+  } finally {
+    W.pl_free(ptr, bytes.length);
+  }
+}
+
+function withString(s, fn) {
+  return withBytes(new TextEncoder().encode(s), fn);
+}
+
+/* ---- the view model --------------------------------------------------
+   The core's JSON is the contract. This adapts it to the shape the
+   renderers below already use — an adapter at a real boundary, not a
+   rename for its own sake. Coordinates stay 1-based inclusive throughout. */
+
+// The .dna flag bits and block types. Named here because this is where the
+// core's JSON is turned back into the format's own vocabulary for display; the
+// core remains the authority on what they mean, these are only labels.
+const FLAG = { CIRCULAR: 0x01, DOUBLE: 0x02, DAM: 0x04, DCM: 0x08, ECOKI: 0x10 };
 const BLOCK = {
-  SEQUENCE: 0, CUT_CACHE: 2, ENZYME_TABLE: 3, PRIMERS: 5, NOTES: 6,
+  SEQUENCE: 0, CUTSITE_CACHE: 2, ENZYME_TABLE: 3, PRIMERS: 5, NOTES: 6,
   HISTORY_TREE: 7, EXTRA_PROPS: 8, HEADER: 9, FEATURES: 10, HISTORY_NODE: 11,
 };
+const DERIVED = new Set([BLOCK.CUTSITE_CACHE, BLOCK.ENZYME_TABLE]);
 
-const BLOCK_NAME = {
-  0:"DNA sequence", 1:"compressed DNA", 2:"cut-site cache", 3:"enzyme table",
-  5:"primers", 6:"notes", 7:"history tree", 8:"extra properties", 9:"file header",
-  10:"features", 11:"history node", 13:"ancillary", 14:"ancillary",
-  16:"alignable sequences", 17:"trace data", 18:"uracil positions",
-  19:"custom colours", 20:"ancillary", 21:"ancillary", 28:"ancillary", 30:"ancillary",
+const DIR_OF = { "+": 1, "-": 2, both: 3, none: 0 };
+const FORMAT_OF = {
+  "SnapGene .dna": "dna",
+  GenBank: "genbank",
+  FASTA: "fasta",
 };
 
-// Blocks that are pure functions of (sequence x enzyme set): regenerable.
-const DERIVED = new Set([BLOCK.CUT_CACHE, BLOCK.ENZYME_TABLE]);
-
-const FLAG = { CIRCULAR:1, DOUBLE:2, DAM:4, DCM:8, ECOKI:16 };
-
-const MAGIC = "SnapGene";
-
-function parseDna(buf) {
-  const dv = new DataView(buf);
-  const bytes = new Uint8Array(buf);
-  const blocks = [];
-  let pos = 0, first = true;
-
-  while (pos < bytes.length) {
-    if (pos + 5 > bytes.length) throw new Error(`truncated block header at byte ${pos}`);
-    const type = dv.getUint8(pos);
-    const len  = dv.getUint32(pos + 1, false);   // big-endian
-    pos += 5;
-    if (pos + len > bytes.length) {
-      throw new Error(`block ${type} claims ${len} bytes but only ${bytes.length - pos} remain`);
-    }
-    const payload = bytes.subarray(pos, pos + len);
-    pos += len;
-
-    if (first) {
-      if (type !== BLOCK.HEADER) throw new Error(`first block is type ${type}, expected 9`);
-      if (new TextDecoder().decode(payload.subarray(0, 8)) !== MAGIC) {
-        throw new Error("missing 'SnapGene' magic — not a .dna file");
-      }
-      first = false;
-    }
-    blocks.push({ type, payload, offset: pos - len - 5 });
-  }
-  if (first) throw new Error("empty file");
-
+function adapt(summary, sequence) {
   const doc = {
-    blocks, totalBytes: bytes.length,
-    sequence: "", flags: FLAG.DOUBLE,
-    fileType: 1, exportVersion: 0, importVersion: 0,
-    features: [], primers: [], notes: {}, hasHistory: false,
+    sourceFormat: FORMAT_OF[summary.format] || "unknown",
+    formatName: summary.format,
+    sequence,
+    length: summary.bp || summary.span,
+    declaredLength: summary.bp ? 0 : summary.span,
+    span: summary.span,
+    annotationSpan: summary.annotationSpan,
+    circular: summary.circular,
+    sequenceAbsent: summary.sequenceAbsent,
+    annotationTrack: summary.annotationTrack,
+    // null when the source does not record it. GenBank almost never does and
+    // FASTA cannot, so the summary stays silent rather than guessing.
+    doubleStranded: summary.doubleStranded,
+    gc: summary.gc,
+    lowercase: summary.lowercase,
+    ambiguous: summary.ambiguous,
+    notes: Object.fromEntries(summary.notes.map(n => [n.name, n.value])),
+    features: summary.features.map(f => ({
+      name: f.name,
+      type: f.kind,
+      dir: DIR_OF[f.strand] ?? 0,
+      color: f.color,
+      segs: f.segments.map(s => ({
+        start: s.start, end: s.end, color: s.color, translated: s.translated,
+      })),
+      quals: Object.fromEntries(f.qualifiers.map(q => [q.name, q.value])),
+      start: f.start,
+      end: f.end,
+    })),
+    primers: summary.primers.map(p => ({
+      name: p.name,
+      seq: p.seq,
+      desc: p.description,
+      sites: p.sites.map(s => ({
+        start: s.start, end: s.end, strand: s.reverse ? 1 : 0, tm: s.tm,
+      })),
+    })),
+    // Reconstruct the .dna flag byte so the summary panel can report
+    // methylation and strandedness the way the format stores it.
+    flags: (summary.circular ? 0x01 : 0) |
+           (summary.doubleStranded === true ? 0x02 : 0) |
+           (summary.methylation.dam ? 0x04 : 0) |
+           (summary.methylation.dcm ? 0x08 : 0) |
+           (summary.methylation.ecoki ? 0x10 : 0),
+    // Filled in below for .dna only.
+    blocks: [],
+    totalBytes: 0,
+    hasHistory: false,
+    historyCompressed: false,
+    fileType: 0,
+    exportVersion: 0,
+    importVersion: 0,
   };
 
-  const dec = new TextDecoder("utf-8");
-  for (const b of blocks) {
-    switch (b.type) {
-      case BLOCK.HEADER: {
-        const d = new DataView(b.payload.buffer, b.payload.byteOffset, b.payload.byteLength);
-        doc.fileType      = d.getUint16(8,  false);
-        doc.exportVersion = d.getUint16(10, false);
-        doc.importVersion = d.getUint16(12, false);
-        break;
-      }
-      case BLOCK.SEQUENCE:
-        if (b.payload.length) {
-          doc.flags = b.payload[0];
-          doc.sequence = dec.decode(b.payload.subarray(1));
-        }
-        break;
-      case BLOCK.FEATURES: doc.features = parseFeatures(dec.decode(b.payload)); break;
-      case BLOCK.PRIMERS:  doc.primers  = parsePrimers(dec.decode(b.payload));  break;
-      case BLOCK.NOTES:    doc.notes    = parseNotes(dec.decode(b.payload));    break;
-      case BLOCK.HISTORY_TREE: doc.hasHistory = true; break;
-    }
+  if (doc.sourceFormat === "dna" && W.pl_blocks_json() === 0) {
+    const b = coreJson();
+    doc.blocks = b.blocks.map(x => ({
+      type: x.kind, size: x.bytes, derived: x.derived, meaning: x.meaning,
+    }));
+    doc.totalBytes = b.totalBytes;
+    doc.derivedBytes = b.derivedBytes;
+    doc.hasHistory = b.historyPresent;
+    doc.historyCompressed = b.historyCompressed;
+    doc.fileType = b.fileType;
+    doc.exportVersion = b.exportVersion;
+    doc.importVersion = b.importVersion;
   }
-  doc.circular = !!(doc.flags & FLAG.CIRCULAR);
-  doc.length   = doc.sequence.length;
   return doc;
 }
 
-function xmlDoc(text) {
-  const d = new DOMParser().parseFromString(text, "text/xml");
-  if (d.querySelector("parsererror")) throw new Error("malformed XML payload");
-  return d;
+/** Open a file. Throws with the core's own message on failure. */
+function coreOpen(bytes) {
+  const rc = withBytes(bytes, (p, n) => W.pl_open(p, n));
+  if (rc !== 0) throw new Error(coreJson().error || "could not read that file");
+  const summary = coreJson();
+  return adapt(summary, coreSequence());
 }
 
-function parseFeatures(text) {
-  const out = [];
-  let d; try { d = xmlDoc(text); } catch { return out; }
-  for (const fe of d.querySelectorAll("Feature")) {
-    const segs = [];
-    for (const se of fe.querySelectorAll("Segment")) {
-      const m = /^(\d+)-(\d+)$/.exec(se.getAttribute("range") || "");
-      if (!m) continue;
-      segs.push({
-        start: +m[1], end: +m[2],
-        color: se.getAttribute("color") || null,
-        translated: se.getAttribute("translated") === "1",
-      });
-    }
-    if (!segs.length) continue;
-    const quals = {};
-    for (const q of fe.querySelectorAll("Q")) {
-      const v = q.querySelector("V");
-      if (!v) continue;
-      quals[q.getAttribute("name")] =
-        v.getAttribute("text") ?? v.getAttribute("int") ?? v.getAttribute("predef") ?? "";
-    }
-    const dir = fe.getAttribute("directionality");
-    out.push({
-      name: fe.getAttribute("name") || "(unnamed)",
-      type: fe.getAttribute("type") || "misc_feature",
-      dir: dir ? +dir : 0,
-      segs, quals,
-      start: Math.min(...segs.map(s => s.start)),
-      end:   Math.max(...segs.map(s => s.end)),
-      color: segs[0].color || null,
-    });
-  }
-  return out.sort((a, b) => a.start - b.start || b.end - a.end);
-}
-
-function parsePrimers(text) {
-  const out = [];
-  let d; try { d = xmlDoc(text); } catch { return out; }
-  for (const pe of d.querySelectorAll("Primer")) {
-    const sites = [];
-    for (const bs of pe.querySelectorAll("BindingSite")) {
-      if (bs.getAttribute("simplified") === "1") continue;  // duplicate view
-      const m = /^(\d+)-(\d+)$/.exec(bs.getAttribute("location") || "");
-      if (!m) continue;
-      sites.push({
-        start: +m[1], end: +m[2],
-        strand: +(bs.getAttribute("boundStrand") || 0),
-        tm: bs.getAttribute("meltingTemperature"),
-      });
-    }
-    out.push({
-      name: pe.getAttribute("name") || "(unnamed)",
-      seq:  pe.getAttribute("sequence") || "",
-      sites,
-    });
-  }
-  return out;
-}
-
-function parseNotes(text) {
-  const o = {};
-  let d; try { d = xmlDoc(text); } catch { return o; }
-  const root = d.documentElement;
-  if (!root) return o;
-  for (const c of root.children) o[c.tagName] = (c.textContent || "").trim();
-  return o;
-}
-
-/* ---- writer ---------------------------------------------------------- */
-
-function packBlocks(list) {
-  let total = 0;
-  for (const b of list) total += 5 + b.payload.length;
-  const out = new Uint8Array(total);
-  const dv = new DataView(out.buffer);
-  let p = 0;
-  for (const b of list) {
-    dv.setUint8(p, b.type);
-    dv.setUint32(p + 1, b.payload.length, false);
-    out.set(b.payload, p + 5);
-    p += 5 + b.payload.length;
-  }
-  return out;
-}
-
-const enc = s => new TextEncoder().encode(s);
-
-function buildDna({ sequence, circular, features, primers, notes }) {
-  const header = new Uint8Array(14);
-  header.set(enc(MAGIC), 0);
-  const hv = new DataView(header.buffer);
-  hv.setUint16(8, 1, false);    // fileType: DNA
-  hv.setUint16(10, 15, false);  // export version, as seen in current files
-  hv.setUint16(12, 19, false);  // import version
-
-  let flags = FLAG.DOUBLE | FLAG.DAM | FLAG.DCM | FLAG.ECOKI;
-  if (circular) flags |= FLAG.CIRCULAR;
-  const seqBytes = enc(sequence);
-  const seqBlock = new Uint8Array(seqBytes.length + 1);
-  seqBlock[0] = flags;
-  seqBlock.set(seqBytes, 1);
-
-  const esc = s => String(s).replace(/[<>&"']/g, c =>
-    ({ "<":"&lt;", ">":"&gt;", "&":"&amp;", '"':"&quot;", "'":"&apos;" }[c]));
-
-  const featXml = `<?xml version="1.0"?><Features nextValidID="${features.length}">` +
-    features.map((f, i) =>
-      `<Feature recentID="${i}" name="${esc(f.name)}" type="${esc(f.type)}"` +
-      (f.dir ? ` directionality="${f.dir}"` : "") +
-      ` allowSegmentOverlaps="0" consecutiveTranslationNumbering="1">` +
-      f.segs.map(s =>
-        `<Segment range="${s.start}-${s.end}" color="${esc(s.color)}" type="standard"` +
-        (s.translated ? ` translated="1"` : "") + `/>`).join("") +
-      `<Q name="label"><V text="${esc(f.name)}"/></Q>` +
-      `</Feature>`).join("") + `</Features>`;
-
-  const primXml = `<?xml version="1.0"?><Primers nextValidID="${primers.length}">` +
-    `<HybridizationParams minContinuousMatchLen="10" allowMismatch="1"` +
-    ` minMeltingTemperature="40" showAdditionalFivePrimeMatches="1"` +
-    ` minimumFivePrimeAnnealing="15"/>` +
-    primers.map((p, i) =>
-      `<Primer recentID="${i}" name="${esc(p.name)}" sequence="${esc(p.seq)}"/>`).join("") +
-    `</Primers>`;
-
-  const notesXml = `<Notes>` +
-    Object.entries(notes).map(([k, v]) => `<${k}>${esc(v)}</${k}>`).join("") +
-    `</Notes>`;
-
-  const propsXml = `<AdditionalSequenceProperties>` +
-    `<UpstreamStickiness>0</UpstreamStickiness>` +
-    `<DownstreamStickiness>0</DownstreamStickiness>` +
-    `</AdditionalSequenceProperties>`;
-
-  // Note the omission of blocks 2 and 3: both are caches derivable from
-  // (sequence x enzyme set), so a writer should not need to fabricate them.
-  return packBlocks([
-    { type: BLOCK.HEADER,      payload: header },
-    { type: BLOCK.SEQUENCE,    payload: seqBlock },
-    { type: BLOCK.FEATURES,    payload: enc(featXml) },
-    { type: BLOCK.PRIMERS,     payload: enc(primXml) },
-    { type: BLOCK.NOTES,       payload: enc(notesXml) },
-    { type: BLOCK.EXTRA_PROPS, payload: enc(propsXml) },
-  ]);
-}
-
-/* =====================================================================
-   1b. GenBank and FASTA — the way out of .dna
-
-   GenBank is plain text and every free tool reads it, so this is what
-   turns a viewer into an exit route. Colours are written in the ApE
-   convention that ApE, UGENE and SnapGene all understand, and repeated
-   as a /note for the web viewers that only read that.
-   ===================================================================== */
-
-const MONTHS = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
-
-function sniffFormat(bytes, text) {
-  if (bytes.length > 5 && bytes[0] === BLOCK.HEADER) {
-    const magic = new TextDecoder().decode(bytes.subarray(5, 13));
-    if (magic === MAGIC) return "dna";
-  }
-  const head = text.slice(0, 4000);
-  if (/^LOCUS\s/m.test(head)) return "genbank";
-  if (/^>/.test(text.trimStart())) return "fasta";
-  if (/^\s*ORIGIN/m.test(head)) return "genbank";
-  return null;
-}
-
-/** Parse a GenBank feature location: 1-based inclusive, join(), complement(). */
-function parseLocation(loc) {
-  const rev = /^complement\(/.test(loc);
-  let body = loc.replace(/^complement\(/, "").replace(/\)$/, "");
-  body = body.replace(/^join\(/, "").replace(/^order\(/, "").replace(/\)$/, "");
-  const segs = [];
-  for (const part of body.split(",")) {
-    const m = /(\d+)\s*\.\.\s*[<>]?(\d+)/.exec(part) || /^\s*[<>]?(\d+)\s*$/.exec(part);
-    if (!m) continue;
-    const a = +m[1], b = m[2] !== undefined ? +m[2] : +m[1];
-    if (Number.isFinite(a) && Number.isFinite(b) && b >= a) segs.push({ start: a, end: b });
-  }
-  return { segs, rev };
-}
-
-function parseGenBank(text) {
-  // Only the first record; a viewer showing one molecule at a time.
-  const recEnd = text.indexOf("\n//");
-  const rec = recEnd === -1 ? text : text.slice(0, recEnd);
-  const lines = rec.split(/\r?\n/);
-
-  let circular = false, name = "", declaredLength = 0;
-  const locus = lines.find(l => l.startsWith("LOCUS"));
-  if (locus) {
-    circular = /\bcircular\b/i.test(locus);
-    name = (locus.split(/\s+/)[1] || "").trim();
-    const bp = /\s(\d+)\s+(?:bp|aa)\b/i.exec(locus);
-    if (bp) declaredLength = +bp[1];
-  }
-
-  // --- ORIGIN block ---
-  let seq = "";
-  const oi = lines.findIndex(l => /^ORIGIN/.test(l));
-  if (oi !== -1) {
-    const buf = [];
-    for (let i = oi + 1; i < lines.length; i++) {
-      const l = lines[i];
-      if (/^\/\//.test(l)) break;
-      buf.push(l.replace(/[\s\d]/g, ""));
-    }
-    // Case is preserved, not normalised: lowercase carries meaning in this
-    // field (masked or low-coverage assembly bases, non-annealing primer
-    // tails) and silently upper-casing it destroys information the user put
-    // there. Matching routines upper-case internally instead.
-    seq = buf.join("");
-  }
-
-  // --- FEATURES block ---
-  const features = [];
-  const fi = lines.findIndex(l => /^FEATURES/.test(l));
-  if (fi !== -1) {
-    let cur = null;
-    const flush = () => {
-      if (!cur) return;
-      // `source` is whole-molecule metadata that every GenBank file carries.
-      // Showing it would draw a full-length bar over the map.
-      if (cur.key === "source") { cur = null; return; }
-      const { segs, rev } = parseLocation(cur.loc);
-      if (!segs.length) { cur = null; return; }
-      const q = cur.quals;
-      const color = (q.ApEinfo_fwdcolor || q.ApEinfo_revcolor ||
-                     (/(#[0-9a-fA-F]{6})/.exec(q.note || "") || [])[1] || null);
-      features.push({
-        name: q.label || q.gene || q.product || q.locus_tag || q.note || cur.key,
-        type: cur.key,
-        dir: rev ? 2 : 1,
-        segs: segs.map(s => ({ ...s, color })),
-        quals: q,
-        start: Math.min(...segs.map(s => s.start)),
-        end: Math.max(...segs.map(s => s.end)),
-        color,
-      });
-      cur = null;
-    };
-
-    for (let i = fi + 1; i < lines.length; i++) {
-      const l = lines[i];
-      if (/^(ORIGIN|CONTIG|BASE COUNT|\/\/)/.test(l)) break;
-      if (!/^\s{5}/.test(l)) continue;
-      const featStart = /^\s{5}(\S+)\s+(.*)$/.exec(l);
-      if (featStart && !/^\s{6,}/.test(l.slice(0, 6))) {
-        flush();
-        cur = { key: featStart[1], loc: featStart[2].trim(), quals: {}, pending: null };
-        continue;
-      }
-      if (!cur) continue;
-      const cont = l.trim();
-      if (cont.startsWith("/")) {
-        const kv = /^\/([^=]+)=?"?([\s\S]*?)"?$/.exec(cont);
-        if (kv) {
-          cur.pending = kv[1];
-          cur.quals[kv[1]] = (cur.quals[kv[1]] ? cur.quals[kv[1]] + " " : "") + (kv[2] || "");
-          if (cont.endsWith('"') && cont.indexOf('"') !== cont.length - 1) cur.pending = null;
-        }
-      } else if (cur.pending) {
-        cur.quals[cur.pending] += " " + cont.replace(/"$/, "");
-      } else {
-        cur.loc += cont;      // continued location line
-      }
-    }
-    flush();
-  }
-
-  features.sort((a, b) => a.start - b.start || b.end - a.end);
-
-  // Annotation-only GenBank is real and common: ORIGIN immediately followed by
-  // "//", with the length declared only on the LOCUS line. Render the features
-  // against the declared span and say plainly that the bases are absent, rather
-  // than showing an empty molecule. (Biopython reports the declared length here
-  // and raises only when the bases are actually read.)
-  const sequenceAbsent = seq.length === 0 && declaredLength > 0;
-
-  return {
-    blocks: [], totalBytes: text.length,
-    sequence: seq, flags: (circular ? FLAG.CIRCULAR : 0) | FLAG.DOUBLE,
-    fileType: 1, exportVersion: 0, importVersion: 0,
-    features, primers: [], notes: { Name: name }, hasHistory: false,
-    circular, length: seq.length || declaredLength,
-    declaredLength, sequenceAbsent, sourceFormat: "genbank",
-  };
-}
-
-function parseFasta(text) {
-  const lines = text.split(/\r?\n/);
-  let name = "sequence";
-  const buf = [];
-  let started = false;
-  for (const l of lines) {
-    if (l.startsWith(">")) {
-      if (started) break;              // first record only
-      name = l.slice(1).trim() || name;
-      started = true;
-      continue;
-    }
-    buf.push(l.replace(/\s/g, ""));
-  }
-  const seq = buf.join("");        // case preserved -- see parseGenBank
-  return {
-    blocks: [], totalBytes: text.length,
-    sequence: seq, flags: FLAG.DOUBLE,
-    fileType: 1, exportVersion: 0, importVersion: 0,
-    features: [], primers: [], notes: { Name: name }, hasHistory: false,
-    circular: false, length: seq.length, sourceFormat: "fasta",
-  };
-}
-
-/* ---- writers ---- */
-
-function gbLocusName(title) {
-  return (title.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_.-]+/g, "_")
-    .replace(/^_+|_+$/g, "") || "sequence").slice(0, 20);
-}
-
-function formatLocation(f) {
-  const parts = f.segs.map(s => `${s.start}..${s.end}`);
-  let loc = parts.length > 1 ? `join(${parts.join(",")})` : parts[0];
-  if (f.dir === 2) loc = `complement(${loc})`;
-  return loc;
-}
-
-function wrapQualifier(key, value) {
-  // GenBank qualifier lines wrap at column 80, continuation indented 21 spaces.
-  const pad = " ".repeat(21);
-  const raw = `/${key}="${String(value).replace(/"/g, '""')}"`;
-  const out = [];
-  let line = pad;
-  for (const word of raw.split(" ")) {
-    if (line.length + word.length + 1 > 79 && line.trim()) { out.push(line); line = pad; }
-    line += (line === pad ? "" : " ") + word;
-  }
-  if (line.trim()) out.push(line);
-  return out.join("\n");
-}
-
-function toGenBank(doc, title) {
-  const name = gbLocusName(title);
-  const n = doc.length;
-  const d = new Date();
-  const date = `${String(d.getDate()).padStart(2, "0")}-${MONTHS[d.getMonth()]}-${d.getFullYear()}`;
-  const out = [];
-
-  out.push(`LOCUS       ${name.padEnd(16)} ${String(n).padStart(7)} bp    DNA     ` +
-           `${doc.circular ? "circular" : "linear  "} SYN ${date}`);
-  out.push(`DEFINITION  ${doc.notes?.Description || name}.`);
-  out.push(`ACCESSION   .`);
-  out.push(`VERSION     .`);
-  out.push(`KEYWORDS    .`);
-  out.push(`SOURCE      synthetic DNA construct`);
-  out.push(`  ORGANISM  synthetic DNA construct`);
-  out.push(`COMMENT     Converted from SnapGene .dna by Polylinker.`);
-  if (doc.notes?.UUID) out.push(`            Original document UUID: ${doc.notes.UUID}`);
-  out.push(`FEATURES             Location/Qualifiers`);
-
-  out.push(`     source          1..${n}`);
-  out.push(wrapQualifier("organism", "synthetic DNA construct"));
-  out.push(wrapQualifier("mol_type", "other DNA"));
-
-  for (const f of doc.features) {
-    out.push(`     ${(f.type || "misc_feature").padEnd(15).slice(0, 15)} ${formatLocation(f)}`);
-    out.push(wrapQualifier("label", f.name));
-    for (const [k, v] of Object.entries(f.quals || {})) {
-      if (k === "label" || !v) continue;
-      out.push(wrapQualifier(k, v));
-    }
-    const col = colorOf(f);
-    if (col) {
-      out.push(wrapQualifier("ApEinfo_fwdcolor", col));
-      out.push(wrapQualifier("ApEinfo_revcolor", col));
-      out.push(wrapQualifier("note", `color: ${col}`));
-    }
-  }
-
-  for (const p of doc.primers) {
-    for (const s of p.sites) {
-      if (s.start < 1 || s.end > n || s.end < s.start) continue;
-      const loc = s.strand ? `complement(${s.start}..${s.end})` : `${s.start}..${s.end}`;
-      out.push(`     primer_bind     ${loc}`);
-      out.push(wrapQualifier("label", p.name));
-      out.push(wrapQualifier("note", `primer ${p.seq}${s.tm ? `; Tm: ${s.tm} C` : ""}`));
-    }
-  }
-
-  out.push("ORIGIN");
-  const s = doc.sequence;          // case preserved deliberately -- see parseGenBank
-  for (let i = 0; i < n; i += 60) {
-    const chunks = [];
-    for (let j = i; j < Math.min(i + 60, n); j += 10) chunks.push(s.slice(j, j + 10));
-    out.push(`${String(i + 1).padStart(9)} ${chunks.join(" ")}`);
-  }
-  out.push("//");
-  return out.join("\n") + "\n";
-}
-
-function toFasta(doc, title) {
-  const name = title.replace(/\.[^.]+$/, "");
-  const lines = [`>${name} ${doc.length} bp ${doc.circular ? "circular" : "linear"}`];
-  for (let i = 0; i < doc.length; i += 70) lines.push(doc.sequence.slice(i, i + 70));
-  return lines.join("\n") + "\n";
-}
-
-/** Serialize the live map to a standalone SVG, resolving CSS variables. */
-function mapToSvg() {
-  const src = document.getElementById("mapHost");
-  const clone = src.cloneNode(true);
-  const rootStyle = getComputedStyle(document.documentElement);
-  const resolve = v => v.replace(/var\((--[a-z0-9-]+)\)/gi,
-    (_, name) => (rootStyle.getPropertyValue(name) || "#888").trim());
-
-  const walk = node => {
-    if (node.nodeType !== 1) return;
-    for (const attr of ["fill", "stroke", "color"]) {
-      const v = node.getAttribute(attr);
-      if (v && v.includes("var(")) node.setAttribute(attr, resolve(v));
-    }
-    const st = node.getAttribute("style");
-    if (st && st.includes("var(")) node.setAttribute("style", resolve(st));
-    for (const c of node.children) walk(c);
-  };
-  walk(clone);
-
-  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-  clone.setAttribute("font-family", "ui-monospace, 'Cascadia Mono', Consolas, monospace");
-  const bg = document.createElementNS(SVGNS, "rect");
-  bg.setAttribute("width", "100%");
-  bg.setAttribute("height", "100%");
-  bg.setAttribute("fill", (rootStyle.getPropertyValue("--card") || "#fff").trim());
-  clone.insertBefore(bg, clone.firstChild);
-
-  return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(clone);
-}
-
-function download(content, filename, mime) {
-  const blob = content instanceof Uint8Array
-    ? new Blob([content], { type: mime })
-    : new Blob([content], { type: mime + ";charset=utf-8" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-
-/* =====================================================================
-   2. Restriction enzymes
-   Textbook Type II enzymes: recognition site and the cut offset in the
-   top strand. Facts, independently transcribed — no vendor table copied.
-   ===================================================================== */
-
-const ENZYMES = [
-  ["AatII","GACGTC",5],   ["AflII","CTTAAG",1],   ["AgeI","ACCGGT",1],
-  ["ApaI","GGGCCC",5],    ["AscI","GGCGCGCC",2],  ["AvrII","CCTAGG",1],
-  ["BamHI","GGATCC",1],   ["BclI","TGATCA",1],    ["BglII","AGATCT",1],
-  ["BsiWI","CGTACG",1],   ["BspEI","TCCGGA",1],   ["BsrGI","TGTACA",1],
-  ["BstBI","TTCGAA",2],   ["ClaI","ATCGAT",2],    ["DraI","TTTAAA",3],
-  ["EagI","CGGCCG",1],    ["EcoRI","GAATTC",1],   ["EcoRV","GATATC",3],
-  ["FseI","GGCCGGCC",6],  ["HindIII","AAGCTT",1], ["HpaI","GTTAAC",3],
-  ["KpnI","GGTACC",5],    ["MfeI","CAATTG",1],    ["MluI","ACGCGT",1],
-  ["NcoI","CCATGG",1],    ["NdeI","CATATG",2],    ["NheI","GCTAGC",1],
-  ["NotI","GCGGCCGC",2],  ["NruI","TCGCGA",3],    ["NsiI","ATGCAT",5],
-  ["PacI","TTAATTAA",5],  ["PmeI","GTTTAAAC",4],  ["PstI","CTGCAG",5],
-  ["PvuI","CGATCG",4],    ["PvuII","CAGCTG",3],   ["SacI","GAGCTC",5],
-  ["SacII","CCGCGG",4],   ["SalI","GTCGAC",1],    ["SbfI","CCTGCAGG",6],
-  ["ScaI","AGTACT",3],    ["SmaI","CCCGGG",3],    ["SnaBI","TACGTA",3],
-  ["SpeI","ACTAGT",1],    ["SphI","GCATGC",5],    ["SspI","AATATT",3],
-  ["StuI","AGGCCT",3],    ["SwaI","ATTTAAAT",4],  ["XbaI","TCTAGA",1],
-  ["XhoI","CTCGAG",1],    ["XmaI","CCCGGG",1],
-];
-
-/** Find every cut position, honouring circular wraparound. */
-function digest(seq, circular) {
-  const s = seq.toUpperCase();
-  const n = s.length;
-  if (!n) return [];
-  // For circular molecules a site may straddle the origin, so scan a window
-  // extended by the longest recognition site minus one.
-  const maxSite = ENZYMES.reduce((m, e) => Math.max(m, e[1].length), 0);
-  const ext = circular ? s + s.slice(0, Math.min(maxSite - 1, n)) : s;
-
-  const results = [];
-  for (const [name, site, cutOffset] of ENZYMES) {
-    const positions = [];
-    let i = ext.indexOf(site);
-    while (i !== -1) {
-      if (i < n) {
-        // 1-based position of the base immediately 5' of the top-strand nick
-        positions.push(((i + cutOffset) % n) + 1);
-      }
-      i = ext.indexOf(site, i + 1);
-    }
-    const uniq = [...new Set(positions)].sort((a, b) => a - b);
-    if (uniq.length) results.push({ name, site, cutOffset, positions: uniq });
-  }
-  return results.sort((a, b) => a.name.localeCompare(b.name));
+/** Digest the open molecule. Returns only enzymes that actually cut. */
+function coreDigest() {
+  if (W.pl_digest_json() !== 0) return [];
+  return coreJson()
+    .filter(d => d.positions.length > 0)
+    .map(d => ({
+      name: d.enzyme, site: d.site, positions: d.positions,
+      fragments: d.fragments, blunt: d.blunt,
+    }));
 }
 
 /* =====================================================================
@@ -1229,7 +828,8 @@ function renderSummary(doc, state) {
     <div class="fname" title="${esc(state.title)}">${esc(state.title)}</div>
     ${doc.sequenceAbsent ? `<span class="pill" style="background:var(--warn);color:#fff">annotations only — no bases in this file</span>` : ""}
     <span class="pill">${doc.circular ? "circular" : "linear"}</span>
-    <span class="pill plain">${doc.flags & FLAG.DOUBLE ? "double-stranded" : "single-stranded"}</span>
+    ${doc.doubleStranded === null || doc.doubleStranded === undefined ? ""
+      : `<span class="pill plain">${doc.doubleStranded ? "double-stranded" : "single-stranded"}</span>`}
     ${meth.length ? `<span class="pill plain">${meth.join(" · ")} methylated</span>` : ""}
     <div class="metric"><span class="k">Length</span><span class="v">${fmt(doc.length)} bp</span></div>
     <div class="metric"><span class="k">GC</span><span class="v">${state.gc}%</span></div>
@@ -1416,27 +1016,71 @@ function setHot(name) {
   }
 }
 
-function gcOf(seq) {
-  let gc = 0, at = 0;
-  for (let i = 0; i < seq.length; i++) {
-    const c = seq.charCodeAt(i) | 32;
-    if (c === 103 || c === 99) gc++;            // g c
-    else if (c === 97 || c === 116) at++;       // a t
-  }
-  const n = gc + at;
-  return n ? (100 * gc / n).toFixed(1) : "0.0";
+/* ---- figure and file output ---- */
+
+/** Serialize the live map to a standalone SVG, resolving CSS variables. */
+function mapToSvg() {
+  const src = document.getElementById("mapHost");
+  const clone = src.cloneNode(true);
+  const rootStyle = getComputedStyle(document.documentElement);
+  const resolve = v => v.replace(/var\((--[a-z0-9-]+)\)/gi,
+    (_, name) => (rootStyle.getPropertyValue(name) || "#888").trim());
+
+  const walk = node => {
+    if (node.nodeType !== 1) return;
+    for (const attr of ["fill", "stroke", "color"]) {
+      const v = node.getAttribute(attr);
+      if (v && v.includes("var(")) node.setAttribute(attr, resolve(v));
+    }
+    const st = node.getAttribute("style");
+    if (st && st.includes("var(")) node.setAttribute("style", resolve(st));
+    for (const c of node.children) walk(c);
+  };
+  walk(clone);
+
+  clone.setAttribute("xmlns", SVGNS);
+  clone.setAttribute("font-family", "ui-monospace, 'Cascadia Mono', Consolas, monospace");
+  const bg = document.createElementNS(SVGNS, "rect");
+  bg.setAttribute("width", "100%");
+  bg.setAttribute("height", "100%");
+  bg.setAttribute("fill", (rootStyle.getPropertyValue("--card") || "#fff").trim());
+  clone.insertBefore(bg, clone.firstChild);
+
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(clone);
 }
+
+function download(content, filename, mime) {
+  const blob = content instanceof Uint8Array
+    ? new Blob([content], { type: mime })
+    : new Blob([content], { type: mime + ";charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function locusName(title) {
+  withString(title, (p, n) => W.pl_locus_name(p, n));
+  return coreText();
+}
+
+/* ---- showing a molecule ---- */
 
 function show(doc, title) {
   CURRENT = doc;
   state.title = title;
   state.hot = null;
-  state.gc = gcOf(doc.sequence);
-  state.digest = doc.length <= 400000 ? digest(doc.sequence, doc.circular) : [];
+  state.gc = doc.gc === null || doc.gc === undefined ? "0.0" : doc.gc.toFixed(1);
+  // The core scans a 4.6 Mb genome in well under a second, but this is the
+  // main thread; keep the interactive ceiling where it was.
+  state.digest = doc.length > 0 && doc.length <= 400000 ? coreDigest() : [];
 
+  const uniq = state.digest.filter(e => e.positions.length === 1).length;
   document.getElementById("mapHint").textContent =
-    doc.length > 400000 ? "enzyme scan skipped — sequence too large for this prototype"
-                        : `${doc.features.length} features · ${state.digest.filter(e => e.positions.length === 1).length} unique cutters`;
+    doc.sequenceAbsent ? "no bases in this file — annotations only"
+      : doc.length > 400000 ? "enzyme scan skipped — sequence too large for this prototype"
+      : `${doc.features.length} features · ${uniq} unique cutters`;
 
   renderSummary(doc, state);
   renderMap(doc, state);
@@ -1445,53 +1089,69 @@ function show(doc, title) {
   renderPrimers(doc);
   renderSequence(doc);
   renderAnatomy(doc, state);
+  document.getElementById("dlBtn").disabled = doc.sourceFormat !== "dna";
 }
 
 function fail(msg) {
-  document.getElementById("summary").innerHTML = `<div class="err">Could not read that file — ${esc(msg)}</div>`;
+  document.getElementById("summary").innerHTML =
+    `<div class="err">Could not read that file — ${esc(msg)}</div>`;
+}
+
+async function openBytes(bytes, name) {
+  await READY;
+  show(coreOpen(bytes), name);
 }
 
 async function openFile(file) {
   try {
     const buf = await file.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    // Sniff content, never trust the extension — 5% of files in the wild are
-    // not what their extension claims.
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes.subarray(0, 200000));
-    const fmt = sniffFormat(bytes, text);
-    if (fmt === "dna") return show(parseDna(buf), file.name);
-    const full = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-    if (fmt === "genbank") return show(parseGenBank(full), file.name);
-    if (fmt === "fasta") return show(parseFasta(full), file.name);
-
-    // Recognisable but unsupported chromatogram formats get a useful message
-    // rather than "unknown file".
-    const magic4 = String.fromCharCode(...bytes.subarray(0, 4));
-    if (magic4 === "ABIF") throw new Error("that is an ABIF (.ab1) chromatogram — trace viewing is not in this prototype yet");
-    if (magic4 === ".scf") throw new Error("that is an SCF chromatogram, not a sequence file");
-    if (bytes[0] === 0xae && magic4.slice(1) === "ZTR") throw new Error("that is a ZTR chromatogram, not a sequence file");
-    throw new Error("unrecognised format — expected SnapGene .dna, GenBank or FASTA");
+    // The core sniffs the format from content and names what it found, so
+    // there is no extension guessing here and no second opinion to disagree.
+    await openBytes(new Uint8Array(buf), file.name);
   } catch (e) {
     fail(e.message);
   }
 }
 
 /* ---- exports ---- */
+
 function requireDoc() {
-  if (!CURRENT || !CURRENT.length) { fail("open a file first"); return null; }
+  if (!CURRENT) { fail("open a file first"); return null; }
   return CURRENT;
 }
+
 document.getElementById("expGb").addEventListener("click", () => {
-  const d = requireDoc(); if (!d) return;
-  download(toGenBank(d, state.title), gbLocusName(state.title) + ".gb", "text/plain");
+  if (!requireDoc()) return;
+  const d = new Date();
+  withString(state.title, (p, n) =>
+    W.pl_to_genbank(p, n, d.getDate(), d.getMonth(), d.getFullYear()));
+  download(coreText(), locusName(state.title) + ".gb", "text/plain");
 });
+
 document.getElementById("expFa").addEventListener("click", () => {
-  const d = requireDoc(); if (!d) return;
-  download(toFasta(d, state.title), gbLocusName(state.title) + ".fa", "text/plain");
+  if (!requireDoc()) return;
+  withString(state.title, (p, n) => W.pl_to_fasta(p, n, 70));
+  download(coreText(), locusName(state.title) + ".fa", "text/plain");
 });
+
 document.getElementById("expSvg").addEventListener("click", () => {
-  const d = requireDoc(); if (!d) return;
-  download(mapToSvg(), gbLocusName(state.title) + "-map.svg", "image/svg+xml");
+  if (!requireDoc()) return;
+  download(mapToSvg(), locusName(state.title) + "-map.svg", "image/svg+xml");
+});
+
+// Rewrites the opened .dna without its two regenerable cache blocks. If
+// SnapGene opens the result, those blocks are optional on read — the open
+// experiment in docs/DNA-FORMAT.md §4.
+document.getElementById("dlBtn").addEventListener("click", () => {
+  const d = requireDoc();
+  if (!d) return;
+  if (d.sourceFormat !== "dna") {
+    fail("that button rewrites a .dna container; open a .dna file first");
+    return;
+  }
+  if (W.pl_to_dna(1) !== 0) { fail(coreJson().error); return; }
+  download(coreOut(), locusName(state.title) + "-no-cache.dna",
+           "application/octet-stream");
 });
 
 /* ---- tabs ---- */
@@ -1520,77 +1180,15 @@ addEventListener("drop", e => {
 });
 
 /* =====================================================================
-   7. Demo construct — generated here, written to a real .dna, then read
-      back through the same parser used for genuine files.
+   7. What loads first
+
+   A committed GenBank file (prototype/demo-construct.gb), inlined at build
+   time and read through the same core as any real file. Nothing about it is
+   special-cased.
    ===================================================================== */
 
-function mulberry32(a) {
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+const DEMO_GENBANK = {{DEMO_GENBANK}};
 
-function demoDocument() {
-  const rnd = mulberry32(20260726);
-  const bases = "ACGT";
-  const N = 3180;
-  const arr = new Array(N);
-  for (let i = 0; i < N; i++) arr[i] = bases[(rnd() * 4) | 0];
-
-  // Splice real recognition sites into a multiple cloning site so the
-  // enzyme panel has something honest to find.
-  const mcs = "GAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTT";
-  const mcsAt = 1806;                       // 0-based
-  for (let i = 0; i < mcs.length; i++) arr[mcsAt + i] = mcs[i];
-
-  // A couple of unique cutters elsewhere, to exercise the map ticks.
-  const put = (s, at) => { for (let i = 0; i < s.length; i++) arr[at + i] = s[i]; };
-  put("GCGGCCGC", 640);       // NotI
-  put("CATATG", 1868);        // NdeI, at the start of the reporter
-  put("ACTAGT", 2600);        // SpeI
-
-  const sequence = arr.join("");
-
-  const features = [
-    { name: "ori",            type: "rep_origin",   dir: 1, segs: [{ start: 60,   end: 648,  color: "#3f6f9a" }] },
-    { name: "AmpR",           type: "CDS",          dir: 1, segs: [{ start: 700,  end: 1560, color: "#9a5b8c", translated: true }] },
-    { name: "AmpR promoter",  type: "promoter",     dir: 1, segs: [{ start: 1570, end: 1674, color: "#3f8f4f" }] },
-    { name: "lac promoter",   type: "promoter",     dir: 1, segs: [{ start: 1740, end: 1786, color: "#3f8f4f" }] },
-    { name: "MCS",            type: "misc_feature", dir: 0, segs: [{ start: 1807, end: 1863, color: "#7d8a86" }] },
-    { name: "reporter CDS",   type: "CDS",          dir: 1, segs: [{ start: 1869, end: 2585, color: "#9a5b8c", translated: true }] },
-    { name: "T7 terminator",  type: "terminator",   dir: 1, segs: [{ start: 2600, end: 2647, color: "#b0553f" }] },
-    { name: "KanR",           type: "CDS",          dir: 2, segs: [{ start: 2700, end: 3120, color: "#9a5b8c", translated: true }] },
-  ];
-
-  const primers = [
-    { name: "M13-fwd-like", seq: "GTAAAACGACGGCCAGTGAATT" },
-    { name: "seq-rev-demo", seq: "CAGGAAACAGCTATGACCATG" },
-  ];
-
-  const notes = {
-    Type: "Synthetic",
-    Description: "Synthetic demo construct generated in the browser. Not a real plasmid.",
-    SequenceClass: "UNA",
-  };
-
-  return buildDna({ sequence, circular: true, features, primers, notes });
-}
-
-const DEMO_BYTES = demoDocument();
-
-document.getElementById("dlBtn").addEventListener("click", () => {
-  const blob = new Blob([DEMO_BYTES], { type: "application/octet-stream" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "demo-construct.dna";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-});
-
-// Round-trip the generated file through the real parser on load.
-show(parseDna(DEMO_BYTES.buffer.slice(DEMO_BYTES.byteOffset, DEMO_BYTES.byteOffset + DEMO_BYTES.byteLength)),
-     "demo-construct.dna");
+READY.then(() => openBytes(new TextEncoder().encode(DEMO_GENBANK), "demo-construct.gb"))
+     .catch(e => fail(e.message));
 </script>

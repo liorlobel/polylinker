@@ -44,8 +44,8 @@ Each ships before the app, stands alone, and survives the app.
 
 | Component | State |
 |---|---|
-| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model), `pl-enzymes` (digestion), `pl-fileio` (`.dna`, GenBank, FASTA), and the `pl` command. **Zero external dependencies**, 501 KB static binary, 66 tests. |
-| [`prototype/dna-reader.html`](prototype/dna-reader.html) | **Usable today.** Opens `.dna`, GenBank and FASTA; draws circular/linear maps; live restriction digest; exports GenBank, FASTA and vector SVG. One file, no install, no network — runs from a USB stick on a locked-down PC. |
+| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model), `pl-enzymes` (digestion), `pl-fileio` (`.dna`, GenBank, FASTA), `pl-wasm` (browser ABI), and the `pl` command. **Zero external dependencies**, 365 KB static binary, 83 tests. |
+| `prototype/dna-reader.html` | **Usable today.** The same Rust core compiled to wasm32 and inlined into one HTML file: opens `.dna`, GenBank and FASTA, draws maps, digests, exports GenBank/FASTA/SVG. No install, no network, no account — runs from a USB stick on a locked-down PC. Built by [`tools/build-web.ps1`](tools/build-web.ps1); not committed, because it is 257 KB of base64 that changes every rebuild. |
 | [`reference/python/dna2gb.py`](reference/python/dna2gb.py) | Bulk `.dna` → GenBank converter. Superseded by `pl convert`, which also preserves sequence case (Biopython does not — see the file's docstring). |
 | [`docs/DNA-FORMAT.md`](docs/DNA-FORMAT.md) | Empirical spec of the `.dna` container. Validated on a 41-file corpus (138 bp → 4.64 Mb). |
 | [`reference/python/snapdna.py`](reference/python/snapdna.py) | Reader + writer, stdlib only. **Byte-exact round-trip on 41/41 files.** |
@@ -66,9 +66,16 @@ target/release/pl digest  plasmid.dna --unique
 target/release/pl blocks  plasmid.dna      # what the container is made of
 ```
 
-No toolchain? Open [`prototype/dna-reader.html`](prototype/dna-reader.html) in a
-browser, drop a file on it, and press **Save GenBank** — no install, no admin
-rights.
+No toolchain on the machine that has the files? Build the browser tool once and
+carry it:
+
+```powershell
+.\tools\build-web.ps1        # -> prototype\dna-reader.html, one self-contained file
+```
+
+Open it, drop a file on it, press **Save GenBank**. No install, no admin rights,
+no network — the wasm core is inlined, so it works over `file://` from a USB
+stick.
 
 GenBank is plain text and is read by ApE, UGENE, Benchling, Biopython and
 SnapGene itself, so converting costs you nothing and un-strands your data.
@@ -137,6 +144,23 @@ Built and verified natively on Windows (MSVC 14.44, Rust 1.97.1) and on Linux.
   report and **590 ms** for a 50-enzyme digest on Linux; **103 ms** and
   **1,195 ms** natively on Windows. 30 MB peak RSS.
 - The whole suite passes on **Windows (MSVC) and Linux**, from the same source.
+- The wasm build and the native binary **agree on 41/41 files**, and the GenBank
+  they write is **byte-identical** on all 41. The browser page holds no parser of
+  its own; there used to be a second implementation in JavaScript, and two
+  implementations of an undocumented format is two things to keep correct.
+- The wasm module declares **zero imports** — no JS glue, no `wasm-bindgen`, no
+  runtime to trust.
+
+### One core, three surfaces
+
+```
+crates/pl-core ─ pl-enzymes ─ pl-fileio ─┬─ bins/pl        native CLI    (365 KB)
+                                         └─ crates/pl-wasm wasm32        (150 KB)
+                                                              └─ inlined into one HTML file
+```
+
+Correctness lives in one place. The CLI, the browser tool and any future GUI are
+distribution, not logic.
 
 ## Try it
 

@@ -212,7 +212,8 @@ pub fn parse(data: &[u8]) -> Result<Document, Error> {
                 } else {
                     Topology::Linear
                 };
-                doc.molecule.double_stranded = flags & flag::DOUBLE_STRANDED != 0;
+                // The .dna format does record this, so it is known either way.
+                doc.molecule.double_stranded = Some(flags & flag::DOUBLE_STRANDED != 0);
                 doc.molecule.methylation = Methylation {
                     dam: flags & flag::DAM != 0,
                     dcm: flags & flag::DCM != 0,
@@ -506,7 +507,7 @@ mod tests {
         assert!(doc.molecule.methylation.dam);
         assert!(!doc.molecule.methylation.dcm);
         assert!(doc.molecule.methylation.ecoki);
-        assert!(!doc.molecule.double_stranded);
+        assert_eq!(doc.molecule.double_stranded, Some(false));
     }
 
     #[test]

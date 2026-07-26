@@ -186,7 +186,13 @@ pub struct Molecule {
     /// Raw bases, **case preserved**. Not guaranteed to be valid IUPAC.
     pub seq: Vec<u8>,
     pub topology: Topology,
-    pub double_stranded: bool,
+    /// `None` when the source does not record it — which is the normal case for
+    /// GenBank and always the case for FASTA.
+    ///
+    /// Defaulting this to `false` made the viewer assert "single-stranded" about
+    /// ordinary plasmids, and defaulting to `true` would invent information just
+    /// as confidently. Unknown is a real third state and callers should say so.
+    pub double_stranded: Option<bool>,
     pub methylation: Methylation,
     pub features: Vec<Feature>,
     pub primers: Vec<Primer>,

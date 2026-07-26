@@ -1,0 +1,20 @@
+[package]
+name = "pl-wasm"
+description = "WebAssembly surface for the Polylinker core. Plain C ABI, no bindgen."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Still no external dependencies. wasm-bindgen would pull in a large tree and
+# emit a JS glue file, which would break the single-file property of the browser
+# tool -- the thing that makes it work from a USB stick on a locked-down PC.
+# The ABI here is small enough to write by hand.
+[dependencies]
+pl-core.workspace = true
+pl-enzymes.workspace = true
+pl-fileio.workspace = true

@@ -67,6 +67,16 @@ fn parse_record(lines: &[&str]) -> Molecule {
                 break;
             }
         }
+        // The molecule-type field may carry an ss-/ds-/ms- prefix, but usually
+        // does not. Absent means unknown, not single-stranded.
+        let lower = locus.to_ascii_lowercase();
+        mol.double_stranded = if lower.contains("ds-") {
+            Some(true)
+        } else if lower.contains("ss-") {
+            Some(false)
+        } else {
+            None
+        };
     }
 
     if let Some(d) = lines.iter().find(|l| l.starts_with("DEFINITION")) {
@@ -120,7 +130,18 @@ fn parse_record(lines: &[&str]) -> Molecule {
                         .iter()
                         .find(|(k, v)| k == "note" && v.contains('#'))
                         .and_then(|(_, v)| v.split('#').nth(1))
-                        .map(|h| format!("#{}", &h[..h.len().min(6)]))
+                        .and_then(|h| {
+                            // Take hex digits by character, never by byte: a
+                            // multibyte char straddling byte 6 would panic, and
+                            // this runs inside wasm where a panic kills the
+                            // module rather than one call.
+                            let hex: String = h
+                                .chars()
+                                .take(6)
+                                .take_while(|c| c.is_ascii_hexdigit())
+                                .collect();
+                            (hex.len() == 6).then(|| format!("#{hex}"))
+                        })
                 });
             let segments = segments
                 .into_iter()
@@ -369,11 +390,10 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
         } else {
             &f.kind
         };
-        out.push_str(&format!(
-            "     {:<15} {}\n",
-            &kind[..kind.len().min(15)],
-            format_location(f)
-        ));
+        // Truncate by character. A feature key is normally ASCII, but this must
+        // not panic on one that is not.
+        let key: String = kind.chars().take(15).collect();
+        out.push_str(&format!("     {:<15} {}\n", key, format_location(f)));
         qualifier_lines("label", &f.name, &mut out);
         for (k, v) in &f.qualifiers {
             if k == "label" || v.is_empty() || k.starts_with("ApEinfo") {
@@ -526,6 +546,42 @@ mod tests {
     }
 
     #[test]
+    fn multibyte_text_never_panics_on_truncation() {
+        // Both of these used to slice a str by byte offset. A feature key or a
+        // colour note containing a multibyte character would panic, which in
+        // wasm takes down the whole module.
+        let mut mol = Molecule {
+            seq: b"acgt".to_vec(),
+            ..Default::default()
+        };
+        let mut f = Feature::new("δ subunit", "δδδδδδδδδδδδδδδδδδδδ");
+        f.segments.push(Segment::new(1, 4));
+        f.set_qualifier("note", "color: #δβγ");
+        mol.features.push(f);
+
+        let gb = write(&mol, "t.dna", (1, 0, 2026)); // must not panic
+        let back = parse(&gb);
+        assert_eq!(back.features.len(), 1);
+        assert_eq!(back.features[0].name, "δ subunit");
+        // "#δβγ" is not six hex digits, so no colour is claimed.
+        assert_eq!(back.features[0].color(), None);
+    }
+
+    #[test]
+    fn colour_notes_are_only_believed_when_they_are_real_hex() {
+        let gb = "LOCUS       x                         4 bp    DNA     linear   SYN 01-JAN-2026\n\
+                  FEATURES             Location/Qualifiers\n\
+                  \x20    gene            1..4\n\
+                  \x20                    /note=\"color: #1a2b3c\"\n\
+                  ORIGIN\n\
+                  \x20       1 acgt\n//\n";
+        assert_eq!(parse(gb).features[0].color(), Some("#1a2b3c"));
+
+        let short = gb.replace("#1a2b3c", "#12");
+        assert_eq!(parse(&short).features[0].color(), None);
+    }
+
+    #[test]
     fn standalone_annotation_tracks_are_read() {
         // UGENE and SnapGene both export these: features only, no ORIGIN block,
         // and no bp field on the LOCUS line. Real files, and Biopython refuses
@@ -551,6 +607,24 @@ mod tests {
         assert_eq!(m.span(), 0);
         assert_eq!(m.annotation_span(), 1951);
         assert_eq!(m.features[1].strand, Strand::Reverse);
+    }
+
+    #[test]
+    fn strandedness_is_unknown_unless_the_file_says() {
+        let base = "LOCUS       x                        4 bp    {} linear   SYN 01-JAN-2026\nORIGIN\n        1 acgt\n//\n";
+        assert_eq!(
+            parse(&base.replace("{}", "DNA    ")).double_stranded,
+            None,
+            "a plain DNA record records nothing, so we must not claim single-stranded"
+        );
+        assert_eq!(
+            parse(&base.replace("{}", "ds-DNA ")).double_stranded,
+            Some(true)
+        );
+        assert_eq!(
+            parse(&base.replace("{}", "ss-DNA ")).double_stranded,
+            Some(false)
+        );
     }
 
     #[test]
