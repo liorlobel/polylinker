@@ -151,31 +151,21 @@ Built and verified natively on Windows (MSVC 14.44, Rust 1.97.1) and on Linux.
 - The wasm module declares **zero imports** — no JS glue, no `wasm-bindgen`, no
   runtime to trust.
 
-### Known issue: the desktop app on a scaled Windows display
+### A note on measuring a GUI from a script
 
-`polylinker.exe` draws slightly larger than its window and clips at the edges
-when Windows display scaling is not 100%. It is an upstream sizing defect, not
-a layout bug here, and the following were each measured and ruled out:
+If you screenshot or measure this app from a helper process on Windows, make
+that process **per-monitor DPI aware first**:
 
-| Suspect | Result |
-|---|---|
-| wgpu instead of glow | byte-identical geometry |
-| `pixels_per_point` 1.0 or native | cancels out of the identity below |
-| `set_zoom_factor` | likewise |
-| `SetProcessDpiAwarenessContext` | no effect |
-| our own panel layout | `Panel::right` reserves space correctly in isolation |
+```powershell
+[Win32]::SetProcessDpiAwarenessContext([IntPtr](-4))
+```
 
-The identity is `screen_rect_points = physical_px × display_scale ÷ ppp`, so the
-pixels egui asks for are always `physical × scale` whatever `ppp` is set to. It
-should not appear at all at 100% scaling, where that factor is 1.
-
-A resize reconciles the two, so the app requests one on its second frame, which
-recovers most of it; resizing the window clears the rest. Run with
-`PL_GUI_DEBUG_GEOMETRY=1` to print the rects.
-
-A minimal reproduction and a filed-ready write-up are in
-[`docs/upstream/eframe-hidpi/`](docs/upstream/eframe-hidpi/REPORT.md): ~90 lines,
-`eframe` as the only dependency, reproduced on eframe 0.35.0 with both backends.
+Without it Windows reports *virtualised* coordinates. On a 125% display a
+1600×1050 window is reported as 1280×840, and a screenshot taken at those
+numbers captures the top-left 80% of the window — which looks exactly like the
+UI being clipped. That artifact cost real time here and produced a bug report
+for a bug that did not exist. `PL_GUI_DEBUG_GEOMETRY=1` prints what the app
+believes its own geometry is, which is the number to trust.
 
 ### One core, three surfaces
 

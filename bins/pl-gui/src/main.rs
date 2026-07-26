@@ -25,41 +25,17 @@ fn pal(ui: &Ui) -> Palette {
     Palette::of(ui.visuals().dark_mode)
 }
 
-/// Tell Windows this process handles DPI itself.
-///
-/// Correct to declare regardless, but be clear about what it does *not* do: it
-/// does not fix the sizing defect described below. That was measured, not
-/// assumed.
-///
-/// A bare `extern` rather than a Windows-API crate: it is one call, and the
-/// alternative is a large dependency for a single symbol.
-#[cfg(windows)]
-fn declare_dpi_awareness() {
-    // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-    const PER_MONITOR_AWARE_V2: isize = -4;
-    unsafe extern "system" {
-        fn SetProcessDpiAwarenessContext(value: isize) -> i32;
-    }
-    // Fails harmlessly if awareness has already been established.
-    unsafe {
-        SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2);
-    }
-}
-
-#[cfg(not(windows))]
-fn declare_dpi_awareness() {}
-
 /// Set `PL_GUI_DEBUG_GEOMETRY=1` to print the layout rects each frame.
 ///
-/// Kept in the shipped binary because this exact class of mismatch — egui's
-/// screen rect disagreeing with the real framebuffer by the display scale — is
-/// invisible in a screenshot and painful to diagnose without numbers.
+/// Worth keeping in the shipped binary: when a window looks wrong, this is the
+/// only trustworthy number. A helper process that is not per-monitor DPI aware
+/// is told *virtualised* coordinates by Windows, so measuring or screenshotting
+/// the app from one shows a window that appears clipped when it is not.
 fn debug_geometry() -> bool {
     matches!(std::env::var("PL_GUI_DEBUG_GEOMETRY").as_deref(), Ok("1"))
 }
 
 fn main() -> eframe::Result {
-    declare_dpi_awareness();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 840.0])
@@ -91,8 +67,6 @@ struct App {
     hot: Option<usize>,
     filter: String,
     status: String,
-    /// Frames drawn, used only for the startup resize nudge below.
-    frames: u32,
 }
 
 impl App {
@@ -112,7 +86,6 @@ impl App {
             hot: None,
             filter: String::new(),
             status: String::new(),
-            frames: 0,
         };
         // Opening a file named on the command line makes the app usable as a
         // file association and from a terminal.
@@ -212,32 +185,6 @@ impl eframe::App for App {
                 ui.clip_rect(),
                 ctx.pixels_per_point()
             );
-        }
-
-        // Startup geometry nudge — a workaround for an upstream defect.
-        //
-        // On Windows with display scaling, eframe gives egui a screen rect
-        // measured in physical pixels but renders it as points, so the UI is
-        // drawn scale-factor too large and clipped at every edge.
-        //
-        // Measured, so that nobody repeats the search:
-        //   screen_rect_points = physical_px * display_scale / pixels_per_point
-        // which means the pixels egui asks for are always physical * scale,
-        // independent of pixels_per_point. Setting ppp to 1.0 does not help,
-        // and neither does set_zoom_factor — both cancel out of that identity.
-        //   * wgpu vs glow: byte-identical geometry, so not a backend problem.
-        //   * SetProcessDpiAwarenessContext: no effect.
-        //   * Panel::right in isolation reserves space correctly, so it is not
-        //     our layout.
-        // It should not appear at all on a display scaled to 100%, where the
-        // factor is 1.
-        //
-        // A resize event does reconcile the two, so ask for one. Sending our own
-        // size back is a no-op in the good case and a fix in the bad one.
-        self.frames += 1;
-        if self.frames == 2 {
-            let size = ui.clip_rect().size();
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
 
         // Files dropped anywhere on the window.
