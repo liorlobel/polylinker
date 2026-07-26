@@ -1,0 +1,82 @@
+polylinker-features
+Copyright (c) 2026 The Polylinker contributors
+
+This dataset is licensed under the Creative Commons Attribution 4.0
+International License (CC BY 4.0).
+    https://creativecommons.org/licenses/by/4.0/
+
+It incorporates data from the sources below. Their attribution requirements are
+reproduced here because they travel with the data: anyone redistributing this
+dataset must carry this file with it.
+
+Per-field provenance for every row -- including which source each individual
+field came from and under what licence -- is in `provenance.tsv`. The evidence
+that each source was cleared, with quoted licence text and the URL it was
+fetched from, is in `SOURCING.md`.
+
+--------------------------------------------------------------------------------
+U.S. National Library of Medicine / NCBI
+--------------------------------------------------------------------------------
+
+Courtesy of the U.S. National Library of Medicine.
+
+Nucleotide and protein reference sequences are derived from the NCBI
+AMRFinderPlus Reference Gene Catalog:
+    https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/
+
+NCBI's Disclaimer and Copyright notice applies:
+    https://www.ncbi.nlm.nih.gov/home/about/policies/
+
+NCBI holds no copyright in the sequence records themselves and states that it
+has no rights to transfer; individual records may be subject to rights held by
+their submitters.
+
+THIS DATASET IS A DATED SNAPSHOT AND DOES NOT REFLECT THE MOST CURRENT DATA
+AVAILABLE FROM NLM. The retrieval date and the sha256 of every fetched source
+file are recorded per field in `provenance.tsv`.
+
+--------------------------------------------------------------------------------
+INSDC submitters
+--------------------------------------------------------------------------------
+
+Sequence records reached through NCBI, ENA or DDBJ originate with the scientists
+who deposited them. INSDC places no use restrictions or licensing requirements
+on the records:
+    https://www.insdc.org/policy/
+
+Credit to the original submission is nevertheless expected, and the specific
+accession behind each sequence is recorded in `provenance.tsv` and in each
+record's `boundary_evidence` field.
+
+--------------------------------------------------------------------------------
+Sources not yet used, listed so their absence is deliberate and legible
+--------------------------------------------------------------------------------
+
+UniProt (CC BY 4.0), Rfam (CC0 1.0, with enforced exclusions), and EMBL-EBI/ENA
+are cleared in `SOURCING.md` and will require attribution here when rows derived
+from them are added.
+
+The following are NOT used, and their absence is a decision rather than an
+oversight -- see `SOURCING.md` for the evidence behind each:
+
+  * SnapGene Common Features, and pLannotate's snapgene.csv derived from it
+  * GenoLIB
+  * Addgene bulk records
+  * PlasMapper 3.0 FeatureDB
+  * SEVA
+  * FPbase sequence data (its name-to-accession index only, pending resolution)
+  * Sequence Ontology terms (pending resolution of a CC BY / CC BY-SA conflict
+    between its LICENSE file and its README)
+
+--------------------------------------------------------------------------------
+Changes made
+--------------------------------------------------------------------------------
+
+CC BY 4.0 requires that changes be indicated. This dataset transforms its
+sources rather than reproducing them:
+
+  * Sequences are extracted from larger records and paired nucleotide-to-protein.
+  * Every coding sequence is verified by translation against its reference
+    protein; entries that do not translate exactly are dropped, not corrected.
+  * Feature boundaries are computed from reading frames, not inherited.
+  * All names and descriptions are written by the Polylinker contributors.

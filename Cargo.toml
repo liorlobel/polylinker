@@ -4,6 +4,7 @@ members = [
     "crates/pl-core",
     "crates/pl-enzymes",
     "crates/pl-clone",
+    "crates/pl-features",
     "crates/pl-fileio",
     "crates/pl-wasm",
     "bins/pl",
@@ -21,6 +22,7 @@ repository = "https://github.com/polylinker/polylinker"
 pl-core = { path = "crates/pl-core", version = "0.1.0" }
 pl-clone = { path = "crates/pl-clone", version = "0.1.0" }
 pl-enzymes = { path = "crates/pl-enzymes", version = "0.1.0" }
+pl-features = { path = "crates/pl-features", version = "0.1.0" }
 pl-fileio = { path = "crates/pl-fileio", version = "0.1.0" }
 
 [profile.release]

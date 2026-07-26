@@ -48,3 +48,10 @@ Cargo.lock
 # from the template plus the compiled wasm. It is ~257 KB of base64 that changes
 # on every rebuild, which does not belong in history. Ship it in releases.
 prototype/dna-reader.html
+
+# Fetched source archives for the features build. Regenerate with
+# `python features/build/build.py --refresh`; the sha256 of each is recorded in
+# features/provenance.tsv, which is what actually needs to be reviewable.
+features/build/.cache/
+packages/circular-map/node_modules/
+packages/circular-map/dist/

@@ -96,6 +96,33 @@ Step 'rust reader vs python reader' {
     python reference/python/tests/xcheck_rust.py target/release/pl.exe "$Corpus\**\*.dna"
 } { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
 
+Write-Host "`nannotation database" -ForegroundColor Cyan
+Step 'features.tsv satisfies its own schema' {
+    cargo test -p pl-features --test corpus the_shipped_database 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { cargo test -p pl-features --test corpus the_shipped_database }
+} { Test-Path 'features/features.tsv' }
+Step 'every coding record translates to its protein' {
+    cargo test -p pl-features --test corpus every_coding_record 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { cargo test -p pl-features --test corpus every_coding_record }
+} { Test-Path 'features/features.tsv' }
+Step 'no SnapGene sseqid fingerprint in our ids' {
+    # PLAN 8.3 rule 2: `CmR_(2)` / `KanR_(3)` is a copying fingerprint, and
+    # 21.5% of their rows carry it. Ours must never look like that.
+    $bad = Select-String -Path 'features/features.tsv' -Pattern '^\S*_\(\d+\)	' -AllMatches
+    if ($bad) { Write-Output "sseqid-style ids found: $($bad.Count)"; $global:LASTEXITCODE = 1 }
+    else { $global:LASTEXITCODE = 0 }
+} { Test-Path 'features/features.tsv' }
+
+Write-Host "`ncircular-map (TypeScript)" -ForegroundColor Cyan
+Step 'typecheck' {
+    Push-Location packages/circular-map; npx --no-install tsc -p tsconfig.json --noEmit; Pop-Location
+} { (Have node) -and (Test-Path 'packages/circular-map/node_modules') }
+Step 'circular-map tests' {
+    Push-Location packages/circular-map
+    node --test --experimental-strip-types test/*.test.ts
+    Pop-Location
+} { Have node }
+
 Write-Host "`nbenchmark" -ForegroundColor Cyan
 Step 'polylinker-bench' {
     python bench/run.py bench/polylinker-bench.json -- target/release/pl.exe bench-adapter

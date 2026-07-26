@@ -1,0 +1,49 @@
+record_id	field	source_db	source_accession	licence	url	retrieved	sha256
+PLF:0001	reference_nt	amrfinderplus	WP_000027057.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0001	reference_aa	amrfinderplus	WP_000027057.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0001	aliases	amrfinderplus	WP_000027057.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0001	boundary_rule	polylinker	-	own-work	-	2026-07-27	
+PLF:0001	description	polylinker	-	own-work	-	2026-07-27	
+PLF:0001	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0002	reference_nt	amrfinderplus	WP_063841683.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0002	reference_aa	amrfinderplus	WP_063841683.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0002	aliases	amrfinderplus	WP_063841683.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0002	boundary_rule	polylinker	-	own-work	-	2026-07-27	
+PLF:0002	description	polylinker	-	own-work	-	2026-07-27	
+PLF:0002	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0003	reference_nt	amrfinderplus	WP_000572405.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0003	reference_aa	amrfinderplus	WP_000572405.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0003	aliases	amrfinderplus	WP_000572405.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0003	boundary_rule	polylinker	-	own-work	-	2026-07-27	
+PLF:0003	description	polylinker	-	own-work	-	2026-07-27	
+PLF:0003	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0004	reference_nt	amrfinderplus	WP_001206316.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0004	reference_aa	amrfinderplus	WP_001206316.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0004	aliases	amrfinderplus	WP_001206316.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0004	boundary_rule	polylinker	-	own-work	-	2026-07-27	
+PLF:0004	description	polylinker	-	own-work	-	2026-07-27	
+PLF:0004	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0005	reference_nt	amrfinderplus	WP_000412211.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0005	reference_aa	amrfinderplus	WP_000412211.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0005	aliases	amrfinderplus	WP_000412211.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0005	boundary_rule	polylinker	-	own-work	-	2026-07-27	
+PLF:0005	description	polylinker	-	own-work	-	2026-07-27	
+PLF:0005	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0006	reference_nt	amrfinderplus	WP_011645018.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0006	reference_aa	amrfinderplus	WP_011645018.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0006	aliases	amrfinderplus	WP_011645018.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0006	boundary_rule	polylinker	-	own-work	-	2026-07-27	
+PLF:0006	description	polylinker	-	own-work	-	2026-07-27	
+PLF:0006	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0007	reference_nt	amrfinderplus	WP_022542381.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0007	reference_aa	amrfinderplus	WP_022542381.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0007	aliases	amrfinderplus	WP_022542381.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0007	boundary_rule	polylinker	-	own-work	-	2026-07-27	
+PLF:0007	description	polylinker	-	own-work	-	2026-07-27	
+PLF:0007	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0008	reference_nt	amrfinderplus	WP_000131935.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0008	reference_aa	amrfinderplus	WP_000131935.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0008	aliases	amrfinderplus	WP_000131935.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0008	boundary_rule	polylinker	-	own-work	-	2026-07-27	
+PLF:0008	description	polylinker	-	own-work	-	2026-07-27	
+PLF:0008	name	polylinker	-	own-work	-	2026-07-27	

@@ -1,0 +1,19 @@
+[package]
+name = "pl-features"
+description = "Auto-annotation against polylinker-features, the openly-licensed common-features database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Zero dependencies, like the rest of the correctness layer. The aligner and the
+# seed index are small enough to own, and owning them is what makes the whole
+# annotation path auditable and offline-buildable.
+[dependencies]
+pl-core.workspace = true
+
+# Corpus tests read real `.dna` and GenBank files; the library itself does not
+# depend on any file format.
+[dev-dependencies]
+pl-fileio.workspace = true
