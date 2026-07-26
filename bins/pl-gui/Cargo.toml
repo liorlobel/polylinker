@@ -20,8 +20,12 @@ pl-fileio.workspace = true
 # logic. The correctness crates above still have none, and everything this
 # binary decides about a molecule it asks them.
 #
-# glow (OpenGL) rather than wgpu: one renderer, a smaller tree, and no Vulkan or
-# DX12 driver surface on lab machines that are frequently ancient.
+# glow (OpenGL): a smaller tree, and it asks least of a lab machine's drivers.
+#
+# wgpu was tried and measured against this, on the suspicion that the Windows
+# HiDPI sizing defect noted in main.rs was a GL surface problem. It is not —
+# both backends report byte-identical geometry — and wgpu costs 6 MB of binary
+# plus a Vulkan/DX12 driver requirement. Ruled out on evidence, not taste.
 eframe = { version = "0.35", default-features = false, features = [
     "accesskit",      # screen-reader support; not optional in a tool people rely on
     "default_fonts",

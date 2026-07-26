@@ -27,10 +27,9 @@ fn pal(ui: &Ui) -> Palette {
 
 /// Tell Windows this process handles DPI itself.
 ///
-/// Without it Windows hands the process a window sized in physical pixels while
-/// egui lays out in points, so on a 125%-scaled display everything is drawn
-/// 1.25x too large and cropped at every edge — enzyme names lose their first
-/// letters and the side panel falls off the right side entirely.
+/// Correct to declare regardless, but be clear about what it does *not* do: it
+/// does not fix the sizing defect described below. That was measured, not
+/// assumed.
 ///
 /// A bare `extern` rather than a Windows-API crate: it is one call, and the
 /// alternative is a large dependency for a single symbol.
@@ -49,6 +48,15 @@ fn declare_dpi_awareness() {
 
 #[cfg(not(windows))]
 fn declare_dpi_awareness() {}
+
+/// Set `PL_GUI_DEBUG_GEOMETRY=1` to print the layout rects each frame.
+///
+/// Kept in the shipped binary because this exact class of mismatch — egui's
+/// screen rect disagreeing with the real framebuffer by the display scale — is
+/// invisible in a screenshot and painful to diagnose without numbers.
+fn debug_geometry() -> bool {
+    matches!(std::env::var("PL_GUI_DEBUG_GEOMETRY").as_deref(), Ok("1"))
+}
 
 fn main() -> eframe::Result {
     declare_dpi_awareness();
@@ -197,12 +205,34 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // Startup geometry nudge.
+        if debug_geometry() {
+            eprintln!(
+                "geometry: root={:?} clip={:?} ppp={}",
+                ui.max_rect(),
+                ui.clip_rect(),
+                ctx.pixels_per_point()
+            );
+        }
+
+        // Startup geometry nudge — a workaround for an upstream defect.
         //
-        // On Windows with display scaling, eframe hands egui a screen rect
-        // measured in physical pixels but renders it as points, so the first
-        // frames are drawn ~scale-factor too large and clipped at every edge.
-        // A resize event reconciles the two, so ask for one. Sending our own
+        // On Windows with display scaling, eframe gives egui a screen rect
+        // measured in physical pixels but renders it as points, so the UI is
+        // drawn scale-factor too large and clipped at every edge.
+        //
+        // Measured, so that nobody repeats the search:
+        //   screen_rect_points = physical_px * display_scale / pixels_per_point
+        // which means the pixels egui asks for are always physical * scale,
+        // independent of pixels_per_point. Setting ppp to 1.0 does not help,
+        // and neither does set_zoom_factor — both cancel out of that identity.
+        //   * wgpu vs glow: byte-identical geometry, so not a backend problem.
+        //   * SetProcessDpiAwarenessContext: no effect.
+        //   * Panel::right in isolation reserves space correctly, so it is not
+        //     our layout.
+        // It should not appear at all on a display scaled to 100%, where the
+        // factor is 1.
+        //
+        // A resize event does reconcile the two, so ask for one. Sending our own
         // size back is a no-op in the good case and a fix in the bad one.
         self.frames += 1;
         if self.frames == 2 {

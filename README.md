@@ -151,6 +151,28 @@ Built and verified natively on Windows (MSVC 14.44, Rust 1.97.1) and on Linux.
 - The wasm module declares **zero imports** — no JS glue, no `wasm-bindgen`, no
   runtime to trust.
 
+### Known issue: the desktop app on a scaled Windows display
+
+`polylinker.exe` draws slightly larger than its window and clips at the edges
+when Windows display scaling is not 100%. It is an upstream sizing defect, not
+a layout bug here, and the following were each measured and ruled out:
+
+| Suspect | Result |
+|---|---|
+| wgpu instead of glow | byte-identical geometry |
+| `pixels_per_point` 1.0 or native | cancels out of the identity below |
+| `set_zoom_factor` | likewise |
+| `SetProcessDpiAwarenessContext` | no effect |
+| our own panel layout | `Panel::right` reserves space correctly in isolation |
+
+The identity is `screen_rect_points = physical_px × display_scale ÷ ppp`, so the
+pixels egui asks for are always `physical × scale` whatever `ppp` is set to. It
+should not appear at all at 100% scaling, where that factor is 1.
+
+A resize reconciles the two, so the app requests one on its second frame, which
+recovers most of it; resizing the window clears the rest. Run with
+`PL_GUI_DEBUG_GEOMETRY=1` to print the rects.
+
 ### One core, three surfaces
 
 ```
