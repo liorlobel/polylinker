@@ -173,6 +173,10 @@ A resize reconciles the two, so the app requests one on its second frame, which
 recovers most of it; resizing the window clears the rest. Run with
 `PL_GUI_DEBUG_GEOMETRY=1` to print the rects.
 
+A minimal reproduction and a filed-ready write-up are in
+[`docs/upstream/eframe-hidpi/`](docs/upstream/eframe-hidpi/REPORT.md): ~90 lines,
+`eframe` as the only dependency, reproduced on eframe 0.35.0 with both backends.
+
 ### One core, three surfaces
 
 ```
