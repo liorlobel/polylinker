@@ -89,15 +89,15 @@ operation      pass   fail  unsup  total   rate
 assembly          0      0      5      5     0.0%
 digest          123      0      0    123   100.0%
 identity         42      0      0     42   100.0%
-pcr               0      0      6      6     0.0%
+pcr               6      0      0      6   100.0%
 --------------------------------------------------------
-all             165      0     11    176    93.8%
+all             171      0      5    176    97.2%
 
 hazard tier 1 (silent and expensive): 158 passed, 0 failed, 5 unsupported
 ```
 
-Zero failures, and eleven cases Polylinker cannot attempt because it does not
-implement PCR or assembly yet. That gap is real and the number says so.
+Zero failures. The five remaining are assembly, which is not implemented; the
+number says so rather than dropping them from the denominator.
 
 ## Regenerating
 

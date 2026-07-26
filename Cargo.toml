@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/pl-core",
     "crates/pl-enzymes",
+    "crates/pl-clone",
     "crates/pl-fileio",
     "crates/pl-wasm",
     "bins/pl",
@@ -18,6 +19,7 @@ repository = "https://github.com/polylinker/polylinker"
 
 [workspace.dependencies]
 pl-core = { path = "crates/pl-core", version = "0.1.0" }
+pl-clone = { path = "crates/pl-clone", version = "0.1.0" }
 pl-enzymes = { path = "crates/pl-enzymes", version = "0.1.0" }
 pl-fileio = { path = "crates/pl-fileio", version = "0.1.0" }
 

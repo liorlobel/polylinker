@@ -66,6 +66,7 @@ fn main() -> ExitCode {
         "blocks" => cmd_blocks(rest),
         "checksum" => cmd_checksum(rest),
         "bench-adapter" => cmd_bench_adapter(rest),
+        "cut-adapter" => cmd_cut_adapter(rest),
         "-V" | "--version" => {
             println!("pl {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -609,6 +610,57 @@ fn cmd_checksum(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Emit digest fragments for the differential test against pydna.
+///
+/// Reads `id \t enzyme \t topology \t sequence` and writes one JSON object per
+/// line with every fragment's watson, crick and overhang. All three are
+/// reported because a fragment can have the right length and the wrong end
+/// shape, and only the overhang shows it.
+fn cmd_cut_adapter(_args: &[String]) -> Result<(), String> {
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map_err(|e| e.to_string())?;
+
+    for line in input.lines() {
+        let f: Vec<&str> = line.trim_end().split('\t').collect();
+        if f.len() < 4 {
+            continue;
+        }
+        let (id, enzyme, topology, seq) = (f[0], f[1], f[2], f[3]);
+        let Some(e) = pl_enzymes::by_name(enzyme) else {
+            println!(
+                "{{{}: {}, {}: []}}",
+                json_str("id"),
+                json_str(id),
+                json_str("fragments")
+            );
+            continue;
+        };
+        let d = pl_clone::Dseq::new(seq, topology == "circular");
+        let frags: Vec<String> = pl_clone::cut(&d, e)
+            .iter()
+            .map(|fr| {
+                format!(
+                    "{{{}: {}, {}: {}, {}: {}}}",
+                    json_str("watson"),
+                    json_str(&fr.watson),
+                    json_str("crick"),
+                    json_str(&fr.crick),
+                    json_str("ovhg"),
+                    fr.ovhg
+                )
+            })
+            .collect();
+        println!(
+            "{{{}: {}, {}: [{}]}}",
+            json_str("id"),
+            json_str(id),
+            json_str("fragments"),
+            frags.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// The polylinker-bench adapter.
 ///
 /// The bench is meant to be run against any tool, so the interface it asks of a
@@ -629,10 +681,11 @@ fn cmd_bench_adapter(args: &[String]) -> Result<(), String> {
     let a = parse_args(args, &[])?;
 
     if a.has("capabilities") {
-        // Deliberately short. pcr and assembly are not implemented, and the
-        // published pass rate should show that rather than hide it.
+        // assembly is still absent, and the published pass rate should show
+        // that rather than hide it.
         println!("identity");
         println!("digest");
+        println!("pcr");
         return Ok(());
     }
 
@@ -693,6 +746,29 @@ fn cmd_bench_adapter(args: &[String]) -> Result<(), String> {
                             list.join(","),
                             pos.len()
                         );
+                    }
+                }
+            }
+            "pcr" => {
+                let (Some(fwd), Some(rev)) = (param("forward_primer"), param("reverse_primer"))
+                else {
+                    println!("{id}\terror=missing a primer");
+                    continue;
+                };
+                let template = pl_clone::Dseq::new(&upper, circular);
+                match pl_clone::pcr(fwd, rev, &template) {
+                    Err(e) => println!("{id}\terror={e}"),
+                    Ok(product) => {
+                        let w = &product.watson;
+                        let rc =
+                            String::from_utf8_lossy(&pl_core::reverse_complement(w.as_bytes()))
+                                .into_owned();
+                        match pl_core::ldseguid(w, &rc) {
+                            Ok(v) => {
+                                println!("{id}\tproduct_length={}\tldseguid={v}", w.len())
+                            }
+                            Err(e) => println!("{id}\terror={e}"),
+                        }
                     }
                 }
             }

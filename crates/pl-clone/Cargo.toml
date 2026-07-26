@@ -1,0 +1,12 @@
+[package]
+name = "pl-clone"
+description = "Double-stranded DNA with sticky ends: digestion into fragments, and PCR."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pl-core.workspace = true
+pl-enzymes.workspace = true
