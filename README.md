@@ -76,12 +76,30 @@ SnapGene itself, so converting costs you nothing and un-strands your data.
 ### Building
 
 `pl-core` has no dependencies, so `cargo build` needs no network. A linker is
-the only external requirement:
+the only external requirement.
 
 - **Linux/macOS** — works out of the box.
-- **Windows** — needs the MSVC linker (Visual Studio Build Tools, "Desktop
-  development with C++") or a MinGW-w64 toolchain. Rust alone is not enough;
-  `rustup` does not ship a linker. Building under WSL works today.
+- **Windows** — needs a linker. `rustup` does not ship one, and the failure is a
+  confusing `linker 'link.exe' not found` deep in a build log. Install the MSVC
+  toolset:
+
+  ```powershell
+  winget install --id Microsoft.VisualStudio.2022.BuildTools --exact --override "--quiet --wait --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100"
+  ```
+
+  A `--profile minimal` rustup install also omits clippy and rustfmt:
+  `rustup component add clippy rustfmt`.
+
+Verify a build end to end, including against real files:
+
+```powershell
+.\tools\verify.ps1 -Corpus "C:\path\to\your\plasmids"
+```
+
+That script checks for the linker first and prints the fix rather than letting
+cargo fail obscurely.
+
+Built and verified natively on Windows (MSVC 14.44, Rust 1.97.1) and on Linux.
 
 ### What has been proven so far
 
@@ -115,8 +133,10 @@ the only external requirement:
 - Content sniffing found **20 files whose extension lies**: four SCF and sixteen
   ZTR chromatograms named `.ab1`. This is why detection never trusts the
   extension.
-- On the 4.64 Mb *E. coli* genome: **70 ms** to parse and report, **590 ms** for
-  a 50-enzyme digest, 30 MB peak RSS.
+- On the 4.64 Mb *E. coli* genome (a 17.7 MB `.dna`): **70 ms** to parse and
+  report and **590 ms** for a 50-enzyme digest on Linux; **103 ms** and
+  **1,195 ms** natively on Windows. 30 MB peak RSS.
+- The whole suite passes on **Windows (MSVC) and Linux**, from the same source.
 
 ## Try it
 
