@@ -75,6 +75,30 @@ screen_rect_points = physical_px * display_scale / pixels_per_point
 so the pixels egui asks for are always `physical_px * display_scale`,
 **independent of `pixels_per_point`**. That is why no scaling knob compensates.
 
+## Controlled check: the discrepancy is exactly the scale factor
+
+Same machine, same binary, only the effective scale factor varied — using
+Windows' per-process compatibility layer rather than changing display settings,
+so nothing else differs:
+
+| run | `native_ppp` | `screen_rect` given | `inner_rect / native_ppp` | agree? |
+|---|---|---|---|---|
+| default (per-monitor aware) | 1.25 | 800 x 600 | **640 x 480** | ✗ out by 1.25x |
+| `__COMPAT_LAYER=DPIUNAWARE` | 1.0 | 800 x 600 | **800 x 600** | ✓ |
+
+(`screen_rect` is reported as 784 x 584 in both, being 800 x 600 less the
+default `CentralPanel` margin of 8 points a side.)
+
+The defect appears only when the effective scale factor is not 1, and its
+magnitude is exactly that factor. This predicts it is worse at 150% and absent
+at 100%.
+
+> No screenshot is offered for the 1.0 row. Under DPI virtualisation Windows
+> upscales the app's surface before it reaches the screen, so a screen capture
+> of that window shows a cropped region regardless of whether the bug is
+> present — the image would look like evidence without being any. The numbers
+> above come from the app's own reporting and are not affected.
+
 ## Already ruled out
 
 Listed so reviewer time is not spent on them — each was measured, not assumed.
