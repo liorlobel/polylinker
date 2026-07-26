@@ -1,0 +1,55 @@
+Polylinker
+Copyright 2026 The Polylinker contributors
+
+This product includes software developed by the Polylinker project.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+================================================================================
+Third-party components
+================================================================================
+
+No third-party code is vendored into this repository at present.
+
+Test-time only (not distributed, not linked):
+
+  Biopython
+    Used solely as an independent oracle in reference/python/tests/.
+    Biopython License Agreement (BSD-3-clause-like).
+    https://github.com/biopython/biopython/blob/master/LICENSE.rst
+
+  jsdom
+    Used solely to run headless checks on prototype/dna-reader.html.
+    MIT.
+
+================================================================================
+Data
+================================================================================
+
+Restriction-enzyme recognition sequences appearing in
+prototype/dna-reader.html and reference/python/tests/validate_digest.py were
+transcribed independently from standard published references. They are
+statements of biological fact about approximately fifty well-known Type II
+enzymes, not a reproduction of any database.
+
+Production enzyme data will be sourced from REBASE (Roberts lab, New England
+Biolabs) and packaged in a SEPARATE repository under REBASE's own terms with
+its own NOTICE. REBASE data is not Apache-2.0 and must not be commingled with
+this repository's code.
+
+  REBASE                http://rebase.neb.com/
+  Citation              Roberts RJ, Vincze T, Posfai J, Macelis D.
+                        REBASE: a database for DNA restriction and modification.
+                        Nucleic Acids Research.
+
+The planned annotation database (polylinker-features) will be CC BY 4.0 and
+will live in a separate repository, sourced from UniProt/Swiss-Prot, Rfam,
+FPbase and NCBI UniVec, with per-entry attribution.
+
+The planned correctness benchmark (polylinker-bench) will be CC0.
+
+================================================================================
+Trademarks
+================================================================================
+
+See TRADEMARKS.md. Marks referenced in documentation are used nominatively and
+descriptively only, and do not imply affiliation or endorsement.

@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Rust
+target/
+Cargo.lock
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local test corpora -- never commit sequence data belonging to a lab.
+# Contributors point the test scripts at their own files instead.
+corpus/
+*.dna
+*.ab1
+*.scf
+*.ztr
+!prototype/**/demo-*.dna
+
+# Build/test scratch
+*.log

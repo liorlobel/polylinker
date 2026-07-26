@@ -1,0 +1,1238 @@
+<title>.dna Reader — open-source plasmid editor prototype</title>
+
+<style>
+  /* ---------------------------------------------------------------
+     Tokens. Neutrals carry a slight viridian bias so they read as
+     chosen rather than inherited; the accent is a deep lab-glass
+     green that sits behind the map's own feature colours instead of
+     competing with them.
+     --------------------------------------------------------------- */
+  :root {
+    --paper:      #f4f6f4;
+    --card:       #ffffff;
+    --sunk:       #eaeeea;
+    --ink:        #111917;
+    --ink-2:      #3d4b46;
+    --muted:      #6e7d77;
+    --faint:      #97a49e;
+    --line:       #d9e0dc;
+    --line-soft:  #e6ebe7;
+    --accent:     #12796a;
+    --accent-ink: #0b544a;
+    --accent-wash:#e0efeb;
+    --warn:       #a8641b;
+    --strandF:    #2f7d62;
+    --strandR:    #7a5aa8;
+    --shadow:     0 1px 2px rgba(17,25,23,.06), 0 8px 24px -12px rgba(17,25,23,.18);
+
+    --sans: ui-sans-serif, "Segoe UI Variable Text", "Segoe UI", -apple-system,
+            system-ui, Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SF Mono", Consolas,
+            "Liberation Mono", Menlo, monospace;
+
+    --r: 7px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:      #0d1211;
+      --card:       #141c1a;
+      --sunk:       #101817;
+      --ink:        #e6ece9;
+      --ink-2:      #b6c3be;
+      --muted:      #8b9a94;
+      --faint:      #64726c;
+      --line:       #26322e;
+      --line-soft:  #1d2725;
+      --accent:     #3fbfa6;
+      --accent-ink: #7fdcc8;
+      --accent-wash:#14302b;
+      --warn:       #d69a55;
+      --strandF:    #4fb28e;
+      --strandR:    #a98ad6;
+      --shadow:     0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:#0d1211; --card:#141c1a; --sunk:#101817; --ink:#e6ece9; --ink-2:#b6c3be;
+    --muted:#8b9a94; --faint:#64726c; --line:#26322e; --line-soft:#1d2725;
+    --accent:#3fbfa6; --accent-ink:#7fdcc8; --accent-wash:#14302b; --warn:#d69a55;
+    --strandF:#4fb28e; --strandR:#a98ad6;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.7);
+  }
+  :root[data-theme="light"] {
+    --paper:#f4f6f4; --card:#ffffff; --sunk:#eaeeea; --ink:#111917; --ink-2:#3d4b46;
+    --muted:#6e7d77; --faint:#97a49e; --line:#d9e0dc; --line-soft:#e6ebe7;
+    --accent:#12796a; --accent-ink:#0b544a; --accent-wash:#e0efeb; --warn:#a8641b;
+    --strandF:#2f7d62; --strandR:#7a5aa8;
+    --shadow:0 1px 2px rgba(17,25,23,.06), 0 8px 24px -12px rgba(17,25,23,.18);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- shell ---------- */
+  .wrap { max-width: 1360px; margin: 0 auto; padding: 20px 20px 64px; }
+
+  header.bar {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding-bottom: 14px; border-bottom: 1px solid var(--line);
+  }
+  .wordmark {
+    font-family: var(--mono);
+    font-size: 15px; font-weight: 600; letter-spacing: -.01em;
+    color: var(--ink);
+  }
+  .wordmark b { color: var(--accent); font-weight: 600; }
+  .tagline { color: var(--muted); font-size: 13px; }
+  .bar-spacer { flex: 1 1 auto; }
+
+  /* ---------- controls ---------- */
+  .btn {
+    font: inherit; font-size: 13px;
+    padding: 7px 13px; border-radius: var(--r);
+    border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    cursor: pointer; transition: border-color .12s, background .12s;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  :root[data-theme="dark"] .btn.primary,
+  .btn.primary { color: #fff; }
+  @media (prefers-color-scheme: dark) { .btn.primary { color: #06201c; } }
+  :root[data-theme="dark"] .btn.primary { color: #06201c; }
+  :root[data-theme="light"] .btn.primary { color: #fff; }
+  .btn.primary:hover { filter: brightness(1.06); }
+
+  /* ---------- file summary strip ---------- */
+  .summary {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    margin: 16px 0 18px; padding: 13px 16px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--r); box-shadow: var(--shadow);
+  }
+  .fname {
+    font-family: var(--mono); font-size: 14px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 42ch;
+  }
+  .metric { display: flex; flex-direction: column; gap: 1px; }
+  .metric .k {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--faint);
+  }
+  .metric .v { font-family: var(--mono); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .pill {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+    padding: 3px 9px; border-radius: 100px;
+    background: var(--accent-wash); color: var(--accent-ink);
+    border: 1px solid transparent;
+  }
+  .pill.plain { background: var(--sunk); color: var(--muted); }
+
+  /* ---------- main split ---------- */
+  .split { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 18px; }
+  @media (max-width: 1000px) { .split { grid-template-columns: minmax(0,1fr); } }
+
+  .panel {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--r); box-shadow: var(--shadow); overflow: hidden;
+  }
+  .panel-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid var(--line-soft);
+  }
+  .panel-title {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .panel-body { padding: 14px; }
+
+  /* ---------- map ---------- */
+  #mapHost { display: block; width: 100%; height: auto; }
+  #mapHost text { font-family: var(--mono); }
+  .seg { cursor: pointer; }
+  .seg:focus-visible { outline: none; }
+
+  /* ---------- tabs ---------- */
+  .tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--line-soft); flex-wrap: wrap; }
+  .tab {
+    font: inherit; font-size: 12.5px; cursor: pointer;
+    background: none; border: 0; border-bottom: 2px solid transparent;
+    padding: 7px 11px; color: var(--muted); border-radius: 5px 5px 0 0;
+  }
+  .tab:hover { color: var(--ink); background: var(--sunk); }
+  .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .tabpane { display: none; }
+  .tabpane.on { display: block; }
+  .scroll { max-height: 560px; overflow-y: auto; overflow-x: auto; }
+
+  /* ---------- tables ---------- */
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th {
+    text-align: left; font-family: var(--mono); font-weight: 500;
+    font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--faint); padding: 8px 10px;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0;
+    background: var(--card); z-index: 1;
+  }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  tbody tr:hover { background: var(--sunk); }
+  tbody tr.hot { background: var(--accent-wash); }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .mono { font-family: var(--mono); }
+  .swatch {
+    display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+    margin-right: 7px; vertical-align: baseline;
+  }
+  .tag {
+    font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+    background: var(--sunk); padding: 1px 6px; border-radius: 4px;
+  }
+
+  /* ---------- sequence ---------- */
+  .seqbox { font-family: var(--mono); font-size: 12.5px; line-height: 1.75; white-space: pre; }
+  .seqbox .n { color: var(--faint); font-variant-numeric: tabular-nums; }
+  .seqbox mark { background: var(--accent-wash); color: var(--ink); border-radius: 2px; }
+
+  /* ---------- anatomy ---------- */
+  .stack { display: flex; height: 34px; border-radius: 5px; overflow: hidden; border: 1px solid var(--line); }
+  .stack div { position: relative; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .note {
+    margin-top: 14px; padding: 11px 13px; background: var(--sunk);
+    border-left: 2px solid var(--accent); border-radius: 0 5px 5px 0;
+    font-size: 12.5px; color: var(--ink-2);
+  }
+  .note b { color: var(--ink); }
+
+  /* ---------- drop ---------- */
+  #drop {
+    position: fixed; inset: 0; display: none; place-items: center; z-index: 50;
+    background: color-mix(in srgb, var(--paper) 88%, transparent);
+    backdrop-filter: blur(3px);
+  }
+  #drop.on { display: grid; }
+  #drop .inner {
+    border: 2px dashed var(--accent); border-radius: 12px;
+    padding: 44px 68px; text-align: center;
+    font-family: var(--mono); color: var(--accent-ink); background: var(--card);
+  }
+
+  .empty { color: var(--muted); font-size: 13px; padding: 26px 4px; text-align: center; }
+  .err {
+    color: var(--warn); font-family: var(--mono); font-size: 12.5px;
+    padding: 10px 12px; background: var(--sunk); border-radius: 5px;
+  }
+
+  footer.foot {
+    margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 12.5px; max-width: 74ch;
+  }
+  footer.foot code { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="bar">
+    <div class="wordmark">·dna <b>reader</b></div>
+    <div class="tagline">Clean-room parser for SnapGene files — everything runs locally, nothing is uploaded.</div>
+    <div class="bar-spacer"></div>
+    <button class="btn primary" id="openBtn">Open .dna file…</button>
+    <button class="btn" id="dlBtn">Download generated .dna</button>
+    <input type="file" id="fileIn" accept=".dna" hidden>
+  </header>
+
+  <div class="summary" id="summary"></div>
+
+  <div class="split">
+    <section class="panel">
+      <div class="panel-head">
+        <span class="panel-title">Map</span>
+        <span class="bar-spacer"></span>
+        <span class="panel-title" id="mapHint"></span>
+      </div>
+      <div class="panel-body" style="padding:6px 10px 12px">
+        <svg id="mapHost" viewBox="0 0 660 660" role="img" aria-label="Plasmid map"></svg>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" aria-selected="true"  data-pane="features">Features</button>
+        <button class="tab" role="tab" aria-selected="false" data-pane="enzymes">Enzymes</button>
+        <button class="tab" role="tab" aria-selected="false" data-pane="primers">Primers</button>
+        <button class="tab" role="tab" aria-selected="false" data-pane="sequence">Sequence</button>
+        <button class="tab" role="tab" aria-selected="false" data-pane="anatomy">File anatomy</button>
+      </div>
+      <div class="panel-body">
+        <div class="tabpane on" id="pane-features"></div>
+        <div class="tabpane"    id="pane-enzymes"></div>
+        <div class="tabpane"    id="pane-primers"></div>
+        <div class="tabpane"    id="pane-sequence"></div>
+        <div class="tabpane"    id="pane-anatomy"></div>
+      </div>
+    </section>
+  </div>
+
+  <footer class="foot">
+    Reads the block-framed <code>.dna</code> container directly in the browser: header, sequence
+    and topology flags, feature and primer XML, notes, and the xz-compressed history tree
+    (detected, not yet inflated). Restriction sites are computed live from a small textbook
+    enzyme set. The file offered by <b>Download generated .dna</b> is written by this page from
+    scratch and deliberately omits the two derived cache blocks — open it in SnapGene to check
+    whether they are genuinely optional.
+  </footer>
+</div>
+
+<div id="drop"><div class="inner">Drop a .dna file to open it</div></div>
+
+<script>
+"use strict";
+
+/* =====================================================================
+   1. Container codec
+   ===================================================================== */
+
+const BLOCK = {
+  SEQUENCE: 0, CUT_CACHE: 2, ENZYME_TABLE: 3, PRIMERS: 5, NOTES: 6,
+  HISTORY_TREE: 7, EXTRA_PROPS: 8, HEADER: 9, FEATURES: 10, HISTORY_NODE: 11,
+};
+
+const BLOCK_NAME = {
+  0:"DNA sequence", 1:"compressed DNA", 2:"cut-site cache", 3:"enzyme table",
+  5:"primers", 6:"notes", 7:"history tree", 8:"extra properties", 9:"file header",
+  10:"features", 11:"history node", 13:"ancillary", 14:"ancillary",
+  16:"alignable sequences", 17:"trace data", 18:"uracil positions",
+  19:"custom colours", 20:"ancillary", 21:"ancillary", 28:"ancillary", 30:"ancillary",
+};
+
+// Blocks that are pure functions of (sequence x enzyme set): regenerable.
+const DERIVED = new Set([BLOCK.CUT_CACHE, BLOCK.ENZYME_TABLE]);
+
+const FLAG = { CIRCULAR:1, DOUBLE:2, DAM:4, DCM:8, ECOKI:16 };
+
+const MAGIC = "SnapGene";
+
+function parseDna(buf) {
+  const dv = new DataView(buf);
+  const bytes = new Uint8Array(buf);
+  const blocks = [];
+  let pos = 0, first = true;
+
+  while (pos < bytes.length) {
+    if (pos + 5 > bytes.length) throw new Error(`truncated block header at byte ${pos}`);
+    const type = dv.getUint8(pos);
+    const len  = dv.getUint32(pos + 1, false);   // big-endian
+    pos += 5;
+    if (pos + len > bytes.length) {
+      throw new Error(`block ${type} claims ${len} bytes but only ${bytes.length - pos} remain`);
+    }
+    const payload = bytes.subarray(pos, pos + len);
+    pos += len;
+
+    if (first) {
+      if (type !== BLOCK.HEADER) throw new Error(`first block is type ${type}, expected 9`);
+      if (new TextDecoder().decode(payload.subarray(0, 8)) !== MAGIC) {
+        throw new Error("missing 'SnapGene' magic — not a .dna file");
+      }
+      first = false;
+    }
+    blocks.push({ type, payload, offset: pos - len - 5 });
+  }
+  if (first) throw new Error("empty file");
+
+  const doc = {
+    blocks, totalBytes: bytes.length,
+    sequence: "", flags: FLAG.DOUBLE,
+    fileType: 1, exportVersion: 0, importVersion: 0,
+    features: [], primers: [], notes: {}, hasHistory: false,
+  };
+
+  const dec = new TextDecoder("utf-8");
+  for (const b of blocks) {
+    switch (b.type) {
+      case BLOCK.HEADER: {
+        const d = new DataView(b.payload.buffer, b.payload.byteOffset, b.payload.byteLength);
+        doc.fileType      = d.getUint16(8,  false);
+        doc.exportVersion = d.getUint16(10, false);
+        doc.importVersion = d.getUint16(12, false);
+        break;
+      }
+      case BLOCK.SEQUENCE:
+        if (b.payload.length) {
+          doc.flags = b.payload[0];
+          doc.sequence = dec.decode(b.payload.subarray(1));
+        }
+        break;
+      case BLOCK.FEATURES: doc.features = parseFeatures(dec.decode(b.payload)); break;
+      case BLOCK.PRIMERS:  doc.primers  = parsePrimers(dec.decode(b.payload));  break;
+      case BLOCK.NOTES:    doc.notes    = parseNotes(dec.decode(b.payload));    break;
+      case BLOCK.HISTORY_TREE: doc.hasHistory = true; break;
+    }
+  }
+  doc.circular = !!(doc.flags & FLAG.CIRCULAR);
+  doc.length   = doc.sequence.length;
+  return doc;
+}
+
+function xmlDoc(text) {
+  const d = new DOMParser().parseFromString(text, "text/xml");
+  if (d.querySelector("parsererror")) throw new Error("malformed XML payload");
+  return d;
+}
+
+function parseFeatures(text) {
+  const out = [];
+  let d; try { d = xmlDoc(text); } catch { return out; }
+  for (const fe of d.querySelectorAll("Feature")) {
+    const segs = [];
+    for (const se of fe.querySelectorAll("Segment")) {
+      const m = /^(\d+)-(\d+)$/.exec(se.getAttribute("range") || "");
+      if (!m) continue;
+      segs.push({
+        start: +m[1], end: +m[2],
+        color: se.getAttribute("color") || null,
+        translated: se.getAttribute("translated") === "1",
+      });
+    }
+    if (!segs.length) continue;
+    const quals = {};
+    for (const q of fe.querySelectorAll("Q")) {
+      const v = q.querySelector("V");
+      if (!v) continue;
+      quals[q.getAttribute("name")] =
+        v.getAttribute("text") ?? v.getAttribute("int") ?? v.getAttribute("predef") ?? "";
+    }
+    const dir = fe.getAttribute("directionality");
+    out.push({
+      name: fe.getAttribute("name") || "(unnamed)",
+      type: fe.getAttribute("type") || "misc_feature",
+      dir: dir ? +dir : 0,
+      segs, quals,
+      start: Math.min(...segs.map(s => s.start)),
+      end:   Math.max(...segs.map(s => s.end)),
+      color: segs[0].color || null,
+    });
+  }
+  return out.sort((a, b) => a.start - b.start || b.end - a.end);
+}
+
+function parsePrimers(text) {
+  const out = [];
+  let d; try { d = xmlDoc(text); } catch { return out; }
+  for (const pe of d.querySelectorAll("Primer")) {
+    const sites = [];
+    for (const bs of pe.querySelectorAll("BindingSite")) {
+      if (bs.getAttribute("simplified") === "1") continue;  // duplicate view
+      const m = /^(\d+)-(\d+)$/.exec(bs.getAttribute("location") || "");
+      if (!m) continue;
+      sites.push({
+        start: +m[1], end: +m[2],
+        strand: +(bs.getAttribute("boundStrand") || 0),
+        tm: bs.getAttribute("meltingTemperature"),
+      });
+    }
+    out.push({
+      name: pe.getAttribute("name") || "(unnamed)",
+      seq:  pe.getAttribute("sequence") || "",
+      sites,
+    });
+  }
+  return out;
+}
+
+function parseNotes(text) {
+  const o = {};
+  let d; try { d = xmlDoc(text); } catch { return o; }
+  const root = d.documentElement;
+  if (!root) return o;
+  for (const c of root.children) o[c.tagName] = (c.textContent || "").trim();
+  return o;
+}
+
+/* ---- writer ---------------------------------------------------------- */
+
+function packBlocks(list) {
+  let total = 0;
+  for (const b of list) total += 5 + b.payload.length;
+  const out = new Uint8Array(total);
+  const dv = new DataView(out.buffer);
+  let p = 0;
+  for (const b of list) {
+    dv.setUint8(p, b.type);
+    dv.setUint32(p + 1, b.payload.length, false);
+    out.set(b.payload, p + 5);
+    p += 5 + b.payload.length;
+  }
+  return out;
+}
+
+const enc = s => new TextEncoder().encode(s);
+
+function buildDna({ sequence, circular, features, primers, notes }) {
+  const header = new Uint8Array(14);
+  header.set(enc(MAGIC), 0);
+  const hv = new DataView(header.buffer);
+  hv.setUint16(8, 1, false);    // fileType: DNA
+  hv.setUint16(10, 15, false);  // export version, as seen in current files
+  hv.setUint16(12, 19, false);  // import version
+
+  let flags = FLAG.DOUBLE | FLAG.DAM | FLAG.DCM | FLAG.ECOKI;
+  if (circular) flags |= FLAG.CIRCULAR;
+  const seqBytes = enc(sequence);
+  const seqBlock = new Uint8Array(seqBytes.length + 1);
+  seqBlock[0] = flags;
+  seqBlock.set(seqBytes, 1);
+
+  const esc = s => String(s).replace(/[<>&"']/g, c =>
+    ({ "<":"&lt;", ">":"&gt;", "&":"&amp;", '"':"&quot;", "'":"&apos;" }[c]));
+
+  const featXml = `<?xml version="1.0"?><Features nextValidID="${features.length}">` +
+    features.map((f, i) =>
+      `<Feature recentID="${i}" name="${esc(f.name)}" type="${esc(f.type)}"` +
+      (f.dir ? ` directionality="${f.dir}"` : "") +
+      ` allowSegmentOverlaps="0" consecutiveTranslationNumbering="1">` +
+      f.segs.map(s =>
+        `<Segment range="${s.start}-${s.end}" color="${esc(s.color)}" type="standard"` +
+        (s.translated ? ` translated="1"` : "") + `/>`).join("") +
+      `<Q name="label"><V text="${esc(f.name)}"/></Q>` +
+      `</Feature>`).join("") + `</Features>`;
+
+  const primXml = `<?xml version="1.0"?><Primers nextValidID="${primers.length}">` +
+    `<HybridizationParams minContinuousMatchLen="10" allowMismatch="1"` +
+    ` minMeltingTemperature="40" showAdditionalFivePrimeMatches="1"` +
+    ` minimumFivePrimeAnnealing="15"/>` +
+    primers.map((p, i) =>
+      `<Primer recentID="${i}" name="${esc(p.name)}" sequence="${esc(p.seq)}"/>`).join("") +
+    `</Primers>`;
+
+  const notesXml = `<Notes>` +
+    Object.entries(notes).map(([k, v]) => `<${k}>${esc(v)}</${k}>`).join("") +
+    `</Notes>`;
+
+  const propsXml = `<AdditionalSequenceProperties>` +
+    `<UpstreamStickiness>0</UpstreamStickiness>` +
+    `<DownstreamStickiness>0</DownstreamStickiness>` +
+    `</AdditionalSequenceProperties>`;
+
+  // Note the omission of blocks 2 and 3: both are caches derivable from
+  // (sequence x enzyme set), so a writer should not need to fabricate them.
+  return packBlocks([
+    { type: BLOCK.HEADER,      payload: header },
+    { type: BLOCK.SEQUENCE,    payload: seqBlock },
+    { type: BLOCK.FEATURES,    payload: enc(featXml) },
+    { type: BLOCK.PRIMERS,     payload: enc(primXml) },
+    { type: BLOCK.NOTES,       payload: enc(notesXml) },
+    { type: BLOCK.EXTRA_PROPS, payload: enc(propsXml) },
+  ]);
+}
+
+/* =====================================================================
+   2. Restriction enzymes
+   Textbook Type II enzymes: recognition site and the cut offset in the
+   top strand. Facts, independently transcribed — no vendor table copied.
+   ===================================================================== */
+
+const ENZYMES = [
+  ["AatII","GACGTC",5],   ["AflII","CTTAAG",1],   ["AgeI","ACCGGT",1],
+  ["ApaI","GGGCCC",5],    ["AscI","GGCGCGCC",2],  ["AvrII","CCTAGG",1],
+  ["BamHI","GGATCC",1],   ["BclI","TGATCA",1],    ["BglII","AGATCT",1],
+  ["BsiWI","CGTACG",1],   ["BspEI","TCCGGA",1],   ["BsrGI","TGTACA",1],
+  ["BstBI","TTCGAA",2],   ["ClaI","ATCGAT",2],    ["DraI","TTTAAA",3],
+  ["EagI","CGGCCG",1],    ["EcoRI","GAATTC",1],   ["EcoRV","GATATC",3],
+  ["FseI","GGCCGGCC",6],  ["HindIII","AAGCTT",1], ["HpaI","GTTAAC",3],
+  ["KpnI","GGTACC",5],    ["MfeI","CAATTG",1],    ["MluI","ACGCGT",1],
+  ["NcoI","CCATGG",1],    ["NdeI","CATATG",2],    ["NheI","GCTAGC",1],
+  ["NotI","GCGGCCGC",2],  ["NruI","TCGCGA",3],    ["NsiI","ATGCAT",5],
+  ["PacI","TTAATTAA",5],  ["PmeI","GTTTAAAC",4],  ["PstI","CTGCAG",5],
+  ["PvuI","CGATCG",4],    ["PvuII","CAGCTG",3],   ["SacI","GAGCTC",5],
+  ["SacII","CCGCGG",4],   ["SalI","GTCGAC",1],    ["SbfI","CCTGCAGG",6],
+  ["ScaI","AGTACT",3],    ["SmaI","CCCGGG",3],    ["SnaBI","TACGTA",3],
+  ["SpeI","ACTAGT",1],    ["SphI","GCATGC",5],    ["SspI","AATATT",3],
+  ["StuI","AGGCCT",3],    ["SwaI","ATTTAAAT",4],  ["XbaI","TCTAGA",1],
+  ["XhoI","CTCGAG",1],    ["XmaI","CCCGGG",1],
+];
+
+/** Find every cut position, honouring circular wraparound. */
+function digest(seq, circular) {
+  const s = seq.toUpperCase();
+  const n = s.length;
+  if (!n) return [];
+  // For circular molecules a site may straddle the origin, so scan a window
+  // extended by the longest recognition site minus one.
+  const maxSite = ENZYMES.reduce((m, e) => Math.max(m, e[1].length), 0);
+  const ext = circular ? s + s.slice(0, Math.min(maxSite - 1, n)) : s;
+
+  const results = [];
+  for (const [name, site, cutOffset] of ENZYMES) {
+    const positions = [];
+    let i = ext.indexOf(site);
+    while (i !== -1) {
+      if (i < n) {
+        // 1-based position of the base immediately 5' of the top-strand nick
+        positions.push(((i + cutOffset) % n) + 1);
+      }
+      i = ext.indexOf(site, i + 1);
+    }
+    const uniq = [...new Set(positions)].sort((a, b) => a - b);
+    if (uniq.length) results.push({ name, site, cutOffset, positions: uniq });
+  }
+  return results.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/* =====================================================================
+   3. Feature colouring
+   ===================================================================== */
+
+const TYPE_COLOR = {
+  CDS: "#9a5b8c", promoter: "#3f8f4f", terminator: "#b0553f", rep_origin: "#3f6f9a",
+  misc_feature: "#7d8a86", primer_bind: "#8a7a3f", protein_bind: "#6a5f9a",
+  RBS: "#4f8f8a", oriT: "#3f6f9a", polyA_signal: "#8a5f6f", gene: "#7a6f9a",
+  LTR: "#8a6f4f", enhancer: "#4f7f6f", intron: "#8a8a5f", tRNA: "#5f8a7a",
+  sig_peptide: "#8a6f8a", source: "#7d8a86",
+};
+const colorOf = f => f.color || TYPE_COLOR[f.type] || "#7d8a86";
+
+/* =====================================================================
+   4. Map rendering
+   ===================================================================== */
+
+const SVGNS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}) => {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v != null) n.setAttribute(k, v);
+  return n;
+};
+
+/** Greedy interval packing so overlapping features occupy separate tracks. */
+function assignTracks(items, total, circular) {
+  const tracks = [];
+  const placed = new Map();
+  const sorted = [...items].sort((a, b) => (a.start - b.start) || (b.end - a.end));
+  for (const it of sorted) {
+    // A feature wrapping the origin is treated as running to the end.
+    const s = it.start, e = Math.max(it.end, it.start);
+    let t = 0;
+    for (;; t++) {
+      if (!tracks[t]) { tracks[t] = []; }
+      const clash = tracks[t].some(r => s <= r.e && e >= r.s);
+      if (!clash) { tracks[t].push({ s, e }); break; }
+      if (t > 40) break;
+    }
+    placed.set(it, t);
+  }
+  return { placed, count: Math.max(1, tracks.length) };
+}
+
+function niceTickStep(total) {
+  const target = total / 12;
+  const pow = Math.pow(10, Math.floor(Math.log10(target)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (pow * m >= target) return pow * m;
+  return pow * 10;
+}
+
+function renderMap(doc, state) {
+  const svg = document.getElementById("mapHost");
+  svg.textContent = "";
+  const W = 660, H = 660;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  if (!doc.length) return;
+  if (doc.circular) renderCircular(svg, doc, state, W, H);
+  else renderLinear(svg, doc, state, W, H);
+}
+
+function renderCircular(svg, doc, state, W, H) {
+  const cx = W / 2, cy = H / 2 + 4;
+  const R = 196;                       // backbone radius
+  const total = doc.length;
+  const A = p => (2 * Math.PI * (p / total)) - Math.PI / 2;   // 12 o'clock origin
+  const pt = (r, a) => [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+
+  const g = el("g");
+  svg.appendChild(g);
+
+  // ---- backbone ----
+  g.appendChild(el("circle", {
+    cx, cy, r: R, fill: "none",
+    stroke: "var(--line)", "stroke-width": 8,
+  }));
+  g.appendChild(el("circle", {
+    cx, cy, r: R, fill: "none",
+    stroke: "var(--line-soft)", "stroke-width": 1,
+  }));
+
+  // ---- ticks ----
+  const step = niceTickStep(total);
+  for (let p = 0; p < total; p += step) {
+    const a = A(p);
+    const [x1, y1] = pt(R - 5, a), [x2, y2] = pt(R + 5, a);
+    g.appendChild(el("line", { x1, y1, x2, y2, stroke: "var(--faint)", "stroke-width": 1 }));
+    const [tx, ty] = pt(R - 16, a);
+    const t = el("text", {
+      x: tx, y: ty, "font-size": 9, fill: "var(--faint)",
+      "text-anchor": "middle", "dominant-baseline": "middle",
+    });
+    t.textContent = p === 0 ? "1" : fmt(p);
+    g.appendChild(t);
+  }
+
+  // ---- features ----
+  const { placed, count } = assignTracks(doc.features, total, true);
+  const band = 15, gap = 4;
+  const trackR = t => R + 20 + t * (band + gap);
+
+  for (const f of doc.features) {
+    const t = placed.get(f) ?? 0;
+    const r = trackR(t);
+    const col = colorOf(f);
+    const grp = el("g", { class: "seg", tabindex: "0" });
+    grp.dataset.fname = f.name;
+
+    for (const s of f.segs) {
+      let a0 = A(s.start - 1), a1 = A(s.end);
+      if (a1 <= a0) a1 += 2 * Math.PI;
+      const sweep = a1 - a0;
+      // arrowhead consumes up to ~7 degrees, never more than a third of the arc
+      const headA = f.dir ? Math.min(0.12, sweep / 3) : 0;
+      const bodyEnd = f.dir === 2 ? a0 + headA : a1 - headA;
+      const bodyStart = f.dir === 2 ? a1 : a0;
+
+      const bs = Math.min(bodyStart, bodyEnd), be = Math.max(bodyStart, bodyEnd);
+      const large = (be - bs) > Math.PI ? 1 : 0;
+      const [sx, sy] = pt(r, bs), [ex, ey] = pt(r, be);
+      grp.appendChild(el("path", {
+        d: `M ${sx} ${sy} A ${r} ${r} 0 ${large} 1 ${ex} ${ey}`,
+        fill: "none", stroke: col, "stroke-width": band, "stroke-linecap": "butt",
+        opacity: state.hot && state.hot !== f.name ? .28 : .92,
+      }));
+
+      if (f.dir) {
+        const aTip  = f.dir === 2 ? a0 : a1;
+        const aBase = f.dir === 2 ? a0 + headA : a1 - headA;
+        const [tx, ty] = pt(r, aTip);
+        const [b1x, b1y] = pt(r + band / 2 + 3, aBase);
+        const [b2x, b2y] = pt(r - band / 2 - 3, aBase);
+        grp.appendChild(el("polygon", {
+          points: `${tx},${ty} ${b1x},${b1y} ${b2x},${b2y}`,
+          fill: col, opacity: state.hot && state.hot !== f.name ? .28 : .92,
+        }));
+      }
+    }
+    wireHover(grp, f.name);
+    g.appendChild(grp);
+  }
+
+  // ---- labels, de-collided down each side ----
+  const outerR = trackR(count - 1) + band / 2 + 12;
+  const labels = doc.features.map(f => {
+    const mid = (f.start - 1 + f.end) / 2;
+    const a = A(mid);
+    return { f, a, right: Math.cos(a) >= 0, y: cy + (outerR + 8) * Math.sin(a) };
+  });
+
+  for (const side of [true, false]) {
+    const col = labels.filter(l => l.right === side).sort((a, b) => a.y - b.y);
+    const minGap = 15;
+    for (let i = 1; i < col.length; i++) {
+      if (col[i].y - col[i - 1].y < minGap) col[i].y = col[i - 1].y + minGap;
+    }
+    const overflow = col.length ? col[col.length - 1].y - (H - 14) : 0;
+    if (overflow > 0) for (const l of col) l.y -= overflow;
+    for (let i = col.length - 1; i > 0; i--) {
+      if (col[i].y - col[i - 1].y < minGap) col[i - 1].y = col[i].y - minGap;
+    }
+
+    for (const l of col) {
+      const lx = side ? cx + outerR + 26 : cx - outerR - 26;
+      const [ax, ay] = pt(outerR, l.a);
+      const grp = el("g", { class: "seg", tabindex: "0" });
+      grp.appendChild(el("polyline", {
+        points: `${ax},${ay} ${side ? lx - 6 : lx + 6},${l.y}`,
+        fill: "none", stroke: "var(--faint)", "stroke-width": 1,
+        opacity: state.hot && state.hot !== l.f.name ? .25 : .7,
+      }));
+      const t = el("text", {
+        x: lx, y: l.y, "font-size": 10.5,
+        fill: state.hot === l.f.name ? "var(--ink)" : "var(--ink-2)",
+        "font-weight": state.hot === l.f.name ? 600 : 400,
+        "text-anchor": side ? "start" : "end",
+        "dominant-baseline": "middle",
+        opacity: state.hot && state.hot !== l.f.name ? .35 : 1,
+      });
+      t.textContent = l.f.name.length > 22 ? l.f.name.slice(0, 21) + "…" : l.f.name;
+      grp.appendChild(t);
+      wireHover(grp, l.f.name);
+      g.appendChild(grp);
+    }
+  }
+
+  // ---- unique cutters ----
+  const uniq = state.digest.filter(e => e.positions.length === 1);
+  for (const e of uniq.slice(0, 26)) {
+    const a = A(e.positions[0]);
+    const [x1, y1] = pt(R - 14, a), [x2, y2] = pt(R - 30, a);
+    g.appendChild(el("line", { x1, y1, x2, y2, stroke: "var(--ink-2)", "stroke-width": 1, opacity: .5 }));
+    const [tx, ty] = pt(R - 40, a);
+    const t = el("text", {
+      x: tx, y: ty, "font-size": 9.5, fill: "var(--ink-2)",
+      "text-anchor": "middle", "dominant-baseline": "middle", opacity: .85,
+    });
+    t.textContent = e.name;
+    g.appendChild(t);
+  }
+
+  // ---- centre caption ----
+  const name = el("text", {
+    x: cx, y: cy - 8, "font-size": 15, "font-weight": 600, fill: "var(--ink)",
+    "text-anchor": "middle",
+  });
+  name.textContent = state.title.replace(/\.dna$/i, "");
+  g.appendChild(name);
+  const sub = el("text", {
+    x: cx, y: cy + 12, "font-size": 12, fill: "var(--muted)", "text-anchor": "middle",
+  });
+  sub.textContent = `${fmt(total)} bp`;
+  g.appendChild(sub);
+}
+
+function renderLinear(svg, doc, state, W, H) {
+  const total = doc.length;
+  const L = 56, Rr = W - 40, span = Rr - L;
+  const X = p => L + span * (p / total);
+  const yAxis = 96;
+
+  const g = el("g");
+  svg.appendChild(g);
+
+  g.appendChild(el("line", {
+    x1: L, y1: yAxis, x2: Rr, y2: yAxis, stroke: "var(--line)", "stroke-width": 8,
+    "stroke-linecap": "round",
+  }));
+
+  const step = niceTickStep(total);
+  for (let p = 0; p <= total; p += step) {
+    const x = X(p);
+    g.appendChild(el("line", { x1: x, y1: yAxis - 8, x2: x, y2: yAxis - 14, stroke: "var(--faint)", "stroke-width": 1 }));
+    const t = el("text", { x, y: yAxis - 20, "font-size": 9, fill: "var(--faint)", "text-anchor": "middle" });
+    t.textContent = p === 0 ? "1" : fmt(p);
+    g.appendChild(t);
+  }
+
+  const { placed } = assignTracks(doc.features, total, false);
+  const band = 15, gap = 8;
+
+  for (const f of doc.features) {
+    const t = placed.get(f) ?? 0;
+    const y = yAxis + 26 + t * (band + gap);
+    const col = colorOf(f);
+    const grp = el("g", { class: "seg", tabindex: "0" });
+    const dim = state.hot && state.hot !== f.name;
+
+    for (const s of f.segs) {
+      const x0 = X(s.start - 1), x1 = X(s.end);
+      const w = Math.max(2, x1 - x0);
+      const head = f.dir ? Math.min(9, w / 3) : 0;
+      let pts;
+      if (f.dir === 2) {
+        pts = `${x0 + head},${y} ${x0 + head},${y - band / 2} ${x1},${y - band / 2} ` +
+              `${x1},${y + band / 2} ${x0 + head},${y + band / 2}`;
+      } else if (f.dir === 1) {
+        pts = `${x1},${y} ${x1 - head},${y - band / 2} ${x0},${y - band / 2} ` +
+              `${x0},${y + band / 2} ${x1 - head},${y + band / 2}`;
+      } else {
+        pts = `${x0},${y - band / 2} ${x1},${y - band / 2} ${x1},${y + band / 2} ${x0},${y + band / 2}`;
+      }
+      grp.appendChild(el("polygon", { points: pts, fill: col, opacity: dim ? .28 : .92 }));
+    }
+    const label = el("text", {
+      x: X((f.start - 1 + f.end) / 2), y: y + band / 2 + 12,
+      "font-size": 10, "text-anchor": "middle",
+      fill: state.hot === f.name ? "var(--ink)" : "var(--ink-2)",
+      opacity: dim ? .35 : 1,
+    });
+    label.textContent = f.name.length > 24 ? f.name.slice(0, 23) + "…" : f.name;
+    grp.appendChild(label);
+    wireHover(grp, f.name);
+    g.appendChild(grp);
+  }
+
+  const uniq = state.digest.filter(e => e.positions.length === 1);
+  uniq.slice(0, 24).forEach((e, i) => {
+    const x = X(e.positions[0]);
+    const yTop = 40 + (i % 3) * 13;
+    g.appendChild(el("line", { x1: x, y1: yTop + 6, x2: x, y2: yAxis - 6, stroke: "var(--ink-2)", "stroke-width": 1, opacity: .35 }));
+    const t = el("text", { x, y: yTop, "font-size": 9.5, fill: "var(--ink-2)", "text-anchor": "middle", opacity: .85 });
+    t.textContent = e.name;
+    g.appendChild(t);
+  });
+
+  const cap = el("text", { x: L, y: 22, "font-size": 13, "font-weight": 600, fill: "var(--ink)" });
+  cap.textContent = `${state.title.replace(/\.dna$/i, "")} · ${fmt(total)} bp linear`;
+  g.appendChild(cap);
+}
+
+function wireHover(node, name) {
+  node.addEventListener("mouseenter", () => setHot(name));
+  node.addEventListener("mouseleave", () => setHot(null));
+  node.addEventListener("focus",      () => setHot(name));
+  node.addEventListener("blur",       () => setHot(null));
+}
+
+/* =====================================================================
+   5. Panels
+   ===================================================================== */
+
+const fmt = n => n.toLocaleString("en-US");
+const esc = s => String(s).replace(/[<>&"]/g, c => ({ "<":"&lt;", ">":"&gt;", "&":"&amp;", '"':"&quot;" }[c]));
+
+function renderSummary(doc, state) {
+  const host = document.getElementById("summary");
+  const meth = [];
+  if (doc.flags & FLAG.DAM)   meth.push("Dam");
+  if (doc.flags & FLAG.DCM)   meth.push("Dcm");
+  if (doc.flags & FLAG.ECOKI) meth.push("EcoKI");
+
+  host.innerHTML = `
+    <div class="fname" title="${esc(state.title)}">${esc(state.title)}</div>
+    <span class="pill">${doc.circular ? "circular" : "linear"}</span>
+    <span class="pill plain">${doc.flags & FLAG.DOUBLE ? "double-stranded" : "single-stranded"}</span>
+    ${meth.length ? `<span class="pill plain">${meth.join(" · ")} methylated</span>` : ""}
+    <div class="metric"><span class="k">Length</span><span class="v">${fmt(doc.length)} bp</span></div>
+    <div class="metric"><span class="k">GC</span><span class="v">${state.gc}%</span></div>
+    <div class="metric"><span class="k">Features</span><span class="v">${doc.features.length}</span></div>
+    <div class="metric"><span class="k">Primers</span><span class="v">${doc.primers.length}</span></div>
+    <div class="metric"><span class="k">Unique cutters</span><span class="v">${state.digest.filter(e => e.positions.length === 1).length}</span></div>
+    <div class="metric"><span class="k">Versions</span><span class="v">${doc.exportVersion}/${doc.importVersion}</span></div>`;
+}
+
+function renderFeatures(doc) {
+  const host = document.getElementById("pane-features");
+  if (!doc.features.length) { host.innerHTML = `<div class="empty">This file carries no feature annotations.</div>`; return; }
+  host.innerHTML = `<div class="scroll"><table><thead><tr>
+      <th>Feature</th><th>Type</th><th class="num">Start</th><th class="num">End</th>
+      <th class="num">Length</th><th>Strand</th></tr></thead><tbody>` +
+    doc.features.map(f => {
+      const len = f.segs.reduce((n, s) => n + (s.end - s.start + 1), 0);
+      const strand = f.dir === 1 ? "→" : f.dir === 2 ? "←" : "—";
+      return `<tr data-fname="${esc(f.name)}">
+        <td><span class="swatch" style="background:${esc(colorOf(f))}"></span>${esc(f.name)}</td>
+        <td><span class="tag">${esc(f.type)}</span></td>
+        <td class="num">${fmt(f.start)}</td><td class="num">${fmt(f.end)}</td>
+        <td class="num">${fmt(len)}</td>
+        <td class="mono" style="color:${f.dir === 2 ? "var(--strandR)" : "var(--strandF)"}">${strand}</td>
+      </tr>`;
+    }).join("") + `</tbody></table></div>`;
+  for (const tr of host.querySelectorAll("tr[data-fname]")) {
+    tr.addEventListener("mouseenter", () => setHot(tr.dataset.fname));
+    tr.addEventListener("mouseleave", () => setHot(null));
+  }
+}
+
+function renderEnzymes(doc, state) {
+  const host = document.getElementById("pane-enzymes");
+  const uniq = state.digest.filter(e => e.positions.length === 1);
+  const rest = state.digest.filter(e => e.positions.length > 1);
+  const none = ENZYMES.filter(e => !state.digest.some(d => d.name === e[0]));
+
+  const rows = list => list.map(e => `<tr>
+      <td class="mono">${esc(e.name)}</td>
+      <td class="mono" style="color:var(--muted)">${esc(e.site)}</td>
+      <td class="num">${e.positions.length}</td>
+      <td class="num" style="color:var(--muted)">${e.positions.slice(0, 6).map(fmt).join(", ")}${e.positions.length > 6 ? " …" : ""}</td>
+    </tr>`).join("");
+
+  host.innerHTML = `
+    <p style="margin:0 0 12px;color:var(--muted);font-size:12.5px">
+      Computed live from a ${ENZYMES.length}-enzyme textbook set, with circular
+      wraparound handled. Positions are 1-based, at the top-strand nick.
+    </p>
+    <div class="scroll"><table>
+      <thead><tr><th>Enzyme</th><th>Site</th><th class="num">Cuts</th><th class="num">Positions</th></tr></thead>
+      <tbody>
+        <tr><td colspan="4" style="background:var(--sunk);font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent-ink)">Unique cutters — ${uniq.length}</td></tr>
+        ${rows(uniq) || `<tr><td colspan="4" class="empty">none</td></tr>`}
+        <tr><td colspan="4" style="background:var(--sunk);font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">Multiple cutters — ${rest.length}</td></tr>
+        ${rows(rest) || `<tr><td colspan="4" class="empty">none</td></tr>`}
+      </tbody></table></div>
+    <div class="note"><b>${none.length}</b> of the ${ENZYMES.length} enzymes in the set do not cut this
+      molecule at all${none.length ? `: <span class="mono" style="font-size:11.5px">${none.map(e => esc(e[0])).join(", ")}</span>` : ""}.</div>`;
+}
+
+function renderPrimers(doc) {
+  const host = document.getElementById("pane-primers");
+  if (!doc.primers.length) { host.innerHTML = `<div class="empty">No primers are stored in this file.</div>`; return; }
+  host.innerHTML = `<div class="scroll"><table><thead><tr>
+      <th>Primer</th><th class="num">Length</th><th>Sequence</th><th class="num">Binding sites</th>
+    </tr></thead><tbody>` +
+    doc.primers.map(p => {
+      const sites = p.sites.map(s =>
+        `${fmt(s.start)}–${fmt(s.end)} ${s.strand ? "←" : "→"}${s.tm ? ` · ${s.tm} °C` : ""}`).join("<br>");
+      const seq = p.seq.length > 46 ? p.seq.slice(0, 44) + "…" : p.seq;
+      return `<tr>
+        <td>${esc(p.name)}</td>
+        <td class="num">${p.seq.length}</td>
+        <td class="mono" style="font-size:11.5px;word-break:break-all">${esc(seq)}</td>
+        <td class="num" style="color:var(--muted);font-size:11.5px">${sites || "—"}</td>
+      </tr>`;
+    }).join("") + `</tbody></table></div>`;
+}
+
+function renderSequence(doc) {
+  const host = document.getElementById("pane-sequence");
+  const seq = doc.sequence;
+  if (!seq) { host.innerHTML = `<div class="empty">No sequence.</div>`; return; }
+  const CAP = 12000, shown = seq.slice(0, CAP);
+  const width = 60;
+  let out = "";
+  for (let i = 0; i < shown.length; i += width) {
+    const n = String(i + 1).padStart(8, " ");
+    out += `<span class="n">${n}</span>  ${esc(shown.slice(i, i + width))}\n`;
+  }
+  host.innerHTML =
+    `<div class="scroll"><div class="seqbox">${out}</div></div>` +
+    (seq.length > CAP
+      ? `<div class="note">Showing the first ${fmt(CAP)} of ${fmt(seq.length)} bases. A real
+         editor would virtualise this view — rendering ${fmt(seq.length)} bases as DOM nodes is
+         exactly the wall a naive implementation hits.</div>`
+      : "");
+}
+
+function renderAnatomy(doc, state) {
+  const host = document.getElementById("pane-anatomy");
+  const groups = { sequence: 0, metadata: 0, derived: 0, other: 0 };
+  const rows = [];
+  for (const b of doc.blocks) {
+    const size = 5 + b.payload.length;
+    let cls;
+    if (b.type === BLOCK.SEQUENCE) cls = "sequence";
+    else if (DERIVED.has(b.type)) cls = "derived";
+    else if ([BLOCK.FEATURES, BLOCK.PRIMERS, BLOCK.NOTES, BLOCK.HISTORY_TREE,
+              BLOCK.EXTRA_PROPS, BLOCK.HEADER, BLOCK.HISTORY_NODE].includes(b.type)) cls = "metadata";
+    else cls = "other";
+    groups[cls] += size;
+    rows.push({ type: b.type, name: BLOCK_NAME[b.type] || "unknown", size, cls });
+  }
+  const total = doc.totalBytes;
+  const pct = v => (100 * v / total);
+  const COL = { sequence: "var(--accent)", metadata: "var(--strandR)", derived: "var(--faint)", other: "var(--warn)" };
+
+  const bar = Object.entries(groups).filter(([, v]) => v > 0).map(([k, v]) =>
+    `<div style="width:${pct(v)}%;background:${COL[k]};${k === "derived" ? "opacity:.45" : ""}"
+       title="${k}: ${fmt(v)} bytes"></div>`).join("");
+
+  const byType = new Map();
+  for (const r of rows) {
+    const e = byType.get(r.type) || { ...r, size: 0, n: 0 };
+    e.size += r.size; e.n += 1; byType.set(r.type, e);
+  }
+
+  host.innerHTML = `
+    <p style="margin:0 0 10px;color:var(--muted);font-size:12.5px">
+      How the ${fmt(total)} bytes of this file are actually spent.
+    </p>
+    <div class="stack">${bar}</div>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--accent)"></i>sequence ${pct(groups.sequence).toFixed(0)}%</span>
+      <span><i class="swatch" style="background:var(--strandR)"></i>annotation ${pct(groups.metadata).toFixed(0)}%</span>
+      <span><i class="swatch" style="background:var(--faint);opacity:.45"></i>derived cache ${pct(groups.derived).toFixed(0)}%</span>
+      ${groups.other ? `<span><i class="swatch" style="background:var(--warn)"></i>other ${pct(groups.other).toFixed(0)}%</span>` : ""}
+    </div>
+    <div style="margin-top:16px" class="scroll"><table>
+      <thead><tr><th class="num">Type</th><th>Block</th><th class="num">Count</th><th class="num">Bytes</th><th class="num">Share</th></tr></thead>
+      <tbody>${[...byType.values()].sort((a, b) => b.size - a.size).map(r => `
+        <tr>
+          <td class="num mono">${r.type}</td>
+          <td>${esc(r.name)}${DERIVED.has(r.type) ? ` <span class="tag">regenerable</span>` : ""}</td>
+          <td class="num">${r.n}</td>
+          <td class="num">${fmt(r.size)}</td>
+          <td class="num" style="color:var(--muted)">${pct(r.size).toFixed(1)}%</td>
+        </tr>`).join("")}</tbody></table></div>
+    ${groups.derived > 0 ? `<div class="note">
+      <b>${pct(groups.derived).toFixed(0)}% of this file is recomputable.</b> Blocks 2 and 3 hold
+      precomputed restriction cut positions and the enzyme table they index — both are pure
+      functions of the sequence and the chosen enzyme set. A writer can regenerate them instead
+      of preserving them, which is what makes round-tripping tractable.</div>`
+    : `<div class="note">This file carries <b>no derived cache blocks</b> — it was written by this
+       page. If SnapGene opens it, that confirms blocks 2 and 3 are optional on read.</div>`}
+    ${doc.hasHistory ? `<div class="note">A <b>history tree</b> is present (xz-compressed XML).
+      Uncompressed it holds the full cloning provenance — parent constructs, the enzymes used,
+      and which sites were regenerated at each junction.</div>` : ""}`;
+}
+
+/* =====================================================================
+   6. State and wiring
+   ===================================================================== */
+
+let CURRENT = null;
+const state = { hot: null, title: "", gc: "0.0", digest: [] };
+
+function setHot(name) {
+  if (state.hot === name) return;
+  state.hot = name;
+  if (CURRENT) renderMap(CURRENT, state);
+  for (const tr of document.querySelectorAll("tr[data-fname]")) {
+    tr.classList.toggle("hot", !!name && tr.dataset.fname === name);
+  }
+}
+
+function gcOf(seq) {
+  let gc = 0, at = 0;
+  for (let i = 0; i < seq.length; i++) {
+    const c = seq.charCodeAt(i) | 32;
+    if (c === 103 || c === 99) gc++;            // g c
+    else if (c === 97 || c === 116) at++;       // a t
+  }
+  const n = gc + at;
+  return n ? (100 * gc / n).toFixed(1) : "0.0";
+}
+
+function show(doc, title) {
+  CURRENT = doc;
+  state.title = title;
+  state.hot = null;
+  state.gc = gcOf(doc.sequence);
+  state.digest = doc.length <= 400000 ? digest(doc.sequence, doc.circular) : [];
+
+  document.getElementById("mapHint").textContent =
+    doc.length > 400000 ? "enzyme scan skipped — sequence too large for this prototype"
+                        : `${doc.features.length} features · ${state.digest.filter(e => e.positions.length === 1).length} unique cutters`;
+
+  renderSummary(doc, state);
+  renderMap(doc, state);
+  renderFeatures(doc);
+  renderEnzymes(doc, state);
+  renderPrimers(doc);
+  renderSequence(doc);
+  renderAnatomy(doc, state);
+}
+
+function fail(msg) {
+  document.getElementById("summary").innerHTML = `<div class="err">Could not read that file — ${esc(msg)}</div>`;
+}
+
+async function openFile(file) {
+  try {
+    const buf = await file.arrayBuffer();
+    show(parseDna(buf), file.name);
+  } catch (e) {
+    fail(e.message);
+  }
+}
+
+/* ---- tabs ---- */
+for (const tab of document.querySelectorAll(".tab")) {
+  tab.addEventListener("click", () => {
+    for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t === tab));
+    for (const p of document.querySelectorAll(".tabpane")) p.classList.remove("on");
+    document.getElementById("pane-" + tab.dataset.pane).classList.add("on");
+  });
+}
+
+/* ---- file input + drag & drop ---- */
+const fileIn = document.getElementById("fileIn");
+document.getElementById("openBtn").addEventListener("click", () => fileIn.click());
+fileIn.addEventListener("change", () => { if (fileIn.files[0]) openFile(fileIn.files[0]); });
+
+const dropEl = document.getElementById("drop");
+let dragDepth = 0;
+addEventListener("dragenter", e => { e.preventDefault(); if (++dragDepth === 1) dropEl.classList.add("on"); });
+addEventListener("dragover",  e => e.preventDefault());
+addEventListener("dragleave", e => { e.preventDefault(); if (--dragDepth <= 0) { dragDepth = 0; dropEl.classList.remove("on"); } });
+addEventListener("drop", e => {
+  e.preventDefault(); dragDepth = 0; dropEl.classList.remove("on");
+  const f = e.dataTransfer?.files?.[0];
+  if (f) openFile(f);
+});
+
+/* =====================================================================
+   7. Demo construct — generated here, written to a real .dna, then read
+      back through the same parser used for genuine files.
+   ===================================================================== */
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function demoDocument() {
+  const rnd = mulberry32(20260726);
+  const bases = "ACGT";
+  const N = 3180;
+  const arr = new Array(N);
+  for (let i = 0; i < N; i++) arr[i] = bases[(rnd() * 4) | 0];
+
+  // Splice real recognition sites into a multiple cloning site so the
+  // enzyme panel has something honest to find.
+  const mcs = "GAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTT";
+  const mcsAt = 1806;                       // 0-based
+  for (let i = 0; i < mcs.length; i++) arr[mcsAt + i] = mcs[i];
+
+  // A couple of unique cutters elsewhere, to exercise the map ticks.
+  const put = (s, at) => { for (let i = 0; i < s.length; i++) arr[at + i] = s[i]; };
+  put("GCGGCCGC", 640);       // NotI
+  put("CATATG", 1868);        // NdeI, at the start of the reporter
+  put("ACTAGT", 2600);        // SpeI
+
+  const sequence = arr.join("");
+
+  const features = [
+    { name: "ori",            type: "rep_origin",   dir: 1, segs: [{ start: 60,   end: 648,  color: "#3f6f9a" }] },
+    { name: "AmpR",           type: "CDS",          dir: 1, segs: [{ start: 700,  end: 1560, color: "#9a5b8c", translated: true }] },
+    { name: "AmpR promoter",  type: "promoter",     dir: 1, segs: [{ start: 1570, end: 1674, color: "#3f8f4f" }] },
+    { name: "lac promoter",   type: "promoter",     dir: 1, segs: [{ start: 1740, end: 1786, color: "#3f8f4f" }] },
+    { name: "MCS",            type: "misc_feature", dir: 0, segs: [{ start: 1807, end: 1863, color: "#7d8a86" }] },
+    { name: "reporter CDS",   type: "CDS",          dir: 1, segs: [{ start: 1869, end: 2585, color: "#9a5b8c", translated: true }] },
+    { name: "T7 terminator",  type: "terminator",   dir: 1, segs: [{ start: 2600, end: 2647, color: "#b0553f" }] },
+    { name: "KanR",           type: "CDS",          dir: 2, segs: [{ start: 2700, end: 3120, color: "#9a5b8c", translated: true }] },
+  ];
+
+  const primers = [
+    { name: "M13-fwd-like", seq: "GTAAAACGACGGCCAGTGAATT" },
+    { name: "seq-rev-demo", seq: "CAGGAAACAGCTATGACCATG" },
+  ];
+
+  const notes = {
+    Type: "Synthetic",
+    Description: "Synthetic demo construct generated in the browser. Not a real plasmid.",
+    SequenceClass: "UNA",
+  };
+
+  return buildDna({ sequence, circular: true, features, primers, notes });
+}
+
+const DEMO_BYTES = demoDocument();
+
+document.getElementById("dlBtn").addEventListener("click", () => {
+  const blob = new Blob([DEMO_BYTES], { type: "application/octet-stream" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "demo-construct.dna";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+// Round-trip the generated file through the real parser on load.
+show(parseDna(DEMO_BYTES.buffer.slice(DEMO_BYTES.byteOffset, DEMO_BYTES.byteOffset + DEMO_BYTES.byteLength)),
+     "demo-construct.dna");
+</script>
