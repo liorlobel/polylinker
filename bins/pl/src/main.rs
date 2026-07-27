@@ -26,6 +26,7 @@ USAGE:
     pl sanger  <read>... --ref <file>    did the clone work?
     pl annotate <file>...                find known features in a plasmid
     pl gel     <file> --cut A --cut B    will the digest be readable?
+    pl methods [topic]                   what to write in your methods section
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -189,6 +190,7 @@ fn main() -> ExitCode {
         "sanger" => cmd_sanger(rest),
         "annotate" => cmd_annotate(rest),
         "gel" => cmd_gel(rest),
+        "methods" => cmd_methods(rest),
         "trace" => cmd_trace(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
@@ -1985,6 +1987,88 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
 }
 
 /// Where primers anneal on a template, with footprint and tail kept apart.
+/// The paragraph a user pastes into a paper.
+///
+/// Generated from the parameters the code actually uses rather than written
+/// out, so a changed default changes the text. Prose in a manual drifts from
+/// the code the first time a constant moves, and the drift is invisible: the
+/// sentence still reads correctly and is no longer true.
+fn cmd_methods(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &[])?;
+    let names: Vec<String> = a.files.iter().map(|p| p.display().to_string()).collect();
+
+    if names.is_empty() {
+        println!(
+            "Polylinker {} — what each operation does, and what it does not
+",
+            env!("CARGO_PKG_VERSION")
+        );
+        for t in pl_doc::TOPICS {
+            println!("  {:<12} {}", t.name, t.title);
+            for line in wrap(pl_doc::help(*t), 66) {
+                println!("               {line}");
+            }
+            println!();
+        }
+        println!("  pl methods <topic>   the full text, for a methods section");
+        return Ok(());
+    }
+
+    for (i, name) in names.iter().enumerate() {
+        let t = pl_doc::topic(name).ok_or_else(|| {
+            format!(
+                "unknown topic {name:?}: try one of {}",
+                pl_doc::TOPICS
+                    .iter()
+                    .map(|t| t.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        if i > 0 {
+            println!();
+        }
+        println!(
+            "{}
+{}
+",
+            t.title,
+            "-".repeat(t.title.len())
+        );
+        for para in pl_doc::methods(t).split(
+            "
+
+",
+        ) {
+            for line in wrap(para, 78) {
+                println!("{line}");
+            }
+            println!();
+        }
+    }
+    Ok(())
+}
+
+/// Wrap on whitespace, collapsing the runs that come from a Rust string
+/// continuation. Nothing clever: a methods paragraph is prose.
+fn wrap(s: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if !line.is_empty() && line.len() + 1 + word.len() > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 fn cmd_gel(args: &[String]) -> Result<(), String> {
     let a = parse_args(
         args,

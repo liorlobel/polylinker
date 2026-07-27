@@ -12,6 +12,7 @@ members = [
     "crates/pl-primer",
     "crates/pl-sanger",
     "crates/pl-gel",
+    "crates/pl-doc",
     "crates/pl-thermo",
     "crates/pl-fileio",
     "crates/pl-wasm",
@@ -38,6 +39,7 @@ pl-scan = { path = "crates/pl-scan", version = "0.1.0" }
 pl-primer = { path = "crates/pl-primer", version = "0.1.0" }
 pl-sanger = { path = "crates/pl-sanger", version = "0.1.0" }
 pl-gel = { path = "crates/pl-gel", version = "0.1.0" }
+pl-doc = { path = "crates/pl-doc", version = "0.1.0" }
 pl-thermo = { path = "crates/pl-thermo", version = "0.1.0" }
 pl-fileio = { path = "crates/pl-fileio", version = "0.1.0" }
 

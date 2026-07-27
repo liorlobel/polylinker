@@ -1,0 +1,17 @@
+[package]
+name = "pl-doc"
+description = "Offline documentation, and the methods paragraph for a paper — generated from the parameters the code actually uses."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pl-core.workspace = true
+pl-enzymes.workspace = true
+pl-features.workspace = true
+pl-gel.workspace = true
+pl-primer.workspace = true
+pl-sanger.workspace = true
+pl-thermo.workspace = true
