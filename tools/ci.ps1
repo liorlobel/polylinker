@@ -97,6 +97,19 @@ Step 'SEGUID vs the reference' {
 Step 'digest + PCR vs pydna' {
     python reference/python/tests/xcheck_clone.py target/release/pl.exe
 } { (HavePy 'pydna') -and (HavePy 'Bio') }
+# A second, independent digest oracle over real plasmids.
+#
+# `xcheck_clone.py` above compares fragments against pydna on synthetic cases;
+# this compares cut *positions* against Biopython on the corpus, and runs the
+# Python transcription alongside the Rust so a divergence says which one moved.
+# It guards `cut_positions`, which is now a thin wrapper over
+# `pl_core::iupac::find_all` shared with the library's motif search.
+#
+# Corpus-gated because no `.dna` may live in this repo (see the header) and the
+# script now — correctly — fails rather than passes when it compares nothing.
+Step 'digest vs Biopython (real plasmids)' {
+    python reference/python/tests/validate_digest.py target/release/pl.exe "$Corpus\**\*.dna"
+} { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
 Step 'rust reader vs python reader' {
     python reference/python/tests/xcheck_rust.py target/release/pl.exe "$Corpus\**\*.dna"
 } { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }

@@ -443,24 +443,25 @@ pub fn cut_positions(seq: &[u8], topology: Topology, enzyme: &Enzyme) -> Vec<u64
     if n == 0 || k == 0 || k > n {
         return Vec::new();
     }
-    let pattern = enzyme.site.as_bytes();
+    // The scan itself is `pl_core::iupac::find_all`, so the library's motif
+    // search runs the same code this function's Biopython oracle covers rather
+    // than a second implementation of it. Scanning `n` starts on a circle
+    // against `n - k + 1` on a line — the whole of the wraparound handling —
+    // lives there now.
+    //
+    // The `k > n` guard above stays here as well: it is this function's
+    // documented divergence, and a reader looking for it should find it at the
+    // place that owns it.
     let circular = topology.is_circular();
-
-    // Scanning `n` starts on a circle vs `n - k + 1` on a line is the whole
-    // of the wraparound handling; indices are taken modulo n.
-    let starts = if circular { n } else { n - k + 1 };
-    let mut out = Vec::new();
-    for i in 0..starts {
-        let hit = (0..k).all(|j| {
-            let idx = if circular { (i + j) % n } else { i + j };
-            iupac::matches(pattern[j], seq[idx])
-        });
-        if hit {
-            // 0-based index of the base 3' of the nick, then to 1-based.
-            let cut0 = (i + enzyme.cut_offset as usize) % n;
-            out.push(cut0 as u64 + 1);
-        }
-    }
+    let mut out: Vec<u64> = iupac::find_all(enzyme.site.as_bytes(), seq, circular)
+        .into_iter()
+        // `find_all` gives the 1-based start of the site; the nick is
+        // `cut_offset` further along, wrapped back into `1..=n`.
+        .map(|start| ((start - 1 + enzyme.cut_offset as u64) % n as u64) + 1)
+        .collect();
+    // Two sites at different starts can nick the same bond once the offset has
+    // wrapped, so the sort and dedup stay. `find_all` returns ascending starts;
+    // the mapped cuts need not be ascending.
     out.sort_unstable();
     out.dedup();
     out
