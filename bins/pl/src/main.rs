@@ -24,6 +24,7 @@ USAGE:
     pl trace   <file.ab1>... [--svg F]   read or draw a Sanger chromatogram
     pl orfs    <file> [--table N]        open reading frames, six frames
     pl sanger  <read>... --ref <file>    did the clone work?
+    pl annotate <file>...                find known features in a plasmid
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -40,6 +41,15 @@ INDEX OPTIONS:
     --index-at <dir>             keep the index here instead of the OS cache
     --follow-links               follow symbolic links (off by default)
     --max-depth <n>              default 32
+
+ANNOTATE OPTIONS:
+    --include-proposed           search rows no human has signed off on
+    --min-identity <0..1>        default 0.96
+    --min-coverage <0..1>        default 0.30
+    --no-protein                 skip six-frame protein matching
+    --fragments                  list partial hits too
+    --genbank                    write an annotated GenBank record to stdout
+    --db                         describe the shipped database and exit
 
 TRACE OPTIONS:
     --svg <file>                 draw the chromatogram
@@ -161,6 +171,7 @@ fn main() -> ExitCode {
         "primers" => cmd_primers(rest),
         "orfs" => cmd_orfs(rest),
         "sanger" => cmd_sanger(rest),
+        "annotate" => cmd_annotate(rest),
         "trace" => cmd_trace(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
@@ -1857,6 +1868,192 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
 }
 
 /// Where primers anneal on a template, with footprint and tail kept apart.
+fn cmd_annotate(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["min-identity", "min-coverage"])?;
+
+    let (all, errors) = pl_features::Db::builtin();
+    for e in &errors {
+        eprintln!("pl: {}:{}: {}", e.file, e.line, e.problem);
+    }
+    let counts = all.review_counts();
+    let n_reviewed = all.reviewed().records.len();
+
+    if a.has("db") {
+        println!("feature database {}\n", all.version);
+        for (status, n) in &counts {
+            println!("  {:>4}  {}", n, status.as_str());
+        }
+        println!(
+            "\n  {} record(s), {n_reviewed} of them shippable",
+            all.records.len()
+        );
+        if n_reviewed == 0 {
+            println!(
+                "\n  Nothing here has been signed off. Every row was assembled by machine\n  \
+                 from public sources and no human has checked one against its cited\n  \
+                 accession. Writing a gene's name onto a map is an assertion, so the\n  \
+                 default finds nothing until a curator reviews these rows."
+            );
+        }
+        return Ok(());
+    }
+    a.require_files()?;
+
+    // The default searches only reviewed rows, which today means nothing at
+    // all. Printing "no features found" over an unapproved database would be
+    // true and useless, so the reason is printed instead.
+    let proposed = a.has("include-proposed");
+    let db = if proposed {
+        all.clone()
+    } else {
+        all.reviewed()
+    };
+
+    let fraction = |flag: &str| -> Result<Option<f64>, String> {
+        match a.get(flag) {
+            None => Ok(None),
+            Some(v) => v
+                .parse::<f64>()
+                .ok()
+                .filter(|x| (0.0..=1.0).contains(x))
+                .map(Some)
+                .ok_or_else(|| format!("--{flag} {v:?}: expected 0 to 1")),
+        }
+    };
+    let mut config = pl_features::annotate::Config::default();
+    if let Some(x) = fraction("min-identity")? {
+        config.min_identity = x;
+    }
+    if let Some(x) = fraction("min-coverage")? {
+        config.min_coverage = x;
+    }
+    config.protein = !a.has("no-protein");
+
+    if db.records.is_empty() {
+        println!(
+            "no records to search: {} of {} rows are reviewed\n",
+            n_reviewed,
+            all.records.len()
+        );
+        println!(
+            "  The shipped database is entirely 'proposed' — machine-assembled from\n  \
+             public sources, with no human sign-off. Pass --include-proposed to search\n  \
+             it anyway, and treat anything it finds as a suggestion to check."
+        );
+        return Ok(());
+    }
+
+    let annotator = pl_features::annotate::Annotator::new(&db, config);
+    let unseedable = annotator.unseedable();
+    if !unseedable.is_empty() {
+        eprintln!(
+            "pl: {} record(s) are too short to seed and cannot be found: {}",
+            unseedable.len(),
+            unseedable
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    for path in &a.files {
+        let data = read(path)?;
+        let (mol, _, _) =
+            load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        let found = annotator.annotate(&mol);
+        let shown: Vec<&pl_features::annotate::Annotation> = found
+            .iter()
+            .filter(|f| a.has("fragments") || !f.is_fragment)
+            .collect();
+
+        if a.has("genbank") {
+            let mut out = mol.clone();
+            for f in &shown {
+                let r = &db.records[f.record];
+                let mut feat = pl_core::Feature::new(r.name.clone(), r.genbank_key.clone());
+                feat.strand = f.strand;
+                feat.segments = vec![pl_core::Segment::new(f.start, f.end)];
+                // Provenance travels with the annotation. A map that cannot say
+                // where a name came from is a map nobody can check, and an
+                // unreviewed row must carry that fact into the file it lands in
+                // — otherwise the caveat stops at the terminal.
+                feat.qualifiers.push((
+                    "note".into(),
+                    Some(format!(
+                        "{} {}: {:.1}% identity, {:.0}% coverage, polylinker feature db {}{}",
+                        r.id,
+                        if f.via_protein {
+                            "protein match"
+                        } else {
+                            "nucleotide match"
+                        },
+                        f.identity * 100.0,
+                        f.coverage * 100.0,
+                        db.version,
+                        if r.review_status == pl_features::ReviewStatus::Proposed {
+                            "; PROPOSED, not reviewed by a human"
+                        } else {
+                            ""
+                        }
+                    )),
+                ));
+                out.features.push(feat);
+            }
+            print!(
+                "{}",
+                pl_fileio::genbank::write(&out, &title_of(path), today())
+            );
+            continue;
+        }
+
+        println!(
+            "{}  {} bp {}",
+            path.display(),
+            mol.seq.len(),
+            if mol.topology.is_circular() {
+                "circular"
+            } else {
+                "linear"
+            }
+        );
+        if shown.is_empty() {
+            println!("  nothing found");
+        }
+        for f in &shown {
+            let r = &db.records[f.record];
+            println!(
+                "  {:>7}..{:<7} {} {:<14} {:>5.1}% id  {:>4.0}% cov{}{}{}",
+                f.start,
+                f.end,
+                if f.strand == pl_core::Strand::Reverse {
+                    "-"
+                } else {
+                    "+"
+                },
+                r.name,
+                f.identity * 100.0,
+                f.coverage * 100.0,
+                if f.is_fragment { "  fragment" } else { "" },
+                if f.via_protein { "  via protein" } else { "" },
+                if f.wraps_origin {
+                    "  crosses origin"
+                } else {
+                    ""
+                },
+            );
+        }
+        if proposed && !shown.is_empty() {
+            println!(
+                "\n  These come from unreviewed rows. Check each against its source\n  \
+                 before putting a name on a map: `pl annotate --db` lists the state."
+            );
+        }
+        println!();
+    }
+    Ok(())
+}
+
 fn cmd_sanger(args: &[String]) -> Result<(), String> {
     let a = parse_args(args, &["ref", "ref-seq", "read", "min-quality"])?;
 

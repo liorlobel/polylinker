@@ -454,7 +454,42 @@ fn rows<'a>(
     out
 }
 
+/// The shipped tables, compiled in.
+///
+/// `include_str!` rather than a file read: this crate does no I/O, and an
+/// offline desktop tool should not depend on finding a data directory next to
+/// its own executable.
+const BUILTIN_FEATURES: &str = include_str!("../../../features/features.tsv");
+const BUILTIN_PROVENANCE: &str = include_str!("../../../features/provenance.tsv");
+
 impl Db {
+    /// The database compiled into this binary.
+    ///
+    /// **Every row in it is [`ReviewStatus::Proposed`]**, so [`Db::reviewed`]
+    /// returns an empty database and an annotator built on that finds nothing.
+    /// This is the intended state and not a defect: the rows were assembled by
+    /// machine from public sources and no human has checked one. Writing
+    /// `AmpR` onto somebody's plasmid map is an assertion, and the rule here is
+    /// that the tool may propose and never assert.
+    ///
+    /// A caller that wants the proposed rows has to ask for them by name, and
+    /// owes the user that same sentence.
+    pub fn builtin() -> (Db, Vec<LoadError>) {
+        Db::parse(BUILTIN_FEATURES, BUILTIN_PROVENANCE)
+    }
+
+    /// How many records sit at each review status.
+    ///
+    /// What a caller needs in order to explain an empty result honestly rather
+    /// than printing "no features found" over a database nobody has approved.
+    pub fn review_counts(&self) -> BTreeMap<ReviewStatus, usize> {
+        let mut m = BTreeMap::new();
+        for r in &self.records {
+            *m.entry(r.review_status).or_insert(0) += 1;
+        }
+        m
+    }
+
     /// Parse both tables.
     ///
     /// Every problem is reported rather than failing on the first, because a
@@ -985,5 +1020,43 @@ mod tests {
             errs.iter().any(|e| e.problem.contains("no header")),
             "{errs:?}"
         );
+    }
+
+    #[test]
+    fn the_shipped_database_parses_and_ships_nothing() {
+        // Two claims, and the second is a promise to Lior rather than a
+        // property of the code: the compiled-in table is well formed, and
+        // *none of it is approved*. Every row was assembled by machine from
+        // public sources and no human has checked one against its accession.
+        //
+        // If a future change makes `reviewed()` non-empty without a curator
+        // having signed those rows off, this fails — which is the point.
+        // Putting `AmpR` on somebody's plasmid map is an assertion, and the
+        // rule for this project is that it may propose and never assert.
+        let (db, errors) = Db::builtin();
+        assert!(
+            errors.is_empty(),
+            "the shipped table must parse: {errors:?}"
+        );
+        assert!(!db.records.is_empty(), "and it must not be empty");
+        assert!(
+            !db.version.is_empty(),
+            "every annotation is stamped with it"
+        );
+
+        let counts = db.review_counts();
+        assert_eq!(
+            counts.get(&ReviewStatus::Proposed).copied(),
+            Some(db.records.len()),
+            "every row is still proposed: {counts:?}"
+        );
+        assert!(
+            db.reviewed().records.is_empty(),
+            "nothing is shippable until a named human signs each row off"
+        );
+        for r in &db.records {
+            assert!(!r.reference_nt.is_empty(), "{} has no sequence", r.id);
+            assert!(r.id.starts_with("PLF:"), "{} is not one of ours", r.id);
+        }
     }
 }
