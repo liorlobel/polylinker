@@ -23,6 +23,7 @@ USAGE:
     pl primers <file> --primer SEQ       where primers anneal
     pl trace   <file.ab1>...             read a Sanger chromatogram
     pl orfs    <file> [--table N]        open reading frames, six frames
+    pl sanger  <read>... --ref <file>    did the clone work?
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -39,6 +40,14 @@ INDEX OPTIONS:
     --index-at <dir>             keep the index here instead of the OS cache
     --follow-links               follow symbolic links (off by default)
     --max-depth <n>              default 32
+
+SANGER OPTIONS:
+    --ref <file>                 the reference to compare against
+    --ref-seq <ACGT>             a reference sequence instead of a file
+    --read <ACGT>                a read instead of a trace file
+    --min-quality <n>            Phred at or above which to believe a
+                                 difference (default 20)
+    --all                        list low-confidence differences too
 
 ORFS OPTIONS:
     --table <n>                  NCBI genetic code (default 11, bacterial)
@@ -145,6 +154,7 @@ fn main() -> ExitCode {
         "goldengate" => cmd_goldengate(rest),
         "primers" => cmd_primers(rest),
         "orfs" => cmd_orfs(rest),
+        "sanger" => cmd_sanger(rest),
         "trace" => cmd_trace(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
@@ -1841,6 +1851,187 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
 }
 
 /// Where primers anneal on a template, with footprint and tail kept apart.
+fn cmd_sanger(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["ref", "ref-seq", "read", "min-quality"])?;
+
+    let mut p = pl_sanger::Params::default();
+    if let Some(v) = a.get("min-quality") {
+        p.min_quality = v
+            .parse()
+            .map_err(|_| format!("--min-quality {v:?}: expected 0 to 93"))?;
+    }
+
+    let (reference, circular, ref_label) = match a.get("ref-seq") {
+        Some(s) => (
+            s.as_bytes().to_vec(),
+            a.has("circular"),
+            "<--ref-seq>".into(),
+        ),
+        None => {
+            let path = a.get("ref").ok_or("give --ref <file> or --ref-seq")?;
+            let path = std::path::PathBuf::from(path);
+            let data = read(&path)?;
+            let (mol, _, _) =
+                load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+            (
+                mol.seq.clone(),
+                mol.topology.is_circular(),
+                path.display().to_string(),
+            )
+        }
+    };
+
+    // Reads: either sequences on the command line or chromatograms on disk.
+    let mut reads: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
+    for s in a.get_all("read") {
+        reads.push((
+            format!("<--read {}nt>", s.len()),
+            s.as_bytes().to_vec(),
+            vec![],
+        ));
+    }
+    for path in &a.files {
+        let data = read(path)?;
+        let t = pl_abif::parse(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        reads.push((
+            path.file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            t.sequence.clone(),
+            t.quality.clone(),
+        ));
+    }
+    if reads.is_empty() {
+        return Err("give a .ab1 file, or --read".into());
+    }
+
+    if a.has("json") {
+        println!("{{\n  \"reads\": [");
+        for (i, (name, seq, qual)) in reads.iter().enumerate() {
+            let comma = if i + 1 == reads.len() { "" } else { "," };
+            match pl_sanger::compare(seq, qual, &reference, circular, &p) {
+                None => println!(
+                    "    {{\"name\": {}, \"placed\": false}}{comma}",
+                    json_str(name)
+                ),
+                Some(r) => {
+                    print!(
+                        "    {{\"name\": {}, \"placed\": true, \"reversed\": {}, \"wrapped\": {}, \"score\": {}, \"ref_start\": {}, \"ref_end\": {}, \"identity\": {:.6}, \"differences\": [",
+                        json_str(name),
+                        r.reversed,
+                        r.wrapped,
+                        r.alignment.score,
+                        r.alignment.ref_start,
+                        r.alignment.ref_end,
+                        r.identity
+                    );
+                    for (k, d) in r.discrepancies.iter().enumerate() {
+                        print!(
+                            "{}{{\"ref_pos\": {}, \"read_pos\": {}, \"kind\": {}, \"ref\": {}, \"read\": {}, \"quality\": {}}}",
+                            if k == 0 { "" } else { ", " },
+                            d.ref_pos,
+                            d.read_pos,
+                            json_str(match d.kind {
+                                pl_sanger::Op::Mismatch => "mismatch",
+                                pl_sanger::Op::Insertion => "insertion",
+                                pl_sanger::Op::Deletion => "deletion",
+                                pl_sanger::Op::Match => "match",
+                            }),
+                            json_str(&(d.ref_base as char).to_string()),
+                            json_str(&(d.read_base as char).to_string()),
+                            match d.quality {
+                                Some(q) => q.to_string(),
+                                None => "null".into(),
+                            }
+                        );
+                    }
+                    println!("]}}{comma}");
+                }
+            }
+        }
+        println!("  ]\n}}");
+        return Ok(());
+    }
+
+    println!(
+        "reference {ref_label}, {} bp {}\n",
+        reference.len(),
+        if circular { "circular" } else { "linear" }
+    );
+
+    let mut worst = 0usize;
+    for (name, seq, qual) in &reads {
+        let r = match pl_sanger::compare(seq, qual, &reference, circular, &p) {
+            Some(r) => r,
+            None => {
+                println!("{name}: could not be placed on this reference");
+                worst += 1;
+                continue;
+            }
+        };
+        // Unknown counts here too: a file with no qualities gives no grounds
+        // to dismiss anything.
+        let high = r.count(pl_sanger::Confidence::High) + r.count(pl_sanger::Confidence::Unknown);
+        worst += high;
+        println!(
+            "{name}  {} nt, {} strand, covers {}..{}{}  {:.2}% identity",
+            seq.len(),
+            if r.reversed { "reverse" } else { "forward" },
+            r.covered.0,
+            r.covered.1,
+            if r.wrapped { " (crosses origin)" } else { "" },
+            r.identity * 100.0
+        );
+        match r.reliable {
+            Some((s, e)) => println!("  basecaller stands behind read bases {s}..{e}"),
+            None if qual.is_empty() => println!("  no quality values in this file"),
+            None => println!("  no stretch of this read is reliable"),
+        }
+
+        // High-confidence first and always; the rest only on request. Both
+        // counts are printed either way, so nothing is hidden by the default.
+        let show: Vec<&pl_sanger::Discrepancy> = r
+            .discrepancies
+            .iter()
+            .filter(|d| a.has("all") || d.confidence != pl_sanger::Confidence::Low)
+            .collect();
+        for d in &show {
+            println!(
+                "  {:>8}  ref {} -> read {}   {}{}",
+                d.ref_pos,
+                d.ref_base as char,
+                d.read_base as char,
+                match d.quality {
+                    Some(q) => format!("Q{q}"),
+                    None => "Q?".into(),
+                },
+                match d.confidence {
+                    pl_sanger::Confidence::High => String::new(),
+                    pl_sanger::Confidence::Low => "  low confidence".into(),
+                    pl_sanger::Confidence::Unknown => "  no quality".into(),
+                }
+            );
+        }
+        let low = r.count(pl_sanger::Confidence::Low);
+        if r.clean() {
+            println!("  no difference worth acting on");
+        }
+        if low > 0 && !a.has("all") {
+            println!("  {low} more below Q{} — see --all", p.min_quality);
+        }
+        println!();
+    }
+
+    if worst > 0 {
+        println!(
+            "{worst} difference(s) not dismissible at Q{} across {} read(s)",
+            p.min_quality,
+            reads.len()
+        );
+    }
+    Ok(())
+}
+
 fn cmd_orfs(args: &[String]) -> Result<(), String> {
     let a = parse_args(args, &["table", "min-aa", "seq"])?;
 

@@ -1,0 +1,11 @@
+[package]
+name = "pl-sanger"
+description = "Sanger reads against a reference: alignment, orientation and quality-weighted discrepancy calling."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pl-core.workspace = true

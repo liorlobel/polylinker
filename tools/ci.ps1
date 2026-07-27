@@ -267,6 +267,23 @@ Step 'primer binding sites vs pydna' {
 Step 'genetic codes and ORFs vs Biopython' {
     python reference/python/tests/xcheck_translate.py target/release/pl.exe
 } { HavePy 'Bio' }
+# Sanger read placement vs Biopython's PairwiseAligner.
+#
+# The *score* is compared, not the traceback. An optimal alignment is usually
+# not unique -- when the bases flanking a deletion repeat, two gap placements
+# score identically and both are right -- so comparing columns would be
+# comparing tie-breaks. The score is well defined and moves for any error in
+# the recurrence, the initialisation, the affine bookkeeping or the k-mer
+# windowing. 60 reads, 10,601 read bases, circular and reverse-primer cases
+# included; the windowing has never yet cost a point against the full-reference
+# optimum.
+#
+# Verified it can fail: aligning only the forward orientation gives 17
+# disagreements, and charging a gap opening without its first extension -- an
+# off-by-one invisible on any read without an indel -- gives 31.
+Step 'Sanger placement vs Biopython' {
+    python reference/python/tests/xcheck_sanger.py target/release/pl.exe
+} { HavePy 'Bio' }
 # Chromatograms vs Biopython, on real traces.
 #
 # Corpus-gated: 394 .ab1 files live on the lab drive and none may live here.
