@@ -238,6 +238,14 @@ pub enum Invalid {
     PastEnd { what: String, end: u64, len: u64 },
     /// A feature that annotates nowhere.
     FeatureWithoutSegments { index: usize, name: String },
+    /// The file declares one length and carries a different number of bases.
+    ///
+    /// Reading text with `from_utf8_lossy` turns one invalid byte into U+FFFD,
+    /// three bytes the base filter then accepts: a 12 bp record read as 14 bp,
+    /// and every feature after that point pointed at the wrong bases while
+    /// `validate()` returned clean. Only checked when bases are present, since
+    /// annotation-only GenBank declares a length and ships none by design.
+    LengthMismatch { declared: u64, actual: u64 },
 }
 
 impl std::fmt::Display for Invalid {
@@ -254,6 +262,9 @@ impl std::fmt::Display for Invalid {
             }
             Invalid::FeatureWithoutSegments { index, name } => {
                 write!(f, "feature {index} '{name}': has no segments")
+            }
+            Invalid::LengthMismatch { declared, actual } => {
+                write!(f, "the file declares {declared} bases but carries {actual}")
             }
         }
     }
@@ -419,6 +430,18 @@ impl Molecule {
                         len: n,
                     });
                 }
+            }
+        }
+
+        // Guarded on non-empty: annotation-only GenBank declares a length and
+        // deliberately ships no bases, and flagging that would break a
+        // supported class of file.
+        if let Some(declared) = self.declared_len {
+            if !self.seq.is_empty() && declared != self.seq.len() as u64 {
+                out.push(Invalid::LengthMismatch {
+                    declared,
+                    actual: self.seq.len() as u64,
+                });
             }
         }
 
@@ -600,6 +623,43 @@ mod tests {
         assert!(s.start >= 1, "start {} is not a real coordinate", s.start);
         assert_eq!(s.len(), 4);
         assert!(m.is_valid(), "{:?}", m.validate());
+    }
+
+    #[test]
+    fn a_declared_length_that_disagrees_with_the_bases_is_reported() {
+        // `from_utf8_lossy` turns one invalid byte into U+FFFD, three bytes the
+        // base filter then accepts: a 12 bp record read as 14 bp, with every
+        // feature after that point pointing at the wrong bases while
+        // `validate()` returned clean.
+        let m = Molecule {
+            seq: b"ACGTACGTACGTAA".to_vec(),
+            declared_len: Some(12),
+            ..Default::default()
+        };
+        assert!(!m.is_valid());
+        assert!(matches!(
+            m.validate()[0],
+            Invalid::LengthMismatch {
+                declared: 12,
+                actual: 14
+            }
+        ));
+
+        // Agreement is silent.
+        let ok = Molecule {
+            seq: b"ACGTACGTACGT".to_vec(),
+            declared_len: Some(12),
+            ..Default::default()
+        };
+        assert!(ok.is_valid());
+
+        // Annotation-only GenBank declares a length and ships no bases by
+        // design; flagging that would break a supported class of file.
+        let annotations_only = Molecule {
+            declared_len: Some(2_900_000),
+            ..Default::default()
+        };
+        assert!(annotations_only.is_valid());
     }
 
     #[test]

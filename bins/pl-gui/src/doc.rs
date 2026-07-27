@@ -50,6 +50,9 @@ pub struct Document {
     /// Present only for `.dna`, so the container can be described.
     pub container: Option<snapgene::Document>,
     pub digest: DigestState,
+    /// Records the file held. Only the first is shown, and a viewer that does
+    /// not say so is indistinguishable from a file with fewer records in it.
+    pub records_in_file: usize,
 }
 
 impl Document {
@@ -59,7 +62,8 @@ impl Document {
         } else {
             None
         };
-        let (molecule, format) = pl_fileio::load(data).map_err(|e| e.to_string())?;
+        let (molecule, format, report) =
+            pl_fileio::load_with_report(data).map_err(|e| e.to_string())?;
         let digest = start_digest(&molecule);
         Ok(Document {
             path,
@@ -68,6 +72,7 @@ impl Document {
             format,
             container,
             digest,
+            records_in_file: report.records,
         })
     }
 

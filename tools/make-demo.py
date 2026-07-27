@@ -101,7 +101,16 @@ def find_sites(seq, primer):
 def main():
     seq = build_sequence()
     out = []
-    out.append(f"LOCUS       demo-construct    {N:>7} bp    DNA     circular SYN 26-JUL-2026")
+    # Columns per the GenBank spec, matching `genbank::locus_line` in
+    # crates/pl-fileio. This is a second, independent LOCUS writer, so it drifts
+    # unless kept in step deliberately: it was emitting 76 characters while the
+    # Rust writer emitted 75, and neither was the specified 79.
+    #   13-28 name | 30-40 length | 42-43 bp | 45-47 ss-/ds- | 48-53 type
+    #   56-63 topology | 65-67 division | 69-79 date
+    out.append(
+        f"LOCUS       {'demo-construct':<16} {N:>11} bp    DNA     "
+        f"{'circular':<8} {'SYN':<3} 26-JUL-2026"
+    )
     out.append("DEFINITION  Synthetic demo construct. Not a real plasmid.")
     out.append("ACCESSION   .")
     out.append("VERSION     .")

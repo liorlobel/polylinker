@@ -673,6 +673,7 @@ fn survey_real_files_for_coordinates_that_describe_nothing() {
                     pl_core::Invalid::ZeroStart { .. } => "zero start",
                     pl_core::Invalid::PastEnd { .. } => "past the end",
                     pl_core::Invalid::FeatureWithoutSegments { .. } => "no segments",
+                    pl_core::Invalid::LengthMismatch { .. } => "declared length disagrees",
                 };
                 *by_kind.entry(k).or_default() += 1;
             }

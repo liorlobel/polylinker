@@ -51,32 +51,58 @@ fn parse_record(lines: &[&str]) -> Molecule {
     let mut declared: Option<u64> = None;
 
     if let Some(locus) = lines.iter().find(|l| l.starts_with("LOCUS")) {
-        let mut it = locus.split_whitespace();
-        it.next();
-        mol.name = it.next().unwrap_or_default().to_string();
-        mol.topology = if locus.to_ascii_lowercase().contains("circular") {
+        // Read by token, never by substring over the whole line.
+        //
+        // `locus.contains("circular")` matched the *name* as readily as the
+        // topology field, so `pCircularise` parsed as circular even when its
+        // field said `linear`, and `pcDNA3-ss-mCherry` asserted
+        // `double_stranded: Some(false)` about an ordinary plasmid. Both are
+        // self-inflicted: `locus_name` keeps `-`, and `write` puts the document
+        // title in the name column, so our own export of a linear molecule
+        // called `pCircularise-v2.dna` read back circular. `Topology` has no
+        // unknown state, and a wrong circular flag changes computed digests.
+        //
+        // Real LOCUS lines are ragged (`LOCUS       WT       74 bp`, names
+        // containing `|`), so every rule below degrades to a default rather
+        // than guessing.
+        let toks: Vec<&str> = locus.split_whitespace().collect();
+        mol.name = toks.get(1).copied().unwrap_or_default().to_string();
+
+        // Token index 1 is the name and is skipped: only a standalone
+        // `circular`/`linear` token decides topology.
+        mol.topology = if toks
+            .iter()
+            .skip(2)
+            .any(|t| t.eq_ignore_ascii_case("circular"))
+        {
             Topology::Circular
         } else {
             Topology::Linear
         };
+
         // "<n> bp" or "<n> aa"
-        let toks: Vec<&str> = locus.split_whitespace().collect();
-        for w in toks.windows(2) {
-            if (w[1] == "bp" || w[1] == "aa") && w[0].chars().all(|c| c.is_ascii_digit()) {
-                declared = w[0].parse().ok();
-                break;
+        let unit_at = toks
+            .iter()
+            .position(|t| *t == "bp" || *t == "aa")
+            .filter(|i| *i >= 2);
+        if let Some(i) = unit_at {
+            if toks[i - 1].chars().all(|c| c.is_ascii_digit()) {
+                declared = toks[i - 1].parse().ok();
             }
         }
-        // The molecule-type field may carry an ss-/ds-/ms- prefix, but usually
-        // does not. Absent means unknown, not single-stranded.
-        let lower = locus.to_ascii_lowercase();
-        mol.double_stranded = if lower.contains("ds-") {
-            Some(true)
-        } else if lower.contains("ss-") {
-            Some(false)
-        } else {
-            None
-        };
+
+        // Strandedness lives on the molecule-type token that follows the unit,
+        // as an `ss-`/`ds-`/`ms-` prefix. Absent means unknown, not single.
+        mol.double_stranded = unit_at.and_then(|i| toks.get(i + 1)).and_then(|t| {
+            let lower = t.to_ascii_lowercase();
+            if lower.starts_with("ds-") {
+                Some(true)
+            } else if lower.starts_with("ss-") {
+                Some(false)
+            } else {
+                None
+            }
+        });
     }
 
     if let Some(d) = lines.iter().find(|l| l.starts_with("DEFINITION")) {
@@ -452,6 +478,46 @@ fn qualifier_lines_opt(key: &str, value: Option<&str>, out: &mut String) {
     }
 }
 
+/// The LOCUS line, in the columns the specification names.
+///
+/// ```text
+///   1-5   LOCUS          45-47  ss-/ds-/ms- or blank
+///  13-28  name           48-53  molecule type
+///  30-40  length         56-63  linear | circular
+///  42-43  bp | aa        65-67  division
+///                        69-79  DD-MMM-YYYY
+/// ```
+///
+/// The previous line was 75 characters with every field left of where it
+/// belongs -- length ending at 36 rather than 40, `bp` at 38, topology at 52 --
+/// and Biopython 1.87 emitted `BiopythonParserWarning: Attempting to parse
+/// malformed locus line` on **100% of our exports** and on none of the 303 real
+/// corpus files. Biopython recovers through a lenient fallback, so this was a
+/// conformance defect rather than corruption; a parser reading the columns as
+/// specified got `"ular SYN"` for topology.
+///
+/// The width of the length field matters too: `{:>7}` overflowed at 10 Mbp and
+/// shifted every field after it, which an annotation-only molecule can reach
+/// carrying no sequence data at all.
+fn locus_line(mol: &Molecule, name: &str, n: u64, date: &str) -> String {
+    // Unknown strandedness is written blank rather than guessed. `ss-` on a
+    // plasmid is a claim, and this is exactly the field where it is believed.
+    let strandedness = match mol.double_stranded {
+        Some(true) => "ds-",
+        Some(false) => "ss-",
+        None => "   ",
+    };
+    let topology = if mol.topology.is_circular() {
+        "circular"
+    } else {
+        "linear"
+    };
+    format!(
+        "LOCUS       {name:<16} {n:>11} bp {strandedness}{:<6}  {topology:<8} {:<3} {date}",
+        "DNA", "SYN"
+    )
+}
+
 /// Render a molecule as GenBank. `date` is `(day, month_index_0_based, year)`;
 /// passing it in keeps this function pure and its output reproducible.
 pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
@@ -461,17 +527,8 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
     let date_str = format!("{:02}-{}-{}", d, MONTHS[m.min(11)], y);
 
     let mut out = String::new();
-    out.push_str(&format!(
-        "LOCUS       {:<16} {:>7} bp    DNA     {} SYN {}\n",
-        name,
-        n,
-        if mol.topology.is_circular() {
-            "circular"
-        } else {
-            "linear  "
-        },
-        date_str
-    ));
+    out.push_str(&locus_line(mol, &name, n, &date_str));
+    out.push('\n');
     let def = if mol.description.is_empty() {
         name.as_str()
     } else {
@@ -673,6 +730,172 @@ mod tests {
         let text = write(&m, "test", (27, 6, 2026));
         assert!(text.lines().any(|l| l.trim() == "/pseudo"));
         assert!(text.lines().any(|l| l.trim() == r#"/replace="""#), "{text}");
+    }
+
+    #[test]
+    fn a_name_containing_the_word_circular_does_not_make_the_molecule_circular() {
+        // `locus.contains("circular")` matched the *name* as readily as the
+        // topology field. This is self-inflicted: `locus_name` keeps `-` and
+        // `write` puts the document title in the name column, so our own export
+        // of a linear molecule called `pCircularise-v2.dna` read back circular
+        // -- and topology feeds `pl_enzymes::fragments`, so it changes computed
+        // digest results.
+        let m = parse(
+            "LOCUS       pCircularise-v2      100 bp    DNA     linear   SYN 27-JUL-2026
+             ORIGIN
+        1 acgt
+//
+",
+        );
+        assert_eq!(m.topology, Topology::Linear, "the name is not the topology");
+
+        // ...and the real field still decides.
+        let c = parse(
+            "LOCUS       pLinearThing         100 bp    DNA     circular SYN 27-JUL-2026
+             ORIGIN
+        1 acgt
+//
+",
+        );
+        assert_eq!(c.topology, Topology::Circular);
+    }
+
+    #[test]
+    fn a_name_containing_ss_does_not_assert_single_strandedness() {
+        // `pcDNA3-ss-mCherry` claimed `double_stranded: Some(false)` about an
+        // ordinary plasmid. Unknown must stay unknown.
+        let m = parse(
+            "LOCUS       pcDNA3-ss-mCherry    100 bp    DNA     linear   SYN 27-JUL-2026
+//
+",
+        );
+        assert_eq!(m.double_stranded, None, "absent means unknown, not single");
+
+        let d = parse(
+            "LOCUS       plain                100 bp ds-DNA     linear   SYN 27-JUL-2026
+//
+",
+        );
+        assert_eq!(d.double_stranded, Some(true));
+        let ss = parse(
+            "LOCUS       plain                100 bp ss-RNA      linear   SYN 27-JUL-2026
+//
+",
+        );
+        assert_eq!(ss.double_stranded, Some(false));
+    }
+
+    #[test]
+    fn a_ragged_locus_line_degrades_rather_than_guessing() {
+        // Real corpus lines look like this; none may panic or invent a value.
+        for src in [
+            "LOCUS       WT       74 bp
+//
+",
+            "LOCUS       a|b|c    12 bp    DNA
+//
+",
+            "LOCUS
+//
+",
+            "LOCUS       only-a-name
+//
+",
+        ] {
+            let m = parse(src);
+            assert_eq!(m.topology, Topology::Linear);
+            assert_eq!(m.double_stranded, None);
+        }
+        assert_eq!(
+            parse(
+                "LOCUS       WT       74 bp
+//
+"
+            )
+            .declared_len,
+            Some(74)
+        );
+    }
+
+    #[test]
+    fn the_locus_line_lands_in_the_columns_the_spec_names() {
+        // 79 characters, and every field where a positional reader expects it.
+        // The old line was 75 with everything shifted left, and Biopython
+        // warned on 100% of our exports and 0 of 303 real files.
+        let m = Molecule {
+            seq: b"acgtacgtacgt".to_vec(),
+            topology: Topology::Circular,
+            double_stranded: Some(true),
+            ..Default::default()
+        };
+        let line = write(&m, "pTest.dna", (27, 6, 2026))
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(line.len(), 79, "{line:?}");
+        assert_eq!(&line[0..5], "LOCUS");
+        assert_eq!(line[12..28].trim(), "pTest");
+        assert_eq!(line[29..40].trim(), "12");
+        assert_eq!(&line[41..43], "bp");
+        assert_eq!(&line[44..47], "ds-");
+        assert_eq!(line[47..53].trim(), "DNA");
+        assert_eq!(&line[55..63], "circular");
+        assert_eq!(&line[64..67], "SYN");
+        assert_eq!(&line[68..79], "27-JUL-2026");
+
+        // A linear molecule of unknown strandedness leaves that field blank
+        // rather than claiming anything.
+        let m2 = Molecule {
+            seq: b"acgt".to_vec(),
+            ..Default::default()
+        };
+        let l2 = write(&m2, "x.gb", (1, 0, 2026))
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(l2.len(), 79);
+        assert_eq!(&l2[44..47], "   ", "unknown strandedness must be blank");
+        assert_eq!(&l2[55..63], "linear  ");
+    }
+
+    #[test]
+    fn a_very_long_molecule_does_not_shift_the_locus_fields() {
+        // `{:>7}` overflowed at 10 Mbp and pushed every later field right.
+        // Reachable with no sequence data at all, via a declared length.
+        let m = Molecule {
+            declared_len: Some(2_500_000_000),
+            ..Default::default()
+        };
+        let line = write(&m, "big.gb", (1, 0, 2026))
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(line.len(), 79, "{line:?}");
+        assert_eq!(line[29..40].trim(), "2500000000");
+        assert_eq!(&line[41..43], "bp");
+    }
+
+    #[test]
+    fn our_own_output_round_trips_topology_and_strandedness() {
+        for (topology, ds) in [
+            (Topology::Circular, Some(true)),
+            (Topology::Linear, Some(false)),
+            (Topology::Linear, None),
+            (Topology::Circular, None),
+        ] {
+            let m = Molecule {
+                seq: b"acgtacgt".to_vec(),
+                topology,
+                double_stranded: ds,
+                ..Default::default()
+            };
+            let again = parse(&write(&m, "pCircularise-v2.dna", (27, 6, 2026)));
+            assert_eq!(again.topology, topology, "topology drifted");
+            assert_eq!(again.double_stranded, ds, "strandedness drifted");
+        }
     }
 
     #[test]

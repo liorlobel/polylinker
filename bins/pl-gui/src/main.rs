@@ -99,7 +99,17 @@ impl App {
         match Document::open(&path) {
             Ok(d) => {
                 self.status = describe(&d.molecule, d.format);
-                // Say so when a file's own annotations do not describe it.
+                // Say so when the file held more than we are showing. A viewer
+                // that stays silent is indistinguishable from a file with
+                // fewer records in it — which is how 1,879 features went
+                // missing from a 124-record file without anyone noticing.
+                if d.records_in_file > 1 {
+                    self.status = format!(
+                        "{}  —  showing record 1 of {} in this file",
+                        self.status, d.records_in_file
+                    );
+                }
+                // ...and when a file's own annotations do not describe it.
                 //
                 // `Molecule::validate` already detects coordinates past the end
                 // of the sequence, inverted spans and zero starts, and nothing

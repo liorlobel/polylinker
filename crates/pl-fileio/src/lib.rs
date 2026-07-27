@@ -90,18 +90,61 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-/// Read any supported sequence file into the common model.
+/// What a file contained, beyond the molecule that was returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadReport {
+    /// Records present in the file. `load` returns only the first.
+    ///
+    /// Multi-record files are ordinary — a genome writes one record per contig
+    /// — and there was no channel to say so. A 124-record `.gbk` came back as
+    /// one molecule with 1,879 features missing, and `pl convert` then wrote
+    /// that truncated molecule back out. 8 of 303 GenBank files and 351 FASTA
+    /// files in this project's corpus have more than one record.
+    pub records: usize,
+}
+
+impl LoadReport {
+    /// Did the file hold more than we returned?
+    pub fn truncated(&self) -> bool {
+        self.records > 1
+    }
+}
+
+/// Load the first record of a file.
+///
+/// Prefer [`load_with_report`] where the caller can tell the user what was
+/// left behind; this exists because most callers genuinely want one molecule.
 pub fn load(data: &[u8]) -> Result<(Molecule, Format), LoadError> {
+    load_with_report(data).map(|(m, f, _)| (m, f))
+}
+
+/// Load the first record, and say what else the file held.
+pub fn load_with_report(data: &[u8]) -> Result<(Molecule, Format, LoadReport), LoadError> {
     match detect(data) {
         Some(Format::SnapGene) => {
             let doc = snapgene::parse(data).map_err(LoadError::SnapGene)?;
-            Ok((doc.molecule, Format::SnapGene))
+            Ok((doc.molecule, Format::SnapGene, LoadReport { records: 1 }))
         }
-        Some(Format::GenBank) => Ok((
-            genbank::parse(&String::from_utf8_lossy(data)),
-            Format::GenBank,
-        )),
-        Some(Format::Fasta) => Ok((fasta::parse(&String::from_utf8_lossy(data)), Format::Fasta)),
+        Some(Format::GenBank) => {
+            let text = String::from_utf8_lossy(data);
+            let all = genbank::parse_all(&text);
+            let records = all.len();
+            Ok((
+                all.into_iter().next().unwrap_or_default(),
+                Format::GenBank,
+                LoadReport { records },
+            ))
+        }
+        Some(Format::Fasta) => {
+            let text = String::from_utf8_lossy(data);
+            let all = fasta::parse_all(&text);
+            let records = all.len();
+            Ok((
+                all.into_iter().next().unwrap_or_default(),
+                Format::Fasta,
+                LoadReport { records },
+            ))
+        }
         Some(other) => Err(LoadError::NotASequenceFile(other)),
         None => Err(LoadError::Unrecognised),
     }
@@ -110,6 +153,47 @@ pub fn load(data: &[u8]) -> Result<(Molecule, Format), LoadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multi_record_file_reports_what_it_held() {
+        // `load` returns record 1 and used to have no way to say so. A
+        // 124-record .gbk came back as one molecule with 1,879 features gone,
+        // and `pl convert` then wrote that truncated molecule back out.
+        // Built from lines rather than one literal: GenBank is column-sensitive
+        // and a stray indent on ORIGIN silently produces an empty sequence.
+        let record = |name: &str, bases: &str| {
+            [
+                format!(
+                    "LOCUS       {name:<16}           4 bp    DNA     linear   SYN 27-JUL-2026"
+                ),
+                "ORIGIN".to_string(),
+                format!("        1 {bases}"),
+                "//".to_string(),
+            ]
+            .join("\n")
+        };
+        let two = format!("{}\n{}\n", record("one", "acgt"), record("two", "tttt"));
+        let (mol, fmt, report) = load_with_report(two.as_bytes()).unwrap();
+        assert_eq!(fmt, Format::GenBank);
+        assert_eq!(mol.seq, b"acgt".to_vec(), "the first record is returned");
+        assert_eq!(report.records, 2);
+        assert!(report.truncated());
+
+        let fasta = ">a
+ACGT
+>b
+TTTT
+>c
+GGGG
+";
+        let (_, _, r) = load_with_report(fasta.as_bytes()).unwrap();
+        assert_eq!(r.records, 3);
+        assert!(r.truncated());
+
+        // A single-record file is not truncated.
+        let one = format!("{}\n", record("one", "acgt"));
+        assert!(!load_with_report(one.as_bytes()).unwrap().2.truncated());
+    }
 
     #[test]
     fn detects_by_content_not_extension() {

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use pl_fileio::{detect, fasta, genbank, load, snapgene, Format};
+use pl_fileio::{detect, fasta, genbank, load, load_with_report, snapgene, Format};
 
 const USAGE: &str = "\
 pl -- Polylinker command line
@@ -225,7 +225,7 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                     continue;
                 }
             };
-            match load(&data) {
+            match load_with_report(&data) {
                 Err(e) => out.push_str(&format!(
                     "  {{{}: {}, {}: {}}}",
                     json_str("file"),
@@ -233,7 +233,7 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                     json_str("error"),
                     json_str(&e.to_string())
                 )),
-                Ok((mol, fmt)) => {
+                Ok((mol, fmt, report)) => {
                     let sites: usize = mol.primers.iter().map(|p| p.sites.len()).sum();
                     let lower = mol.seq.iter().filter(|b| b.is_ascii_lowercase()).count();
                     let feats: Vec<String> = mol
@@ -263,12 +263,13 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                         })
                         .collect();
                     out.push_str(&format!(
-                        "  {{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: [{}]}}",
+                        "  {{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: [{}]}}",
                         json_str("file"), json_str(&path.display().to_string()),
                         json_str("format"), json_str(fmt.name()),
                         json_str("bp"), mol.len(),
                         json_str("declared_bp"), mol.declared_len.unwrap_or(0),
                         json_str("sequence_absent"), mol.seq.is_empty(),
+                        json_str("records_in_file"), report.records,
                         json_str("span"), mol.span(),
                         json_str("circular"), mol.topology.is_circular(),
                         json_str("lowercase"), lower,
@@ -293,11 +294,19 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
 
     for path in &a.files {
         let data = read(path)?;
-        match load(&data) {
+        match load_with_report(&data) {
             Err(e) => println!("{}\n   ERROR: {e}\n", path.display()),
-            Ok((mol, fmt)) => {
+            Ok((mol, fmt, report)) => {
                 println!("{}", path.display());
                 println!("   format     {}", fmt.name());
+                if report.truncated() {
+                    // Saying nothing here is how 1,879 features went missing
+                    // from a 124-record file without anyone noticing.
+                    println!(
+                        "   records    {} in this file; showing the first",
+                        report.records
+                    );
+                }
                 if mol.sequence_absent() {
                     println!(
                         "   length     {} bp DECLARED, but this file carries no bases",
@@ -378,7 +387,18 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
 
     for path in &a.files {
         let data = read(path)?;
-        let (mol, _fmt) = load(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (mol, _fmt, report) =
+            load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        if report.truncated() {
+            // Converting would write record 1 and silently discard the rest.
+            // A 124-record 36 KB .gbk became a 28 KB single-record file with
+            // 1,879 features gone, reported as success.
+            return Err(format!(
+                "{}: holds {} records and this would write only the first.                  Split the file first, or use --stdout to see what would be written.",
+                path.display(),
+                report.records
+            ));
+        }
         let title = title_of(path);
         let text = if is_gb {
             genbank::write(&mol, &title, date)
