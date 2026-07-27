@@ -91,7 +91,7 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 /// What a file contained, beyond the molecule that was returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LoadReport {
     /// Records present in the file. `load` returns only the first.
     ///
@@ -101,6 +101,14 @@ pub struct LoadReport {
     /// that truncated molecule back out. 8 of 303 GenBank files and 351 FASTA
     /// files in this project's corpus have more than one record.
     pub records: usize,
+    /// Location forms the GenBank reader could not represent.
+    ///
+    /// Empty for every other format. An exotic location — `1^2`, a remote
+    /// reference such as `J00194.1:200..300`, a `bond(...)` operator — used to
+    /// vanish without trace, leaving a feature quietly claiming a span it does
+    /// not have. Reported rather than dropped, and never invented: see
+    /// `genbank::parse_location`.
+    pub unrepresentable_locations: Vec<String>,
 }
 
 impl LoadReport {
@@ -123,16 +131,26 @@ pub fn load_with_report(data: &[u8]) -> Result<(Molecule, Format, LoadReport), L
     match detect(data) {
         Some(Format::SnapGene) => {
             let doc = snapgene::parse(data).map_err(LoadError::SnapGene)?;
-            Ok((doc.molecule, Format::SnapGene, LoadReport { records: 1 }))
+            Ok((
+                doc.molecule,
+                Format::SnapGene,
+                LoadReport {
+                    records: 1,
+                    ..Default::default()
+                },
+            ))
         }
         Some(Format::GenBank) => {
             let text = String::from_utf8_lossy(data);
-            let all = genbank::parse_all(&text);
+            let (all, unrepresentable_locations) = genbank::parse_all_reporting(&text);
             let records = all.len();
             Ok((
                 all.into_iter().next().unwrap_or_default(),
                 Format::GenBank,
-                LoadReport { records },
+                LoadReport {
+                    records,
+                    unrepresentable_locations,
+                },
             ))
         }
         Some(Format::Fasta) => {
@@ -142,7 +160,10 @@ pub fn load_with_report(data: &[u8]) -> Result<(Molecule, Format, LoadReport), L
             Ok((
                 all.into_iter().next().unwrap_or_default(),
                 Format::Fasta,
-                LoadReport { records },
+                LoadReport {
+                    records,
+                    ..Default::default()
+                },
             ))
         }
         Some(other) => Err(LoadError::NotASequenceFile(other)),

@@ -6,6 +6,16 @@
 //! Matching routines fold case internally instead.
 
 /// Complement a single base, preserving case. Unknown bytes pass through.
+///
+/// **This is the DNA complement**: `U` complements to `A`, and `A` complements
+/// to `T`, so a round trip through [`reverse_complement`] rewrites RNA as DNA
+/// and is not an involution on `U`. That is deliberate rather than an
+/// oversight — changing `A => U` would alter the complement of every ordinary
+/// sequence and break every duplex SEGUID — but it means an RNA sequence
+/// silently changes alphabet. Use [`reverse_complement_rna`] for RNA.
+///
+/// The root cause is that `Molecule` has no alphabet field; until it does,
+/// the caller has to know which they hold.
 #[inline]
 pub const fn complement(b: u8) -> u8 {
     match b {
@@ -49,6 +59,27 @@ pub const fn complement(b: u8) -> u8 {
 /// Reverse complement, preserving case.
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter().rev().map(|&b| complement(b)).collect()
+}
+
+/// Reverse-complement an RNA sequence, keeping `U` as `U`.
+///
+/// [`reverse_complement`] is the DNA operation and maps `A -> T`, so RNA passed
+/// through it comes back as DNA. This is purely additive: it does not change
+/// what any existing caller gets.
+///
+/// Deliberately *not* implemented by sniffing T-versus-U per sequence. That
+/// would destroy `rc(a ++ b) == rc(b) ++ rc(a)`, which the annotator, the
+/// translator and the cloning engine all rely on when they concatenate
+/// fragments — a mixed pair would complement inconsistently.
+pub fn reverse_complement_rna(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&b| match complement(b) {
+            b'T' => b'U',
+            b't' => b'u',
+            other => other,
+        })
+        .collect()
 }
 
 /// The set of concrete bases an IUPAC code stands for, as a 4-bit mask
@@ -163,5 +194,37 @@ mod tests {
         assert!((gc - 200.0 / 3.0).abs() < 1e-9, "got {gc}");
         // No unambiguous bases means no answer, not a misleading 0.0.
         assert_eq!(Composition::of(b"NNNN").gc_percent(), None);
+    }
+
+    #[test]
+    fn rna_keeps_its_alphabet_only_through_the_rna_helper() {
+        // `complement` is the DNA operation: U -> A and A -> T, so a round
+        // trip through `reverse_complement` rewrites RNA as DNA and is not an
+        // involution on U. Deliberate — changing A -> U would alter every
+        // ordinary complement and break every duplex SEGUID — but it means the
+        // caller has to pick the right function.
+        assert_eq!(reverse_complement(b"AUGC"), b"GCAT".to_vec());
+        assert_ne!(
+            reverse_complement(&reverse_complement(b"AUGC")),
+            b"AUGC".to_vec(),
+            "documented: the DNA operation is not an involution on U"
+        );
+
+        // The RNA helper is, and it preserves case.
+        assert_eq!(reverse_complement_rna(b"AUGC"), b"GCAU".to_vec());
+        assert_eq!(
+            reverse_complement_rna(&reverse_complement_rna(b"AUGC")),
+            b"AUGC".to_vec()
+        );
+        assert_eq!(reverse_complement_rna(b"augc"), b"gcau".to_vec());
+        // A DNA sequence put through it comes back as RNA, which is the
+        // caller's business to know.
+        assert_eq!(reverse_complement_rna(b"ACGT"), b"ACGU".to_vec());
+
+        // Both agree wherever no T or U is involved, which is what keeps the
+        // ambiguity codes consistent between them.
+        for s in [b"RYSWKM".as_slice(), b"BDHVN", b"CCGG"] {
+            assert_eq!(reverse_complement(s), reverse_complement_rna(s));
+        }
     }
 }

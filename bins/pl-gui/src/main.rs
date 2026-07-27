@@ -109,6 +109,13 @@ impl App {
                         self.status, d.records_in_file
                     );
                 }
+                if !d.unrepresentable_locations.is_empty() {
+                    self.status = format!(
+                        "{}  —  {} location(s) skipped as unrepresentable",
+                        self.status,
+                        d.unrepresentable_locations.len()
+                    );
+                }
                 // ...and when a file's own annotations do not describe it.
                 //
                 // `Molecule::validate` already detects coordinates past the end
@@ -180,8 +187,24 @@ impl App {
         } else {
             pl_fileio::genbank::write(&d.molecule, &d.title, today())
         };
+        let lossy = if as_fasta {
+            Vec::new()
+        } else {
+            d.molecule.features_without_expressible_orientation()
+        };
+        let note = if lossy.is_empty() {
+            String::new()
+        } else {
+            // GenBank has no way to say "unoriented", so those features are
+            // written as forward. For about half of them that is a directional
+            // claim the source never made.
+            format!(
+                "  —  {} feature(s) written as forward; GenBank cannot express their strand",
+                lossy.len()
+            )
+        };
         match std::fs::write(&path, text) {
-            Ok(()) => self.status = format!("wrote {}", path.display()),
+            Ok(()) => self.status = format!("wrote {}{note}", path.display()),
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
         }
     }

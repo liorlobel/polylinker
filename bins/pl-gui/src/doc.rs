@@ -53,6 +53,8 @@ pub struct Document {
     /// Records the file held. Only the first is shown, and a viewer that does
     /// not say so is indistinguishable from a file with fewer records in it.
     pub records_in_file: usize,
+    /// Location forms the reader could not represent, reported not dropped.
+    pub unrepresentable_locations: Vec<String>,
 }
 
 impl Document {
@@ -73,6 +75,7 @@ impl Document {
             container,
             digest,
             records_in_file: report.records,
+            unrepresentable_locations: report.unrepresentable_locations,
         })
     }
 

@@ -161,7 +161,13 @@ impl Frame {
         if self.reverse {
             // The frame runs along the reverse complement, so a residue that
             // begins at `start_in_frame` there ends at the mirrored position.
-            let end = len - start_in_frame;
+            //
+            // `saturating_sub`: now that all six frames are always produced, a
+            // frame with `offset > len` is constructible (a 1 bp sequence has a
+            // frame at offset 2), and `len - start_in_frame` underflowed on it.
+            // Such a frame has no residues, so this is unreachable through
+            // `protein`, but the method is public and must not panic.
+            let end = len.saturating_sub(start_in_frame);
             (end.saturating_sub(3), end)
         } else {
             (start_in_frame, start_in_frame + 3)
@@ -176,13 +182,16 @@ pub fn six_frames(seq: &[u8], code: Code) -> Vec<Frame> {
     for reverse in [false, true] {
         let src: &[u8] = if reverse { &rc } else { seq };
         for offset in 0..3 {
-            if src.len() < offset {
-                continue;
-            }
+            // Always six. The guard here used to `continue`, so a 0 bp input
+            // got two frames and a 1 bp input four — from a function called
+            // `six_frames` whose documentation promises all six. A frame that
+            // starts past the end is simply empty, which is the honest answer;
+            // skipping it silently changes the shape of the result.
+            let start = offset.min(src.len());
             out.push(Frame {
                 offset,
                 reverse,
-                protein: code.translate(&src[offset..]),
+                protein: code.translate(&src[start..]),
             });
         }
     }
@@ -351,6 +360,29 @@ mod tests {
         assert_eq!(f.iter().filter(|x| x.reverse).count(), 3);
         for (i, fr) in f.iter().enumerate() {
             assert_eq!(fr.offset, i % 3);
+        }
+    }
+
+    #[test]
+    fn six_frames_are_six_at_every_length() {
+        // A function called `six_frames` returned two frames for a 0 bp input
+        // and four for a 1 bp one, because the guard `continue`d instead of
+        // clamping. A frame starting past the end is empty, which is the
+        // honest answer; omitting it changes the shape of the result.
+        for n in 0..8 {
+            let seq: Vec<u8> = std::iter::repeat_n(b'A', n).collect();
+            let f = six_frames(&seq, TABLE1);
+            assert_eq!(f.len(), 6, "{n} bp gave {} frames", f.len());
+            assert_eq!(f.iter().filter(|x| x.reverse).count(), 3);
+            for (i, fr) in f.iter().enumerate() {
+                assert_eq!(fr.offset, i % 3);
+            }
+            // ...and mapping back never panics, even for a frame that starts
+            // past the end.
+            for fr in &f {
+                let _ = fr.to_source(0, n);
+                let _ = fr.to_source(5, n);
+            }
         }
     }
 

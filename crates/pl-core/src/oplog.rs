@@ -587,11 +587,40 @@ impl OpLog {
         // importer's mess would be both wrong and infuriating.
         let before = self.current.validate();
         let after = next.validate();
-        if after.len() > before.len() {
-            let fresh: Vec<_> = after.into_iter().filter(|x| !before.contains(x)).collect();
-            if !fresh.is_empty() {
-                return Err(OpError::WouldCorrupt(fresh));
+        // Compare problems by KIND, counting them.
+        //
+        // Two things were wrong with `if after.len() > before.len()`. It let an
+        // edit that *swapped* one problem for another straight through, because
+        // one is not greater than one — which is how a reverse-complement could
+        // trade a `PastEnd` for a wrapped `Inverted` and commit it. And the
+        // `!before.contains(x)` inside compares `Invalid` values, which cannot
+        // work: every variant embeds data that moves under ordinary editing
+        // (`PastEnd` carries the molecule length; `what` carries the feature
+        // index and name), so deleting that guard refuses a length-changing
+        // insert, a feature removal, and even a rename, on any file that
+        // arrived with a bad coordinate.
+        //
+        // Counts per kind are stable under all of those and still catch a
+        // genuinely new problem. See [`crate::Invalid::kind`].
+        let tally = |v: &[crate::Invalid]| {
+            let mut m: std::collections::BTreeMap<&'static str, usize> = Default::default();
+            for x in v {
+                *m.entry(x.kind()).or_default() += 1;
             }
+            m
+        };
+        let (was, now) = (tally(&before), tally(&after));
+        let worsened: Vec<&'static str> = now
+            .iter()
+            .filter(|(k, n)| **n > was.get(*k).copied().unwrap_or(0))
+            .map(|(k, _)| *k)
+            .collect();
+        if !worsened.is_empty() {
+            let fresh: Vec<_> = after
+                .into_iter()
+                .filter(|x| worsened.contains(&x.kind()))
+                .collect();
+            return Err(OpError::WouldCorrupt(fresh));
         }
 
         let id = derive_id(self.cursor, &kind);
@@ -1330,13 +1359,23 @@ mod tests {
         // Only *new* problems block an edit. Refusing to let someone touch a
         // file because its importer left a bad coordinate would blame the user
         // for someone else's bug.
+        // The fixture matters. This used to plant an inverted segment at 4..2,
+        // which `remap_annotations` then wiped, so `after.validate()` was empty
+        // and the test passed whatever the gate did. A coordinate PAST THE END
+        // survives every edit below, so the gate is actually exercised.
         let mut m = mol("AAAACCCC", false);
         let mut f = Feature::new("already wrong", "misc_feature");
-        f.segments.push(Segment::new(4, 2)); // inverted on arrival
+        f.segments.push(Segment::new(2, 4000)); // past the end on arrival
         m.features.push(f);
-        assert!(!m.is_valid());
+        let mut ok = Feature::new("fine", "misc_feature");
+        ok.segments.push(Segment::new(2, 5));
+        m.features.push(ok);
+        assert_eq!(m.validate().len(), 1, "{:?}", m.validate());
 
         let mut log = OpLog::new(m);
+
+        // A length-changing insert. `PastEnd` embeds the molecule length, so a
+        // value-comparing gate reads the same problem as brand new here.
         log.apply(
             OpKind::InsertAt {
                 at: 1,
@@ -1346,6 +1385,57 @@ mod tests {
         )
         .expect("a pre-existing problem must not block an unrelated edit");
         assert_eq!(log.current().seq, b"TTAAAACCCC".to_vec());
+
+        // Removing a feature renumbers the rest, and `what` embeds the index.
+        log.apply(OpKind::RemoveFeature { index: 1 }, "t")
+            .expect("removing an unrelated feature must be allowed");
+
+        // Renaming: `what` embeds the name too.
+        let mut renamed = log.current().features[0].clone();
+        renamed.name = "renamed".into();
+        log.apply(
+            OpKind::SetFeature {
+                index: Some(0),
+                feature: Box::new(renamed),
+            },
+            "t",
+        )
+        .expect("renaming a feature the importer broke must be allowed");
+        assert_eq!(log.current().features[0].name, "renamed");
+    }
+
+    #[test]
+    fn an_edit_that_trades_one_problem_for_another_is_refused() {
+        // The old gate asked only whether the *total* went up, so swapping a
+        // `PastEnd` for an `Inverted` slipped through: one is not greater than
+        // one. That is how a reverse-complement could commit a wrapped
+        // coordinate of 18446744073709550634.
+        let mut m = mol("AAAACCCCGGGGTTTT", false);
+        let mut broken = Feature::new("broken", "misc_feature");
+        broken.segments.push(Segment::new(2, 9000)); // past the end
+        m.features.push(broken);
+        assert_eq!(m.validate().len(), 1);
+
+        let mut log = OpLog::new(m);
+        // Replace it with a feature that is inverted instead: still one
+        // problem, but a different kind, so it must not be waved through.
+        let mut inverted = Feature::new("broken", "misc_feature");
+        inverted.segments.push(Segment::new(9, 3));
+        let e = log
+            .apply(
+                OpKind::SetFeature {
+                    index: Some(0),
+                    feature: Box::new(inverted),
+                },
+                "t",
+            )
+            .unwrap_err();
+        match e {
+            OpError::WouldCorrupt(v) => {
+                assert!(v.iter().any(|x| x.kind() == "inverted"), "{v:?}");
+            }
+            other => panic!("expected WouldCorrupt, got {other:?}"),
+        }
     }
 
     #[test]

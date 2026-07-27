@@ -307,6 +307,19 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                         report.records
                     );
                 }
+                if !report.unrepresentable_locations.is_empty() {
+                    println!(
+                        "   skipped    {} location(s) this reader cannot represent: {}",
+                        report.unrepresentable_locations.len(),
+                        report
+                            .unrepresentable_locations
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
                 if mol.sequence_absent() {
                     println!(
                         "   length     {} bp DECLARED, but this file carries no bases",
@@ -405,6 +418,26 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
         } else {
             fasta::write(&mol, &title, 70)
         };
+
+        // GenBank cannot express an unoriented or bidirectional feature, so
+        // those are written as forward. Say so rather than letting the export
+        // publish a directional claim the source never made.
+        if is_gb {
+            let lossy = mol.features_without_expressible_orientation();
+            if !lossy.is_empty() {
+                eprintln!(
+                    "pl: {}: {} feature(s) have no GenBank-expressible strand and are written as forward: {}",
+                    path.display(),
+                    lossy.len(),
+                    lossy
+                        .iter()
+                        .take(3)
+                        .map(|(_, f)| f.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
 
         if to_stdout {
             print!("{text}");

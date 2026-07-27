@@ -248,6 +248,33 @@ pub enum Invalid {
     LengthMismatch { declared: u64, actual: u64 },
 }
 
+impl Invalid {
+    /// A stable name for *what kind of* problem this is.
+    ///
+    /// The operation log needs to compare the problems before an edit against
+    /// the problems after it, and `Invalid` values themselves cannot be
+    /// compared for that purpose: every variant embeds data that moves under
+    /// ordinary editing. `PastEnd` carries the molecule length, so any
+    /// length-changing insert makes an untouched problem look new. `what`
+    /// embeds both the feature index and its name, so removing feature 0 or
+    /// renaming a feature does the same. Comparing values directly therefore
+    /// refuses perfectly reasonable edits to a file that arrived broken.
+    ///
+    /// Comparing *counts per kind* is stable under all of those, and still
+    /// catches an edit that trades one problem for a different one — which the
+    /// old "did the total go up?" test let through, and which is exactly how a
+    /// reverse-complement could commit a wrapped coordinate.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Invalid::Inverted { .. } => "inverted",
+            Invalid::ZeroStart { .. } => "zero start",
+            Invalid::PastEnd { .. } => "past the end",
+            Invalid::FeatureWithoutSegments { .. } => "feature without segments",
+            Invalid::LengthMismatch { .. } => "declared length disagrees",
+        }
+    }
+}
+
 impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -478,6 +505,28 @@ impl Molecule {
 
     /// Rotate a circular molecule so that 1-based position `origin` becomes 1,
     /// moving every annotation with it. No-op on a linear molecule.
+    /// Features whose strand GenBank cannot express.
+    ///
+    /// A GenBank location is either plain or wrapped in `complement()`, so
+    /// `Unoriented` and `Both` have nowhere to go and are written as forward.
+    /// That is a real loss and, for roughly half of them, a biologically wrong
+    /// claim — `cat` and `TcR` on pACYC184 are on opposite strands, and an
+    /// export that calls both forward publishes something untrue. 47 features
+    /// across this project's own corpus are affected.
+    ///
+    /// The loss is unavoidable at that boundary; being silent about it is not.
+    /// `Strand`'s own documentation says the loss should be "visible at the
+    /// boundary where it happens", and this is how a caller sees it without
+    /// the writer inventing a marker qualifier that would then be re-read as
+    /// data on the next import.
+    pub fn features_without_expressible_orientation(&self) -> Vec<(usize, &Feature)> {
+        self.features
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| matches!(f.strand, Strand::Unoriented | Strand::Both))
+            .collect()
+    }
+
     pub fn rotate(&mut self, origin: u64) -> bool {
         let n = self.len();
         if !self.topology.is_circular() || n == 0 || origin == 0 || origin > n {
@@ -623,6 +672,35 @@ mod tests {
         assert!(s.start >= 1, "start {} is not a real coordinate", s.start);
         assert_eq!(s.len(), 4);
         assert!(m.is_valid(), "{:?}", m.validate());
+    }
+
+    #[test]
+    fn strands_genbank_cannot_express_are_reported() {
+        // A GenBank location is plain or wrapped in `complement()`, so
+        // `Unoriented` and `Both` are written as forward. 47 features in this
+        // project's own corpus are affected, and for roughly half the export
+        // publishes a direction the source never claimed — `cat` and `TcR` on
+        // pACYC184 really are on opposite strands.
+        let mut m = Molecule {
+            seq: b"ACGTACGTACGT".to_vec(),
+            ..Default::default()
+        };
+        for (name, strand) in [
+            ("fwd", Strand::Forward),
+            ("rev", Strand::Reverse),
+            ("unoriented", Strand::Unoriented),
+            ("both", Strand::Both),
+        ] {
+            let mut f = Feature::new(name, "misc_feature");
+            f.strand = strand;
+            f.segments.push(Segment::new(1, 4));
+            m.features.push(f);
+        }
+        let lossy = m.features_without_expressible_orientation();
+        let names: Vec<&str> = lossy.iter().map(|(_, f)| f.name.as_str()).collect();
+        assert_eq!(names, vec!["unoriented", "both"]);
+        // Indices come back too, so a caller can point at the right row.
+        assert_eq!(lossy[0].0, 2);
     }
 
     #[test]

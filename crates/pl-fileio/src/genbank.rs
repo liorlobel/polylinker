@@ -22,12 +22,26 @@ pub fn parse(text: &str) -> Molecule {
 }
 
 pub fn parse_all(text: &str) -> Vec<Molecule> {
+    parse_all_reporting(text).0
+}
+
+/// Every record, plus any location form we could not represent.
+///
+/// The warnings are the point: an exotic location that simply vanished left a
+/// feature quietly claiming a span it does not have. See [`parse_location`].
+pub fn parse_all_reporting(text: &str) -> (Vec<Molecule>, Vec<String>) {
     let mut out = Vec::new();
+    let mut warnings = Vec::new();
     let mut current: Vec<&str> = Vec::new();
+    let take = |lines: &Vec<&str>, out: &mut Vec<Molecule>, w: &mut Vec<String>| {
+        let (m, bad) = parse_record(lines);
+        out.push(m);
+        w.extend(bad);
+    };
     for line in text.lines() {
         if line.starts_with("//") {
             if !current.is_empty() {
-                out.push(parse_record(&current));
+                take(&current, &mut out, &mut warnings);
                 current.clear();
             }
             continue;
@@ -35,9 +49,9 @@ pub fn parse_all(text: &str) -> Vec<Molecule> {
         current.push(line);
     }
     if current.iter().any(|l| l.starts_with("LOCUS")) {
-        out.push(parse_record(&current));
+        take(&current, &mut out, &mut warnings);
     }
-    out
+    (out, warnings)
 }
 
 /// A feature being accumulated across lines: (key, location, qualifiers).
@@ -46,8 +60,10 @@ pub fn parse_all(text: &str) -> Vec<Molecule> {
 /// quoted qualifier can wrap, so parsing has to hold a partial feature open.
 type Pending = (String, String, Vec<(String, Option<String>)>);
 
-fn parse_record(lines: &[&str]) -> Molecule {
+fn parse_record(lines: &[&str]) -> (Molecule, Vec<String>) {
     let mut mol = Molecule::default();
+    // Location forms we cannot represent, reported rather than dropped.
+    let mut unparsable: Vec<String> = Vec::new();
     let mut declared: Option<u64> = None;
 
     if let Some(locus) = lines.iter().find(|l| l.starts_with("LOCUS")) {
@@ -132,14 +148,15 @@ fn parse_record(lines: &[&str]) -> Molecule {
         let mut open_qual: Option<usize> = None;
         let mut loc_open = false;
 
-        let flush = |p: Option<Pending>, out: &mut Vec<Feature>| {
+        let flush = |p: Option<Pending>, out: &mut Vec<Feature>, unparsable: &mut Vec<String>| {
             let Some((key, loc, quals)) = p else { return };
             // `source` is whole-molecule metadata every file carries; showing
             // it would draw a full-length bar across the map.
             if key == "source" {
                 return;
             }
-            let (segments, strand) = parse_location(&loc);
+            let (segments, strand, bad) = parse_location(&loc);
+            unparsable.extend(bad.into_iter().map(|b| format!("{key}: {b}")));
             if segments.is_empty() {
                 return;
             }
@@ -208,7 +225,7 @@ fn parse_record(lines: &[&str]) -> Molecule {
             let is_new_feature = !body.starts_with(' ') && !body.trim().is_empty();
 
             if is_new_feature {
-                flush(pending.take(), &mut mol.features);
+                flush(pending.take(), &mut mol.features, &mut unparsable);
                 let mut parts = body.trim().splitn(2, char::is_whitespace);
                 let key = parts.next().unwrap_or_default().to_string();
                 let loc = parts.next().unwrap_or_default().trim().to_string();
@@ -274,14 +291,14 @@ fn parse_record(lines: &[&str]) -> Molecule {
                 }
             }
         }
-        flush(pending.take(), &mut mol.features);
+        flush(pending.take(), &mut mol.features, &mut unparsable);
     }
 
     // Features are left in file order on purpose. A reader reports what the
     // file says; sorting is a presentation choice and belongs to whatever is
     // drawing the map. Sorting here also silently breaks round-trip fidelity,
     // because the writer emits in model order.
-    mol
+    (mol, unparsable)
 }
 
 fn unbalanced(s: &str) -> bool {
@@ -336,7 +353,23 @@ fn decode_quoted(s: &str) -> (String, bool) {
 }
 
 /// Parse a GenBank location into 1-based inclusive segments plus a strand.
-fn parse_location(loc: &str) -> (Vec<Segment>, Strand) {
+/// Parse a GenBank location into 1-based inclusive segments plus a strand.
+///
+/// Returns any part it could not represent, rather than discarding it. The
+/// crate's posture is liberal-on-read, so an exotic location must not be fatal;
+/// but it must not be invisible either, and it certainly must not be *invented*.
+///
+/// Both halves matter, and shipping either alone makes things worse:
+///
+/// - Without the strictness, `bond(5,10)` split on the comma into `bond(5` and
+///   `10)`; the first failed to parse and vanished, and the second became a
+///   **fabricated** `10..10` segment that `validate()` was happy with.
+///   `order(bond(30,115),bond(64,80))` — the form NCBI writes in GenPept —
+///   yielded `[115..115, 80..80]`, two annotations pointing at nothing.
+/// - Without the report, `1^2`, `J00194.1:200..300` and every other form we
+///   cannot express simply disappear, and `join(1..100,J00194.1:200..300)`
+///   leaves a feature quietly claiming to be 100 bp when it is not.
+fn parse_location(loc: &str) -> (Vec<Segment>, Strand, Vec<String>) {
     let mut s = loc.trim();
     let mut strand = Strand::Forward;
     if let Some(inner) = s.strip_prefix("complement(") {
@@ -355,24 +388,53 @@ fn parse_location(loc: &str) -> (Vec<Segment>, Strand) {
     }
 
     let mut segs = Vec::new();
-    for part in s.split(',') {
-        let part = part
-            .trim()
-            .trim_start_matches("complement(")
-            .trim_end_matches(')')
-            .replace(['<', '>'], "");
+    let mut unparsable = Vec::new();
+    for raw in s.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        // Only a *balanced* `complement(...)` wrapper is unwrapped. Blanket
+        // `trim_end_matches(')')` was what made `bond(5,10)` dangerous: split on
+        // the comma it gives `bond(5` and `10)`, and stripping the stray paren
+        // turned the second into a perfectly numeric `10` — a fabricated
+        // `10..10` segment that `validate()` accepted.
+        let inner = match raw
+            .strip_prefix("complement(")
+            .and_then(|r| r.strip_suffix(')'))
+        {
+            Some(i) => i,
+            None => raw,
+        };
+        let part = inner.replace(['<', '>'], "");
+
+        // A location part is a number or an `a..b` range and nothing else. Any
+        // other character — `^` for a site between bases, `:` for a remote
+        // accession, a letter or paren from a `bond(`/`gap(` operator — means
+        // this is a form we do not model.
+        let numeric = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
+        let ok = match part.split_once("..") {
+            Some((a, b)) => numeric(a.trim()) && numeric(b.trim()),
+            None => numeric(part.trim()),
+        };
+        if !ok {
+            unparsable.push(raw.to_string());
+            continue;
+        }
+
         let (a, b) = match part.split_once("..") {
             Some((a, b)) => (a, b),
-            None if !part.is_empty() => (part.as_str(), part.as_str()),
-            None => continue,
+            None => (part.as_str(), part.as_str()),
         };
         if let (Ok(start), Ok(end)) = (a.trim().parse::<u64>(), b.trim().parse::<u64>()) {
             if end >= start && start > 0 {
                 segs.push(Segment::new(start, end));
+            } else {
+                unparsable.push(raw.to_string());
             }
         }
     }
-    (segs, strand)
+    (segs, strand, unparsable)
 }
 
 // ---------------------------------------------------------------------------
@@ -931,10 +993,83 @@ mod tests {
     }
 
     #[test]
+    fn an_unrepresentable_location_is_reported_not_invented() {
+        // `bond(5,10)` split on the comma into `bond(5` and `10)`. The first
+        // failed to parse and vanished; the second became a FABRICATED 10..10
+        // segment that `validate()` was perfectly happy with. And
+        // `order(bond(30,115),bond(64,80))` -- the form NCBI writes in GenPept
+        // -- produced [115..115, 80..80]: two annotations pointing at nothing.
+        let (segs, _, bad) = parse_location("bond(5,10)");
+        assert!(segs.is_empty(), "nothing may be invented here: {segs:?}");
+        assert_eq!(bad.len(), 2, "{bad:?}");
+
+        let (segs, _, bad) = parse_location("order(bond(30,115),bond(64,80))");
+        assert!(segs.is_empty(), "{segs:?}");
+        assert_eq!(bad.len(), 4);
+
+        // Forms we simply cannot express must be reported, not dropped.
+        for loc in ["1^2", "J00194.1:200..300", "gap(unk100)"] {
+            let (segs, _, bad) = parse_location(loc);
+            assert!(segs.is_empty(), "{loc}: {segs:?}");
+            assert!(!bad.is_empty(), "{loc} vanished silently");
+        }
+
+        // A join that mixes a representable part with an unrepresentable one
+        // keeps the good half AND says the other was skipped -- otherwise the
+        // feature quietly claims to be 100 bp when it is not.
+        let (segs, _, bad) = parse_location("join(1..100,J00194.1:200..300)");
+        assert_eq!(segs, vec![Segment::new(1, 100)]);
+        assert_eq!(bad.len(), 1);
+    }
+
+    #[test]
+    fn ordinary_locations_still_parse_and_report_nothing() {
+        for loc in [
+            "1..10",
+            "complement(5..8)",
+            "join(1..3,7..9)",
+            "<1..>10",
+            "42",
+            "complement(join(1..3,7..9))",
+        ] {
+            let (segs, _, bad) = parse_location(loc);
+            assert!(!segs.is_empty(), "{loc} produced no segments");
+            assert!(bad.is_empty(), "{loc} reported {bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_reader_surfaces_skipped_locations_through_load() {
+        let src = [
+            "LOCUS       test                      12 bp    DNA     linear   SYN 27-JUL-2026",
+            "FEATURES             Location/Qualifiers",
+            "     misc_feature    bond(5,10)",
+            "     CDS             1..12",
+            "ORIGIN",
+            "        1 acgtacgtacgt",
+            "//",
+        ]
+        .join(
+            "
+",
+        );
+        let (mols, warnings) = parse_all_reporting(&src);
+        assert_eq!(mols.len(), 1);
+        // The good feature survives; the impossible one is named, not invented.
+        assert_eq!(mols[0].features.len(), 1);
+        assert_eq!(mols[0].features[0].kind, "CDS");
+        assert!(
+            !warnings.is_empty(),
+            "the skipped location was not reported"
+        );
+        assert!(warnings[0].contains("misc_feature"), "{warnings:?}");
+    }
+
+    #[test]
     fn location_forms_all_parse() {
         assert_eq!(parse_location("1..10").0, vec![Segment::new(1, 10)]);
         assert_eq!(parse_location("complement(5..8)").1, Strand::Reverse);
-        let (segs, strand) = parse_location("join(1..3,7..9)");
+        let (segs, strand, _) = parse_location("join(1..3,7..9)");
         assert_eq!(segs.len(), 2);
         assert_eq!(strand, Strand::Forward);
         // fuzzy boundaries
