@@ -1,0 +1,12 @@
+[package]
+name = "pl-thermo"
+description = "Nearest-neighbour melting temperature, and annealing advice kept separate from it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Zero dependencies, like the rest of the correctness layer.
+[dependencies]
+pl-core.workspace = true

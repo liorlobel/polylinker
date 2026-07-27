@@ -219,6 +219,19 @@ Step 'motif vs Biopython (degenerate, both strands)' {
 Step 'PDF is a PDF, and matches the SVG' {
     python reference/python/tests/xcheck_pdf.py target/release/pl.exe
 } { (HavePy 'fitz') -and (HavePy 'pypdf') }
+# Melting temperature vs Biopython.
+#
+# Biopython implements the same published nearest-neighbour model
+# independently, and docs/PLAN.md names its tables as the licence-clean source
+# for the parameters (Primer3's oligotm.c is GPL-2.0). The numbers were taken
+# from it, so this checks the arithmetic written here -- and it earned its keep
+# immediately: the plan's own formula had the concentration convention
+# backwards (x = 4 for self-complementary, 1 otherwise, where SantaLucia is the
+# reverse), which put every palindrome out by ~8 C. Nothing hand-written here
+# noticed; 480 comparisons against Biopython did, on the first run.
+Step 'melting temperature vs Biopython' {
+    python reference/python/tests/xcheck_tm.py target/release/pl.exe
+} { HavePy 'Bio' }
 # A second, independent digest oracle over real plasmids.
 #
 # `xcheck_clone.py` above compares fragments against pydna on synthetic cases;

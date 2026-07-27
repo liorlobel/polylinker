@@ -574,8 +574,15 @@ Derive blunt/5′/3′ from `sign(ovhg)`. This one representation handles blunt,
 
 ```
 Tm = ΔH / (ΔS + R·ln(C_T/x)) − 273.15,   R = 1.987 cal/(K·mol)
-x = 4 for self-complementary oligos, 1 otherwise
+x = 1 for self-complementary oligos, 4 otherwise
 ```
+
+*(Corrected 2026-07-27: this line previously said `x = 4` for self-complementary
+and 1 otherwise, which is the wrong way round. SantaLucia uses C_T/4 for an
+ordinary duplex — the two strands are at C_T/2 each — and C_T for a
+self-complementary one. Implementing it as written put every palindrome out by
+~8 °C. Caught by the differential against Biopython in
+`reference/python/tests/xcheck_tm.py`, not by any hand-written test.)*
 
 Salt corrections: SantaLucia 1998 entropy correction (default, `ΔS' = ΔS + 0.368·(N−1)·ln[Na⁺]`), Schildkraut–Lifson 1965, Owczarzy 2004 monovalent, Owczarzy 2008 divalent with the Mg/dNTP chelation term. Defaults: 50 nM oligo, 50 mM Na⁺, 1.5 mM Mg²⁺, 0.6 mM dNTP.
 

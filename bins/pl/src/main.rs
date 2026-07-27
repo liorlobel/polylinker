@@ -18,6 +18,7 @@ USAGE:
     pl checksum <file>...                SEGUID v2 checksums
     pl export  <file>... [options]       plasmid map as SVG or PDF
     pl find-motif <IUPAC> <file>         search a sequence, both strands
+    pl tm      <OLIGO>...                melting temperature
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -50,6 +51,12 @@ FIND OPTIONS:
 
 LIBRARY OPTIONS:
     --problems                   every record that could not be fully read
+
+TM OPTIONS:
+    --table <1998|2004>          SantaLucia parameter set (default: 1998)
+    --na <mM>                    monovalent cation (default: 50)
+    --oligo <nM>                 strand concentration (default: 50)
+    --salt <santalucia|schildkraut|none>
 
 FIND-MOTIF OPTIONS:
     --seq <BASES>                search this literal sequence instead of a file
@@ -108,6 +115,7 @@ fn main() -> ExitCode {
         "checksum" => cmd_checksum(rest),
         "export" => cmd_export(rest),
         "find-motif" => cmd_find_motif(rest),
+        "tm" => cmd_tm(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
         "library" => cmd_library(rest),
@@ -1555,6 +1563,121 @@ fn cmd_library(args: &[String]) -> Result<(), String> {
     }
     for (s, n) in &counts {
         println!("{n:>10} {s}");
+    }
+    Ok(())
+}
+
+/// Melting temperature for one or more oligos.
+///
+/// Reports a Tm and, separately, annealing advice per polymerase -- never a Tm
+/// with a buffer correction folded in, because a number like that can never be
+/// explained when it differs from another tool's.
+fn cmd_tm(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["table", "na", "oligo", "salt"])?;
+
+    let mut m = match a.get("table").unwrap_or("1998") {
+        "1998" => pl_thermo::Method::default(),
+        "2004" => pl_thermo::Method::santalucia_2004(),
+        other => return Err(format!("--table {other:?}: expected 1998 or 2004")),
+    };
+    if let Some(v) = a.get("na") {
+        m.na_molar = v.parse::<f64>().map_err(|e| format!("--na: {e}"))? * 1e-3;
+    }
+    if let Some(v) = a.get("oligo") {
+        m.oligo_molar = v.parse::<f64>().map_err(|e| format!("--oligo: {e}"))? * 1e-9;
+    }
+    m.salt = match a.get("salt").unwrap_or("santalucia") {
+        "santalucia" => pl_thermo::SaltCorrection::SantaLucia1998,
+        "schildkraut" => pl_thermo::SaltCorrection::SchildkrautLifson,
+        "none" => pl_thermo::SaltCorrection::None,
+        other => {
+            return Err(format!(
+                "--salt {other:?}: expected santalucia, schildkraut or none"
+            ))
+        }
+    };
+
+    // Oligos come from the command line, or one per line on stdin.
+    let mut seqs: Vec<String> = a
+        .files
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    if seqs.is_empty() {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .map_err(|e| e.to_string())?;
+        seqs = buf
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    if seqs.is_empty() {
+        return Err("give one or more oligos, or pipe them in one per line".into());
+    }
+
+    if a.has("json") {
+        for s in &seqs {
+            println!("{}", pl_thermo::tm_report_line(s, &m));
+        }
+        return Ok(());
+    }
+
+    println!("{}", m.describe());
+    println!();
+    println!("{:>8}  {:>6}  {:>9}  {:>9}  oligo", "Tm", "GC%", "dH", "dS");
+    let mut tms = Vec::new();
+    for s in &seqs {
+        match pl_thermo::tm(s.as_bytes(), &m) {
+            Ok(t) => {
+                tms.push(t.tm);
+                println!(
+                    "{:>7.1}C  {:>5.1}%  {:>9.1}  {:>9.1}  {}{}",
+                    t.tm,
+                    t.gc_percent,
+                    t.dh,
+                    t.ds,
+                    s,
+                    if t.self_complementary {
+                        "   (self-complementary)"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            Err(e) => {
+                tms.clear();
+                println!(
+                    "{:>8}  {:>6}  {:>9}  {:>9}  {s}  --  {e}",
+                    "-", "-", "-", "-"
+                );
+            }
+        }
+    }
+
+    // Annealing advice, separately and per polymerase, exactly as the plan
+    // insists: a Tm is a property of a duplex, a Ta is protocol advice.
+    if !tms.is_empty() {
+        let low = tms.iter().cloned().fold(f64::INFINITY, f64::min);
+        println!(
+            "
+annealing advice, from the lowest Tm ({low:.1}C):"
+        );
+        for p in pl_thermo::POLYMERASES {
+            let (lo, hi) = pl_thermo::anneal(low, None, p);
+            let range = if (lo - hi).abs() < 0.01 {
+                format!("{lo:.0}C")
+            } else {
+                format!("{lo:.0}-{hi:.0}C")
+            };
+            println!("{:>10}  {range:<10}  {}", p.name, p.note);
+        }
+        println!(
+            "
+this is advice, not a measurement; the Tm above is the measurement"
+        );
     }
     Ok(())
 }

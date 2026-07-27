@@ -22,3 +22,4 @@ pl-enzymes.workspace = true
 pl-fileio.workspace = true
 pl-index.workspace = true
 pl-scan.workspace = true
+pl-thermo.workspace = true
