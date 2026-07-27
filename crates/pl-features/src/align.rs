@@ -108,7 +108,11 @@ fn best_end(pattern: &[u8], text: &[u8], max_dist: u32, cutoff: bool) -> Option<
             cur[i] = sub.min(prev[i] + 1).min(cur[i - 1] + 1);
         }
         // Anything below the computed band is unreachable within budget.
-        cur[(upto + 1).min(m + 1)..].fill(max_dist + 1);
+        // `saturating_add`: `max_dist` comes from `(1.0 - min_identity) * len`
+        // cast to u32, and a nonsensical `min_identity` saturates the cast to
+        // u32::MAX. Inert in practice — at u32::MAX the fill slice is always
+        // empty — but it panicked in every debug build.
+        cur[(upto + 1).min(m + 1)..].fill(max_dist.saturating_add(1));
 
         if cutoff {
             last = upto;

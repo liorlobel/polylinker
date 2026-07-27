@@ -79,4 +79,11 @@ sources rather than reproducing them:
   * Every coding sequence is verified by translation against its reference
     protein; entries that do not translate exactly are dropped, not corrected.
   * Feature boundaries are computed from reading frames, not inherited.
-  * All names and descriptions are written by the Polylinker contributors.
+  * All names, aliases and descriptions are written by the Polylinker
+    contributors, and are marked `own-work` per field in `provenance.tsv`.
+
+Provenance is recorded per FIELD, so the nucleotide reference, the protein
+reference and our own editorial each cite the file they actually came from,
+with that file's sha256 and retrieval date. Verifying a hash and then looking
+for the data in the named file is expected to succeed; if it does not, that is
+a bug in this dataset, not in your procedure.

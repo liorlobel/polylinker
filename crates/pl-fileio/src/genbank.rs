@@ -377,11 +377,32 @@ pub fn locus_name(title: &str) -> String {
     name.chars().take(16).collect()
 }
 
-fn format_location(f: &Feature) -> String {
+/// Render a feature's location.
+///
+/// `span` is the molecule length, needed only to split a segment that crosses
+/// the origin; pass 0 when there is nothing to split against.
+///
+/// # The origin split belongs here
+///
+/// The model writes an origin-spanning segment as `end < start`, which
+/// `Molecule::subseq`, the annotator and the SVG renderer all understand.
+/// GenBank has no such form: `12..3` is not a location, and our own reader
+/// silently dropped it — one feature in, zero out, and the molecule still
+/// reported valid. So the wrap is expanded into `join(12..16,1..3)` at the
+/// format boundary, which is exactly where `docs/PLAN.md` §5.3.1 says
+/// coordinate conversions belong.
+fn format_location(f: &Feature, span: u64) -> String {
     let parts: Vec<String> = f
         .segments
         .iter()
-        .map(|s| format!("{}..{}", s.start, s.end))
+        .flat_map(|s| {
+            if s.end < s.start && span >= s.start {
+                // Crosses the origin: two ranges, in reading order.
+                vec![format!("{}..{}", s.start, span), format!("1..{}", s.end)]
+            } else {
+                vec![format!("{}..{}", s.start, s.end)]
+            }
+        })
         .collect();
     let joined = if parts.len() > 1 {
         format!("join({})", parts.join(","))
@@ -477,7 +498,7 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
         // Truncate by character. A feature key is normally ASCII, but this must
         // not panic on one that is not.
         let key: String = kind.chars().take(15).collect();
-        out.push_str(&format!("     {:<15} {}\n", key, format_location(f)));
+        out.push_str(&format!("     {:<15} {}\n", key, format_location(f, n)));
         qualifier_lines("label", &f.name, &mut out);
         for (k, v) in &f.qualifiers {
             // A key must be a legal GenBank qualifier name. The reader used to
@@ -652,6 +673,38 @@ mod tests {
         let text = write(&m, "test", (27, 6, 2026));
         assert!(text.lines().any(|l| l.trim() == "/pseudo"));
         assert!(text.lines().any(|l| l.trim() == r#"/replace="""#), "{text}");
+    }
+
+    #[test]
+    fn a_feature_crossing_the_origin_survives_a_round_trip() {
+        // The model writes a wrap as `end < start`. GenBank has no such form,
+        // and our own reader silently dropped `12..3` — one feature in, zero
+        // out, molecule still reported valid. It must be split into a join at
+        // the format boundary.
+        let mut m = Molecule {
+            seq: b"AAAACCCCGGGGTTTT".to_vec(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let mut f = Feature::new("wraps", "misc_feature");
+        f.segments.push(Segment::new(13, 3));
+        m.features.push(f);
+
+        let text = write(&m, "test", (27, 6, 2026));
+        assert!(
+            text.contains("join(13..16,1..3)"),
+            "the wrap must become a join:
+{text}"
+        );
+
+        let again = parse(&text);
+        assert_eq!(again.features.len(), 1, "the feature was dropped");
+        let segs = &again.features[0].segments;
+        assert_eq!(segs.len(), 2);
+        assert_eq!((segs[0].start, segs[0].end), (13, 16));
+        assert_eq!((segs[1].start, segs[1].end), (1, 3));
+        // The same seven bases, either way round.
+        assert_eq!(segs.iter().map(|s| s.len()).sum::<u64>(), 7);
     }
 
     #[test]

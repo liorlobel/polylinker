@@ -192,22 +192,47 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
     a.require_files()?;
 
     if a.has("json") {
+        // Accumulate, then print once.
+        //
+        // `println!("[")` ran before `read(path)?`, so an unreadable file
+        // aborted mid-document: `pl info --json missing.fa ok.fa ok2.fa` emitted
+        // exactly "[" plus a newline, processed neither valid file, and left a
+        // unparseable array behind. A *parse* failure was already reported
+        // per-file; only an I/O failure had this behaviour. `cmd_checksum
+        // --stdin-json` already accumulates, which makes truncation structurally
+        // impossible — this is that pattern.
+        let mut out = String::from("[\n");
         let mut first = true;
-        println!("[");
+        let mut failed = false;
         for path in &a.files {
-            let data = read(path)?;
             if !first {
-                println!(",");
+                out.push_str(",\n");
             }
             first = false;
+            let data = match read(path) {
+                Ok(d) => d,
+                Err(e) => {
+                    // Same shape as a parse failure, so a consumer has one
+                    // error form to handle rather than two.
+                    failed = true;
+                    out.push_str(&format!(
+                        "  {{{}: {}, {}: {}}}",
+                        json_str("file"),
+                        json_str(&path.display().to_string()),
+                        json_str("error"),
+                        json_str(&e)
+                    ));
+                    continue;
+                }
+            };
             match load(&data) {
-                Err(e) => print!(
+                Err(e) => out.push_str(&format!(
                     "  {{{}: {}, {}: {}}}",
                     json_str("file"),
                     json_str(&path.display().to_string()),
                     json_str("error"),
                     json_str(&e.to_string())
-                ),
+                )),
                 Ok((mol, fmt)) => {
                     let sites: usize = mol.primers.iter().map(|p| p.sites.len()).sum();
                     let lower = mol.seq.iter().filter(|b| b.is_ascii_lowercase()).count();
@@ -237,23 +262,32 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                             )
                         })
                         .collect();
-                    print!(
-                        "  {{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: [{}]}}",
+                    out.push_str(&format!(
+                        "  {{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: [{}]}}",
                         json_str("file"), json_str(&path.display().to_string()),
                         json_str("format"), json_str(fmt.name()),
                         json_str("bp"), mol.len(),
                         json_str("declared_bp"), mol.declared_len.unwrap_or(0),
+                        json_str("sequence_absent"), mol.seq.is_empty(),
+                        json_str("span"), mol.span(),
                         json_str("circular"), mol.topology.is_circular(),
                         json_str("lowercase"), lower,
                         json_str("n_primers"), mol.primers.len(),
                         json_str("n_binding_sites"), sites,
                         json_str("n_features"), mol.features.len(),
                         json_str("features"), feats.join(", ")
-                    );
+                    ));
                 }
             }
         }
-        println!("\n]");
+        out.push_str("\n]");
+        println!("{out}");
+        // A read failure still exits non-zero: `reference/python/tests/
+        // xcheck_rust.py` bails on a non-zero status, so returning 0 here would
+        // turn a hard stop into a soft mismatch.
+        if failed {
+            return Err("one or more files could not be read".into());
+        }
         return Ok(());
     }
 

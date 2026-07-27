@@ -103,9 +103,23 @@ impl Segment {
             kind: "standard".into(),
         }
     }
-    /// Number of bases covered. Zero if the span is inverted.
+    /// Number of bases covered, reading left to right. **Zero** if the span is
+    /// inverted.
+    ///
+    /// `saturating_sub` alone returned 1 for an inverted span while
+    /// `is_empty()` returned true and this comment said 0 — three answers to
+    /// one question. An inverted span on a *circular* molecule is a wrap and
+    /// its real length is `n - start + 1 + end`, which needs the molecule and
+    /// so cannot be computed here; a caller holding one should ask the
+    /// molecule. The saturating arithmetic is load-bearing either way: a
+    /// hostile `.dna` can set `end` to `u64::MAX`, and `end - start + 1` would
+    /// panic on it.
     pub fn len(&self) -> u64 {
-        self.end.saturating_sub(self.start).saturating_add(1)
+        if self.end < self.start {
+            0
+        } else {
+            (self.end - self.start).saturating_add(1)
+        }
     }
     pub fn is_empty(&self) -> bool {
         self.end < self.start
@@ -211,8 +225,12 @@ pub struct Methylation {
 /// See [`Molecule::validate`] for why these are possible at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invalid {
-    /// `end < start`. In this model a span that crosses the origin is written
-    /// as two segments, so an inverted one is a mistake rather than a wrap.
+    /// `end < start` on a **linear** molecule, which has no origin to cross.
+    ///
+    /// On a circle the same shape is a legitimate wrap — `Molecule::subseq`,
+    /// the annotator and the SVG renderer all read it that way — so it is not
+    /// reported there. Reporting it was a contradiction that made `rotate`
+    /// refuse roughly a third of real rotations.
     Inverted { what: String, start: u64, end: u64 },
     /// Coordinates are 1-based, so there is no position 0.
     ZeroStart { what: String },
@@ -360,6 +378,19 @@ impl Molecule {
         // file carrying no bases is the length it declares.
         let n = self.annotation_span();
 
+        // On a circle, `end < start` is not a mistake — it is a feature running
+        // across the origin, and the rest of this codebase already reads it
+        // that way: `Molecule::subseq`, the annotator, and the SVG renderer all
+        // treat it as a wrap. Calling the same shape invalid here was a
+        // contradiction with real consequences: `rotate` produces exactly this
+        // for any feature straddling the new origin, and 23 of 78 rotations of
+        // 13 real corpus plasmids were therefore refused outright by the
+        // operation log, making "set origin" impossible on roughly a third of
+        // rotations.
+        //
+        // A linear molecule has no origin to cross, so there it stays invalid.
+        let wraps_are_legal = self.topology.is_circular();
+
         for (i, f) in self.features.iter().enumerate() {
             if f.segments.is_empty() {
                 out.push(Invalid::FeatureWithoutSegments {
@@ -374,7 +405,7 @@ impl Molecule {
                         what: format!("feature {i} '{}' segment {j}", f.name),
                     });
                 }
-                if s.end < s.start {
+                if s.end < s.start && !wraps_are_legal {
                     out.push(Invalid::Inverted {
                         what: format!("feature {i} '{}' segment {j}", f.name),
                         start: s.start,
@@ -398,7 +429,7 @@ impl Molecule {
                         what: format!("primer {i} '{}' site {j}", p.name),
                     });
                 }
-                if s.end < s.start {
+                if s.end < s.start && !wraps_are_legal {
                     out.push(Invalid::Inverted {
                         what: format!("primer {i} '{}' site {j}", p.name),
                         start: s.start,
@@ -434,7 +465,19 @@ impl Molecule {
             return true;
         }
         self.seq.rotate_left(shift as usize);
-        let remap = |p: u64| -> u64 { ((p - 1 + n - shift) % n) + 1 };
+        // Coordinates are clamped into `1..=n` before the arithmetic.
+        //
+        // `p - 1` underflowed on `start == 0`, which the SnapGene reader can
+        // produce and deliberately carries through rather than dropping
+        // (`<Segment range="0-4"/>`). In debug that panicked; under the wasm
+        // profile, which disables overflow checks and aborts on panic, it
+        // instead silently relocated the annotation somewhere else entirely.
+        // Clamping rather than mapping 0 to 0 preserves the span's *length*,
+        // which is the property a reader would notice going wrong.
+        let remap = |p: u64| -> u64 {
+            let p = p.clamp(1, n);
+            ((p - 1 + n - shift) % n) + 1
+        };
         for f in &mut self.features {
             for s in &mut f.segments {
                 s.start = remap(s.start);
@@ -495,6 +538,81 @@ mod tests {
         let s = &m.features[0].segments[0];
         assert_eq!((s.start, s.end), (1, 4));
         assert_eq!(m.subseq(s.start, s.end).unwrap(), b"GGGG".to_vec());
+    }
+
+    #[test]
+    fn a_rotation_that_wraps_a_feature_is_still_a_valid_molecule() {
+        // 23 of 78 rotations of 13 real corpus plasmids used to leave the
+        // molecule "invalid", because a feature straddling the new origin comes
+        // out `end < start` and `validate()` called that a mistake — while
+        // `subseq`, the annotator and the renderer all read the same shape as a
+        // wrap. The operation log refused all 23, so "set origin" was
+        // impossible on roughly a third of rotations.
+        let mut m = circular(b"AAAACCCCGGGGTTTT");
+        let mut f = Feature::new("gg", "misc_feature");
+        f.segments.push(Segment::new(9, 12)); // GGGG
+        m.features.push(f);
+
+        assert!(m.rotate(11));
+        let s = &m.features[0].segments[0];
+        assert!(s.end < s.start, "this rotation should wrap the feature");
+        assert!(
+            m.is_valid(),
+            "a wrap on a circle is not a defect: {:?}",
+            m.validate()
+        );
+        // ...and it still names the bases it named before.
+        assert_eq!(m.subseq(s.start, s.end).unwrap(), b"GGGG".to_vec());
+    }
+
+    #[test]
+    fn a_wrapped_span_on_a_linear_molecule_is_still_invalid() {
+        // A linear molecule has no origin to cross.
+        let mut m = Molecule {
+            seq: b"AAAACCCCGGGGTTTT".to_vec(),
+            topology: Topology::Linear,
+            ..Default::default()
+        };
+        let mut f = Feature::new("bad", "misc_feature");
+        f.segments.push(Segment {
+            start: 12,
+            end: 3,
+            ..Segment::new(12, 3)
+        });
+        m.features.push(f);
+        assert!(!m.is_valid());
+        assert!(matches!(m.validate()[0], Invalid::Inverted { .. }));
+    }
+
+    #[test]
+    fn rotate_does_not_panic_on_a_zero_start_the_importer_carried_through() {
+        // The SnapGene reader accepts `<Segment range="0-4"/>` and deliberately
+        // carries it rather than dropping it. `p - 1` underflowed on it.
+        let mut m = circular(b"AAAACCCCGGGGTTTT");
+        let mut f = Feature::new("z", "misc_feature");
+        f.segments.push(Segment::new(0, 4));
+        m.features.push(f);
+        assert!(m.rotate(5));
+        let s = &m.features[0].segments[0];
+        // Clamped into 1..=n. Base 0 does not exist, so `0-4` really described
+        // four bases (1..4) and that is what survives — the alternative,
+        // mapping 0 to 0, would have kept an impossible coordinate.
+        assert!(s.start >= 1, "start {} is not a real coordinate", s.start);
+        assert_eq!(s.len(), 4);
+        assert!(m.is_valid(), "{:?}", m.validate());
+    }
+
+    #[test]
+    fn an_inverted_segment_has_no_left_to_right_length() {
+        let s = Segment::new(12, 3);
+        assert_eq!(
+            s.len(),
+            0,
+            "the doc comment says zero, so the code must too"
+        );
+        assert!(s.is_empty());
+        // ...and a hostile coordinate does not panic.
+        assert_eq!(Segment::new(1, u64::MAX).len(), u64::MAX);
     }
 
     #[test]

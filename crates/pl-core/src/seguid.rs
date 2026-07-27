@@ -85,7 +85,7 @@ const PREFIX_CD: &str = "cdseguid=";
 /// than folded: a checksum is an identity claim, and silently upper-casing
 /// would let two sequences the caller considers different collide. Callers
 /// holding mixed-case sequence should decide explicitly — see
-/// [`crate::Molecule::checksum`].
+/// `pl checksum`.
 fn assert_dna(seq: &str) -> Result<(), Error> {
     if seq.is_empty() {
         return Err(Error::Empty);
@@ -171,7 +171,13 @@ pub fn rotate(seq: &str, amount: isize) -> String {
 /// Ordering is by byte value, so uppercase sorts before lowercase, matching the
 /// reference's ASCII ordering.
 pub fn min_rotation(seq: &str) -> usize {
-    let s: Vec<u8> = seq.bytes().collect();
+    // Indexed by **character**, not byte, because `rotate` consumes a character
+    // index and `rotate_to_min` composes the two. Mixing them made
+    // `rotate_to_min("aA")` return the input unchanged when the minimum is
+    // "Aa". Unreachable from the checksums, which gate on ACGT, and provably
+    // identical on ASCII: UTF-8 orders code points the same way it orders
+    // bytes, so the comparisons below are unaffected for any ASCII input.
+    let s: Vec<char> = seq.chars().collect();
     let n = s.len();
     if n == 0 {
         return 0;

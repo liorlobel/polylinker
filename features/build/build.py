@@ -102,11 +102,28 @@ def translate(seq: str) -> str:
 
 
 def fetch(url: str, name: str, refresh: bool = False) -> bytes:
+    """Fetch `url`, caching it, and never trust a cache we cannot verify.
+
+    A cache hit used to be returned unchecked, and the payload was written
+    before its metadata with no atomic rename. Interrupting a download therefore
+    left a truncated file that the next run consumed silently: it emitted blank
+    sha256 columns, stamped today's date on them, printed a false statement
+    about upstream ("not present in this AMRFinderPlus release"), exited 0 --
+    and, because the deterministic tie-break then saw a different candidate set,
+    shipped *different nucleotide sequences* under the same marker names, with
+    notes still asserting an exact translation match.
+    """
     CACHE.mkdir(parents=True, exist_ok=True)
     path = CACHE / name
     meta = CACHE / (name + ".meta.json")
     if path.exists() and not refresh:
-        return path.read_bytes()
+        data = path.read_bytes()
+        recorded = cached_meta(name).get("sha256")
+        if recorded and hashlib.sha256(data).hexdigest() == recorded:
+            return data
+        # Re-fetch rather than abort: someone with a pre-verification cache
+        # should not be hard-blocked, they should just pay for one download.
+        print(f"  cache for {name} is unverified or stale; re-fetching")
 
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     for attempt in range(4):
@@ -119,18 +136,19 @@ def fetch(url: str, name: str, refresh: bool = False) -> bytes:
                 raise SystemExit(f"failed to fetch {url}: {e}")
             time.sleep(2 * (attempt + 1))
 
-    path.write_bytes(data)
+    # Metadata first, then an atomic rename of the payload. In that order a
+    # crash can leave an orphaned meta file (harmless -- the payload is absent,
+    # so the next run fetches) but never a payload the meta does not describe.
+    digest = hashlib.sha256(data).hexdigest()
     meta.write_text(
         json.dumps(
-            {
-                "url": url,
-                "retrieved": TODAY,
-                "bytes": len(data),
-                "sha256": hashlib.sha256(data).hexdigest(),
-            },
+            {"url": url, "retrieved": TODAY, "bytes": len(data), "sha256": digest},
             indent=2,
         )
     )
+    part = path.with_suffix(path.suffix + ".part")
+    part.write_bytes(data)
+    os.replace(part, path)
     return data
 
 
@@ -255,6 +273,7 @@ def stage_amrfinder(refresh: bool) -> tuple[list, list]:
     cds_raw = fetch(f"{AMR_BASE}/AMR_CDS.fa", "AMR_CDS.fa", refresh).decode("utf8", "replace")
     prot_raw = fetch(f"{AMR_BASE}/AMRProt.fa", "AMRProt.fa", refresh).decode("utf8", "replace")
     cds_meta = cached_meta("AMR_CDS.fa")
+    prot_meta = cached_meta("AMRProt.fa")
 
     # >WP_000018321.1|NG_056047.1|1|1|aph(3')-Ia|aph(3')-Ia|product NG_056047.1:101-916
     proteins: dict[str, str] = {}
@@ -332,13 +351,24 @@ def stage_amrfinder(refresh: bool) -> tuple[list, list]:
                     f"{len(verified)}/{len(candidates)} catalogue entries for this allele "
                     f"passed the same check."
                 ),
+                # One row per field, each pointing at the file the bytes
+                # actually came from. Attributing all three to AMR_CDS.fa
+                # stamped that file's sha256 on the amino acids, which live in
+                # AMRProt.fa -- so a reviewer doing exactly what features/NOTICE
+                # promises would verify the hash and then fail to find the
+                # protein in the file. `aliases` are hand-written in MARKERS
+                # above, so they are our work, like `name` below.
                 provenance=[
-                    (rid, f, "amrfinderplus", best["protein_acc"], "INSDC-free",
-                     f"{AMR_BASE}/AMR_CDS.fa", cds_meta.get("retrieved", TODAY),
-                     cds_meta.get("sha256", ""))
-                    for f in ("reference_nt", "reference_aa", "aliases")
-                ]
-                + [
+                    (rid, "reference_nt", "amrfinderplus", best["protein_acc"],
+                     "INSDC-free", f"{AMR_BASE}/AMR_CDS.fa",
+                     cds_meta.get("retrieved", TODAY), cds_meta.get("sha256", "")),
+                    (rid, "reference_aa", "amrfinderplus", best["protein_acc"],
+                     "INSDC-free", f"{AMR_BASE}/AMRProt.fa",
+                     prot_meta.get("retrieved", TODAY), prot_meta.get("sha256", "")),
+                    (rid, "boundary_evidence", "amrfinderplus", best["nucl_acc"],
+                     "INSDC-free", f"{AMR_BASE}/AMR_CDS.fa",
+                     cds_meta.get("retrieved", TODAY), cds_meta.get("sha256", "")),
+                    (rid, "aliases", "polylinker", "-", "own-work", "-", TODAY, ""),
                     (rid, "boundary_rule", "polylinker", "-", "own-work", "-", TODAY, ""),
                     (rid, "description", "polylinker", "-", "own-work", "-", TODAY, ""),
                     (rid, "name", "polylinker", "-", "own-work", "-", TODAY, ""),
@@ -394,6 +424,17 @@ def main() -> int:
         fh.write("\t".join(PROVENANCE_COLUMNS) + "\n")
         for r in rows:
             for p in r.provenance:
+                # A row citing an external source must carry the hash of the
+                # file it was read from; that hash is the entire claim. Checked
+                # here rather than in the loader, because half the shipped rows
+                # are own-work and legitimately have no hash — adding the column
+                # to the loader's required-field list would reject our own
+                # database.
+                if p[4] != "own-work" and not p[7]:
+                    raise SystemExit(
+                        f"{p[0]} field {p[1]}: cites {p[2]} with no sha256 — the "
+                        f"source cache is unverified, refusing to write"
+                    )
                 fh.write("\t".join(str(x) for x in p) + "\n")
 
     print(f"\nwrote {len(rows)} records to {out / 'features.tsv'}")

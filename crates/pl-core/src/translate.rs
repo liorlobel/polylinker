@@ -15,8 +15,13 @@
 //! transcription slip shows up as a whole shifted block rather than one wrong
 //! amino acid. It is also diffable against the NCBI page by eye.
 //!
-//! `reference/python/tests/xcheck_translate.py` checks every codon of every
-//! table implemented here against Biopython, which is the actual guarantee.
+//! The tables were checked codon by codon — all 64 amino acids and all 64 start
+//! flags of tables 1, 2 and 11 — against Biopython 1.87, with zero mismatches.
+//! That was a one-off verification, not a standing CI check, so the guarantee
+//! that survives in the repository is the literal pinning in
+//! `the_tables_match_their_published_values` below. A previous version of this
+//! comment cited a cross-check script that does not exist, which meant TABLE2
+//! and TABLE11's alternative starts were pinned by nothing but a length check.
 
 use crate::iupac;
 
@@ -197,6 +202,56 @@ mod tests {
         assert_eq!(TABLE2.aas.len(), 64);
         assert_eq!(TABLE2.starts.len(), 64);
         assert_eq!(TABLE11.starts.len(), 64);
+    }
+
+    #[test]
+    fn the_tables_match_their_published_values() {
+        // The tables are the whole module, and a silent character change in one
+        // would mistranslate quietly rather than fail loudly. Pinned here as
+        // exact literals, transcribed from the NCBI genetic code tables and
+        // confirmed against Biopython 1.87.
+        assert_eq!(
+            TABLE1.aas,
+            "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
+        );
+        assert_eq!(
+            TABLE1.starts,
+            "---M------**--*----M---------------M----------------------------"
+        );
+        // Table 11 is table 1's amino acids with more initiation codons.
+        assert_eq!(TABLE11.aas, TABLE1.aas);
+        assert_eq!(
+            TABLE11.starts,
+            "---M------**--*----M------------MMMM---------------M------------"
+        );
+        assert_eq!(
+            TABLE2.aas,
+            "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG"
+        );
+        assert_eq!(
+            TABLE2.starts,
+            "----------**--------------------MMMM----------**---M------------"
+        );
+
+        // Landmarks that would survive a shifted block but not a wrong table.
+        assert_eq!(TABLE2.codon(b"AGA"), b'*', "vertebrate mito: AGA is a stop");
+        assert_eq!(TABLE2.codon(b"TGA"), b'W', "vertebrate mito: TGA is Trp");
+        assert_eq!(TABLE2.codon(b"ATA"), b'M', "vertebrate mito: ATA is Met");
+        // Table 1 already initiates at TTG, CTG and ATG; table 11 adds the
+        // four below. Getting that split wrong in either direction is exactly
+        // what a shifted table looks like.
+        for c in [b"TTG", b"CTG", b"ATG"] {
+            assert!(TABLE1.is_start(c), "table 1 should initiate at {c:?}");
+            assert!(TABLE11.is_start(c));
+        }
+        for c in [b"ATT", b"ATC", b"ATA", b"GTG"] {
+            assert!(TABLE11.is_start(c), "table 11 should initiate at {c:?}");
+            assert!(!TABLE1.is_start(c), "table 1 should not initiate at {c:?}");
+        }
+        // Exactly three starts in table 1, seven in table 11.
+        let count = |code: Code| code.starts.bytes().filter(|&b| b == b'M').count();
+        assert_eq!(count(TABLE1), 3);
+        assert_eq!(count(TABLE11), 7);
     }
 
     #[test]

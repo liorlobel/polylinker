@@ -137,7 +137,21 @@ export function renderCircularMap(
     featureColors: merged.featureColors,
   };
 
-  const length = Math.max(1, Math.floor(molecule.length));
+  // Non-finite input is rejected outright, not clamped. `Math.max(1, ...)` let
+  // Infinity through, `niceStep(Infinity / 12)` returned 1, and the ruler loop
+  // became `for (base = 1; base <= Infinity; base += 1)` — 4 GB and a crash in
+  // 1.2 s, with every tick reading `MNaN,NaN` anyway. A GenBank record with an
+  // absurd LOCUS length reaches this through the package's own example reader.
+  const malformed: Array<{ name: string; reason: string }> = [];
+  const rawLength = molecule.length;
+  const lengthOk = Number.isFinite(rawLength) && rawLength >= 1;
+  if (!lengthOk) {
+    malformed.push({
+      name: molecule.name,
+      reason: `molecule length ${rawLength} is not a usable number`,
+    });
+  }
+  const length = lengthOk ? Math.max(1, Math.floor(rawLength)) : 1;
   const circular = (molecule.topology ?? 'circular') === 'circular';
   const features = molecule.features ?? [];
   const sites = molecule.sites ?? [];
@@ -212,7 +226,18 @@ export function renderCircularMap(
     const degrees = (span / length) * 360;
     const strand = f.strand ?? 'none';
     const ranges = f.segments.flatMap((s) => segmentRanges(s, length, circular));
-    if (ranges.length === 0) return;
+    if (ranges.length === 0) {
+      // No segments at all, coordinates outside the molecule, or NaN. Each of
+      // these used to vanish with no signal anywhere in the result.
+      malformed.push({
+        name: f.name,
+        reason:
+          f.segments.length === 0
+            ? 'no segments'
+            : `segments do not fall within 1..${length}`,
+      });
+      return;
+    }
 
     // The arrow belongs on the terminal piece only, or the feature appears to
     // be several features each pointing somewhere.
@@ -265,6 +290,10 @@ export function renderCircularMap(
 
   // ---- restriction sites --------------------------------------------------
   sites.forEach((s, i) => {
+    if (!Number.isFinite(s.position)) {
+      malformed.push({ name: s.name, reason: `position ${s.position} is not a number` });
+      return;
+    }
     const a = baseToAngle(s.position, length, originAtTop);
     body.push(
       `<path d="${radialLine(ring, a, ro, ro + 6)}" stroke="${theme.tickStroke}" stroke-width="1" fill="none"/>`,
@@ -301,11 +330,22 @@ export function renderCircularMap(
     });
     const { positions, dropped } = placeColumn(boxes, pad + fontSize, height - pad);
     for (const d of dropped) hiddenLabels.push(anchors[idxs[d]].text);
+    // `placeColumn` writes NaN for the entries it dropped, and those are
+    // already accounted for in `hiddenLabels` — only a NaN that is *not* a
+    // deliberate drop indicates something malformed.
+    const droppedSet = new Set(dropped);
 
     idxs.forEach((anchorIdx, k) => {
       const y = positions[k];
-      if (!Number.isFinite(y)) return;
       const a = anchors[anchorIdx];
+      if (!Number.isFinite(y)) {
+        if (!droppedSet.has(k)) {
+          // Neither drawn, nor in `labels`, nor in `hiddenLabels` — the one
+          // documented signal that a map is incomplete said all was well.
+          malformed.push({ name: a.text, reason: 'label position could not be computed' });
+        }
+        return;
+      }
       const dir = side === 'right' ? 1 : -1;
       const labelX = ring.cx + dir * (ro + 26);
       const target = polar(ring, ro + 2, a.angle);
@@ -359,7 +399,7 @@ export function renderCircularMap(
     overlay.join('') +
     `</svg>`;
 
-  return { svg, labels: placedLabels, hiddenLabels };
+  return { svg, labels: placedLabels, hiddenLabels, malformed };
 }
 
 /** Round a tick interval up to something a human would have chosen. */

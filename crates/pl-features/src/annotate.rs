@@ -177,11 +177,31 @@ impl<'a> Annotator<'a> {
     /// Reported rather than swallowed: a caller that believes it searched the
     /// whole database when it did not will report a confident empty result.
     pub fn unseedable(&self) -> Vec<&Record> {
-        let mut v: Vec<u32> = self.dna.short().to_vec();
-        v.extend_from_slice(self.protein.short());
-        v.sort_unstable();
-        v.dedup();
-        v.into_iter()
+        // The **intersection**, not the union. A record only one index can
+        // reach is still reachable, and listing it here was worse than saying
+        // nothing: a well-formed 5-codon CDS was reported unsearchable and then
+        // found at coverage 1.0 in the same run.
+        //
+        // Gated on `config.protein`, because with translated matching switched
+        // off the protein index is never consulted and a record the DNA index
+        // cannot seed really is unreachable. Under-reporting is the worse of
+        // the two failures.
+        let dna: std::collections::BTreeSet<u32> = self.dna.short().iter().copied().collect();
+        let kept: Vec<u32> = if self.config.protein {
+            let protein: std::collections::BTreeSet<u32> =
+                self.protein.short().iter().copied().collect();
+            dna.into_iter()
+                .filter(|i| {
+                    // A record with no protein reference was never in the
+                    // protein index, so that index cannot rescue it.
+                    !self.db.records[*i as usize].has_protein() || protein.contains(i)
+                })
+                .collect()
+        } else {
+            dna.into_iter().collect()
+        };
+        // BTreeSet throughout, so this is record order rather than hash order.
+        kept.into_iter()
             .map(|i| &self.db.records[i as usize])
             .collect()
     }
@@ -362,7 +382,13 @@ impl<'a> Annotator<'a> {
         if span.0 >= len || span.1 <= span.0 || db_units == 0 {
             return None;
         }
-        let coverage = (m.aligned as f64 / db_units as f64).min(1.0);
+        // A database record longer than a circular molecule can match more
+        // bases than the molecule has: a 40 bp terminal repeat matched 1240
+        // bases of a 1200 bp plasmid, which came back flagged `wraps_origin`
+        // while `start <= end`, with `len()` bigger than the molecule and
+        // coverage 1.000. Clamp the span so those three agree.
+        let span = (span.0, span.1.min(span.0 + len));
+        let coverage = (m.aligned.min(db_units) as f64 / db_units as f64).min(1.0);
         // Too little of the feature to be a claim about the feature at all.
         if coverage < self.config.min_coverage {
             return None;
@@ -377,6 +403,12 @@ impl<'a> Annotator<'a> {
         }
 
         let mut a = Annotation::from_span(record, span, len, strand);
+        debug_assert!(
+            !a.wraps_origin || a.start > a.end,
+            "wraps_origin must mean start > end, got {}..{}",
+            a.start,
+            a.end
+        );
         a.identity = m.identity;
         a.coverage = coverage;
         // §7.7 step 7.

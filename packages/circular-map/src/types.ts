@@ -127,4 +127,18 @@ export interface RenderResult {
    * canvas, shrink the font, or show a list beside the figure.
    */
   hiddenLabels: string[];
+  /**
+   * Features that could not be drawn at all, with the reason.
+   *
+   * Deliberately **not** folded into `hiddenLabels`, whose contract is "would
+   * have overlapped, try a bigger canvas" — advice that cannot help a feature
+   * whose coordinates are `NaN`.
+   *
+   * Before this existed, such a feature was either silently skipped or, worse,
+   * *fabricated*: a segment starting past the end of the molecule had both its
+   * endpoints clamped independently and collapsed onto a 1 bp arc at the last
+   * base, drawn and labelled with the real feature's name. Inventing a feature
+   * is worse than losing one, and neither should be silent.
+   */
+  malformed: Array<{ name: string; reason: string }>;
 }

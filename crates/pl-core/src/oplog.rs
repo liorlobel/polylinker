@@ -366,14 +366,27 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
             }
         }
         OpKind::ReverseComplement => {
-            let n = mol.len();
+            // `span()`, not `len()`: annotation-only GenBank is a supported,
+            // common class (no ORIGIN block, length declared on the LOCUS
+            // line), and measuring against `len()` made every coordinate in
+            // such a file underflow. `validate()` already measures against
+            // `annotation_span()`, so the two disagreed and a molecule
+            // `is_valid()` accepted could still panic here.
+            let n = mol.span();
             mol.seq = crate::reverse_complement(&mol.seq);
+            // A coordinate already past the end cannot be reflected onto a
+            // real position. Saturating rather than wrapping keeps the
+            // *existing* problem visible to `validate()` instead of turning it
+            // into a fresh one at 18446744073709550634 — and the operation-log
+            // gate only refuses newly introduced problems, so a wrapped value
+            // would have committed.
+            let flip = |p: u64| -> u64 { n.saturating_sub(p).saturating_add(1) };
             // Everything flips end for end, and each feature changes strand.
             for f in &mut mol.features {
                 for s in &mut f.segments {
                     let (a, b) = (s.start, s.end);
-                    s.start = n - b + 1;
-                    s.end = n - a + 1;
+                    s.start = flip(b);
+                    s.end = flip(a);
                 }
                 f.strand = match f.strand {
                     crate::Strand::Forward => crate::Strand::Reverse,
@@ -384,8 +397,8 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
             for p in &mut mol.primers {
                 for s in &mut p.sites {
                     let (a, b) = (s.start, s.end);
-                    s.start = n - b + 1;
-                    s.end = n - a + 1;
+                    s.start = flip(b);
+                    s.end = flip(a);
                     s.strand = match s.strand {
                         crate::Strand::Forward => crate::Strand::Reverse,
                         crate::Strand::Reverse => crate::Strand::Forward,
@@ -436,13 +449,31 @@ fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64)
 
     // Returns None when the coordinate fell inside a region that no longer
     // exists and there is nothing to anchor it to.
+    // Whether an *interior* coordinate — one inside the replaced region —
+    // still means anything afterwards.
+    //
+    // It does when the replacement is the same length: a 1 bp point mutation
+    // under a 1 bp `snp` feature, or an equal-length codon-optimisation swap
+    // across exactly a gene's span, both leave every base in place and the
+    // annotation still describes what it describes.
+    //
+    // It does not when the length changed. Collapsing interior coordinates onto
+    // the edges regardless meant no segment was ever dropped by a replacement,
+    // so pasting a 20 bp linker over AmpR left "AmpR" behind as a 20 bp feature
+    // sitting on the linker — the same "valid, plausible at a glance, and
+    // false" annotation this function's own docstring says it exists to
+    // prevent. It also moved features that nothing had touched: replacing the
+    // whole sequence with byte-identical bases dragged a feature at 5..12 out
+    // to 1..16.
+    let interior_survives = new_len > 0 && new_len == old_len;
+
     let map_start = |p: u64| -> Option<u64> {
         if p < start {
             Some(p)
         } else if p >= old_end {
             Some((p as i64 + delta) as u64)
-        } else if new_len > 0 {
-            Some(start)
+        } else if interior_survives {
+            Some(p)
         } else {
             None
         }
@@ -452,8 +483,8 @@ fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64)
             Some(p)
         } else if p >= old_end {
             Some((p as i64 + delta) as u64)
-        } else if new_len > 0 {
-            Some(start + new_len - 1)
+        } else if interior_survives {
+            Some(p)
         } else {
             None
         }
@@ -461,11 +492,9 @@ fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64)
 
     let remap = |s_start: &mut u64, s_end: &mut u64| -> bool {
         // A segment straddling the edit keeps whichever ends survive.
-        let a = map_start(*s_start).or_else(|| {
-            (*s_end >= old_end)
-                .then(|| (start as i64 + delta.min(0)) as u64)
-                .map(|_| start)
-        });
+        // A segment whose far end survives the edit keeps its near end pinned
+        // to where the replaced region begins.
+        let a = map_start(*s_start).or_else(|| (*s_end >= old_end).then_some(start));
         let b = map_end(*s_end).or_else(|| (*s_start < start).then_some(start - 1));
         match (a, b) {
             (Some(a), Some(b)) if b >= a && a >= 1 => {
@@ -652,11 +681,23 @@ impl OpLog {
 
     /// The branch points: operations with more than one child.
     pub fn forks(&self) -> Vec<OpId> {
-        self.children
+        let mut out: Vec<OpId> = self
+            .children
             .iter()
             .filter(|(k, v)| v.len() > 1 && k.is_some())
             .filter_map(|(k, _)| *k)
-            .collect()
+            .collect();
+        // `children` is a HashMap, so this came back in a different order on
+        // every call — four builds of the identical log in one process gave
+        // four distinct orders. Sorted by position in `ops`, i.e. **creation
+        // order**, which is what a history panel wants; sorting by the id would
+        // be stable but would order by SHA-1 bytes, which means nothing to a
+        // reader.
+        //
+        // The `children` *values* are deliberately left alone: `redo()` reads
+        // `.last()` for its documented "most recent branch" semantics.
+        out.sort_by_key(|id| self.by_id.get(id).copied().unwrap_or(usize::MAX));
+        out
     }
 
     /// Rebuild the document at `target` by replaying from the nearest snapshot.
@@ -969,6 +1010,173 @@ mod tests {
     }
 
     #[test]
+    fn reverse_complement_survives_a_molecule_with_no_bases() {
+        // Annotation-only GenBank is a real, supported class: no ORIGIN block,
+        // length declared only on the LOCUS line. `n = mol.len()` was 0 there,
+        // so every coordinate underflowed — a panic in debug, and in release a
+        // wrapped coordinate that the operation-log gate then let commit,
+        // because it swapped one problem for another rather than adding one.
+        let mut mol = Molecule {
+            declared_len: Some(1000),
+            ..Default::default()
+        };
+        let mut f = Feature::new("gene", "CDS");
+        f.segments.push(Segment::new(100, 200));
+        mol.features.push(f);
+        assert!(mol.seq.is_empty());
+        assert!(mol.is_valid());
+
+        let mut log = OpLog::new(mol);
+        log.apply(OpKind::ReverseComplement, "t").unwrap();
+        let s = &log.current().features[0].segments[0];
+        assert_eq!((s.start, s.end), (801, 901));
+        assert!(log.current().is_valid(), "{:?}", log.current().validate());
+
+        // ...and it is an involution, which is the property that matters.
+        log.apply(OpKind::ReverseComplement, "t").unwrap();
+        let s = &log.current().features[0].segments[0];
+        assert_eq!((s.start, s.end), (100, 200));
+    }
+
+    #[test]
+    fn reverse_complement_does_not_invent_a_coordinate_from_a_broken_one() {
+        // A file that arrived with a coordinate past the end stays broken in
+        // the same way rather than acquiring a fresh, larger absurdity.
+        let mut mol = Molecule {
+            seq: b"ACGTACGT".to_vec(),
+            ..Default::default()
+        };
+        let mut f = Feature::new("bad", "misc_feature");
+        f.segments.push(Segment::new(4, 9_000));
+        mol.features.push(f);
+        assert!(!mol.is_valid());
+
+        let mut log = OpLog::new(mol);
+        // Refused or applied, it must not panic and must not produce a
+        // wrapped u64.
+        let _ = log.apply(OpKind::ReverseComplement, "t");
+        for s in &log.current().features[0].segments {
+            assert!(s.start < 1_000_000, "coordinate wrapped: {}", s.start);
+            assert!(s.end < 1_000_000, "coordinate wrapped: {}", s.end);
+        }
+    }
+
+    #[test]
+    fn replacing_a_region_keeps_annotations_only_where_they_still_mean_something() {
+        // `ReplaceRange` had no test that could tell a preserved feature from a
+        // mangled one, so every one of these was free to be wrong.
+        let base = || OpLog::new(with_feature("AAAACCCCGGGGTTTT", 9, 12)); // GGGG
+
+        // Interior, shorter: the bases the feature described are gone.
+        let mut log = base();
+        log.apply(
+            OpKind::ReplaceRange {
+                start: 5,
+                len: 8,
+                seq: "NN".into(),
+            },
+            "t",
+        )
+        .unwrap();
+        assert!(
+            log.current().features.is_empty(),
+            "a feature whose bases were all replaced must not be re-anchored onto              the replacement: {:?}",
+            log.current().features
+        );
+
+        // Interior, longer: same reasoning. Pasting a linker over a gene does
+        // not leave the gene behind sitting on the linker.
+        let mut log = base();
+        log.apply(
+            OpKind::ReplaceRange {
+                start: 5,
+                len: 8,
+                seq: "NNNNNNNNNNNNNNNNNNNN".into(),
+            },
+            "t",
+        )
+        .unwrap();
+        assert!(log.current().features.is_empty());
+
+        // Interior, equal length: every base stayed put, so the annotation
+        // still describes what it describes. A codon-optimisation swap.
+        let mut log = base();
+        log.apply(
+            OpKind::ReplaceRange {
+                start: 5,
+                len: 8,
+                seq: "TTTTAAAA".into(),
+            },
+            "t",
+        )
+        .unwrap();
+        assert_eq!(log.current().features.len(), 1);
+        let f = &log.current().features[0];
+        assert_eq!(
+            (f.start(), f.end()),
+            (9, 12),
+            "an equal-length swap moves nothing"
+        );
+
+        // A 1 bp point mutation under a 1 bp feature is the commonest real
+        // replacement there is, and must be preserved.
+        let mut log = OpLog::new(with_feature("AAAACCCCGGGGTTTT", 9, 9));
+        log.apply(
+            OpKind::ReplaceRange {
+                start: 9,
+                len: 1,
+                seq: "T".into(),
+            },
+            "t",
+        )
+        .unwrap();
+        assert_eq!(log.current().features.len(), 1);
+        assert_eq!(
+            (
+                log.current().features[0].start(),
+                log.current().features[0].end()
+            ),
+            (9, 9)
+        );
+
+        // An identity replacement changes nothing, so it must move nothing.
+        let mut log = OpLog::new(with_feature("AAAACCCCGGGGTTTT", 5, 12));
+        log.apply(
+            OpKind::ReplaceRange {
+                start: 1,
+                len: 16,
+                seq: "AAAACCCCGGGGTTTT".into(),
+            },
+            "t",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                log.current().features[0].start(),
+                log.current().features[0].end()
+            ),
+            (5, 12),
+            "replacing bases with themselves must not drag the annotation"
+        );
+
+        // A straddling segment keeps the part that survived.
+        let mut log = OpLog::new(with_feature("AAAACCCCGGGGTTTT", 5, 16));
+        log.apply(
+            OpKind::ReplaceRange {
+                start: 9,
+                len: 8,
+                seq: "N".into(),
+            },
+            "t",
+        )
+        .unwrap();
+        assert_eq!(log.current().features.len(), 1);
+        let f = &log.current().features[0];
+        assert_eq!((f.start(), f.end()), (5, 8), "the surviving prefix is kept");
+        assert!(log.current().is_valid());
+    }
+
+    #[test]
     fn a_partly_deleted_feature_is_truncated_to_what_survives() {
         // The feature covers CCCCGGGG; remove its last four bases.
         let mut log = OpLog::new(with_feature("AAAACCCCGGGGTTTT", 5, 12));
@@ -1066,8 +1274,8 @@ mod tests {
             }
         };
         assert_ne!(
-            derive_id(None, &mk("a b", "c")),
-            derive_id(None, &mk("a", "b c"))
+            derive_id(None, &mk("a\0b", "c")),
+            derive_id(None, &mk("a", "b\0c"))
         );
     }
 
