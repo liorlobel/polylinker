@@ -245,6 +245,28 @@ Step 'melting temperature vs Biopython' {
 Step 'primer binding sites vs pydna' {
     python reference/python/tests/xcheck_primers.py target/release/pl.exe
 } { HavePy 'pydna' }
+# All 27 NCBI genetic codes, and the ORFs read with them, against Biopython.
+#
+# Four checks of deliberately different kinds, because the failure modes are
+# different in kind. Biopython supplies the tables; every reported ORF is
+# re-translated from its own coordinates (which catches a span off by three, on
+# the wrong strand, or wrapped the wrong way -- all of which still produce a
+# plausible-looking protein); linear ORF sets are enumerated a second time in
+# protein space; and circular ones must survive rotation.
+#
+# The rotation check earned its place immediately. The scan used to begin at
+# the origin, which is an arbitrary cut, so the first start codon it met was
+# whichever one happened to sit nearest that cut -- rotating a plasmid changed
+# its ORFs. Synchronising to a stop first removed the origin from the answer.
+#
+# Verified it can fail three ways: reverting the origin sync gives 22
+# disagreements; flipping one residue in table 24 is caught and named exactly
+# ('GTG', 'A', 'V'); and reading stops off the amino-acid line instead of the
+# Starts line breaks tables 27, 28 and 31, where a codon is both a stop and an
+# amino acid.
+Step 'genetic codes and ORFs vs Biopython' {
+    python reference/python/tests/xcheck_translate.py target/release/pl.exe
+} { HavePy 'Bio' }
 # Chromatograms vs Biopython, on real traces.
 #
 # Corpus-gated: 394 .ab1 files live on the lab drive and none may live here.

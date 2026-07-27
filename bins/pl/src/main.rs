@@ -22,6 +22,7 @@ USAGE:
     pl goldengate <OVERHANG>...          check a Type IIS overhang set
     pl primers <file> --primer SEQ       where primers anneal
     pl trace   <file.ab1>...             read a Sanger chromatogram
+    pl orfs    <file> [--table N]        open reading frames, six frames
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -38,6 +39,16 @@ INDEX OPTIONS:
     --index-at <dir>             keep the index here instead of the OS cache
     --follow-links               follow symbolic links (off by default)
     --max-depth <n>              default 32
+
+ORFS OPTIONS:
+    --table <n>                  NCBI genetic code (default 11, bacterial)
+    --min-aa <n>                 shortest ORF to report (default 30)
+    --any-start                  stop-to-stop runs, not just real start codons
+    --complete-only              drop frames that run off the end
+    --seq <ACGT>                 a sequence instead of a file
+    --circular                   with --seq, treat it as a circle
+    --translate                  print the protein
+    --tables                     list every genetic code and exit
 
 FIND OPTIONS:
     --motif <IUPAC>              both strands, origin-aware
@@ -133,6 +144,7 @@ fn main() -> ExitCode {
         "tm" => cmd_tm(rest),
         "goldengate" => cmd_goldengate(rest),
         "primers" => cmd_primers(rest),
+        "orfs" => cmd_orfs(rest),
         "trace" => cmd_trace(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
@@ -1829,6 +1841,187 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
 }
 
 /// Where primers anneal on a template, with footprint and tail kept apart.
+fn cmd_orfs(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["table", "min-aa", "seq"])?;
+
+    if a.has("tables") {
+        if a.has("json") {
+            println!("{{\n  \"tables\": [");
+            let all: Vec<_> = pl_core::translate::all_tables().collect();
+            for (i, c) in all.iter().enumerate() {
+                println!(
+                    "    {{\"id\": {}, \"name\": {}, \"aas\": {}, \"starts\": {}}}{}",
+                    c.id,
+                    json_str(c.name()),
+                    json_str(c.amino_acids()),
+                    json_str(c.start_codons()),
+                    if i + 1 == all.len() { "" } else { "," }
+                );
+            }
+            println!("  ]\n}}");
+            return Ok(());
+        }
+        println!("NCBI genetic codes\n");
+        for c in pl_core::translate::all_tables() {
+            println!(
+                "  {:>2}  {:<44}{}",
+                c.id,
+                c.name(),
+                if c.is_stop(b"TGA") {
+                    ""
+                } else {
+                    "  TGA is not a stop"
+                }
+            );
+        }
+        return Ok(());
+    }
+
+    // 11, not 1: this is a plasmid tool, and its molecules are read in
+    // bacteria. Table 11 differs only in allowing more initiation codons, so
+    // defaulting to 1 would silently miss the GTG- and TTG-started markers that
+    // fill the vectors people actually clone with.
+    let id: u8 = match a.get("table") {
+        Some(v) => v
+            .parse()
+            .map_err(|_| format!("--table {v:?}: expected a number"))?,
+        None => 11,
+    };
+    let code = pl_core::translate::table(id)
+        .ok_or_else(|| format!("--table {id}: no such NCBI code (try --tables)"))?;
+
+    let mut p = pl_core::orf::Params::default();
+    if let Some(v) = a.get("min-aa") {
+        p.min_aa = v
+            .parse()
+            .map_err(|_| format!("--min-aa {v:?}: expected a number"))?;
+    }
+    p.require_start = !a.has("any-start");
+    p.include_incomplete = !a.has("complete-only");
+
+    let (seq, circular, label) = match a.get("seq") {
+        Some(s) => (
+            s.as_bytes().to_vec(),
+            a.has("circular"),
+            "<--seq>".to_string(),
+        ),
+        None => {
+            let path = a.files.first().ok_or("give a file, or --seq")?;
+            let data = read(path)?;
+            let (mol, _, _) =
+                load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+            (
+                mol.seq.clone(),
+                mol.topology.is_circular(),
+                path.display().to_string(),
+            )
+        }
+    };
+
+    let orfs = pl_core::orf::find_orfs(&seq, code, circular, &p);
+    let n = seq.len();
+
+    // Read an ORF's bases the way its coordinates say to. `start..end` always
+    // runs low-to-high along the plus strand, wrapping the origin when
+    // `end < start`; a reverse ORF is that same span read the other way.
+    let bases_of = |o: &pl_core::orf::Orf| -> Vec<u8> {
+        let span: Vec<u8> = (0..o.bases())
+            .map(|j| seq[(o.start as usize - 1 + j) % n])
+            .collect();
+        if o.strand == pl_core::Strand::Reverse {
+            pl_core::reverse_complement(&span)
+        } else {
+            span
+        }
+    };
+
+    if a.has("json") {
+        println!("{{\n  \"table\": {id},\n  \"orfs\": [");
+        for (i, o) in orfs.iter().enumerate() {
+            print!(
+                "    {{\"start\": {}, \"end\": {}, \"strand\": {}, \"frame\": {}, \"aa_len\": {}, \"start_codon\": {}, \"complete\": {}, \"wrapped\": {}, \"protein\": {}}}{}",
+                o.start,
+                o.end,
+                json_str(if o.strand == pl_core::Strand::Reverse { "-" } else { "+" }),
+                o.frame,
+                o.aa_len,
+                json_str(&String::from_utf8_lossy(&o.start_codon)),
+                o.complete,
+                o.wrapped,
+                json_str(&String::from_utf8_lossy(&code.translate(&bases_of(o)))),
+                if i + 1 == orfs.len() { "" } else { "," }
+            );
+            println!();
+        }
+        println!("  ]\n}}");
+        return Ok(());
+    }
+
+    println!(
+        "{label}, {n} bp {}",
+        if circular { "circular" } else { "linear" }
+    );
+    println!("table {id} — {}\n", code.name());
+    if orfs.is_empty() {
+        println!("  no ORF of {} aa or more", p.min_aa);
+    }
+    for o in &orfs {
+        println!(
+            "  {} {:>7}..{:<7} {:>5} aa  {}{}{}",
+            if o.strand == pl_core::Strand::Reverse {
+                "-"
+            } else {
+                "+"
+            },
+            o.start,
+            o.end,
+            o.aa_len,
+            String::from_utf8_lossy(&o.start_codon),
+            if o.wrapped { "  crosses origin" } else { "" },
+            if o.complete {
+                ""
+            } else {
+                "  no stop — runs off the end"
+            }
+        );
+        if a.has("translate") {
+            let aa = code.translate(&bases_of(o));
+            for chunk in aa.chunks(60) {
+                println!("      {}", String::from_utf8_lossy(chunk));
+            }
+        }
+    }
+    if !orfs.is_empty() {
+        println!("\n  {} ORF(s)", orfs.len());
+    }
+    if !code.is_stop(b"TGA") {
+        println!("  note: table {id} reads TGA as an amino acid, not a stop");
+    }
+    for c in [b"TAA", b"TAG", b"TGA"] {
+        if code.is_ambiguous_stop(c) {
+            println!(
+                "  note: {} is both a stop and {} in table {id} — where it \
+                 terminates depends on context this tool does not have",
+                String::from_utf8_lossy(c),
+                code.codon(c) as char
+            );
+        }
+    }
+    // A frame with no stop anywhere on a circle has no ORF to report, because
+    // every start in it is equally first. Say so rather than leave a silent gap.
+    for (st, f) in pl_core::stopless_frames(&seq, code, circular) {
+        println!(
+            "  note: frame {}{f} has no stop codon anywhere on this circle",
+            if st == pl_core::Strand::Reverse {
+                "-"
+            } else {
+                "+"
+            }
+        );
+    }
+    Ok(())
+}
+
 fn cmd_primers(args: &[String]) -> Result<(), String> {
     let a = parse_args(args, &["seed", "primer", "seq"])?;
 

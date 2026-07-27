@@ -15,13 +15,26 @@
 //! transcription slip shows up as a whole shifted block rather than one wrong
 //! amino acid. It is also diffable against the NCBI page by eye.
 //!
-//! The tables were checked codon by codon — all 64 amino acids and all 64 start
-//! flags of tables 1, 2 and 11 — against Biopython 1.87, with zero mismatches.
-//! That was a one-off verification, not a standing CI check, so the guarantee
-//! that survives in the repository is the literal pinning in
-//! `the_tables_match_their_published_values` below. A previous version of this
-//! comment cited a cross-check script that does not exist, which meant TABLE2
-//! and TABLE11's alternative starts were pinned by nothing but a length check.
+//! Tables 1, 2 and 11 were checked codon by codon against Biopython 1.87 —
+//! all 64 amino acids and all 64 start flags, zero mismatches — and *because*
+//! they agreed, the remaining 24 were generated from the same source rather
+//! than typed out. All 27 are now compared against Biopython on every run by
+//! `reference/python/tests/xcheck_translate.py`, which is wired into the gate
+//! and was verified to fail: flipping one residue in table 24 is caught and
+//! named exactly. `the_tables_match_their_published_values` below still pins
+//! the three literals, so the tables do not depend on Python being installed.
+//!
+//! An earlier version of this comment cited a cross-check that did not exist,
+//! which left TABLE2 and TABLE11's alternative starts pinned by nothing but a
+//! length check. The script named above is real; if it is ever removed, this
+//! paragraph is a lie again.
+//!
+//! # A codon can be both a stop and an amino acid
+//!
+//! In tables 27, 28 and 31, termination is context-dependent, and NCBI records
+//! that by putting the residue in the AAs line and the stop in the Starts line.
+//! So [`Code::is_stop`] reads the *Starts* line — the amino-acid line is wrong
+//! for those three, and it was what this module used at first.
 
 use crate::iupac;
 
@@ -49,14 +62,58 @@ pub struct Code {
     pub id: u8,
     aas: &'static str,
     starts: &'static str,
+    name: &'static str,
 }
 
-/// Table 1. The only one auto-annotation uses; the others exist so that a
-/// GenBank `/transl_table=` qualifier can be honoured rather than ignored.
+/// Every NCBI genetic code, in the compact form NCBI publishes them in.
+///
+/// All 27, generated from Biopython's `Bio.Data.CodonTable` rather than typed
+/// out — and the three that were already here (1, 2 and 11) were checked
+/// against it first and agreed exactly, which is what made generating the rest
+/// from the same place reasonable. A mistyped amino acid in a table nobody
+/// uses often is invisible until the day someone translates a mitochondrial
+/// construct.
+///
+/// **13 of the 27 do not treat `TGA` as a stop.** Honouring a GenBank
+/// `/transl_table=` qualifier is therefore not a nicety: with the wrong table a
+/// protein reads through its own stop codon, or ends early, and the translation
+/// looks perfectly plausible either way.
+const TABLES: &[(u8, &str, &str, &str)] = &[
+    (1, "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "---M------**--*----M---------------M----------------------------", "Standard"),
+    (2, "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG", "----------**--------------------MMMM----------**---M------------", "Vertebrate Mitochondrial"),
+    (3, "FFLLSSSSYY**CCWWTTTTPPPPHHQQRRRRIIMMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "----------**----------------------MM---------------M------------", "Yeast Mitochondrial"),
+    (4, "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "--MM------**-------M------------MMMM---------------M------------", "Mold Mitochondrial, Protozoan Mitochondrial, Coelenterate Mitochondrial, Mycoplasma, Spiroplasma"),
+    (5, "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSSSVVVVAAAADDEEGGGG", "---M------**--------------------MMMM---------------M------------", "Invertebrate Mitochondrial"),
+    (6, "FFLLSSSSYYQQCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "--------------*--------------------M----------------------------", "Ciliate Nuclear, Dasycladacean Nuclear, Hexamita Nuclear"),
+    (9, "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG", "----------**-----------------------M---------------M------------", "Echinoderm Mitochondrial, Flatworm Mitochondrial"),
+    (10, "FFLLSSSSYY**CCCWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "----------**-----------------------M----------------------------", "Euplotid Nuclear"),
+    (11, "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "---M------**--*----M------------MMMM---------------M------------", "Bacterial, Archaeal, Plant Plastid"),
+    (12, "FFLLSSSSYY**CC*WLLLSPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "----------**--*----M---------------M----------------------------", "Alternative Yeast Nuclear"),
+    (13, "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSGGVVVVAAAADDEEGGGG", "---M------**----------------------MM---------------M------------", "Ascidian Mitochondrial"),
+    (14, "FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG", "-----------*-----------------------M----------------------------", "Alternative Flatworm Mitochondrial"),
+    (15, "FFLLSSSSYY*QCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "----------*---*--------------------M----------------------------", "Blepharisma Macronuclear"),
+    (16, "FFLLSSSSYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "----------*---*--------------------M----------------------------", "Chlorophycean Mitochondrial"),
+    (21, "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNNKSSSSVVVVAAAADDEEGGGG", "----------**-----------------------M---------------M------------", "Trematode Mitochondrial"),
+    (22, "FFLLSS*SYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "------*---*---*--------------------M----------------------------", "Scenedesmus obliquus Mitochondrial"),
+    (23, "FF*LSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "--*-------**--*-----------------M--M---------------M------------", "Thraustochytrium Mitochondrial"),
+    (24, "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG", "---M------**-------M---------------M---------------M------------", "Pterobranchia Mitochondrial"),
+    (25, "FFLLSSSSYY**CCGWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "---M------**-----------------------M---------------M------------", "Candidate Division SR1, Gracilibacteria"),
+    (26, "FFLLSSSSYY**CC*WLLLAPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "----------**--*----M---------------M----------------------------", "Pachysolen tannophilus Nuclear"),
+    (27, "FFLLSSSSYYQQCCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "--------------*--------------------M----------------------------", "Karyorelict Nuclear"),
+    (28, "FFLLSSSSYYQQCCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "----------**--*--------------------M----------------------------", "Condylostoma Nuclear"),
+    (29, "FFLLSSSSYYYYCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "--------------*--------------------M----------------------------", "Mesodinium Nuclear"),
+    (30, "FFLLSSSSYYEECC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "--------------*--------------------M----------------------------", "Peritrich Nuclear"),
+    (31, "FFLLSSSSYYEECCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "----------**-----------------------M----------------------------", "Blastocrithidia Nuclear"),
+    (32, "FFLLSSSSYY*WCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG", "---M------*---*----M------------MMMM---------------M------------", "Balanophoraceae Plastid"),
+    (33, "FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG", "---M-------*-------M---------------M---------------M------------", "Cephalodiscidae Mitochondrial"),
+];
+
+/// Table 1 — the standard code.
 pub const TABLE1: Code = Code {
     id: 1,
     aas: STANDARD,
     starts: STANDARD_STARTS,
+    name: "Standard",
 };
 
 /// Table 11 — bacterial, archaeal and plant plastid. Identical amino acids to
@@ -66,6 +123,7 @@ pub const TABLE11: Code = Code {
     id: 11,
     aas: STANDARD,
     starts: "---M------**--*----M------------MMMM---------------M------------",
+    name: "Bacterial, Archaeal, Plant Plastid",
 };
 
 /// Table 2 — vertebrate mitochondrial. Present so mitochondrial constructs are
@@ -74,16 +132,30 @@ pub const TABLE2: Code = Code {
     id: 2,
     aas: "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG",
     starts: "----------**--------------------MMMM----------**---M------------",
+    name: "Vertebrate Mitochondrial",
 };
 
 /// Look up a code by its GenBank `transl_table` number.
 pub fn table(id: u8) -> Option<Code> {
-    match id {
-        1 => Some(TABLE1),
-        2 => Some(TABLE2),
-        11 => Some(TABLE11),
-        _ => None,
-    }
+    TABLES
+        .iter()
+        .find(|(i, ..)| *i == id)
+        .map(|&(id, aas, starts, name)| Code {
+            id,
+            aas,
+            starts,
+            name,
+        })
+}
+
+/// Every code, in NCBI order.
+pub fn all_tables() -> impl Iterator<Item = Code> {
+    TABLES.iter().map(|&(id, aas, starts, name)| Code {
+        id,
+        aas,
+        starts,
+        name,
+    })
 }
 
 /// The index of a codon in the NCBI ordering, or `None` if any base is not a
@@ -108,6 +180,21 @@ fn codon_index(codon: &[u8]) -> Option<usize> {
 }
 
 impl Code {
+    /// NCBI's name for this code, for a UI that has to say which one it used.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The 64 amino acids, in NCBI's codon order (`TCAG` on each position).
+    pub fn amino_acids(&self) -> &'static str {
+        self.aas
+    }
+
+    /// `M` where a codon may initiate, `-` where it may not, same order.
+    pub fn start_codons(&self) -> &'static str {
+        self.starts
+    }
+
     /// Translate one codon. `None` becomes `X`, so the output length is always
     /// `seq.len() / 3` and a caller can index into it without special cases.
     pub fn codon(&self, codon: &[u8]) -> u8 {
@@ -125,8 +212,35 @@ impl Code {
         }
     }
 
+    /// Does this codon terminate translation?
+    ///
+    /// Read off the *Starts* line, not the amino-acid line, because the two
+    /// disagree in three tables and only the Starts line is right in all 27.
+    /// In the Karyorelict (27), Condylostoma (28) and Blastocrithidia (31)
+    /// nuclear codes a codon is **both** a stop and an amino acid; NCBI writes
+    /// the residue in the AAs line and marks termination in the Starts line, so
+    /// `TGA` in table 27 is `W` *and* a terminator. Asking the amino-acid line
+    /// whether something is a stop gets all three of those codes wrong, in
+    /// opposite directions depending on which line you trust.
     pub fn is_stop(&self, codon: &[u8]) -> bool {
-        self.codon(codon) == b'*'
+        match codon_index(codon) {
+            Some(i) => self.starts.as_bytes()[i] == b'*',
+            None => false,
+        }
+    }
+
+    /// A codon that both terminates and encodes a residue.
+    ///
+    /// True for six codons across tables 27, 28 and 31, and nowhere else.
+    /// Whether one of them actually stops translation depends on context this
+    /// crate does not have — in these organisms, on how close the poly(A) tail
+    /// is — so an ORF that ends at one is a guess. Callers that care should say
+    /// so rather than present the boundary as settled.
+    pub fn is_ambiguous_stop(&self, codon: &[u8]) -> bool {
+        match codon_index(codon) {
+            Some(i) => self.starts.as_bytes()[i] == b'*' && self.aas.as_bytes()[i] != b'*',
+            None => false,
+        }
     }
 
     /// Translate a sequence in frame 0. A trailing partial codon is dropped.
@@ -211,6 +325,61 @@ mod tests {
         assert_eq!(TABLE2.aas.len(), 64);
         assert_eq!(TABLE2.starts.len(), 64);
         assert_eq!(TABLE11.starts.len(), 64);
+    }
+
+    #[test]
+    fn the_named_constants_are_the_same_tables_the_lookup_returns() {
+        // TABLE1/2/11 are spelled out separately for callers that want one
+        // without a lookup, so they can drift from the generated array —
+        // silently, and only for whoever used the constant.
+        for (named, id) in [(TABLE1, 1u8), (TABLE2, 2), (TABLE11, 11)] {
+            let looked_up = table(id).expect("a shipped table");
+            assert_eq!(named.aas, looked_up.aas, "table {id} amino acids");
+            assert_eq!(named.starts, looked_up.starts, "table {id} starts");
+            assert_eq!(named.id, looked_up.id);
+            assert_eq!(named.name, looked_up.name, "table {id} name");
+        }
+    }
+
+    #[test]
+    fn a_codon_can_be_both_a_stop_and_an_amino_acid() {
+        // Tables 27, 28 and 31 encode context-dependent termination: NCBI puts
+        // the residue in the AAs line and the stop in the Starts line. Reading
+        // stops off the AAs line — which this module used to do — makes those
+        // three codes translate through their own stop codons.
+        let t27 = table(27).expect("Karyorelict Nuclear");
+        assert!(t27.is_stop(b"TGA"), "it terminates");
+        assert_eq!(t27.codon(b"TGA"), b'W', "and it is tryptophan");
+        assert!(t27.is_ambiguous_stop(b"TGA"));
+
+        let ambiguous: Vec<(u8, usize)> = all_tables()
+            .map(|c| {
+                (
+                    c.id,
+                    [b"TAA", b"TAG", b"TGA"]
+                        .iter()
+                        .filter(|x| c.is_ambiguous_stop(**x))
+                        .count(),
+                )
+            })
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        assert_eq!(ambiguous, vec![(27, 1), (28, 3), (31, 2)]);
+
+        // Everywhere else the two lines agree, so nothing else changes.
+        for c in all_tables() {
+            for codon in [b"TAA", b"TAG", b"TGA"] {
+                if !c.is_ambiguous_stop(codon) {
+                    assert_eq!(
+                        c.is_stop(codon),
+                        c.codon(codon) == b'*',
+                        "table {} disagrees with itself about {}",
+                        c.id,
+                        String::from_utf8_lossy(codon)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
