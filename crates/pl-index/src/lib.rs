@@ -49,6 +49,7 @@
 //! It also means the browser tool can search an in-memory `Vec<Row>` through
 //! exactly this code.
 
+pub mod codec;
 pub mod nibble;
 pub mod scan;
 

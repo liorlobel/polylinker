@@ -305,16 +305,99 @@ pub const PROVENANCE_COLUMNS: &[&str] = &[
     "sha256",
 ];
 
+/// Reverse [`escape`], in one left-to-right pass.
+///
+/// The chained-`replace` version this replaces did not round-trip. Escaping
+/// `C:\temp\thing` gives `C:\\temp\\thing`; unescaping then ran
+/// `replace("\\t", "\t")` **first**, which saw the `\t` formed by the second
+/// escape backslash and the following `t`, and produced `C:\<TAB>emp\<TAB>hing`.
+/// Three of eight probe strings came back wrong, and a `/note` quoting a
+/// Windows path is all it takes to hit it. Consuming the escape character as
+/// you go cannot make that mistake.
+///
+/// `\r` is handled too. `str::lines()` strips a trailing `\r`, so a cell ending
+/// in one silently lost it — and GenBank written on Windows is full of them.
+///
+/// Deliberately identical to `pl_index::codec::{escape, unescape}`: the two
+/// tables are read by the same eyes, and a second dialect would be a second
+/// bug.
 fn unescape(s: &str) -> String {
-    s.replace("\\t", "\t")
-        .replace("\\n", "\n")
-        .replace("\\\\", "\\")
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            // An unknown escape is kept verbatim: losing a byte is worse than
+            // keeping one we did not write.
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\t', "\\t")
-        .replace('\n', "\\n")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod escaping_tests {
+    use super::{escape, unescape};
+
+    #[test]
+    fn a_windows_path_in_a_note_survives_the_round_trip() {
+        // The exact case the previous codec destroyed.
+        for s in [
+            "C:\\temp\\thing",
+            "a\\tb",
+            "\\n",
+            "\\r",
+            "\\\\",
+            "\\",
+            "ends with a backslash\\",
+            "a\tb",
+            "a\nb",
+            "a\rb",
+            "a\r\nb",
+            "   leading and trailing   ",
+            "",
+            "plain",
+        ] {
+            assert_eq!(unescape(&escape(s)), s, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn an_escaped_cell_never_contains_a_raw_separator() {
+        // The reason escaping exists at all: a tab or newline inside a cell
+        // would silently become a new column or a new row.
+        for s in ["a\tb", "a\nb", "a\rb", "\t\n\r"] {
+            let e = escape(s);
+            assert!(!e.contains('\t'), "{e:?}");
+            assert!(!e.contains('\n'), "{e:?}");
+            assert!(!e.contains('\r'), "{e:?}");
+        }
+    }
 }
 
 /// Split a TSV body into data rows, checking the header.
