@@ -121,7 +121,16 @@ pub struct Feature {
     pub strand: Strand,
     pub segments: Vec<Segment>,
     /// Ordered and allowed to repeat, because GenBank qualifiers are.
-    pub qualifiers: Vec<(String, String)>,
+    ///
+    /// The value is `None` for a **valueless** qualifier — `/pseudo`,
+    /// `/ribosomal_slippage`, `/trans_splicing` — which GenBank writes bare,
+    /// with no `=`. That is a different thing from `/replace=""`, an empty
+    /// *value*, and conflating the two is not cosmetic: collapsing them made
+    /// the writer drop every valueless qualifier, so a `/pseudo` gene came back
+    /// as an ordinary protein-coding one. There are 11,716 valueless
+    /// qualifiers across this project's 328-file GenBank corpus against 4
+    /// empty-valued ones, so the common case was the one being lost.
+    pub qualifiers: Vec<(String, Option<String>)>,
 }
 
 impl Feature {
@@ -147,14 +156,26 @@ impl Feature {
     pub fn color(&self) -> Option<&str> {
         self.segments.iter().find_map(|s| s.color.as_deref())
     }
+    /// The value of a qualifier, or `None` if it is absent **or valueless**.
+    ///
+    /// Use [`Feature::has_qualifier`] to ask whether it is present at all —
+    /// for `/pseudo` that is the entire question.
     pub fn qualifier(&self, key: &str) -> Option<&str> {
         self.qualifiers
             .iter()
             .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+            .and_then(|(_, v)| v.as_deref())
+    }
+    /// Is this qualifier present, with or without a value?
+    pub fn has_qualifier(&self, key: &str) -> bool {
+        self.qualifiers.iter().any(|(k, _)| k == key)
     }
     pub fn set_qualifier(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.qualifiers.push((key.into(), value.into()));
+        self.qualifiers.push((key.into(), Some(value.into())));
+    }
+    /// Record a qualifier that GenBank writes bare, such as `/pseudo`.
+    pub fn set_flag_qualifier(&mut self, key: impl Into<String>) {
+        self.qualifiers.push((key.into(), None));
     }
 }
 

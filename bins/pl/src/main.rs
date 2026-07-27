@@ -150,6 +150,35 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Do these two paths name the same file on disk?
+///
+/// Compared after canonicalisation, so `./x.gb` and `x.gb` are recognised as
+/// one file. `canonicalize` requires the path to exist, which is true of the
+/// input and false of a destination that has not been written yet — so the
+/// destination falls back to canonicalising its parent directory and comparing
+/// the file name.
+fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    let real = |p: &Path| -> Option<PathBuf> {
+        match std::fs::canonicalize(p) {
+            Ok(c) => Some(c),
+            Err(_) => {
+                let dir = std::fs::canonicalize(p.parent().filter(|d| !d.as_os_str().is_empty())?)
+                    .ok()?;
+                Some(dir.join(p.file_name()?))
+            }
+        }
+    };
+    match (real(a), real(b)) {
+        (Some(x), Some(y)) => x == y,
+        // If either side cannot be resolved, fall back to the literal
+        // comparison already made above rather than guessing.
+        _ => false,
+    }
+}
+
 fn title_of(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -338,6 +367,23 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
 
         let stem = genbank::locus_name(&title);
         let mut dest = dir.join(format!("{stem}.{ext}"));
+
+        // Never write over the file we just read.
+        //
+        // Converting a `.gb` to genbank in place computes a destination equal
+        // to the input, and `claimed` only ever guarded output against other
+        // output. A multi-record file made that destructive rather than merely
+        // redundant: `load` keeps only the first record, so a 124-record 36 KB
+        // `.gbk` was rewritten as a 28 KB single-record file with 1,879
+        // features gone — and the CLI reported success.
+        if same_file(path, &dest) {
+            return Err(format!(
+                "{}: converting to {ext} here would overwrite the input file. \
+                 Use --outdir <dir> to write elsewhere, or --stdout.",
+                path.display()
+            ));
+        }
+
         if claimed.contains(&dest) {
             let mut n = 2;
             loop {

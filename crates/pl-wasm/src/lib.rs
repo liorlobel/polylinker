@@ -217,7 +217,14 @@ fn summary_json(mol: &Molecule, fmt: Format) -> String {
         j.end_arr();
         j.key("qualifiers").arr();
         for (k, v) in &f.qualifiers {
-            j.obj().kv_str("name", k).kv_str("value", v).end_obj();
+            // `valueless` distinguishes a bare `/pseudo` from `/replace=""`.
+            // Emitting both as `""` would tell a caller that a pseudogene
+            // carries an empty note rather than a flag.
+            j.obj()
+                .kv_str("name", k)
+                .kv_str("value", v.as_deref().unwrap_or(""))
+                .kv_bool("valueless", v.is_none())
+                .end_obj();
         }
         j.end_arr();
         j.end_obj();

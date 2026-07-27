@@ -99,6 +99,29 @@ impl App {
         match Document::open(&path) {
             Ok(d) => {
                 self.status = describe(&d.molecule, d.format);
+                // Say so when a file's own annotations do not describe it.
+                //
+                // `Molecule::validate` already detects coordinates past the end
+                // of the sequence, inverted spans and zero starts, and nothing
+                // under `bins/` was calling it — so a `.dna` claiming a feature
+                // at `1..18446744073709551615` reached the renderer unchecked
+                // and took the app down. The drawing code is now hardened too,
+                // but a bad file should be *reported*, not merely survived.
+                let problems = d.molecule.validate();
+                if !problems.is_empty() {
+                    self.status = format!(
+                        "{}  —  {} coordinate problem{} in this file: {}",
+                        self.status,
+                        problems.len(),
+                        if problems.len() == 1 { "" } else { "s" },
+                        problems
+                            .iter()
+                            .take(3)
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
+                }
                 self.document = Some(d);
                 self.error = None;
                 self.selected = None;

@@ -33,6 +33,7 @@ export {
   arcPath,
   baseToAngle,
   polar,
+  safeColor,
   segmentRanges,
   type Point,
   type Ring,

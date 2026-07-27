@@ -119,7 +119,32 @@ impl OpKind {
     /// may. Adding a timestamp would make two identical digests hash
     /// differently and destroy the cross-machine comparability that is the
     /// whole point of content addressing.
+    ///
+    /// # The encoding must be injective
+    ///
+    /// Two operations that differ in *any* way `apply` acts on must produce
+    /// different bytes, and this got it wrong twice.
+    ///
+    /// Fields were omitted: `SetFeature` hashed only a feature's name, kind,
+    /// strand and segment bounds, while `apply` clones the whole feature. So
+    /// editing a qualifier or a segment colour derived the *same* `OpId` as the
+    /// edit before it, `apply` saw the id already present and declined to record
+    /// the operation — while still advancing to the new document. The log then
+    /// said one thing and the document another, and undo/redo silently restored
+    /// the older text. A qualifier edit disappearing without an error is
+    /// exactly the class of loss ADR-2 exists to prevent.
+    ///
+    /// And the framing was ambiguous: variable-length fields were separated by
+    /// NUL bytes, but a Rust `String` may contain NUL, so `(name "a\0b", kind
+    /// "c")` and `(name "a", kind "b\0c")` encoded identically. Every
+    /// variable-length field is now length-prefixed instead.
     fn content(&self) -> Vec<u8> {
+        /// Append a length-prefixed field. Unambiguous for any byte content.
+        fn field(v: &mut Vec<u8>, bytes: &[u8]) {
+            v.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+            v.extend_from_slice(bytes);
+        }
+
         let mut v = Vec::new();
         match self {
             OpKind::InsertAt { at, seq } => {
@@ -150,16 +175,41 @@ impl OpKind {
             OpKind::SetFeature { index, feature } => {
                 v.push(7);
                 v.extend_from_slice(&(index.map(|i| i as u64).unwrap_or(u64::MAX)).to_be_bytes());
-                v.extend_from_slice(feature.name.as_bytes());
-                v.push(0);
-                v.extend_from_slice(feature.kind.as_bytes());
-                v.push(0);
-                v.extend_from_slice(
-                    &(feature.strand.to_directionality().unwrap_or(0)).to_be_bytes(),
-                );
+                field(&mut v, feature.name.as_bytes());
+                field(&mut v, feature.kind.as_bytes());
+                // `Unoriented` has no directionality; distinguish it from a
+                // recorded 0 rather than folding the two together.
+                match feature.strand.to_directionality() {
+                    Some(d) => {
+                        v.push(1);
+                        v.extend_from_slice(&d.to_be_bytes());
+                    }
+                    None => v.push(0),
+                }
+                v.extend_from_slice(&(feature.segments.len() as u64).to_be_bytes());
                 for s in &feature.segments {
                     v.extend_from_slice(&s.start.to_be_bytes());
                     v.extend_from_slice(&s.end.to_be_bytes());
+                    v.push(s.translated as u8);
+                    field(&mut v, s.kind.as_bytes());
+                    match &s.color {
+                        Some(c) => {
+                            v.push(1);
+                            field(&mut v, c.as_bytes());
+                        }
+                        None => v.push(0),
+                    }
+                }
+                v.extend_from_slice(&(feature.qualifiers.len() as u64).to_be_bytes());
+                for (k, val) in &feature.qualifiers {
+                    field(&mut v, k.as_bytes());
+                    match val {
+                        Some(x) => {
+                            v.push(1);
+                            field(&mut v, x.as_bytes());
+                        }
+                        None => v.push(0),
+                    }
                 }
             }
             OpKind::RemoveFeature { index } => {
@@ -209,6 +259,15 @@ pub enum OpError {
     /// an accepted cost, paid back here: an operation that would corrupt the
     /// annotations is refused rather than recorded.
     WouldCorrupt(Vec<crate::Invalid>),
+    /// Two different operations derived the same identity.
+    ///
+    /// Should be unreachable: `OpKind::content` is length-prefixed and covers
+    /// every field `apply` acts on. It exists because the alternative to
+    /// noticing a collision was silently discarding an edit, and a refused
+    /// operation is recoverable where a lost one is not.
+    IdCollision {
+        id: OpId,
+    },
     /// Nothing to undo or redo.
     AtEnd,
 }
@@ -234,6 +293,10 @@ impl std::fmt::Display for OpError {
                 }
                 Ok(())
             }
+            OpError::IdCollision { id } => write!(
+                f,
+                "operation id {id} is already used by a different operation;                  refusing rather than losing the edit"
+            ),
             OpError::AtEnd => write!(f, "nothing further in that direction"),
         }
     }
@@ -503,15 +566,31 @@ impl OpLog {
         }
 
         let id = derive_id(self.cursor, &kind);
-        if !self.by_id.contains_key(&id) {
-            self.by_id.insert(id, self.ops.len());
-            self.ops.push(Op {
-                id,
-                parent: self.cursor,
-                kind,
-                actor: actor.to_string(),
-            });
-            self.children.entry(self.cursor).or_default().push(id);
+        match self.by_id.get(&id) {
+            None => {
+                self.by_id.insert(id, self.ops.len());
+                self.ops.push(Op {
+                    id,
+                    parent: self.cursor,
+                    kind,
+                    actor: actor.to_string(),
+                });
+                self.children.entry(self.cursor).or_default().push(id);
+            }
+            // Re-doing the identical operation from the identical parent is
+            // legitimate and idempotent — that is what content addressing is
+            // for. But an id collision between two *different* operations is
+            // not, and used to pass silently: the op was not recorded while
+            // `current` still advanced, so the log and the document disagreed
+            // and the next undo/redo quietly reinstated the older version.
+            //
+            // Belt and braces alongside the injective encoding above. If this
+            // ever fires, the encoding has a hole, and losing an edit is far
+            // worse than refusing one.
+            Some(&existing) if self.ops[existing].kind != kind => {
+                return Err(OpError::IdCollision { id });
+            }
+            Some(_) => {}
         }
 
         self.cursor = Some(id);
@@ -900,6 +979,113 @@ mod tests {
         let s = &log.current().seq;
         assert_eq!(&s[(f.start() - 1) as usize..f.end() as usize], b"CCCC");
         assert!(log.current().is_valid());
+    }
+
+    #[test]
+    fn two_different_feature_edits_do_not_share_an_identity() {
+        // `content()` hashed only name/kind/strand/segment-bounds while `apply`
+        // clones the whole feature, so editing a qualifier or a colour derived
+        // the SAME id as the previous edit. `apply` then saw the id already
+        // present, declined to record the operation, and advanced `current`
+        // anyway — so the log and the document disagreed and the next
+        // undo/redo silently reinstated the older version.
+        let mut a = Feature::new("gene", "misc_feature");
+        a.segments.push(Segment::new(1, 4));
+        a.set_qualifier("note", "version A");
+
+        let mut b = a.clone();
+        b.qualifiers.clear();
+        b.set_qualifier("note", "version B");
+        b.segments[0].color = Some("#ff0000".into());
+
+        assert_ne!(
+            derive_id(
+                None,
+                &OpKind::SetFeature {
+                    index: Some(0),
+                    feature: Box::new(a.clone())
+                }
+            ),
+            derive_id(
+                None,
+                &OpKind::SetFeature {
+                    index: Some(0),
+                    feature: Box::new(b.clone())
+                }
+            ),
+            "two different features must not derive the same id"
+        );
+
+        // End to end: edit, undo, edit differently, undo, redo.
+        let mut log = OpLog::new(with_feature("AAAACCCCGGGGTTTT", 1, 4));
+        log.apply(
+            OpKind::SetFeature {
+                index: Some(0),
+                feature: Box::new(a),
+            },
+            "t",
+        )
+        .unwrap();
+        log.undo().unwrap();
+        log.apply(
+            OpKind::SetFeature {
+                index: Some(0),
+                feature: Box::new(b),
+            },
+            "t",
+        )
+        .unwrap();
+        assert_eq!(
+            log.current().features[0].qualifier("note"),
+            Some("version B")
+        );
+
+        log.undo().unwrap();
+        log.redo().unwrap();
+        assert_eq!(
+            log.current().features[0].qualifier("note"),
+            Some("version B"),
+            "the second edit was lost through undo/redo"
+        );
+        assert_eq!(
+            log.current().features[0].segments[0].color.as_deref(),
+            Some("#ff0000")
+        );
+    }
+
+    #[test]
+    fn a_nul_byte_in_a_name_cannot_forge_another_operation() {
+        // NUL used to delimit the variable-length fields, but a Rust String may
+        // contain NUL, so these two encoded identically.
+        let mk = |name: &str, kind: &str| {
+            let mut f = Feature::new(name, kind);
+            f.segments.push(Segment::new(1, 4));
+            OpKind::SetFeature {
+                index: Some(0),
+                feature: Box::new(f),
+            }
+        };
+        assert_ne!(
+            derive_id(None, &mk("a b", "c")),
+            derive_id(None, &mk("a", "b c"))
+        );
+    }
+
+    #[test]
+    fn identical_work_still_derives_an_identical_id() {
+        // The property the whole scheme exists for must survive the fix:
+        // the same edit from the same parent is the same operation, on any
+        // machine, at any time.
+        let mk = || {
+            let mut f = Feature::new("AmpR", "CDS");
+            f.segments.push(Segment::new(10, 900));
+            f.set_qualifier("gene", "bla");
+            OpKind::SetFeature {
+                index: None,
+                feature: Box::new(f),
+            }
+        };
+        assert_eq!(derive_id(None, &mk()), derive_id(None, &mk()));
     }
 
     #[test]

@@ -51,7 +51,21 @@ pub fn unescape(s: &str) -> String {
             i += ch.len_utf8();
             continue;
         }
-        match s[i..].find(';') {
+        // Search only as far as the longest entity this can expand, rather than
+        // to the end of the payload.
+        //
+        // `s[i..].find(';')` scanned the whole remainder for every `&`, which is
+        // O(n²) on input an attacker chooses: 800 KB of bare `&` took 8.8 s, and
+        // 8 MB would peg a core for roughly a quarter of an hour — synchronous
+        // and uncancellable inside the wasm module. Ten of the corpus `.dna`
+        // files are already over 400 KB.
+        //
+        // The window must reach `i + 13`: the longest form accepted below is
+        // `&#4294967295;`, whose `;` sits at `rel == 12`. Searching bytes rather
+        // than `&str` also keeps the slice off a char boundary — `find` on a
+        // `&str` sliced at an arbitrary index would be a fresh panic.
+        let window = &b[i + 1..(i + 14).min(b.len())];
+        match window.iter().position(|&c| c == b';').map(|p| p + 1) {
             // A bare '&' is not an entity; emit it and move on rather than
             // discarding the rest of the label.
             None => {
@@ -211,18 +225,18 @@ fn parse_attrs(s: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        while i < b.len() && (b[i] as char).is_whitespace() {
+        while i < b.len() && b[i].is_ascii_whitespace() {
             i += 1;
         }
         if i >= b.len() {
             break;
         }
         let key_start = i;
-        while i < b.len() && b[i] != b'=' && !(b[i] as char).is_whitespace() {
+        while i < b.len() && b[i] != b'=' && !b[i].is_ascii_whitespace() {
             i += 1;
         }
         let key = s[key_start..i].to_string();
-        while i < b.len() && (b[i] as char).is_whitespace() {
+        while i < b.len() && b[i].is_ascii_whitespace() {
             i += 1;
         }
         if i >= b.len() || b[i] != b'=' {
@@ -233,7 +247,7 @@ fn parse_attrs(s: &str) -> Vec<(String, String)> {
             continue;
         }
         i += 1; // '='
-        while i < b.len() && (b[i] as char).is_whitespace() {
+        while i < b.len() && b[i].is_ascii_whitespace() {
             i += 1;
         }
         if i >= b.len() {
@@ -251,7 +265,7 @@ fn parse_attrs(s: &str) -> Vec<(String, String)> {
             v
         } else {
             let start = i;
-            while i < b.len() && !(b[i] as char).is_whitespace() {
+            while i < b.len() && !b[i].is_ascii_whitespace() {
                 i += 1;
             }
             &s[start..i]
@@ -355,5 +369,67 @@ mod tests {
     fn multibyte_text_is_not_split_mid_character() {
         let ev = opens("<A>δβγ &amp; more</A>");
         assert_eq!(ev[1], Event::Text("δβγ & more".into()));
+    }
+
+    #[test]
+    fn non_ascii_inside_a_tag_does_not_panic() {
+        // `b[i] as char` is a Latin-1 widening, so the UTF-8 continuation bytes
+        // 0xA0 and 0x85 looked like NBSP and NEL. The attribute scan stopped
+        // mid-codepoint and the next slice panicked on a char boundary. A `.dna`
+        // whose feature name carries a non-breaking space reaches this, and on
+        // the shipped wasm (`panic = "abort"`) it kills the module.
+        for src in [
+            "<Feature na\u{a0}me=\"x\"/>",
+            "<Feature name\u{a0}=\"x\"/>",
+            "<Feature name=\u{a0}\"x\"/>",
+            "<Feature\u{a0}name=\"x\"/>",
+            "<Feature name=x\u{85}y/>",
+            "<Feature δ=\"β\" name=\"γ\"/>",
+            "<A a=\u{a0}/>",
+        ] {
+            // The only requirement is that it terminates without panicking;
+            // what it makes of malformed markup is not specified.
+            let _ = opens(src);
+        }
+    }
+
+    #[test]
+    fn unescape_is_linear_not_quadratic() {
+        // 800 KB of bare '&' took 8.8 s before the search window was bounded,
+        // and 8 MB would have taken about a quarter of an hour — synchronous
+        // and uncancellable inside wasm.
+        let n = 400_000;
+        let hostile = "&".repeat(n);
+        let started = std::time::Instant::now();
+        let out = unescape(&hostile);
+        let elapsed = started.elapsed();
+        assert_eq!(out.len(), n, "a bare '&' must survive unchanged");
+        assert!(
+            elapsed.as_millis() < 2_000,
+            "unescape took {elapsed:?} for {n} ampersands — the search is not bounded"
+        );
+
+        // The window must still reach the longest entity it accepts.
+        assert_eq!(
+            unescape("&#4294967295;"),
+            "&#4294967295;",
+            "out of range, kept literal"
+        );
+        assert_eq!(unescape("&#65;"), "A");
+        assert_eq!(unescape("&#x41;"), "A");
+        assert_eq!(unescape("&amp;"), "&");
+        // ...and stop before something that is merely long.
+        assert_eq!(unescape("&notanentityatall;"), "&notanentityatall;");
+        assert_eq!(unescape("&amp"), "&amp");
+        assert_eq!(unescape("a&b&c"), "a&b&c");
+    }
+
+    #[test]
+    fn unescape_handles_an_entity_split_by_the_end_of_input() {
+        // The bounded window is computed with `.min(b.len())`; check the edge.
+        for tail in ["&", "&#", "&#6", "&#65", "&amp", "&#x"] {
+            let s = format!("prefix{tail}");
+            assert_eq!(unescape(&s), s);
+        }
     }
 }

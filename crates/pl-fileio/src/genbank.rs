@@ -44,7 +44,7 @@ pub fn parse_all(text: &str) -> Vec<Molecule> {
 ///
 /// GenBank spreads one feature over many lines, and both the location and any
 /// quoted qualifier can wrap, so parsing has to hold a partial feature open.
-type Pending = (String, String, Vec<(String, String)>);
+type Pending = (String, String, Vec<(String, Option<String>)>);
 
 fn parse_record(lines: &[&str]) -> Molecule {
     let mut mol = Molecule::default();
@@ -119,17 +119,24 @@ fn parse_record(lines: &[&str]) -> Molecule {
             }
             let name = ["label", "gene", "product", "locus_tag", "note"]
                 .iter()
-                .find_map(|k| quals.iter().find(|(qk, _)| qk == k).map(|(_, v)| v.clone()))
+                .find_map(|k| {
+                    quals
+                        .iter()
+                        .find(|(qk, _)| qk == k)
+                        // A valueless qualifier cannot name anything.
+                        .and_then(|(_, v)| v.clone())
+                })
                 .unwrap_or_else(|| key.clone());
             let color = quals
                 .iter()
                 .find(|(k, _)| k == "ApEinfo_fwdcolor" || k == "ApEinfo_revcolor")
-                .map(|(_, v)| v.clone())
+                .and_then(|(_, v)| v.clone())
                 .or_else(|| {
                     quals
                         .iter()
-                        .find(|(k, v)| k == "note" && v.contains('#'))
-                        .and_then(|(_, v)| v.split('#').nth(1))
+                        .find(|(k, v)| k == "note" && v.as_deref().is_some_and(|s| s.contains('#')))
+                        .and_then(|(_, v)| v.as_deref())
+                        .and_then(|v| v.split('#').nth(1))
                         .and_then(|h| {
                             // Take hex digits by character, never by byte: a
                             // multibyte char straddling byte 6 would panic, and
@@ -196,32 +203,47 @@ fn parse_record(lines: &[&str]) -> Molecule {
                 continue;
             }
 
-            if let Some(rest) = t.strip_prefix('/') {
+            // A line only starts a new qualifier when no quoted value is open.
+            //
+            // Testing `starts_with('/')` first meant a continuation line that
+            // happened to begin with `/` — extremely common in COG and product
+            // descriptions, 168 times across 66 of this project's corpus files
+            // — was read as a brand new qualifier. The real value truncated,
+            // a junk key was fabricated from the prose, and every later
+            // continuation line was dropped. It is also self-inflicted:
+            // `qualifier_lines` wraps on spaces, so any name containing " / "
+            // failed to survive our own write-then-read.
+            if open_qual.is_none() && t.starts_with('/') {
+                let rest = &t[1..];
                 loc_open = false;
-                let (k, v) = match rest.split_once('=') {
-                    Some((k, v)) => (k.to_string(), v.to_string()),
-                    None => (rest.to_string(), String::new()),
+                let (k, raw) = match rest.split_once('=') {
+                    Some((k, v)) => (k.to_string(), Some(v.to_string())),
+                    // No '=' at all: a valueless qualifier such as /pseudo.
+                    None => (rest.to_string(), None),
                 };
-                let quoted_open = v.starts_with('"') && !(v.len() > 1 && v.ends_with('"'));
-                let clean = v.trim_matches('"').to_string();
-                quals.push((k, clean));
-                open_qual = if quoted_open {
-                    Some(quals.len() - 1)
-                } else {
-                    None
-                };
+                match raw {
+                    None => {
+                        quals.push((k, None));
+                        open_qual = None;
+                    }
+                    Some(v) => {
+                        let (text, closed) = open_value(&v);
+                        quals.push((k, Some(text)));
+                        open_qual = if closed { None } else { Some(quals.len() - 1) };
+                    }
+                }
             } else if let Some(idx) = open_qual {
                 // Continuation of a quoted qualifier such as /translation.
-                let closing = t.ends_with('"');
-                let piece = t.trim_end_matches('"');
+                let (piece, closed) = continue_value(t);
                 let sep = if quals[idx].0 == "translation" {
                     ""
                 } else {
                     " "
                 };
-                quals[idx].1.push_str(sep);
-                quals[idx].1.push_str(piece);
-                if closing {
+                let slot = quals[idx].1.get_or_insert_with(String::new);
+                slot.push_str(sep);
+                slot.push_str(&piece);
+                if closed {
                     open_qual = None;
                 }
             }
@@ -238,6 +260,53 @@ fn parse_record(lines: &[&str]) -> Molecule {
 
 fn unbalanced(s: &str) -> bool {
     s.matches('(').count() > s.matches(')').count()
+}
+
+/// Read the text of a quoted qualifier value, collapsing `""` to `"`.
+///
+/// Returns the decoded text and whether the closing quote was reached on this
+/// line. An unquoted value (`/codon_start=1`) is taken whole and is always
+/// closed.
+///
+/// The old code used `trim_matches('"')`, which never collapsed the escape, so
+/// a value containing a literal quote doubled its quote count on **every**
+/// save/load cycle: 2 → 4 → 8 → 16. Worse, when an escaped `""` fell on a line
+/// wrap, `ends_with('"')` read it as the close, the qualifier was marked
+/// finished, and every remaining continuation line was silently discarded.
+fn open_value(v: &str) -> (String, bool) {
+    match v.strip_prefix('"') {
+        None => (v.to_string(), true),
+        Some(body) => decode_quoted(body),
+    }
+}
+
+/// The same, for a continuation line of an already-open value.
+fn continue_value(t: &str) -> (String, bool) {
+    decode_quoted(t)
+}
+
+/// Walk a quoted run, treating `""` as one literal `"` and a lone `"` as the
+/// terminator.
+fn decode_quoted(s: &str) -> (String, bool) {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            if i + 1 < b.len() && b[i + 1] == b'"' {
+                out.push('"');
+                i += 2;
+                continue;
+            }
+            // A single quote closes the value; GenBank puts nothing after it.
+            return (out, true);
+        }
+        // Copy whole characters so multi-byte text is not split.
+        let ch = s[i..].chars().next().expect("index is on a char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    (out, false)
 }
 
 /// Parse a GenBank location into 1-based inclusive segments plus a strand.
@@ -327,7 +396,22 @@ fn format_location(f: &Feature) -> String {
 }
 
 fn qualifier_lines(key: &str, value: &str, out: &mut String) {
+    qualifier_lines_opt(key, Some(value), out)
+}
+
+/// Write one qualifier. `None` emits the bare `/key` form.
+fn qualifier_lines_opt(key: &str, value: Option<&str>, out: &mut String) {
     const PAD: &str = "                     "; // 21 spaces
+    let Some(value) = value else {
+        // `/pseudo` and friends. These used to be skipped entirely by a
+        // `v.is_empty()` test at the call site, which silently turned every
+        // pseudogene in an exported file into an ordinary protein-coding gene.
+        out.push_str(PAD);
+        out.push('/');
+        out.push_str(key);
+        out.push('\n');
+        return;
+    };
     let raw = format!("/{}=\"{}\"", key, value.replace('"', "\"\""));
     let mut line = String::from(PAD);
     for word in raw.split(' ') {
@@ -396,10 +480,18 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
         out.push_str(&format!("     {:<15} {}\n", key, format_location(f)));
         qualifier_lines("label", &f.name, &mut out);
         for (k, v) in &f.qualifiers {
-            if k == "label" || v.is_empty() || k.starts_with("ApEinfo") {
+            // A key must be a legal GenBank qualifier name. The reader used to
+            // manufacture keys out of prose when it mistook a continuation line
+            // for a new qualifier; that is fixed, but validating here keeps a
+            // malformed input from becoming malformed output.
+            if k == "label"
+                || k.starts_with("ApEinfo")
+                || k.is_empty()
+                || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
                 continue;
             }
-            qualifier_lines(k, v, &mut out);
+            qualifier_lines_opt(k, v.as_deref(), &mut out);
         }
         if let Some(c) = f.color() {
             qualifier_lines("ApEinfo_fwdcolor", c, &mut out);
@@ -452,6 +544,115 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal record wrapping one feature's qualifier block.
+    fn with_quals(quals: &str) -> Molecule {
+        let src = format!(
+            "LOCUS       test                      12 bp    DNA     linear   SYN 27-JUL-2026\n\
+             FEATURES             Location/Qualifiers\n\
+             \x20    CDS             1..12\n{quals}\
+             ORIGIN\n        1 acgtacgtacgt\n//\n"
+        );
+        parse(&src)
+    }
+
+    #[test]
+    fn a_continuation_line_starting_with_a_slash_is_not_a_new_qualifier() {
+        // 168 occurrences across 66 of this project's corpus files. The value
+        // truncated, the continuation became a fabricated qualifier key, and
+        // every later continuation line was dropped.
+        let m = with_quals(
+            "                     /product=\"Energy production\n\
+             \x20                    /conversion; Region: UbiH\n\
+             \x20                    /and more text\"\n\
+             \x20                    /codon_start=1\n",
+        );
+        assert_eq!(m.features.len(), 1);
+        let f = &m.features[0];
+        assert_eq!(
+            f.qualifier("product"),
+            Some("Energy production /conversion; Region: UbiH /and more text")
+        );
+        // No key was invented out of the prose...
+        assert!(!f.has_qualifier("conversion; Region: UbiH"));
+        assert!(!f.has_qualifier("and"));
+        // ...and the qualifier that genuinely followed still arrived.
+        assert_eq!(f.qualifier("codon_start"), Some("1"));
+        assert_eq!(f.qualifiers.len(), 2, "{:?}", f.qualifiers);
+    }
+
+    #[test]
+    fn an_escaped_quote_survives_repeated_round_trips() {
+        // `trim_matches('"')` never collapsed `""`, so the quote count doubled
+        // on every save/load: 2 -> 4 -> 8 -> 16.
+        let m = with_quals("                     /note=\"a \"\"quoted\"\" word\"\n");
+        assert_eq!(m.features[0].qualifier("note"), Some(r#"a "quoted" word"#));
+
+        let mut cur = m;
+        for cycle in 0..4 {
+            let text = write(&cur, "test", (27, 6, 2026));
+            cur = parse(&text);
+            assert_eq!(
+                cur.features[0].qualifier("note"),
+                Some(r#"a "quoted" word"#),
+                "quote handling drifted on cycle {cycle}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_escaped_quote_at_a_line_wrap_does_not_end_the_value() {
+        // The nastier half: when `""` landed on a wrap boundary the old
+        // `ends_with('"')` read it as the close, and every remaining
+        // continuation line was silently discarded.
+        let m = with_quals(
+            "                     /note=\"first part ends with an escaped \"\"\n\
+             \x20                    second line must not be lost\"\n",
+        );
+        let note = m.features[0].qualifier("note").unwrap();
+        assert!(note.contains("second line must not be lost"), "{note:?}");
+        assert!(
+            note.contains('"'),
+            "the escaped quote should be literal: {note:?}"
+        );
+    }
+
+    #[test]
+    fn a_valueless_qualifier_survives_a_round_trip() {
+        // 11,561 `/pseudo` in this project's corpus were being deleted on
+        // write, silently turning every pseudogene into a protein-coding gene.
+        let m = with_quals(
+            "                     /pseudo\n\
+             \x20                    /ribosomal_slippage\n\
+             \x20                    /gene=\"thrA\"\n",
+        );
+        let f = &m.features[0];
+        assert!(f.has_qualifier("pseudo"));
+        assert_eq!(f.qualifier("pseudo"), None, "it has no value, and says so");
+        assert!(f.has_qualifier("ribosomal_slippage"));
+        assert_eq!(f.qualifier("gene"), Some("thrA"));
+
+        let text = write(&m, "test", (27, 6, 2026));
+        assert!(
+            text.lines().any(|l| l.trim() == "/pseudo"),
+            "/pseudo must be written bare, not dropped:\n{text}"
+        );
+        let again = parse(&text);
+        assert!(again.features[0].has_qualifier("pseudo"));
+        assert!(again.features[0].has_qualifier("ribosomal_slippage"));
+        assert_eq!(again.features[0].qualifier("gene"), Some("thrA"));
+    }
+
+    #[test]
+    fn an_empty_value_is_not_the_same_as_no_value() {
+        let m = with_quals("                     /pseudo\n                     /replace=\"\"\n");
+        let f = &m.features[0];
+        assert_eq!(f.qualifier("pseudo"), None);
+        assert_eq!(f.qualifier("replace"), Some(""));
+        let text = write(&m, "test", (27, 6, 2026));
+        assert!(text.lines().any(|l| l.trim() == "/pseudo"));
+        assert!(text.lines().any(|l| l.trim() == r#"/replace="""#), "{text}");
+    }
 
     #[test]
     fn location_forms_all_parse() {

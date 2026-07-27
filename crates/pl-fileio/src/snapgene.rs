@@ -148,7 +148,13 @@ pub fn read_blocks(data: &[u8]) -> Result<Vec<Block>, Error> {
         let len = u32::from_be_bytes([data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4]]);
         let body = pos + 5;
         let len_us = len as usize;
-        if body + len_us > n {
+        // Compared by subtraction, not by `body + len_us > n`. `usize` is 32
+        // bits on wasm32, where a declared length of 0xFFFFFFFB wraps the sum
+        // back below `n`, this guard passes, and line 170 then slices
+        // `data[5..4]` — a trap that kills the module. `body <= n` is already
+        // guaranteed by the `TruncatedHeader` check above, so the subtraction
+        // cannot underflow.
+        if len_us > n - body {
             return Err(Error::ShortBlock {
                 kind,
                 offset: pos,
@@ -302,7 +308,7 @@ fn parse_features(x: &str) -> Vec<Feature> {
                             .or_else(|| Event::attr(&attrs, "int"))
                             .or_else(|| Event::attr(&attrs, "predef"))
                             .unwrap_or_default();
-                        f.qualifiers.push((k.clone(), v.to_string()));
+                        f.qualifiers.push((k.clone(), Some(v.to_string())));
                     }
                 }
                 _ => {}
@@ -363,17 +369,23 @@ fn parse_primers(x: &str) -> Vec<Primer> {
                     }
                     if let (Some(p), Some(loc)) = (cur.as_mut(), Event::attr(&attrs, "location")) {
                         if let Some((a, b)) = loc.split_once('-') {
-                            if let (Ok(start), Ok(end)) =
-                                (a.trim().parse::<u64>(), b.trim().parse::<u64>())
-                            {
+                            // `checked_add`: these are numbers from an untrusted
+                            // file, and `location="18446744073709551615-1"`
+                            // panicked here in debug and wrapped to `{start: 0,
+                            // end: 2}` in release — a fabricated coordinate that
+                            // then entered the model unflagged.
+                            if let (Some(start), Some(end)) = (
+                                a.trim().parse::<u64>().ok().and_then(|v| v.checked_add(1)),
+                                b.trim().parse::<u64>().ok().and_then(|v| v.checked_add(1)),
+                            ) {
                                 let rev = Event::attr(&attrs, "boundStrand") == Some("1");
                                 p.sites.push(BindingSite {
                                     // NOT a typo, and not the same as Segment
                                     // above: `location` is 0-based inclusive
                                     // while `range` is 1-based inclusive. See
                                     // `binding_sites_are_zero_based_unlike_segments`.
-                                    start: start + 1,
-                                    end: end + 1,
+                                    start,
+                                    end,
                                     strand: if rev {
                                         Strand::Reverse
                                     } else {
@@ -469,6 +481,29 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
         )
+    }
+
+    #[test]
+    fn a_huge_declared_block_length_does_not_wrap_on_32_bit() {
+        // `body + len_us > n` was computed in usize, which is 32 bits on
+        // wasm32. A declared length of 0xFFFFFFFB wrapped the sum back under
+        // `n`, the guard passed, and the payload slice became `data[5..4]` —
+        // a trap that killed the shipped module on a 19-byte file.
+        for claimed in [u32::MAX, 0xFFFF_FFFB, 0xFFFF_FFF0, 0x8000_0000] {
+            let mut f = header_block();
+            let mut raw = vec![block::HEADER];
+            raw.extend_from_slice(&(f.len() as u32).to_be_bytes());
+            raw.append(&mut f);
+            // A second block claiming more bytes than exist anywhere.
+            raw.push(block::SEQUENCE);
+            raw.extend_from_slice(&claimed.to_be_bytes());
+            raw.extend_from_slice(b"ACGT");
+
+            match read_blocks(&raw) {
+                Err(Error::ShortBlock { claimed: c, .. }) => assert_eq!(c, claimed),
+                other => panic!("expected ShortBlock for {claimed:#x}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

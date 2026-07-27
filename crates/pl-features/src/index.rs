@@ -270,7 +270,31 @@ impl Index {
         }
 
         // Deterministic order, so annotation output is stable between runs.
-        out.sort_by_key(|c| (c.record, c.window.0, c.window.1));
+        //
+        // The sort key must decide the *survivor*, not merely the order. It
+        // used to be `(record, window)` — exactly the key `dedup_by_key` then
+        // compares — so among chains sharing a window the winner was whichever
+        // the (randomly seeded) `HashMap` above happened to yield first. Those
+        // chains carry different `record_span`s, which selects a different slice
+        // of the reference to align, so the annotation could differ run to run
+        // on identical input. Two diagonals collide like this whenever both
+        // clamp at both ends, i.e. for any feature nearly as long as the
+        // molecule.
+        //
+        // The tie-break is a preference, not just a tidy-up: most seed support
+        // first, then the widest span of the reference, so the surviving chain
+        // is the best-evidenced one rather than an arbitrary one.
+        out.sort_by_key(|c| {
+            (
+                c.record,
+                c.window.0,
+                c.window.1,
+                std::cmp::Reverse(c.seeds),
+                std::cmp::Reverse(c.record_span.1 - c.record_span.0),
+                c.record_span.0,
+                c.diagonal,
+            )
+        });
         out.dedup_by_key(|c| (c.record, c.window));
         out
     }
@@ -456,6 +480,35 @@ mod tests {
         // The protein index must not have indexed the DNA record.
         let chains = prot.chain(&prot.seeds(b"ACGTACGTACGTACGTACGT"), 20, 10, 2);
         assert!(chains.iter().all(|c| c.record == 1), "{chains:?}");
+    }
+
+    #[test]
+    fn chains_sharing_a_window_resolve_to_the_same_one_every_time() {
+        // A feature nearly as long as the molecule makes several diagonals
+        // clamp to the same window. The sort key used to be identical to the
+        // dedup key, so which chain survived was decided by HashMap iteration
+        // order — and the survivors carry different `record_span`s, which
+        // changes the slice of the reference that gets aligned.
+        let mut rng = Rng(0x5150_1234_9999_0001);
+        let feature = rng.seq(600);
+        let db = db_of(vec![rec("pf:a", &feature, false)]);
+        let idx = Index::build(&db, false, K_DNA);
+
+        // Two near-identical copies, a few bases apart, in a molecule barely
+        // longer than the feature: both diagonals clamp at both ends.
+        let query = format!("{}{feature}", rng.seq(6));
+        let seeds = idx.seeds(query.as_bytes());
+        let first = idx.chain(&seeds, query.len(), 40, 3);
+
+        // Fresh `Index` values each round, so each gets its own HashMap seed.
+        for _ in 0..40 {
+            let idx2 = Index::build(&db, false, K_DNA);
+            let again = idx2.chain(&idx2.seeds(query.as_bytes()), query.len(), 40, 3);
+            assert_eq!(
+                again, first,
+                "chain() is not deterministic across instances"
+            );
+        }
     }
 
     #[test]

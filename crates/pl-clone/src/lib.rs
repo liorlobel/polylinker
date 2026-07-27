@@ -75,9 +75,15 @@ impl Dseq {
         }
         let w = self.watson.len() as i64;
         let c = self.crick.len() as i64;
-        // watson occupies [0, w); crick occupies [ovhg, ovhg + c).
-        let left = 0.min(self.ovhg);
-        let right = w.max(self.ovhg + c);
+        // watson occupies [0, w); crick occupies **[-ovhg, -ovhg + c)**.
+        //
+        // The sign matters and this line had it backwards. `fragment()`,
+        // `left_end()` and `to_string_full()` all place crick at `-ovhg`, and
+        // that is the convention pydna uses — `xcheck_clone.py` asserts field
+        // equality against pydna and passes. Reading `+ovhg` here over-reported
+        // the length of every sticky-ended fragment by `|ovhg|`.
+        let left = 0.min(-self.ovhg);
+        let right = w.max(c - self.ovhg);
         (right - left) as usize
     }
 
@@ -109,7 +115,13 @@ impl Dseq {
     pub fn right_end(&self) -> End {
         let w = self.watson.len() as i64;
         let c = self.crick.len() as i64;
-        let d = w - (self.ovhg + c);
+        // crick ends at `-ovhg + c`, so watson's protrusion is `w - (c - ovhg)`.
+        // With the sign wrong this called a blunt fragment an 8-base 3'
+        // overhang, and re-closing a molecule you had just cut reported
+        // `ligates_with == false` — "complete digest then religation
+        // reconstructs the original" is a stated validation criterion
+        // (`docs/PLAN.md` §6) and it was failing.
+        let d = w + self.ovhg - c;
         match d.cmp(&0) {
             std::cmp::Ordering::Equal => End::Blunt,
             // watson runs past crick on the right: a 3' overhang on top
@@ -129,12 +141,26 @@ impl Dseq {
     /// filling from crick where it does not. Loses the end shapes, so it is for
     /// display and checksums rather than for cloning decisions.
     pub fn to_string_full(&self) -> String {
-        if self.ovhg >= 0 {
+        let w = self.watson.len() as i64;
+        let c = self.crick.len() as i64;
+        let mut out = String::with_capacity(self.len());
+
+        // crick protruding past watson on the left is crick's 3' end.
+        if self.ovhg > 0 {
             let head = &self.crick[self.crick.len() - self.ovhg as usize..];
-            format!("{}{}", rc(head), self.watson)
-        } else {
-            self.watson.clone()
+            out.push_str(&rc(head));
         }
+        out.push_str(&self.watson);
+
+        // ...and on the right it is crick's 5' end, which had no term at all.
+        // Without it a sequential double digest *deleted bases*: cutting a
+        // 15 nt molecule with BamHI then EcoRI summed to 11 nt, and the missing
+        // GATC was not recoverable from any strand.
+        let tail = (c - self.ovhg - w).min(c);
+        if tail > 0 {
+            out.push_str(&rc(&self.crick[..tail as usize]));
+        }
+        out
     }
 }
 
@@ -537,6 +563,72 @@ mod tests {
             seq.len(),
             "circular fragments must tile the molecule"
         );
+    }
+
+    #[test]
+    fn a_complete_digest_religates_into_the_original() {
+        // `docs/PLAN.md` §6 lists this as a validation criterion, and it did
+        // not hold: `right_end()` read `ovhg` with the wrong sign, so it called
+        // a freshly cut sticky end blunt and every consecutive pair reported
+        // `ligates_with == false`. The cut molecule could not be put back
+        // together — while every unit test passed, because they all used
+        // `ovhg == 0`, the one value at which both sign conventions agree.
+        for (seq, enzyme) in [
+            ("AAAAGGATCCTTTTGGATCCGGGGCCCC", "BamHI"),
+            ("TTTTGAATTCAAAAGAATTCCCCCGGGG", "EcoRI"),
+            ("AAAACTGCAGTTTTCTGCAGGGGGCCCC", "PstI"), // 3' overhang
+        ] {
+            let d = Dseq::new(seq, true);
+            let frags = cut(&d, by_name(enzyme).unwrap());
+            assert!(frags.len() >= 2, "{enzyme} should cut {seq} twice");
+
+            for (i, f) in frags.iter().enumerate() {
+                let next = &frags[(i + 1) % frags.len()];
+                assert!(
+                    f.right_end().ligates_with(&next.left_end()),
+                    "{enzyme} fragment {i} right end {:?} will not re-join {:?}",
+                    f.right_end(),
+                    next.left_end()
+                );
+                // A fragment cut by a sticky cutter has no blunt end.
+                assert_ne!(f.right_end(), End::Blunt, "{enzyme} left a blunt end");
+            }
+
+            // Every base survives the round trip. `to_string_full` had no term
+            // for crick's right-hand protrusion, so bases went missing here.
+            let rebuilt: usize = frags.iter().map(|f| f.to_string_full().len()).sum();
+            let overlap: usize = frags
+                .iter()
+                .map(|f| match f.left_end() {
+                    End::Blunt => 0,
+                    End::Overhang { ref bases, .. } => bases.len(),
+                })
+                .sum();
+            assert_eq!(
+                rebuilt - overlap,
+                seq.len(),
+                "{enzyme}: {rebuilt} bases across fragments (minus {overlap} of shared \
+                 overhang) should reconstruct {} ",
+                seq.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_sticky_fragments_length_counts_each_base_once() {
+        // `len()` also read `ovhg` with the wrong sign and over-reported every
+        // sticky fragment by |ovhg| — a 9 nt BamHI fragment measured 13.
+        let frags = cut(
+            &Dseq::new("AAAAGGATCCTTTT", false),
+            by_name("BamHI").unwrap(),
+        );
+        for f in &frags {
+            assert_eq!(
+                f.len(),
+                f.to_string_full().len(),
+                "len() and the full sequence disagree for {f:?}"
+            );
+        }
     }
 
     #[test]

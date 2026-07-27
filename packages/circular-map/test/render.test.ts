@@ -183,6 +183,50 @@ test('feature names containing xml metacharacters are escaped', () => {
   assert.ok(tagsBalanced(svg));
 });
 
+test('a hostile colour cannot inject an svg attribute', () => {
+  // Colours are not author-controlled: they arrive in .dna and GenBank files
+  // downloaded from Addgene and emailed between labs, and this renderer exists
+  // to produce SVG that a page embeds inline. Before this was fixed, a feature
+  // coloured `#fff" onload="alert(1)" x="` closed the fill attribute and added
+  // an event handler to the host page.
+  const hostile = [
+    '#fff" onload="alert(1)" x="',
+    '" onmouseover="alert(1)',
+    'url(javascript:alert(1))',
+    "#fff' onload='alert(1)",
+    '#fff"><script>alert(1)</script><path d="',
+  ];
+  for (const color of hostile) {
+    const { svg } = renderCircularMap({
+      name: 'x',
+      length: 1000,
+      features: [{ name: 'f', color, segments: [{ start: 10, end: 500 }] }],
+    });
+    assert.ok(!/onload|onmouseover|<script|javascript:/i.test(svg), `injected via ${color}`);
+    assert.ok(tagsBalanced(svg), `unbalanced after ${color}`);
+  }
+
+  // ...and an ordinary colour still works, because refusing everything would be
+  // a safe renderer that draws the wrong picture.
+  for (const good of ['#4f7fd0', '#abc', 'rebeccapurple', 'rgb(10, 20, 30)', 'rgba(1,2,3,0.5)']) {
+    const { svg } = renderCircularMap({
+      name: 'x',
+      length: 1000,
+      features: [{ name: 'f', color: good, segments: [{ start: 10, end: 500 }] }],
+    });
+    assert.ok(svg.includes(`fill="${good}"`), `${good} should survive`);
+  }
+});
+
+test('a hostile theme cannot inject either', () => {
+  const { svg } = renderCircularMap(
+    { name: 'x', length: 1000, features: [{ name: 'f', segments: [{ start: 1, end: 500 }] }] },
+    { theme: { backboneStroke: '#000" onload="alert(1)', labelFill: '"><script>x</script>' } },
+  );
+  assert.ok(!/onload|<script/i.test(svg));
+  assert.ok(tagsBalanced(svg));
+});
+
 test('rendering is deterministic', () => {
   const first = renderCircularMap(pUC19ish).svg;
   for (let i = 0; i < 10; i++) {

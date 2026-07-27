@@ -17,6 +17,7 @@ import {
   n,
   polar,
   radialLine,
+  safeColor,
   segmentRanges,
   type Ring,
 } from './geometry.ts';
@@ -68,9 +69,15 @@ function textWidth(s: string, fontSize: number): number {
 }
 
 function featureColor(f: Feature, theme: Theme): string {
-  if (f.color) return f.color;
-  const byType = f.type ? theme.featureColors[f.type] : undefined;
-  return byType ?? theme.featureColors.default;
+  // `Object.hasOwn`, because `f.type` is a GenBank feature key straight out of
+  // a file. A key of `constructor`, `toString` or `__proto__` otherwise reaches
+  // through to `Object.prototype` and yields an inherited function.
+  const byType =
+    (f.type && Object.hasOwn(theme.featureColors, f.type)
+      ? theme.featureColors[f.type]
+      : undefined) ?? theme.featureColors.default;
+  // Never interpolate a caller-supplied colour raw — see `safeColor`.
+  return safeColor(f.color, safeColor(byType, DEFAULT_THEME.featureColors.default));
 }
 
 function featureSpan(f: Feature, length: number, circular: boolean): number {
@@ -108,13 +115,26 @@ export function renderCircularMap(
   const labelSpacing = options.labelSpacing ?? 3;
   const originAtTop = options.originAtTop ?? 1;
   const minDeg = options.minFeatureDegrees ?? 1.2;
-  const theme: Theme = {
+  // A caller-supplied theme is as untrusted as a feature colour, so every
+  // colour in it is laundered once, here, rather than at each use site.
+  const merged: Theme = {
     ...DEFAULT_THEME,
     ...options.theme,
     featureColors: {
       ...DEFAULT_THEME.featureColors,
       ...(options.theme?.featureColors ?? {}),
     },
+  };
+  const theme: Theme = {
+    background: safeColor(merged.background, DEFAULT_THEME.background),
+    backboneStroke: safeColor(merged.backboneStroke, DEFAULT_THEME.backboneStroke),
+    tickStroke: safeColor(merged.tickStroke, DEFAULT_THEME.tickStroke),
+    labelFill: safeColor(merged.labelFill, DEFAULT_THEME.labelFill),
+    titleFill: safeColor(merged.titleFill, DEFAULT_THEME.titleFill),
+    subtitleFill: safeColor(merged.subtitleFill, DEFAULT_THEME.subtitleFill),
+    leaderStroke: safeColor(merged.leaderStroke, DEFAULT_THEME.leaderStroke),
+    featureStroke: safeColor(merged.featureStroke, DEFAULT_THEME.featureStroke),
+    featureColors: merged.featureColors,
   };
 
   const length = Math.max(1, Math.floor(molecule.length));

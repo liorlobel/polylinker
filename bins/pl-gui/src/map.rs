@@ -39,7 +39,13 @@ pub fn lanes(spans: &[(u64, u64)]) -> Vec<usize> {
     for &i in &order {
         let (s, e) = spans[i];
         // A one-base gap keeps adjacent features visually distinct.
-        let lane = lane_end.iter().position(|&end| end + 1 < s);
+        //
+        // `saturating_add`, because `end` is a coordinate straight out of a
+        // file and nothing on the open path has validated it. A `.dna` carrying
+        // `range="1-18446744073709551615"` panicked here in debug with "attempt
+        // to add with overflow", and in release wrapped to 0 so every feature
+        // silently stacked into a single lane.
+        let lane = lane_end.iter().position(|&end| end.saturating_add(1) < s);
         match lane {
             Some(l) => {
                 lane_end[l] = e;
@@ -380,7 +386,12 @@ fn draw_circular(
 /// any size, few enough that a genome with hundreds of features stays cheap.
 fn arc_points(center: Pos2, radius: f32, a0: f32, a1: f32) -> Vec<Pos2> {
     let sweep = (a1 - a0).abs().max(0.004);
-    let steps = ((sweep / std::f32::consts::TAU) * 240.0).ceil().max(2.0) as usize;
+    // Capped, because `a0`/`a1` derive from file coordinates. A feature ending
+    // at u64::MAX produced a sweep large enough that `steps` reached usize::MAX
+    // and the `collect` below panicked with "capacity overflow", killing the
+    // app on open. A full turn needs 240 points, so 720 is three times more
+    // than any valid sweep can ask for and the cap never fires on a real file.
+    let steps = (((sweep / std::f32::consts::TAU) * 240.0).ceil().max(2.0) as usize).min(720);
     (0..=steps)
         .map(|i| polar(center, radius, a0 + (a1 - a0) * (i as f32 / steps as f32)))
         .collect()
@@ -620,5 +631,25 @@ mod tests {
         assert!(pts.len() >= 240, "{} points for a full circle", pts.len());
         // ...and a hairline feature still yields a drawable segment.
         assert!(arc_points(Pos2::ZERO, 100.0, 0.0, 0.0001).len() >= 2);
+    }
+
+    #[test]
+    fn a_hostile_coordinate_does_not_take_the_window_down() {
+        // A 185-byte `.dna` declaring `range="1-18446744073709551615"` used to
+        // kill the app on open: `lanes` panicked on `end + 1` in debug and
+        // wrapped to 0 in release, and `arc_points` then asked for a vector of
+        // usize::MAX points and panicked with "capacity overflow".
+        let spans = [(1u64, u64::MAX), (2, 3), (u64::MAX, u64::MAX), (0, 0)];
+        let out = lanes(&spans);
+        assert_eq!(out.len(), spans.len());
+
+        // A sweep no valid file can produce must still terminate cheaply.
+        for sweep in [1e9f32, f32::MAX, std::f32::consts::TAU * 1e6] {
+            let pts = arc_points(Pos2::ZERO, 100.0, 0.0, sweep);
+            assert!(pts.len() <= 721, "{} points", pts.len());
+            assert!(pts.len() >= 2);
+        }
+        // Non-finite input must not produce a NaN-sized allocation either.
+        assert!(arc_points(Pos2::ZERO, 100.0, 0.0, f32::INFINITY).len() <= 721);
     }
 }
