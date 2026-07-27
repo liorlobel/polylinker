@@ -132,15 +132,13 @@ impl Document {
         Self::from_bytes(&data, title, Some(path.to_path_buf()))
     }
 
-    pub fn unique_cutters(&self) -> impl Iterator<Item = &Digest> {
-        self.digest
-            .results()
-            .iter()
-            .filter(|d| d.is_unique_cutter())
-    }
-
-    pub fn cutters(&self) -> impl Iterator<Item = &Digest> {
-        self.digest.results().iter().filter(|d| !d.is_non_cutter())
+    /// What the given set is showing, and what it is not.
+    ///
+    /// Replaces the old `unique_cutters`/`cutters` pair. Those partitioned the
+    /// results but had no notion of a filter, so nothing could report what a
+    /// filter concealed — which is the whole point of `docs/PLAN.md` item 33.
+    pub fn visibility(&self, set: pl_enzymes::EnzymeSet) -> pl_enzymes::Visibility {
+        pl_enzymes::Visibility::of(self.digest.results(), set)
     }
 }
 

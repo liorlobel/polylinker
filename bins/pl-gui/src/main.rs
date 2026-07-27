@@ -68,6 +68,15 @@ struct App {
     hot: Option<usize>,
     filter: String,
     status: String,
+    /// Which enzymes the panel is showing.
+    ///
+    /// Defaults to `All`. Every tool in this category defaults to a *subset*,
+    /// and `docs/PLAN.md` item 33 records that hiding sites behind a default
+    /// filter is the one documented case of this software category costing a
+    /// user a month of bench time. Defaulting to the whole truth costs a
+    /// slightly longer list; defaulting to a subset costs someone an
+    /// experiment.
+    enzyme_set: pl_enzymes::EnzymeSet,
 }
 
 impl App {
@@ -87,6 +96,7 @@ impl App {
             hot: None,
             filter: String::new(),
             status: String::new(),
+            enzyme_set: pl_enzymes::EnzymeSet::All,
         };
         // Opening a file named on the command line makes the app usable as a
         // file association and from a terminal.
@@ -636,30 +646,98 @@ impl App {
             DigestState::Done(_) => {}
         }
 
-        let uniq: Vec<_> = d.unique_cutters().collect();
-        let multi: Vec<_> = d.cutters().filter(|x| !x.is_unique_cutter()).collect();
-        let total = d.digest.results().len();
-        let non = total - uniq.len() - multi.len();
+        let results = d.digest.results();
+        let set = self.enzyme_set;
+        let vis = d.visibility(set);
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Show").color(pal(ui).muted).size(12.0));
+            for s in pl_enzymes::EnzymeSet::ALL {
+                if ui.selectable_label(set == s, s.label()).clicked() {
+                    self.enzyme_set = s;
+                }
+            }
+        });
+        ui.add_space(4.0);
+
+        // THE BADGE. `docs/PLAN.md` item 33: persistent and unmissable whenever
+        // the active filter hides anything, with the way out in the same
+        // breath.
+        //
+        // Counted in SITES, not enzymes. "3 enzymes hidden" understates three
+        // enzymes cutting fourteen times between them, and it is the cut you
+        // did not know about that ruins the experiment.
+        if vis.hides_anything() {
+            egui::Frame::new()
+                .fill(pal(ui).warn.gamma_multiply(0.18))
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .corner_radius(6.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("⚠").color(pal(ui).warn).strong());
+                        ui.label(
+                            RichText::new(format!(
+                                "{} more cut site{} hidden by “{}”, across {} enzyme{}.",
+                                vis.hidden_sites,
+                                if vis.hidden_sites == 1 { "" } else { "s" },
+                                set.label(),
+                                vis.hidden_enzymes,
+                                if vis.hidden_enzymes == 1 { "" } else { "s" },
+                            ))
+                            .strong(),
+                        );
+                        if ui.button("Show all").clicked() {
+                            self.enzyme_set = pl_enzymes::EnzymeSet::All;
+                        }
+                    });
+                });
+            ui.add_space(6.0);
+        }
+
+        let shown: Vec<_> = results.iter().filter(|x| set.admits(x)).collect();
+        let uniq: Vec<_> = shown.iter().filter(|x| x.is_unique_cutter()).collect();
+        let multi: Vec<_> = shown.iter().filter(|x| !x.is_unique_cutter()).collect();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.label(RichText::new(format!("{} unique cutters", uniq.len())).strong());
-            ui.add_space(2.0);
-            for e in &uniq {
-                enzyme_row(ui, e.enzyme.name, e.enzyme.site, &e.positions, true);
+            if !uniq.is_empty() {
+                ui.label(RichText::new(format!("{} unique cutters", uniq.len())).strong());
+                ui.add_space(2.0);
+                for e in &uniq {
+                    enzyme_row(ui, e.enzyme.name, e.enzyme.site, &e.positions, true);
+                }
+                ui.add_space(10.0);
             }
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(format!("{} cut more than once", multi.len())).color(pal(ui).muted),
-            );
-            ui.add_space(2.0);
-            for e in &multi {
-                enzyme_row(ui, e.enzyme.name, e.enzyme.site, &e.positions, false);
+            if !multi.is_empty() {
+                ui.label(
+                    RichText::new(format!("{} cut more than once", multi.len()))
+                        .color(pal(ui).muted),
+                );
+                ui.add_space(2.0);
+                for e in &multi {
+                    enzyme_row(ui, e.enzyme.name, e.enzyme.site, &e.positions, false);
+                }
+                ui.add_space(10.0);
             }
-            ui.add_space(10.0);
+            if shown.is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "No enzyme in “{}” cuts this molecule.",
+                        set.label()
+                    ))
+                    .color(pal(ui).muted),
+                );
+                ui.add_space(8.0);
+            }
+            // Non-cutters are absent, not hidden. Keeping them out of the badge
+            // is what lets the badge mean one thing.
             ui.label(
-                RichText::new(format!("{non} of {total} do not cut"))
-                    .color(pal(ui).muted)
-                    .size(11.5),
+                RichText::new(format!(
+                    "{} of {} enzymes do not cut this molecule at all",
+                    vis.non_cutters,
+                    results.len()
+                ))
+                .color(pal(ui).muted)
+                .size(11.5),
             );
             ui.add_space(4.0);
             ui.label(
