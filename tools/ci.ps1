@@ -86,6 +86,21 @@ Step 'wasm module vs native binary' {
         target/wasm32-unknown-unknown/wasm/pl_wasm.wasm target/release/pl.exe
 } { $hasWasm -and (Have node) }
 
+# `pl-index` must never touch the filesystem.
+#
+# The split between the pure search engine and `pl-scan`, which owns all the
+# I/O, is the whole reason the engine can be reasoned about -- and a convention
+# nobody can check is a convention that decays. wasm32 has no filesystem, so
+# this step goes red the day a storage concern leaks in. It also means the
+# browser tool can search an in-memory Vec<Row> through the identical code.
+Step 'pl-index stays pure (wasm32)' {
+    cargo build -p pl-index --target wasm32-unknown-unknown --profile wasm
+} { $hasWasm }
+# `unit tests` runs --lib --bins and would never reach an integration test.
+Step 'pl-index tests' {
+    cargo test -p pl-index --tests
+}
+
 Write-Host "`noracles — our answers checked against tools that are not ours" -ForegroundColor Cyan
 Step 'SEGUID vs the reference' {
     if ([string]::IsNullOrWhiteSpace($Corpus)) {

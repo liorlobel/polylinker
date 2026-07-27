@@ -1,0 +1,15 @@
+[package]
+name = "pl-index"
+description = "The library index: a packed sequence store and the queries over it. Pure, no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Zero dependencies, like the rest of the correctness layer -- and enforced
+# rather than merely intended: `tools/ci.ps1` builds this crate for
+# wasm32-unknown-unknown, which fails the moment a storage or filesystem
+# concern leaks into the search engine. All I/O lives in `pl-scan`.
+[dependencies]
+pl-core.workspace = true
