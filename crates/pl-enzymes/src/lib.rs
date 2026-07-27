@@ -702,26 +702,48 @@ impl Digest {
     /// fragment; cut *k* times it yields *k* fragments. A linear molecule cut
     /// *k* times yields *k + 1*.
     pub fn fragments(&self, len: u64, topology: Topology) -> Vec<u64> {
-        if len == 0 || self.positions.is_empty() {
-            return if len == 0 { Vec::new() } else { vec![len] };
+        fragments_from_cuts(&self.positions, len, topology)
+    }
+}
+
+/// Fragment lengths from a set of cut positions, descending.
+///
+/// Split out of [`Digest::fragments`] so a **combined** digest — several
+/// enzymes in one tube, which is what a diagnostic double digest is — can merge
+/// their positions and get the real pattern. Running each enzyme separately and
+/// concatenating the results gives a different and wrong answer: a double
+/// digest makes fragments shorter than either single digest does, and that is
+/// usually the whole reason for doing it.
+///
+/// `positions` need not be sorted or unique. Two enzymes cutting at the same
+/// base — an isoschizomer pair, or overlapping sites — make one cut and not
+/// two, so duplicates collapse rather than producing a phantom zero-length
+/// fragment.
+pub fn fragments_from_cuts(positions: &[u64], len: u64, topology: Topology) -> Vec<u64> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut p: Vec<u64> = positions.to_vec();
+    p.sort_unstable();
+    p.dedup();
+    if p.is_empty() {
+        return vec![len];
+    }
+    if topology.is_circular() {
+        if p.len() == 1 {
+            return vec![len];
         }
-        let p = &self.positions;
-        if topology.is_circular() {
-            if p.len() == 1 {
-                return vec![len];
-            }
-            let mut out: Vec<u64> = p.windows(2).map(|w| w[1] - w[0]).collect();
-            out.push(len - p[p.len() - 1] + p[0]);
-            out.sort_unstable_by(|a, b| b.cmp(a));
-            out
-        } else {
-            let mut out = vec![p[0] - 1];
-            out.extend(p.windows(2).map(|w| w[1] - w[0]));
-            out.push(len - p[p.len() - 1] + 1);
-            out.retain(|&f| f > 0);
-            out.sort_unstable_by(|a, b| b.cmp(a));
-            out
-        }
+        let mut out: Vec<u64> = p.windows(2).map(|w| w[1] - w[0]).collect();
+        out.push(len - p[p.len() - 1] + p[0]);
+        out.sort_unstable_by(|a, b| b.cmp(a));
+        out
+    } else {
+        let mut out = vec![p[0] - 1];
+        out.extend(p.windows(2).map(|w| w[1] - w[0]));
+        out.push(len - p[p.len() - 1] + 1);
+        out.retain(|&f| f > 0);
+        out.sort_unstable_by(|a, b| b.cmp(a));
+        out
     }
 }
 
@@ -1138,5 +1160,72 @@ mod tests {
         for set in EnzymeSet::ALL {
             assert!(!set.admits(&mk(0)), "{} admitted a non-cutter", set.label());
         }
+    }
+
+    #[test]
+    fn a_combined_digest_cuts_at_the_union_of_its_enzymes() {
+        // A double digest is one tube. Running each enzyme separately and
+        // stacking the fragment lists gives a different and wrong answer: the
+        // real fragments are shorter than either single digest makes, which is
+        // usually the whole reason for doing it.
+        let len = 1000u64;
+        let a = [100u64, 500];
+        let b = [300u64, 800];
+        let single_a = fragments_from_cuts(&a, len, Topology::Circular);
+        let single_b = fragments_from_cuts(&b, len, Topology::Circular);
+        let both = fragments_from_cuts(&[100, 500, 300, 800], len, Topology::Circular);
+        assert_eq!(both, vec![300, 300, 200, 200]);
+        assert!(
+            both[0] < single_a[0] && both[0] < single_b[0],
+            "the double digest's largest fragment is smaller than either single one"
+        );
+    }
+
+    #[test]
+    fn fragments_always_add_up_to_the_molecule() {
+        // Checked on a real plasmid first: pACYC184-Ppho-fab2-6his cut with
+        // EcoRI and BamHI gives 4358+3009+3028+2129+1869+1254 = 15647, its
+        // exact length. A digest that loses or invents bases is wrong in a way
+        // that still looks like a plausible gel.
+        for topology in [Topology::Circular, Topology::Linear] {
+            for cuts in [
+                vec![],
+                vec![1u64],
+                vec![500],
+                vec![1, 999],
+                vec![100, 500, 300, 800],
+                vec![7, 7, 7],
+                vec![1, 2, 3, 998, 999, 1000],
+            ] {
+                let f = fragments_from_cuts(&cuts, 1000, topology);
+                let sum: u64 = f.iter().sum();
+                assert_eq!(
+                    sum, 1000,
+                    "{topology:?} with cuts {cuts:?} produced {f:?} summing to {sum}"
+                );
+                assert!(f.windows(2).all(|w| w[0] >= w[1]), "descending: {f:?}");
+                assert!(f.iter().all(|x| *x > 0), "no empty fragments: {f:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn two_enzymes_cutting_the_same_base_make_one_cut() {
+        // Isoschizomers, or two sites that happen to cut at the same place.
+        // Counting the cut twice inserts a zero-length fragment, which is a
+        // band that does not exist.
+        let one = fragments_from_cuts(&[250, 750], 1000, Topology::Circular);
+        let twice = fragments_from_cuts(&[250, 250, 750, 750], 1000, Topology::Circular);
+        assert_eq!(one, twice);
+        assert_eq!(one, vec![500, 500]);
+    }
+
+    #[test]
+    fn an_unsorted_cut_list_gives_the_same_answer_as_a_sorted_one() {
+        // Callers merge positions from several enzymes and have no reason to
+        // sort first.
+        let sorted = fragments_from_cuts(&[100, 300, 500, 800], 1000, Topology::Circular);
+        let jumbled = fragments_from_cuts(&[800, 100, 500, 300], 1000, Topology::Circular);
+        assert_eq!(sorted, jumbled);
     }
 }

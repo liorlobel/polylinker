@@ -284,6 +284,26 @@ Step 'genetic codes and ORFs vs Biopython' {
 Step 'Sanger placement vs Biopython' {
     python reference/python/tests/xcheck_sanger.py target/release/pl.exe
 } { HavePy 'Bio' }
+# The gel's calibration spline vs SciPy's PchipInterpolator.
+#
+# SciPy's PCHIP *is* Fritsch-Carlson monotone cubic Hermite -- the same 1980
+# algorithm, written by other people -- so this is a genuine second
+# implementation rather than a transcription of ours.
+#
+# It matters because a gel calibration must be monotone: a longer fragment
+# cannot run further than a shorter one. An ordinary cubic through real,
+# unevenly spaced ladder points (3, 4, 6, 10 kb) overshoots by enough to swap
+# two bands, which is not a rounding error but the wrong answer about which
+# band is which. The tangent-clamping rules that prevent it are exactly the
+# fiddly kind of thing to check against someone else, and ladder-shaped knot
+# sets are included because the one-sided end-tangent rule applies at a
+# ladder's largest and smallest bands.
+#
+# 4,312 points across 44 knot sets, worst relative difference 4.9e-13.
+Step 'gel calibration spline vs SciPy' {
+    cargo build --release -p pl-gel --example dump_spline 2>&1 | Out-Null
+    python reference/python/tests/xcheck_spline.py target/release/examples/dump_spline.exe
+} { HavePy 'scipy' }
 # The rendered chromatogram agrees with the file it came from.
 #
 # Nothing external renders ABIF, so the SVG is read back and asserted to have

@@ -25,6 +25,7 @@ USAGE:
     pl orfs    <file> [--table N]        open reading frames, six frames
     pl sanger  <read>... --ref <file>    did the clone work?
     pl annotate <file>...                find known features in a plasmid
+    pl gel     <file> --cut A --cut B    will the digest be readable?
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -41,6 +42,16 @@ INDEX OPTIONS:
     --index-at <dir>             keep the index here instead of the OS cache
     --follow-links               follow symbolic links (off by default)
     --max-depth <n>              default 32
+
+GEL OPTIONS:
+    --cut <ENZYME>               add to the digest; repeat for a double digest
+    --lane <A+B>                 a whole lane, enzymes joined by '+'
+    --agarose <percent>          default 1.0
+    --ladder <1kb|100bp|1kb-plus>  default 1kb
+    --band-mm <mm>               how wide a band is (default 1.5) — this is
+                                 what decides whether two fragments resolve
+    --run-mm <mm>                how far the dye front ran (default 80)
+    --svg <file>                 draw it
 
 ANNOTATE OPTIONS:
     --include-proposed           search rows no human has signed off on
@@ -172,6 +183,7 @@ fn main() -> ExitCode {
         "orfs" => cmd_orfs(rest),
         "sanger" => cmd_sanger(rest),
         "annotate" => cmd_annotate(rest),
+        "gel" => cmd_gel(rest),
         "trace" => cmd_trace(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
@@ -1868,6 +1880,170 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
 }
 
 /// Where primers anneal on a template, with footprint and tail kept apart.
+fn cmd_gel(args: &[String]) -> Result<(), String> {
+    let a = parse_args(
+        args,
+        &[
+            "cut", "lane", "agarose", "ladder", "band-mm", "run-mm", "svg",
+        ],
+    )?;
+    a.require_files()?;
+
+    let mut conditions = pl_gel::Conditions::default();
+    if let Some(v) = a.get("agarose") {
+        conditions.agarose_percent = v
+            .trim_end_matches('%')
+            .parse()
+            .ok()
+            .filter(|x: &f64| (0.3..=4.0).contains(x))
+            .ok_or_else(|| format!("--agarose {v:?}: expected 0.3 to 4"))?;
+    }
+    if let Some(v) = a.get("run-mm") {
+        conditions.run_mm = v
+            .parse()
+            .ok()
+            .filter(|x: &f64| (10.0..=400.0).contains(x))
+            .ok_or_else(|| format!("--run-mm {v:?}: expected 10 to 400"))?;
+    }
+    if let Some(v) = a.get("band-mm") {
+        conditions.band_mm = v
+            .parse()
+            .ok()
+            .filter(|x: &f64| (0.1..=20.0).contains(x))
+            .ok_or_else(|| format!("--band-mm {v:?}: expected 0.1 to 20"))?;
+    }
+
+    let ladder_name: &str = a.get("ladder").map_or("1kb", |s| s);
+    let ladder = pl_gel::ladder(ladder_name).ok_or_else(|| {
+        format!(
+            "--ladder {ladder_name:?}: known ladders are {}",
+            pl_gel::LADDERS
+                .iter()
+                .map(|l| l.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+
+    // One lane per --lane, plus one lane for all the --cut enzymes together.
+    // They go in the same tube, so their cuts merge: running each separately
+    // and stacking the results is a different experiment.
+    let mut lane_specs: Vec<Vec<String>> = a
+        .get_all("lane")
+        .iter()
+        .map(|s| s.split('+').map(|e| e.trim().to_string()).collect())
+        .collect();
+    let cuts: Vec<String> = a.get_all("cut").iter().map(|s| s.to_string()).collect();
+    if !cuts.is_empty() {
+        lane_specs.push(cuts);
+    }
+    if lane_specs.is_empty() {
+        return Err("give --cut <ENZYME> (repeatable) or --lane <A+B>".into());
+    }
+
+    let gel = pl_gel::Gel::modelled(conditions);
+    for path in &a.files {
+        let data = read(path)?;
+        let (mol, _, _) =
+            load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+
+        let mut lanes = vec![pl_gel::render::Lane {
+            label: format!("{} ladder", ladder.name),
+            sim: gel.run(ladder.sizes),
+            is_ladder: true,
+        }];
+        let mut uncut = true;
+        for spec in &lane_specs {
+            let mut positions = Vec::new();
+            for name in spec {
+                let e =
+                    pl_enzymes::by_name(name).ok_or_else(|| format!("unknown enzyme {name:?}"))?;
+                let cuts = pl_enzymes::cut_positions(&mol.seq, mol.topology, e);
+                if !cuts.is_empty() {
+                    uncut = false;
+                }
+                positions.extend(cuts);
+            }
+            let frags = pl_enzymes::fragments_from_cuts(&positions, mol.len(), mol.topology);
+            lanes.push(pl_gel::render::Lane {
+                label: spec.join("+"),
+                sim: gel.run(&frags),
+                is_ladder: false,
+            });
+        }
+
+        println!(
+            "{}  {} bp {}   {}% agarose, {} ladder",
+            path.display(),
+            mol.len(),
+            mol.topology.as_str(),
+            conditions.agarose_percent,
+            ladder.name
+        );
+        for lane in lanes.iter().filter(|l| !l.is_ladder) {
+            println!("\n  {}", lane.label);
+            if lane.sim.groups.is_empty() && lane.sim.bands.is_empty() {
+                println!("    no fragments");
+            }
+            for g in &lane.sim.groups {
+                println!(
+                    "    {:>6.1} mm  {}{}",
+                    g.mm,
+                    g.sizes
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                    if g.is_merged() {
+                        "   one band — these will not separate"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            for bp in lane.sim.too_large() {
+                println!("        --      {bp}   too large for this gel to place");
+            }
+            for bp in lane.sim.too_small() {
+                println!("        --      {bp}   too small for this gel to place");
+            }
+            let merged: usize = lane.sim.merged().iter().map(|g| g.sizes.len()).sum();
+            if merged > 0 {
+                println!(
+                    "    {} fragment(s) hide in {} band(s)",
+                    merged,
+                    lane.sim.merged().len()
+                );
+            }
+        }
+        if uncut {
+            println!("\n  none of these enzymes cuts this molecule");
+        }
+        println!("\n  {}", lanes[1].sim.caveat());
+
+        if let Some(out) = a.get("svg") {
+            let scene = pl_gel::render::to_scene(
+                &lanes,
+                &pl_gel::render::Options::default(),
+                &title_of(path),
+            );
+            let out = if a.files.len() > 1 {
+                std::path::PathBuf::from(out).with_file_name(format!(
+                    "{}.svg",
+                    path.file_stem().unwrap_or_default().to_string_lossy()
+                ))
+            } else {
+                std::path::PathBuf::from(out)
+            };
+            std::fs::write(&out, pl_draw::svg_of(&scene).as_bytes())
+                .map_err(|e| format!("{}: {e}", out.display()))?;
+            println!("  -> {}", out.display());
+        }
+        println!();
+    }
+    Ok(())
+}
+
 fn cmd_annotate(args: &[String]) -> Result<(), String> {
     let a = parse_args(args, &["min-identity", "min-coverage"])?;
 
