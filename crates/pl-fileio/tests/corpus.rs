@@ -805,3 +805,108 @@ fn digest_invariants_hold_on_real_plasmids() {
         failures.join("\n  ")
     );
 }
+
+/// Synthesise a `.dna` from the molecule alone, on every real file.
+///
+/// `snapgene::write` re-emits the blocks it read, so a byte-exact round-trip
+/// proves the *container* survives and says nothing about whether the
+/// annotations were understood. `from_molecule` throws the original blocks away
+/// and rebuilds the file from the parsed model, so anything the reader did not
+/// understand or the writer cannot express is simply gone — and this compares
+/// what comes back.
+///
+/// The distinction matters here more than usual: the memory of how the format
+/// was worked out records that byte-exact round-tripping on 41 files proved
+/// nothing about coordinate *interpretation*, because an off-by-one on read
+/// cancels on write. This test cannot cancel.
+#[test]
+fn a_synthesised_dna_preserves_everything_the_model_holds() {
+    let files = files_with(&["dna"]);
+    if files.is_empty() {
+        eprintln!("skipping: set PL_CORPUS");
+        return;
+    }
+    let (mut checked, mut features, mut quals) = (0usize, 0usize, 0usize);
+    let mut problems: Vec<String> = Vec::new();
+
+    for f in &files {
+        let Ok(data) = std::fs::read(f) else { continue };
+        let Ok(orig) = snapgene::parse(&data) else {
+            continue;
+        };
+
+        let rebuilt = match snapgene::parse(&snapgene::from_molecule(&orig.molecule)) {
+            Ok(d) => d,
+            Err(e) => {
+                problems.push(format!(
+                    "{}: cannot re-read what we wrote: {e:?}",
+                    f.display()
+                ));
+                continue;
+            }
+        };
+        checked += 1;
+        let (a, b) = (&orig.molecule, &rebuilt.molecule);
+
+        if a.seq != b.seq {
+            problems.push(format!("{}: sequence changed", f.display()));
+        }
+        if a.topology != b.topology {
+            problems.push(format!(
+                "{}: topology {:?} became {:?}",
+                f.display(),
+                a.topology,
+                b.topology
+            ));
+        }
+        if a.methylation != b.methylation {
+            problems.push(format!("{}: methylation changed", f.display()));
+        }
+        if a.features.len() != b.features.len() {
+            problems.push(format!(
+                "{}: {} features became {}",
+                f.display(),
+                a.features.len(),
+                b.features.len()
+            ));
+            continue;
+        }
+        for (x, y) in a.features.iter().zip(&b.features) {
+            features += 1;
+            quals += x.qualifiers.len();
+            if x.name != y.name || x.kind != y.kind || x.strand != y.strand {
+                problems.push(format!("{}: feature {} changed", f.display(), x.name));
+            }
+            if x.segments != y.segments {
+                problems.push(format!(
+                    "{}: {} segments {:?} became {:?}",
+                    f.display(),
+                    x.name,
+                    x.segments,
+                    y.segments
+                ));
+            }
+            // Valueless qualifiers are the specific thing that used to be lost:
+            // `/pseudo` is not `/replace=""`, and dropping it turns a
+            // pseudogene into an ordinary protein-coding gene.
+            if x.qualifiers != y.qualifiers {
+                problems.push(format!("{}: {} qualifiers changed", f.display(), x.name));
+            }
+        }
+    }
+
+    eprintln!(
+        "synthesised {checked} .dna file(s) from the model alone:          {features} features, {quals} qualifiers preserved"
+    );
+    assert!(checked > 0, "no .dna files parsed");
+    assert!(
+        problems.is_empty(),
+        "{} problem(s):
+{}",
+        problems.len(),
+        problems.iter().take(10).cloned().collect::<Vec<_>>().join(
+            "
+"
+        )
+    );
+}

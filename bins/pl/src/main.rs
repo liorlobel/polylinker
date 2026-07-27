@@ -33,7 +33,7 @@ USAGE:
     pl library <dir> [options]           what is indexed, and what could not be
 
 CONVERT OPTIONS:
-    --to <genbank|gb|fasta|fa>   output format (default: genbank)
+    --to <genbank|fasta|dna>     output format (default: genbank)
     -o, --outdir <dir>           where to write (default: beside the input)
     --stdout                     write to stdout instead of files
 
@@ -513,11 +513,19 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
     a.require_files()?;
 
     let to = a.get("to").unwrap_or("genbank").to_ascii_lowercase();
-    let (ext, is_gb) = match to.as_str() {
-        "genbank" | "gb" | "gbk" => ("gb", true),
-        "fasta" | "fa" | "fna" => ("fa", false),
+    #[derive(PartialEq)]
+    enum Out {
+        GenBank,
+        Fasta,
+        Dna,
+    }
+    let (ext, out_fmt) = match to.as_str() {
+        "genbank" | "gb" | "gbk" => ("gb", Out::GenBank),
+        "fasta" | "fa" | "fna" => ("fa", Out::Fasta),
+        "dna" | "snapgene" => ("dna", Out::Dna),
         other => return Err(format!("unknown output format '{other}'")),
     };
+    let is_gb = out_fmt == Out::GenBank;
 
     let outdir = a.get("outdir").or_else(|| a.get("o")).map(PathBuf::from);
     let to_stdout = a.has("stdout");
@@ -544,10 +552,19 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
             ));
         }
         let title = title_of(path);
-        let text = if is_gb {
-            genbank::write(&mol, &title, date)
-        } else {
-            fasta::write(&mol, &title, 70)
+        // `.dna` is bytes rather than text, so the payload is a Vec<u8> for
+        // all three formats and the destination logic below — which guards
+        // against overwriting the input and against two inputs claiming one
+        // output name — is shared rather than reimplemented per format.
+        //
+        // What the `.dna` writer deliberately omits is stated at
+        // `snapgene::from_molecule`: the two regenerable caches, 78% of a
+        // typical file and dangerous when stale, and the history tree, which
+        // is a provenance graph this file does not have.
+        let bytes: Vec<u8> = match out_fmt {
+            Out::GenBank => genbank::write(&mol, &title, date).into_bytes(),
+            Out::Fasta => fasta::write(&mol, &title, 70).into_bytes(),
+            Out::Dna => pl_fileio::snapgene::from_molecule(&mol),
         };
 
         // GenBank cannot express an unoriented or bidirectional feature, so
@@ -571,7 +588,10 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
         }
 
         if to_stdout {
-            print!("{text}");
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(&bytes)
+                .map_err(|e| format!("stdout: {e}"))?;
             converted += 1;
             continue;
         }
@@ -615,7 +635,7 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
             renamed += 1;
         }
         claimed.push(dest.clone());
-        std::fs::write(&dest, text).map_err(|e| format!("{}: {e}", dest.display()))?;
+        std::fs::write(&dest, &bytes).map_err(|e| format!("{}: {e}", dest.display()))?;
 
         println!(
             "{:>10} bp  {:>8}  {:>4} feat  {}",

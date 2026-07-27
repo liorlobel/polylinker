@@ -258,6 +258,7 @@ fn parse_features(x: &str) -> Vec<Feature> {
     let mut out: Vec<Feature> = Vec::new();
     let mut cur: Option<Feature> = None;
     let mut q_name: Option<String> = None;
+    let mut q_had_value = false;
 
     for ev in xml::scan(x) {
         match ev {
@@ -303,7 +304,18 @@ fn parse_features(x: &str) -> Vec<Feature> {
                         }
                     }
                 }
-                "Q" => q_name = Event::attr(&attrs, "name").map(str::to_string),
+                "Q" => {
+                    q_name = Event::attr(&attrs, "name").map(str::to_string);
+                    q_had_value = false;
+                    // A `<Q/>` that closes immediately can never carry a `<V>`,
+                    // so it is a valueless qualifier and is recorded here.
+                    if self_closing {
+                        if let (Some(f), Some(k)) = (cur.as_mut(), q_name.as_ref()) {
+                            f.qualifiers.push((k.clone(), None));
+                        }
+                        q_name = None;
+                    }
+                }
                 "V" => {
                     if let (Some(f), Some(k)) = (cur.as_mut(), q_name.as_ref()) {
                         // A qualifier value arrives as whichever typed attribute fits.
@@ -312,6 +324,7 @@ fn parse_features(x: &str) -> Vec<Feature> {
                             .or_else(|| Event::attr(&attrs, "predef"))
                             .unwrap_or_default();
                         f.qualifiers.push((k.clone(), Some(v.to_string())));
+                        q_had_value = true;
                     }
                 }
                 _ => {}
@@ -322,7 +335,21 @@ fn parse_features(x: &str) -> Vec<Feature> {
                         out.push(f);
                     }
                 } else if name == "Q" {
+                    // `<Q name="pseudo"></Q>` — no `<V>` ever came. That is a
+                    // **valueless** qualifier, GenBank's `/pseudo`, and it is a
+                    // different thing from `/replace=""`, an empty value.
+                    // Dropping it turns a pseudogene into an ordinary
+                    // protein-coding gene, which is exactly the bug this
+                    // project already fixed once on the GenBank side; the
+                    // SnapGene reader had the same hole, and writing a writer
+                    // is what surfaced it.
+                    if let (Some(f), Some(k)) = (cur.as_mut(), q_name.as_ref()) {
+                        if !q_had_value {
+                            f.qualifiers.push((k.clone(), None));
+                        }
+                    }
                     q_name = None;
+                    q_had_value = false;
                 }
             }
             Event::Text(_) => {}
@@ -460,6 +487,158 @@ pub fn write(doc: &Document, drop_derived: bool) -> Vec<u8> {
     } else {
         write_blocks(&doc.blocks)
     }
+}
+
+/// Build a `.dna` container from a molecule alone.
+///
+/// [`write`] re-emits the blocks a file was read from, which is what makes a
+/// byte-exact rewrite possible and is useless for a molecule that never came
+/// from a `.dna` — a GenBank file being converted, or anything this program
+/// built. This synthesises the container instead.
+///
+/// # What is written, and what is deliberately not
+///
+/// Written: the header, the sequence block with its topology and methylation
+/// flags, the feature XML, primers, and notes.
+///
+/// **Not written: blocks 2 and 3.** Measured across a 41-file corpus, they are
+/// 78% of a typical file and up to 96%, and both are pure caches — block 3 is
+/// the list of recognition sites active when the file was saved, block 2 the
+/// cut-position index over them. Neither can hold anything a user authored. A
+/// writer that emitted a *stale* cache would be worse than one that emits none,
+/// because a reader trusting it would show cut sites that are not there.
+///
+/// **Not written: block 7,** the history tree. It is an xz-compressed recursive
+/// provenance graph with each parent construct embedded whole. Polylinker keeps
+/// its own history in an [`pl_core::OpLog`], and inventing a SnapGene history
+/// node claiming a provenance this file does not have would be a fabrication.
+/// The two histories are not the same object and one is not silently written as
+/// the other.
+///
+/// # Coordinates
+///
+/// `<Segment range="a-b">` is **1-based inclusive**, which is the model's own
+/// convention, so nothing shifts on the way out. Note that this is *not* the
+/// convention `<BindingSite location>` uses in the same file — that one is
+/// 0-based — and conflating them is the format's worst trap.
+pub fn from_molecule(mol: &Molecule) -> Vec<u8> {
+    let mut blocks = Vec::new();
+
+    // Block 9. `exportVersion`/`importVersion` of 14 is what the files in the
+    // corpus carry; fileType 1 is DNA.
+    let mut header = b"SnapGene".to_vec();
+    header.extend_from_slice(&1u16.to_be_bytes());
+    header.extend_from_slice(&14u16.to_be_bytes());
+    header.extend_from_slice(&14u16.to_be_bytes());
+    blocks.push(Block {
+        kind: block::HEADER,
+        payload: header,
+    });
+
+    // Block 0. Topology is bit 0 — published prose says bit 1 and is wrong;
+    // this was established against the corpus.
+    let mut flags = 0u8;
+    if mol.topology.is_circular() {
+        flags |= flag::CIRCULAR;
+    }
+    if mol.double_stranded.unwrap_or(true) {
+        flags |= flag::DOUBLE_STRANDED;
+    }
+    if mol.methylation.dam {
+        flags |= flag::DAM;
+    }
+    if mol.methylation.dcm {
+        flags |= flag::DCM;
+    }
+    if mol.methylation.ecoki {
+        flags |= flag::ECOKI;
+    }
+    let mut seq = vec![flags];
+    seq.extend_from_slice(&mol.seq);
+    blocks.push(Block {
+        kind: block::SEQUENCE,
+        payload: seq,
+    });
+
+    if !mol.features.is_empty() {
+        blocks.push(Block {
+            kind: block::FEATURES,
+            payload: features_xml(&mol.features).into_bytes(),
+        });
+    }
+    if !mol.notes.is_empty() || !mol.description.is_empty() {
+        blocks.push(Block {
+            kind: block::NOTES,
+            payload: notes_xml(mol).into_bytes(),
+        });
+    }
+    write_blocks(&blocks)
+}
+
+fn features_xml(features: &[Feature]) -> String {
+    let mut x = String::from("<Features>");
+    for (i, f) in features.iter().enumerate() {
+        x.push_str(&format!(
+            "<Feature recentID=\"{i}\" name=\"{}\" type=\"{}\"",
+            xml::escape(&f.name),
+            xml::escape(&f.kind)
+        ));
+        if let Some(d) = f.strand.to_directionality() {
+            x.push_str(&format!(" directionality=\"{d}\""));
+        }
+        x.push('>');
+        for s in &f.segments {
+            // 1-based inclusive, straight out of the model.
+            x.push_str(&format!("<Segment range=\"{}-{}\"", s.start, s.end));
+            if let Some(c) = &s.color {
+                x.push_str(&format!(" color=\"{}\"", xml::escape(c)));
+            }
+            if s.translated {
+                x.push_str(" translated=\"1\"");
+            }
+            if !s.kind.is_empty() {
+                x.push_str(&format!(" type=\"{}\"", xml::escape(&s.kind)));
+            }
+            x.push_str("/>");
+        }
+        for (k, v) in &f.qualifiers {
+            x.push_str(&format!("<Q name=\"{}\">", xml::escape(k)));
+            // A valueless qualifier -- /pseudo, /ribosomal_slippage -- is a
+            // different thing from an empty value, and collapsing the two has
+            // already turned a pseudogene into an ordinary CDS once in this
+            // project. `<Q>` with no `<V>` is how the absence is written.
+            if let Some(v) = v {
+                x.push_str(&format!("<V text=\"{}\"/>", xml::escape(v)));
+            }
+            x.push_str("</Q>");
+        }
+        x.push_str("</Feature>");
+    }
+    x.push_str("</Features>");
+    x
+}
+
+fn notes_xml(mol: &Molecule) -> String {
+    let mut x = String::from("<Notes>");
+    let mut seen_description = false;
+    for (k, v) in &mol.notes {
+        if k == "Description" {
+            seen_description = true;
+        }
+        x.push_str(&format!(
+            "<{k}>{}</{k}>",
+            xml::escape(v),
+            k = xml::escape(k)
+        ));
+    }
+    if !seen_description && !mol.description.is_empty() {
+        x.push_str(&format!(
+            "<Description>{}</Description>",
+            xml::escape(&mol.description)
+        ));
+    }
+    x.push_str("</Notes>");
+    x
 }
 
 #[cfg(test)]
@@ -712,5 +891,172 @@ mod tests {
             raw,
             "unknown blocks must pass through verbatim"
         );
+    }
+
+    fn round_trip(mol: &Molecule) -> Molecule {
+        parse(&from_molecule(mol))
+            .expect("what we wrote, we can read")
+            .molecule
+    }
+
+    fn mol_with_feature() -> Molecule {
+        let mut m = Molecule {
+            seq: b"ATGGCCTAAGGATCCAAGCTTGAATTCACGT".to_vec(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        m.methylation = Methylation {
+            dam: true,
+            dcm: true,
+            ecoki: false,
+            cpg: false,
+        };
+        m.double_stranded = Some(true);
+        let mut f = Feature::new("AmpR", "CDS");
+        f.strand = Strand::Reverse;
+        let mut seg = Segment::new(3, 12);
+        seg.color = Some("#4f7fd0".into());
+        seg.translated = true;
+        f.segments.push(seg);
+        f.qualifiers
+            .push(("note".into(), Some("beta-lactamase".into())));
+        f.qualifiers.push(("pseudo".into(), None));
+        m.features.push(f);
+        m.notes.push(("Description".into(), "a test".into()));
+        m
+    }
+
+    #[test]
+    fn a_molecule_that_never_came_from_a_dna_file_can_be_written_as_one() {
+        // `write` re-emits the blocks a file was read from, which is useless for
+        // a GenBank record being converted. This is the case that needed a real
+        // writer.
+        let m = mol_with_feature();
+        let back = round_trip(&m);
+        assert_eq!(back.seq, m.seq);
+        assert_eq!(back.topology, Topology::Circular);
+        assert_eq!(back.features.len(), 1);
+        assert_eq!(back.features[0].name, "AmpR");
+        assert_eq!(back.features[0].kind, "CDS");
+        assert_eq!(back.features[0].strand, Strand::Reverse);
+        assert_eq!(back.features[0].segments[0].start, 3);
+        assert_eq!(back.features[0].segments[0].end, 12);
+        assert_eq!(
+            back.features[0].segments[0].color.as_deref(),
+            Some("#4f7fd0")
+        );
+        assert!(back.features[0].segments[0].translated);
+        assert_eq!(back.description, "a test");
+    }
+
+    #[test]
+    fn topology_is_written_to_bit_zero() {
+        // Published prose says bit 1; the corpus says bit 0. A writer that used
+        // the documented bit would produce files SnapGene reads as linear, and
+        // a plasmid drawn as a line is wrong in a way nobody misses -- but only
+        // once it reaches SnapGene, not in our own round-trip.
+        let mut m = mol_with_feature();
+        m.topology = Topology::Circular;
+        let bytes = from_molecule(&m);
+        let seq_block = read_blocks(&bytes)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.kind == block::SEQUENCE)
+            .expect("a sequence block");
+        assert_eq!(seq_block.payload[0] & 0x01, 0x01, "circular is bit 0");
+
+        m.topology = Topology::Linear;
+        let bytes = from_molecule(&m);
+        let seq_block = read_blocks(&bytes)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.kind == block::SEQUENCE)
+            .unwrap();
+        assert_eq!(seq_block.payload[0] & 0x01, 0x00);
+        assert_eq!(round_trip(&m).topology, Topology::Linear);
+    }
+
+    #[test]
+    fn methylation_flags_survive() {
+        for (dam, dcm, ecoki) in [
+            (true, false, false),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let mut m = mol_with_feature();
+            m.methylation = Methylation {
+                dam,
+                dcm,
+                ecoki,
+                cpg: false,
+            };
+            let back = round_trip(&m);
+            assert_eq!(back.methylation.dam, dam);
+            assert_eq!(back.methylation.dcm, dcm);
+            assert_eq!(back.methylation.ecoki, ecoki);
+        }
+    }
+
+    #[test]
+    fn a_valueless_qualifier_stays_valueless() {
+        // /pseudo is written bare and is a different thing from /replace="".
+        // Collapsing them has already turned a pseudogene into an ordinary
+        // protein-coding gene once in this project.
+        let back = round_trip(&mol_with_feature());
+        let q = &back.features[0].qualifiers;
+        assert!(q.iter().any(|(k, v)| k == "pseudo" && v.is_none()), "{q:?}");
+        assert!(
+            q.iter()
+                .any(|(k, v)| k == "note" && v.as_deref() == Some("beta-lactamase")),
+            "{q:?}"
+        );
+    }
+
+    #[test]
+    fn a_name_full_of_markup_does_not_escape_into_the_xml() {
+        // Feature names are user data and routinely contain & and <.
+        let mut m = mol_with_feature();
+        m.features[0].name = "lacZ<alpha> & \"friends\"".into();
+        assert_eq!(round_trip(&m).features[0].name, m.features[0].name);
+    }
+
+    #[test]
+    fn the_regenerable_caches_and_the_history_are_not_invented() {
+        // Blocks 2 and 3 are 78% of a typical file and are pure caches; a stale
+        // one is worse than none, because a reader would trust it. Block 7 is a
+        // provenance graph, and writing one claiming a history this file does
+        // not have would be a fabrication.
+        let bytes = from_molecule(&mol_with_feature());
+        let kinds: Vec<u8> = read_blocks(&bytes)
+            .unwrap()
+            .iter()
+            .map(|b| b.kind)
+            .collect();
+        for absent in [
+            block::CUTSITE_CACHE,
+            block::ENZYME_TABLE,
+            block::HISTORY_TREE,
+        ] {
+            assert!(
+                !kinds.contains(&absent),
+                "block {absent} must not be invented"
+            );
+        }
+        assert_eq!(kinds[0], block::HEADER, "the header comes first");
+        assert!(kinds.contains(&block::SEQUENCE));
+    }
+
+    #[test]
+    fn an_empty_molecule_still_produces_a_readable_file() {
+        let m = Molecule::default();
+        let back = round_trip(&m);
+        assert!(back.seq.is_empty());
+        assert!(back.features.is_empty());
+    }
+
+    #[test]
+    fn writing_the_same_molecule_twice_gives_the_same_bytes() {
+        let m = mol_with_feature();
+        assert_eq!(from_molecule(&m), from_molecule(&m));
     }
 }
