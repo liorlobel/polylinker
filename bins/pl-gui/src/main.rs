@@ -11,6 +11,7 @@
 mod doc;
 mod library;
 mod map;
+mod recover;
 mod theme;
 
 use std::path::PathBuf;
@@ -84,9 +85,172 @@ struct App {
     lib_mode: library::Mode,
     lib_query: String,
     lib_absent: bool,
+
+    /// Where this window's autosave goes, and what was left behind by a
+    /// process that did not exit cleanly.
+    ///
+    /// The recovery file's *presence* is the crash flag. Nothing is written to
+    /// say "we crashed" — a flag recorded during a crash is a flag that does
+    /// not get recorded — so quitting normally deletes it and anything still
+    /// there at startup is by definition an unclean exit.
+    recovery: Option<std::path::PathBuf>,
+    stale: Vec<(std::path::PathBuf, Result<recover::Snapshot, String>)>,
+    /// Ops in the log when the last autosave was written, so an idle window
+    /// does not rewrite the same bytes forever.
+    autosaved_at_ops: usize,
+    last_autosave: Option<std::time::Instant>,
 }
 
 impl App {
+    /// How long an unsaved edit can survive a crash.
+    ///
+    /// Thirty seconds. The cost of getting this wrong is asymmetric: too often
+    /// wastes a few milliseconds of disk, too rarely costs an afternoon. It is
+    /// also skipped entirely when nothing has changed, so an idle window never
+    /// touches the disk at all.
+    const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Documents left by a session that did not close cleanly.
+    ///
+    /// Listed, with age and edit count, and never restored automatically.
+    /// Silently reopening a draft over whatever the user meant to open is the
+    /// failure mode; choosing between two drafts is something they can do and
+    /// this program cannot.
+    fn recovery_banner(&mut self, ui: &mut Ui) {
+        if self.stale.is_empty() {
+            return;
+        }
+        let mut restore: Option<usize> = None;
+        let mut discard: Option<usize> = None;
+        egui::Frame::NONE
+            .fill(pal(ui).selection())
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("A previous session did not close cleanly")
+                        .color(pal(ui).ink)
+                        .strong(),
+                );
+                for (i, (path, snap)) in self.stale.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        match snap {
+                            Ok(s) => {
+                                let from = s
+                                    .original
+                                    .as_ref()
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_else(|| "never saved to a file".into());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} — {} edit(s), from {from}",
+                                        if s.title.is_empty() {
+                                            "untitled"
+                                        } else {
+                                            &s.title
+                                        },
+                                        s.ops
+                                    ))
+                                    .color(pal(ui).ink2),
+                                );
+                            }
+                            // Damaged, and still offered: the body of the file
+                            // is plain GenBank, so the sequence is very likely
+                            // recoverable even when the header is not.
+                            Err(e) => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} — damaged ({e}), the sequence may still be readable",
+                                        path.display()
+                                    ))
+                                    .color(pal(ui).warn),
+                                );
+                            }
+                        }
+                        if ui.button("Open").clicked() {
+                            restore = Some(i);
+                        }
+                        if ui.button("Discard").clicked() {
+                            discard = Some(i);
+                        }
+                    });
+                }
+                ui.label(
+                    RichText::new("These are copies. Your original files were not modified.")
+                        .color(pal(ui).muted)
+                        .size(11.0),
+                );
+            });
+
+        if let Some(i) = restore {
+            let (path, snap) = self.stale[i].clone();
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            // Whatever state the header is in, the body is the molecule.
+            let body = match &snap {
+                Ok(s) => s.genbank.clone(),
+                Err(_) => recover::salvage(&text).unwrap_or("").to_string(),
+            };
+            let title = snap.as_ref().map(|s| s.title.clone()).unwrap_or_default();
+            match Document::from_bytes(body.as_bytes(), title, None) {
+                Ok(d) => {
+                    self.status = format!("recovered from {}", path.display());
+                    self.error = None;
+                    self.document = Some(d);
+                    // The path is deliberately dropped: a recovered document is
+                    // unsaved, so Save has to ask where, and cannot overwrite
+                    // the original with a draft the user has not looked at.
+                    let _ = self.stale.remove(i);
+                }
+                Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+            }
+        } else if let Some(i) = discard {
+            let (path, _) = self.stale.remove(i);
+            recover::clear(&path);
+            self.status = format!("discarded {}", path.display());
+        }
+    }
+
+    /// Write the current document to the recovery file, if it is time.
+    ///
+    /// Never writes to the file the user opened. An editor that quietly
+    /// rewrites the original every few minutes has turned "close without
+    /// saving" into a lie.
+    fn autosave(&mut self) {
+        let Some(doc) = &self.document else { return };
+        let ops = doc.log.path().len();
+        if ops == self.autosaved_at_ops {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_autosave {
+            if now.duration_since(last) < Self::AUTOSAVE_EVERY {
+                return;
+            }
+        }
+        let Some(path) = self.recovery.clone() else {
+            return;
+        };
+        let snap = recover::Snapshot {
+            original: doc.path.clone(),
+            title: doc.title.clone(),
+            saved_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            ops,
+            genbank: pl_fileio::genbank::write(doc.molecule(), &doc.title, today()),
+        };
+        match recover::write(&path, &snap) {
+            Ok(()) => {
+                self.autosaved_at_ops = ops;
+                self.last_autosave = Some(now);
+            }
+            // A failed autosave must not interrupt the work it exists to
+            // protect, but it must not be silent either -- a user who thinks
+            // they are covered and is not is worse off than one who knows.
+            Err(e) => self.status = format!("autosave failed: {e}"),
+        }
+    }
+
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Styles are per-theme in egui 0.35, so adjust both rather than
         // stamping one over the user's light/dark preference.
@@ -108,7 +272,30 @@ impl App {
             lib_mode: library::Mode::Name,
             lib_query: String::new(),
             lib_absent: false,
+            recovery: None,
+            stale: Vec::new(),
+            autosaved_at_ops: 0,
+            last_autosave: None,
         };
+        // Anything left in the recovery directory by another process is an
+        // unclean exit. Listed, never auto-restored: which of two drafts is the
+        // wanted one is something the user knows and this program does not.
+        match recover::recovery_dir() {
+            Ok(dir) => {
+                app.stale = recover::stale(&dir);
+                app.recovery = Some(recover::recovery_path(&dir, 0));
+                if !app.stale.is_empty() {
+                    app.status = format!(
+                        "{} document(s) from a session that did not close cleanly — see Recover",
+                        app.stale.len()
+                    );
+                }
+            }
+            // No recovery directory means no autosave, and saying so is the
+            // point: a user who believes they are covered and is not is worse
+            // off than one who knows they are not.
+            Err(e) => app.status = format!("autosave is off: {e}"),
+        }
         // Opening a file named on the command line makes the app usable as a
         // file association and from a terminal.
         if let Some(arg) = std::env::args_os().nth(1) {
@@ -341,8 +528,18 @@ fn today() -> (u32, usize, i32) {
 }
 
 impl eframe::App for App {
+    /// Called on a normal quit. Removing the file is what records that the exit
+    /// was clean, which is why nothing else needs to be written for recovery to
+    /// work.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(p) = &self.recovery {
+            recover::clear(p);
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.autosave();
 
         if debug_geometry() {
             eprintln!(
@@ -1435,6 +1632,7 @@ impl App {
         let mut clicked_out = None;
 
         egui::CentralPanel::default().show(ui, |ui| {
+            self.recovery_banner(ui);
             if let Some(err) = &error {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -1448,10 +1646,23 @@ impl App {
             let Some(d) = &self.document else {
                 ui.centered_and_justified(|ui| {
                     ui.label(
-                        RichText::new(
+                        RichText::new(format!(
                             "Drop a .dna, GenBank or FASTA file here\n\n\
-                             Nothing leaves this machine.",
-                        )
+                             Nothing leaves this machine.{}",
+                            // Which application owns the extension is *read*,
+                            // never changed. Claiming .dna at install time is
+                            // how two plasmid editors end up fighting over
+                            // double-click, and doing it unasked is worse than
+                            // not doing it: say who owns it, and leave the
+                            // decision where it belongs.
+                            match recover::association("dna") {
+                                Some(h) if !h.contains("Polylinker") => format!(
+                                    "\n\n.dna files currently open in {h}.\n\
+                                     Polylinker does not change that."
+                                ),
+                                _ => String::new(),
+                            }
+                        ))
                         .color(pal(ui).muted)
                         .size(14.0),
                     );
