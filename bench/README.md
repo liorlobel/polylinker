@@ -86,18 +86,24 @@ advertisement.
 ```
 operation      pass   fail  unsup  total   rate
 --------------------------------------------------------
-assembly          0      0      5      5     0.0%
+assembly          5      0      0      5   100.0%
 digest          123      0      0    123   100.0%
 identity         42      0      0     42   100.0%
 pcr               6      0      0      6   100.0%
 --------------------------------------------------------
-all             171      0      5    176    97.2%
+all             176      0      0    176   100.0%
 
-hazard tier 1 (silent and expensive): 158 passed, 0 failed, 5 unsupported
+hazard tier 1 (silent and expensive): 163 passed, 0 failed, 0 unsupported
 ```
 
-Zero failures. The five remaining are assembly, which is not implemented; the
-number says so rather than dropping them from the denominator.
+Zero failures and nothing declined.
+
+What that does and does not mean: 176 cases from three oracles is a floor, not a
+certificate. Every case here is one somebody thought to write down, and the
+defects this project has actually shipped were in the gaps between such cases --
+a sign error invisible to every test that used a blunt end, a coordinate error
+that cancelled on write. A perfect score on a truth set is evidence that the
+truth set is being respected, and nothing more.
 
 ## Regenerating
 

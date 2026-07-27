@@ -26,6 +26,8 @@
 //! different recognition sites and the same `GATC` overhang, which is why they
 //! ligate — and a tool that models ends as "blunt or not" cannot tell you that.
 
+pub mod assembly;
+
 use pl_core::{reverse_complement, Topology};
 use pl_enzymes::Enzyme;
 
@@ -42,7 +44,7 @@ pub struct Dseq {
     pub circular: bool,
 }
 
-fn rc(s: &str) -> String {
+pub(crate) fn rc(s: &str) -> String {
     String::from_utf8_lossy(&reverse_complement(s.as_bytes())).into_owned()
 }
 

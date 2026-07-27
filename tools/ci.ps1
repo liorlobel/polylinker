@@ -30,7 +30,7 @@ if (Test-Path $cargoBin) { $env:PATH = "$cargoBin;$env:PATH" }
 # Cases polylinker-bench must still pass. Asserted, not merely printed: the
 # step used to report ok while the benchmark scored zero. Raise this when the
 # score rises; never lower it without saying why in the commit message.
-$BenchFloor = 171
+$BenchFloor = 176
 
 $script:failed = @()
 $script:skipped = @()

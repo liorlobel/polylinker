@@ -67,13 +67,20 @@ def capabilities(cmd):
 
 
 def encode(case):
-    """One case as a tab-separated line, or None if it has no single sequence."""
+    """One case as a tab-separated line, or None if it cannot be expressed.
+
+    Multi-fragment operations put the fragments in the sequence column, joined
+    by commas. The column is positional so it cannot simply be omitted, and a
+    separate `fragments=` parameter would mean two ways to say where the input
+    is. Commas cannot occur in a sequence, so the encoding is unambiguous.
+    """
     inp = case["input"]
     seq = inp.get("sequence")
     if seq is None:
-        # Multi-fragment operations (assembly) have no single-sequence form in
-        # this protocol version.
-        return None
+        frags = inp.get("fragments")
+        if not frags:
+            return None
+        seq = ",".join(frags)
     fields = [case["id"], case["operation"], inp.get("topology", "linear"), seq]
     for k, v in sorted(case.get("params", {}).items()):
         fields.append(f"{k}={v}")

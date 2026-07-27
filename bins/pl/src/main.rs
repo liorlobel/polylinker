@@ -814,11 +814,10 @@ fn cmd_bench_adapter(args: &[String]) -> Result<(), String> {
     let a = parse_args(args, &[])?;
 
     if a.has("capabilities") {
-        // assembly is still absent, and the published pass rate should show
-        // that rather than hide it.
         println!("identity");
         println!("digest");
         println!("pcr");
+        println!("assembly");
         return Ok(());
     }
 
@@ -857,6 +856,44 @@ fn cmd_bench_adapter(args: &[String]) -> Result<(), String> {
                         (Ok(d), Ok(s)) => println!("{id}\tldseguid={d}\tlsseguid={s}"),
                         (Err(e), _) | (_, Err(e)) => println!("{id}\terror={e}"),
                     }
+                }
+            }
+            "assembly" => {
+                // Fragments arrive comma-separated in the sequence column.
+                let method = param("method").unwrap_or("homologous");
+                if method != "homologous" {
+                    println!("{id}	unsupported");
+                    continue;
+                }
+                let limit: usize = param("min_homology")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(25);
+                let frags: Vec<pl_clone::Dseq> = upper
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| pl_clone::Dseq::new(s, false))
+                    .collect();
+                let opts = pl_clone::assembly::Options {
+                    limit,
+                    ..Default::default()
+                };
+                match pl_clone::assembly::assemble(&frags, circular, opts) {
+                    Err(e) => println!("{id}	error={e}"),
+                    Ok(products) => match products.len() {
+                        0 => println!("{id}	error=no assembly"),
+                        // More than one distinct product is a real answer about
+                        // the reaction, not a tie to be broken silently.
+                        1 => {
+                            let p = &products[0];
+                            match p.checksum() {
+                                Some(c) => {
+                                    println!("{id}	cdseguid={c}	length={}", p.seq.watson.len())
+                                }
+                                None => println!("{id}	error=product is not plain ACGT"),
+                            }
+                        }
+                        n => println!("{id}	error={n} distinct products"),
+                    },
                 }
             }
             "digest" => {

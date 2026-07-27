@@ -136,7 +136,8 @@ def main():
     print("length and the wrong shape, and only the overhang shows it")
 
     pcr_problems = check_pcr(pl)
-    return 0 if not problems and not pcr_problems else 1
+    asm_problems = check_assembly(pl)
+    return 0 if not problems and not pcr_problems and not asm_problems else 1
 
 
 def build_pcr_cases():
@@ -215,6 +216,127 @@ def build_pcr_cases():
         cases.append({"id": f"pcr-repeat-{i}", "tmpl": tmpl, "fwd": fwd, "rev": rev,
                       "circular": False})
     return cases
+
+
+def build_assembly_cases():
+    """Homology-overlap assemblies, including the ones that must NOT assemble.
+
+    The bench pins five fixed Gibson cases; this randomises around them, and
+    adds the negatives — fragments sharing an *internal* repeat rather than
+    terminal homology, and homology just under the limit — because an
+    assembler that says yes to everything scores perfectly on positives alone.
+    """
+    cases = []
+    for i in range(8):
+        a, b = rand_seq(30), rand_seq(30)
+        m1, m2 = rand_seq(rng.randint(150, 400)), rand_seq(rng.randint(150, 400))
+        cases.append({"id": f"asm-two-{i}", "frags": [a + m1 + b, b + m2 + a],
+                      "circular": True, "limit": 25})
+
+    for i in range(4):
+        a, b, c = rand_seq(35), rand_seq(35), rand_seq(35)
+        cases.append({
+            "id": f"asm-three-{i}",
+            "frags": [a + rand_seq(200) + b, b + rand_seq(220) + c, c + rand_seq(240) + a],
+            "circular": True, "limit": 25,
+        })
+
+    # Negatives. An internal repeat is not a junction.
+    for i in range(3):
+        rep = rand_seq(40)
+        cases.append({
+            "id": f"asm-internal-repeat-{i}",
+            "frags": [rand_seq(120) + rep + rand_seq(120),
+                      rand_seq(120) + rep + rand_seq(120)],
+            "circular": True, "limit": 25,
+        })
+    # Homology below the limit.
+    for i in range(2):
+        a = rand_seq(20)
+        cases.append({
+            "id": f"asm-short-homology-{i}",
+            "frags": [rand_seq(200) + a, a + rand_seq(200)],
+            "circular": False, "limit": 25,
+        })
+    return cases
+
+
+def check_assembly(pl):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        from pydna.assembly import Assembly
+    from pydna.dseqrecord import Dseqrecord
+    from seguid import cdseguid, ldseguid
+
+    def rc(s):
+        return s.translate(str.maketrans("ACGT", "TGCA"))[::-1]
+
+    cases = build_assembly_cases()
+    lines, expected, declined = [], {}, {}
+    for c in cases:
+        topo = "circular" if c["circular"] else "linear"
+        lines.append(f"{c['id']}	assembly	{topo}	{','.join(c['frags'])}"
+                     f"	method=homologous	min_homology={c['limit']}")
+        frags = [Dseqrecord(f) for f in c["frags"]]
+        try:
+            asm = Assembly(frags, limit=c["limit"])
+            prods = asm.assemble_circular() if c["circular"] else asm.assemble_linear()
+        except Exception as e:
+            declined[c["id"]] = str(e).splitlines()[0]
+            continue
+        if not prods:
+            declined[c["id"]] = "no assembly"
+            continue
+        # pydna reports each circular product once per starting rotation;
+        # cdseguid is rotation-invariant, so collapse them the same way we do.
+        ids = set()
+        for p in prods:
+            sq = str(p.seq).upper()
+            ids.add(cdseguid(sq, rc(sq)) if c["circular"] else ldseguid(sq, rc(sq)))
+        if len(ids) != 1:
+            declined[c["id"]] = f"{len(ids)} distinct products"
+            continue
+        expected[c["id"]] = ids.pop()
+
+    r = subprocess.run([pl, "bench-adapter"], input="\n".join(lines) + "\n",
+                       capture_output=True, text=True, encoding="utf-8")
+    if r.returncode != 0:
+        print(f"pl bench-adapter failed:\n{r.stderr[:2000]}")
+        return [("adapter", "failed", "", "")]
+    ours = {}
+    for line in r.stdout.splitlines():
+        parts = line.split("	")
+        if len(parts) > 1:
+            ours[parts[0]] = dict(p.split("=", 1) for p in parts[1:] if "=" in p)
+
+    problems, agree = [], 0
+    for cid, want in expected.items():
+        got = ours.get(cid) or {}
+        if got.get("cdseguid") != want:
+            problems.append((cid, "product differs", want, str(got)[:80]))
+        else:
+            agree += 1
+    for cid, why in declined.items():
+        got = ours.get(cid) or {}
+        if "error" not in got:
+            problems.append((cid, "we assembled what pydna will not",
+                             f"pydna: {why}", str(got)[:80]))
+        else:
+            agree += 1
+
+    print()
+    print("=" * 72)
+    print(f"assembly cases   : {len(expected)} assemble, {len(declined)} pydna refuses")
+    print(f"agree with pydna : {agree}")
+    print(f"disagree         : {len(problems)}")
+    for cid, what, want, got in problems[:10]:
+        print(f"\n  {cid}  [{what}]")
+        print(f"    pydna : {want}")
+        print(f"    ours  : {got}")
+    print("\ncompared by cdseguid, which is rotation- and strand-invariant, so a")
+    print("product that is right but rotated still counts as right")
+    return problems
 
 
 def check_pcr(pl):
