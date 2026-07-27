@@ -128,6 +128,10 @@ EXPORT OPTIONS:
     --width <px>                 canvas width  (default: 720)
     --height <px>                canvas height (default: 720)
     --pdf                        write PDF instead of SVG
+    --eps                        write EPS instead of SVG
+    --mm <width>                 final printed width in millimetres
+    --journal <name>             column width and type floor from a preset
+    --column <single|double>     which column width (default single)
     --no-ruler                   omit the base-position ruler
     -o, --outdir <dir>           where to write (default: beside the input)
     --stdout                     write to stdout instead of files
@@ -511,6 +515,7 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
         "fasta" | "fa" | "fna" => ("fa", false),
         other => return Err(format!("unknown output format '{other}'")),
     };
+
     let outdir = a.get("outdir").or_else(|| a.get("o")).map(PathBuf::from);
     let to_stdout = a.has("stdout");
     let date = today();
@@ -873,7 +878,10 @@ fn cmd_checksum(args: &[String]) -> Result<(), String> {
 /// is self-contained — no external stylesheet, no font file, no script — so it
 /// opens in Illustrator, Inkscape and a browser alike.
 fn cmd_export(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["outdir", "o", "width", "height"])?;
+    let a = parse_args(
+        args,
+        &["outdir", "o", "width", "height", "mm", "journal", "column"],
+    )?;
     a.require_files()?;
 
     let num = |name: &str, default: f64| -> Result<f64, String> {
@@ -891,6 +899,35 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         height: num("height", 720.0)?,
         ruler: !a.has("no-ruler"),
         ..Default::default()
+    };
+
+    // Physical size. A figure exported at "720 pixels" arrives in a manuscript
+    // as whatever width the template gives it, and every label scales with it:
+    // an 8 pt name at half size is 4 pt, below every journal's floor, which is
+    // invisible on screen and caught by a copy editor.
+    let journal = match a.get("journal") {
+        Some(j) => Some(pl_draw::page::preset(j).ok_or_else(|| {
+            format!(
+                "--journal {j:?}: known presets are {}",
+                pl_draw::page::PRESETS
+                    .iter()
+                    .map(|p| p.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?),
+        None => None,
+    };
+    let double = a.get("column").map(|c| c == "double").unwrap_or(false);
+    let width_mm: Option<f64> = match (a.get("mm"), journal) {
+        (Some(v), _) => Some(
+            v.parse::<f64>()
+                .ok()
+                .filter(|x| (5.0..=500.0).contains(x))
+                .ok_or_else(|| format!("--mm {v:?}: expected 5 to 500"))?,
+        ),
+        (None, Some(p)) => Some(if double { p.double_mm } else { p.single_mm }),
+        (None, None) => None,
     };
 
     let outdir = a.get("outdir").or_else(|| a.get("o")).map(PathBuf::from);
@@ -914,13 +951,45 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         }
 
         let as_pdf = a.has("pdf");
-        let (bytes, drawn, font) = if as_pdf {
+        let as_eps = a.has("eps");
+        let (bytes, drawn, font) = if as_eps {
+            let (scene, d) = pl_draw::scene(&mol, opts);
+            let fit = width_mm.map(|mm| pl_draw::page::Fit::to_width_mm(&scene, mm));
+            let (text, f) = pl_draw::eps::to_eps(&scene, fit.map_or(1.0, |f| f.scale));
+            (text.into_bytes(), d, Some(f))
+        } else if as_pdf {
             let (b, d, f) = pl_draw::circular_pdf(&mol, opts);
             (b, d, Some(f))
         } else {
             let (s, d) = pl_draw::circular_svg(&mol, opts);
             (s.into_bytes(), d, None)
         };
+
+        // The check the physical size exists for. Report it once per file,
+        // whatever the format, because it is a property of the figure and not
+        // of the encoder.
+        if let Some(mm) = width_mm {
+            let (scene, _) = pl_draw::scene(&mol, opts);
+            let fit = pl_draw::page::Fit::to_width_mm(&scene, mm);
+            eprintln!(
+                "pl: {}: {:.1} x {:.1} mm at final size",
+                path.display(),
+                fit.width_mm,
+                fit.height_mm
+            );
+            if let Some(p) = journal {
+                if fit.type_too_small(&p) {
+                    eprintln!(
+                        "pl: {}: smallest type is {:.1} pt, below {}'s {:.0} pt minimum",
+                        path.display(),
+                        fit.min_font_pt.unwrap_or(0.0),
+                        p.name,
+                        p.min_font_pt
+                    );
+                    eprintln!("     raise --font-size, drop labels, or use --column double");
+                }
+            }
+        }
 
         // Helvetica is one of the fourteen fonts every PDF viewer provides, so
         // nothing is embedded -- at the cost of WinAnsi, which has no Greek.
@@ -985,7 +1054,13 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         });
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
-        let ext = if as_pdf { "pdf" } else { "svg" };
+        let ext = if as_eps {
+            "eps"
+        } else if as_pdf {
+            "pdf"
+        } else {
+            "svg"
+        };
         let stem = genbank::locus_name(&title_of(path));
         let mut dest = dir.join(format!("{stem}.{ext}"));
         if same_file(path, &dest) {

@@ -30,7 +30,9 @@
 
 use pl_core::{Molecule, Strand};
 
+pub mod eps;
 mod labels;
+pub mod page;
 pub mod pdf;
 pub mod scene;
 pub mod trace;

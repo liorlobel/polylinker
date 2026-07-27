@@ -300,6 +300,30 @@ Step 'Sanger placement vs Biopython' {
 # ladder's largest and smallest bands.
 #
 # 4,312 points across 44 knot sets, worst relative difference 4.9e-13.
+# EPS against the PDF, and against PostScript's own rules.
+#
+# **No PostScript interpreter is installed here** -- no Ghostscript, and MuPDF
+# refuses EPS -- so this does NOT prove a renderer draws the file. Saying so
+# matters, because "the EPS oracle passes" would otherwise sound like more than
+# it is. What it does prove: the geometry is point-for-point the PDF's after the
+# y-flip (284 path operators), gsave/grestore and every string literal balance,
+# only Level 2 operators appear, and the BoundingBox contains the artwork.
+#
+# The circle is drawn as four Beziers rather than PostScript's native `arc`, on
+# purpose: PDF has no arc operator, and two formats that approximate a circle
+# differently are two slightly different figures.
+#
+# Verified it can fail three ways: not flipping the y axis (an upside-down but
+# otherwise perfect figure) is caught at operator 0; a BoundingBox 20% too small
+# is caught as "the figure would be cropped"; and leaving ')' unescaped drops a
+# label. That third one needed a fixture -- `tests/export-fixture/hostile-names.gb`
+# exists because none of the other fixtures has a parenthesis in a feature name,
+# so the check could not fail and therefore proved nothing. The name in it is
+# real: aph(3')-Ia is what this project's own database calls KanR.
+Step 'EPS agrees with the PDF, and is valid PostScript' {
+    python reference/python/tests/xcheck_eps.py target/release/pl.exe (Get-ChildItem tests/library-fixture/*.gb, tests/export-fixture/*.gb | ForEach-Object { $_.FullName })
+}
+
 Step 'gel calibration spline vs SciPy' {
     cargo build --release -p pl-gel --example dump_spline 2>&1 | Out-Null
     python reference/python/tests/xcheck_spline.py target/release/examples/dump_spline.exe

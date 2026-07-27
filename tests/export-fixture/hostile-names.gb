@@ -1,0 +1,26 @@
+LOCUS       hostile                  240 bp    DNA     circular SYN 27-JUL-2026
+DEFINITION  Feature names that break a naive PostScript or PDF string writer.
+COMMENT     Every name here is hostile to a specific escaping bug, and the first
+            one is real: aph(3')-Ia is the gene this project's own feature
+            database calls KanR. An unescaped ')' ends a PostScript string
+            literal and turns the rest of the program into garbage, so the whole
+            figure is lost to one gene name. Without a fixture containing one,
+            the check for it cannot fail and therefore proves nothing.
+FEATURES             Location/Qualifiers
+     source          1..240
+                     /organism="synthetic DNA construct"
+                     /mol_type="other DNA"
+     CDS             1..60
+                     /label="aph(3')-Ia"
+     CDS             61..120
+                     /label="back\slash"
+     CDS             121..180
+                     /label="paren (unclosed"
+     CDS             181..240
+                     /label="Olschlager 1989"
+ORIGIN
+        1 atgagccata ttcaacggga aacgtcttgc tcgaggccgc gattaaattc caacatggat
+       61 gctgatttat atgggtataa atgggctcgc gataatgtcg ggcaatcagg tgcgacaatc
+      121 tatcgattgt atgggaagcc cgatgcgcca gagttgtttc tgaaacatgg caaaggtagc
+      181 gttgccaatg atgttacaga tgagatggtc agactaaact ggctgacgga atttatgcct
+//
