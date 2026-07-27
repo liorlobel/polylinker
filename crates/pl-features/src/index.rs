@@ -15,10 +15,21 @@
 //! The consequence nobody mentions: **a feature shorter than `k` cannot be
 //! seeded at all**, and a feature containing ambiguity codes cannot be seeded
 //! across them. Short degenerate consensus sites — a −35 box, a ribosome
-//! binding site — are exactly that case. Silently failing to find them would
-//! look like an empty result rather than an unsupported one, so they are routed
-//! to a direct IUPAC-aware scan instead ([`Index::short`]), and indels are not
-//! considered for them: a 10 bp element with an indel is not identifiable.
+//! binding site — are exactly that case.
+//!
+//! [`Index::short`] **reports** those records; it does not scan for them. Its
+//! only caller is `Annotator::unseedable`, and `annotate` runs `scan_dna` and
+//! `scan_protein` and nothing else — so an unseedable feature is currently
+//! *named as unsupported*, not found by another route.
+//!
+//! This paragraph used to say they were "routed to a direct IUPAC-aware scan
+//! instead ([`Index::short`])". They were not. Describing a fallback that had
+//! never been written is worse than describing the gap, because a reader
+//! checking whether short degenerate sites are handled would have stopped
+//! reading there and believed they were. The scan now exists as
+//! [`pl_core::iupac::find_all`]; wiring it in is a separate change with its own
+//! tests. Indels stay out of scope for these either way — a 10 bp element with
+//! an indel is not identifiable.
 
 use std::collections::HashMap;
 

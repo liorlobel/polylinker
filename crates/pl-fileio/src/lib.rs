@@ -109,12 +109,114 @@ pub struct LoadReport {
     /// not have. Reported rather than dropped, and never invented: see
     /// `genbank::parse_location`.
     pub unrepresentable_locations: Vec<String>,
+    /// Did the *file* state the topology, or did we fall back to a default?
+    ///
+    /// [`Molecule::topology`] has two states and defaults to `Linear`, which
+    /// conflates "this file says linear" with "this file says nothing". FASTA
+    /// has no topology field at all, so every FASTA record reads as linear —
+    /// and a Plasmidsaurus assembly of a plasmid arrives as FASTA, at an
+    /// arbitrary rotation. Treating that as linear loses exactly the
+    /// origin-straddling sites the assembly was sequenced to check.
+    ///
+    /// A third `Topology` variant would ripple into `cut_positions`,
+    /// `fragments` and every computed digest, so the provenance is reported
+    /// beside the value instead and callers who care can ask. `Molecule
+    /// ::double_stranded` is `Option<bool>` for the same reason.
+    ///
+    /// **`false` is not a claim that the molecule is linear.** It means we do
+    /// not know, and a caller that scans it as linear is choosing to miss
+    /// wrapping hits.
+    pub topology_declared: bool,
+    /// The file parsed, and what came out does not look like a molecule.
+    ///
+    /// `genbank::parse` and `fasta::parse` cannot fail: garbage yields an empty
+    /// `Molecule` that is indistinguishable, through `Result`, from a genuine
+    /// annotation-only record. Only SnapGene returns structured errors. So a
+    /// 48 KB file of noise that happens to start with `LOCUS` loads
+    /// "successfully" as nothing at all.
+    ///
+    /// Set when `detect` said GenBank or FASTA and the parse produced no
+    /// records, or one record with no bases, no declared length and no
+    /// features. Deliberately an *observation* and not a diagnosis: we cannot
+    /// tell a corrupt file from an exotic one, so the caller is told what was
+    /// seen and left to decide.
+    pub suspect: bool,
 }
 
 impl LoadReport {
     /// Did the file hold more than we returned?
     pub fn truncated(&self) -> bool {
         self.records > 1
+    }
+}
+
+/// Load **every** record in a file.
+///
+/// [`load`] and [`load_with_report`] return only the first, which is right for
+/// a viewer showing one molecule and wrong for anything that walks a folder: a
+/// 124-record `.gbk` came back as one molecule with 1,879 features gone, and
+/// 8 of 303 GenBank files and 351 FASTA files in this project's corpus hold
+/// more than one record. An importer built on `load` would reproduce that
+/// silently across an entire shared drive.
+///
+/// The `Vec` is empty only for a file that parsed to nothing, which is exactly
+/// the case `LoadReport::suspect` flags.
+pub fn load_all(data: &[u8]) -> Result<(Vec<Molecule>, Format, LoadReport), LoadError> {
+    match detect(data) {
+        Some(Format::SnapGene) => {
+            let doc = snapgene::parse(data).map_err(LoadError::SnapGene)?;
+            Ok((
+                vec![doc.molecule],
+                Format::SnapGene,
+                LoadReport {
+                    records: 1,
+                    // A `.dna` always carries a topology flag.
+                    topology_declared: true,
+                    ..Default::default()
+                },
+            ))
+        }
+        Some(Format::GenBank) => {
+            let text = String::from_utf8_lossy(data);
+            let (all, unrepresentable_locations) = genbank::parse_all_reporting(&text);
+            let records = all.len();
+            let report = LoadReport {
+                records,
+                unrepresentable_locations,
+                topology_declared: genbank::declares_topology(&text),
+                suspect: looks_like_nothing(&all),
+            };
+            Ok((all, Format::GenBank, report))
+        }
+        Some(Format::Fasta) => {
+            let text = String::from_utf8_lossy(data);
+            let all = fasta::parse_all(&text);
+            let records = all.len();
+            let report = LoadReport {
+                records,
+                // FASTA has no topology field. Never declared, ever.
+                topology_declared: false,
+                suspect: looks_like_nothing(&all),
+                ..Default::default()
+            };
+            Ok((all, Format::Fasta, report))
+        }
+        Some(other) => Err(LoadError::NotASequenceFile(other)),
+        None => Err(LoadError::Unrecognised),
+    }
+}
+
+/// Did a format that cannot report errors produce anything worth having?
+fn looks_like_nothing(all: &[Molecule]) -> bool {
+    match all {
+        [] => true,
+        [one] => {
+            one.seq.is_empty()
+                && one.declared_len.unwrap_or(0) == 0
+                && one.features.is_empty()
+                && one.primers.is_empty()
+        }
+        _ => false,
     }
 }
 
@@ -127,53 +229,156 @@ pub fn load(data: &[u8]) -> Result<(Molecule, Format), LoadError> {
 }
 
 /// Load the first record, and say what else the file held.
+///
+/// Literally the first element of [`load_all`], rather than a second parse that
+/// could disagree with it about how many records there are or whether the file
+/// is suspect.
 pub fn load_with_report(data: &[u8]) -> Result<(Molecule, Format, LoadReport), LoadError> {
-    match detect(data) {
-        Some(Format::SnapGene) => {
-            let doc = snapgene::parse(data).map_err(LoadError::SnapGene)?;
-            Ok((
-                doc.molecule,
-                Format::SnapGene,
-                LoadReport {
-                    records: 1,
-                    ..Default::default()
-                },
-            ))
-        }
-        Some(Format::GenBank) => {
-            let text = String::from_utf8_lossy(data);
-            let (all, unrepresentable_locations) = genbank::parse_all_reporting(&text);
-            let records = all.len();
-            Ok((
-                all.into_iter().next().unwrap_or_default(),
-                Format::GenBank,
-                LoadReport {
-                    records,
-                    unrepresentable_locations,
-                },
-            ))
-        }
-        Some(Format::Fasta) => {
-            let text = String::from_utf8_lossy(data);
-            let all = fasta::parse_all(&text);
-            let records = all.len();
-            Ok((
-                all.into_iter().next().unwrap_or_default(),
-                Format::Fasta,
-                LoadReport {
-                    records,
-                    ..Default::default()
-                },
-            ))
-        }
-        Some(other) => Err(LoadError::NotASequenceFile(other)),
-        None => Err(LoadError::Unrecognised),
-    }
+    let (all, format, report) = load_all(data)?;
+    Ok((all.into_iter().next().unwrap_or_default(), format, report))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TWO_GB: &str = "\
+LOCUS       one           10 bp    DNA     circular SYN 26-JUL-2026
+FEATURES             Location/Qualifiers
+     misc_feature    1..5
+                     /label=\"a\"
+ORIGIN
+        1 ACGTACGTAC
+//
+LOCUS       two           8 bp    DNA     linear SYN 26-JUL-2026
+ORIGIN
+        1 TTTTGGGG
+//
+";
+
+    #[test]
+    fn load_all_returns_every_record_where_load_returns_one() {
+        // `load` keeps the first record. That is right for a viewer and wrong
+        // for a folder walk: a 124-record file came back as one molecule with
+        // 1,879 features gone. An importer on `load` reproduces that across a
+        // whole shared drive, silently.
+        let (all, fmt, report) = load_all(TWO_GB.as_bytes()).unwrap();
+        assert_eq!(fmt, Format::GenBank);
+        assert_eq!(all.len(), 2);
+        assert_eq!(report.records, 2);
+        assert_eq!(all[0].name, "one");
+        assert_eq!(all[1].name, "two");
+        assert_eq!(all[0].seq.len(), 10);
+        assert_eq!(all[1].seq.len(), 8);
+        assert!(all[0].topology.is_circular());
+        assert!(!all[1].topology.is_circular());
+
+        // And the one-record API is the first element of it, not a second
+        // parse that could disagree.
+        let (one, _, r2) = load_with_report(TWO_GB.as_bytes()).unwrap();
+        assert_eq!(one.name, all[0].name);
+        assert_eq!(r2, report);
+    }
+
+    #[test]
+    fn a_multi_record_fasta_is_not_truncated_either() {
+        let text = ">a desc\nACGT\n>b\nGGGG\n>c\nTTTT\n";
+        let (all, fmt, report) = load_all(text.as_bytes()).unwrap();
+        assert_eq!(fmt, Format::Fasta);
+        assert_eq!(all.len(), 3);
+        assert_eq!(report.records, 3);
+        assert!(report.truncated());
+    }
+
+    #[test]
+    fn genbank_says_nothing_and_says_linear_are_different_facts() {
+        // The whole point of `topology_declared`. Both parse to
+        // `Topology::Linear`, because `Topology` has no third state; only the
+        // report distinguishes them.
+        let says_linear = "LOCUS       x    4 bp    DNA     linear   SYN 26-JUL-2026\nORIGIN\n        1 ACGT\n//\n";
+        let says_nothing =
+            "LOCUS       x    4 bp    DNA     SYN 26-JUL-2026\nORIGIN\n        1 ACGT\n//\n";
+        let says_circular = "LOCUS       x    4 bp    DNA     circular SYN 26-JUL-2026\nORIGIN\n        1 ACGT\n//\n";
+
+        for (text, want_declared, want_circular) in [
+            (says_linear, true, false),
+            (says_nothing, false, false),
+            (says_circular, true, true),
+        ] {
+            let (m, _, r) = load_with_report(text.as_bytes()).unwrap();
+            assert_eq!(r.topology_declared, want_declared, "declared, for {text:?}");
+            assert_eq!(m.topology.is_circular(), want_circular, "topology");
+        }
+    }
+
+    #[test]
+    fn a_plasmid_name_containing_circular_does_not_declare_topology() {
+        // `pCircularise` already fooled a `contains` check into calling a
+        // linear molecule circular. The provenance check must not reintroduce
+        // it through the back door by matching the name token.
+        let text = "LOCUS       pCircularise    4 bp    DNA     SYN 26-JUL-2026\nORIGIN\n        1 ACGT\n//\n";
+        let (m, _, r) = load_with_report(text.as_bytes()).unwrap();
+        assert!(!r.topology_declared, "the name is not a declaration");
+        assert!(!m.topology.is_circular());
+    }
+
+    #[test]
+    fn one_record_declaring_does_not_vouch_for_another_that_does_not() {
+        let mixed = "\
+LOCUS       one    4 bp    DNA     circular SYN 26-JUL-2026
+ORIGIN
+        1 ACGT
+//
+LOCUS       two    4 bp    DNA     SYN 26-JUL-2026
+ORIGIN
+        1 TTTT
+//
+";
+        let (_, _, r) = load_all(mixed.as_bytes()).unwrap();
+        assert!(
+            !r.topology_declared,
+            "a file is only 'declared' when every record declares"
+        );
+    }
+
+    #[test]
+    fn fasta_never_declares_a_topology_and_snapgene_always_does() {
+        let (_, _, r) = load_all(b">x\nACGT\n").unwrap();
+        assert!(
+            !r.topology_declared,
+            "FASTA has no topology field; claiming otherwise loses the \
+             origin-straddling hits in a Plasmidsaurus assembly"
+        );
+    }
+
+    #[test]
+    fn a_file_that_parses_to_nothing_is_flagged_suspect() {
+        // `genbank::parse` and `fasta::parse` cannot fail, so garbage is
+        // indistinguishable from an annotation-only record through `Result`.
+        let noise = "LOCUS\n\u{1}\u{2}\u{3} not really a genbank file at all\n";
+        let (_, _, r) = load_with_report(noise.as_bytes()).unwrap();
+        assert!(r.suspect, "parsed to nothing and did not say so");
+
+        // A real annotation-only record is NOT suspect: it has features, and a
+        // declared length, and is a legitimate thing to hold.
+        let track = "\
+LOCUS       track    3000 bp    DNA     circular SYN 26-JUL-2026
+FEATURES             Location/Qualifiers
+     misc_feature    1..3000
+                     /label=\"everything\"
+ORIGIN
+//
+";
+        let (m, _, r) = load_with_report(track.as_bytes()).unwrap();
+        assert!(!r.suspect, "an annotation track is not suspect");
+        assert!(m.seq.is_empty());
+        assert_eq!(m.declared_len, Some(3000));
+        assert_eq!(m.features.len(), 1);
+
+        // Nor is an ordinary record.
+        let (_, _, r) = load_with_report(TWO_GB.as_bytes()).unwrap();
+        assert!(!r.suspect);
+    }
 
     #[test]
     fn a_multi_record_file_reports_what_it_held() {

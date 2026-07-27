@@ -25,6 +25,37 @@ pub fn parse_all(text: &str) -> Vec<Molecule> {
     parse_all_reporting(text).0
 }
 
+/// Does every LOCUS line in this text state a topology?
+///
+/// `parse_record` returns `Topology::Linear` both for a file that says `linear`
+/// and for one that says nothing, because `Topology` has only two states.
+/// Those are different facts: the first is the file's claim, the second is our
+/// default. A caller deciding whether to scan for origin-straddling sites needs
+/// to know which it has.
+///
+/// Conservative on purpose — **all** records must declare. A file whose first
+/// record says `circular` and whose second says nothing is not a file that
+/// declared its topology, and answering `true` would let the second record
+/// inherit the first one's provenance.
+///
+/// Returns `false` for text with no LOCUS line at all: nothing declared it.
+pub fn declares_topology(text: &str) -> bool {
+    let mut seen = false;
+    for locus in text.lines().filter(|l| l.starts_with("LOCUS")) {
+        seen = true;
+        // Same tokenised rule as `parse_record`, and skipping the name token
+        // for the same reason: `pCircularise` is a name, not a topology.
+        let declared = locus
+            .split_whitespace()
+            .skip(2)
+            .any(|t| t.eq_ignore_ascii_case("circular") || t.eq_ignore_ascii_case("linear"));
+        if !declared {
+            return false;
+        }
+    }
+    seen
+}
+
 /// Every record, plus any location form we could not represent.
 ///
 /// The warnings are the point: an exotic location that simply vanished left a
@@ -86,6 +117,11 @@ fn parse_record(lines: &[&str]) -> (Molecule, Vec<String>) {
 
         // Token index 1 is the name and is skipped: only a standalone
         // `circular`/`linear` token decides topology.
+        //
+        // Absence of both is *not* linear, only undeclared — which this returns
+        // as `Linear` because `Topology` has no third state. See
+        // [`declares_topology`] and `LoadReport::topology_declared`, which is
+        // how a caller tells the two apart.
         mol.topology = if toks
             .iter()
             .skip(2)
