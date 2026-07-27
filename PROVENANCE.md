@@ -112,6 +112,18 @@ Recognition sites used in the prototype were transcribed independently from
 standard published references. They are facts about enzymes, not a copied
 database.
 
+**Verified 2026-07-27** against Biopython's `Bio.Restriction`, which is
+REBASE-derived and BSD-licensed: all 51 sites and top-strand cut offsets agreed
+exactly. The signed `ovhg` column and the eight Type IIS entries (BsaI, BsmBI,
+Esp3I, BbsI, SapI, BspQI, PaqCI, AarI) were taken from the same place, in the
+same spirit — a cut geometry is a measurement, and Biopython's implementation
+carries a licence while the numbers do not. `docs/PLAN.md` §7.2 makes the
+equivalent call for thermodynamic parameters and names the source to avoid
+(Primer3's GPL-2.0 `oligotm.c`).
+
+This does not change the position below: production enzyme coverage means
+REBASE, under REBASE's own terms, in its own package.
+
 Production enzyme data will come from **REBASE** (Roberts lab / New England
 Biolabs) under REBASE's own terms, packaged separately with its own `NOTICE`,
 and not commingled with Apache-2.0 code.

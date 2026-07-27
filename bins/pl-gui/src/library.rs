@@ -237,17 +237,20 @@ mod tests {
 
     #[test]
     fn an_unknown_enzyme_names_itself_instead_of_becoming_a_motif() {
-        match parse_query(Mode::Enzyme, "BsaI", false) {
-            Parsed::Rejected(e) => {
-                assert!(e.contains("BsaI"), "{e}");
-                assert!(e.contains("no BsaI"), "{e}");
-            }
-            _ => panic!("BsaI is not shipped and must not silently become a motif"),
+        // `BsaI` used to be the example here, because it was not shipped. It
+        // is now, so the test needs a name that really is absent — otherwise
+        // it would pass while asserting nothing.
+        assert!(pl_enzymes::by_name("BsaI").is_some(), "BsaI ships now");
+        match parse_query(Mode::Enzyme, "NotAnEnzyme", false) {
+            Parsed::Rejected(e) => assert!(e.contains("NotAnEnzyme"), "{e}"),
+            _ => panic!("an unknown name must not silently become a motif"),
         }
-        assert!(matches!(
-            parse_query(Mode::Enzyme, "EcoRI", false),
-            Parsed::Ready(..)
-        ));
+        for known in ["EcoRI", "BsaI", "BsmBI", "SapI"] {
+            assert!(
+                matches!(parse_query(Mode::Enzyme, known, false), Parsed::Ready(..)),
+                "{known} should be searchable"
+            );
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@ USAGE:
     pl export  <file>... [options]       plasmid map as SVG or PDF
     pl find-motif <IUPAC> <file>         search a sequence, both strands
     pl tm      <OLIGO>...                melting temperature
+    pl goldengate <OVERHANG>...          check a Type IIS overhang set
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -51,6 +52,9 @@ FIND OPTIONS:
 
 LIBRARY OPTIONS:
     --problems                   every record that could not be fully read
+
+GOLDENGATE OPTIONS:
+    --enzyme <NAME>              digest a file with a Type IIS enzyme instead
 
 TM OPTIONS:
     --table <1998|2004>          SantaLucia parameter set (default: 1998)
@@ -116,6 +120,7 @@ fn main() -> ExitCode {
         "export" => cmd_export(rest),
         "find-motif" => cmd_find_motif(rest),
         "tm" => cmd_tm(rest),
+        "goldengate" => cmd_goldengate(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
         "library" => cmd_library(rest),
@@ -1679,6 +1684,134 @@ annealing advice, from the lowest Tm ({low:.1}C):"
 this is advice, not a measurement; the Tm above is the measurement"
         );
     }
+    Ok(())
+}
+
+/// Check a Golden Gate overhang set, or the one a file would produce.
+///
+/// Reports the faults that can be found from the overhangs alone, and says
+/// plainly that it is not reporting a fidelity percentage — the measured
+/// ligation rates that would justify one are not shipped.
+fn cmd_goldengate(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["enzyme"])?;
+
+    // Either bare overhangs on the command line, or a file plus --enzyme.
+    let mut overhangs: Vec<pl_clone::goldengate::Overhang> = Vec::new();
+    let source;
+
+    let bare: Vec<String> = a
+        .files
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| pl_core::iupac::code_mask(b) != 0))
+        .collect();
+
+    if let Some(name) = a.get("enzyme") {
+        let e = pl_enzymes::by_name(name)
+            .ok_or_else(|| format!("--enzyme {name:?}: not in the shipped table"))?;
+        if !e.cuts_outside_site() {
+            return Err(format!(
+                "{} is not a Type IIS enzyme: it cuts inside its own site, so every                  fragment gets the same ends and there is no overhang set to check",
+                e.name
+            ));
+        }
+        let path = a
+            .files
+            .iter()
+            .find(|p| p.exists())
+            .ok_or("give a file to digest with --enzyme")?;
+        let data = read(path)?;
+        let (mol, _, _) =
+            load_with_report(&data).map_err(|f| format!("{}: {f}", path.display()))?;
+        let seq = String::from_utf8_lossy(&mol.seq).to_string();
+        let frags = pl_clone::cut(&pl_clone::Dseq::new(&seq, mol.topology.is_circular()), e);
+        for f in &frags {
+            if let Some(o) = pl_clone::goldengate::left_overhang(f) {
+                overhangs.push(o);
+            }
+        }
+        source = format!(
+            "{} cut with {} -> {} fragment(s)",
+            path.display(),
+            e.name,
+            frags.len()
+        );
+    } else {
+        if bare.is_empty() {
+            return Err("give overhangs (e.g. AATG GCTT CAGG) or a file with --enzyme".into());
+        }
+        for b in &bare {
+            overhangs.push(pl_clone::goldengate::Overhang {
+                bases: b.to_ascii_uppercase().into_bytes(),
+                five_prime: true,
+            });
+        }
+        source = format!("{} overhang(s) given", overhangs.len());
+    }
+
+    let report = pl_clone::goldengate::check(&overhangs);
+
+    if a.has("json") {
+        let mut out = String::from(
+            "{
+  \"overhangs\": [",
+        );
+        for (i, o) in report.overhangs.iter().enumerate() {
+            out.push_str(&format!("{}{}", if i > 0 { ", " } else { "" }, json_str(o)));
+        }
+        out.push_str(
+            "],
+  \"faults\": [
+",
+        );
+        for (i, f) in report.faults.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{\"fatal\": {}, \"detail\": {}}}{}
+",
+                f.is_fatal(),
+                json_str(&f.to_string()),
+                if i + 1 == report.faults.len() {
+                    ""
+                } else {
+                    ","
+                }
+            ));
+        }
+        out.push_str(&format!(
+            "  ],
+  \"usable\": {}
+}}
+",
+            report.is_usable()
+        ));
+        print!("{out}");
+        return Ok(());
+    }
+
+    println!("{source}");
+    println!("{}", report.overhangs.join("  "));
+    println!();
+    if report.faults.is_empty() {
+        println!("no structural fault found");
+    } else {
+        for f in &report.faults {
+            println!("{}  {f}", if f.is_fatal() { "STOPS  " } else { "reduces" });
+        }
+        println!();
+        println!(
+            "{}",
+            if report.is_usable() {
+                "the assembly should still give the intended construct, with a wrong minor product"
+            } else {
+                "this set will not give one construct"
+            }
+        );
+    }
+    println!(
+        "
+{}",
+        report.caveat()
+    );
     Ok(())
 }
 

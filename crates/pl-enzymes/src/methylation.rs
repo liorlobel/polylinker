@@ -609,12 +609,24 @@ mod tests {
 
     #[test]
     fn a_palindromic_site_reacts_the_same_read_either_way() {
-        // Every site here is a palindrome and every motif is
-        // self-complementary, so a rule that fires on a sequence must fire on
-        // its reverse complement. A one-sided rule is physically impossible
-        // for a Type IIP enzyme, and this is the check that catches one.
+        // For a **palindromic** site and a self-complementary motif, a rule
+        // that fires on a sequence must fire on its reverse complement. A
+        // one-sided rule is physically impossible for a Type IIP enzyme, and
+        // this is the check that catches one.
+        //
+        // Type IIS enzymes are excluded, and the exclusion is the point rather
+        // than a convenience: `GGTCTC` does not appear in the reverse
+        // complement of a sequence containing it -- `GAGACC` does -- so the
+        // symmetry this asserts is not a claim about them at all. Before they
+        // were added, this loop ran over every enzyme and the premise happened
+        // to hold.
         let all = meth(true, true, true);
+        let mut checked = 0;
         for e in ENZYMES {
+            if !pl_core::iupac::is_palindrome_masks(e.site.as_bytes()) {
+                continue;
+            }
+            checked += 1;
             for flank in ["G", "C", "GA", "TC", "CC", "GG", "CCAGG", "GATC"] {
                 for seq in [
                     format!("TTTT{flank}{}TTTT", e.site),
@@ -635,6 +647,10 @@ mod tests {
                 }
             }
         }
+        assert!(
+            checked >= 50,
+            "only {checked} palindromic enzymes were exercised"
+        );
     }
 
     #[test]

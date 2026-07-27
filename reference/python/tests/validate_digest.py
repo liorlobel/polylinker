@@ -50,7 +50,22 @@ OUR_ENZYMES = [
     ("SpeI","ACTAGT",1), ("SphI","GCATGC",5), ("SspI","AATATT",3),
     ("StuI","AGGCCT",3), ("SwaI","ATTTAAAT",4), ("XbaI","TCTAGA",1),
     ("XhoI","CTCGAG",1), ("XmaI","CCCGGG",1),
+    # Type IIS: these cut *outside* their site, on both strands, and are the
+    # reason the enzyme model had to grow a stored signed overhang. The Python
+    # transcription below scans the forward strand only and would miss their
+    # minus-strand sites entirely, so they are compared through the Rust arm
+    # and Biopython alone -- see `RUST_ONLY`.
+    ("BsaI","GGTCTC",7), ("BsmBI","CGTCTC",7), ("Esp3I","CGTCTC",7),
+    ("BbsI","GAAGAC",8), ("SapI","GCTCTTC",8), ("BspQI","GCTCTTC",8),
+    ("PaqCI","CACCTGC",11), ("AarI","CACCTGC",11),
 ]
+
+# Enzymes whose sites are not palindromes. `our_digest` below scans one strand,
+# which is correct for every Type IIP enzyme and incomplete for these, so the
+# Python arm is skipped for them and the Rust is compared against Biopython
+# directly. Skipping *quietly* would be the usual mistake; the summary prints
+# how many were compared each way.
+RUST_ONLY = {"BsaI", "BsmBI", "Esp3I", "BbsI", "SapI", "BspQI", "PaqCI", "AarI"}
 
 
 def our_digest(seq, circular):
@@ -117,7 +132,7 @@ def compare(path, exe=None):
     mismatches = []
     for nme in sorted(names):
         a, b = ours.get(nme, []), theirs.get(nme, [])
-        if a != b:
+        if nme not in RUST_ONLY and a != b:
             mismatches.append((nme, "python", a, b))
         if rust is not None:
             r = rust.get(nme, [])
@@ -170,6 +185,9 @@ def main(argv):
     print(f"enzymes disagreeing   : {total_mm}")
     print(f"implementations       : python + biopython"
           + (" + rust" if exe else "  (rust arm OFF -- pass pl.exe to enable)"))
+    print(f"type IIS enzymes      : {len(RUST_ONLY)} (rust vs biopython only;")
+    print(f"                        the python arm scans one strand and cannot")
+    print(f"                        see their minus-strand sites)")
 
     for fname, mm in detail[:6]:
         print(f"\n  {fname}")

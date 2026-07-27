@@ -27,6 +27,7 @@
 //! ligate — and a tool that models ends as "blunt or not" cannot tell you that.
 
 pub mod assembly;
+pub mod goldengate;
 
 use pl_core::{reverse_complement, Topology};
 use pl_enzymes::Enzyme;
@@ -202,22 +203,15 @@ impl End {
     }
 }
 
-/// Where an enzyme cuts each strand, as offsets from the start of its site.
-///
-/// For the palindromic Type IIP enzymes in `pl-enzymes` the bottom-strand cut
-/// is the mirror of the top-strand one, so it is derived rather than stored:
-/// `GAATTC` cut at 1 on top is cut at 6 - 1 = 5 on the bottom, leaving the
-/// four-base 5' overhang everyone knows as an EcoRI end.
-fn strand_cuts(e: &Enzyme) -> (i64, i64) {
-    let top = e.cut_offset as i64;
-    let bottom = e.site.len() as i64 - top;
-    (top, bottom)
-}
-
 /// The overhang an enzyme leaves: positive for 5', negative for 3', 0 blunt.
+///
+/// The opposite sign to [`Enzyme::ovhg`], which follows Biopython's convention;
+/// this one is `bottom - top`, which is what the fragment arithmetic below
+/// wants. Both are kept rather than one silently reused, because a sign error
+/// here turns a 5' overhang into a 3' one and every ligation downstream is
+/// wrong in a way that still looks like DNA.
 pub fn overhang_of(e: &Enzyme) -> i64 {
-    let (top, bottom) = strand_cuts(e);
-    bottom - top
+    -(e.ovhg as i64)
 }
 
 /// Cut a molecule with one enzyme, returning the fragments with their ends.

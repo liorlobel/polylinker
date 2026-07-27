@@ -27,6 +27,11 @@ ENZYMES = [
     "PstI", "KpnI", "SacI", "SphI", "NsiI",            # 3' overhang
     "EcoRV", "SmaI", "DraI", "PvuII", "ScaI",          # blunt
     "NotI", "AscI",                                     # 8-cutters
+    # Type IIS: these cut outside their site, so the overhang is whatever bases
+    # happen to be there and both strands carry sites. Their fragment *ends*
+    # are what the stored signed `ovhg` changed, and pydna is the only oracle
+    # here that checks watson, crick and overhang rather than just positions.
+    "BsaI", "BsmBI", "BbsI", "SapI",
 ]
 
 rng = random.Random(20260727)

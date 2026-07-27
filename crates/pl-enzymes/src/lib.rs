@@ -21,15 +21,41 @@ pub mod methylation;
 
 use pl_core::{iupac, Molecule, Topology};
 
-/// A Type IIP restriction enzyme: palindromic site, fixed cut offset.
+/// A restriction enzyme, in Biopython's coordinates.
+///
+/// Two numbers describe every cut this project can make — Type IIP, Type IIS
+/// cutting at a distance, blunt, 5' overhang, 3' overhang:
+///
+/// ```text
+/// top    = match_start + fst5
+/// bottom = top - ovhg
+/// ```
+///
+/// `docs/PLAN.md` §7.1 specifies exactly this and adds "do not invent
+/// another", which is worth heeding: the previous model stored only the
+/// top-strand offset and *derived* the bottom one by mirroring it about the
+/// centre of the site. That is true for a palindrome and false for every
+/// Type IIS enzyme, whose two nicks are both outside the site and are not
+/// symmetric about anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Enzyme {
     pub name: &'static str,
     /// Recognition site, IUPAC, 5'->3' on the top strand.
     pub site: &'static str,
-    /// Bases into the site at which the top strand is cut.
-    /// `GAATTC` with offset 1 is `G^AATTC`.
-    pub cut_offset: u8,
+    /// Bases from the start of the match to the top-strand nick.
+    ///
+    /// `GAATTC` with `fst5 = 1` is `G^AATTC`. For a Type IIS enzyme this
+    /// exceeds the site length: `BsaI` is `GGTCTCN^NNNN`, so `fst5 = 7` on a
+    /// six-base site.
+    pub fst5: u8,
+    /// The overhang left behind: **negative for 5', positive for 3', zero for
+    /// blunt** — Biopython's sign convention.
+    ///
+    /// Stored rather than inferred. The geometric guess it replaces (a nick at
+    /// the centre of an even-length site means blunt) is right for all 51
+    /// Type IIP enzymes here and wrong for 5 of Biopython's 389, and it cannot
+    /// be right at all for an enzyme that cuts outside its site.
+    pub ovhg: i8,
 }
 
 impl Enzyme {
@@ -39,9 +65,33 @@ impl Enzyme {
     pub fn is_empty(&self) -> bool {
         self.site.is_empty()
     }
-    /// Blunt when the top-strand nick sits at the centre of the site.
+    /// Blunt ends, read off the stored overhang rather than guessed at.
     pub fn is_blunt(&self) -> bool {
-        self.site.len() % 2 == 0 && self.cut_offset as usize == self.site.len() / 2
+        self.ovhg == 0
+    }
+    /// Leaves a 5' overhang — the sticky end most cloning uses.
+    pub fn is_five_prime_overhang(&self) -> bool {
+        self.ovhg < 0
+    }
+    pub fn is_three_prime_overhang(&self) -> bool {
+        self.ovhg > 0
+    }
+    /// Length of the single-stranded end, whichever kind it is.
+    pub fn overhang_len(&self) -> usize {
+        self.ovhg.unsigned_abs() as usize
+    }
+    /// Does this enzyme cut outside its recognition site?
+    ///
+    /// The defining property of a Type IIS enzyme, and the reason the overhang
+    /// a cut leaves depends on the *sequence* rather than on the enzyme: `BsaI`
+    /// leaves whatever four bases happen to sit one past its site, which is the
+    /// whole basis of Golden Gate assembly.
+    pub fn cuts_outside_site(&self) -> bool {
+        self.fst5 as usize >= self.site.len()
+    }
+    /// The bottom-strand nick, as an offset from the start of the match.
+    pub fn bottom_cut(&self) -> i64 {
+        self.fst5 as i64 - self.ovhg as i64
     }
 
     /// How many bases of the site are actually specified.
@@ -161,257 +211,361 @@ impl Visibility {
     }
 }
 
-/// A textbook set of Type IIP enzymes, sorted by name.
+/// The shipped enzymes, sorted by name.
+///
+/// Type IIP throughout, plus the eight Type IIS enzymes Golden Gate needs.
+/// Sites and cut geometry were verified against Biopython's REBASE-derived
+/// tables, which agreed with every one of the 51 already here; the `ovhg`
+/// column and the Type IIS entries were taken from the same place. These are
+/// published facts about enzymes, not a copied database — see `PROVENANCE.md`.
 pub const ENZYMES: &[Enzyme] = &[
+    Enzyme {
+        name: "AarI",
+        site: "CACCTGC",
+        fst5: 11, // Type IIS: cuts outside its site
+        ovhg: -4,
+    },
     Enzyme {
         name: "AatII",
         site: "GACGTC",
-        cut_offset: 5,
+        fst5: 5,
+        ovhg: 4,
     },
     Enzyme {
         name: "AflII",
         site: "CTTAAG",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "AgeI",
         site: "ACCGGT",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "ApaI",
         site: "GGGCCC",
-        cut_offset: 5,
+        fst5: 5,
+        ovhg: 4,
     },
     Enzyme {
         name: "AscI",
         site: "GGCGCGCC",
-        cut_offset: 2,
+        fst5: 2,
+        ovhg: -4,
     },
     Enzyme {
         name: "AvrII",
         site: "CCTAGG",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "BamHI",
         site: "GGATCC",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
+    },
+    Enzyme {
+        name: "BbsI",
+        site: "GAAGAC",
+        fst5: 8, // Type IIS: cuts outside its site
+        ovhg: -4,
     },
     Enzyme {
         name: "BclI",
         site: "TGATCA",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "BglII",
         site: "AGATCT",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
+    },
+    Enzyme {
+        name: "BsaI",
+        site: "GGTCTC",
+        fst5: 7, // Type IIS: cuts outside its site
+        ovhg: -4,
     },
     Enzyme {
         name: "BsiWI",
         site: "CGTACG",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
+    },
+    Enzyme {
+        name: "BsmBI",
+        site: "CGTCTC",
+        fst5: 7, // Type IIS: cuts outside its site
+        ovhg: -4,
     },
     Enzyme {
         name: "BspEI",
         site: "TCCGGA",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
+    },
+    Enzyme {
+        name: "BspQI",
+        site: "GCTCTTC",
+        fst5: 8, // Type IIS: cuts outside its site
+        ovhg: -3,
     },
     Enzyme {
         name: "BsrGI",
         site: "TGTACA",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "BstBI",
         site: "TTCGAA",
-        cut_offset: 2,
+        fst5: 2,
+        ovhg: -2,
     },
     Enzyme {
         name: "ClaI",
         site: "ATCGAT",
-        cut_offset: 2,
+        fst5: 2,
+        ovhg: -2,
     },
     Enzyme {
         name: "DraI",
         site: "TTTAAA",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
     },
     Enzyme {
         name: "EagI",
         site: "CGGCCG",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "EcoRI",
         site: "GAATTC",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "EcoRV",
         site: "GATATC",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
+    },
+    Enzyme {
+        name: "Esp3I",
+        site: "CGTCTC",
+        fst5: 7, // Type IIS: cuts outside its site
+        ovhg: -4,
     },
     Enzyme {
         name: "FseI",
         site: "GGCCGGCC",
-        cut_offset: 6,
+        fst5: 6,
+        ovhg: 4,
     },
     Enzyme {
         name: "HindIII",
         site: "AAGCTT",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "HpaI",
         site: "GTTAAC",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
     },
     Enzyme {
         name: "KpnI",
         site: "GGTACC",
-        cut_offset: 5,
+        fst5: 5,
+        ovhg: 4,
     },
     Enzyme {
         name: "MfeI",
         site: "CAATTG",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "MluI",
         site: "ACGCGT",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "NcoI",
         site: "CCATGG",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "NdeI",
         site: "CATATG",
-        cut_offset: 2,
+        fst5: 2,
+        ovhg: -2,
     },
     Enzyme {
         name: "NheI",
         site: "GCTAGC",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "NotI",
         site: "GCGGCCGC",
-        cut_offset: 2,
+        fst5: 2,
+        ovhg: -4,
     },
     Enzyme {
         name: "NruI",
         site: "TCGCGA",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
     },
     Enzyme {
         name: "NsiI",
         site: "ATGCAT",
-        cut_offset: 5,
+        fst5: 5,
+        ovhg: 4,
     },
     Enzyme {
         name: "PacI",
         site: "TTAATTAA",
-        cut_offset: 5,
+        fst5: 5,
+        ovhg: 2,
+    },
+    Enzyme {
+        name: "PaqCI",
+        site: "CACCTGC",
+        fst5: 11, // Type IIS: cuts outside its site
+        ovhg: -4,
     },
     Enzyme {
         name: "PmeI",
         site: "GTTTAAAC",
-        cut_offset: 4,
+        fst5: 4,
+        ovhg: 0,
     },
     Enzyme {
         name: "PstI",
         site: "CTGCAG",
-        cut_offset: 5,
+        fst5: 5,
+        ovhg: 4,
     },
     Enzyme {
         name: "PvuI",
         site: "CGATCG",
-        cut_offset: 4,
+        fst5: 4,
+        ovhg: 2,
     },
     Enzyme {
         name: "PvuII",
         site: "CAGCTG",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
     },
     Enzyme {
         name: "SacI",
         site: "GAGCTC",
-        cut_offset: 5,
+        fst5: 5,
+        ovhg: 4,
     },
     Enzyme {
         name: "SacII",
         site: "CCGCGG",
-        cut_offset: 4,
+        fst5: 4,
+        ovhg: 2,
     },
     Enzyme {
         name: "SalI",
         site: "GTCGAC",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
+    },
+    Enzyme {
+        name: "SapI",
+        site: "GCTCTTC",
+        fst5: 8, // Type IIS: cuts outside its site
+        ovhg: -3,
     },
     Enzyme {
         name: "SbfI",
         site: "CCTGCAGG",
-        cut_offset: 6,
+        fst5: 6,
+        ovhg: 4,
     },
     Enzyme {
         name: "ScaI",
         site: "AGTACT",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
     },
     Enzyme {
         name: "SmaI",
         site: "CCCGGG",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
     },
     Enzyme {
         name: "SnaBI",
         site: "TACGTA",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
     },
     Enzyme {
         name: "SpeI",
         site: "ACTAGT",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "SphI",
         site: "GCATGC",
-        cut_offset: 5,
+        fst5: 5,
+        ovhg: 4,
     },
     Enzyme {
         name: "SspI",
         site: "AATATT",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
     },
     Enzyme {
         name: "StuI",
         site: "AGGCCT",
-        cut_offset: 3,
+        fst5: 3,
+        ovhg: 0,
     },
     Enzyme {
         name: "SwaI",
         site: "ATTTAAAT",
-        cut_offset: 4,
+        fst5: 4,
+        ovhg: 0,
     },
     Enzyme {
         name: "XbaI",
         site: "TCTAGA",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "XhoI",
         site: "CTCGAG",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
     Enzyme {
         name: "XmaI",
         site: "CCCGGG",
-        cut_offset: 1,
+        fst5: 1,
+        ovhg: -4,
     },
 ];
 
@@ -453,12 +607,69 @@ pub fn cut_positions(seq: &[u8], topology: Topology, enzyme: &Enzyme) -> Vec<u64
     // documented divergence, and a reader looking for it should find it at the
     // place that owns it.
     let circular = topology.is_circular();
+
+    // Sites on the bottom strand are cut too.
+    //
+    // For a palindrome the two searches find the same places, so scanning
+    // forward alone was complete — and stayed complete for as long as every
+    // shipped enzyme was palindromic. A Type IIS enzyme is not: `BsaI` binds
+    // `GGTCTC` on either strand, and on the bottom strand it reaches the other
+    // way, so its minus-strand sites are real cuts at different coordinates.
+    // Biopython finds them; we did not, and on one 180 kb contig that was five
+    // cuts reported where there are eight.
+    let rc_site = iupac::reverse_complement(enzyme.site.as_bytes());
+    let antisense = !iupac::is_palindrome_masks(enzyme.site.as_bytes());
+
+    // Where the *bottom*-strand nick of an antisense match lands on the top
+    // strand. In the enzyme's own frame it nicks `bottom_cut` bases past its
+    // site start, and that frame runs the other way, so from the 0-based start
+    // `i` of the reverse-complemented site the nick is at
+    // `i - (bottom_cut - k)`.
+    let k = enzyme.site.len() as i64;
+    let back = enzyme.bottom_cut() - k;
+
     let mut out: Vec<u64> = iupac::find_all(enzyme.site.as_bytes(), seq, circular)
         .into_iter()
-        // `find_all` gives the 1-based start of the site; the nick is
-        // `cut_offset` further along, wrapped back into `1..=n`.
-        .map(|start| ((start - 1 + enzyme.cut_offset as u64) % n as u64) + 1)
+        // `find_all` gives the 1-based start of the site; the nick is `fst5`
+        // further along.
+        .filter_map(|start| {
+            let cut0 = start as i64 - 1 + enzyme.fst5 as i64;
+            if circular {
+                // Wrapped back into 1..=n. Note this project never had
+                // Biopython's too-short-doubling bug that `docs/PLAN.md` §7.1
+                // warns about: the *site* search walks the circle itself, so a
+                // Type IIS enzyme reaching 11 bases past its site is found and
+                // placed correctly however close to the origin it sits.
+                Some(cut0.rem_euclid(n as i64) as u64 + 1)
+            } else if (0..n as i64).contains(&cut0) {
+                Some(cut0 as u64 + 1)
+            } else {
+                // A Type IIS enzyme can bind near the end of a linear molecule
+                // and reach past it. It binds; there is nothing there to cut.
+                // Reporting a wrapped position would invent a cut on a
+                // molecule with no other end.
+                None
+            }
+        })
         .collect();
+
+    if antisense {
+        out.extend(
+            iupac::find_all(&rc_site, seq, circular)
+                .into_iter()
+                .filter_map(|start| {
+                    let cut0 = start as i64 - 1 - back;
+                    if circular {
+                        Some(cut0.rem_euclid(n as i64) as u64 + 1)
+                    } else if (0..n as i64).contains(&cut0) {
+                        Some(cut0 as u64 + 1)
+                    } else {
+                        None
+                    }
+                }),
+        );
+    }
+
     // Two sites at different starts can nick the same bond once the offset has
     // wrapped, so the sort and dedup stay. `find_all` returns ascending starts;
     // the mapped cuts need not be ascending.
@@ -701,18 +912,76 @@ mod tests {
     }
 
     #[test]
-    fn every_cut_offset_lies_within_its_site() {
+    fn a_type_iip_enzyme_cuts_inside_its_site_and_a_type_iis_outside() {
+        // This replaced a blanket "every cut lies within its site". That was a
+        // true statement about a table of Type IIP enzymes and a false one
+        // about restriction enzymes: cutting at a distance is the defining
+        // property of Type IIS, and it is the whole basis of Golden Gate.
+        let mut iis = 0;
         for e in ENZYMES {
-            assert!(
-                (e.cut_offset as usize) <= e.site.len(),
-                "{} cuts outside its own recognition site",
-                e.name
-            );
             assert!(
                 e.site.bytes().all(|b| iupac::code_mask(b) != 0),
                 "{} has a non-IUPAC character in its site",
                 e.name
             );
+            if e.cuts_outside_site() {
+                iis += 1;
+                assert!(
+                    e.ovhg != 0,
+                    "{}: a Type IIS enzyme leaving blunt ends would be unusable for assembly",
+                    e.name
+                );
+            } else {
+                assert!(
+                    (e.fst5 as usize) <= e.site.len(),
+                    "{} nicks at {} on a {}-base site but is not marked as cutting outside it",
+                    e.name,
+                    e.fst5,
+                    e.site.len()
+                );
+            }
+            // The bottom-strand nick must be somewhere real.
+            assert!(
+                e.bottom_cut() >= 0,
+                "{}: bottom cut before the site",
+                e.name
+            );
+        }
+        assert!(
+            iis >= 8,
+            "the Type IIS enzymes Golden Gate needs are missing"
+        );
+    }
+
+    #[test]
+    fn the_overhang_is_stored_rather_than_guessed_from_geometry() {
+        // The heuristic this replaced -- a nick at the centre of an even-length
+        // site means blunt -- is right for all 51 Type IIP enzymes here and
+        // wrong for 5 of Biopython's 389. It also cannot be right at all for an
+        // enzyme that cuts outside its site, which is why it had to go before
+        // Type IIS could be added.
+        for e in ENZYMES {
+            let guess = e.site.len() % 2 == 0 && e.fst5 as usize == e.site.len() / 2;
+            if e.cuts_outside_site() {
+                assert!(!e.is_blunt(), "{} should have sticky ends", e.name);
+                continue;
+            }
+            assert_eq!(
+                guess,
+                e.is_blunt(),
+                "{}: the old geometric guess and the stored overhang disagree",
+                e.name
+            );
+        }
+        // And the three kinds are exclusive and exhaustive.
+        for e in ENZYMES {
+            let kinds = [
+                e.is_blunt(),
+                e.is_five_prime_overhang(),
+                e.is_three_prime_overhang(),
+            ];
+            assert_eq!(kinds.iter().filter(|k| **k).count(), 1, "{}", e.name);
+            assert_eq!(e.overhang_len() == 0, e.is_blunt(), "{}", e.name);
         }
     }
 
@@ -766,7 +1035,8 @@ mod tests {
         let bstxi = Enzyme {
             name: "BstXI",
             site: "CCANNNNNNTGG",
-            cut_offset: 8,
+            fst5: 8,
+            ovhg: 4,
         };
         assert_eq!(bstxi.len(), 12);
         assert_eq!(bstxi.specificity(), 6, "the six Ns constrain nothing");

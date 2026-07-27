@@ -467,7 +467,8 @@ pub extern "C" fn pl_enzymes_json() -> i32 {
         j.obj()
             .kv_str("name", e.name)
             .kv_str("site", e.site)
-            .kv_num("cutOffset", e.cut_offset as u64)
+            .kv_num("cutOffset", e.fst5 as u64)
+            .kv_num("overhang", e.overhang_len() as u64)
             .kv_bool("blunt", e.is_blunt())
             .end_obj();
     }

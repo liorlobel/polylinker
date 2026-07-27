@@ -339,10 +339,19 @@ mod tests {
         let mut st = 0xabc_1234_5678_9001u64;
         for enzyme in pl_enzymes::ENZYMES {
             // Plant the site a few times in random sequence, on both a circle
-            // and a line.
+            // and a line -- and, for a non-palindromic enzyme, plant its
+            // reverse complement too. Without that the minus-strand assertions
+            // below compare two empty lists and prove nothing, which is what
+            // the vacuity check at the end of this loop is for.
             let mut seq = random_seq(&mut st, 200, b"ACGT");
             for at in [10usize, 90, 150] {
                 seq[at..at + enzyme.site.len()].copy_from_slice(enzyme.site.as_bytes());
+            }
+            let rc_site = pl_core::iupac::reverse_complement(enzyme.site.as_bytes());
+            if rc_site != enzyme.site.as_bytes() {
+                for at in [40usize, 120, 175] {
+                    seq[at..at + rc_site.len()].copy_from_slice(&rc_site);
+                }
             }
             for topo in [Topology::Circular, Topology::Linear] {
                 let (packed, row) = one(&seq, topo);
@@ -354,24 +363,63 @@ mod tests {
                 } else {
                     pl_core::Topology::Linear
                 };
-                // `cut_positions` maps starts through cut_offset; compare
-                // against an enzyme with offset zero so both report starts.
+                // `cut_positions` maps starts through fst5; compare against an
+                // enzyme nicking at offset zero so both report site starts.
                 let mut zeroed = *enzyme;
-                zeroed.cut_offset = 0;
+                zeroed.fst5 = 0;
                 let want = pl_enzymes::cut_positions(&seq, pl_topo, &zeroed);
 
-                let got: Vec<u64> = hits.iter().map(|h| h.start).collect();
-                assert_eq!(
-                    got, want,
-                    "{} on a {:?}: motif search and cut_positions disagree",
-                    enzyme.name, topo
-                );
-                // Every shipped site is palindromic, so every hit is Both.
-                assert!(
-                    hits.iter().all(|h| h.strand == Strand::Both),
-                    "{} should report ± once, not + and - separately",
-                    enzyme.name
-                );
+                let palindromic = pl_core::iupac::is_palindrome_masks(enzyme.site.as_bytes());
+
+                if palindromic {
+                    // For a palindrome the two searches see the same places,
+                    // so the whole hit set is comparable against the digest --
+                    // and every hit must be marked as both strands. Two would
+                    // be a miscount, and "GAATTC found in 2,576 files" reads
+                    // the same either way.
+                    let got: Vec<u64> = hits.iter().map(|h| h.start).collect();
+                    assert_eq!(
+                        got, want,
+                        "{} on a {:?}: motif search and cut_positions disagree",
+                        enzyme.name, topo
+                    );
+                    assert!(
+                        hits.iter().all(|h| h.strand == Strand::Both),
+                        "{} should report ± once, not + and - separately",
+                        enzyme.name
+                    );
+                } else {
+                    // A Type IIS site is not its own reverse complement, so
+                    // the two strands are genuinely different sets of sites.
+                    // `cut_positions` now scans both as well, so it cannot be
+                    // used as the per-strand reference; `find_all` is.
+                    assert!(
+                        hits.iter().all(|h| h.strand != Strand::Both),
+                        "{} is not palindromic and must not report ±",
+                        enzyme.name
+                    );
+                    let circ = topo == Topology::Circular;
+                    let want_fwd = pl_core::iupac::find_all(enzyme.site.as_bytes(), &seq, circ);
+                    let rc = pl_core::iupac::reverse_complement(enzyme.site.as_bytes());
+                    let want_rev = pl_core::iupac::find_all(&rc, &seq, circ);
+                    let fwd: Vec<u64> = hits
+                        .iter()
+                        .filter(|h| h.strand == Strand::Forward)
+                        .map(|h| h.start)
+                        .collect();
+                    let rev: Vec<u64> = hits
+                        .iter()
+                        .filter(|h| h.strand == Strand::Reverse)
+                        .map(|h| h.start)
+                        .collect();
+                    assert_eq!(fwd, want_fwd, "{}: plus-strand sites", enzyme.name);
+                    assert_eq!(rev, want_rev, "{}: minus-strand sites", enzyme.name);
+                    assert!(
+                        !want_rev.is_empty(),
+                        "{}: the fixture plants no minus-strand site, so this                          proves nothing",
+                        enzyme.name
+                    );
+                }
             }
         }
     }

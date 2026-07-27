@@ -1103,7 +1103,7 @@ impl App {
             // `positions` are 1-based cut sites; recover the site start.
             let start = first
                 .saturating_sub(1)
-                .saturating_sub(dg.enzyme.cut_offset as usize)
+                .saturating_sub(dg.enzyme.fst5 as usize)
                 % mol.seq.len().max(1);
             pl_enzymes::methylation::site_effect(
                 dg.enzyme,
