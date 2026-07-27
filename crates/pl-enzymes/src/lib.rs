@@ -428,6 +428,18 @@ pub fn by_name(name: &str) -> Option<&'static Enzyme> {
 pub fn cut_positions(seq: &[u8], topology: Topology, enzyme: &Enzyme) -> Vec<u64> {
     let n = seq.len();
     let k = enzyme.site.len();
+    // A circular molecule shorter than the recognition site has no site.
+    //
+    // A deliberate, documented divergence from Biopython, which reports a cut
+    // here: circular `CGTA` with BsiWI (`CGTACG`) gives Bio `[2]` and us `[]`.
+    // Biopython searches a doubled string, so the site wraps the molecule more
+    // than once and matches. No restriction enzyme binds a 6 bp site on a 4 bp
+    // circle, so ours is the biology and Biopython's is an artifact of its
+    // implementation. Pinned by `a_circle_shorter_than_the_site_has_no_site`
+    // so nobody "restores parity" and makes it wrong.
+    //
+    // For every n >= k the two agree exactly — 25,400 compared positions,
+    // including origin-straddling and tandem sites.
     if n == 0 || k == 0 || k > n {
         return Vec::new();
     }
@@ -709,6 +721,29 @@ mod tests {
             topology,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_circle_shorter_than_the_site_has_no_site() {
+        // Biopython says otherwise, and Biopython is wrong here — see the note
+        // in `cut_positions`. Recorded as a test rather than left as a silent
+        // difference from the oracle we otherwise match exactly.
+        for (name, seq) in [("BsiWI", "CGTA"), ("PacI", "TTAA"), ("NotI", "CCGCGG")] {
+            let e = by_name(name).unwrap();
+            assert!(seq.len() < e.site.len());
+            assert!(
+                cut_positions(seq.as_bytes(), Topology::Circular, e).is_empty(),
+                "{name} cannot bind its site on a {} bp circle",
+                seq.len()
+            );
+        }
+        // Exactly at the boundary the site does exist, and is found once.
+        let e = by_name("EcoRI").unwrap();
+        assert_eq!(
+            cut_positions(b"GAATTC", Topology::Circular, e),
+            vec![2],
+            "n == k is a real site and must still be found"
+        );
     }
 
     #[test]

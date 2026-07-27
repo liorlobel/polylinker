@@ -219,6 +219,48 @@ impl App {
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
         }
     }
+
+    /// Write the map as SVG.
+    ///
+    /// Deliberately the default `pl_draw::Options`, the same ones `pl export`
+    /// uses, so the app and the command line produce byte-identical files for
+    /// the same molecule. A figure that changes depending on which of the two
+    /// you reached for is a figure you cannot cite.
+    fn export_svg(&mut self) {
+        let Some(d) = &self.document else { return };
+        let stem = pl_fileio::genbank::locus_name(&d.title);
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{stem}.svg"))
+            .add_filter("SVG", &["svg"])
+            .save_file()
+        else {
+            return;
+        };
+        let (svg, drawn) = pl_draw::circular_svg(d.molecule(), pl_draw::Options::default());
+
+        // A map missing three labels looks exactly like a plasmid with three
+        // fewer features, so the count goes in the status line rather than
+        // nowhere.
+        let mut note = String::new();
+        if !drawn.labels_hidden.is_empty() {
+            note.push_str(&format!(
+                "  —  {} label(s) did not fit: {}",
+                drawn.labels_hidden.len(),
+                drawn.labels_hidden.join(", ")
+            ));
+        }
+        if !drawn.malformed.is_empty() {
+            note.push_str(&format!(
+                "  —  {} feature(s) lie outside the molecule and are not drawn: {}",
+                drawn.malformed.len(),
+                drawn.malformed.join(", ")
+            ));
+        }
+        match std::fs::write(&path, svg) {
+            Ok(()) => self.status = format!("wrote {}{note}", path.display()),
+            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+        }
+    }
 }
 
 /// Local date as (day, month index, year), without a date crate.
@@ -325,6 +367,13 @@ impl App {
                     }
                     if ui.button("FASTA…").clicked() {
                         self.export(true);
+                    }
+                    if ui
+                        .button("Map SVG…")
+                        .on_hover_text("Vector map, for a figure")
+                        .clicked()
+                    {
+                        self.export_svg();
                     }
                 });
 

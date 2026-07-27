@@ -128,6 +128,49 @@ Step 'circular-map tests' {
     Pop-Location
 } { Have node }
 
+# Do the two renderers still agree?
+#
+# The desktop app draws with egui and the browser tool is TypeScript, so there
+# are two implementations of one specification. Checking one against the other
+# is the only thing that makes the second one worth its cost -- it has already
+# caught three divergences, including JavaScript's Math.round breaking ties
+# toward +Inf where Rust's breaks them away from zero.
+#
+# Regenerating first is the point. A fixture that is only ever read records what
+# the reference used to say, and agrees with nothing.
+Step 'renderers agree (fixture is current)' {
+    # Compared by content, not by `git diff --exit-code`.
+    #
+    # git only reports on *tracked* files, so the obvious version of this step
+    # passed silently for a brand-new fixture -- checking nothing while printing
+    # ok, which is precisely how the bench step once reported a score of zero as
+    # a pass. Comparing bytes works whether or not the file is in the index.
+    $fixture = 'crates/pl-draw/tests/agreement.json'
+    $fresh = Join-Path ([System.IO.Path]::GetTempPath()) 'pl-agreement.json'
+    # The generator writes the file itself. Redirecting it here would re-encode
+    # stdout as CRLF, so the check would compare a bash-written fixture against
+    # a PowerShell-written one and always disagree.
+    node --experimental-strip-types tools/gen-agreement.mjs $fresh
+    if ($LASTEXITCODE -ne 0) { return }
+    $a = if (Test-Path $fixture) { Get-Content -Raw $fixture } else { '' }
+    $b = Get-Content -Raw $fresh
+    if ($a -ceq $b) {
+        Remove-Item $fresh
+        $global:LASTEXITCODE = 0
+    } else {
+        Copy-Item $fresh $fixture -Force
+        Remove-Item $fresh
+        Write-Host '        the TypeScript renderer changed and the fixture was stale.'
+        Write-Host '        it has been regenerated -- review the diff, then re-run.'
+        $global:LASTEXITCODE = 1
+    }
+} { Have node }
+Step 'renderers agree (rust replays it)' {
+    # Explicitly, because `unit tests` runs --lib --bins and would never reach
+    # an integration test.
+    cargo test -p pl-draw --test agreement
+} { Have node }
+
 Write-Host "`nbenchmark" -ForegroundColor Cyan
 Step 'polylinker-bench' {
     # An absolute path, and the score is asserted rather than assumed.

@@ -16,9 +16,17 @@ USAGE:
     pl digest  <file> [--enzyme NAME]    restriction sites
     pl blocks  <file.dna>                anatomy of a SnapGene container
     pl checksum <file>...                SEGUID v2 checksums
+    pl export  <file>... [options]       plasmid map as SVG
 
 CONVERT OPTIONS:
     --to <genbank|gb|fasta|fa>   output format (default: genbank)
+    -o, --outdir <dir>           where to write (default: beside the input)
+    --stdout                     write to stdout instead of files
+
+EXPORT OPTIONS:
+    --width <px>                 canvas width  (default: 720)
+    --height <px>                canvas height (default: 720)
+    --no-ruler                   omit the base-position ruler
     -o, --outdir <dir>           where to write (default: beside the input)
     --stdout                     write to stdout instead of files
 
@@ -65,6 +73,7 @@ fn main() -> ExitCode {
         "digest" => cmd_digest(rest),
         "blocks" => cmd_blocks(rest),
         "checksum" => cmd_checksum(rest),
+        "export" => cmd_export(rest),
         "bench-adapter" => cmd_bench_adapter(rest),
         "cut-adapter" => cmd_cut_adapter(rest),
         "-V" | "--version" => {
@@ -738,6 +747,144 @@ fn cmd_checksum(args: &[String]) -> Result<(), String> {
         match pl_core::lsseguid(&seq) {
             Ok(v) => println!("   {v}   (this strand alone)"),
             Err(e) => println!("   lsseguid: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Render each molecule's map to a standalone SVG.
+///
+/// SVG rather than PNG because a map is a figure: it goes into a paper at
+/// whatever size the journal asks for, and a raster of it does not. The output
+/// is self-contained — no external stylesheet, no font file, no script — so it
+/// opens in Illustrator, Inkscape and a browser alike.
+fn cmd_export(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["outdir", "o", "width", "height"])?;
+    a.require_files()?;
+
+    let num = |name: &str, default: f64| -> Result<f64, String> {
+        match a.get(name) {
+            None => Ok(default),
+            Some(v) => v
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && (16.0..=20000.0).contains(v))
+                .ok_or_else(|| format!("--{name} '{v}' is not a size between 16 and 20000")),
+        }
+    };
+    let opts = pl_draw::Options {
+        width: num("width", 720.0)?,
+        height: num("height", 720.0)?,
+        ruler: !a.has("no-ruler"),
+        ..Default::default()
+    };
+
+    let outdir = a.get("outdir").or_else(|| a.get("o")).map(PathBuf::from);
+    let to_stdout = a.has("stdout");
+    let mut claimed: Vec<PathBuf> = Vec::new();
+    let (mut written, mut renamed) = (0usize, 0usize);
+
+    for path in &a.files {
+        let data = read(path)?;
+        let (mol, _fmt, report) =
+            load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        if report.truncated() {
+            // One file, one picture. Drawing record 1 and calling the result
+            // "the map of this file" is the same silent-truncation mistake
+            // `convert` had.
+            return Err(format!(
+                "{}: holds {} records and this would draw only the first. Split the file first.",
+                path.display(),
+                report.records
+            ));
+        }
+
+        let (svg, drawn) = pl_draw::circular_svg(&mol, opts);
+
+        // A map missing three labels looks exactly like a plasmid with three
+        // fewer features, so say which ones went.
+        if !drawn.labels_hidden.is_empty() {
+            eprintln!(
+                "pl: {}: {} label(s) did not fit and are not shown: {}{}",
+                path.display(),
+                drawn.labels_hidden.len(),
+                drawn
+                    .labels_hidden
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if drawn.labels_hidden.len() > 5 {
+                    ", ..."
+                } else {
+                    ""
+                }
+            );
+            eprintln!("     a larger --width/--height fits more of them");
+        }
+        if !drawn.malformed.is_empty() {
+            eprintln!(
+                "pl: {}: {} feature(s) have coordinates outside the molecule and are not drawn: {}",
+                path.display(),
+                drawn.malformed.len(),
+                drawn.malformed.join(", ")
+            );
+        }
+
+        if to_stdout {
+            println!("{svg}");
+            written += 1;
+            continue;
+        }
+
+        let dir = outdir.clone().unwrap_or_else(|| {
+            path.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+
+        let stem = genbank::locus_name(&title_of(path));
+        let mut dest = dir.join(format!("{stem}.svg"));
+        if same_file(path, &dest) {
+            return Err(format!(
+                "{}: writing the map here would overwrite the input. Use --outdir <dir> or --stdout.",
+                path.display()
+            ));
+        }
+        if claimed.contains(&dest) {
+            let mut k = 2;
+            loop {
+                let candidate = dir.join(format!("{stem}-{k}.svg"));
+                if !claimed.contains(&candidate) {
+                    dest = candidate;
+                    break;
+                }
+                k += 1;
+            }
+            renamed += 1;
+        }
+        claimed.push(dest.clone());
+        std::fs::write(&dest, &svg).map_err(|e| format!("{}: {e}", dest.display()))?;
+
+        println!(
+            "{:>10} bp  {:>8}  {:>4} label  {}",
+            mol.span(),
+            mol.topology.as_str(),
+            drawn.labels_placed,
+            dest.display()
+        );
+        written += 1;
+    }
+
+    if !to_stdout {
+        eprintln!("\nwrote {written} map(s)");
+        if renamed > 0 {
+            eprintln!(
+                "{renamed} output name(s) were suffixed because inputs shared a basename -- \
+                 nothing was overwritten"
+            );
         }
     }
     Ok(())

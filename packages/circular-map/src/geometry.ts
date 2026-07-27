@@ -42,9 +42,15 @@ export function polar(ring: Ring, radius: number, angle: number): Point {
 }
 
 /** Trim to a sane number of decimals — SVG files are mostly coordinates, and
- *  17 significant figures of float noise triples the size for no benefit. */
+ *  17 significant figures of float noise triples the size for no benefit.
+ *
+ *  Ties round **away from zero**, not the `Math.round` rule of toward +∞. The
+ *  two differ only on negative halves — `Math.round(-0.5)` is `-0` where Rust's
+ *  `f64::round` gives `-1` — but a directional tie-break tilts a whole figure
+ *  by 0.01 px in +y, and it made the two renderers disagree. Symmetric is both
+ *  the less surprising rule and the portable one. */
 export function n(v: number): string {
-  return (Math.round(v * 100) / 100).toString();
+  return (Math.sign(v) * (Math.round(Math.abs(v) * 100) / 100)).toString();
 }
 
 function pt(p: Point): string {
@@ -255,7 +261,13 @@ export function safeColor(value: string | undefined, fallback: string): string {
   // #rgb, #rgba, #rrggbb, #rrggbbaa
   if (/^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(v)) return v;
   // rgb()/rgba()/hsl()/hsla() with only numbers, %, commas, slashes and spaces.
-  if (/^(?:rgba?|hsla?)\([0-9eE+\-.,%/\s]*\)$/.test(v)) return v;
+  //
+  // ASCII whitespace spelled out rather than `\s`, which in JavaScript also
+  // matches NBSP, U+2028 and the rest of the Unicode space category. The Rust
+  // port checks bytes and would refuse those; rather than carry a divergence
+  // that only shows up on input neither implementation should accept, both
+  // refuse it. See `crates/pl-draw/tests/agreement.rs`.
+  if (/^(?:rgba?|hsla?)\([0-9eE+\-.,%/ \t\n\v\f\r]*\)$/.test(v)) return v;
   // A bare CSS colour keyword, plus the two SVG paint keywords.
   if (/^[a-zA-Z]{1,32}$/.test(v)) return v;
   return fallback;

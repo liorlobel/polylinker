@@ -1,0 +1,13 @@
+[package]
+name = "pl-draw"
+description = "Plasmid maps as SVG. Pure, deterministic, byte-identical across platforms."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Zero dependencies, like the rest of the correctness layer. An SVG writer is a
+# string builder; taking a crate for it would buy nothing and cost auditability.
+[dependencies]
+pl-core.workspace = true

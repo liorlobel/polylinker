@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 pl-core.workspace = true
+pl-draw.workspace = true
 pl-enzymes.workspace = true
 pl-fileio.workspace = true
 

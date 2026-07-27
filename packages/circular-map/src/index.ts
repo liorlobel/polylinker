@@ -25,13 +25,16 @@
  * only by us.
  */
 
-export { renderCircularMap } from './render.ts';
+export { renderCircularMap, niceStep } from './render.ts';
 export { isotonic, placeColumn } from './labels.ts';
 export type { LabelBox, ColumnResult } from './labels.ts';
 export {
   TAU,
   arcPath,
   baseToAngle,
+  commas,
+  esc,
+  n,
   polar,
   safeColor,
   segmentRanges,

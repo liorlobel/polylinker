@@ -1,0 +1,6 @@
+# The cross-implementation fixture is written by `tools/gen-agreement.mjs` with
+# LF endings and compared byte-for-byte by `tools/ci.ps1`. With core.autocrlf on
+# — the Windows default — checkout would rewrite it as CRLF, the generator would
+# write LF, and the drift check would fail on every fresh clone for a reason
+# that has nothing to do with the renderers.
+crates/pl-draw/tests/agreement.json -text

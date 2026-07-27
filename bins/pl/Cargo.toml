@@ -17,5 +17,6 @@ path = "src/main.rs"
 [dependencies]
 pl-clone.workspace = true
 pl-core.workspace = true
+pl-draw.workspace = true
 pl-enzymes.workspace = true
 pl-fileio.workspace = true

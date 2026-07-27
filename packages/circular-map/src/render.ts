@@ -403,7 +403,7 @@ export function renderCircularMap(
 }
 
 /** Round a tick interval up to something a human would have chosen. */
-function niceStep(raw: number): number {
+export function niceStep(raw: number): number {
   if (!Number.isFinite(raw) || raw <= 0) return 1;
   const mag = Math.pow(10, Math.floor(Math.log10(raw)));
   const norm = raw / mag;
