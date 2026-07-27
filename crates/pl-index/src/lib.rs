@@ -83,6 +83,28 @@ pub struct Row {
     pub path: String,
     /// 0-based index of this record within its file.
     pub record: u32,
+    /// Source file size in bytes.
+    ///
+    /// Filesystem facts live on the row because they are the *invalidation
+    /// key*: `(format, engine, path, size, mtime)` decides whether a rescan may
+    /// reuse this row without reading the file. Storing them here rather than
+    /// in a sidecar keeps one file to write atomically instead of two that
+    /// could be observed disagreeing. They are data about a file, not I/O, so
+    /// they do not compromise this crate's purity.
+    pub size: u64,
+    /// Source file mtime, nanoseconds since the Unix epoch; 0 if unknown.
+    ///
+    /// **Not proof of sameness.** A sync client, a backup restore, or an edit
+    /// inside the filesystem's timestamp granularity can all leave `(size,
+    /// mtime)` unchanged over changed content, which is why `content` exists
+    /// and `--verify` can check it.
+    pub mtime_ns: i128,
+    /// SHA-1 of the whole source file, lowercase hex. Empty when not computed.
+    ///
+    /// Two jobs: it makes the mtime shortcut *checkable*, and it lets an
+    /// unchanged file whose mtime moved — which is what a sync client does —
+    /// skip the parse instead of re-parsing the entire library on every sync.
+    pub content: String,
     pub state: State,
     pub name: String,
     pub topology: Topology,

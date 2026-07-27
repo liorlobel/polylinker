@@ -1,0 +1,15 @@
+[package]
+name = "pl-scan"
+description = "Walking a folder and keeping a library index on disk. The one crate under crates/ that performs I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Zero external dependencies, like everything else under crates/. The directory
+# walk, the cache-directory resolution and the atomic write are all std.
+[dependencies]
+pl-core.workspace = true
+pl-fileio.workspace = true
+pl-index.workspace = true

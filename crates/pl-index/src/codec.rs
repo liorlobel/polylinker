@@ -45,6 +45,9 @@ const TRAILER: usize = 20;
 const COLUMNS: &[&str] = &[
     "path",
     "record",
+    "size",
+    "mtime_ns",
+    "content",
     "state",
     "name",
     "topology",
@@ -213,6 +216,9 @@ pub fn to_bytes(lib: &Library) -> Vec<u8> {
         let cells = [
             escape(&r.path),
             r.record.to_string(),
+            r.size.to_string(),
+            r.mtime_ns.to_string(),
+            r.content.clone(),
             r.state.as_str().to_string(),
             escape(&r.name),
             r.topology.as_str().to_string(),
@@ -369,21 +375,26 @@ pub fn parse(data: &[u8]) -> Result<Library, OpenError> {
         lib.rows.push(Row {
             path: unescape(c[0]),
             record: num(1)? as u32,
-            state: State::from_name(c[2]).ok_or_else(|| {
-                OpenError::BadTable(format!("line {}: unknown state {:?}", n + 1, c[2]))
+            size: num(2)?,
+            mtime_ns: c[3].parse::<i128>().map_err(|e| {
+                OpenError::BadTable(format!("line {}: column mtime_ns: {e}", n + 1))
             })?,
-            name: unescape(c[3]),
-            topology: Topology::from_name(c[4]).ok_or_else(|| {
-                OpenError::BadTable(format!("line {}: unknown topology {:?}", n + 1, c[4]))
+            content: c[4].to_string(),
+            state: State::from_name(c[5]).ok_or_else(|| {
+                OpenError::BadTable(format!("line {}: unknown state {:?}", n + 1, c[5]))
             })?,
-            length: num(5)?,
-            declared_len: num(6)?,
-            n_features: num(7)? as u32,
-            ambiguous: num(8)?,
-            seq_off: num(9)?,
-            seq_bases: num(10)?,
-            text: unescape(c[11]),
-            problem: unescape(c[12]),
+            name: unescape(c[6]),
+            topology: Topology::from_name(c[7]).ok_or_else(|| {
+                OpenError::BadTable(format!("line {}: unknown topology {:?}", n + 1, c[7]))
+            })?,
+            length: num(8)?,
+            declared_len: num(9)?,
+            n_features: num(10)? as u32,
+            ambiguous: num(11)?,
+            seq_off: num(12)?,
+            seq_bases: num(13)?,
+            text: unescape(c[14]),
+            problem: unescape(c[15]),
         });
     }
     if !header_seen {
@@ -432,6 +443,9 @@ mod tests {
             rows.push(Row {
                 path: format!("sub dir/p{i}.gb"),
                 record: 0,
+                size: 100 + i as u64,
+                mtime_ns: 1_700_000_000_000_000_000 + i as i128,
+                content: "0".repeat(40),
                 state: State::Ok,
                 name: format!("p{i}"),
                 topology: if i == 0 {
