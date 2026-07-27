@@ -50,6 +50,7 @@
 //! exactly this code.
 
 pub mod nibble;
+pub mod scan;
 
 /// The derivation version.
 ///

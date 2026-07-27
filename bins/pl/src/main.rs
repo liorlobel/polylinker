@@ -17,11 +17,16 @@ USAGE:
     pl blocks  <file.dna>                anatomy of a SnapGene container
     pl checksum <file>...                SEGUID v2 checksums
     pl export  <file>... [options]       plasmid map as SVG
+    pl find-motif <IUPAC> <file>         search a sequence, both strands
 
 CONVERT OPTIONS:
     --to <genbank|gb|fasta|fa>   output format (default: genbank)
     -o, --outdir <dir>           where to write (default: beside the input)
     --stdout                     write to stdout instead of files
+
+FIND-MOTIF OPTIONS:
+    --seq <BASES>                search this literal sequence instead of a file
+    --topology <circular|linear> default: linear
 
 EXPORT OPTIONS:
     --width <px>                 canvas width  (default: 720)
@@ -74,6 +79,7 @@ fn main() -> ExitCode {
         "blocks" => cmd_blocks(rest),
         "checksum" => cmd_checksum(rest),
         "export" => cmd_export(rest),
+        "find-motif" => cmd_find_motif(rest),
         "bench-adapter" => cmd_bench_adapter(rest),
         "cut-adapter" => cmd_cut_adapter(rest),
         "-V" | "--version" => {
@@ -887,6 +893,124 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             );
         }
     }
+    Ok(())
+}
+
+/// Search one sequence for an IUPAC motif, on both strands.
+///
+/// The single-molecule form of the library search, and the way the differential
+/// test reaches it: `reference/python/tests/xcheck_motif.py` drives this against
+/// a regex built from Biopython's own IUPAC table. Before it existed, every
+/// cross-check in this project used restriction sites — and every site in the
+/// shipped table is a non-degenerate palindrome, so nothing compared a
+/// degenerate pattern or a minus-strand hit against an outside implementation.
+fn cmd_find_motif(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["seq", "topology", "motif"])?;
+
+    // The pattern is the first bare word, or `--motif`.
+    let pattern = match a.get("motif") {
+        Some(p) => p.to_string(),
+        None => a
+            .files
+            .first()
+            .map(|p| p.to_string_lossy().to_string())
+            .ok_or("no motif given")?,
+    };
+    let motif =
+        pl_index::scan::Motif::new(&pattern).map_err(|e| format!("--motif {pattern:?}: {e}"))?;
+
+    let circular = match a.get("topology").unwrap_or("linear") {
+        "circular" => true,
+        "linear" => false,
+        other => return Err(format!("--topology {other:?}: expected circular or linear")),
+    };
+
+    // `--seq` for a literal sequence; otherwise the remaining files, whose
+    // first record is used.
+    let (seq, label) = match a.get("seq") {
+        Some(s) => (s.as_bytes().to_vec(), "<--seq>".to_string()),
+        None => {
+            let path = a
+                .files
+                .get(if a.get("motif").is_some() { 0 } else { 1 })
+                .ok_or("give a sequence with --seq, or a file")?;
+            let data = read(path)?;
+            let (mol, _, _) =
+                load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+            (mol.seq.clone(), path.display().to_string())
+        }
+    };
+
+    let row = pl_index::Row {
+        state: pl_index::State::Ok,
+        topology: if circular {
+            pl_index::Topology::Circular
+        } else {
+            pl_index::Topology::Linear
+        },
+        seq_off: 0,
+        seq_bases: seq.len() as u64,
+        length: seq.len() as u64,
+        ..Default::default()
+    };
+    let packed = pl_index::nibble::pack(&seq);
+    let hits = pl_index::scan::find_in_row(&motif, &packed, &row);
+
+    if a.has("json") {
+        let mut out = String::from("{\n");
+        out.push_str(&format!("  \"motif\": {},\n", json_str(&motif.text)));
+        out.push_str(&format!("  \"bp\": {},\n", seq.len()));
+        out.push_str(&format!("  \"circular\": {circular},\n"));
+        out.push_str(&format!("  \"palindromic\": {},\n", motif.palindromic));
+        out.push_str("  \"hits\": [\n");
+        for (i, h) in hits.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{\"start\": {}, \"end\": {}, \"strand\": {}, \"wrapped\": {}}}{}\n",
+                h.start,
+                h.end,
+                json_str(match h.strand {
+                    pl_index::scan::Strand::Forward => "+",
+                    pl_index::scan::Strand::Reverse => "-",
+                    pl_index::scan::Strand::Both => "both",
+                }),
+                h.wrapped,
+                if i + 1 == hits.len() { "" } else { "," }
+            ));
+        }
+        out.push_str("  ]\n}\n");
+        print!("{out}");
+        return Ok(());
+    }
+
+    // The header states what was actually searched, so an empty result reads as
+    // "searched and absent" rather than "did not search".
+    println!(
+        "{}  —  {label}, {} bp, {}",
+        motif.describe(),
+        seq.len(),
+        if circular { "circular" } else { "linear" }
+    );
+    if hits.is_empty() {
+        println!("\nno hits");
+        return Ok(());
+    }
+    println!("\n{:>10}  {:>10}  {:>6}  bases", "start", "end", "strand");
+    for h in &hits {
+        let bases = pl_index::scan::hit_bases(&packed, &row, h, motif.len());
+        println!(
+            "{:>10}  {:>10}  {:>6}  {}{}",
+            h.start,
+            h.end,
+            h.strand.as_str(),
+            String::from_utf8_lossy(&bases),
+            if h.wrapped {
+                "   (wraps the origin)"
+            } else {
+                ""
+            }
+        );
+    }
+    println!("\n{} hit(s)", hits.len());
     Ok(())
 }
 

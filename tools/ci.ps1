@@ -112,6 +112,17 @@ Step 'SEGUID vs the reference' {
 Step 'digest + PCR vs pydna' {
     python reference/python/tests/xcheck_clone.py target/release/pl.exe
 } { (HavePy 'pydna') -and (HavePy 'Bio') }
+# Degenerate, both-strand, origin-wrapping motif search vs Biopython.
+#
+# Every other oracle here uses restriction sites, and every site in the shipped
+# table is a non-degenerate palindrome -- so before this step nothing compared a
+# degenerate pattern or a minus-strand hit against an outside implementation,
+# and the library's headline query had an oracle for none of its interesting
+# cases. Verified the way this file's header asks: disabling the palindrome
+# collapse produced 107 disagreements, restoring it produced 0.
+Step 'motif vs Biopython (degenerate, both strands)' {
+    python reference/python/tests/xcheck_motif.py target/release/pl.exe
+} { HavePy 'Bio' }
 # A second, independent digest oracle over real plasmids.
 #
 # `xcheck_clone.py` above compares fragments against pydna on synthetic cases;

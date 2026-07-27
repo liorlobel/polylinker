@@ -13,3 +13,9 @@ repository.workspace = true
 # concern leaks into the search engine. All I/O lives in `pl-scan`.
 [dependencies]
 pl-core.workspace = true
+
+[dev-dependencies]
+# Tests only. The motif scan is cross-checked against `cut_positions`, which
+# carries the Biopython oracle -- two implementations of one search, and the
+# other one is already externally validated.
+pl-enzymes.workspace = true
