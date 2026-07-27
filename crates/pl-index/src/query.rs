@@ -44,17 +44,31 @@ pub struct Coverage {
     /// Of the records searched, how many were scanned as circular only because
     /// their file never said.
     pub assumed_circular: usize,
+    /// Records the non-sequence criteria ruled out before any scanning.
+    ///
+    /// Without this the footer does not balance: a `--name` filter that leaves
+    /// one record out of nine says "1 of 9 records searched" and accounts for
+    /// none of the other eight, which reads as eight records silently skipped.
+    /// They were not skipped; they were not asked about.
+    pub filtered_out: usize,
 }
 
 impl Coverage {
-    /// The excluded records, all buckets summed.
+    /// Every record not searched, whatever the reason.
     pub fn excluded_total(&self) -> usize {
-        self.excluded.iter().map(|(_, n)| n).sum()
+        self.filtered_out + self.excluded.iter().map(|(_, n)| n).sum::<usize>()
     }
 
     /// Human-readable, in the shape the CLI and the GUI both print.
     pub fn describe(&self) -> String {
         let mut s = format!("{} of {} records searched", self.searched, self.total);
+        if self.filtered_out > 0 {
+            s.push_str(&format!(
+                "
+{:>7} ruled out by the other criteria before scanning",
+                self.filtered_out
+            ));
+        }
         for (state, n) in &self.excluded {
             s.push_str(&format!("\n{:>7} {}", n, reason(*state)));
         }
@@ -214,18 +228,21 @@ pub fn run<'a>(rows: &'a [Row], packed: &[u8], q: &Query) -> Results<'a> {
     for row in rows {
         // Filters and text criteria apply to every record, searchable or not:
         // a chromatogram should still be findable by name.
-        if !q.filters.accepts(row) {
+        let ruled_out = !q.filters.accepts(row)
+            || q.name
+                .as_ref()
+                .is_some_and(|n| !(contains_fold(&row.path, n) || contains_fold(&row.name, n)))
+            || q.text
+                .as_ref()
+                .is_some_and(|t| !contains_fold(&row.text, t));
+        if ruled_out {
+            // Only counted when there is something to be excluded *from*: with
+            // no sequence criterion nothing is searched, so a footer would be
+            // reporting on a scan that never happened.
+            if q.motif.is_some() {
+                cov.filtered_out += 1;
+            }
             continue;
-        }
-        if let Some(n) = &q.name {
-            if !(contains_fold(&row.path, n) || contains_fold(&row.name, n)) {
-                continue;
-            }
-        }
-        if let Some(t) = &q.text {
-            if !contains_fold(&row.text, t) {
-                continue;
-            }
         }
 
         let Some(motif) = &q.motif else {
@@ -402,8 +419,28 @@ mod tests {
                 }
             }
             let packed = nibble::pack(&packed_all);
+            // Filters and text criteria are varied too, because they are the
+            // other way a record ends up unsearched. A footer counting only
+            // the unsearchable ones would say "1 of 9 records searched" and
+            // account for none of the other eight, which reads as eight
+            // records silently skipped.
             let q = Query {
                 motif: Some(Motif::new("GAATTC").unwrap()),
+                name: match rng(&mut st) % 4 {
+                    0 => Some("f1".into()),
+                    1 => Some("nothing matches this".into()),
+                    _ => None,
+                },
+                filters: Filters {
+                    topology: match rng(&mut st) % 4 {
+                        0 => Some(Topology::Circular),
+                        1 => Some(Topology::Linear),
+                        _ => None,
+                    },
+                    min_len: if rng(&mut st) % 3 == 0 { Some(5) } else { None },
+                    ..Default::default()
+                },
+                absent: rng(&mut st) % 5 == 0,
                 ..Default::default()
             };
             let r = run(&rows, &packed, &q);
@@ -414,6 +451,11 @@ mod tests {
                 r.coverage.searched,
                 r.coverage.excluded_total(),
                 r.coverage.total
+            );
+            // And nothing can match that was never looked at.
+            assert!(
+                r.matches.len() <= r.coverage.searched,
+                "case {case}: more matches than records searched"
             );
         }
     }

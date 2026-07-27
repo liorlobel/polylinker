@@ -1,0 +1,9 @@
+LOCUS       a    20 bp    DNA     circular SYN 26-JUL-2026
+FEATURES             Location/Qualifiers
+     CDS             1..9
+                     /label="AmpR"
+     misc_feature    10..15
+                     /label="spacer"
+ORIGIN
+        1 GAATTCAAAAGGGGCCCCAA
+//

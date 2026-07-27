@@ -97,8 +97,76 @@ Step 'pl-index stays pure (wasm32)' {
     cargo build -p pl-index --target wasm32-unknown-unknown --profile wasm
 } { $hasWasm }
 # `unit tests` runs --lib --bins and would never reach an integration test.
-Step 'pl-index tests' {
-    cargo test -p pl-index --tests
+Step 'pl-index and pl-scan tests' {
+    cargo test -p pl-index -p pl-scan --tests
+}
+
+# Does the index agree with the files it was built from?
+#
+# The deepest risk in the library feature: a wrong sequence offset, or a column
+# lost on write, makes the index answer confidently about the wrong molecule --
+# and nothing in a self-consistent round-trip can see it. `--no-index` re-reads
+# every file and answers from scratch, so the two must agree exactly.
+#
+# **The index is written by one invocation and read by the next.** Doing both in
+# one process checks nothing: `pl find` answers from the library it just built
+# in memory, so a bug that only corrupts the file on write stays invisible.
+# Verified by injecting exactly that -- truncating the searchable text in
+# `to_bytes` -- and watching the single-process form stay green while this form
+# fails.
+#
+# Fixtures are real files under tests/library-fixture rather than strings built
+# here: an earlier version constructed GenBank with PowerShell escapes, the
+# backtick-n was eaten, every file failed to parse, and both sides agreed on
+# nothing -- which the step reported as success.
+#
+# Structurally blind to anything both paths share: they use the same parser, so
+# a mis-parse is wrong identically in both. It catches storage bugs, which is
+# what it is for.
+Step 'the index agrees with the files' {
+    $lab = 'tests/library-fixture'
+    $idx = Join-Path ([System.IO.Path]::GetTempPath()) 'pl-ci-index'
+    if (Test-Path $idx) { Remove-Item -Recurse -Force $idx }
+
+    & target/release/pl.exe index $lab --index-at $idx 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '        could not build the index'
+        $global:LASTEXITCODE = 1
+        return
+    }
+
+    $queries = @(
+        @('--motif','GAATTC'), @('--motif','GGATCC'), @('--motif','RGCY'),
+        @('--motif','N','--limit','5'), @('--motif','GAATTC','--absent'),
+        @('--enzyme','EcoRI'), @('--name','a'), @('--text','AmpR'),
+        @('--text','spacer'), @('--motif','GAATTC','--topology','undeclared'),
+        @('--length','10..30'), @('--state','ok'), @('--features','2..2')
+    )
+    $bad = 0
+    foreach ($q in $queries) {
+        $indexed = & target/release/pl.exe find $lab @q --index-at $idx 2>$null | Out-String
+        $direct  = & target/release/pl.exe find $lab @q --no-index 2>$null | Out-String
+        if ($indexed -cne $direct) {
+            $bad++
+            Write-Host "        DIFFER: $($q -join ' ')"
+            Write-Host "        indexed: $($indexed -replace "`r?`n",' | ')"
+            Write-Host "        direct : $($direct  -replace "`r?`n",' | ')"
+        }
+    }
+    # A query set that matches nothing would agree trivially, so assert that
+    # the fixture actually produces hits.
+    $hits = & target/release/pl.exe find $lab --motif GAATTC --index-at $idx 2>$null | Out-String
+    if ($hits -notmatch 'records? matched' -or $hits -match '^0 records matched') {
+        Write-Host '        the fixture produced no matches; the comparison is vacuous'
+        $bad++
+    }
+    Remove-Item -Recurse -Force $idx
+    if ($bad -gt 0) {
+        Write-Host "        $bad problem(s) across $($queries.Count) queries"
+        $global:LASTEXITCODE = 1
+    } else {
+        $global:LASTEXITCODE = 0
+    }
 }
 
 Write-Host "`noracles — our answers checked against tools that are not ours" -ForegroundColor Cyan

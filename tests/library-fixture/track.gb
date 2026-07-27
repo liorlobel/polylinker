@@ -1,0 +1,6 @@
+LOCUS       track    3000 bp    DNA     circular SYN 26-JUL-2026
+FEATURES             Location/Qualifiers
+     misc_feature    1..3000
+                     /label="coords only"
+ORIGIN
+//

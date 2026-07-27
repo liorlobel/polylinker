@@ -54,18 +54,52 @@ use pl_core::{iupac, Molecule};
 use pl_index::nibble;
 use pl_index::{codec::Library, Row, State, Topology};
 
-/// Files past this many bases are recorded and not parsed for sequence.
+/// Files holding more bases than this are recorded, not searched.
 ///
-/// 32 Mbase. The measured corpus holds single FASTA files of 1.39 GB beside a
-/// 3 kB median plasmid; one of them would cost roughly six times the parse time
-/// of the entire rest of the library, and it is a reference genome nobody is
-/// searching for a cloning site. Such records get a row, a `TooLarge` state and
-/// a line in every coverage footer — never silence.
-pub const MAX_BASES: u64 = 32_000_000;
+/// **2 Mbase, chosen against the biology rather than against a disk budget.**
+/// The largest thing this tool is for is a BAC at roughly 300 kb; a plasmid is
+/// a few kb. Anything past 2 Mbase is a genome, an assembly or a reference set,
+/// and indexing it means a lab drive's search cost is dominated by files nobody
+/// is looking for a cloning site in.
+///
+/// The number was set by running on a real drive, not by guessing. At the first
+/// attempt — a 64 MB byte cap and nothing else — the measured corpus produced
+/// **11,562,363 records and a 5.9 GB index**. Capping records per file brought
+/// that to 13,233 records and 1.1 Gbase, still 34x the size at which a search
+/// stops feeling instant, because 2,338 individually-reasonable files add up.
+/// Only a cap that reflects what a plasmid *is* fixes it.
+///
+/// Over-cap files get a row, a `TooLarge` state naming the count, and a line in
+/// every coverage footer — never silence. `pl library --problems` lists them.
+pub const MAX_BASES: u64 = 2_000_000;
 
 /// The same cap in bytes, applied before reading, since we cannot count bases
 /// in a file we have not opened.
 pub const MAX_BYTES: u64 = 64_000_000;
+
+/// Records one file may contribute before it is refused as a reference set.
+///
+/// **The byte cap does not catch this, and running on a real corpus is how it
+/// was found.** A 14 MB FASTA holding 9,712 sequences passes a 64 MB gate
+/// comfortably; the measured lab drive holds enough of them that a first index
+/// came out at **11,562,363 records and 5.9 GB**, against ~1,100 actual plasmid
+/// files. Every synthetic test passed.
+///
+/// A construct file holds one record. A legitimate multi-construct file holds a
+/// few dozen — the largest in this project's own corpus is 124. A file holding
+/// thousands is a reference database (SILVA, RefSeq, an assembly's contigs),
+/// which is not what a plasmid library is for. Such files get one row, a
+/// `TooLarge` state naming the count, and a line in every coverage footer.
+pub const MAX_RECORDS_PER_FILE: usize = 256;
+
+/// Total bases beyond which searches stop feeling instant.
+///
+/// Not a cap — a threshold to *report*. Measured throughput is ~335 Mbase/s
+/// single-threaded, so the 100 ms budget that makes a search box feel
+/// responsive is spent at roughly this size. Past it the library still works
+/// and the caller says how long a search will take, rather than the user
+/// discovering it.
+pub const INTERACTIVE_BASES: u64 = 33_000_000;
 
 /// Options for a scan.
 #[derive(Debug, Clone, Default)]
@@ -143,6 +177,21 @@ pub fn rows_for_file(rel_path: &str, data: &[u8], size: u64) -> (Vec<Row>, Vec<u
         }
     };
 
+    if mols.len() > MAX_RECORDS_PER_FILE {
+        rows.push(Row {
+            path: rel_path.to_string(),
+            state: State::TooLarge,
+            name: mols[0].name.clone(),
+            n_features: 0,
+            problem: format!(
+                "{} records; the cap is {MAX_RECORDS_PER_FILE}. a file with this many                  sequences is a reference set, not a construct",
+                mols.len()
+            ),
+            ..Default::default()
+        });
+        return (rows, bases);
+    }
+
     if mols.is_empty() || report.suspect {
         rows.push(Row {
             path: rel_path.to_string(),
@@ -150,6 +199,24 @@ pub fn rows_for_file(rel_path: &str, data: &[u8], size: u64) -> (Vec<Row>, Vec<u
             // An observation, not a diagnosis we cannot make: we can say what
             // was seen, not whether the file is corrupt or merely exotic.
             problem: format!("recognised as a sequence file; yielded no molecule ({size} bytes)"),
+            ..Default::default()
+        });
+        return (rows, bases);
+    }
+
+    // The cap is on the *file*, not on each record: a hundred 1 Mbase contigs
+    // cost as much to search as one 100 Mbase genome, and a caller reading a
+    // per-record cap would think it was protected.
+    let total: u64 = mols.iter().map(|m| m.len()).sum();
+    if total > MAX_BASES {
+        rows.push(Row {
+            path: rel_path.to_string(),
+            state: State::TooLarge,
+            name: mols[0].name.clone(),
+            problem: format!(
+                "{total} bases across {} record(s); the cap is {MAX_BASES}",
+                mols.len()
+            ),
             ..Default::default()
         });
         return (rows, bases);
