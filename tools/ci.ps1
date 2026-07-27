@@ -27,6 +27,11 @@ Set-Location $repo
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 if (Test-Path $cargoBin) { $env:PATH = "$cargoBin;$env:PATH" }
 
+# Cases polylinker-bench must still pass. Asserted, not merely printed: the
+# step used to report ok while the benchmark scored zero. Raise this when the
+# score rises; never lower it without saying why in the commit message.
+$BenchFloor = 171
+
 $script:failed = @()
 $script:skipped = @()
 $started = Get-Date
@@ -125,7 +130,35 @@ Step 'circular-map tests' {
 
 Write-Host "`nbenchmark" -ForegroundColor Cyan
 Step 'polylinker-bench' {
-    python bench/run.py bench/polylinker-bench.json -- target/release/pl.exe bench-adapter
+    # An absolute path, and the score is asserted rather than assumed.
+    #
+    # This step used to pass a relative forward-slash path, which Python's
+    # subprocess cannot resolve on Windows -- so the adapter never launched,
+    # every case scored "unsupported", the bench printed 0.0%, and run.py still
+    # exited 0. The step reported ok for a score of zero. A gate that only
+    # checks an exit code cannot notice a benchmark collapsing.
+    $exe = (Resolve-Path 'target/release/pl.exe').Path
+    $out = python bench/run.py bench/polylinker-bench.json -- $exe bench-adapter 2>&1
+    $out
+    if ($LASTEXITCODE -ne 0) { return }
+    $line = $out | Select-String -Pattern '^all\s' | Select-Object -Last 1
+    if (-not $line) {
+        Write-Output 'no scorecard line in the bench output'
+        $global:LASTEXITCODE = 1
+        return
+    }
+    # all  <pass> <fail> <unsup> <total>  <rate>%
+    $f = ($line.Line -split '\s+')
+    [int]$passed = $f[1]; [int]$failed = $f[2]
+    if ($failed -gt 0) {
+        Write-Output "bench has $failed failing case(s)"
+        $global:LASTEXITCODE = 1
+    } elseif ($passed -lt $BenchFloor) {
+        Write-Output "bench passed only $passed cases; the floor is $BenchFloor"
+        $global:LASTEXITCODE = 1
+    } else {
+        $global:LASTEXITCODE = 0
+    }
 } { Have python }
 Step 'bench regenerates identically' {
     python bench/generate.py > "$env:TEMP\regen.json" 2>$null
