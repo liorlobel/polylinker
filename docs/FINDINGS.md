@@ -143,3 +143,69 @@ Two useful conclusions:
    copyleft tools from a permissively-licensed application, demonstrated by the
    incumbent. Note that ViennaRNA's licence forbids redistribution for a fee —
    prefer `seqfold` (MIT) — and CAP3 is academic-use only.
+
+---
+
+## The library corpus, measured (2026-07-27)
+
+Measured on the development machine (Core Ultra 9 275HX, 24 logical cores,
+127 GiB RAM, NTFS) against `<CORPUS>
+folder that motivates the library index. Numbers, not estimates; the commands
+are in the session record.
+
+**The corpus is bimodal, and that is the design constraint.** 68,813 files
+total, 472 GiB. Of those, 2,042 are sequence files totalling 10.72 GiB — but
+the plasmid formats (`.dna .gb .gbk .ape .seq`) are 1,075 files with a median
+of **3,184 bytes**, while `.fa/.fasta/.fna` contribute 9.7 of the 10.7 GiB as a
+handful of NGS and SILVA reference files up to **1.39 GB each**. Treating
+"sequence file" as one population is wrong: the single largest file would cost
+roughly six times the parse time of the entire rest of the library. **Size-gate,
+and say what was gated.**
+
+**Enumeration is cheap; the API choice is not.** Metadata-only walk of all
+68,813 files: 2.1 s warm, 19.8 s cold. The same walk with
+`Get-ChildItem -Include *.dna,*.gb,…` takes **15.2 s warm — 7.2× the full
+walk**. Enumerate once with `-File` and filter extensions in memory.
+
+**Reading is not the thing to be afraid of.** Per file: metadata 0.076 ms,
+open + 4 KB 0.169 ms, open + read every byte 1.83 ms (2,311 MB/s; a 1.29 GB
+FASTA reads at 5,572 MB/s).
+
+**Correction to an earlier hypothesis.** A walk of this folder was observed to
+run over ten minutes, and cloud placeholders were assumed to be the cause. They
+are not. `FILE_ATTRIBUTE_OFFLINE`, `RECALL_ON_OPEN` and `RECALL_ON_DATA_ACCESS`
+are **zero across all 68,813 files**; 68,654 carry `FILE_ATTRIBUTE_PINNED`
+(0x80000), i.e. every file is materialised locally and no hydration is possible.
+The likeliest cause is the `-Include` cost above against a cold metadata cache,
+plus OneDrive syncing concurrently — but **this remains unreproduced**, and the
+original cold state cannot be recovered without a reboot. Recorded as
+unexplained rather than closed.
+
+**A landmine for any directory walker.** 68,811 of 68,813 files *are* reparse
+points, tag `0x9000601A` = `IO_REPARSE_TAG_CLOUD_6`, with empty `LinkType` and
+`Target`. The conventional defence against symlink cycles — skip reparse points
+— would therefore skip **the entire corpus**. Follow the tag, not the flag.
+
+**Parse in-process.** Process startup is 7.94 ms; parsing a mean corpus file is
+0.533 ms and a small plasmid 0.052 ms. A subprocess-per-file indexer would be
+~94% startup. 3,000 files single-threaded: **1.6 s** in-process against 25.4 s
+out-of-process.
+
+**Parallelism is not needed for v0.1.** 1.6 s cold, single-threaded. 24 cores
+would take it to ~0.1 s: optimising a non-problem at the price of thread-safety.
+
+**Memory is a non-issue.** The real corpus is 23.2 Mbase → **11.1 MiB** packed
+at 4 bits per base. The 3,000 × 5 kb design target is 7.2 MiB, 0.0055% of RAM.
+Hold it all resident; never page or mmap.
+
+**Search is fast enough, with thin headroom.** A linear nibble scan runs at a
+stable **~335 Mbase/s** single-threaded, and degeneracy costs ~3% because early
+exit dominates. The design target scans in **45 ms** and the real corpus in
+**69 ms**, both inside the 100 ms "feels instant" budget — but that budget is
+**exhausted at roughly 33 Mbase**. Above that, parallelism or a real index
+becomes necessary. This is the number to re-measure before claiming the design
+scales.
+
+Loose ends worth their own look: 30 of 913 corpus files parse without yielding
+a length; four sequence files are zero bytes; `pl info` on a multi-record FASTA
+reports `records 9712 in this file` and shows the first.
