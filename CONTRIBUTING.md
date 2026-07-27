@@ -49,6 +49,22 @@ Therefore:
   cannot be fully preserved, say so in the UI. Silence is the failure mode that
   ends this project's usefulness.
 
+## If you change a parser, bump `ENGINE`
+
+`pl_index::ENGINE` is the version of the *derivation*, not of the file format,
+and it exists for a failure nobody catches. Every derived column in the library
+index — the searchable text, the feature count, the state, the topology — is a
+function of the parser, not only of the file. Teach `genbank.rs` a location form
+it used to report as unrepresentable, and on the next rescan every file is
+"unchanged", every row is reused, and your fix never reaches anybody's library.
+`pl index --verify` will not catch it either, because the file's content hash
+still matches. The user sees `3,002 unchanged (reused)`, which reads as success.
+
+So: **touch `crates/pl-fileio/src/**`, `pl-core/src/iupac.rs` or
+`pl-core/src/seguid.rs`, and bump `ENGINE` in the same commit.** A needless bump
+costs one rebuild, a few seconds. A missed one costs a wrong answer that nothing
+reports.
+
 ## Getting set up
 
 Right now there is no build. The reference implementation is Python with no

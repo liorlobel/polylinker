@@ -187,7 +187,7 @@ These ship before the app and are separately published, separately licensed, sep
 | Circular + linear map render (v0.1 of `@polylinker/circular-map`) | (above) | — |
 | Restriction site search + enzyme sets + **hidden-sites badge** | 2 wk | Workflow #3. The badge is the direct fix for the single documented case of SnapGene costing a user a month of bench time. |
 | SVG export via serialized DOM → `resvg`/`svg2pdf` in Rust | 1 wk | Engine-independent, CI-diffable, strictly better than Chromium `printToPDF`. Never use `html2canvas`. |
-| Bulk folder import + SQLite index + search | 2 wk | The actual switching cost is a shared drive with 3,000 `.dna` files. |
+| Bulk folder import + **rebuildable** index + search | 2 wk | The actual switching cost is a shared drive with 3,000 `.dna` files. **SQLite rejected — see ADR-11.** |
 | **Demo:** open a real Addgene `.dna`, draw the map, list cut sites, export SVG, save GenBank | — | — |
 
 ### v1.0 — "I can stop paying" (target: months 12–15)
@@ -1180,6 +1180,62 @@ That is not a product. It is proof that the hard assumptions hold, that three-pl
 | **ADR-8** | Tier-1 auto-annotation is k-mer + `edlib` in WASM; the BLAST/DIAMOND/Infernal stack is an opt-in v2 tier | SnapGene's magic is approximate string matching, not homology search. Saves a 4–6 month sidecar-packaging workstream | Low |
 | **ADR-9** | No cloud, no accounts, no telemetry, no paid tier | The only durable axis against Benchling; the only reliable defence against *SAS v. WPL*-shaped litigation | **Irreversible in practice** |
 | **ADR-10** | Ship `polylinker-bench` and `polylinker-features` **before** the app | Each is independently valuable and publishable; guarantees a non-catastrophic failure mode | Low |
+| **ADR-11** | The library index is a **rebuildable cache in a hand-rolled format**, not SQLite | FTS5 answers the wrong question about plasmid names, and answers it silently; the one query nobody else offers is one FTS5 cannot express | Low — reversible, see below |
+
+#### ADR-11 in full: why not SQLite
+
+`docs/PLAN.md` line 190 specified a SQLite index. Three architectures were
+designed independently and scored by three judges each; the rebuildable
+zero-dependency cache won 41.0 to SQLite's 33.0.
+
+**The deciding reason is not the dependency.** It is that **FTS5 answers the
+wrong question about this data, and answers it silently.** Verified against real
+plasmid feature names:
+
+```
+MATCH '"uc"*'   against  pUC ori       ->  no rows
+MATCH '"101"*'  against  pSC101 ori    ->  no rows
+trigram tokenizer, any query under 3 characters   ->  no rows
+plain substring ->  finds all of them
+```
+
+A plasmid name is not word-shaped, so a prefix tokenizer misses the middle of
+it. A user typing `uc` would read "not in my library" where the truth is "not
+asked" — the failure this project treats as disqualifying.
+
+Meanwhile the query nobody else offers — degenerate, both-strand,
+origin-wrapping motif search — is one FTS5 cannot express at all, and it costs a
+`for` loop. Measured: the real corpus packs to 122 Mbase and scans in ~365 ms;
+the searchable text is about a megabyte and a substring pass over it is
+microseconds. There is no performance problem here for a storage engine to
+solve.
+
+**What the format buys instead.** Every failure mode degrades to "discard and
+rebuild", because the file is derived: a crash leaves an orphaned temporary and
+an intact index (the live file is never opened for writing); bit rot is caught
+by a SHA-1 trailer verified on every open — strictly *more* than default SQLite,
+whose amalgamation ships no checksum VFS; a stale layout or a changed parser
+forces a rebuild by version number; concurrent writers are last-writer-wins over
+two complete files, with no lock and therefore no stale-lock recovery.
+
+**Reversal condition, written down now rather than discovered later.** The day
+the index holds anything the user authored — tags, assigned folders, per-file
+notes, stars, custom ordering, recent files — it stops being a cache and
+"rebuild" becomes data loss. Line 144 of this plan asks for folders and recent
+files in the same sentence as search, so this is one release away. At that
+moment the answer is **redb** (zero transitive dependencies, pure Rust, builds
+for wasm32), **not SQLite**, and that state goes in a *separate, never-rebuilt*
+file keyed to a stable per-file identifier — **not** to a sequence hash, which
+in an application whose main verb is "edit the plasmid" would silently detach
+the label the user typed the moment they changed a base.
+
+**Deliberately not in v0.1:** user-authored state (above); mismatch-tolerant and
+gapped search, which is refused by name rather than by empty result; ranking and
+relevance, since results are ordered deterministically by `(path, record,
+position)`; protein and translated search; annotate-at-import, which is only as
+good as `features/features.tsv` and that is 8 records today; and Type IIS
+enzymes, so **no Golden Gate query is advertised** — the shipped table has no
+BsaI, BsmBI, BbsI or SapI, and `--enzyme BsaI` says so instead of guessing.
 
 ---
 

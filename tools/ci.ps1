@@ -100,6 +100,19 @@ Step 'pl-index stays pure (wasm32)' {
 Step 'pl-index and pl-scan tests' {
     cargo test -p pl-index -p pl-scan --tests
 }
+# Size and speed at three thousand plasmids.
+#
+# Nothing else in this gate would notice an index costing 800 MB or a query
+# allocating 90 MB, and that is not hypothetical: the first index of a real lab
+# drive came out at 5.9 GB with every functional test passing. The test carries
+# its own counting global allocator -- zero dependencies, same on all three CI
+# operating systems -- and asserts index size, open time, query time and peak
+# allocation. Loose tripwires for an order-of-magnitude regression, not
+# benchmarks; raise one only with a reason in the commit message, same rule as
+# $BenchFloor.
+Step 'index size and speed at 3,000 plasmids' {
+    cargo test -p pl-index --test scale --release
+}
 
 # Does the index agree with the files it was built from?
 #

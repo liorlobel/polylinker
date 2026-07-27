@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod doc;
+mod library;
 mod map;
 mod theme;
 
@@ -53,6 +54,7 @@ fn main() -> eframe::Result {
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Features,
+    Library,
     Enzymes,
     Sequence,
     History,
@@ -77,6 +79,11 @@ struct App {
     /// slightly longer list; defaulting to a subset costs someone an
     /// experiment.
     enzyme_set: pl_enzymes::EnzymeSet,
+    /// The indexed folder, if one has been opened.
+    scan: Option<library::ScanState>,
+    lib_mode: library::Mode,
+    lib_query: String,
+    lib_absent: bool,
 }
 
 impl App {
@@ -97,6 +104,10 @@ impl App {
             filter: String::new(),
             status: String::new(),
             enzyme_set: pl_enzymes::EnzymeSet::All,
+            scan: None,
+            lib_mode: library::Mode::Name,
+            lib_query: String::new(),
+            lib_absent: false,
         };
         // Opening a file named on the command line makes the app usable as a
         // file association and from a terminal.
@@ -297,10 +308,20 @@ impl eframe::App for App {
         }
 
         // Files dropped anywhere on the window.
+        //
+        // A dropped *folder* indexes it. Before, a folder went to `load` and
+        // came back as a read error, which is a poor answer to an unambiguous
+        // gesture.
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if let Some(f) = dropped.first() {
             if let Some(path) = &f.path {
-                self.load(path.clone());
+                if path.is_dir() {
+                    self.scan = Some(library::start(path.clone()));
+                    self.tab = Tab::Library;
+                    self.error = None;
+                } else {
+                    self.load(path.clone());
+                }
             } else if let Some(bytes) = &f.bytes {
                 match Document::from_bytes(bytes, f.name.clone(), None) {
                     Ok(d) => {
@@ -340,6 +361,13 @@ impl eframe::App for App {
                 ctx.request_repaint();
             }
             running = d.digest.is_running();
+        }
+        // The folder scan is the same shape and the same contract.
+        if let Some(s) = &mut self.scan {
+            if s.poll() {
+                ctx.request_repaint();
+            }
+            running |= s.is_running();
         }
         if running {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
@@ -553,6 +581,7 @@ impl App {
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (Tab::Features, "Features"),
+                        (Tab::Library, "Library"),
                         (Tab::Enzymes, "Enzymes"),
                         (Tab::Sequence, "Sequence"),
                         (Tab::History, "History"),
@@ -573,12 +602,279 @@ impl App {
 
                 match self.tab {
                     Tab::Features => self.features_tab(ui),
+                    Tab::Library => self.library_tab(ui),
                     Tab::Enzymes => self.enzymes_tab(ui),
                     Tab::Sequence => self.sequence_tab(ui),
                     Tab::History => self.history_tab(ui),
                     Tab::File => self.file_tab(ui),
                 }
             });
+    }
+
+    fn library_tab(&mut self, ui: &mut Ui) {
+        use library::{Mode, Parsed, ScanState};
+
+        ui.horizontal(|ui| {
+            if ui
+                .button("Open folder…")
+                .on_hover_text("Index a folder of sequence files. Dropping a folder works too.")
+                .clicked()
+            {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    self.scan = Some(library::start(dir));
+                }
+            }
+            if let Some(s) = &self.scan {
+                match s {
+                    ScanState::Running { root, .. } => {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(format!("scanning {}…", root.display()))
+                                .color(pal(ui).muted)
+                                .size(12.0),
+                        );
+                    }
+                    ScanState::Done { root, .. } => {
+                        ui.label(
+                            RichText::new(root.display().to_string())
+                                .color(pal(ui).muted)
+                                .size(12.0),
+                        );
+                    }
+                    ScanState::Failed(_) => {}
+                }
+            }
+        });
+
+        let Some(state) = &self.scan else {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(
+                    "No folder yet.\n\nOpen or drop one and every sequence file in it becomes \
+                     searchable — by name, by feature, or by a stretch of sequence on either \
+                     strand, across the origin of a circular plasmid.",
+                )
+                .color(pal(ui).muted)
+                .size(12.5),
+            );
+            return;
+        };
+
+        if let ScanState::Failed(e) = state {
+            ui.add_space(8.0);
+            ui.label(RichText::new(e).color(pal(ui).warn).size(12.5));
+            return;
+        }
+        let Some(lib) = state.library() else {
+            return;
+        };
+        let report = match state {
+            ScanState::Done { report, .. } => Some(report),
+            _ => None,
+        };
+
+        // A permanent statement of what is in scope. A search box over an
+        // unknown number of files is a search box you cannot trust.
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let problems = lib.rows.iter().filter(|r| !r.state.searchable()).count();
+            ui.label(
+                RichText::new(format!(
+                    "{} record{} · {} bases",
+                    lib.rows.len(),
+                    if lib.rows.len() == 1 { "" } else { "s" },
+                    fmt_int(lib.packed_bases)
+                ))
+                .size(12.0),
+            );
+            if problems > 0 {
+                ui.label(
+                    RichText::new(format!("· {problems} not searchable"))
+                        .color(pal(ui).warn)
+                        .size(12.0),
+                )
+                .on_hover_text(
+                    "Records with no sequence: annotation tracks, chromatograms, files past \
+                     the size cap, files that could not be read. They are still findable by \
+                     name, and they are never counted as lacking a site.",
+                );
+            }
+            if let Some(r) = report {
+                if r.incomplete.is_some() {
+                    ui.label(
+                        RichText::new("· scan did not finish")
+                            .color(pal(ui).warn)
+                            .size(12.0),
+                    )
+                    .on_hover_text(
+                        "Part of the folder became unreachable. Nothing was removed from the \
+                         index — a folder that vanished is not a folder whose files were \
+                         deleted.",
+                    );
+                }
+            }
+        });
+
+        if !lib.complete {
+            ui.label(
+                RichText::new("this index is partial")
+                    .color(pal(ui).warn)
+                    .size(11.5),
+            );
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            for m in [Mode::Name, Mode::Text, Mode::Motif, Mode::Enzyme] {
+                if ui.selectable_label(self.lib_mode == m, m.label()).clicked() {
+                    self.lib_mode = m;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.lib_query)
+                    .hint_text(self.lib_mode.hint())
+                    .desired_width(f32::INFINITY),
+            );
+        });
+        if matches!(self.lib_mode, Mode::Motif | Mode::Enzyme) {
+            ui.checkbox(&mut self.lib_absent, "show records WITHOUT it")
+                .on_hover_text(
+                    "Inverts only the sequence criterion. A record whose bases we never had is \
+                     not evidence of absence, so it is never listed here.",
+                );
+        }
+
+        // Validated live, so the user sees what will be searched as they type.
+        let parsed = library::parse_query(self.lib_mode, &self.lib_query, self.lib_absent);
+        match &parsed {
+            Parsed::Idle => {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Type to search.")
+                        .color(pal(ui).muted)
+                        .size(12.0),
+                );
+                return;
+            }
+            Parsed::Rejected(why) => {
+                ui.add_space(6.0);
+                ui.label(RichText::new(why).color(pal(ui).warn).size(12.0));
+                return;
+            }
+            Parsed::Ready(_, note) => {
+                if let Some(note) = note {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(note).color(pal(ui).muted).size(11.5));
+                }
+            }
+        }
+        let Parsed::Ready(q, _) = &parsed else {
+            return;
+        };
+
+        let results = library::run(lib, q);
+        ui.add_space(6.0);
+        ui.separator();
+
+        let mut open: Option<PathBuf> = None;
+        egui::ScrollArea::vertical()
+            .max_height(ui.available_height() - 92.0)
+            .show(ui, |ui| {
+                for m in results.matches.iter().take(500) {
+                    let label = if m.row.record == 0 {
+                        m.row.path.clone()
+                    } else {
+                        format!("{} #{}", m.row.path, m.row.record + 1)
+                    };
+                    let resp = ui
+                        .scope(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&label).size(12.5));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if !m.hits.is_empty() {
+                                        ui.label(
+                                            RichText::new(format!("{} hit", m.hits.len()))
+                                                .color(pal(ui).muted)
+                                                .size(11.5),
+                                        );
+                                    }
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} bp {}",
+                                            fmt_int(if m.row.length > 0 {
+                                                m.row.length
+                                            } else {
+                                                m.row.declared_len
+                                            }),
+                                            m.row.topology.as_str()
+                                        ))
+                                        .color(pal(ui).muted)
+                                        .size(11.5),
+                                    );
+                                });
+                            });
+                        })
+                        .response;
+                    if resp.interact(Sense::click()).clicked() {
+                        if let ScanState::Done { root, .. } = state {
+                            open = Some(pl_scan::abs(root, &m.row.path));
+                        }
+                    }
+                    // Wrapped hits are worth seeing: they only exist because
+                    // the molecule is circular, and half the time the file
+                    // never said so.
+                    for h in m.hits.iter().take(3) {
+                        let extra = match (h.wrapped, h.assumed_circular) {
+                            (true, true) => "  crosses the origin (topology not declared)",
+                            (true, false) => "  crosses the origin",
+                            _ => "",
+                        };
+                        ui.label(
+                            RichText::new(format!(
+                                "        {}..{} {}{extra}",
+                                h.start,
+                                h.end,
+                                h.strand.as_str()
+                            ))
+                            .color(pal(ui).muted)
+                            .monospace()
+                            .size(11.0),
+                        );
+                    }
+                }
+            });
+
+        ui.separator();
+        ui.label(
+            RichText::new(format!(
+                "{} record{} matched{}",
+                results.matches.len(),
+                if results.matches.len() == 1 { "" } else { "s" },
+                if results.total_hits > 0 {
+                    format!(", {} hits", fmt_int(results.total_hits))
+                } else {
+                    String::new()
+                }
+            ))
+            .strong()
+            .size(12.0),
+        );
+        // The footer is not decoration: it is what makes "3 matched" an audited
+        // claim rather than an unfalsifiable one.
+        if q.motif.is_some() {
+            ui.label(
+                RichText::new(results.coverage.describe())
+                    .color(pal(ui).muted)
+                    .size(11.0),
+            );
+        }
+
+        if let Some(path) = open {
+            self.load(path);
+            self.tab = Tab::Features;
+        }
     }
 
     fn features_tab(&mut self, ui: &mut Ui) {
