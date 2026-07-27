@@ -167,6 +167,43 @@ def build_pcr_cases():
         cases.append({"id": f"pcr-tail-{i}", "tmpl": tmpl, "fwd": fwd, "rev": rev,
                       "circular": False})
 
+    # Circular templates. There was no circular PCR coverage anywhere in this
+    # project -- not in the unit tests, not in the bench, not here -- and three
+    # of the four known pcr() defects only appear on a circle. pydna decides
+    # what these should produce; we do not.
+    for i in range(4):
+        n = rng.randint(300, 600)
+        tmpl = rand_seq(n)
+        start = rng.randint(20, n - 200)
+        length = rng.randint(80, 150)
+        fwd = tmpl[start:start + 20]
+        rev = str(Dseq(tmpl[start + length - 20:start + length]).reverse_complement().watson)
+        cases.append({"id": f"pcr-circ-{i}", "tmpl": tmpl, "fwd": fwd, "rev": rev,
+                      "circular": True})
+
+    # An amplicon that crosses the origin. Entirely routine on a plasmid -- the
+    # origin is an arbitrary numbering choice -- and it was returning
+    # Err(Inverted), i.e. "your primers face away from each other".
+    for i, tail in enumerate(["", "GAATTC"]):
+        n = 400
+        tmpl = rand_seq(n)
+        fwd = tail + tmpl[n - 30:n - 10]        # anneals near the end
+        rev = str(Dseq(tmpl[15:35]).reverse_complement().watson)  # ...and wraps past 1
+        cases.append({"id": f"pcr-origin-{i}", "tmpl": tmpl, "fwd": fwd, "rev": rev,
+                      "circular": True})
+
+    # Primer footprints that overlap, the shape produced by partially
+    # overlapping site-directed-mutagenesis primers. The product is the span,
+    # not the concatenation.
+    for i, (overlap, circular) in enumerate([(10, False), (10, True), (18, False)]):
+        tmpl = rand_seq(400)
+        start = 100
+        fwd = tmpl[start:start + 20]
+        rev_start = start + 20 - overlap
+        rev = str(Dseq(tmpl[rev_start:rev_start + 20]).reverse_complement().watson)
+        cases.append({"id": f"pcr-overlap-{i}", "tmpl": tmpl, "fwd": fwd, "rev": rev,
+                      "circular": circular})
+
     # Templates carrying a repeated motif, where a naive search binds the wrong
     # copy.
     for i in range(4):
@@ -187,12 +224,18 @@ def check_pcr(pl):
     cases = build_pcr_cases()
     lines = []
     expected = {}
+    # Cases pydna refuses, kept rather than skipped so the refusal itself can be
+    # compared. See the check further down.
+    declined = {}
     for c in cases:
         try:
             prod = pydna_pcr(c["fwd"], c["rev"], Dseqrecord(c["tmpl"], circular=c["circular"]))
             expected[c["id"]] = str(prod.seq).upper()
         except Exception as e:
-            print(f"  (pydna declined {c['id']}: {e})")
+            declined[c["id"]] = str(e).splitlines()[0]
+            topo = "circular" if c["circular"] else "linear"
+            lines.append(f"{c['id']}\tpcr\t{topo}\t{c['tmpl']}"
+                         f"\tforward_primer={c['fwd']}\treverse_primer={c['rev']}")
             continue
         topo = "circular" if c["circular"] else "linear"
         lines.append(f"{c['id']}\tpcr\t{topo}\t{c['tmpl']}"
@@ -232,9 +275,30 @@ def check_pcr(pl):
         else:
             agree += 1
 
+    # ...and every case pydna refused, we must refuse too.
+    #
+    # Refusals used to be dropped on the floor, so "agrees with pydna" meant
+    # only "agrees wherever pydna produced something" — a tool that returned a
+    # confident product for every impossible reaction would still have scored
+    # 100%. Refusing correctly is half the behaviour.
+    for cid, why in declined.items():
+        got = ours.get(cid)
+        if got is None:
+            problems.append((cid, "no row at all", f"pydna declined: {why}", None))
+        elif "error" not in got:
+            problems.append((
+                cid,
+                "we returned a product pydna refuses",
+                f"pydna declined: {why}",
+                f"{got.get('product_length')} bp",
+            ))
+        else:
+            agree += 1
+
     print()
     print("=" * 72)
-    print(f"pcr cases        : {len(expected)}")
+    print(f"pcr cases        : {len(expected)} with a product, "
+          f"{len(declined)} pydna refuses")
     print(f"agree with pydna : {agree}")
     print(f"disagree         : {len(problems)}")
     for cid, what, want, got in problems[:10]:

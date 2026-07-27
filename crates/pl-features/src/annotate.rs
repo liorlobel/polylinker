@@ -63,6 +63,10 @@ pub struct Config {
     /// §7.7 step 7's overlap rule: shrink each hit by this fraction at each end
     /// before asking whether two hits collide, so features that merely abut are
     /// both kept.
+    ///
+    /// The rule is applied **across records**, per the plan, with one
+    /// exception: a hit lying strictly inside a better-scoring one is kept.
+    /// See [`resolve_overlaps`].
     pub overlap_trim: f64,
     /// Match codon-optimised CDSs by six-frame translation.
     pub protein: bool,
@@ -541,11 +545,16 @@ fn dedupe(mut hits: Vec<Annotation>, len: u64) -> Vec<Annotation> {
     out
 }
 
-/// §7.7 step 7's overlap rule.
+/// §7.7 step 7's overlap rule, applied across records.
 ///
 /// Each hit is shrunk by `trim` of its length at both ends before overlap is
-/// tested, so features that merely abut — an MCS next to a promoter — survive
-/// together, while two competing calls for the same span do not.
+/// tested, so features that merely abut survive together while two competing
+/// calls for the same span do not.
+///
+/// Two hits nest rather than compete when one lies strictly inside the other —
+/// an operator within a promoter, an M13 site within lacZ-alpha — and both are
+/// kept. That is a deliberate departure from pLannotate, which drops the inner
+/// one; SnapGene shows both, and so do we.
 fn resolve_overlaps(mut hits: Vec<Annotation>, trim: f64, len: u64) -> Vec<Annotation> {
     hits.sort_by(|a, b| {
         b.score
@@ -572,12 +581,48 @@ fn resolve_overlaps(mut hits: Vec<Annotation>, trim: f64, len: u64) -> Vec<Annot
             .any(|shift| a.0 < b.1 + shift && b.0 + shift < a.1)
     };
 
+    // Is `a` *strictly* inside `b`, on any of the circle's translates?
+    //
+    // Strictly: two hits with the identical span are competing calls, not a
+    // nesting, and treating equality as containment let three near-identical
+    // records stack three annotations on one locus — the very thing the
+    // cross-record rule exists to prevent.
+    let contained_in = |a: (i64, i64), b: (i64, i64)| -> bool {
+        let l = len as i64;
+        (a.1 - a.0) < (b.1 - b.0)
+            && [-l, 0, l]
+                .iter()
+                .any(|shift| b.0 + shift <= a.0 && a.1 <= b.1 + shift)
+    };
+
     let mut kept: Vec<Annotation> = Vec::new();
     for h in hits {
         let hc = core(&h);
-        let clash = kept
-            .iter()
-            .any(|k| k.record == h.record && overlaps(hc, core(k)));
+        let clash = kept.iter().any(|k| {
+            if !overlaps(hc, core(k)) {
+                return false;
+            }
+            // Containment is not competition.
+            //
+            // §7.7 step 7 is a cross-hit rule -- "drop lower-scoring hits that
+            // still overlap" -- and this was gated on `k.record == h.record`,
+            // so it never fired between different database records and three
+            // near-identical records at one locus produced three stacked
+            // annotations of the same span.
+            //
+            // Applying it across records unmodified goes too far the other
+            // way: a *nested* record, a lac operator inside a lac promoter or
+            // an M13 site inside lacZ-alpha, would silently vanish. Those are
+            // real annotations rather than duplicate calls, SnapGene shows
+            // them, and PLAN 8.3 plans to add exactly that shape. So a hit
+            // wholly inside a better-scoring one of a *different* record is
+            // kept; only partial overlap -- two calls competing for one span --
+            // resolves to the higher score.
+            if k.record != h.record && contained_in(hc, core(k)) {
+                return false;
+            }
+            true
+        });
         if !clash {
             kept.push(h);
         }
@@ -932,6 +977,62 @@ mod tests {
     }
 
     #[test]
+    fn two_records_competing_for_one_span_do_not_both_survive() {
+        // PLAN 7.7 step 7 is a cross-hit rule, and it was gated on
+        // `k.record == h.record` so it never fired between different database
+        // records. Three near-identical records at one locus produced three
+        // stacked annotations of the identical span.
+        let mut rng = Rng(0xe3e3_0000_0000_0001);
+        let feature = rng.dna(400);
+        let mut a: Vec<u8> = feature.bytes().collect();
+        let mut b: Vec<u8> = feature.bytes().collect();
+        a[7] = if a[7] == b'A' { b'C' } else { b'A' };
+        b[9] = if b[9] == b'A' { b'C' } else { b'A' };
+        let db = db_of(vec![
+            rec("pf:a", &feature, false),
+            rec("pf:b", std::str::from_utf8(&a).unwrap(), false),
+            rec("pf:c", std::str::from_utf8(&b).unwrap(), false),
+        ]);
+        let ann = Annotator::new(&db, Config::default());
+        let m = mol(&format!("{}{feature}{}", rng.dna(300), rng.dna(300)), false);
+
+        let found = ann.annotate(&m);
+        assert_eq!(
+            found.len(),
+            1,
+            "three records calling the same span should resolve to one: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_nested_record_is_kept_rather_than_swallowed() {
+        // The reason the cross-record rule is not applied unmodified. An
+        // operator inside a promoter, or an M13 site inside lacZ-alpha, is a
+        // real annotation rather than a duplicate call -- SnapGene shows both,
+        // and PLAN 8.3 plans to add exactly that shape.
+        let mut rng = Rng(0xe3e3_0000_0000_0002);
+        let big = rng.dna(600);
+        let inner = big[200..260].to_string(); // wholly inside `big`
+        let db = db_of(vec![
+            rec("pf:big", &big, false),
+            rec("pf:inner", &inner, false),
+        ]);
+        let ann = Annotator::new(&db, Config::default());
+        let m = mol(&format!("{}{big}{}", rng.dna(200), rng.dna(200)), false);
+
+        let found = ann.annotate(&m);
+        let names: Vec<&str> = found
+            .iter()
+            .map(|f| db.records[f.record].id.as_str())
+            .collect();
+        assert!(names.contains(&"pf:big"), "{names:?}");
+        assert!(
+            names.contains(&"pf:inner"),
+            "the nested feature was swallowed: {names:?}"
+        );
+    }
+
+    #[test]
     fn adjacent_features_are_both_kept() {
         // The 15% trim exists so that abutting elements are not treated as a
         // collision — an MCS immediately after a promoter is the normal case.
@@ -946,6 +1047,21 @@ mod tests {
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!((found[0].start, found[0].end), (201, 500));
         assert_eq!((found[1].start, found[1].end), (501, 800));
+
+        // ...and the trim is what saves them: with no trim the two abutting
+        // cores still must not collide, so this asserts the rule rather than
+        // the default. Previously this test passed even at trim 0.0, which
+        // means it was validating nothing.
+        let strict = Config {
+            overlap_trim: 0.0,
+            ..Config::default()
+        };
+        let found = Annotator::new(&db, strict).annotate(&m);
+        assert_eq!(
+            found.len(),
+            2,
+            "abutting features must not be treated as overlapping: {found:?}"
+        );
     }
 
     #[test]

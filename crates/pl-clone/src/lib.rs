@@ -320,6 +320,17 @@ pub enum PcrError {
     /// confident product has told the user their experiment worked when it did
     /// not. `docs/PLAN.md` §7.12.2 puts this in hazard tier 1: silent,
     /// expensive, and hard to notice until the gel.
+    /// A primer or the template contains something that is not DNA.
+    ///
+    /// Checked before any searching: `rc()` decodes through
+    /// `from_utf8_lossy`, so a non-ASCII byte -- a non-breaking space pasted
+    /// from a vendor's order sheet is the realistic case -- became a multi-byte
+    /// replacement character and then panicked on a char boundary, aborting a
+    /// whole batch rather than rejecting one primer.
+    NotDna {
+        what: &'static str,
+        found: char,
+    },
     NotSpecific {
         /// Which primer: "forward" or "reverse".
         primer: &'static str,
@@ -337,6 +348,9 @@ impl std::fmt::Display for PcrError {
                 f,
                 "the primers face away from each other; there is no product"
             ),
+            PcrError::NotDna { what, found } => {
+                write!(f, "the {what} contains {found:?}, which is not a DNA base")
+            }
             PcrError::NotSpecific { primer, sites } => {
                 // Cap the list. A primer against a homopolymer tract can bind
                 // at a hundred overlapping offsets, and an error that prints
@@ -383,26 +397,72 @@ pub const MIN_ANNEAL: usize = 12;
 /// simulation and will not tell you a reaction fails for having three
 /// mismatches near the 3' end; `docs/PLAN.md` §7.4 keeps that separate.
 pub fn pcr(forward: &str, reverse: &str, template: &Dseq) -> Result<Dseq, PcrError> {
+    // ASCII up front. `rc()` goes through `from_utf8_lossy`, so a non-ASCII
+    // byte anywhere -- a non-breaking space pasted from a vendor's order sheet
+    // is the realistic case -- became a multi-byte replacement character and
+    // then panicked on a char boundary deep inside the search, aborting a whole
+    // batch run rather than rejecting one primer.
+    for (what, s) in [("forward primer", forward), ("reverse primer", reverse)] {
+        if !s.is_ascii() {
+            return Err(PcrError::NotDna {
+                what,
+                found: s.chars().find(|c| !c.is_ascii()).unwrap_or('?'),
+            });
+        }
+    }
+
     let tmpl = template.to_string_full().to_ascii_uppercase();
+    if !tmpl.is_ascii() {
+        return Err(PcrError::NotDna {
+            what: "template",
+            found: tmpl.chars().find(|c| !c.is_ascii()).unwrap_or('?'),
+        });
+    }
+    let n = tmpl.len();
+    if n == 0 {
+        return Err(PcrError::ForwardNotFound);
+    }
     let fwd = forward.to_ascii_uppercase();
     let rev = reverse.to_ascii_uppercase();
+    let rev_rc = rc(&rev);
 
     // The forward primer's 3' end anneals to the bottom strand, so its
-    // sequence appears in the top strand.
-    let (f_anneal_start, f_anneal_len, f_sites) =
+    // sequence appears in the top strand; the reverse primer's reverse
+    // complement appears there too.
+    let (_, f_len, f_top) =
         anneal(&tmpl, &fwd, template.circular).ok_or(PcrError::ForwardNotFound)?;
+    let (_, r_len, r_top) =
+        anneal_last(&tmpl, &rev_rc, template.circular).ok_or(PcrError::ReverseNotFound)?;
+
+    // Specificity is judged over **both strands**.
+    //
+    // Searching only the top strand called a primer specific when its second
+    // site was an inverted repeat: absent from the top strand, present on the
+    // bottom, and pydna returns two products for exactly that input. Positions
+    // are deduplicated, because a self-complementary footprint matches itself
+    // on both strands and would otherwise count one real site twice.
+    //
+    // Known deviation, taken deliberately: pydna accepts a primer whose
+    // reverse-complement site lies upstream, where the two extensions diverge
+    // and no artifact forms. We refuse it. `docs/PLAN.md` §7.12.2 puts a
+    // silently wrong PCR product in hazard tier 1 — a false "not specific"
+    // costs a re-run, a false "specific" costs a cloning experiment.
+    let sites_on_both_strands = |footprint: &str, top: &[usize]| -> Vec<usize> {
+        let mut all = top.to_vec();
+        all.extend(find_all(&tmpl, &rc(footprint), template.circular));
+        all.sort_unstable();
+        all.dedup();
+        all
+    };
+    let f_sites = sites_on_both_strands(&fwd[fwd.len() - f_len..], &f_top);
+    let r_sites = sites_on_both_strands(&rev_rc[..r_len], &r_top);
+
     if f_sites.len() > 1 {
         return Err(PcrError::NotSpecific {
             primer: "forward",
             sites: f_sites,
         });
     }
-
-    // The reverse primer anneals to the top strand, so its reverse complement
-    // appears there.
-    let rev_rc = rc(&rev);
-    let (r_anneal_start, r_anneal_len, r_sites) =
-        anneal_last(&tmpl, &rev_rc, template.circular).ok_or(PcrError::ReverseNotFound)?;
     if r_sites.len() > 1 {
         return Err(PcrError::NotSpecific {
             primer: "reverse",
@@ -410,15 +470,45 @@ pub fn pcr(forward: &str, reverse: &str, template: &Dseq) -> Result<Dseq, PcrErr
         });
     }
 
-    let f_end = f_anneal_start + f_anneal_len; // one past the forward footprint
-    let r_end = r_anneal_start + r_anneal_len; // one past the reverse footprint
-    if r_end < f_end {
-        return Err(PcrError::Inverted);
+    // Exactly one site each by now, so the geometry has one answer.
+    let f_start = f_sites[0] % n;
+    let r_start = r_sites[0] % n;
+    let f_end = (f_start + f_len) % n;
+
+    let travelled = if template.circular {
+        // Extension from the forward primer's 3' end runs forward, wrapping,
+        // until it reaches the reverse primer's 3' end. A circle always has
+        // such a path, which is why an amplicon across the origin is ordinary
+        // and used to be rejected as "the primers face away from each other".
+        // It is also why overlapping primers on a plasmid give a
+        // whole-plasmid product rather than a short one: pydna returns 430 bp
+        // for a 400 bp template with footprints overlapping by 10.
+        (r_start + n - f_end) % n
+    } else {
+        // On a line the polymerase cannot come round again, so the reverse
+        // primer's 3' end must lie at or after the forward primer's. Where it
+        // does not — overlapping SDM primers, say — there is no product at
+        // all, which is what pydna reports. This used to return the two
+        // primers concatenated, with the overlapping bases duplicated.
+        if r_start < f_start + f_len {
+            return Err(PcrError::Inverted);
+        }
+        r_start - (f_start + f_len)
+    };
+
+    let products = [(f_start, travelled)];
+    let (f_start, travelled) = products[0];
+    let from = (f_start + f_len) % n;
+    // Read the template forward from the forward primer's 3' end, wrapping if
+    // the amplicon crosses the origin. Slicing `&tmpl[f_end..]` directly
+    // panicked whenever the footprint ran past the end of a circular template
+    // -- one crafted line of stdin was enough to kill `pl bench-adapter`.
+    let mut middle = String::with_capacity(travelled);
+    for i in 0..travelled {
+        middle.push(tmpl.as_bytes()[(from + i) % n] as char);
     }
 
-    // Full primers at the ends, template in between.
-    let middle = &tmpl[f_end..r_anneal_start.max(f_end)];
-    let product = format!("{}{}{}", fwd, middle, rev_rc);
+    let product = format!("{fwd}{middle}{rev_rc}");
     Ok(Dseq::new(&product, false))
 }
 
@@ -712,6 +802,127 @@ mod tests {
                 assert_eq!(primer, "forward");
                 assert_eq!(sites.len(), 2, "the motif appears twice");
             }
+            other => panic!("expected NotSpecific, got {other:?}"),
+        }
+    }
+
+    /// Deterministic pseudo-random DNA.
+    ///
+    /// PCR fixtures must not repeat: a hand-written template like
+    /// "ACGTTGCA" x 20 makes every primer bind in a dozen places, so the test
+    /// measures the specificity check rather than the thing it meant to test.
+    fn dna(seed: u64, n: usize) -> String {
+        let mut x = seed | 1;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                b"ACGT"[(x % 4) as usize] as char
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_amplicon_across_the_origin_is_ordinary() {
+        // The origin of a plasmid is an arbitrary numbering choice, so an
+        // amplicon that crosses it is routine. This used to return `Inverted`
+        // -- "the primers face away from each other" -- which is both wrong and
+        // actively misleading about the primer design.
+        let tmpl = dna(0x51de_0001, 300);
+        let n = tmpl.len();
+        let fwd = &tmpl[n - 20..]; // the last 20 bases
+        let rev = rc(&tmpl[..20]); // ...wrapping past base 1
+        let p = pcr(fwd, &rev, &Dseq::new(&tmpl, true)).expect("a circle always has a path");
+        assert_eq!(p.watson, format!("{fwd}{}", &tmpl[..20]));
+        assert_eq!(p.len(), 40);
+    }
+
+    #[test]
+    fn overlapping_primers_give_no_product_on_a_line_and_a_long_one_on_a_circle() {
+        // Settled by pydna, not by us: on a linear template overlapping
+        // footprints give nothing, and on a circular one the polymerase runs
+        // the long way round. Both used to return the two primers concatenated
+        // with the overlapping bases duplicated -- a plausible length and a
+        // sequence that does not exist.
+        let tmpl = dna(0x51de_0002, 400);
+        let fwd = &tmpl[100..120];
+        let rev = rc(&tmpl[110..130]); // begins inside the forward footprint
+
+        assert!(matches!(
+            pcr(fwd, &rev, &Dseq::new(&tmpl, false)),
+            Err(PcrError::Inverted)
+        ));
+
+        if let Ok(p) = pcr(fwd, &rev, &Dseq::new(&tmpl, true)) {
+            assert!(
+                p.watson.len() > tmpl.len(),
+                "a circular overlap should run nearly the whole plasmid, got {}",
+                p.watson.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_crafted_template_does_not_panic() {
+        // Slicing `&tmpl[f_end..]` panicked whenever a footprint ran past the
+        // end of a circular template, and one line of crafted stdin was enough
+        // to kill `pl bench-adapter` -- taking a whole batch with it.
+        let cases: [(&str, &str, &str, bool); 6] = [
+            (
+                "ACGTACGTACGTACGT",
+                "ACGTACGTACGTACGT",
+                "ACGTACGTACGTACGT",
+                true,
+            ),
+            ("ACGT", "ACGTACGTACGTACGTACGT", "ACGT", true),
+            ("", "ACGT", "ACGT", true),
+            ("ACGTACGTACGTACGT", "TTTT", "AAAA", true),
+            ("A", "A", "A", true),
+            (
+                "ACGTACGTACGTACGT",
+                "ACGTACGTACGTACGT",
+                "ACGTACGTACGTACGT",
+                false,
+            ),
+        ];
+        for (tmpl, fwd, rev, circular) in cases {
+            // Any answer is acceptable here; a panic is not.
+            let _ = pcr(fwd, rev, &Dseq::new(tmpl, circular));
+        }
+    }
+
+    #[test]
+    fn a_non_ascii_primer_is_rejected_rather_than_panicking() {
+        // A non-breaking space pasted from a vendor's order sheet. `rc()`
+        // decodes through `from_utf8_lossy`, so this became a multi-byte
+        // replacement character and then panicked on a char boundary --
+        // aborting a whole batch instead of rejecting one primer.
+        let tmpl = "ACGTACGTACGTACGTACGTACGT";
+        for bad in ["ACGT\u{a0}ACGT", "ACGT\u{3b4}ACGT", "\u{fffd}ACGT"] {
+            assert!(matches!(
+                pcr(bad, "ACGT", &Dseq::new(tmpl, false)),
+                Err(PcrError::NotDna { .. })
+            ));
+            assert!(matches!(
+                pcr("ACGT", bad, &Dseq::new(tmpl, false)),
+                Err(PcrError::NotDna { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn an_inverted_repeat_second_site_is_not_specific() {
+        // The primer appears once on the top strand and once on the bottom, so
+        // a top-strand-only search called it specific while pydna returns two
+        // products. A primer that binds two sites gives a smear or the wrong
+        // band; one confident product tells the user their experiment worked
+        // when it did not.
+        let motif = "ACGTTGCAAGGTCCAT";
+        let tmpl = format!("{motif}{}{}{}", "A".repeat(40), rc(motif), "T".repeat(40));
+        let rev = rc(&tmpl[tmpl.len() - 16..]);
+        match pcr(motif, &rev, &Dseq::new(&tmpl, false)) {
+            Err(PcrError::NotSpecific { sites, .. }) => assert!(sites.len() >= 2, "{sites:?}"),
             other => panic!("expected NotSpecific, got {other:?}"),
         }
     }
