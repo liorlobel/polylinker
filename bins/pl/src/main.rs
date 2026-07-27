@@ -407,7 +407,7 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
             // A 124-record 36 KB .gbk became a 28 KB single-record file with
             // 1,879 features gone, reported as success.
             return Err(format!(
-                "{}: holds {} records and this would write only the first.                  Split the file first, or use --stdout to see what would be written.",
+                "{}: holds {} records and this would write only the first. Split the file first, or use --stdout to see what would be written.",
                 path.display(),
                 report.records
             ));

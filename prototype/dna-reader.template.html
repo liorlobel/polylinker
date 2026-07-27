@@ -943,15 +943,21 @@ function renderAnatomy(doc, state) {
   const groups = { sequence: 0, metadata: 0, derived: 0, other: 0 };
   const rows = [];
   for (const b of doc.blocks) {
-    const size = 5 + b.payload.length;
+    // `adapt()` supplies the core's block shape — {type, size, derived,
+    // meaning}. This used to read the deleted JS parser's {type, payload}, and
+    // the stale field names threw a TypeError that `openFile`'s catch reported
+    // as "Could not read that file" — on files the core had in fact parsed
+    // perfectly. `size` is already `size_on_disk()` (5 + payload), so the
+    // header must not be added again.
+    const size = b.size;
     let cls;
     if (b.type === BLOCK.SEQUENCE) cls = "sequence";
-    else if (DERIVED.has(b.type)) cls = "derived";
+    else if (b.derived) cls = "derived";
     else if ([BLOCK.FEATURES, BLOCK.PRIMERS, BLOCK.NOTES, BLOCK.HISTORY_TREE,
               BLOCK.EXTRA_PROPS, BLOCK.HEADER, BLOCK.HISTORY_NODE].includes(b.type)) cls = "metadata";
     else cls = "other";
     groups[cls] += size;
-    rows.push({ type: b.type, name: BLOCK_NAME[b.type] || "unknown", size, cls });
+    rows.push({ type: b.type, name: b.meaning || "unknown", size, cls });
   }
   const total = doc.totalBytes;
   const pct = v => (100 * v / total);
