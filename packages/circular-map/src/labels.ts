@@ -112,10 +112,8 @@ export function placeColumn(boxes: LabelBox[], lo: number, hi: number): ColumnRe
     c[i] = c[i - 1] + (boxes[order[i - 1]].height + boxes[order[i]].height) / 2;
   }
 
-  // The box constraints, mapped into z-space. Because every zᵢ shares the same
-  // feasible interval there, clamping the targets into it is enough: isotonic
-  // regression returns weighted means of its targets, so the answer cannot
-  // leave their range.
+  // The box constraints, mapped into z-space, where every zᵢ turns out to share
+  // one feasible interval — the per-height terms cancel against `cᵢ`.
   let zLo = -Infinity;
   let zHi = Infinity;
   let before = 0;
@@ -128,12 +126,25 @@ export function placeColumn(boxes: LabelBox[], lo: number, hi: number): ColumnRe
     before += h;
   }
 
-  const targets = order.map((idx, i) =>
-    Math.min(Math.max(boxes[idx].ideal - c[i], zLo), zHi),
-  );
+  const targets = order.map((idx, i) => boxes[idx].ideal - c[i]);
   const weights = order.map((idx) => Math.max(boxes[idx].weight ?? 1, 1e-6));
 
+  // Clamp the regression's OUTPUT, not its input.
+  //
+  // Clamping the targets first looks equivalent and is not: it changes the
+  // weighted block means, so the answer drifts even when the unclamped optimum
+  // was feasible all along. Six identical labels wanting y=50 came back
+  // centred on 53.33 — every one 3.33 px low, in the same direction — with the
+  // plainly feasible [20,32,…,80] available. It moved 27 of 500 random maps,
+  // worst shift 7.7 px, and it made this module's headline claim false.
+  //
+  // Clamping afterwards is exact here *because* the bounds are index-
+  // independent: a monotone sequence clamped to a constant interval stays
+  // monotone, so the result is still feasible, and clamping is then precisely
+  // the Euclidean projection onto the intersection of the two constraint sets.
   const z = isotonic(targets, weights);
-  for (let i = 0; i < n; i++) positions[order[i]] = z[i] + c[i];
+  for (let i = 0; i < n; i++) {
+    positions[order[i]] = Math.min(Math.max(z[i], zLo), zHi) + c[i];
+  }
   return { positions, dropped };
 }

@@ -143,6 +143,52 @@ test('the placement is optimal, not merely feasible', () => {
   }
 });
 
+test('identical labels stack symmetrically about their shared ideal', () => {
+  // The assertion that catches a clamp applied to the regression's input.
+  //
+  // n identical boxes all wanting the same y must come back centred on that y.
+  // Clamping the targets first shifted the whole stack — six labels wanting 50
+  // came back centred on 53.33 — while the previous optimality test could never
+  // notice, because it only compared against randomly generated LOOSER stacks
+  // and so could never find the tighter answer. This failed at n=5 and passed
+  // at n=3, which is exactly how it survived.
+  for (const n of [1, 2, 3, 4, 5, 6, 9, 15]) {
+    const h = 12;
+    // Centred in the band, so the box constraint never binds and the
+    // unconstrained optimum is the answer. (At n=9 an ideal of 50 would put the
+    // top label's edge at −4, and pushing the stack down is then correct.)
+    const ideal = 200;
+    const boxes: LabelBox[] = Array.from({ length: n }, () => ({ ideal, height: h }));
+    const { positions, dropped } = placeColumn(boxes, 0, 400);
+    assert.deepEqual(dropped, []);
+    const mean = positions.reduce((s, v) => s + v, 0) / n;
+    assert.ok(
+      Math.abs(mean - ideal) < 1e-9,
+      `n=${n}: stack centred on ${mean}, not ${ideal}`,
+    );
+    // ...and packed as tightly as the constraint allows.
+    const sorted = [...positions].sort((a, b) => a - b);
+    for (let i = 1; i < n; i++) {
+      assert.ok(Math.abs(sorted[i] - sorted[i - 1] - h) < 1e-9);
+    }
+  }
+});
+
+test('a band that forces clamping still yields the constrained optimum', () => {
+  // Push the ideal outside the band so the box constraint actually binds.
+  const h = 10;
+  const n = 5;
+  const boxes: LabelBox[] = Array.from({ length: n }, () => ({ ideal: -500, height: h }));
+  const { positions } = placeColumn(boxes, 0, 200);
+  const sorted = [...positions].sort((a, b) => a - b);
+  // Every label wants to be as high as possible, so the stack sits flush
+  // against the top of the band.
+  assert.ok(Math.abs(sorted[0] - h / 2) < 1e-9, `top label at ${sorted[0]}`);
+  for (let i = 1; i < n; i++) {
+    assert.ok(Math.abs(sorted[i] - sorted[i - 1] - h) < 1e-9);
+  }
+});
+
 test('placement is deterministic', () => {
   const boxes: LabelBox[] = Array.from({ length: 40 }, (_, i) => ({
     ideal: (i * 7919) % 300,
