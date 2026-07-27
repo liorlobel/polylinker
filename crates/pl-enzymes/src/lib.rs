@@ -17,6 +17,8 @@
 //! reproduced. Real use wants REBASE, which carries its own licence terms and
 //! belongs in a separate data package — see `docs/PLAN.md` §8.
 
+pub mod methylation;
+
 use pl_core::{iupac, Molecule, Topology};
 
 /// A Type IIP restriction enzyme: palindromic site, fixed cut offset.

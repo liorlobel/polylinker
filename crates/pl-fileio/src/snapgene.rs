@@ -224,6 +224,9 @@ pub fn parse(data: &[u8]) -> Result<Document, Error> {
                     dam: flags & flag::DAM != 0,
                     dcm: flags & flag::DCM != 0,
                     ecoki: flags & flag::ECOKI != 0,
+                    // The container has no CpG bit. False is "not recorded
+                    // here", not a claim that the plasmid is unmethylated.
+                    cpg: false,
                 };
                 // Bases are stored as ASCII. Case is preserved deliberately.
                 doc.molecule.seq = payload[1..].to_vec();

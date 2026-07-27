@@ -218,6 +218,18 @@ pub struct Methylation {
     pub dam: bool,
     pub dcm: bool,
     pub ecoki: bool,
+    /// CpG methylation (`CG`, C5 on both strands).
+    ///
+    /// Not a flag the `.dna` container carries, so it defaults to false and is
+    /// set by the caller — a plasmid grown in an ordinary *E. coli* is not CpG
+    /// methylated, but one passed through a mammalian cell line, or treated
+    /// with M.SssI, is.
+    ///
+    /// Added because it turns out to dominate: of the 34 (enzyme, methylase)
+    /// pairs that block or impair cleavage across this project's 50 enzymes,
+    /// **26 are CpG**. A methylation model without it is missing three
+    /// quarters of the cases it exists to catch.
+    pub cpg: bool,
 }
 
 /// A coordinate that does not describe anything real.

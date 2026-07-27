@@ -694,6 +694,28 @@ impl App {
             ui.add_space(6.0);
         }
 
+        // The methylation verdict for each shown enzyme. Computed at the first
+        // site: every rule here is a property of the (enzyme, methylase) pair
+        // plus local context, so a per-site answer is what the model gives —
+        // this shows the first, which is exact for the unique cutters that
+        // matter most and indicative for the rest.
+        let mol = d.molecule();
+        let verdict = |dg: &pl_enzymes::Digest| -> Option<pl_enzymes::methylation::SiteEffect> {
+            let first = *dg.positions.first()? as usize;
+            // `positions` are 1-based cut sites; recover the site start.
+            let start = first
+                .saturating_sub(1)
+                .saturating_sub(dg.enzyme.cut_offset as usize)
+                % mol.seq.len().max(1);
+            pl_enzymes::methylation::site_effect(
+                dg.enzyme,
+                &mol.seq,
+                start,
+                mol.topology,
+                &mol.methylation,
+            )
+        };
+
         let shown: Vec<_> = results.iter().filter(|x| set.admits(x)).collect();
         let uniq: Vec<_> = shown.iter().filter(|x| x.is_unique_cutter()).collect();
         let multi: Vec<_> = shown.iter().filter(|x| !x.is_unique_cutter()).collect();
@@ -703,7 +725,15 @@ impl App {
                 ui.label(RichText::new(format!("{} unique cutters", uniq.len())).strong());
                 ui.add_space(2.0);
                 for e in &uniq {
-                    enzyme_row(ui, e.enzyme.name, e.enzyme.site, &e.positions, true);
+                    enzyme_row(
+                        ui,
+                        e.enzyme.name,
+                        e.enzyme.site,
+                        &e.positions,
+                        true,
+                        verdict(e),
+                        poor_single_site_note(e.enzyme.name, e.count()),
+                    );
                 }
                 ui.add_space(10.0);
             }
@@ -714,7 +744,15 @@ impl App {
                 );
                 ui.add_space(2.0);
                 for e in &multi {
-                    enzyme_row(ui, e.enzyme.name, e.enzyme.site, &e.positions, false);
+                    enzyme_row(
+                        ui,
+                        e.enzyme.name,
+                        e.enzyme.site,
+                        &e.positions,
+                        false,
+                        verdict(e),
+                        poor_single_site_note(e.enzyme.name, e.count()),
+                    );
                 }
                 ui.add_space(10.0);
             }
@@ -1065,20 +1103,51 @@ fn strand_glyph(s: Strand) -> &'static str {
     }
 }
 
-fn enzyme_row(ui: &mut Ui, name: &str, site: &str, positions: &[u64], unique: bool) {
+/// One enzyme, with whatever qualifies the answer.
+///
+/// `blocked` is the methylation verdict: `docs/PLAN.md` §7.1 requires such
+/// sites be "struck through, not hidden". A site that will not cut is still a
+/// site — it exists in the sequence, appears on everyone else's map, and cuts
+/// the moment the plasmid goes through a dam- strain. Hiding it produces a map
+/// that disagrees with every other tool for reasons the user cannot see.
+fn enzyme_row(
+    ui: &mut Ui,
+    name: &str,
+    site: &str,
+    positions: &[u64],
+    unique: bool,
+    blocked: Option<pl_enzymes::methylation::SiteEffect>,
+    poor_single_site: Option<&'static str>,
+) {
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("{name:<9}"))
-                .monospace()
-                .size(11.5)
-                .color(if unique { pal(ui).ink } else { pal(ui).ink2 }),
-        );
+        let mut label = RichText::new(format!("{name:<9}"))
+            .monospace()
+            .size(11.5)
+            .color(if unique { pal(ui).ink } else { pal(ui).ink2 });
+        if blocked.is_some_and(|b| b.effect == pl_enzymes::methylation::Effect::Blocked) {
+            label = label.strikethrough();
+        }
+        ui.label(label);
         ui.label(
             RichText::new(site)
                 .monospace()
                 .size(11.0)
                 .color(pal(ui).muted),
         );
+        if let Some(b) = blocked {
+            ui.label(
+                RichText::new(format!("{} {}", b.methylase.name(), b.effect.as_str()))
+                    .size(10.5)
+                    .color(pal(ui).warn),
+            )
+            .on_hover_text(
+                "Methylation of this plasmid affects cleavage here. The site is real                  and is shown; it would cut in an unmethylated preparation.",
+            );
+        }
+        if let Some(note) = poor_single_site {
+            ui.label(RichText::new("1-site").size(10.5).color(pal(ui).warn))
+                .on_hover_text(note);
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let shown: Vec<String> = positions.iter().take(4).map(|p| fmt_int(*p)).collect();
             let more = if positions.len() > 4 { "…" } else { "" };
@@ -1090,6 +1159,28 @@ fn enzyme_row(ui: &mut Ui, name: &str, site: &str, positions: &[u64], unique: bo
             );
         });
     });
+}
+
+/// Enzymes that cleave poorly when the molecule has only one site.
+///
+/// Two of our fifty, verified against NEB and REBASE rather than taken from
+/// `docs/PLAN.md` §7.1 — whose list of fifteen turns out to be the assay panel
+/// from one 2006 paper rather than a catalogue, and disagrees with NEB in both
+/// directions. Only shown when the digest actually returns a single site,
+/// because that is the only case in which it changes what anyone should do.
+fn poor_single_site_note(name: &str, sites: usize) -> Option<&'static str> {
+    if sites != 1 {
+        return None;
+    }
+    match name {
+        "SacII" => Some(
+            "Cleaves poorly at a single site. NEB flags SacII as requiring two or more              sites for optimal cleavage, and says the mechanism is not fully understood.              Do not add more enzyme — excess makes it worse; titrate down instead.",
+        ),
+        "XmaI" => Some(
+            "Reported to behave as a multi-site enzyme (NEB groups it with its              equischizomer Cfr9I), so a single-site digest may be slow or incomplete.              NEB does not carry its multi-site icon for XmaI — a caution, not a warning.",
+        ),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
