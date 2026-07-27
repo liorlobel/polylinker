@@ -479,6 +479,44 @@ Step 'renderers agree (rust replays it)' {
 } { Have node }
 
 Write-Host "`nbenchmark" -ForegroundColor Cyan
+# The release script runs, and its manifest verifies.
+#
+# A checksum file is the only integrity guarantee an unsigned build has, so it
+# has to actually verify on the machine of whoever is checking it: LF endings,
+# no BOM, and the exact two-space format `sha256sum -c` expects. A file that
+# looks right in an editor and fails at the other end is worse than none.
+#
+# Signing itself cannot be checked here — see docs/RELEASING.md — because it
+# needs credentials issued to a person.
+Step 'release script and its manifest' {
+    $out = Join-Path $env:TEMP ('pl-release-check-' + $PID)
+    try {
+        & "$PSScriptRoot/release.ps1" -Out $out -Quiet 2>&1 | Out-Null
+        $m = Join-Path $out 'SHA256SUMS.txt'
+        if (-not (Test-Path $m)) { throw 'no manifest was written' }
+        $bytes = [System.IO.File]::ReadAllBytes($m)
+        if ($bytes[0] -eq 0xEF) { throw 'the manifest has a BOM and will not verify' }
+        if ($bytes -contains 0x0D) { throw 'the manifest has CRLF and will not verify' }
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+        $lines = $text -split "`n"
+        $sep = [Array]::IndexOf($lines, '--')
+        if ($sep -lt 4) { throw 'the manifest has no header' }
+        $n = 0
+        foreach ($line in $lines[($sep + 1)..($lines.Length - 1)]) {
+            if (-not $line) { continue }
+            if ($line -notmatch '^[0-9a-f]{64}  \S+$') { throw "not a checksum line: $line" }
+            $parts = $line -split '  ', 2
+            $actual = (Get-FileHash (Join-Path $out $parts[1]) -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $parts[0]) { throw "$($parts[1]) does not match its recorded hash" }
+            $n++
+        }
+        if ($n -lt 3) { throw "only $n artifact(s) in the manifest" }
+        Write-Host "        $n artifact(s), manifest verified" -ForegroundColor DarkGray
+    } finally {
+        Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
+    }
+}
+
 Step 'polylinker-bench' {
     # An absolute path, and the score is asserted rather than assumed.
     #
