@@ -51,6 +51,7 @@
 
 pub mod codec;
 pub mod nibble;
+pub mod query;
 pub mod scan;
 
 /// The derivation version.
