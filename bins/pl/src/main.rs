@@ -20,6 +20,7 @@ USAGE:
     pl find-motif <IUPAC> <file>         search a sequence, both strands
     pl tm      <OLIGO>...                melting temperature
     pl goldengate <OVERHANG>...          check a Type IIS overhang set
+    pl primers <file> --primer SEQ       where primers anneal
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -52,6 +53,15 @@ FIND OPTIONS:
 
 LIBRARY OPTIONS:
     --problems                   every record that could not be fully read
+
+PRIMERS OPTIONS:
+    --primer <SEQ>               a primer, repeatable
+    --seq <BASES>                template, instead of a file
+    --circular                   with --seq
+    --seed <N>                   3'-anchored seed length, 8-35 (default 14)
+    --seed-mismatch              allow one, never at the 3' end
+    --exact                      footprint stops at the first mismatch
+                                 (pydna and SnapGene behave this way)
 
 GOLDENGATE OPTIONS:
     --enzyme <NAME>              digest a file with a Type IIS enzyme instead
@@ -121,6 +131,7 @@ fn main() -> ExitCode {
         "find-motif" => cmd_find_motif(rest),
         "tm" => cmd_tm(rest),
         "goldengate" => cmd_goldengate(rest),
+        "primers" => cmd_primers(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
         "library" => cmd_library(rest),
@@ -1812,6 +1823,142 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
 {}",
         report.caveat()
     );
+    Ok(())
+}
+
+/// Where primers anneal on a template, with footprint and tail kept apart.
+fn cmd_primers(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["seed", "primer", "seq"])?;
+
+    let mut params = pl_primer::Params::default();
+    if let Some(v) = a.get("seed") {
+        params.seed_len = v
+            .parse()
+            .ok()
+            .filter(|n| (8..=35).contains(n))
+            .ok_or_else(|| format!("--seed {v:?}: expected 8 to 35"))?;
+    }
+    params.seed_mismatch = a.has("seed-mismatch");
+    // `--exact` is the pydna/SnapGene rule: the footprint stops at the first
+    // mismatch rather than extending through isolated ones.
+    params.extend_mismatches = !a.has("exact");
+
+    let primers: Vec<String> = a.get_all("primer").iter().map(|s| s.to_string()).collect();
+    if primers.is_empty() {
+        return Err("give at least one --primer".into());
+    }
+
+    let (seq, circular, label) = match a.get("seq") {
+        Some(s) => (
+            s.as_bytes().to_vec(),
+            a.has("circular"),
+            "<--seq>".to_string(),
+        ),
+        None => {
+            let path = a.files.first().ok_or("give a template file, or --seq")?;
+            let data = read(path)?;
+            let (mol, _, _) =
+                load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+            (
+                mol.seq.clone(),
+                mol.topology.is_circular(),
+                path.display().to_string(),
+            )
+        }
+    };
+
+    if a.has("json") {
+        println!(
+            "{{
+  \"bindings\": ["
+        );
+        let mut first = true;
+        for pr in &primers {
+            for b in pl_primer::find_bindings(pr.as_bytes(), &seq, circular, &params) {
+                if !first {
+                    println!(",");
+                }
+                first = false;
+                print!(
+                    "    {{\"primer\": {}, \"start\": {}, \"end\": {}, \"strand\": {},                      \"footprint\": {}, \"tail\": {}, \"mismatches\": {}}}",
+                    json_str(pr),
+                    b.start,
+                    b.end,
+                    json_str(b.strand.as_str()),
+                    json_str(&b.footprint_str()),
+                    json_str(&b.tail_str()),
+                    b.mismatches.len()
+                );
+            }
+        }
+        println!(
+            "
+  ]
+}}"
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{label}, {} bp {}",
+        seq.len(),
+        if circular { "circular" } else { "linear" }
+    );
+    println!(
+        "3'-anchored seed of {} bases{}
+",
+        params.seed_len,
+        if params.seed_mismatch {
+            ", one mismatch allowed (never at the 3' end)"
+        } else {
+            ", exact"
+        }
+    );
+    let mut any = false;
+    for pr in &primers {
+        let bindings = pl_primer::find_bindings(pr.as_bytes(), &seq, circular, &params);
+        println!("{pr}  ({} nt)", pr.len());
+        if bindings.is_empty() {
+            println!("     no binding site");
+            continue;
+        }
+        any = true;
+        for b in &bindings {
+            let tm = match b.tm {
+                Some(t) => format!("{t:5.1}C"),
+                None => "    -".into(),
+            };
+            println!(
+                "  {} {:>7}..{:<7} {tm}  footprint {}{}{}",
+                b.strand.as_str(),
+                b.start,
+                b.end,
+                b.footprint_str(),
+                if b.has_tail() {
+                    format!("   tail {}", b.tail_str())
+                } else {
+                    String::new()
+                },
+                if b.mismatches.is_empty() {
+                    String::new()
+                } else {
+                    format!("   {} mismatch(es)", b.mismatches.len())
+                }
+            );
+        }
+        if bindings.len() > 1 {
+            println!(
+                "     {} sites: this primer is not specific to one place",
+                bindings.len()
+            );
+        }
+    }
+    if any {
+        println!(
+            "
+Tm is over the annealed footprint only; a 5' tail never contributes to it"
+        );
+    }
     Ok(())
 }
 

@@ -8,6 +8,7 @@ members = [
     "crates/pl-features",
     "crates/pl-index",
     "crates/pl-scan",
+    "crates/pl-primer",
     "crates/pl-thermo",
     "crates/pl-fileio",
     "crates/pl-wasm",
@@ -30,6 +31,7 @@ pl-enzymes = { path = "crates/pl-enzymes", version = "0.1.0" }
 pl-features = { path = "crates/pl-features", version = "0.1.0" }
 pl-index = { path = "crates/pl-index", version = "0.1.0" }
 pl-scan = { path = "crates/pl-scan", version = "0.1.0" }
+pl-primer = { path = "crates/pl-primer", version = "0.1.0" }
 pl-thermo = { path = "crates/pl-thermo", version = "0.1.0" }
 pl-fileio = { path = "crates/pl-fileio", version = "0.1.0" }
 

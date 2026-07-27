@@ -232,6 +232,19 @@ Step 'PDF is a PDF, and matches the SVG' {
 Step 'melting temperature vs Biopython' {
     python reference/python/tests/xcheck_tm.py target/release/pl.exe
 } { HavePy 'Bio' }
+# Primer binding sites vs pydna.
+#
+# docs/PLAN.md §7.3 names pydna's `limit` as the reference for the seed length,
+# so pydna is the natural oracle. Run through `pl primers --exact`, since pydna
+# stops a footprint at the first mismatch and our default walks through
+# isolated ones -- a real difference that showed up as six disagreements on
+# tailed primers before the modes were separated.
+#
+# The tailed cases are the point: the footprint must come back *without* the
+# tail, or the Tm printed beside it belongs to a different oligo.
+Step 'primer binding sites vs pydna' {
+    python reference/python/tests/xcheck_primers.py target/release/pl.exe
+} { HavePy 'pydna' }
 # A second, independent digest oracle over real plasmids.
 #
 # `xcheck_clone.py` above compares fragments against pydna on synthetic cases;
