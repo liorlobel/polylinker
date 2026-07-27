@@ -15,6 +15,7 @@ path = "src/main.rs"
 # and a scientific tool people are asked to trust benefits from a dependency
 # list they can read in one sitting.
 [dependencies]
+pl-abif.workspace = true
 pl-clone.workspace = true
 pl-core.workspace = true
 pl-draw.workspace = true

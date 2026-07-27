@@ -245,6 +245,21 @@ Step 'melting temperature vs Biopython' {
 Step 'primer binding sites vs pydna' {
     python reference/python/tests/xcheck_primers.py target/release/pl.exe
 } { HavePy 'pydna' }
+# Chromatograms vs Biopython, on real traces.
+#
+# Corpus-gated: 394 .ab1 files live on the lab drive and none may live here.
+# The numbers that make this worth running: 336,268 base calls compared, and
+# **20 of the 394 files are not ABIF at all** (4 SCF, 16 ZTR wearing an .ab1
+# name), which both implementations must refuse -- counted rather than skipped,
+# because "we agreed to fail" is a result and dropping them silently would
+# compare less than the summary claims.
+#
+# Verified it can fail: preferring PBAS1 (the human's edit) over PBAS2 (the
+# basecaller's) gives 217 disagreements, which is exactly the number of files
+# where a human had edited the read.
+Step 'chromatograms vs Biopython' {
+    python reference/python/tests/xcheck_abif.py target/release/pl.exe "$Corpus\**\*.ab1"
+} { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
 # A second, independent digest oracle over real plasmids.
 #
 # `xcheck_clone.py` above compares fragments against pydna on synthetic cases;

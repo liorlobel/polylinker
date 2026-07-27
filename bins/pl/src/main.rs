@@ -21,6 +21,7 @@ USAGE:
     pl tm      <OLIGO>...                melting temperature
     pl goldengate <OVERHANG>...          check a Type IIS overhang set
     pl primers <file> --primer SEQ       where primers anneal
+    pl trace   <file.ab1>...             read a Sanger chromatogram
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -132,6 +133,7 @@ fn main() -> ExitCode {
         "tm" => cmd_tm(rest),
         "goldengate" => cmd_goldengate(rest),
         "primers" => cmd_primers(rest),
+        "trace" => cmd_trace(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
         "library" => cmd_library(rest),
@@ -1958,6 +1960,70 @@ fn cmd_primers(args: &[String]) -> Result<(), String> {
             "
 Tm is over the annealed footprint only; a 5' tail never contributes to it"
         );
+    }
+    Ok(())
+}
+
+/// Read a Sanger chromatogram.
+fn cmd_trace(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &[])?;
+    a.require_files()?;
+    for path in &a.files {
+        let data = read(path)?;
+        let t = match pl_abif::parse(&data) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("pl: {}: {e}", path.display());
+                continue;
+            }
+        };
+        if a.has("json") {
+            println!(
+                "{{\"file\": {}, \"sequence\": {}, \"length\": {}, \"edited\": {},                  \"mean_quality\": {}, \"sample\": {}}}",
+                json_str(&path.display().to_string()),
+                json_str(&String::from_utf8_lossy(&t.sequence)),
+                t.sequence.len(),
+                t.edited(),
+                match t.mean_quality() {
+                    // Full precision: rounding here made a differential
+                    // against Biopython report 292 disagreements that were
+                    // entirely this format string.
+                    Some(q) => format!("{q}"),
+                    None => "null".into(),
+                },
+                json_str(&t.sample_name)
+            );
+            continue;
+        }
+        println!("{}", path.display());
+        println!(
+            "{:>10} bases   {:>4} ambiguous   {}",
+            t.sequence.len(),
+            t.ambiguous(),
+            match t.mean_quality() {
+                Some(q) => format!("mean quality {q:.1}"),
+                None => "no quality in this file".into(),
+            }
+        );
+        if !t.sample_name.is_empty() {
+            println!("{:>10}   {}", "sample", t.sample_name);
+        }
+        // A human's correction is a fact the file carries, and it differs from
+        // the machine's call in most real traces. Showing one and hiding the
+        // other is how a user reads a sequence nobody meant them to read.
+        match (t.edited(), t.edit_distance()) {
+            (true, Some(n)) => println!(
+                "{:>10}   a human edited {n} base(s); the machine's call is shown",
+                "edited"
+            ),
+            (true, None) => println!(
+                "{:>10}   a human's version differs in length from the machine's",
+                "edited"
+            ),
+            _ => {}
+        }
+        println!("{}", String::from_utf8_lossy(&t.sequence));
+        println!();
     }
     Ok(())
 }

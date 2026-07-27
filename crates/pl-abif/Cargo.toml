@@ -1,0 +1,11 @@
+[package]
+name = "pl-abif"
+description = "Sanger chromatograms: ABIF (.ab1) traces, base calls and quality."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pl-core.workspace = true
