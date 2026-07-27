@@ -34,14 +34,36 @@ def load(path):
 
 
 def capabilities(cmd):
+    """Ask the adapter what it supports.
+
+    An adapter that cannot even be launched is a broken invocation, not a tool
+    with no capabilities -- and the difference matters, because "declined" cases
+    stay in the denominator and are scored as 0%. Reporting `all 0 0 176 176
+    0.0%` for a typo in the command line looks exactly like a catastrophic
+    regression, and on Windows it is easy to trigger: `subprocess` will not
+    resolve a relative executable path written with forward slashes, so
+    a relative `target/release/pl.exe` fails where a backslash path works.
+    Fail loudly instead.
+    """
     try:
         r = subprocess.run(cmd + ["--capabilities"], capture_output=True,
                            text=True, encoding="utf-8", timeout=60)
-        if r.returncode != 0:
-            return set()
-        return {l.strip() for l in r.stdout.splitlines() if l.strip()}
-    except Exception:
-        return set()
+    except FileNotFoundError:
+        sys.exit(
+            f"cannot run the adapter: {cmd[0]!r} not found. "
+            "On Windows, use a backslash or an absolute path -- subprocess does "
+            "not resolve a relative executable path written with '/'."
+        )
+    except Exception as e:
+        sys.exit(f"cannot run the adapter {cmd!r}: {e}")
+    if r.returncode != 0:
+        sys.exit(
+            f"adapter --capabilities failed (exit {r.returncode}): {r.stderr[:2000]}"
+        )
+    caps = {l.strip() for l in r.stdout.splitlines() if l.strip()}
+    if not caps:
+        sys.exit("adapter declared no capabilities at all; nothing would be scored")
+    return caps
 
 
 def encode(case):
