@@ -1,0 +1,23 @@
+[package]
+name = "pl-py"
+description = "Python bindings for the Polylinker correctness crates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "polylinker"
+crate-type = ["cdylib", "rlib"]
+
+# The first crate here with an external dependency, and it is the boundary
+# rather than the logic: everything forwards to a crate that still has none.
+# abi3-py39 builds one wheel that works on every Python from 3.9, which is what
+# a lab machine with whatever Python it already has actually needs.
+[dependencies]
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+pl-core.workspace = true
+pl-doc.workspace = true
+pl-enzymes.workspace = true
+pl-thermo.workspace = true

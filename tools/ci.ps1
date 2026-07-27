@@ -324,6 +324,35 @@ Step 'EPS agrees with the PDF, and is valid PostScript' {
     python reference/python/tests/xcheck_eps.py target/release/pl.exe (Get-ChildItem tests/library-fixture/*.gb, tests/export-fixture/*.gb | ForEach-Object { $_.FullName })
 }
 
+# The Python bindings, checked from Python, against Biopython.
+#
+# The bindings exist so a script already using Biopython can call Polylinker for
+# the parts that are hard to get right without rewriting the pipeline, and that
+# argument only holds if the two agree where they overlap. The Rust side is
+# already cross-validated, so this checks the *boundary*: arguments passed
+# through unchanged, coordinates unshifted, and failures raised rather than
+# returned as a number. 1,268 checks.
+#
+# Verified it can fail -- and the first version could NOT. Dropping the circular
+# flag at the FFI edge changed nothing, because random sequence almost never
+# carries a recognition site across the origin, which is the only case where
+# circular and linear must differ. The check now plants sites split across the
+# join for every unambiguous enzyme; with those, the same injection gives 616
+# disagreements. A case that cannot distinguish the two answers proves nothing,
+# and the file says so where the cases are built.
+Step 'Python bindings vs Biopython' {
+    cargo build --release -p pl-py 2>&1 | Out-Null
+    $ext = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'dll' } else { 'so' }
+    $src = Join-Path 'target/release' ("$(if ($ext -eq 'dll') { '' } else { 'lib' })polylinker.$ext")
+    $dst = Join-Path $env:TEMP 'polylinker.pyd'
+    Copy-Item $src $dst -Force
+    python reference/python/tests/xcheck_pybindings.py $dst
+} { HavePy 'Bio' }
+# The MCP server answers JSON-RPC, and keeps its caveats across the boundary.
+Step 'MCP server' {
+    cargo test -p pl-mcp --quiet
+}
+
 Step 'gel calibration spline vs SciPy' {
     cargo build --release -p pl-gel --example dump_spline 2>&1 | Out-Null
     python reference/python/tests/xcheck_spline.py target/release/examples/dump_spline.exe

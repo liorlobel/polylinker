@@ -13,10 +13,12 @@ members = [
     "crates/pl-sanger",
     "crates/pl-gel",
     "crates/pl-doc",
+    "crates/pl-py",
     "crates/pl-thermo",
     "crates/pl-fileio",
     "crates/pl-wasm",
     "bins/pl",
+    "bins/pl-mcp",
     "bins/pl-gui",
 ]
 

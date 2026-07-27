@@ -1,0 +1,22 @@
+[package]
+name = "pl-mcp"
+description = "An MCP server over stdio: read-only tools for asking about a plasmid."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pl-mcp"
+path = "src/main.rs"
+
+# No dependencies, like the crates behind it. JSON-RPC is a line of JSON, and
+# `src/json.rs` reads it.
+[dependencies]
+pl-core.workspace = true
+pl-doc.workspace = true
+pl-enzymes.workspace = true
+pl-features.workspace = true
+pl-fileio.workspace = true
+pl-thermo.workspace = true
