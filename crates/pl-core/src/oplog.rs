@@ -671,6 +671,28 @@ impl OpLog {
     }
 
     /// Step the cursor forward, along the most recently created branch.
+    /// Is there anything to undo?
+    ///
+    /// Cheap enough to call every frame, which is what a toolbar needs in
+    /// order to grey a button out rather than let the user press it and be
+    /// told no.
+    pub fn can_undo(&self) -> bool {
+        self.cursor.is_some()
+    }
+
+    /// Is there anything to redo?
+    ///
+    /// True when this point in the log has a child — including after a fork,
+    /// because a branch abandoned by a later edit is still reachable. Nothing
+    /// is ever discarded, so "redo" here can mean "go back down the branch you
+    /// left", which is exactly the afternoon's work every other editor throws
+    /// away without warning.
+    pub fn can_redo(&self) -> bool {
+        self.children
+            .get(&self.cursor)
+            .is_some_and(|c| !c.is_empty())
+    }
+
     pub fn redo(&mut self) -> Result<&Molecule, OpError> {
         let next = self
             .children

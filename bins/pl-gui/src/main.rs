@@ -55,6 +55,7 @@ enum Tab {
     Features,
     Enzymes,
     Sequence,
+    History,
     File,
 }
 
@@ -98,7 +99,7 @@ impl App {
     fn load(&mut self, path: PathBuf) {
         match Document::open(&path) {
             Ok(d) => {
-                self.status = describe(&d.molecule, d.format);
+                self.status = describe(d.molecule(), d.format);
                 // Say so when the file held more than we are showing. A viewer
                 // that stays silent is indistinguishable from a file with
                 // fewer records in it — which is how 1,879 features went
@@ -124,7 +125,7 @@ impl App {
                 // at `1..18446744073709551615` reached the renderer unchecked
                 // and took the app down. The drawing code is now hardened too,
                 // but a bad file should be *reported*, not merely survived.
-                let problems = d.molecule.validate();
+                let problems = d.molecule().validate();
                 if !problems.is_empty() {
                     self.status = format!(
                         "{}  —  {} coordinate problem{} in this file: {}",
@@ -183,14 +184,14 @@ impl App {
             return;
         };
         let text = if as_fasta {
-            pl_fileio::fasta::write(&d.molecule, &d.title, 70)
+            pl_fileio::fasta::write(d.molecule(), &d.title, 70)
         } else {
-            pl_fileio::genbank::write(&d.molecule, &d.title, today())
+            pl_fileio::genbank::write(d.molecule(), &d.title, today())
         };
         let lossy = if as_fasta {
             Vec::new()
         } else {
-            d.molecule.features_without_expressible_orientation()
+            d.molecule().features_without_expressible_orientation()
         };
         let note = if lossy.is_empty() {
             String::new()
@@ -251,7 +252,7 @@ impl eframe::App for App {
             } else if let Some(bytes) = &f.bytes {
                 match Document::from_bytes(bytes, f.name.clone(), None) {
                     Ok(d) => {
-                        self.status = describe(&d.molecule, d.format);
+                        self.status = describe(d.molecule(), d.format);
                         self.document = Some(d);
                         self.error = None;
                     }
@@ -262,6 +263,21 @@ impl eframe::App for App {
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
             self.pick_file();
+        }
+        // Ctrl+Z / Ctrl+Y, plus Ctrl+Shift+Z for the mac-shaped habit.
+        let (undo, redo) = ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            (
+                cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
+                cmd && (i.key_pressed(egui::Key::Y)
+                    || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
+            )
+        });
+        if undo {
+            self.do_undo();
+        }
+        if redo {
+            self.do_redo();
         }
 
         // The digest worker cannot wake the UI, so poll it and keep repainting
@@ -303,8 +319,19 @@ impl App {
                 });
 
                 ui.separator();
+                self.edit_group(ui);
+
+                ui.separator();
                 if let Some(d) = &self.document {
-                    let title = ui.label(RichText::new(&d.title).strong());
+                    // A dot rather than the usual asterisk-in-the-title: the
+                    // point is that edits exist and are undoable, not that a
+                    // file is dirty — nothing here writes over the original.
+                    let shown = if d.edited() {
+                        format!("{} •", d.title)
+                    } else {
+                        d.title.clone()
+                    };
+                    let title = ui.label(RichText::new(shown).strong());
                     if let Some(p) = &d.path {
                         title.on_hover_text(p.display().to_string());
                     }
@@ -330,6 +357,135 @@ impl App {
         });
     }
 
+    /// Undo, redo, and the edits that need no selection.
+    ///
+    /// Every one of these goes through the operation log, so every one is
+    /// undoable and every one shows up in the History tab. There is no other
+    /// path that mutates a molecule.
+    fn edit_group(&mut self, ui: &mut Ui) {
+        let (can_undo, can_redo) = match &self.document {
+            Some(d) => (d.log.can_undo(), d.log.can_redo()),
+            None => (false, false),
+        };
+
+        ui.add_enabled_ui(can_undo, |ui| {
+            if ui.button("Undo").on_hover_text("Ctrl+Z").clicked() {
+                self.do_undo();
+            }
+        });
+        ui.add_enabled_ui(can_redo, |ui| {
+            if ui.button("Redo").on_hover_text("Ctrl+Y").clicked() {
+                self.do_redo();
+            }
+        });
+
+        let has = self.document.is_some();
+        ui.add_enabled_ui(has, |ui| {
+            ui.menu_button("Edit", |ui| {
+                let circular = self
+                    .document
+                    .as_ref()
+                    .is_some_and(|d| d.molecule().topology.is_circular());
+                let label = if circular {
+                    "Make linear"
+                } else {
+                    "Make circular"
+                };
+                if ui.button(label).clicked() {
+                    let t = if circular {
+                        pl_core::Topology::Linear
+                    } else {
+                        pl_core::Topology::Circular
+                    };
+                    self.edit(pl_core::OpKind::SetTopology(t));
+                    ui.close();
+                }
+                if ui
+                    .button("Reverse complement")
+                    .on_hover_text("flips the sequence and every annotation with it")
+                    .clicked()
+                {
+                    self.edit(pl_core::OpKind::ReverseComplement);
+                    ui.close();
+                }
+
+                // Rotating is only meaningful on a circle, and only useful
+                // when the user has said where the new origin should be.
+                let sel = self.selected;
+                let can_rotate = circular && sel.is_some();
+                ui.add_enabled_ui(can_rotate, |ui| {
+                    if ui
+                        .button("Set origin at selected feature")
+                        .on_hover_text("renumber the plasmid to start at this feature")
+                        .clicked()
+                    {
+                        if let (Some(d), Some(i)) = (&self.document, sel) {
+                            if let Some(f) = d.molecule().features.get(i) {
+                                let origin = f.start();
+                                self.edit(pl_core::OpKind::Rotate { origin });
+                            }
+                        }
+                        ui.close();
+                    }
+                });
+
+                ui.separator();
+                ui.add_enabled_ui(sel.is_some(), |ui| {
+                    if ui.button("Remove selected feature").clicked() {
+                        if let Some(i) = sel {
+                            self.edit(pl_core::OpKind::RemoveFeature { index: i });
+                            self.selected = None;
+                        }
+                        ui.close();
+                    }
+                });
+            });
+        });
+    }
+
+    /// Run an edit and report a refusal instead of dropping it.
+    fn edit(&mut self, kind: pl_core::OpKind) {
+        let Some(d) = &mut self.document else { return };
+        let what = kind.describe();
+        match d.apply(kind) {
+            Ok(()) => {
+                self.status = format!("{what} — Ctrl+Z to undo");
+                self.error = None;
+            }
+            // The log refuses an edit that would leave the annotations
+            // describing something the sequence does not contain. Saying which
+            // edit and why is the whole point of refusing rather than
+            // corrupting.
+            Err(e) => self.error = Some(format!("cannot {what}: {e}")),
+        }
+    }
+
+    fn do_undo(&mut self) {
+        if let Some(d) = &mut self.document {
+            match d.undo() {
+                Ok(()) => {
+                    self.status = "undone".into();
+                    self.error = None;
+                }
+                Err(e) => self.error = Some(e.to_string()),
+            }
+            self.selected = None;
+        }
+    }
+
+    fn do_redo(&mut self) {
+        if let Some(d) = &mut self.document {
+            match d.redo() {
+                Ok(()) => {
+                    self.status = "redone".into();
+                    self.error = None;
+                }
+                Err(e) => self.error = Some(e.to_string()),
+            }
+            self.selected = None;
+        }
+    }
+
     fn side_panel(&mut self, ui: &mut Ui) {
         egui::Panel::right(egui::Id::new("details"))
             .exact_size(380.0)
@@ -340,6 +496,7 @@ impl App {
                         (Tab::Features, "Features"),
                         (Tab::Enzymes, "Enzymes"),
                         (Tab::Sequence, "Sequence"),
+                        (Tab::History, "History"),
                         (Tab::File, "File"),
                     ] {
                         if ui.selectable_label(self.tab == tab, label).clicked() {
@@ -359,6 +516,7 @@ impl App {
                     Tab::Features => self.features_tab(ui),
                     Tab::Enzymes => self.enzymes_tab(ui),
                     Tab::Sequence => self.sequence_tab(ui),
+                    Tab::History => self.history_tab(ui),
                     Tab::File => self.file_tab(ui),
                 }
             });
@@ -378,7 +536,7 @@ impl App {
         let doc = self.document.as_ref().expect("checked by caller");
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for (i, f) in doc.molecule.features.iter().enumerate() {
+            for (i, f) in doc.molecule().features.iter().enumerate() {
                 if !needle.is_empty()
                     && !f.name.to_lowercase().contains(&needle)
                     && !f.kind.to_lowercase().contains(&needle)
@@ -516,9 +674,92 @@ impl App {
         });
     }
 
+    /// Every edit, in order, with the point you are standing at.
+    ///
+    /// This is not a nicety bolted onto undo — `docs/PLAN.md` ADR-2 makes them
+    /// the same mechanism, so the list below *is* the undo stack. Two
+    /// properties are worth seeing, because no other editor in this category
+    /// offers them:
+    ///
+    /// - Ids are derived from content, so the same edits from the same start
+    ///   produce the same ids on someone else's machine. History is
+    ///   comparable, not merely local.
+    /// - A new edit after an undo **forks** rather than truncating. The
+    ///   abandoned branch is still there and still reachable, which is the
+    ///   afternoon's work every other editor silently throws away.
+    fn history_tab(&mut self, ui: &mut Ui) {
+        let Some(d) = &self.document else { return };
+        let ops = d.log.all_ops();
+
+        ui.add_space(6.0);
+        if ops.is_empty() {
+            ui.label(
+                RichText::new("No edits yet. Anything you change appears here and can be undone.")
+                    .color(pal(ui).muted),
+            );
+            return;
+        }
+
+        let on_path: std::collections::BTreeSet<_> = d.log.path().iter().map(|o| o.id).collect();
+        let cursor = d.log.cursor();
+        // Branch points counted from the ops' parents rather than from
+        // `forks()`, which returns `Vec<OpId>` and so structurally cannot
+        // report a branch at the base — where the commonest one is: undo the
+        // first edit, then do something else.
+        let mut children: std::collections::BTreeMap<Option<_>, usize> = Default::default();
+        for op in ops {
+            *children.entry(op.parent).or_default() += 1;
+        }
+        let branch_points = children.values().filter(|n| **n > 1).count();
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{} edit(s)", ops.len())).strong());
+            if branch_points > 0 {
+                ui.label(
+                    RichText::new(format!("· {branch_points} branch point(s)"))
+                        .color(pal(ui).muted)
+                        .size(12.0),
+                );
+            }
+        });
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for op in ops {
+                let here = Some(op.id) == cursor;
+                let live = on_path.contains(&op.id);
+                ui.horizontal(|ui| {
+                    // The cursor marker, then whether this edit is on the path
+                    // to the current state or on an abandoned branch.
+                    ui.label(
+                        RichText::new(if here { "▶" } else { " " })
+                            .monospace()
+                            .color(pal(ui).accent),
+                    );
+                    let colour = if live { pal(ui).ink } else { pal(ui).muted };
+                    ui.label(
+                        RichText::new(op.id.short())
+                            .monospace()
+                            .size(11.0)
+                            .color(pal(ui).muted),
+                    );
+                    let text = RichText::new(op.kind.describe()).color(colour);
+                    ui.label(if here { text.strong() } else { text });
+                    if !live {
+                        ui.label(
+                            RichText::new("(other branch)")
+                                .color(pal(ui).muted)
+                                .size(11.0),
+                        );
+                    }
+                });
+            }
+        });
+    }
+
     fn sequence_tab(&mut self, ui: &mut Ui) {
         let d = self.document.as_ref().expect("checked by caller");
-        let seq = &d.molecule.seq;
+        let seq = &d.molecule().seq;
         if seq.is_empty() {
             ui.add_space(8.0);
             ui.label(RichText::new("This file carries no bases.").color(pal(ui).muted));
@@ -565,7 +806,7 @@ impl App {
 
     fn file_tab(&mut self, ui: &mut Ui) {
         let d = self.document.as_ref().expect("checked by caller");
-        let m = &d.molecule;
+        let m = d.molecule();
         ui.add_space(6.0);
 
         egui::Grid::new("fileinfo")
@@ -704,7 +945,7 @@ impl App {
                 return;
             };
 
-            if d.molecule.annotation_span() == 0 {
+            if d.molecule().annotation_span() == 0 {
                 ui.centered_and_justified(|ui| {
                     ui.label(
                         RichText::new("This file describes nothing to draw.").color(pal(ui).muted),
@@ -713,12 +954,12 @@ impl App {
                 return;
             }
 
-            let caption = if d.molecule.name.is_empty() {
+            let caption = if d.molecule().name.is_empty() {
                 d.title.as_str()
             } else {
-                d.molecule.name.as_str()
+                d.molecule().name.as_str()
             };
-            let r = map::show(ui, &d.molecule, caption, d.digest.results(), selected, hot);
+            let r = map::show(ui, d.molecule(), caption, d.digest.results(), selected, hot);
             hovered_out = r.hovered;
             clicked_out = r.clicked;
         });
