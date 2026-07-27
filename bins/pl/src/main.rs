@@ -132,6 +132,7 @@ EXPORT OPTIONS:
     --mm <width>                 final printed width in millimetres
     --journal <name>             column width and type floor from a preset
     --column <single|double>     which column width (default single)
+    --check-contrast             measure every colour against WCAG 2.2 AA
     --no-ruler                   omit the base-position ruler
     -o, --outdir <dir>           where to write (default: beside the input)
     --stdout                     write to stdout instead of files
@@ -964,6 +965,35 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             let (s, d) = pl_draw::circular_svg(&mol, opts);
             (s.into_bytes(), d, None)
         };
+
+        // Contrast, measured against the background the figure is drawn on.
+        // Feature colours come out of the file, so this is not something the
+        // renderer can simply fix -- but an unreadable label is a defect in the
+        // figure whoever authored the colour, and saying so is the only way it
+        // gets noticed before print.
+        if a.has("check-contrast") {
+            let (scene, _) = pl_draw::scene(&mol, opts);
+            let scale =
+                width_mm.map_or(1.0, |mm| pl_draw::page::Fit::to_width_mm(&scene, mm).scale);
+            let findings = pl_draw::contrast::audit(&scene, "#ffffff", scale);
+            if findings.is_empty() {
+                eprintln!("pl: {}: contrast ok (WCAG 2.2 AA)", path.display());
+            }
+            for f in findings.iter().take(12) {
+                eprintln!(
+                    "pl: {}: {:.2}:1 needs {:.1}:1 — {} {} on {}",
+                    path.display(),
+                    f.ratio,
+                    f.required,
+                    f.foreground,
+                    if f.what.is_empty() { "shape" } else { &f.what },
+                    f.background
+                );
+            }
+            if findings.len() > 12 {
+                eprintln!("pl: {}: and {} more", path.display(), findings.len() - 12);
+            }
+        }
 
         // The check the physical size exists for. Report it once per file,
         // whatever the format, because it is a property of the figure and not

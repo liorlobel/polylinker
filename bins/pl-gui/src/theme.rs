@@ -95,11 +95,10 @@ pub fn feature_color(f: &Feature) -> Color32 {
         .unwrap_or_else(|| by_kind(&f.kind))
 }
 
-/// Black or white text on a coloured band, whichever stays legible.
-///
-/// Uses relative luminance rather than a simple average: a saturated green and
-/// a saturated blue of the same mean are nowhere near equally bright.
-pub fn on_color(bg: Color32) -> Color32 {
+/// Relative luminance, per WCAG. Each channel is linearised first, because a
+/// saturated green and a saturated blue with the same mean are nowhere near
+/// equally bright.
+fn luminance(c: Color32) -> f32 {
     let f = |c: u8| {
         let s = c as f32 / 255.0;
         if s <= 0.04045 {
@@ -108,11 +107,39 @@ pub fn on_color(bg: Color32) -> Color32 {
             ((s + 0.055) / 1.055).powf(2.4)
         }
     };
-    let l = 0.2126 * f(bg.r()) + 0.7152 * f(bg.g()) + 0.0722 * f(bg.b());
-    if l > 0.42 {
-        Color32::from_rgb(0x14, 0x1a, 0x1e)
+    0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+}
+
+/// WCAG contrast ratio, 1.0 to 21.0.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Black or white text on a coloured band, whichever actually contrasts more.
+///
+/// Two things here were measured rather than chosen, because a feature's colour
+/// comes out of the user's file and can be any of the 16.7 million:
+///
+/// **Compare, do not threshold.** This used to switch on luminance crossing
+/// 0.42, and sweeping the RGB cube put the worst case at **2.08:1** — less than
+/// half of AA — around mid-tones like `(104, 192, 120)`, an entirely ordinary
+/// feature green. No threshold fixes that; the best one available only reaches
+/// 4.01. Picking whichever of the two colours has the higher ratio is optimal
+/// by construction and needs no constant at all.
+///
+/// **Pure black and white, not softened near-black and near-white.** With
+/// `#141a1e`/`#f4f7f8` the worst case is 4.04:1 and 10.9% of colours cannot
+/// reach AA with either. With `#000000`/`#ffffff` the worst case over the whole
+/// cube is **4.58:1**, so every possible feature colour clears 4.5. Softer
+/// greys look better on the nine colours we chose ourselves and lose the
+/// guarantee on the ones we did not.
+pub fn on_color(bg: Color32) -> Color32 {
+    if contrast(Color32::BLACK, bg) >= contrast(Color32::WHITE, bg) {
+        Color32::BLACK
     } else {
-        Color32::from_rgb(0xf4, 0xf7, 0xf8)
+        Color32::WHITE
     }
 }
 
@@ -170,10 +197,10 @@ mod tests {
     fn label_contrast_flips_with_luminance_not_average() {
         // Saturated blue and saturated yellow have similar means and very
         // different brightness; both must come out readable.
-        assert_eq!(on_color(Color32::from_rgb(0, 0, 255)).r(), 0xf4);
-        assert_eq!(on_color(Color32::from_rgb(255, 255, 0)).r(), 0x14);
-        assert_eq!(on_color(Color32::WHITE).r(), 0x14);
-        assert_eq!(on_color(Color32::BLACK).r(), 0xf4);
+        assert_eq!(on_color(Color32::from_rgb(0, 0, 255)), Color32::WHITE);
+        assert_eq!(on_color(Color32::from_rgb(255, 255, 0)), Color32::BLACK);
+        assert_eq!(on_color(Color32::WHITE), Color32::BLACK);
+        assert_eq!(on_color(Color32::BLACK), Color32::WHITE);
     }
 
     /// Relative luminance, for asserting that text is actually readable.
@@ -231,5 +258,56 @@ mod tests {
                 contrast(p.line, bg)
             );
         }
+    }
+
+    #[test]
+    fn a_label_is_readable_on_every_colour_a_file_can_contain() {
+        // A feature's colour comes out of the user's file, so this has to hold
+        // for all 16.7 million and not just the nine this project picks. The
+        // cube is swept at a stride of 4, which is 262,144 colours -- enough to
+        // find the worst case, which sits at (240, 20, 36) and reaches 4.58:1.
+        //
+        // The numbers this replaced: switching on a luminance threshold of 0.42
+        // bottomed out at 2.08:1 around (104, 192, 120), an ordinary feature
+        // green, and no threshold does better than 4.01. Softened near-black
+        // and near-white bottom out at 4.04 and leave 10.9% of colours below
+        // AA. Both were measured, and neither was visible by looking.
+        let mut worst = f32::MAX;
+        let mut worst_at = Color32::BLACK;
+        let mut r = 0u16;
+        while r < 256 {
+            let mut g = 0u16;
+            while g < 256 {
+                let mut b = 0u16;
+                while b < 256 {
+                    let bg = Color32::from_rgb(r as u8, g as u8, b as u8);
+                    let c = contrast(on_color(bg), bg);
+                    if c < worst {
+                        worst = c;
+                        worst_at = bg;
+                    }
+                    b += 4;
+                }
+                g += 4;
+            }
+            r += 4;
+        }
+        assert!(
+            worst >= 4.5,
+            "worst label contrast is {worst:.2}:1 on rgb({}, {}, {}), below WCAG AA",
+            worst_at.r(),
+            worst_at.g(),
+            worst_at.b()
+        );
+        assert!((worst - 4.58).abs() < 0.02, "{worst}");
+    }
+
+    #[test]
+    fn the_contrast_ratio_is_the_wcag_one() {
+        assert!((contrast(Color32::BLACK, Color32::WHITE) - 21.0).abs() < 1e-4);
+        assert!((contrast(Color32::WHITE, Color32::WHITE) - 1.0).abs() < 1e-5);
+        // Symmetric.
+        let a = Color32::from_rgb(0x4f, 0x7f, 0xd0);
+        assert_eq!(contrast(a, Color32::WHITE), contrast(Color32::WHITE, a));
     }
 }

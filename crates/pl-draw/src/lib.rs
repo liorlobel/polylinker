@@ -30,6 +30,7 @@
 
 use pl_core::{Molecule, Strand};
 
+pub mod contrast;
 pub mod eps;
 mod labels;
 pub mod page;
@@ -154,7 +155,7 @@ pub fn colour_for(kind: &str) -> &'static str {
         "CDS" | "gene" => "#4f7fd0",
         "promoter" | "RBS" => "#4aa564",
         "terminator" | "polyA_signal" => "#c05c5c",
-        "rep_origin" | "origin" => "#d08a3e",
+        "rep_origin" | "origin" => "#c07e2e",
         "primer_bind" => "#7e8a97",
         "protein_bind" => "#b87bb0",
         "misc_feature" => "#8b7bb8",
@@ -278,7 +279,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
             items.push(Item::Path {
                 segs: vec![Seg::Move(x0, y0), Seg::Line(x1, y1)],
                 fill: None,
-                stroke: Some("#8a9199".into()),
+                stroke: Some("#6b7280".into()),
                 stroke_width: 1.0,
                 title: None,
             });
@@ -288,7 +289,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                 y: ty,
                 size: opts.font_size * 0.72,
                 anchor: Anchor::Middle,
-                color: "#8a9199".into(),
+                color: "#6b7280".into(),
                 bold: false,
                 text: commas(base),
             });
@@ -399,7 +400,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                     Seg::Line(lx - dir * 4.0, y),
                 ],
                 fill: None,
-                stroke: Some("#aab1b8".into()),
+                stroke: Some("#868d95".into()),
                 stroke_width: 0.9,
                 title: None,
             });
