@@ -16,7 +16,7 @@ USAGE:
     pl digest  <file> [--enzyme NAME]    restriction sites
     pl blocks  <file.dna>                anatomy of a SnapGene container
     pl checksum <file>...                SEGUID v2 checksums
-    pl export  <file>... [options]       plasmid map as SVG
+    pl export  <file>... [options]       plasmid map as SVG or PDF
     pl find-motif <IUPAC> <file>         search a sequence, both strands
 
     pl index   <dir>... [options]        build or refresh a folder's index
@@ -58,6 +58,7 @@ FIND-MOTIF OPTIONS:
 EXPORT OPTIONS:
     --width <px>                 canvas width  (default: 720)
     --height <px>                canvas height (default: 720)
+    --pdf                        write PDF instead of SVG
     --no-ruler                   omit the base-position ruler
     -o, --outdir <dir>           where to write (default: beside the input)
     --stdout                     write to stdout instead of files
@@ -835,7 +836,30 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             ));
         }
 
-        let (svg, drawn) = pl_draw::circular_svg(&mol, opts);
+        let as_pdf = a.has("pdf");
+        let (bytes, drawn, font) = if as_pdf {
+            let (b, d, f) = pl_draw::circular_pdf(&mol, opts);
+            (b, d, Some(f))
+        } else {
+            let (s, d) = pl_draw::circular_svg(&mol, opts);
+            (s.into_bytes(), d, None)
+        };
+
+        // Helvetica is one of the fourteen fonts every PDF viewer provides, so
+        // nothing is embedded -- at the cost of WinAnsi, which has no Greek.
+        // Say which names lost characters rather than shipping a figure full of
+        // question marks with nothing to explain them.
+        if let Some(f) = &font {
+            if !f.unencodable.is_empty() {
+                eprintln!(
+                    "pl: {}: {} name(s) hold characters Helvetica cannot show and were                      written with '?': {}",
+                    path.display(),
+                    f.unencodable.len(),
+                    f.unencodable.join(", ")
+                );
+                eprintln!("     export SVG instead to keep them");
+            }
+        }
 
         // A map missing three labels looks exactly like a plasmid with three
         // fewer features, so say which ones went.
@@ -869,7 +893,10 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         }
 
         if to_stdout {
-            println!("{svg}");
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(&bytes)
+                .map_err(|e| e.to_string())?;
             written += 1;
             continue;
         }
@@ -881,8 +908,9 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         });
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
+        let ext = if as_pdf { "pdf" } else { "svg" };
         let stem = genbank::locus_name(&title_of(path));
-        let mut dest = dir.join(format!("{stem}.svg"));
+        let mut dest = dir.join(format!("{stem}.{ext}"));
         if same_file(path, &dest) {
             return Err(format!(
                 "{}: writing the map here would overwrite the input. Use --outdir <dir> or --stdout.",
@@ -892,7 +920,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         if claimed.contains(&dest) {
             let mut k = 2;
             loop {
-                let candidate = dir.join(format!("{stem}-{k}.svg"));
+                let candidate = dir.join(format!("{stem}-{k}.{ext}"));
                 if !claimed.contains(&candidate) {
                     dest = candidate;
                     break;
@@ -902,7 +930,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             renamed += 1;
         }
         claimed.push(dest.clone());
-        std::fs::write(&dest, &svg).map_err(|e| format!("{}: {e}", dest.display()))?;
+        std::fs::write(&dest, &bytes).map_err(|e| format!("{}: {e}", dest.display()))?;
 
         println!(
             "{:>10} bp  {:>8}  {:>4} label  {}",

@@ -44,7 +44,7 @@ Each ships before the app, stands alone, and survives the app.
 
 | Component | State |
 |---|---|
-| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model, SEGUID checksums, sequence search), `pl-enzymes` (digestion), `pl-clone` (sticky ends, fragments, PCR), `pl-fileio` (`.dna`, GenBank, FASTA), `pl-draw` (SVG maps), `pl-index` (the library: packed sequence store and queries, **no I/O**), `pl-scan` (the one crate that touches the filesystem), `pl-wasm` (browser ABI), and the `pl` command. **Zero external dependencies.** |
+| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model, SEGUID checksums, sequence search), `pl-enzymes` (digestion), `pl-clone` (sticky ends, fragments, PCR), `pl-fileio` (`.dna`, GenBank, FASTA), `pl-draw` (maps as SVG and PDF), `pl-index` (the library: packed sequence store and queries, **no I/O**), `pl-scan` (the one crate that touches the filesystem), `pl-wasm` (browser ABI), and the `pl` command. **Zero external dependencies.** |
 | [`bins/pl-gui`](bins/pl-gui) | **The desktop app**, `polylinker.exe`. egui; one static binary, no webview. |
 | [`bench/`](bench/README.md) | **`polylinker-bench` v0.1** — a CC0 truth set, 176 cases, every expected value from an independent oracle. Polylinker scores **176/176, zero failures, nothing declined**. |
 | `prototype/dna-reader.html` | **Usable today.** The same Rust core compiled to wasm32 and inlined into one HTML file: opens `.dna`, GenBank and FASTA, draws maps, digests, exports GenBank/FASTA/SVG. No install, no network, no account — runs from a USB stick on a locked-down PC. Built by [`tools/build-web.ps1`](tools/build-web.ps1); not committed, because it is 257 KB of base64 that changes every rebuild. |

@@ -204,6 +204,21 @@ Step 'digest + PCR vs pydna' {
 Step 'motif vs Biopython (degenerate, both strands)' {
     python reference/python/tests/xcheck_motif.py target/release/pl.exe
 } { HavePy 'Bio' }
+# Is the PDF a PDF, and is it the same picture as the SVG?
+#
+# `pl-draw` builds one Scene and renders it twice, so they ought to match --
+# but the PDF back end flips the coordinate system, turns every arc into
+# Beziers, and places text by *measuring* it, since PDF has no text-anchor.
+# Each of those can be plausibly wrong. pypdf and PyMuPDF open the file (a bad
+# xref offset gives a file that greps fine and opens in nothing), every string
+# the SVG draws is checked present, and every single-word string's position is
+# compared against the SVG's with the anchor resolved.
+#
+# Verified the way this file insists: shifting the Helvetica width table by one
+# entry produced 2 disagreements, removing the y flip produced 41.
+Step 'PDF is a PDF, and matches the SVG' {
+    python reference/python/tests/xcheck_pdf.py target/release/pl.exe
+} { (HavePy 'fitz') -and (HavePy 'pypdf') }
 # A second, independent digest oracle over real plasmids.
 #
 # `xcheck_clone.py` above compares fragments against pydna on synthetic cases;

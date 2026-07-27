@@ -231,6 +231,52 @@ impl App {
         }
     }
 
+    /// Write the map as PDF.
+    ///
+    /// The same `Scene` as the SVG, so the two are the same picture. Helvetica
+    /// is one of the fourteen fonts every viewer provides, so nothing is
+    /// embedded -- at the cost of WinAnsi, which has no Greek. Names that lose
+    /// characters are listed rather than silently written with `?`.
+    fn export_pdf(&mut self) {
+        let Some(d) = &self.document else { return };
+        let stem = pl_fileio::genbank::locus_name(&d.title);
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{stem}.pdf"))
+            .add_filter("PDF", &["pdf"])
+            .save_file()
+        else {
+            return;
+        };
+        let (bytes, drawn, font) = pl_draw::circular_pdf(d.molecule(), pl_draw::Options::default());
+
+        let mut note = String::new();
+        if !drawn.labels_hidden.is_empty() {
+            note.push_str(&format!(
+                "  —  {} label(s) did not fit: {}",
+                drawn.labels_hidden.len(),
+                drawn.labels_hidden.join(", ")
+            ));
+        }
+        if !drawn.malformed.is_empty() {
+            note.push_str(&format!(
+                "  —  {} feature(s) lie outside the molecule and are not drawn: {}",
+                drawn.malformed.len(),
+                drawn.malformed.join(", ")
+            ));
+        }
+        if !font.unencodable.is_empty() {
+            note.push_str(&format!(
+                "  —  {} name(s) hold characters Helvetica cannot show and were written with '?': {}. Export SVG to keep them",
+                font.unencodable.len(),
+                font.unencodable.join(", ")
+            ));
+        }
+        match std::fs::write(&path, bytes) {
+            Ok(()) => self.status = format!("wrote {}{note}", path.display()),
+            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+        }
+    }
+
     /// Write the map as SVG.
     ///
     /// Deliberately the default `pl_draw::Options`, the same ones `pl export`
@@ -402,6 +448,13 @@ impl App {
                         .clicked()
                     {
                         self.export_svg();
+                    }
+                    if ui
+                        .button("Map PDF…")
+                        .on_hover_text("The same map, for a manuscript")
+                        .clicked()
+                    {
+                        self.export_pdf();
                     }
                 });
 

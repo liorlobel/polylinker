@@ -31,7 +31,10 @@
 use pl_core::{Molecule, Strand};
 
 mod labels;
+pub mod pdf;
+pub mod scene;
 pub use labels::{isotonic, place_column, LabelBox, Placement};
+pub use scene::{Anchor, Item, Scene, Seg};
 
 #[cfg(test)]
 mod tests;
@@ -204,9 +207,15 @@ pub fn ranges(start: u64, end: u64, len: u64, circular: bool) -> Vec<(u64, u64)>
     vec![(s, len), (1, e)]
 }
 
-/// Render a molecule as a standalone SVG document.
-pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
+/// Build the device-independent picture.
+///
+/// The one place the map's geometry lives. [`circular_svg`] and
+/// [`circular_pdf`] both render this, which is why they cannot disagree about
+/// where anything is — there is nothing above the level of ink for them to
+/// disagree about.
+pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     let mut report = Report::default();
+    let mut items: Vec<Item> = Vec::new();
     let len = mol.span().max(1);
     let circular = mol.topology.is_circular();
     let (cx, cy) = (opts.width / 2.0, opts.height / 2.0);
@@ -221,33 +230,38 @@ pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
     let margin = (widest + 34.0).min(opts.width.min(opts.height) * 0.3);
     let ro = (opts.width.min(opts.height) / 2.0 - margin).max(40.0);
     let ri = ro - opts.ring_width;
-
-    let mut body = String::new();
-    let mut overlay = String::new();
+    let mid_r = (ro + ri) / 2.0;
 
     // --- backbone ---
     if circular {
-        body.push_str(&format!(
-            r##"<circle cx="{}" cy="{}" r="{}" fill="none" stroke="#33383d" stroke-width="1.25"/>"##,
-            n(cx),
-            n(cy),
-            n((ro + ri) / 2.0)
-        ));
+        items.push(Item::Circle {
+            cx,
+            cy,
+            r: mid_r,
+            stroke: "#33383d".into(),
+            stroke_width: 1.25,
+        });
     } else {
         // A linear molecule drawn as a closed ring would be a lie about
-        // topology.
+        // topology, so it gets a gap.
         let gap = 0.06 * TAU;
-        let (x0, y0) = polar(cx, cy, (ro + ri) / 2.0, gap / 2.0);
-        let (x1, y1) = polar(cx, cy, (ro + ri) / 2.0, TAU - gap / 2.0);
-        body.push_str(&format!(
-            r##"<path d="M{},{} A{},{} 0 1 1 {},{}" fill="none" stroke="#33383d" stroke-width="1.25"/>"##,
-            n(x0),
-            n(y0),
-            n((ro + ri) / 2.0),
-            n((ro + ri) / 2.0),
-            n(x1),
-            n(y1)
-        ));
+        let (x0, y0) = polar(cx, cy, mid_r, gap / 2.0);
+        items.push(Item::Path {
+            segs: vec![
+                Seg::Move(x0, y0),
+                Seg::Arc {
+                    cx,
+                    cy,
+                    r: mid_r,
+                    from: gap / 2.0,
+                    to: TAU - gap / 2.0,
+                },
+            ],
+            fill: None,
+            stroke: Some("#33383d".into()),
+            stroke_width: 1.25,
+            title: None,
+        });
     }
 
     // --- ruler ---
@@ -258,32 +272,34 @@ pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
             let a = angle(base, len);
             let (x0, y0) = polar(cx, cy, ri - 4.0, a);
             let (x1, y1) = polar(cx, cy, ri - 9.0, a);
-            body.push_str(&format!(
-                r##"<path d="M{},{}L{},{}" stroke="#8a9199" stroke-width="1" fill="none"/>"##,
-                n(x0),
-                n(y0),
-                n(x1),
-                n(y1)
-            ));
+            items.push(Item::Path {
+                segs: vec![Seg::Move(x0, y0), Seg::Line(x1, y1)],
+                fill: None,
+                stroke: Some("#8a9199".into()),
+                stroke_width: 1.0,
+                title: None,
+            });
             let (tx, ty) = polar(cx, cy, ri - 18.0, a);
-            body.push_str(&format!(
-                r##"<text x="{}" y="{}" font-size="{}" fill="#8a9199" text-anchor="middle" dominant-baseline="middle">{}</text>"##,
-                n(tx),
-                n(ty),
-                n(opts.font_size * 0.72),
-                commas(base)
-            ));
+            items.push(Item::Text {
+                x: tx,
+                y: ty,
+                size: opts.font_size * 0.72,
+                anchor: Anchor::Middle,
+                color: "#8a9199".into(),
+                bold: false,
+                text: commas(base),
+            });
             base += step;
         }
     }
 
     // --- features ---
-    struct Anchor {
+    struct Label {
         text: String,
         angle: f64,
         weight: f64,
     }
-    let mut anchors: Vec<Anchor> = Vec::new();
+    let mut anchors: Vec<Label> = Vec::new();
 
     for f in &mol.features {
         let parts: Vec<(u64, u64)> = f
@@ -306,17 +322,18 @@ pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
 
         for (i, &(a, b)) in parts.iter().enumerate() {
             if degrees < opts.min_feature_degrees {
+                // Below a pixel an arrowhead reads as dirt on the figure, so a
+                // very short feature is a tick instead.
                 let ang = angle(a, len);
                 let (x0, y0) = polar(cx, cy, ri, ang);
                 let (x1, y1) = polar(cx, cy, ro, ang);
-                body.push_str(&format!(
-                    r##"<path d="M{},{}L{},{}" stroke="{colour}" stroke-width="1.75" fill="none"><title>{}</title></path>"##,
-                    n(x0),
-                    n(y0),
-                    n(x1),
-                    n(y1),
-                    esc(&f.name)
-                ));
+                items.push(Item::Path {
+                    segs: vec![Seg::Move(x0, y0), Seg::Line(x1, y1)],
+                    fill: None,
+                    stroke: Some(colour.clone()),
+                    stroke_width: 1.75,
+                    title: Some(f.name.clone()),
+                });
             } else {
                 let arrow = if i as isize == arrow_on {
                     match f.strand {
@@ -326,16 +343,18 @@ pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
                 } else {
                     Arrow::None
                 };
-                body.push_str(&format!(
-                    r##"<path d="{}" fill="{colour}" stroke="#2b2f34" stroke-width="0.6"><title>{}</title></path>"##,
-                    arc_path(cx, cy, ri, ro, angle(a, len), angle(b + 1, len), arrow),
-                    esc(&f.name)
-                ));
+                items.push(Item::Path {
+                    segs: arc_segs(cx, cy, ri, ro, angle(a, len), angle(b + 1, len), arrow),
+                    fill: Some(colour.clone()),
+                    stroke: Some("#2b2f34".into()),
+                    stroke_width: 0.6,
+                    title: Some(f.name.clone()),
+                });
             }
         }
 
         let mid = parts[0].0 + (span / 2).min(parts[0].1 - parts[0].0);
-        anchors.push(Anchor {
+        anchors.push(Label {
             text: f.name.clone(),
             angle: angle(mid, len),
             weight: 1.0 + (1.0 + span as f64).log10(),
@@ -345,6 +364,7 @@ pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
     // --- labels, placed exactly ---
     let line_h = opts.font_size + 3.0;
     let pad = 8.0;
+    let mut overlay: Vec<Item> = Vec::new();
     for right in [true, false] {
         let idx: Vec<usize> = (0..anchors.len())
             .filter(|&i| (anchors[i].angle.sin() >= 0.0) == right)
@@ -369,57 +389,203 @@ pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
             let lx = cx + dir * (ro + 26.0);
             let (tx, ty) = polar(cx, cy, ro + 2.0, anchors[i].angle);
             let (ex, ey) = polar(cx, cy, ro + 12.0, anchors[i].angle);
-            overlay.push_str(&format!(
-                r##"<path d="M{},{}L{},{}L{},{}" fill="none" stroke="#aab1b8" stroke-width="0.9"/>"##,
-                n(tx),
-                n(ty),
-                n(ex),
-                n(ey),
-                n(lx - dir * 4.0),
-                n(y)
-            ));
-            overlay.push_str(&format!(
-                r##"<text x="{}" y="{}" font-size="{}" fill="#22262a" text-anchor="{}" dominant-baseline="middle">{}</text>"##,
-                n(lx),
-                n(y),
-                n(opts.font_size),
-                if right { "start" } else { "end" },
-                esc(&anchors[i].text)
-            ));
+            overlay.push(Item::Path {
+                segs: vec![
+                    Seg::Move(tx, ty),
+                    Seg::Line(ex, ey),
+                    Seg::Line(lx - dir * 4.0, y),
+                ],
+                fill: None,
+                stroke: Some("#aab1b8".into()),
+                stroke_width: 0.9,
+                title: None,
+            });
+            overlay.push(Item::Text {
+                x: lx,
+                y,
+                size: opts.font_size,
+                anchor: if right { Anchor::Start } else { Anchor::End },
+                color: "#22262a".into(),
+                bold: false,
+                text: anchors[i].text.clone(),
+            });
             report.labels_placed += 1;
         }
     }
 
     // --- centre ---
     let title = if mol.name.is_empty() {
-        "unnamed"
+        "unnamed".to_string()
     } else {
-        &mol.name
+        mol.name.clone()
     };
-    overlay.push_str(&format!(
-        r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="#16191c" text-anchor="middle" dominant-baseline="middle">{}</text>"##,
-        n(cx),
-        n(cy - 4.0),
-        n(opts.font_size * 1.25),
-        esc(title)
-    ));
-    overlay.push_str(&format!(
-        r##"<text x="{}" y="{}" font-size="{}" fill="#6b7280" text-anchor="middle" dominant-baseline="middle">{} bp</text>"##,
-        n(cx),
-        n(cy + opts.font_size + 2.0),
-        n(opts.font_size * 0.9),
-        commas(len)
-    ));
+    overlay.push(Item::Text {
+        x: cx,
+        y: cy - 4.0,
+        size: opts.font_size * 1.25,
+        anchor: Anchor::Middle,
+        color: "#16191c".into(),
+        bold: true,
+        text: title.clone(),
+    });
+    overlay.push(Item::Text {
+        x: cx,
+        y: cy + opts.font_size + 2.0,
+        size: opts.font_size * 0.9,
+        anchor: Anchor::Middle,
+        color: "#6b7280".into(),
+        bold: false,
+        text: format!("{} bp", commas(len)),
+    });
 
-    let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"><title>{}</title>{body}{overlay}</svg>"##,
-        n(opts.width),
-        n(opts.height),
-        n(opts.width),
-        n(opts.height),
-        esc(title)
-    );
-    (svg, report)
+    items.extend(overlay);
+    (
+        Scene {
+            width: opts.width,
+            height: opts.height,
+            title,
+            items,
+        },
+        report,
+    )
+}
+
+/// Render a molecule as a standalone SVG document.
+pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
+    let (sc, report) = scene(mol, opts);
+    (svg_of(&sc), report)
+}
+
+/// Render a molecule as a one-page PDF.
+///
+/// The same [`Scene`] as [`circular_svg`], so the two are the same picture.
+/// `Report` carries what the *drawing* could not show; the second report is
+/// what the PDF's font could not encode.
+pub fn circular_pdf(mol: &Molecule, opts: Options) -> (Vec<u8>, Report, pdf::Report) {
+    let (sc, report) = scene(mol, opts);
+    let (bytes, pdf_report) = pdf::to_pdf(&sc);
+    (bytes, report, pdf_report)
+}
+
+/// A scene as SVG.
+pub fn svg_of(sc: &Scene) -> String {
+    let mut body = String::new();
+    for item in &sc.items {
+        match item {
+            Item::Circle {
+                cx,
+                cy,
+                r,
+                stroke,
+                stroke_width,
+            } => body.push_str(&format!(
+                r##"<circle cx="{}" cy="{}" r="{}" fill="none" stroke="{stroke}" stroke-width="{}"/>"##,
+                n(*cx),
+                n(*cy),
+                n(*r),
+                n(*stroke_width)
+            )),
+            Item::Path {
+                segs,
+                fill,
+                stroke,
+                stroke_width,
+                title,
+            } => {
+                let d = svg_path(segs);
+                let fill = fill.clone().unwrap_or_else(|| "none".into());
+                let stroke = stroke.clone().unwrap_or_else(|| "none".into());
+                match title {
+                    Some(t) => body.push_str(&format!(
+                        r##"<path d="{d}" fill="{fill}" stroke="{stroke}" stroke-width="{}"><title>{}</title></path>"##,
+                        n(*stroke_width),
+                        esc(t)
+                    )),
+                    None => body.push_str(&format!(
+                        r##"<path d="{d}" fill="{fill}" stroke="{stroke}" stroke-width="{}"/>"##,
+                        n(*stroke_width)
+                    )),
+                }
+            }
+            Item::Text {
+                x,
+                y,
+                size,
+                anchor,
+                color,
+                bold,
+                text,
+            } => {
+                let a = match anchor {
+                    Anchor::Start => "start",
+                    Anchor::Middle => "middle",
+                    Anchor::End => "end",
+                };
+                let weight = if *bold { r##" font-weight="600""## } else { "" };
+                body.push_str(&format!(
+                    r##"<text x="{}" y="{}" font-size="{}"{weight} fill="{color}" text-anchor="{a}" dominant-baseline="middle">{}</text>"##,
+                    n(*x),
+                    n(*y),
+                    n(*size),
+                    esc(text)
+                ));
+            }
+        }
+    }
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"><title>{}</title>{body}</svg>"##,
+        n(sc.width),
+        n(sc.height),
+        n(sc.width),
+        n(sc.height),
+        esc(&sc.title)
+    )
+}
+
+/// A path's segments as an SVG `d` attribute.
+///
+/// Converts each centre-form arc into SVG's endpoint form. The sweep flag is 1
+/// for increasing angle, which is clockwise on screen; the large-arc flag is
+/// set past a half turn, and a sweep of a full turn or more is split, because
+/// SVG's endpoint form cannot express an arc whose ends coincide.
+fn svg_path(segs: &[Seg]) -> String {
+    let mut d = String::new();
+    for seg in segs {
+        match *seg {
+            Seg::Move(x, y) => d.push_str(&format!("M{},{}", n(x), n(y))),
+            Seg::Line(x, y) => d.push_str(&format!("L{},{}", n(x), n(y))),
+            Seg::Arc {
+                cx,
+                cy,
+                r,
+                from,
+                to,
+            } => {
+                let sweep_flag = if to >= from { 1 } else { 0 };
+                let total = (to - from).abs();
+                let steps = if total >= TAU { 4 } else { 1 };
+                let step = (to - from) / steps as f64;
+                for i in 0..steps {
+                    let t1 = from + step * (i + 1) as f64;
+                    let (x, y) = polar(cx, cy, r, t1);
+                    let large = if step.abs() > std::f64::consts::PI {
+                        1
+                    } else {
+                        0
+                    };
+                    d.push_str(&format!(
+                        "A{},{} 0 {large} {sweep_flag} {},{}",
+                        n(r),
+                        n(r),
+                        n(x),
+                        n(y)
+                    ));
+                }
+            }
+            Seg::Close => d.push('Z'),
+        }
+    }
+    d
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -429,8 +595,12 @@ enum Arrow {
     End,
 }
 
-/// One feature arc, with its arrowhead.
-fn arc_path(cx: f64, cy: f64, ri: f64, ro: f64, a0: f64, a1_in: f64, arrow: Arrow) -> String {
+/// One feature arc, with its arrowhead, as device-independent segments.
+///
+/// Was an SVG `d` string. It has to be segments now so the PDF back end can
+/// turn the arcs into Béziers, and so both back ends draw the same shape rather
+/// than one parsing the other's output.
+fn arc_segs(cx: f64, cy: f64, ri: f64, ro: f64, a0: f64, a1_in: f64, arrow: Arrow) -> Vec<Seg> {
     let mut a1 = a1_in;
     if a1 <= a0 {
         a1 += TAU;
@@ -446,60 +616,57 @@ fn arc_path(cx: f64, cy: f64, ri: f64, ro: f64, a0: f64, a1_in: f64, arrow: Arro
     };
     let barb = ((ro - ri) * 0.35).min(2.5);
 
-    let mut d = String::new();
-    let p = |r: f64, a: f64| {
+    let mut segs = Vec::new();
+    let mv = |r: f64, a: f64| {
         let (x, y) = polar(cx, cy, r, a);
-        format!("{},{}", n(x), n(y))
+        Seg::Move(x, y)
     };
-    let arc = |r: f64, from: f64, to: f64, sweep_flag: u8| {
-        let large = if (to - from).abs() > std::f64::consts::PI {
-            1
-        } else {
-            0
-        };
-        format!("A{},{} 0 {large} {sweep_flag} {}", n(r), n(r), p(r, to))
+    let ln = |r: f64, a: f64| {
+        let (x, y) = polar(cx, cy, r, a);
+        Seg::Line(x, y)
+    };
+    let arc = |r: f64, from: f64, to: f64| Seg::Arc {
+        cx,
+        cy,
+        r,
+        from,
+        to,
     };
 
     match arrow {
         Arrow::End => {
             let base = a1 - head;
-            d.push_str(&format!("M{}", p(ro, a0)));
-            d.push_str(&arc(ro, a0, base, 1));
+            segs.push(mv(ro, a0));
+            segs.push(arc(ro, a0, base));
             if head > 0.0 {
-                d.push_str(&format!(
-                    "L{}L{}L{}",
-                    p(ro + barb, base),
-                    p(mid, a1),
-                    p(ri - barb, base)
-                ));
+                segs.push(ln(ro + barb, base));
+                segs.push(ln(mid, a1));
+                segs.push(ln(ri - barb, base));
             }
-            d.push_str(&format!("L{}", p(ri, base)));
-            d.push_str(&arc(ri, base, a0, 0));
+            segs.push(ln(ri, base));
+            segs.push(arc(ri, base, a0));
         }
         Arrow::Start => {
             let base = a0 + head;
-            d.push_str(&format!("M{}", p(ro, a1)));
-            d.push_str(&arc(ro, a1, base, 0));
+            segs.push(mv(ro, a1));
+            segs.push(arc(ro, a1, base));
             if head > 0.0 {
-                d.push_str(&format!(
-                    "L{}L{}L{}",
-                    p(ro + barb, base),
-                    p(mid, a0),
-                    p(ri - barb, base)
-                ));
+                segs.push(ln(ro + barb, base));
+                segs.push(ln(mid, a0));
+                segs.push(ln(ri - barb, base));
             }
-            d.push_str(&format!("L{}", p(ri, base)));
-            d.push_str(&arc(ri, base, a1, 1));
+            segs.push(ln(ri, base));
+            segs.push(arc(ri, base, a1));
         }
         Arrow::None => {
-            d.push_str(&format!("M{}", p(ro, a0)));
-            d.push_str(&arc(ro, a0, a1, 1));
-            d.push_str(&format!("L{}", p(ri, a1)));
-            d.push_str(&arc(ri, a1, a0, 0));
+            segs.push(mv(ro, a0));
+            segs.push(arc(ro, a0, a1));
+            segs.push(ln(ri, a1));
+            segs.push(arc(ri, a1, a0));
         }
     }
-    d.push('Z');
-    d
+    segs.push(Seg::Close);
+    segs
 }
 
 /// Round a tick interval up to something a human would have chosen.

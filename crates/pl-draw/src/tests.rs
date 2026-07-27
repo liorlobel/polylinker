@@ -253,16 +253,29 @@ fn a_negative_zero_formats_as_zero() {
 fn a_short_feature_degrades_to_a_triangle_not_a_bow_tie() {
     // The arrowhead is clamped to half the arc; unclamped it would start before
     // the arc did and the path would cross itself.
-    let d = arc_path(100.0, 100.0, 80.0, 98.0, 0.0, 0.01, Arrow::End);
-    assert!(!d.is_empty());
-    assert!(!d.contains("NaN"), "{d}");
-    for tok in d.split(['M', 'L', 'A', 'Z', ' ', ',']) {
-        if tok.is_empty() {
-            continue;
-        }
-        assert!(
-            tok.parse::<f64>().map(|v| v.is_finite()).unwrap_or(true),
-            "non-finite coordinate {tok} in {d}"
-        );
+    let segs = arc_segs(100.0, 100.0, 80.0, 98.0, 0.0, 0.01, Arrow::End);
+    assert!(!segs.is_empty());
+    for s in &segs {
+        let finite = match *s {
+            Seg::Move(x, y) | Seg::Line(x, y) => x.is_finite() && y.is_finite(),
+            Seg::Arc {
+                cx,
+                cy,
+                r,
+                from,
+                to,
+            } => {
+                cx.is_finite()
+                    && cy.is_finite()
+                    && r.is_finite()
+                    && from.is_finite()
+                    && to.is_finite()
+            }
+            Seg::Close => true,
+        };
+        assert!(finite, "non-finite coordinate in {s:?}");
     }
+    // And the same shape reaches both back ends.
+    let d = svg_path(&segs);
+    assert!(!d.contains("NaN"), "{d}");
 }

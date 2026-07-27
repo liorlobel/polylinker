@@ -388,6 +388,19 @@ Conversion happens only at the format boundary, in exactly four functions, each 
 
 **5.3.2 Sequence storage.** Plain `Vec<u8>` ASCII. Not bit-packed. A 200 kb BAC is 200 kB; bit-packing saves nothing that matters and breaks IUPAC ambiguity codes, which a plasmid editor needs constantly. Reconsider only if profiling says so.
 
+**Note on PDF export.** The plan says "SVG export via serialized DOM →
+`resvg`/`svg2pdf`". What shipped renders one device-independent `Scene` twice —
+`pl_draw::scene` → SVG or PDF — rather than converting one output into the
+other. Those crates convert *someone else's* SVG; we generate the drawing, so
+going through SVG would mean serialising a picture, parsing it back, and taking
+a font-shaping stack to do it. Rendering the scene directly is a few hundred
+lines and no dependencies, and it is the only arrangement in which the two
+outputs cannot drift, because there is nothing above the level of ink for them
+to disagree about. Text uses Helvetica, one of the fourteen fonts every PDF
+viewer must provide, so nothing is embedded and no font licence is involved;
+the cost is WinAnsi, and any name that loses a character is reported rather
+than silently written with `?`.
+
 **5.3.3 Annotation provenance is not optional metadata — it is the product.** Every auto-annotated feature carries the database version that produced it. Two collaborators with different database versions will otherwise get different annotations for the same file and will blame the tool. Stamped `db_version` also makes the annotation reproducible and therefore citable in a methods section, which is the differentiator over SnapGene's closed, undocumented, complained-about-as-duplicated library.
 
 ### 5.4 Undo/redo, and why it is the same mechanism as history
