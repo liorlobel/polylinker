@@ -284,6 +284,25 @@ Step 'genetic codes and ORFs vs Biopython' {
 Step 'Sanger placement vs Biopython' {
     python reference/python/tests/xcheck_sanger.py target/release/pl.exe
 } { HavePy 'Bio' }
+# The rendered chromatogram agrees with the file it came from.
+#
+# Nothing external renders ABIF, so the SVG is read back and asserted to have
+# the property it must have: at each called base, the curve in that base's
+# colour is the tallest of the four. 40 real traces, 23,057 bases above Q30,
+# 99.94%. Bases below Q30 are skipped and counted -- overlapping peaks at the
+# end of a read are the chemistry, not the renderer.
+#
+# Verified it can fail: swapping two channels scores 49.08%.
+#
+# Verified it CANNOT see one thing, which is why the note is here: every one of
+# the 374 ABIF files on this drive carries FWO_=GATC, so hard-coding that order
+# rather than reading FWO_ is invisible to this step -- injecting exactly that
+# changed the number by nothing. The unit test
+# `every_base_is_drawn_in_the_colour_its_own_channel_says` builds synthetic
+# traces in three channel orders and is the actual guard.
+Step 'rendered chromatograms agree with their files' {
+    python reference/python/tests/xcheck_trace_render.py target/release/pl.exe "$Corpus\**\*.ab1" $env:TEMP
+} { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
 # Chromatograms vs Biopython, on real traces.
 #
 # Corpus-gated: 394 .ab1 files live on the lab drive and none may live here.

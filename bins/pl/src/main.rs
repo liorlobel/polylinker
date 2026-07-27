@@ -21,7 +21,7 @@ USAGE:
     pl tm      <OLIGO>...                melting temperature
     pl goldengate <OVERHANG>...          check a Type IIS overhang set
     pl primers <file> --primer SEQ       where primers anneal
-    pl trace   <file.ab1>...             read a Sanger chromatogram
+    pl trace   <file.ab1>... [--svg F]   read or draw a Sanger chromatogram
     pl orfs    <file> [--table N]        open reading frames, six frames
     pl sanger  <read>... --ref <file>    did the clone work?
 
@@ -40,6 +40,12 @@ INDEX OPTIONS:
     --index-at <dir>             keep the index here instead of the OS cache
     --follow-links               follow symbolic links (off by default)
     --max-depth <n>              default 32
+
+TRACE OPTIONS:
+    --svg <file>                 draw the chromatogram
+    --bases <FIRST..LAST>        which called bases to draw (default all)
+    --width <points>             drawing width (default 1200)
+    --accessible                 Okabe-Ito colours, not the red/green classic
 
 SANGER OPTIONS:
     --ref <file>                 the reference to compare against
@@ -2350,7 +2356,7 @@ Tm is over the annealed footprint only; a 5' tail never contributes to it"
 
 /// Read a Sanger chromatogram.
 fn cmd_trace(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &[])?;
+    let a = parse_args(args, &["svg", "bases", "width"])?;
     a.require_files()?;
     for path in &a.files {
         let data = read(path)?;
@@ -2361,6 +2367,73 @@ fn cmd_trace(args: &[String]) -> Result<(), String> {
                 continue;
             }
         };
+        if let Some(out) = a.get("svg") {
+            let mut o = pl_draw::trace::Options {
+                palette: if a.has("accessible") {
+                    pl_draw::trace::Palette::Accessible
+                } else {
+                    pl_draw::trace::Palette::Classic
+                },
+                ..Default::default()
+            };
+            if let Some(w) = a.get("width") {
+                o.width = w
+                    .parse()
+                    .map_err(|_| format!("--width {w:?}: expected a number"))?;
+            }
+            if let Some(r) = a.get("bases") {
+                let (s, e) = r
+                    .split_once("..")
+                    .ok_or_else(|| format!("--bases {r:?}: expected FIRST..LAST"))?;
+                o.bases = Some((
+                    s.parse().map_err(|_| format!("--bases {r:?}"))?,
+                    e.parse().map_err(|_| format!("--bases {r:?}"))?,
+                ));
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let view = pl_draw::trace::View {
+                channels: [
+                    &t.channels[0],
+                    &t.channels[1],
+                    &t.channels[2],
+                    &t.channels[3],
+                ],
+                base_order: t.base_order,
+                peaks: &t.peaks,
+                sequence: &t.sequence,
+                quality: &t.quality,
+                title: &name,
+            };
+            let (scene, rep) = view.to_scene(&o);
+            let svg = pl_draw::svg_of(&scene);
+            // With several inputs, one `--svg` path would overwrite itself; a
+            // silent last-writer-wins is the wrong answer to that.
+            let out = if a.files.len() > 1 {
+                std::path::PathBuf::from(out).with_file_name(format!(
+                    "{}.svg",
+                    path.file_stem().unwrap_or_default().to_string_lossy()
+                ))
+            } else {
+                std::path::PathBuf::from(out)
+            };
+            std::fs::write(&out, svg.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
+            println!(
+                "{} -> {}  ({} bases, {} samples{})",
+                path.display(),
+                out.display(),
+                rep.bases_drawn,
+                rep.samples,
+                if rep.decimated_to > 0 {
+                    format!(", decimated to {} points", rep.decimated_to)
+                } else {
+                    String::new()
+                }
+            );
+            for n in &rep.notes {
+                println!("  note: {n}");
+            }
+            continue;
+        }
         if a.has("json") {
             println!(
                 "{{\"file\": {}, \"sequence\": {}, \"length\": {}, \"edited\": {},                  \"mean_quality\": {}, \"sample\": {}}}",

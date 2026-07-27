@@ -33,6 +33,7 @@ use pl_core::{Molecule, Strand};
 mod labels;
 pub mod pdf;
 pub mod scene;
+pub mod trace;
 pub use labels::{isotonic, place_column, LabelBox, Placement};
 pub use scene::{Anchor, Item, Scene, Seg};
 
