@@ -149,7 +149,7 @@ Two useful conclusions:
 ## The library corpus, measured (2026-07-27)
 
 Measured on the development machine (Core Ultra 9 275HX, 24 logical cores,
-127 GiB RAM, NTFS) against `<CORPUS>
+127 GiB RAM, NTFS) against a real lab drive of 344 plasmid files, the
 folder that motivates the library index. Numbers, not estimates; the commands
 are in the session record.
 

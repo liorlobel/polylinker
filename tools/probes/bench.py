@@ -1,13 +1,38 @@
-import time, sys, os
-sys.path.insert(0, r"<SCRATCH>")
+"""A rough timing probe over real `.dna` files.
+
+Takes the files to time as arguments, or from `PL_CORPUS` if none are given:
+
+    python tools/probes/bench.py a.dna b.dna
+    PL_CORPUS="/path/to/plasmids" python tools/probes/bench.py
+
+The paths used to be hard-coded to one machine's lab drive, which made the
+script useless to anybody else and published the directory layout of an
+unpublished project into a public repository. Neither is a good trade for three
+saved keystrokes.
+"""
+import glob
+import os
+import sys
+import time
+
+_ref = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
+                    "reference", "python")
+sys.path.insert(0, _ref)
+sys.path.insert(0, os.path.join(_ref, "tests"))
 import snapdna
 from validate_digest import our_digest
 
-targets = [
- r"<CORPUS>\pACYC184-Ppho-fab2-6his.dna",
- r"<CORPUS>\Fusobacterium_nucleatum_subsp_nucleatum_ATCC_23726.dna",
- r"<CORPUS>\NC_000913.3 Escherichia coli str. K-12 substr. MG1655, complete genome.dna",
-]
+targets = [a for a in sys.argv[1:] if os.path.exists(a)]
+if not targets:
+    root = os.environ.get("PL_CORPUS")
+    if not root:
+        print("give .dna files as arguments, or set PL_CORPUS to a directory")
+        raise SystemExit(1)
+    targets = sorted(glob.glob(os.path.join(root, "**", "*.dna"), recursive=True))[:3]
+if not targets:
+    print("no .dna files found")
+    raise SystemExit(1)
+
 print(f"{'file size':>12} {'bp':>10} {'parse ms':>9} {'digest ms':>10} {'sites':>8}  name")
 for t in targets:
     if not os.path.exists(t): continue
