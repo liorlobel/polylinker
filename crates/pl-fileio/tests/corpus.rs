@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use pl_core::Topology;
-use pl_fileio::{detect, genbank, snapgene, Format};
+use pl_fileio::{detect, genbank, snapgene, xml, Format};
 
 fn corpus_root() -> Option<PathBuf> {
     let p = PathBuf::from(std::env::var_os("PL_CORPUS")?);
@@ -873,6 +873,79 @@ fn digest_invariants_hold_on_real_plasmids() {
     );
 }
 
+/// One direct child of a `<Notes>` block, straight out of the payload.
+struct Block6Elem {
+    name: String,
+    /// Trimmed text before the first grandchild, which is the contract
+    /// `snapgene::parse_notes` and `reference/python/snapdna.py` both keep.
+    text: String,
+    attrs: Vec<(String, String)>,
+}
+
+/// The direct children of a document's `<Notes>` block.
+///
+/// Read straight out of the block payload with `xml::scan` rather than out of
+/// `Molecule::notes`, which is the entire point: the model is the thing under
+/// test, so it cannot also be the reference. Nested descendants are deliberately
+/// not returned — `Note` is flat and says so, and `Document
+/// ::unrepresentable_notes` is where those are accounted for.
+///
+/// The text is returned as well as the name and the attributes, and that is not
+/// symmetry for its own sake. It did not used to be, and the omission put the
+/// larger half of every note back inside the cancellation this whole comparison
+/// exists to escape: making `parse_notes` discard every note's value on read —
+/// UUIDs, descriptions, creation dates, all of it — left this test green on all
+/// 33 real files, because `a.notes == b.notes` (both empty) and the loop below
+/// only ever asked whether the element and its attributes were present.
+fn block_six(doc: &snapgene::Document) -> Vec<Block6Elem> {
+    let Some(b) = doc.blocks.iter().find(|b| b.kind == snapgene::block::NOTES) else {
+        return Vec::new();
+    };
+    let payload = String::from_utf8_lossy(&b.payload);
+    let mut out: Vec<Block6Elem> = Vec::new();
+    let mut depth = 0usize;
+    // Text is collected only until the current element sprouts a grandchild.
+    // Fusing the runs on either side of one would invent a string the file does
+    // not contain — the reader refuses to, and a reference that did it anyway
+    // would report the refusal as a difference.
+    let mut collecting = false;
+    for ev in xml::scan(&payload) {
+        match ev {
+            xml::Event::Open {
+                name,
+                attrs,
+                self_closing,
+            } => {
+                if depth == 1 {
+                    out.push(Block6Elem {
+                        name: name.clone(),
+                        text: String::new(),
+                        attrs,
+                    });
+                    collecting = !self_closing;
+                } else if depth >= 2 {
+                    collecting = false;
+                }
+                if !self_closing {
+                    depth += 1;
+                }
+            }
+            xml::Event::Close { .. } => depth = depth.saturating_sub(1),
+            xml::Event::Text(t) => {
+                if depth == 2 && collecting {
+                    if let Some(e) = out.last_mut() {
+                        e.text.push_str(&t);
+                    }
+                }
+            }
+        }
+    }
+    for e in &mut out {
+        e.text = e.text.trim().to_string();
+    }
+    out
+}
+
 /// Synthesise a `.dna` from the molecule alone, on every real file.
 ///
 /// `snapgene::write` re-emits the blocks it read, so a byte-exact round-trip
@@ -885,7 +958,19 @@ fn digest_invariants_hold_on_real_plasmids() {
 /// The distinction matters here more than usual: the memory of how the format
 /// was worked out records that byte-exact round-tripping on 41 files proved
 /// nothing about coordinate *interpretation*, because an off-by-one on read
-/// cancels on write. This test cannot cancel.
+/// cancels on write. A model→file→model comparison cannot cancel **an error the
+/// writer makes**, which is what it was built for.
+///
+/// **It cancels a loss the *reader* makes, and that is not a hypothetical.**
+/// `a.notes != b.notes` was added here and gave notes no cover whatever: both
+/// sides come out of the same `parse_notes`, so a `<Created UTC="22:0:0">` whose
+/// attribute was discarded on the way in was discarded identically on both
+/// sides, the two `Vec`s compared equal, and the recorded time of day was gone
+/// from the rebuilt file with this test green. The same held for the `<Empty/>`
+/// child the reader dropped and for every nested subtree. Anything read
+/// destructively is invisible to every comparison in this loop, however many
+/// fields it grows — so notes are additionally checked **against the original
+/// block 6 bytes**, below, which is the only form that has an independent side.
 ///
 /// **"Everything" means every field of the molecule**, which it did not: it
 /// compared `seq`, `topology`, `methylation` and the features, and said nothing
@@ -901,6 +986,7 @@ fn a_synthesised_dna_preserves_everything_the_model_holds() {
     }
     let (mut checked, mut features, mut quals) = (0usize, 0usize, 0usize);
     let (mut primers, mut sites) = (0usize, 0usize);
+    let (mut notes_elems, mut notes_attrs, mut nested_reported) = (0usize, 0usize, 0usize);
     let mut problems: Vec<String> = Vec::new();
 
     for f in &files {
@@ -964,6 +1050,82 @@ fn a_synthesised_dna_preserves_everything_the_model_holds() {
                 b.notes
             ));
         }
+        // ...and against the file, because the comparison above cannot see a
+        // loss that happened before `a` existed. See this test's doc comment.
+        //
+        // Structure, not bytes: the payloads legitimately differ in whitespace
+        // between tags, in `<Empty/>` versus `<Empty></Empty>`, and in entity
+        // normalisation — one real file's `<Comments>` contains the asymmetric
+        // `&lt;br>`, which unescape-then-escape renders as `&lt;br&gt;`, the
+        // same text spelled differently. Comparing bytes here would fail for
+        // reasons that are not losses and teach the next reader to delete the
+        // check.
+        //
+        // Positionally, not by name lookup. A `find` by name answers with the
+        // first match for every repeat, so a file with two `<Comments>` had one
+        // of them checked twice and the other not at all, and an element the
+        // writer *added* was invisible from either side. Order is part of what
+        // is being preserved here — nothing in block 6 is schema-constrained, so
+        // file order is the only order there is.
+        let orig_b6 = block_six(&orig);
+        let rebuilt_b6 = block_six(&rebuilt);
+        if orig_b6.len() != rebuilt_b6.len() {
+            problems.push(format!(
+                "{}: block 6 has {} element(s) and we wrote {}: {:?} vs {:?}",
+                f.display(),
+                orig_b6.len(),
+                rebuilt_b6.len(),
+                orig_b6.iter().map(|e| &e.name).collect::<Vec<_>>(),
+                rebuilt_b6.iter().map(|e| &e.name).collect::<Vec<_>>(),
+            ));
+        }
+        for (i, e) in orig_b6.iter().enumerate() {
+            let Some(out) = rebuilt_b6.get(i) else {
+                problems.push(format!(
+                    "{}: block 6 element <{}> is in the file and not in what we wrote",
+                    f.display(),
+                    e.name
+                ));
+                notes_elems += 1;
+                continue;
+            };
+            if out.name != e.name {
+                problems.push(format!(
+                    "{}: block 6 element {i} is <{}> in the file and <{}> in what we wrote",
+                    f.display(),
+                    e.name,
+                    out.name
+                ));
+            }
+            // The text, which is the larger half of most notes and was not
+            // compared at all. Trimmed on both sides and unescaped by the same
+            // scanner, so `&lt;br>` versus `&lt;br&gt;` — one real file has it —
+            // compares equal, as the paragraph above requires.
+            if out.text != e.text {
+                problems.push(format!(
+                    "{}: block 6 <{}> held {:?} and we wrote {:?}",
+                    f.display(),
+                    e.name,
+                    e.text,
+                    out.text
+                ));
+            }
+            for (an, av) in &e.attrs {
+                if !out.attrs.iter().any(|(bn, bv)| bn == an && bv == av) {
+                    problems.push(format!(
+                        "{}: block 6 <{} {an}=\"{av}\"> did not survive; we wrote {:?}",
+                        f.display(),
+                        e.name,
+                        out.attrs
+                    ));
+                }
+            }
+            notes_attrs += e.attrs.len();
+            notes_elems += 1;
+        }
+        if !orig.unrepresentable_notes.is_empty() {
+            nested_reported += orig.unrepresentable_notes.len();
+        }
         if a.double_stranded != b.double_stranded {
             problems.push(format!(
                 "{}: double_stranded {:?} became {:?}",
@@ -1016,6 +1178,11 @@ fn a_synthesised_dna_preserves_everything_the_model_holds() {
     eprintln!(
         "synthesised {checked} .dna file(s) from the model alone:          {features} features, \
          {quals} qualifiers, {primers} primers, {sites} binding sites preserved"
+    );
+    eprintln!(
+        "                                                                  {notes_elems} note \
+         elements and {notes_attrs} note attributes checked against the original block 6; \
+         {nested_reported} nested element(s) reported as unrepresentable"
     );
     assert!(checked > 0, "no .dna files parsed");
     assert!(

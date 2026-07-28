@@ -405,3 +405,155 @@ fn info_json_still_reports_the_same_failure_the_same_way() {
     assert!(!out.status.success());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- finding 77: both note notices have to survive a mutation ---------------
+
+/// A `.dna` carrying the block 6 payload given, as bytes.
+///
+/// Hand-rolled rather than built with `pl_fileio::snapgene::write_blocks`,
+/// because this file is std-only on purpose and the container is four lines:
+/// each block is a kind byte, a big-endian `u32` length, and the payload.
+fn dna(notes: &str) -> Vec<u8> {
+    let mut header = b"SnapGene".to_vec();
+    header.extend_from_slice(&1u16.to_be_bytes()); // DNA
+    header.extend_from_slice(&15u16.to_be_bytes()); // export version
+    header.extend_from_slice(&19u16.to_be_bytes()); // import version
+    let mut out = Vec::new();
+    for (kind, payload) in [
+        (9u8, header),                             // HEADER
+        (0u8, vec![0x01, b'A', b'C', b'G', b'T']), // SEQUENCE, circular
+        (6u8, notes.as_bytes().to_vec()),          // NOTES
+    ] {
+        out.push(kind);
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(&payload);
+    }
+    out
+}
+
+fn write_bytes(dir: &Path, name: &str, body: &[u8]) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    p
+}
+
+/// A published citation lives one level below a note, and `Note` is flat.
+const CITED: &str = r#"<Notes><Type>Synthetic</Type><References><Reference pubMedID="9335267" title="Precise deletions in E. coli"/></References></Notes>"#;
+
+#[test]
+fn info_names_the_part_of_the_notes_block_it_could_not_hold() {
+    // Silencing this `println!` left `cargo test --workspace` green, in a repo
+    // that already had a CLI harness. The notice *is* the fix for a loss that
+    // cannot be undone, so it needs a test at the surface a user sees.
+    let dir = scratch("info-notes");
+    write_bytes(&dir, "cited.dna", &dna(CITED));
+
+    let out = run(&dir, &["info", "cited.dna"]);
+    let text = stdout(&out);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        text.contains("Notes/References/Reference"),
+        "the path is the whole value of the notice: {text}"
+    );
+    assert!(
+        text.contains("notes block this model cannot hold"),
+        "and it must say what kind of thing was lost: {text}"
+    );
+    // Not folded into the locations line, which would have the CLI state
+    // something false about coordinates.
+    assert!(!text.contains("location(s)"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn converting_says_what_the_source_held_and_the_output_does_not() {
+    // `pl convert --to dna` is the verb that destroys it: the citation is in the
+    // input, absent from the output, and re-reading the output reports nothing
+    // because by then there is nothing left to report. It bound the load report
+    // five lines above the notice and read only `truncated()` from it, so this
+    // ran with exit 0 and an empty stderr — which is, verbatim, what audit #77
+    // opened by complaining about.
+    let dir = scratch("convert-notes");
+    write_bytes(&dir, "cited.dna", &dna(CITED));
+
+    let out = run(
+        &dir,
+        &["convert", "cited.dna", "--to", "dna", "--outdir", "out"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Notes/References/Reference"),
+        "the loss happens here and has to be said here: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("the output does not carry"),
+        "{}",
+        stderr(&out)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn converting_says_what_the_writer_could_not_carry() {
+    // The other channel, and the one whose plain wrapper had thrown the report
+    // away for as long as it existed: `<5UTC>` is an element name `xml::scan`
+    // reads leniently and XML forbids, so the writer refuses it rather than
+    // emitting a tag no parser can read. The legal sibling still goes out.
+    let dir = scratch("convert-unwritable");
+    write_bytes(
+        &dir,
+        "odd.dna",
+        &dna("<Notes><5UTC>22:0:0</5UTC><Type>Synthetic</Type></Notes>"),
+    );
+
+    let out = run(
+        &dir,
+        &["convert", "odd.dna", "--to", "dna", "--outdir", "out"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("the dna writer could not carry"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("5UTC"), "{}", stderr(&out));
+
+    let written = std::fs::read(dir.join("out").join("odd.dna")).unwrap();
+    let text = String::from_utf8_lossy(&written);
+    assert!(text.contains("<Type>Synthetic</Type>"), "{text}");
+    assert!(!text.contains("5UTC"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_ordinary_dna_converts_without_a_notice() {
+    // The control. A notice that fires on every file is a notice nobody reads,
+    // and both of the two above are one `is_empty()` from doing exactly that.
+    let dir = scratch("convert-quiet");
+    write_bytes(
+        &dir,
+        "plain.dna",
+        &dna(r#"<Notes><Type>Synthetic</Type><Created UTC="22:0:0">2022.12.13</Created></Notes>"#),
+    );
+
+    let out = run(
+        &dir,
+        &["convert", "plain.dna", "--to", "dna", "--outdir", "out"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("could not carry") && !stderr(&out).contains("cannot hold"),
+        "nothing was lost here: {}",
+        stderr(&out)
+    );
+    // ...and the half of the timestamp that lives in the attribute is in the
+    // file we wrote, which is finding #77 itself, measured through the CLI.
+    let written = std::fs::read(dir.join("out").join("plain.dna")).unwrap();
+    assert!(
+        String::from_utf8_lossy(&written).contains(r#"<Created UTC="22:0:0">2022.12.13</Created>"#),
+        "{}",
+        String::from_utf8_lossy(&written)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

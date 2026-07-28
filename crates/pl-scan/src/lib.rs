@@ -313,9 +313,20 @@ fn searchable_text(mol: &Molecule) -> String {
     for p in &mol.primers {
         parts.push(&p.name);
     }
-    for (k, v) in &mol.notes {
-        parts.push(k);
-        parts.push(v);
+    for n in &mol.notes {
+        parts.push(&n.key);
+        parts.push(&n.value);
+        // Attribute names and values are searchable too, as separate parts.
+        // Half of a `.dna`'s `<Created UTC="22:0:0">2022.12.13</Created>` lives
+        // in the attribute, and a text index that reaches the date but not the
+        // time answers `pl find --text 22:0:0` with nothing about a file that
+        // contains exactly that string. Joining them into one `UTC=22:0:0`
+        // token would invent a syntax and defeat the `\n` separator's purpose
+        // at the same time.
+        for (k, v) in &n.attrs {
+            parts.push(k);
+            parts.push(v);
+        }
     }
     parts.join("\n")
 }
@@ -465,6 +476,56 @@ ORIGIN
             t.contains("CDS"),
             "the feature key is searchable too: {t:?}"
         );
+    }
+
+    /// A `.dna` carrying the block 6 payload given. Kind byte, big-endian
+    /// `u32` length, payload — three blocks is enough to parse.
+    fn dna(notes: &str) -> Vec<u8> {
+        let mut header = b"SnapGene".to_vec();
+        header.extend_from_slice(&1u16.to_be_bytes());
+        header.extend_from_slice(&15u16.to_be_bytes());
+        header.extend_from_slice(&19u16.to_be_bytes());
+        let mut out = Vec::new();
+        for (kind, payload) in [
+            (9u8, header),
+            (0u8, vec![0x01, b'A', b'C', b'G', b'T']),
+            (6u8, notes.as_bytes().to_vec()),
+        ] {
+            out.push(kind);
+            out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            out.extend_from_slice(&payload);
+        }
+        out
+    }
+
+    #[test]
+    fn searchable_text_reaches_a_notes_attribute_as_its_own_token() {
+        // The derived column that `pl_index::ENGINE` was bumped 1 -> 2 for, and
+        // it had no test anywhere: the only other test of `searchable_text`
+        // feeds a GenBank record, and GenBank never populates `Molecule::notes`
+        // at all, so neither this loop nor the key/value loop above it was
+        // executed by anything. Deleting the attribute loop kept
+        // `cargo test --workspace` green — which is the exact failure
+        // CONTRIBUTING.md's ENGINE rule exists for, since a stale derived column
+        // reports as "unchanged (reused)" and reads as success.
+        let bytes = dna(r#"<Notes><Created UTC="22:0:0">2022.12.13</Created></Notes>"#);
+        let (rows, _) = rows_for_file("x.dna", &bytes, bytes.len() as u64);
+        let t = &rows[0].text;
+        assert!(
+            t.contains("22:0:0"),
+            "half of `<Created UTC=\"22:0:0\">2022.12.13</Created>` is in the attribute, \
+             and `pl find --text 22:0:0` has to reach it: {t:?}"
+        );
+        assert!(t.contains("2022.12.13") && t.contains("Created"), "{t:?}");
+        assert!(
+            t.contains("UTC"),
+            "the attribute name is searchable too: {t:?}"
+        );
+        // Separate parts joined by the newline, never merged into one token: a
+        // `UTC=22:0:0` string is a syntax no file contains and would defeat the
+        // separator at the same time.
+        assert!(!t.contains("UTC=22:0:0"), "{t:?}");
+        assert!(t.contains("UTC\n22:0:0"), "{t:?}");
     }
 
     #[test]

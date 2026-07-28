@@ -67,18 +67,24 @@ def to_record(doc: snapdna.SnapDnaDocument, name: str) -> SeqRecord:
         Seq(doc.sequence),
         id=name,
         name=name,
-        description=doc.notes.get("Description", "").strip() or name,
+        description=snapdna.note_text(doc.notes, "Description").strip() or name,
     )
     rec.annotations["molecule_type"] = "DNA"
     rec.annotations["topology"] = "circular" if doc.is_circular else "linear"
     rec.annotations["data_file_division"] = "SYN"
-    created = doc.notes.get("Created", "")
+    # The date only.  `<Created UTC="22:0:0">` carries a time of day too, and it
+    # is now reachable -- `snapdna.Note.attr("UTC")` -- but GenBank's date field
+    # is a bare DD-MMM-YYYY with nowhere to put a time, so it is deliberately not
+    # merged in here.  Inventing `13-DEC-2022 22:00:00` would be a GenBank line
+    # no reader parses.
+    created = snapdna.note_text(doc.notes, "Created")
     rec.annotations["date"] = _gb_date(created)
 
-    if doc.notes.get("UUID"):
+    uuid = snapdna.note_text(doc.notes, "UUID")
+    if uuid:
         rec.annotations["comment"] = (
             f"Converted from SnapGene .dna by polylinker/dna2gb.\n"
-            f"Original document UUID: {doc.notes['UUID']}"
+            f"Original document UUID: {uuid}"
         )
 
     n = len(doc.sequence)

@@ -109,6 +109,24 @@ pub struct LoadReport {
     /// not have. Reported rather than dropped, and never invented: see
     /// `genbank::parse_location`.
     pub unrepresentable_locations: Vec<String>,
+    /// Paths in a `.dna`'s notes block that the model has no shape for.
+    ///
+    /// Three forms, spelled apart so one report can carry all three:
+    /// `Notes/References/Reference` (a subtree under a note),
+    /// `Notes/Comments/text()` (text following one) and `Notes@version` (an
+    /// attribute on the root).
+    ///
+    /// A sibling of `unrepresentable_locations` and deliberately not the same
+    /// field: `pl info` prints that one as "location(s) this reader cannot
+    /// represent", and folding `Notes/References/Reference` into it would make
+    /// the CLI state something false about coordinates — the same
+    /// encode-it-into-the-neighbouring-field mistake this whole channel exists
+    /// to avoid. Empty for every format that is not SnapGene, and for every
+    /// `.dna` whose block 6 is flat, which is most of them.
+    ///
+    /// A note's own key, text and attributes are all kept; see
+    /// `snapgene::Document::unrepresentable_notes`.
+    pub unrepresentable_notes: Vec<String>,
     /// Did the *file* state the topology, or did we fall back to a default?
     ///
     /// [`Molecule::topology`] has two states and defaults to `Linear`, which
@@ -165,16 +183,14 @@ pub fn load_all(data: &[u8]) -> Result<(Vec<Molecule>, Format, LoadReport), Load
     match detect(data) {
         Some(Format::SnapGene) => {
             let doc = snapgene::parse(data).map_err(LoadError::SnapGene)?;
-            Ok((
-                vec![doc.molecule],
-                Format::SnapGene,
-                LoadReport {
-                    records: 1,
-                    // A `.dna` always carries a topology flag.
-                    topology_declared: true,
-                    ..Default::default()
-                },
-            ))
+            let report = LoadReport {
+                records: 1,
+                // A `.dna` always carries a topology flag.
+                topology_declared: true,
+                unrepresentable_notes: doc.unrepresentable_notes,
+                ..Default::default()
+            };
+            Ok((vec![doc.molecule], Format::SnapGene, report))
         }
         Some(Format::GenBank) => {
             let text = String::from_utf8_lossy(data);
@@ -185,6 +201,8 @@ pub fn load_all(data: &[u8]) -> Result<(Vec<Molecule>, Format, LoadReport), Load
                 unrepresentable_locations,
                 topology_declared: genbank::declares_topology(&text),
                 suspect: looks_like_nothing(&all),
+                // GenBank has no notes block; only a `.dna` fills this.
+                unrepresentable_notes: Vec::new(),
             };
             Ok((all, Format::GenBank, report))
         }

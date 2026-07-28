@@ -252,8 +252,19 @@ fn summary_json(mol: &Molecule, fmt: Format) -> String {
     j.end_arr();
 
     j.key("notes").arr();
-    for (k, v) in &mol.notes {
-        j.obj().kv_str("name", k).kv_str("value", v).end_obj();
+    for n in &mol.notes {
+        j.obj().kv_str("name", &n.key).kv_str("value", &n.value);
+        // `attrs` is emitted even when empty, exactly as `sites` is above. A key
+        // that appears only sometimes is the harder contract to consume, and the
+        // half of `<Created UTC="22:0:0">2022.12.13</Created>` that lives in the
+        // attribute has nowhere else to go — the alternative was concatenating
+        // it into `value`, which every consumer would then have to un-parse.
+        j.key("attrs").arr();
+        for (k, v) in &n.attrs {
+            j.obj().kv_str("name", k).kv_str("value", v).end_obj();
+        }
+        j.end_arr();
+        j.end_obj();
     }
     j.end_arr();
 
@@ -573,6 +584,45 @@ mod tests {
         assert!(
             json.contains(r#""lowercase":20"#),
             "case must be reported: {json}"
+        );
+    }
+
+    /// The same fixture with a block 6 appended.
+    fn dna_with_notes(notes: &str) -> Vec<u8> {
+        let mut out = dna_fixture();
+        out.push(snapgene::block::NOTES);
+        out.extend_from_slice(&(notes.len() as u32).to_be_bytes());
+        out.extend_from_slice(notes.as_bytes());
+        out
+    }
+
+    #[test]
+    fn a_notes_attribute_reaches_the_browser_as_its_own_field() {
+        // Nothing looked at notes on this path: `dna_fixture` has no block 6,
+        // and `tests/drive_wasm.mjs` — the driver that compares this module's
+        // output against `pl.exe --json` over a corpus and reports
+        // "identical: 33/33" — does not mention notes at all. So `attrs` could
+        // be emitted empty on every note with every check in the repository
+        // green, while the browser reader silently lost the half of
+        // `<Created UTC="22:0:0">2022.12.13</Created>` that lives in the
+        // attribute. Two hand-written serialisers now emit this shape (the other
+        // is `pl info --json`); this pins one of them.
+        let (rc, json) = open(&dna_with_notes(
+            r#"<Notes><Created UTC="22:0:0">2022.12.13</Created><Empty/></Notes>"#,
+        ));
+        assert_eq!(rc, 0, "{json}");
+        assert!(
+            json.contains(
+                r#"{"name":"Created","value":"2022.12.13","attrs":[{"name":"UTC","value":"22:0:0"}]}"#
+            ),
+            "{json}"
+        );
+        // `attrs` is present and empty rather than absent, which is the contract
+        // the comment at the emission site states and the only one a consumer
+        // can read without a fallback.
+        assert!(
+            json.contains(r#"{"name":"Empty","value":"","attrs":[]}"#),
+            "an attribute-free note still carries the key: {json}"
         );
     }
 

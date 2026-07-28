@@ -311,7 +311,7 @@ struct SequenceDocument {
     features:      Vec<Feature>,
     primers:       Vec<Primer>,
     colors:        Vec<ColorOverride>,
-    notes:         Notes,
+    notes:         Vec<Note>,            // key + text + attrs, in file order
     provenance:    Provenance,           // { op_log_head, parents: Vec<Ulid> }
     foreign:       ForeignBlocks,        // see §6.3
     checksums:     Checksums,            // cdseguid | ldseguid + sha256(seq)

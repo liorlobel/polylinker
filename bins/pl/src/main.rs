@@ -504,6 +504,44 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                 Ok((mol, fmt, report)) => {
                     let sites: usize = mol.primers.iter().map(|p| p.sites.len()).sum();
                     let lower = mol.seq.iter().filter(|b| b.is_ascii_lowercase()).count();
+                    // Notes, with their attributes. This is the only machine-
+                    // readable view of block 6 the CLI has, and it exists so
+                    // `reference/python/tests/xcheck_rust.py` can compare it:
+                    // two independently written parsers had silently disagreed
+                    // about that block for as long as both existed — Python kept
+                    // `<Empty/>` and Rust dropped it, Python collapsed a
+                    // repeated tag and Rust kept both — because the cross-check
+                    // compared bases, features and primer counts and nothing
+                    // else. An `.dna` attribute is exactly the kind of detail
+                    // one implementation notices and the other does not.
+                    let notes: Vec<String> = mol
+                        .notes
+                        .iter()
+                        .map(|n| {
+                            let attrs: Vec<String> = n
+                                .attrs
+                                .iter()
+                                .map(|(k, v)| {
+                                    format!(
+                                        "{{{}: {}, {}: {}}}",
+                                        json_str("name"),
+                                        json_str(k),
+                                        json_str("value"),
+                                        json_str(v)
+                                    )
+                                })
+                                .collect();
+                            format!(
+                                "{{{}: {}, {}: {}, {}: [{}]}}",
+                                json_str("name"),
+                                json_str(&n.key),
+                                json_str("value"),
+                                json_str(&n.value),
+                                json_str("attrs"),
+                                attrs.join(", ")
+                            )
+                        })
+                        .collect();
                     let feats: Vec<String> = mol
                         .features
                         .iter()
@@ -531,7 +569,7 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                         })
                         .collect();
                     out.push_str(&format!(
-                        "  {{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: [{}]}}",
+                        "  {{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: [{}], {}: [{}], {}: [{}]}}",
                         json_str("file"), json_str(&path.display().to_string()),
                         json_str("format"), json_str(fmt.name()),
                         json_str("bp"), mol.len(),
@@ -544,7 +582,11 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                         json_str("n_primers"), mol.primers.len(),
                         json_str("n_binding_sites"), sites,
                         json_str("n_features"), mol.features.len(),
-                        json_str("features"), feats.join(", ")
+                        json_str("features"), feats.join(", "),
+                        json_str("notes"), notes.join(", "),
+                        json_str("unrepresentable_notes"),
+                        report.unrepresentable_notes.iter()
+                            .map(|s| json_str(s)).collect::<Vec<_>>().join(", ")
                     ));
                 }
             }
@@ -599,6 +641,26 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                         report.unrepresentable_locations.len(),
                         report
                             .unrepresentable_locations
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                // Its own line with its own noun. Folding these into the
+                // "location(s)" line above would have the CLI say something
+                // false about coordinates. "part(s) of the notes block" rather
+                // than "element(s) nested deeper" because the channel carries
+                // three shapes — a nested element, a note's text after one and
+                // an attribute on the `<Notes>` root — and a noun naming only
+                // the first would misdescribe `Notes/Comments/text()`.
+                if !report.unrepresentable_notes.is_empty() {
+                    println!(
+                        "   skipped    {} part(s) of the notes block this model cannot hold: {}",
+                        report.unrepresentable_notes.len(),
+                        report
+                            .unrepresentable_notes
                             .iter()
                             .take(3)
                             .cloned()
@@ -770,14 +832,104 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
         // What the `.dna` writer deliberately omits is stated at
         // `snapgene::from_molecule`: the two regenerable caches, 78% of a
         // typical file and dangerous when stale, and the history tree, which
-        // is a provenance graph this file does not have.
+        // is a provenance graph this file does not have. Anything else missing
+        // from the output is reported below rather than assumed absent — from
+        // *both* directions, which took two goes to get right: what the writer
+        // could not carry, and what the reader could not build in the first
+        // place. Only the writer's half was wired at first, and the reader's
+        // half is where a `.dna`'s nested citation goes.
+        //
+        // The `_reporting` variants, not `write`/`from_molecule`. Both writers
+        // have filled a `Vec<String>` of un-writable items since block 5 was
+        // implemented and both plain wrappers throw it away, so the only callers
+        // of the reporting forms in this workspace were unit tests: a primer
+        // binding site starting before base 1 was dropped by the `.dna` writer
+        // and `pl convert` printed nothing and exited 0. docs/PLAN.md §6.4.5 is
+        // blunt about which way this goes — "a writer that drops unknown blocks
+        // while appearing to succeed is the single worst outcome in this
+        // document".
+        let mut unwritable: Vec<String> = Vec::new();
         let bytes: Vec<u8> = match out_fmt {
-            Out::GenBank => genbank::write(&mol, &title, date).into_bytes(),
+            Out::GenBank => {
+                let (text, rep) = genbank::write_reporting(&mol, &title, date);
+                unwritable = rep;
+                text.into_bytes()
+            }
             Out::Fasta => fasta::write(&mol, &title, 70).into_bytes(),
-            Out::Dna => pl_fileio::snapgene::from_molecule(&mol),
+            Out::Dna => {
+                let (b, rep) = pl_fileio::snapgene::from_molecule_reporting(&mol);
+                unwritable = rep;
+                b
+            }
         };
+        if !unwritable.is_empty() {
+            eprintln!(
+                "pl: {}: {} item(s) the {} writer could not carry: {}",
+                path.display(),
+                unwritable.len(),
+                ext,
+                unwritable
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
 
-        // GenBank cannot express an unoriented or bidirectional feature, so
+        // The *reader's* half of the same sentence, and it has to be said here
+        // rather than only by `pl info`. `report` was bound above and only
+        // `truncated()` was ever read from it, so a `.dna` whose block 6 holds
+        // `<References><Reference pubMedID=".." title=".." journal=".."/></References>`
+        // — a published citation, on 3 of the 33 real files this was checked
+        // against — went through `pl convert --to dna` with exit 0, an empty
+        // stderr, and `<References></References>` in the output. Re-reading that
+        // output reports nothing, because by then there is nothing left to
+        // report: one hop and the loss is both total and invisible. That is
+        // verbatim the complaint audit #77 opened with, and wiring only the
+        // writer's channel left it true.
+        //
+        // Not folded into the `unwritable` line above: that line says "the
+        // writer could not carry", and this says "the file held something the
+        // reader could not build". Ungated by `out_fmt` — GenBank and FASTA
+        // discard the notes block wholesale, so the statement is no less true
+        // there.
+        if !report.unrepresentable_notes.is_empty() {
+            eprintln!(
+                "pl: {}: {} part(s) of the source's notes block this model cannot hold, so \
+                 the output does not carry them: {}",
+                path.display(),
+                report.unrepresentable_notes.len(),
+                report
+                    .unrepresentable_notes
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        // The same for the GenBank reader's exotic locations, for the same
+        // reason and by the same route: `pl info` said so and `pl convert`,
+        // which is the verb that writes the lossy copy, did not.
+        if !report.unrepresentable_locations.is_empty() {
+            eprintln!(
+                "pl: {}: {} location(s) the reader could not represent, so the output does \
+                 not carry them: {}",
+                path.display(),
+                report.unrepresentable_locations.len(),
+                report
+                    .unrepresentable_locations
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        // A different statement, and still GenBank-only: GenBank cannot express
+        // an unoriented or bidirectional feature, so
         // those are written as forward. Say so rather than letting the export
         // publish a directional claim the source never made.
         if is_gb {

@@ -214,6 +214,89 @@ pub struct Primer {
     pub sites: Vec<BindingSite>,
 }
 
+/// One entry of a source file's metadata block: a name, its text, and the named
+/// parts the source recorded *beside* that text.
+///
+/// This was `(String, String)` and lost half of a field. `.dna` block 6 splits
+/// one value across both halves — `<Created UTC="22:0:0">2022.12.13</Created>`
+/// is a single timestamp whose date is the element text and whose time of day is
+/// an attribute — and a pair can hold the date or the time, not both. The reader
+/// kept the date, so by the time anything could ask for the time it was gone,
+/// and `snapgene::from_molecule` re-emitted `<Created>2022.12.13</Created>`: a
+/// `.dna` in, a `.dna` out, and the recorded creation time absent from the
+/// second one with nothing printed. See docs/DNA-FORMAT.md §7.
+///
+/// Encoding the attribute into the key instead — `"Created UTC=22:0:0"` — would
+/// have been cheaper and is why this is a type change rather than a string hack:
+/// `pl-scan`, `pl-wasm` and the GUI's notes grid all render the key verbatim, so
+/// that syntax would have been displayed raw to the user as the note's name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Note {
+    pub key: String,
+    /// The element's own text.
+    ///
+    /// Empty is a real state and not the same as absent: `<Empty/>` and
+    /// `<Created UTC="21:55:7"/>` carry no text at all, and the reader that
+    /// waited for a text event to create the note emitted nothing for either, so
+    /// a note the file contained had no representation to be empty *in*.
+    pub value: String,
+    /// Named parts recorded alongside `value`, in file order.
+    ///
+    /// A `Vec` rather than a map because the source's order is not stable and
+    /// there is no reason to normalise it: two `.dna` files written by the same
+    /// SnapGene install spell one `<Reference>`'s attributes
+    /// `title,pubMedID,journal,authors` and `authors,pubMedID,title,journal`, so
+    /// a map would silently reorder one of them on rewrite.
+    ///
+    /// Set only by the SnapGene reader. `Molecule::notes` has exactly one
+    /// producer in this workspace, and block 6 is the only metadata block in any
+    /// format read here that puts half a field in an attribute — GenBank and
+    /// FASTA never populate `notes` at all, they only read it — so this is empty
+    /// for every molecule that did not come from a `.dna`.
+    pub attrs: Vec<(String, String)>,
+}
+
+impl Note {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Note {
+            key: key.into(),
+            value: value.into(),
+            attrs: Vec::new(),
+        }
+    }
+    /// The value of one attribute, or `None` if it is absent.
+    ///
+    /// First-wins if the name repeats, matching [`Molecule::note`]. A repeat can
+    /// only arrive from a file — `set_attr` below cannot produce one — and XML
+    /// forbids it, so there is no second value this could legitimately prefer.
+    pub fn attr(&self, name: &str) -> Option<&str> {
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+    /// Set one attribute, replacing an existing entry of that name **in place**.
+    ///
+    /// It appended, which made a method named `set_` the shortest route to a
+    /// state XML has no spelling for: two `set_attr("UTC", ..)` calls left
+    /// `attrs` holding `UTC` twice, `attr("UTC")` answered with the first and
+    /// stale one, and `snapgene::notes_xml` wrote
+    /// `<Created UTC="22:0:0" UTC="09:00:00">` — markup that violates XML 1.0's
+    /// "Unique Att Spec" well-formedness constraint, so the reference
+    /// implementation's `ET.fromstring` refuses the whole block. Replacing in
+    /// place keeps the position the caller first chose, because block 6's
+    /// attribute order is not stable and reordering on edit is a diff nobody
+    /// asked for.
+    pub fn set_attr(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        let name = name.into();
+        let value = value.into();
+        match self.attrs.iter_mut().find(|(k, _)| *k == name) {
+            Some(slot) => slot.1 = value,
+            None => self.attrs.push((name, value)),
+        }
+    }
+}
+
 /// Methylation state, which blocks some restriction enzymes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Methylation {
@@ -329,7 +412,13 @@ pub struct Molecule {
     pub methylation: Methylation,
     pub features: Vec<Feature>,
     pub primers: Vec<Primer>,
-    pub notes: Vec<(String, String)>,
+    /// The source file's metadata block, in file order. See [`Note`].
+    ///
+    /// Ordered, and duplicate keys are possible: block 6 is a list of elements,
+    /// not a map, and nothing in it is schema-constrained. The Python oracle
+    /// models it as a `dict` and therefore keeps the *last* of a repeated tag
+    /// where this keeps every one of them.
+    pub notes: Vec<Note>,
     /// Length claimed by the source when the bases themselves are absent.
     ///
     /// Annotation-only GenBank is real and common: `ORIGIN` immediately
@@ -360,6 +449,27 @@ impl Molecule {
     /// True when the file described a molecule but carried no bases.
     pub fn sequence_absent(&self) -> bool {
         self.seq.is_empty() && self.declared_len.unwrap_or(0) > 0
+    }
+
+    /// The **text** of the first note with this key, or `None` if there is none.
+    ///
+    /// First-wins, deliberately, and written down here because it was previously
+    /// an undocumented accident implemented twice: `snapgene::parse` takes the
+    /// first `Description` and `genbank::write` the first `UUID`, and
+    /// `snapgene::notes_xml`'s de-duplication of `Description` is written
+    /// against that assumption. `notes` can hold the same key twice — see the
+    /// field's own comment — and a caller that needs all of them iterates it.
+    ///
+    /// Returns the text only. A note whose value lives in an attribute, such as
+    /// the time of day on `<Created UTC="22:0:0">`, is reached through
+    /// [`Note::attr`]; this deliberately does not merge the two, because
+    /// whatever it returned would have to disagree with what `notes_xml` writes
+    /// back out.
+    pub fn note(&self, key: &str) -> Option<&str> {
+        self.notes
+            .iter()
+            .find(|n| n.key == key)
+            .map(|n| n.value.as_str())
     }
 
     /// True for a standalone annotation track: features, but neither bases nor

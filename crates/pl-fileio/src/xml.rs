@@ -110,6 +110,23 @@ pub fn unescape(s: &str) -> String {
 }
 
 /// Escape text for inclusion in an attribute value or element body.
+///
+/// TAB, LF and CR are escaped as numeric character references, not written raw,
+/// and that is not decoration. XML 1.0 requires *attribute-value normalization*
+/// — a literal tab, newline or carriage return inside an attribute value is
+/// replaced by a space before the value ever reaches the application — and
+/// *line-end normalization*, which turns a literal CR (or CRLF) anywhere in the
+/// document into LF. So `title="line one\nline two"` written raw comes back as
+/// `"line one line two"` from SnapGene or any conformant reader, while `pl`'s
+/// own deliberately lenient [`scan`] copies the bytes verbatim and sees no
+/// change at all: the corruption is invisible to every round trip in this
+/// repository and appears only in the other tool. `&#9;` / `&#10;` / `&#13;`
+/// survive both normalizations, and [`unescape`] already expands numeric
+/// references, so the trip closes.
+///
+/// One function for element bodies and attribute values, though only attributes
+/// need TAB and LF escaped. Two escapers would mean a call site could pick the
+/// wrong one, and a character reference in a body is the same text.
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -119,6 +136,9 @@ pub fn escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            '\t' => out.push_str("&#9;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
             _ => out.push(c),
         }
     }
@@ -348,6 +368,29 @@ mod tests {
     #[test]
     fn escape_round_trips_through_unescape() {
         for s in [r#"a&b<c>d"e'f"#, "plain", "δ subunit", "5' & 3'"] {
+            assert_eq!(unescape(&escape(s)), s);
+        }
+    }
+
+    /// A tab, newline or carriage return has to leave as a character reference.
+    ///
+    /// Not a round-trip test through our own reader — that passed while raw:
+    /// `scan` copies the bytes between the quotes verbatim, so `pl` -> `pl`
+    /// looked stable and the value changed only when SnapGene, or ElementTree in
+    /// `reference/python`, applied the attribute-value normalization XML 1.0
+    /// mandates. So this asserts the *spelling* on the way out, which is the
+    /// half the other implementation can see.
+    #[test]
+    fn whitespace_that_a_conformant_parser_would_normalise_leaves_as_a_reference() {
+        assert_eq!(escape("line one\nline two"), "line one&#10;line two");
+        assert_eq!(escape("a\tb"), "a&#9;b");
+        assert_eq!(escape("a\r\nb"), "a&#13;&#10;b");
+        for s in ["a\tb", "a\nb", "a\rb", "mixed\r\n\tand & <text>"] {
+            assert!(
+                !escape(s).contains(['\t', '\n', '\r']),
+                "escape({s:?}) left a raw control character: {:?}",
+                escape(s)
+            );
             assert_eq!(unescape(&escape(s)), s);
         }
     }

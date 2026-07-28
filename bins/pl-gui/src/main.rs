@@ -1694,6 +1694,26 @@ impl App {
                     .size(11.5),
                 );
             }
+            // A statement about the file, so it belongs beside the history-tree
+            // line and not in the notes grid below: these paths name parts of
+            // block 6 that have no row in that grid precisely because the model
+            // could not hold them. Deliberately not "nested deeper" — a
+            // `Notes/Comments/text()` entry is a note's own text, not a nested
+            // element, and the wording has to cover every form the channel
+            // carries or it will describe two of the three falsely.
+            if !c.unrepresentable_notes.is_empty() {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} part(s) of this file's notes block cannot be held by this model \
+                         and are not shown: {}",
+                        c.unrepresentable_notes.len(),
+                        c.unrepresentable_notes.join(", ")
+                    ))
+                    .color(pal(ui).muted)
+                    .size(11.5),
+                );
+            }
         }
 
         if !m.notes.is_empty() {
@@ -1707,9 +1727,28 @@ impl App {
                         .num_columns(2)
                         .spacing([12.0, 4.0])
                         .show(ui, |ui| {
-                            for (k, v) in &m.notes {
-                                ui.label(RichText::new(k).color(pal(ui).muted).size(11.0));
-                                ui.label(RichText::new(v).size(11.0));
+                            for n in &m.notes {
+                                ui.label(RichText::new(&n.key).color(pal(ui).muted).size(11.0));
+                                // Two columns, and the attributes go *under* the
+                                // value rather than into a third column: most
+                                // notes have none, so a third column would be
+                                // empty on nearly every row. What must not
+                                // happen is a synthesised "Created (UTC=22:0:0)"
+                                // key or a "2022.12.13 UTC=22:0:0" value — that
+                                // is a syntax this grid would render raw and
+                                // that no file contains.
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(&n.value).size(11.0));
+                                    for (k, v) in &n.attrs {
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(8.0);
+                                            ui.label(
+                                                RichText::new(k).color(pal(ui).muted).size(10.5),
+                                            );
+                                            ui.label(RichText::new(v).size(10.5));
+                                        });
+                                    }
+                                });
                                 ui.end_row();
                             }
                         });

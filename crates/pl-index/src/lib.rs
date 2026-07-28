@@ -82,7 +82,16 @@ pub mod scan;
 ///
 /// **Bump this by hand whenever parsing or derivation changes.** A false
 /// positive costs one rebuild; a false negative costs a wrong answer.
-pub const ENGINE: u32 = 1;
+///
+/// 2: the SnapGene notes reader stopped discarding element attributes and
+/// attribute-only children, and `pl_scan::searchable_text` started indexing
+/// them. Both halves qualify — the parser changed *and* a derived column did —
+/// and without the bump the `<Created UTC="22:0:0">` that `pl find --text
+/// 22:0:0` now matches would stay invisible in every already-built library.
+/// The same bump covers the note *values* the reader stopped fusing across a
+/// nested child: a `<Comments>` field indexed as `Grown at 37 C overnight`, a
+/// string in no file, is now indexed as what the file actually says.
+pub const ENGINE: u32 = 2;
 
 /// The on-disk layout version. Bumped when the bytes change shape.
 pub const FORMAT: u32 = 1;

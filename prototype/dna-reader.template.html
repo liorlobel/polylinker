@@ -439,7 +439,18 @@ function adapt(summary, sequence) {
     gc: summary.gc,
     lowercase: summary.lowercase,
     ambiguous: summary.ambiguous,
-    notes: Object.fromEntries(summary.notes.map(n => [n.name, n.value])),
+    // An ordered list, not an object keyed by name. `Object.fromEntries` threw
+    // away two things the core deliberately keeps: a repeated note tag, where
+    // the later one silently won, and — once the core grew an attribute channel
+    // — the `attrs` that hold half of `<Created UTC="22:0:0">2022.12.13</Created>`.
+    // The core's JSON is the contract, and this adapter was narrowing it.
+    // No `n.attrs || []`: the emitter writes `attrs` on every note, empty or
+    // not, and its comment says so — a fallback here would be a second, quieter
+    // reading of the same contract and the two would drift. A pl-wasm unit test
+    // now pins the array's presence, so this can take it at its word.
+    notes: summary.notes.map(n => ({
+      name: n.name, value: n.value, attrs: n.attrs,
+    })),
     features: summary.features.map(f => ({
       name: f.name,
       type: f.kind,

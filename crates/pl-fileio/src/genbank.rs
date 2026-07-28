@@ -784,7 +784,7 @@ pub fn write_reporting(
     out.push_str("ACCESSION   .\nVERSION     .\nKEYWORDS    .\n");
     out.push_str("SOURCE      synthetic DNA construct\n  ORGANISM  synthetic DNA construct\n");
     out.push_str("COMMENT     Converted by Polylinker.\n");
-    if let Some((_, uuid)) = mol.notes.iter().find(|(k, _)| k == "UUID") {
+    if let Some(uuid) = mol.note("UUID") {
         out.push_str(&format!("            Source document UUID: {uuid}\n"));
     }
     out.push_str("FEATURES             Location/Qualifiers\n");

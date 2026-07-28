@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import snapdna  # noqa: E402
@@ -75,7 +76,81 @@ def compare(path, rust, doc):
     if rust["lowercase"] != lower:
         problems.append(f"lowercase bases {rust['lowercase']} vs {lower}")
 
+    # Block 6, element by element, attributes included.
+    #
+    # This comparison did not exist, and the two implementations had disagreed
+    # about that block for as long as both existed: Python's dict comprehension
+    # kept `<Empty/>` (text None -> "") where Rust waited for a text event and
+    # dropped it, Python collapsed a repeated tag to the last where Rust kept
+    # every one, and neither carried the `UTC` attribute that is half of
+    # `<Created UTC="22:0:0">2022.12.13</Created>`.  Nothing compared them, so
+    # nothing said so -- which is the failure mode this whole script exists to
+    # prevent.
+    py_notes = [(n.key, n.value, sorted(n.attrs)) for n in doc.notes]
+    rs_notes = [
+        (n["name"], n["value"], sorted((a["name"], a["value"]) for a in n["attrs"]))
+        for n in rust.get("notes", [])
+    ]
+    if py_notes != rs_notes:
+        problems.append(f"notes {rs_notes} vs {py_notes}")
+    # Compared exactly, which is why the two readers have to agree on *what*
+    # goes in here and not merely that something does: Rust reported every
+    # descendant with a full path while Python reported the note's direct
+    # children only, so `<A><B><C/></B></A>` was a hard DIFFER in the one field
+    # added to prove this fix against an independent implementation.  Both now
+    # carry three spellings -- `Notes/A/B`, `Notes/A/text()`, `Notes@version` --
+    # and the synthetic fixtures below exercise all three, since no real file
+    # does.
+    if sorted(rust.get("unrepresentable_notes", [])) != sorted(doc.unrepresentable_notes):
+        problems.append(
+            f"unrepresentable note parts {rust.get('unrepresentable_notes')} "
+            f"vs {doc.unrepresentable_notes}")
+
     return problems
+
+
+# Block 6 shapes that no real file on any machine here has, and on which the two
+# implementations were found disagreeing the moment anything compared them.
+#
+# The corpus cannot reach these -- all 32 real payloads are flat or one level
+# deep, none has mixed content, none has an attribute on <Notes> -- so a
+# cross-check driven only by real files reports "agree 33 / disagree 0" and
+# proves nothing about any of them.  Both readers are written to a contract, and
+# a contract is exactly what a corpus cannot pin.  Generated rather than checked
+# in as binaries so the bytes stay readable in the diff.
+SYNTHETIC = {
+    # Text on both sides of a nested child.  Rust concatenated every run at note
+    # depth and answered "beforeafter"; ElementTree's .text answered "before".
+    "mixed_content": "<Notes><A>before<B/>after</A></Notes>",
+    # Three levels.  Python walked one and hard-coded a three-segment path.
+    "deep_nesting": '<Notes><A><B><C x="1"/></B></A></Notes>',
+    # An attribute on the root, which both used to drop in silence.
+    "root_attribute": '<Notes version="3"><Type>Synthetic</Type></Notes>',
+    # The shapes that already agreed, kept as controls: a regression that
+    # "fixes" the three above by breaking these would otherwise pass.
+    "attribute_and_empty": '<Notes><Created UTC="22:0:0">2022.12.13</Created><Empty/></Notes>',
+    "repeated_tag": "<Notes><Comments>one</Comments><Comments>two</Comments></Notes>",
+    "citation": '<Notes><References>\n<Reference pubMedID="9335267"/>\n</References></Notes>',
+}
+
+
+def _write_synthetic(dirname):
+    """Write one .dna per SYNTHETIC entry and return their paths."""
+    os.makedirs(dirname, exist_ok=True)
+    header = b"SnapGene" + (1).to_bytes(2, "big") + (15).to_bytes(2, "big") \
+        + (19).to_bytes(2, "big")
+    paths = []
+    for name, notes in SYNTHETIC.items():
+        raw = bytearray()
+        for kind, payload in ((9, header), (0, b"\x01ACGT"), (6, notes.encode())):
+            raw.append(kind)
+            raw += len(payload).to_bytes(4, "big")
+            raw += payload
+        p = os.path.join(dirname, f"synthetic_{name}.dna")
+        with open(p, "wb") as fh:
+            fh.write(raw)
+        paths.append(p)
+    return paths
 
 
 def main():
@@ -87,6 +162,7 @@ def main():
     files = sorted(f for f in glob.glob(pattern, recursive=True) if os.path.isfile(f))
     if not files:
         sys.exit("no files matched")
+    files += _write_synthetic(os.path.join(tempfile.gettempdir(), "pl-xcheck-synthetic"))
 
     # Batch to keep the command line short on Windows.
     rust = {}

@@ -124,6 +124,35 @@ class Primer:
 
 
 @dataclass
+class Note:
+    """One direct child of ``<Notes>``: its tag, its text, and its attributes.
+
+    This was a ``dict[str, str]`` mapping tag to text, which lost the same thing
+    the Rust reader lost and one more besides.  ``<Created UTC="22:0:0">
+    2022.12.13</Created>`` is one timestamp split across an attribute and a text
+    node, and a tag->text mapping can hold the date or the time, never both.  A
+    dict additionally collapses a repeated tag to whichever came last, where the
+    Rust model keeps every one of them in file order -- so the two reference
+    implementations disagreed structurally about block 6, and nothing compared
+    them (``tests/xcheck_rust.py`` checked bases, features and primer counts).
+
+    ``attrs`` is a list, not a dict, because SnapGene's attribute order is not
+    stable between files: one ``<Reference>`` is written
+    ``title,pubMedID,journal,authors`` in one file and
+    ``authors,pubMedID,title,journal`` in another.
+    """
+    key: str
+    value: str = ""
+    attrs: list[tuple[str, str]] = field(default_factory=list)
+
+    def attr(self, name: str) -> str | None:
+        for k, v in self.attrs:
+            if k == name:
+                return v
+        return None
+
+
+@dataclass
 class SnapDnaDocument:
     sequence: str = ""
     flags: int = FLAG_DOUBLE_STRANDED
@@ -132,7 +161,9 @@ class SnapDnaDocument:
     import_version: int = 19
     features: list[Feature] = field(default_factory=list)
     primers: list[Primer] = field(default_factory=list)
-    notes: dict[str, str] = field(default_factory=dict)
+    notes: list[Note] = field(default_factory=list)
+    # Paths of elements nested under a note, which `Note` is too flat to hold.
+    unrepresentable_notes: list[str] = field(default_factory=list)
     history_xml: str | None = None
     blocks: list[Block] = field(default_factory=list)   # verbatim, for round-tripping
 
@@ -268,9 +299,84 @@ def _parse_primers(payload: bytes) -> list[Primer]:
     return prims
 
 
-def _parse_notes(payload: bytes) -> dict[str, str]:
+def _parse_notes(payload: bytes) -> tuple[list[Note], list[str]]:
+    """Block 6 as ordered notes, plus the paths of everything a flat note cannot hold.
+
+    Every behaviour here exists to match ``snapgene::parse_notes`` on the Rust
+    side, because a reference implementation that disagrees with the thing it
+    references is not a reference.  Two of them were found disagreeing after the
+    cross-check first learned to compare this block, and both were invisible on
+    real files -- they need shapes no observed ``.dna`` has, which is exactly why
+    an oracle has to be written to the contract and not to the corpus:
+
+    * ``child.text`` is stripped, is ``None`` rather than ``""`` for a
+      self-closing child, and is the text *before the first grandchild* only.
+      ``<Empty/>`` is a note with no text, not an absence.  Rust used to append
+      every text run at note depth, so ``<A>before<B/>after</A>`` gave it
+      ``"beforeafter"`` against ElementTree's ``"before"``; it now keeps the
+      leading run, as here, and reports the discarded tail as
+      ``Notes/A/text()`` -- so this walks the direct children's ``.tail`` and
+      reports the same path.
+    * The nested walk is *recursive*.  It looked one level down and hard-coded a
+      three-segment path, so ``<A><B><C/></B></A>`` gave Python ``["Notes/A/B"]``
+      against Rust's ``["Notes/A/B", "Notes/A/B/C"]`` -- a hard DIFFER in
+      ``xcheck_rust.py``, which compares these lists exactly.
+    * Attributes on ``<Notes>`` itself are reported as ``Notes@version``.  No
+      observed file has one; the branch exists so a future one is named.
+
+    ``<References><Reference .../></References>`` -- a plasmid's citation, and
+    real files carry it -- is deeper than this flat shape can hold.  Its path is
+    returned rather than folded into ``<References>``'s text, which is what
+    ElementTree hands back if you take ``.text`` at face value: the container's
+    whitespace, ``"\\n"``, a value the file never stated.
+    """
     root = ET.fromstring(payload.decode("utf-8", "replace"))
-    return {child.tag: (child.text or "") for child in root}
+    notes: list[Note] = []
+    nested: list[str] = []
+
+    def add(path: str) -> None:
+        # One line per distinct path: a <References> holding eight <Reference/>
+        # elements is one thing this model cannot hold, not eight.
+        if path not in nested:
+            nested.append(path)
+
+    def walk(prefix: str, el: ET.Element) -> None:
+        for sub in el:
+            path = f"{prefix}/{sub.tag}"
+            add(path)
+            walk(path, sub)
+
+    for name in root.attrib:
+        add(f"{root.tag}@{name}")
+    for child in root:
+        notes.append(Note(
+            key=child.tag,
+            value=(child.text or "").strip(),
+            attrs=list(child.attrib.items()),
+        ))
+        walk(f"{root.tag}/{child.tag}", child)
+        # A note's own text that follows a nested child.  Rust sees these as
+        # text events at note depth after a child has opened; ElementTree hangs
+        # them off the child as ``.tail``.  Whitespace only -- the newlines
+        # around a real <Reference/> -- is not a loss and is not reported, which
+        # is what ``xml::scan`` suppressing whitespace-only runs achieves on the
+        # other side.
+        if any((sub.tail or "").strip() for sub in child):
+            add(f"{root.tag}/{child.tag}/text()")
+    return notes, nested
+
+
+def note_text(notes: list[Note], key: str, default: str = "") -> str:
+    """The text of the first note with this key.
+
+    First-wins, matching ``Molecule::note`` on the Rust side.  Repeated tags are
+    possible -- nothing in block 6 is schema-constrained -- and this used to be a
+    dict lookup, which silently answered with the *last* of them.
+    """
+    for n in notes:
+        if n.key == key:
+            return n.value
+    return default
 
 
 def _parse_history(payload: bytes) -> str | None:
@@ -305,7 +411,7 @@ def loads(data: bytes) -> SnapDnaDocument:
         elif b.type == BLOCK_PRIMERS:
             doc.primers = _parse_primers(b.payload)
         elif b.type == BLOCK_NOTES:
-            doc.notes = _parse_notes(b.payload)
+            doc.notes, doc.unrepresentable_notes = _parse_notes(b.payload)
         elif b.type == BLOCK_HISTORY_TREE:
             doc.history_xml = _parse_history(b.payload)
     return doc
