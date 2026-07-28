@@ -6,9 +6,16 @@ Reads your lab's real files, including SnapGene `.dna`. Annotates from an openly
 licensed database that cites every source. Publishes its own correctness. Never
 sends a sequence anywhere.
 
-> **Status: pre-alpha.** There is no application yet. What exists today is a
-> validated file-format specification, two working reference implementations,
-> and a 135 KB architecture plan. See [Where this actually is](#where-this-actually-is).
+> **Status: pre-release.** The desktop app, the `pl` command line, the browser
+> build, Python bindings and an MCP server all work today, over 16 crates and
+> ~47,500 lines of dependency-free Rust, with 812 tests and a 39-step gate that
+> cross-checks the answers against Biopython, pydna, SciPy and the SEGUID
+> reference implementation.
+>
+> **Two things are deliberately not ready**, and they are the two that decide
+> whether you should trust it: the builds are **unsigned**, and the features
+> database ships **0 reviewed records**, so `pl annotate` finds nothing until a
+> curator signs rows off. See [Where this actually is](#where-this-actually-is).
 
 ---
 
@@ -53,7 +60,11 @@ Each ships before the app, stands alone, and survives the app.
 | [`reference/python/snapdna.py`](reference/python/snapdna.py) | Reader + writer, stdlib only. **Byte-exact round-trip on 41/41 files.** |
 | [`reference/python/ab1_probe.py`](reference/python/ab1_probe.py) | ABIF (`.ab1`) chromatogram reader. Parses 374/394 real traces. |
 | [`docs/PLAN.md`](docs/PLAN.md) | The architecture and roadmap this repo is built from. |
-| Application | **Not started.** |
+| [`bins/pl-mcp`](bins/pl-mcp) | **MCP server**, read-only, no dependencies — so an assistant can ask about a plasmid without being able to overwrite one. |
+| [`crates/pl-py`](crates/pl-py) | **Python bindings** (PyO3, abi3), so a script already using Biopython can call the parts that are hard to get right without being rewritten. |
+| [`docs/AUDIT-2026-07-28.md`](docs/AUDIT-2026-07-28.md) | A 123-agent audit of the whole workspace: 90 confirmed findings, 89 fixed. Kept in the repo because the findings that mattered most were **checks that could not fail**, and that is worth being public about. |
+| Signing | **Not done.** Needs a code-signing certificate and an Apple Developer ID; see [`docs/RELEASING.md`](docs/RELEASING.md). Until then `SHA256SUMS.txt` is the only integrity guarantee. |
+| Features database | **8 records, 0 reviewed.** Machine-assembled from public sources and not shipped by default. This is the intended state, enforced by a test: the tool may propose and never assert. |
 
 ### Getting your sequences out of `.dna`, today
 
