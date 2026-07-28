@@ -198,7 +198,14 @@ fn main() -> ExitCode {
         "bench-adapter" => cmd_bench_adapter(rest),
         "cut-adapter" => cmd_cut_adapter(rest),
         "-V" | "--version" => {
-            println!("pl {}", env!("CARGO_PKG_VERSION"));
+            // The commit, not just the version. There is no auto-updater by
+            // design (docs/RELEASING.md), so this line is the whole mechanism
+            // by which anyone establishes which build they are running — and
+            // every build between two releases says 0.1.0. `build.rs` stamps
+            // it, and marks it `-dirty` when the tree it was built from had
+            // uncommitted changes, because then the commit does not describe
+            // this binary.
+            println!("pl {} ({})", env!("CARGO_PKG_VERSION"), env!("PL_COMMIT"));
             Ok(())
         }
         other => Err(format!("unknown command '{other}'\n\n{USAGE}")),
@@ -3402,5 +3409,23 @@ mod tests {
         assert_eq!(from_secs(0), (1, 0, 1970));
         assert_eq!(from_secs(951_782_400), (29, 1, 2000)); // 2000-02-29
         assert_eq!(from_secs(1_774_483_200), (26, 2, 2026)); // 2026-03-26
+    }
+
+    #[test]
+    fn the_version_carries_the_commit_it_was_built_from() {
+        // `docs/RELEASING.md` says the update path is that a user checks when
+        // they want to, and that `pl --version` tells them which build they
+        // have. That sentence was false for a while: the binary printed
+        // "pl 0.1.0" and nothing else, and every build between two releases
+        // says 0.1.0. This test is what keeps the document honest.
+        let commit = env!("PL_COMMIT");
+        assert!(!commit.is_empty());
+        // Either a real short hash, or the documented fallback for a source
+        // tarball with no .git — never silently blank.
+        let core = commit.strip_suffix("-dirty").unwrap_or(commit);
+        assert!(
+            core == "unknown" || (core.len() >= 7 && core.chars().all(|c| c.is_ascii_hexdigit())),
+            "{commit:?} is neither a short hash nor 'unknown'"
+        );
     }
 }
