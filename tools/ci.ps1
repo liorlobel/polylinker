@@ -44,8 +44,39 @@ function Step {
         return
     }
     Write-Host ("  ....  {0}" -f $Name) -NoNewline
-    $out = & $Body 2>&1
-    if ($LASTEXITCODE -eq 0) {
+
+    # A step must PROVE it ran. Three ways this used to report ok while
+    # measuring nothing, all of them found by audit rather than by a red gate:
+    #
+    #   1. The command did not exist. PowerShell leaves $LASTEXITCODE at its
+    #      previous value, so a missing `python` inherited the 0 from whatever
+    #      ran last. Demonstrated: `nosuchcommand; $LASTEXITCODE` -> 0.
+    #   2. The body threw. `$out = & $Body 2>&1` captured the error object and
+    #      $LASTEXITCODE was never touched, so every `throw` in a step body was
+    #      decorative.
+    #   3. The body ran only cmdlets, which never set $LASTEXITCODE at all.
+    #
+    # The sentinel closes all three: nothing may pass without either a real
+    # exit code or an explicit `$global:LASTEXITCODE = 0`.
+    $sentinel = 424242
+    $global:LASTEXITCODE = $sentinel
+    $threw = $null
+    try {
+        $out = & $Body 2>&1
+    } catch {
+        $threw = $_
+    }
+
+    if ($threw) {
+        Write-Host ("`r  FAIL  {0}      " -f $Name) -ForegroundColor Red
+        Write-Host "        $threw"
+        $script:failed += $Name
+    } elseif ($LASTEXITCODE -eq $sentinel) {
+        Write-Host ("`r  FAIL  {0}      " -f $Name) -ForegroundColor Red
+        Write-Host '        this step reported no exit code, so it may have run nothing at all.'
+        Write-Host '        End it with a native command, or set $global:LASTEXITCODE explicitly.'
+        $script:failed += $Name
+    } elseif ($LASTEXITCODE -eq 0) {
         Write-Host ("`r  ok    {0}      " -f $Name) -ForegroundColor Green
     } else {
         Write-Host ("`r  FAIL  {0}      " -f $Name) -ForegroundColor Red
@@ -81,10 +112,25 @@ $hasWasm = (rustup target list --installed) -contains 'wasm32-unknown-unknown'
 Step 'wasm32 build' {
     cargo build -p pl-wasm --target wasm32-unknown-unknown --profile wasm
 } { $hasWasm }
-Step 'wasm module vs native binary' {
+# The wasm module's own checks: the ABI, the allocator, the string boundary.
+Step 'wasm module self-checks' {
     node crates/pl-wasm/tests/drive_wasm.mjs `
         target/wasm32-unknown-unknown/wasm/pl_wasm.wasm target/release/pl.exe
 } { $hasWasm -and (Have node) }
+
+# The same molecules through the wasm build and through the native binary.
+#
+# `drive_wasm.mjs` takes the corpus as its THIRD argument and skips the whole
+# comparison when it is absent (`if (!corpus)`, drive_wasm.mjs:137). This gate
+# never passed one, so a step named "wasm module vs native binary" ran the
+# self-checks above and compared nothing -- green, while measuring none of the
+# thing in its own name. Split out and preconditioned on the corpus, so its
+# absence SKIPS loudly instead of passing silently.
+Step 'wasm module vs native binary' {
+    node crates/pl-wasm/tests/drive_wasm.mjs `
+        target/wasm32-unknown-unknown/wasm/pl_wasm.wasm target/release/pl.exe `
+        (Resolve-Path $Corpus).Path
+} { $hasWasm -and (Have node) -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
 
 # `pl-index` must never touch the filesystem.
 #
@@ -169,7 +215,12 @@ Step 'the index agrees with the files' {
     # A query set that matches nothing would agree trivially, so assert that
     # the fixture actually produces hits.
     $hits = & target/release/pl.exe find $lab --motif GAATTC --index-at $idx 2>$null | Out-String
-    if ($hits -notmatch 'records? matched' -or $hits -match '^0 records matched') {
+    # Parse the count rather than anchoring a regex at the start of the string:
+    # `pl find` opens with the motif header, and PowerShell's -match has no
+    # Multiline, so the old `^0 records matched` clause could never match and
+    # the guard only ever caught a missing footer.
+    $matched = if ($hits -match '(\d+)\s+records?\s+matched') { [int]$Matches[1] } else { -1 }
+    if ($matched -le 0) {
         Write-Host '        the fixture produced no matches; the comparison is vacuous'
         $bad++
     }
@@ -322,7 +373,7 @@ Step 'Sanger placement vs Biopython' {
 # real: aph(3')-Ia is what this project's own database calls KanR.
 Step 'EPS agrees with the PDF, and is valid PostScript' {
     python reference/python/tests/xcheck_eps.py target/release/pl.exe (Get-ChildItem tests/library-fixture/*.gb, tests/export-fixture/*.gb | ForEach-Object { $_.FullName })
-}
+} { Have python }
 
 # The Python bindings, checked from Python, against Biopython.
 #
