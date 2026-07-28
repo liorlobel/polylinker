@@ -70,17 +70,43 @@ if ($dirty) {
 New-Item -ItemType Directory -Force $Out | Out-Null
 
 Say '  building...'
+# `$ErrorActionPreference = 'Stop'` turns *any* stderr from a native command
+# into a terminating error, and cargo writes warnings there. A warning must not
+# abort a release — it did, on an "output filename collision" note about a PDB —
+# so the exit code is what decides, which is the only thing that actually says
+# whether the build worked.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 cargo build --release --workspace 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'the release build failed' }
+$buildOk = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevEAP
+if (-not $buildOk) { throw 'the release build failed' }
 
 $artifacts = @()
-foreach ($name in 'pl.exe', 'polylinker.exe', 'pl-mcp.exe', 'polylinker.dll') {
+foreach ($name in 'pl.exe', 'polylinker.exe', 'pl-mcp.exe') {
     $p = Join-Path 'target/release' $name
     if (Test-Path $p) {
         Copy-Item $p (Join-Path $Out $name) -Force
         $artifacts += $name
     }
 }
+
+# The Python extension has to be *named* for the platform or it cannot be
+# imported at all. CPython on Windows loads `.pyd`, not `.dll`, however
+# correctly the DLL was built — and cargo has no say in the matter, so the
+# rename belongs here. Shipping `polylinker.dll` and expecting the user to
+# rename it is a papercut that reads as "the wheel is broken".
+$pyBuilt = Join-Path 'target/release' 'polylinker.dll'
+$pyShipped = 'polylinker.pyd'
+if (-not (Test-Path $pyBuilt)) {
+    $pyBuilt = Join-Path 'target/release' 'libpolylinker.so'
+    $pyShipped = 'polylinker.so'
+}
+if (Test-Path $pyBuilt) {
+    Copy-Item $pyBuilt (Join-Path $Out $pyShipped) -Force
+    $artifacts += $pyShipped
+}
+
 if (-not $artifacts) { throw 'the build produced nothing to ship' }
 
 # Signing. Absent credentials this reports and continues; it never silently
@@ -109,7 +135,7 @@ if ($MacIdentity) {
 $manifest = @()
 $manifest += "polylinker release manifest 1"
 $manifest += "built: $stamp"
-$manifest += "commit: $commit$(if ($dirty) { ' (WORKING TREE DIRTY — not reproducible)' })"
+$manifest += "commit: $commit$(if ($dirty) { ' (WORKING TREE DIRTY - not reproducible)' })"
 $manifest += "rustc: $rustc"
 $manifest += "signed: $(if ($signed) { $signed -join ', ' } else { 'no' })"
 $manifest += '--'
@@ -118,8 +144,14 @@ foreach ($a in $artifacts | Sort-Object) {
     $manifest += "$h  $a"
 }
 $manifestPath = Join-Path $Out 'SHA256SUMS.txt'
-# LF, and no BOM: a checksum file with CRLF or a BOM does not verify with
-# sha256sum on the machine of whoever is checking it.
+# LF, no BOM, and pure ASCII.
+#
+# The first two because a checksum file with CRLF or a BOM does not verify with
+# sha256sum on the machine of whoever is checking it. ASCII because Windows
+# PowerShell 5.1 reads a BOM-less script as ANSI, so a non-ASCII character in a
+# string here is read as several and written back out double-encoded: an em-dash
+# in the dirty-tree warning arrived in the manifest as three mojibake bytes.
+# There is nothing a checksum file needs that ASCII cannot spell.
 [System.IO.File]::WriteAllText(
     (Resolve-Path -LiteralPath $Out).Path + [System.IO.Path]::DirectorySeparatorChar + 'SHA256SUMS.txt',
     ($manifest -join "`n") + "`n",

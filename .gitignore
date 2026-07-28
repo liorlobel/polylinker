@@ -55,3 +55,7 @@ prototype/dna-reader.html
 features/build/.cache/
 packages/circular-map/node_modules/
 packages/circular-map/dist/
+
+# Release artifacts. Built by tools/release.ps1 on demand; the manifest records
+# the commit they came from, so there is nothing here worth versioning.
+/dist/

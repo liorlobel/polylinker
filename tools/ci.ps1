@@ -497,6 +497,14 @@ Step 'release script and its manifest' {
         $bytes = [System.IO.File]::ReadAllBytes($m)
         if ($bytes[0] -eq 0xEF) { throw 'the manifest has a BOM and will not verify' }
         if ($bytes -contains 0x0D) { throw 'the manifest has CRLF and will not verify' }
+        # Pure ASCII. Windows PowerShell 5.1 reads a BOM-less script as ANSI, so
+        # a non-ASCII character in one of the script's strings comes back out
+        # double-encoded -- an em-dash in the dirty-tree warning reached the
+        # manifest as three mojibake bytes, and nothing else here would have
+        # noticed. A checksum file needs nothing ASCII cannot spell.
+        foreach ($b in $bytes) {
+            if ($b -gt 0x7F) { throw 'the manifest is not pure ASCII' }
+        }
         $text = [System.Text.Encoding]::UTF8.GetString($bytes)
         $lines = $text -split "`n"
         $sep = [Array]::IndexOf($lines, '--')
@@ -511,6 +519,16 @@ Step 'release script and its manifest' {
             $n++
         }
         if ($n -lt 3) { throw "only $n artifact(s) in the manifest" }
+        # The Python extension must be shipped under a name CPython will load.
+        # A correctly built `polylinker.dll` cannot be imported on Windows at
+        # all, and the failure reads as "the wheel is broken" rather than as a
+        # naming problem — which is exactly how it presented when a smoke test
+        # first tried to import one.
+        $py = Get-ChildItem $out -Filter 'polylinker.*' |
+              Where-Object { $_.Extension -in '.pyd', '.so' }
+        if (-not $py) { throw 'no importable Python extension in the release' }
+        $probe = python -c "import importlib.util as u, sys; s = u.spec_from_file_location('polylinker', sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m); print(len(m.enzymes()))" $py.FullName 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "the shipped extension does not import: $probe" }
         Write-Host "        $n artifact(s), manifest verified" -ForegroundColor DarkGray
     } finally {
         Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
