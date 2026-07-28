@@ -64,7 +64,7 @@ Each ships before the app, stands alone, and survives the app.
 | [`crates/pl-py`](crates/pl-py) | **Python bindings** (PyO3, abi3), so a script already using Biopython can call the parts that are hard to get right without being rewritten. |
 | [`docs/AUDIT-2026-07-28.md`](docs/AUDIT-2026-07-28.md) | A 123-agent audit of the whole workspace: 90 confirmed findings, 89 fixed. Kept in the repo because the findings that mattered most were **checks that could not fail**, and that is worth being public about. |
 | Signing | **Not done.** Needs a code-signing certificate and an Apple Developer ID; see [`docs/RELEASING.md`](docs/RELEASING.md). Until then `SHA256SUMS.txt` is the only integrity guarantee. |
-| Features database | **8 records, 0 reviewed.** Machine-assembled from public sources and not shipped by default. This is the intended state, enforced by a test: the tool may propose and never assert. |
+| Features database | **70 records as of release 2026.07.28, 0 reviewed.** Machine-assembled from public sources and not shipped by default. This is the intended state, enforced by a test: the tool may propose and never assert. `pl licences` prints the live count and the attribution. |
 
 ### Getting your sequences out of `.dna`, today
 

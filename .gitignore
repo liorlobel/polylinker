@@ -59,3 +59,10 @@ packages/circular-map/dist/
 # Release artifacts. Built by tools/release.ps1 on demand; the manifest records
 # the commit they came from, so there is nothing here worth versioning.
 /dist/
+
+# The pLannotate taint gate (features/SOURCING.md section 0.4) fetches
+# snapgene.csv transiently, compares, and deletes it. That file carries no
+# licence of any kind and must never enter this history -- so it is ignored by
+# name here, and tools/hooks/pre-commit additionally rejects any staged blob
+# whose sha256 is the pinned one, which catches it under a different filename.
+snapgene.csv

@@ -1,0 +1,54 @@
+{
+  "what": "Licence evidence for features/SOURCING.md, archived as files because two of the URLs it cites render nothing without JavaScript. Retrieval date and sha256 are the point.",
+  "generated_by": "features/build/archive_legal.py",
+  "files": [
+    {
+      "file": "uniprot-help-license.json",
+      "url": "https://rest.uniprot.org/help/license",
+      "why": "The human page at www.uniprot.org/help/license is a JavaScript shell with no licence text in the HTML. This REST endpoint returns the same help article as JSON, which is what can actually be archived and hashed.",
+      "bytes": 914,
+      "sha256": "5960c22bf17f22286504b927dbb3ca41713c571ed91a10fe7a88ddd964b416ce",
+      "retrieved": "2026-07-28"
+    },
+    {
+      "file": "uniprot-ftp-LICENSE.txt",
+      "url": "https://ftp.uniprot.org/pub/databases/uniprot/LICENSE",
+      "why": "The operative licence file that ships with the distribution. SOURCING.md section 1 disagreement 4 turns on a per-copy notice condition stated here and nowhere on the website.",
+      "bytes": 384,
+      "sha256": "64e362ea88d408d318b9aa3fa7842e5fde78a2c8187b0070641982019bb16a32",
+      "retrieved": "2026-07-28"
+    },
+    {
+      "file": "uniprot-knowledgebase-README.txt",
+      "url": "https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/complete/README",
+      "why": "The knowledgebase README, which is where the distribution states what the release contains and under what terms.",
+      "bytes": 3918,
+      "sha256": "e7604f957cd32b59ba9fe06b86e4fb5c3be1cc9969294676f116af3b470365ae",
+      "retrieved": "2026-07-28"
+    },
+    {
+      "file": "rfam-COPYING.txt",
+      "url": "https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/COPYING",
+      "why": "Rfam's CC0 declaration as shipped, rather than as summarised by a badge. SOURCING.md section 1 records that the challenge round narrowed Rfam from GO to GO_WITH_CAVEAT on the strength of what this does and does not cover.",
+      "bytes": 601,
+      "sha256": "4366e90e0da3df45363e4c1d1bba140b3036ff3f78967f1b5f9ba23685b889d5",
+      "retrieved": "2026-07-28"
+    },
+    {
+      "file": "ncbi-policies.html",
+      "url": "https://www.ncbi.nlm.nih.gov/home/about/policies/",
+      "why": "NCBI's Disclaimer and Copyright notice. The old /About/disclaimer.html now redirects here, and features/NOTICE points users at this URL, so the page it points at is archived.",
+      "bytes": 38936,
+      "sha256": "8ad8f6f186ca51ec73a5fb8935ecfa17b8cbaad300b7025b381898ab72621869",
+      "retrieved": "2026-07-28"
+    },
+    {
+      "file": "nlm-terms-and-conditions.html",
+      "url": "https://www.nlm.nih.gov/web_policies.html",
+      "why": "The NLM Terms and Conditions governing the FTP servers this build pulls AMRFinderPlus from. SOURCING.md's first named disagreement is that the prober never opened this page, and that reading it flips attribution_required from false to TRUE.",
+      "bytes": 43557,
+      "sha256": "ec1279d1538944222eb49eb0b1fba0c168562cbed8701545f4fa475b7967a5c4",
+      "retrieved": "2026-07-28"
+    }
+  ]
+}

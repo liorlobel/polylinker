@@ -1253,7 +1253,8 @@ the label the user typed the moment they changed a base.
 gapped search, which is refused by name rather than by empty result; ranking and
 relevance, since results are ordered deterministically by `(path, record,
 position)`; protein and translated search; annotate-at-import, which is only as
-good as `features/features.tsv` and that is 8 records today; and Type IIS
+good as `features/features.tsv` and that is 70 records at release 2026.07.28,
+none of them signed off by a curator yet; and Type IIS
 enzymes, so **no Golden Gate query is advertised** — the shipped table has no
 BsaI, BsmBI, BbsI or SapI, and `--enzyme BsaI` says so instead of guessing.
 

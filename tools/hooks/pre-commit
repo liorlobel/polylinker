@@ -1,0 +1,28 @@
+#!/bin/sh
+# Reject the pLannotate snapgene.csv payload, whatever it has been renamed to.
+#
+# features/SOURCING.md section 0.4 requires both halves of this: the filename in
+# .gitignore, AND a hook keyed on the content hash. The filename alone is not a
+# control, because the taint gate's whole job is to bring those bytes onto the
+# machine and a rename defeats a name-based rule. That file has no licence of
+# any kind and no byte of it may ever be committed.
+#
+# Install: git config core.hooksPath tools/hooks
+# (checked by CI, which runs the same comparison over the staged tree)
+
+PINNED=793631d9eebf721efae9e1d6cd483b1cbb62f5adad41174afa8f8b78b1342d5c
+status=0
+
+for path in $(git diff --cached --name-only --diff-filter=ACMR); do
+    [ -f "$path" ] || continue
+    got=$(git show ":$path" | sha256sum | cut -d' ' -f1)
+    if [ "$got" = "$PINNED" ]; then
+        echo "refusing to commit $path: its contents are pLannotate's snapgene.csv"
+        echo "(sha256 $PINNED). That file is unlicensed and is fetched transiently"
+        echo "by features/build/taint_gate.py for comparison only -- see"
+        echo "features/SOURCING.md section 0.4. Delete it and re-stage."
+        status=1
+    fi
+done
+
+exit $status

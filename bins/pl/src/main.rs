@@ -2,6 +2,7 @@
 //!
 //! Everything is local. No network, no account, no telemetry.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -30,6 +31,7 @@ USAGE:
     pl annotate <file>...                find known features in a plasmid
     pl gel     <file> --cut A --cut B    will the digest be readable?
     pl methods [topic]                   what to write in your methods section
+    pl licences                          who the annotation data belongs to
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [query] [filters]   search it
@@ -202,6 +204,7 @@ fn main() -> ExitCode {
         "annotate" => cmd_annotate(rest),
         "gel" => cmd_gel(rest),
         "methods" => cmd_methods(rest),
+        "licences" | "licenses" => cmd_licences(rest),
         "trace" => cmd_trace(rest),
         "index" => cmd_index(rest),
         "find" => cmd_find(rest),
@@ -2452,6 +2455,71 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
 /// out, so a changed default changes the text. Prose in a manual drifts from
 /// the code the first time a constant moves, and the drift is invisible: the
 /// sentence still reads correctly and is no longer true.
+fn cmd_licences(_args: &[String]) -> Result<(), String> {
+    let (db, errs) = pl_features::Db::builtin();
+    // If the compiled-in table did not load cleanly, say so rather than
+    // printing an attribution table computed from a partial parse.
+    for e in &errs {
+        eprintln!("warning: {} line {}: {}", e.file, e.line, e.problem);
+    }
+    println!(
+        "Polylinker {} - annotation data: sources, licences and attribution\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!(
+        "The feature database (release {}) is compiled into this program: {} record(s),\n\
+         {} per-field provenance row(s). A single record legitimately mixes licences,\n\
+         which is why provenance is recorded per field rather than per row.\n",
+        db.version,
+        db.records.len(),
+        db.provenance.len()
+    );
+
+    let mut by_source: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for p in &db.provenance {
+        *by_source
+            .entry((p.source_db.clone(), p.licence.clone()))
+            .or_insert(0) += 1;
+    }
+    println!("  {:<16} {:<36} FIELDS", "SOURCE", "LICENCE");
+    for ((source, licence), n) in &by_source {
+        println!("  {source:<16} {licence:<36} {n}");
+    }
+
+    println!(
+        "
+ATTRIBUTION
+
+  UniProt data are (c) 2002-2024 UniProt Consortium, used under CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/). Changes were made: entries
+  were resolved to a verified coding sequence and reduced to the fields above.
+
+  Courtesy of the U.S. National Library of Medicine.
+  NCBI's Disclaimer and Copyright notice:
+  https://www.ncbi.nlm.nih.gov/home/about/policies/
+
+  Nucleotide sequences come from INSDC records and carry a credit expectation to
+  the original submitters; each record's accession is in its provenance row.
+  ENA and Rfam are services of EMBL-EBI. Rfam is CC0 1.0, with per-family
+  primary-source credit carried in each record's notes.
+
+  This dataset is a dated snapshot and does not reflect the most current data
+  available from NLM.
+
+  The full notice, including the per-family credit table and the statement of
+  changes, is features/NOTICE in the source distribution."
+    );
+
+    let reviewed = db.reviewed().records.len();
+    println!(
+        "
+SIGN-OFF: {reviewed} of {} record(s) have been reviewed by a named curator.
+`pl annotate` searches only reviewed records unless you pass --include-proposed.",
+        db.records.len()
+    );
+    Ok(())
+}
+
 fn cmd_methods(args: &[String]) -> Result<(), String> {
     let a = parse_args(args, &[], &[])?;
     let names: Vec<String> = a.files.iter().map(|p| p.display().to_string()).collect();

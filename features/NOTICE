@@ -14,14 +14,37 @@ field came from and under what licence -- is in `provenance.tsv`. The evidence
 that each source was cleared, with quoted licence text and the URL it was
 fetched from, is in `SOURCING.md`.
 
---------------------------------------------------------------------------------
+================================================================================
+DATED SNAPSHOT
+================================================================================
+
+This dataset is a dated snapshot (retrieved 2026-07-28) and does not reflect
+the most current data available from NLM.
+
+That sentence is reproduced exactly as `SOURCING.md` section 2 Stage 0.1
+requires it. It is narrower than the truth, so the broader statement follows:
+this dataset is a dated snapshot (sources retrieved 2026-07-27 and 2026-07-28)
+and does not reflect the most current data available from NLM, the UniProt
+Consortium, EMBL-EBI or Rfam.
+
+The exact retrieval date and the sha256 of every fetched source file are
+recorded per field in `provenance.tsv`, so the age of any individual value can
+be established without trusting this banner.
+
+NLM asks redistributors either to keep their data current or to state
+conspicuously that they do not. We state it: we do not. We also cannot bind
+anyone downstream to do so -- CC BY 4.0 has no mechanism for it -- and we say
+that plainly rather than accept an obligation we cannot propagate.
+(SOURCING.md Risk 3; this is flagged for counsel and is not a resolved question.)
+
+================================================================================
 U.S. National Library of Medicine / NCBI
---------------------------------------------------------------------------------
+================================================================================
 
 Courtesy of the U.S. National Library of Medicine.
 
-Nucleotide and protein reference sequences are derived from the NCBI
-AMRFinderPlus Reference Gene Catalog:
+Nucleotide and protein reference sequences for the resistance and selection
+markers are derived from the NCBI AMRFinderPlus Reference Gene Catalog:
     https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/
 
 NCBI's Disclaimer and Copyright notice applies:
@@ -31,13 +54,113 @@ NCBI holds no copyright in the sequence records themselves and states that it
 has no rights to transfer; individual records may be subject to rights held by
 their submitters.
 
-THIS DATASET IS A DATED SNAPSHOT AND DOES NOT REFLECT THE MOST CURRENT DATA
-AVAILABLE FROM NLM. The retrieval date and the sha256 of every fetched source
-file are recorded per field in `provenance.tsv`.
+================================================================================
+UniProt Consortium
+================================================================================
 
---------------------------------------------------------------------------------
+(c) 2002-2024 UniProt Consortium
+
+UniProt data is distributed under the Creative Commons Attribution 4.0
+International License (CC BY 4.0):
+    https://creativecommons.org/licenses/by/4.0/
+
+The UniProt Consortium states that it cannot grant unrestricted permission for
+all uses of its data, because some of it may be subject to third-party rights
+including patents. This dataset therefore grants no patent licence and makes no
+claim that any sequence in it is free of patent claims -- CC BY 4.0 excludes
+patent rights by its own terms. Rows where that exposure is known to be live
+carry `patent_flag = 1`.
+
+WHAT WE TOOK FROM UNIPROT, AND WHAT WE CHANGED
+CC BY 4.0 requires that changes be indicated. Per field, from `provenance.tsv`:
+
+  * `name` and `aliases` on the natural-protein rows are UniProt's -- the gene
+    symbol where the entry has one, the recommended or submission name
+    otherwise, with every other name UniProt offers kept as an alias.
+  * `reference_aa` on those rows is UniProt's canonical sequence string.
+  * `peptide_anchor` on the curated designed-part rows records that the residue
+    offset of a peptide inside its parent protein was read out of a UniProt
+    canonical. No UniProt string is stored in those rows; the position is.
+
+  Changes made: we selected single entries from a much larger database; we
+  discarded every cross-reference that was not an EMBL ProteinId, so that no
+  KEGG, DrugBank, ChEMBL or DrugCentral identifier is carried into this dataset
+  under UniProt's licence; we paired each protein with an independently fetched
+  nucleotide CDS and kept only cross-references whose CDS translates to the
+  canonical exactly; and we wrote every description ourselves. Descriptions,
+  boundary rules and record ids are not UniProt's and are marked `own-work`.
+
+================================================================================
+EMBL-EBI -- European Nucleotide Archive (ENA)
+================================================================================
+
+Nucleotide sequences and INSDC location expressions for the natural-protein and
+curated designed-part rows were retrieved from the European Nucleotide Archive,
+operated by the European Molecular Biology Laboratory's European Bioinformatics
+Institute (EMBL-EBI):
+    https://www.ebi.ac.uk/ena/browser/
+
+ENA records are INSDC records; see the INSDC section below.
+
+================================================================================
+EMBL-EBI -- Rfam
+================================================================================
+
+Structured RNA reference sequences are derived from the Rfam database, produced
+at EMBL-EBI:
+    https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/
+
+Rfam is released into the public domain under the Creative Commons Zero (CC0
+1.0) waiver:
+    https://creativecommons.org/publicdomain/zero/1.0/
+
+CC0 imposes no attribution requirement. The credit below is given because Rfam
+asks for per-family primary-source credit and because a database that trades on
+provenance should say where its rows came from whether or not it is compelled
+to. Each row is derived from one Rfam seed alignment; the paper named is taken
+from that family's own `#=GF RM` lines, not chosen by us:
+
+  PLF:2000  RNAI                                  RF00106   PMID:7523833
+  PLF:2001  CopA                                  RF00042   PMID:2421250
+  PLF:2002  R1162 antisense RNA                   RF00043   PMID:2430262
+  PLF:2003  ctRNA (pT181)                         RF00242   PMID:2478296
+  PLF:2004  RNAIII (pIP501)                       RF00235   PMID:14583190
+  PLF:2005  repZ pseudoknot                       RF01087   PMID:9565606
+  PLF:2006  sok antitoxin RNA                     RF01794   PMID:3049248
+  PLF:2007  FinP                                  RF00107   PMID:9917389
+  PLF:2008  traJ 5' leader                        RF00243   PMID:14633993
+  PLF:2009  RRE                                   RF00036   PMID:12177299
+  PLF:2010  HIV-1 PBS                             RF00375   PMID:14757051
+  PLF:2011  HIV-1 Psi SL3                         RF01381   PMID:18713870
+  PLF:2012  MMLV Psi (core encapsidation signal)  RF00374   PMID:15003457
+  PLF:2013  HCV IRES                              RF00061   PMID:25775547
+  PLF:2014  CrPV IGR IRES                         RF00458   PMID:11233983
+  PLF:2015  HDV ribozyme                          RF00094   PMID:9783582
+  PLF:2016  hammerhead ribozyme (type III)        RF00008   PMID:7969422
+  PLF:2017  glmS ribozyme-riboswitch              RF00234   PMID:15029187
+  PLF:2018  TPP riboswitch                        RF00059   PMID:12410317
+  PLF:2019  FMN riboswitch                        RF00050   PMID:12456892
+  PLF:2020  tracrRNA                              RF02348   PMID:22745249
+  PLF:2021  MS2 operator hairpin                  RF02359   PMID:11095669
+  PLF:2022  tRNA                                  RF00005   PMID:8256282
+  PLF:2023  5S rRNA                               RF00001   PMID:11752286
+
+TWO EXCLUSIONS ARE ENFORCED AT INGEST, not merely intended:
+
+  * miRBase-derived families are excluded. miRBase carries no licence at all and
+    is 37.8% of Rfam (1,598 of 4,227 families). The exclusion keys on Rfam's
+    `type` field and never on the family name: matching names beginning "mir"
+    lets eight families through.
+  * Wikipedia-derived prose is excluded. Every Rfam family carries a Wikipedia
+    article pointer (`#=GF WK`) and most carry free-text comments (`#=GF CC`)
+    that reproduce it, including inside `Rfam.seed.gz`. The parser keeps a
+    named allow-list of Stockholm tags and drops `CC`, `WK` and `DR`
+    unconditionally, so no Wikipedia text and no Sequence Ontology identifier
+    enters this dataset. Our descriptions are written from the cited papers.
+
+================================================================================
 INSDC submitters
---------------------------------------------------------------------------------
+================================================================================
 
 Sequence records reached through NCBI, ENA or DDBJ originate with the scientists
 who deposited them. INSDC places no use restrictions or licensing requirements
@@ -48,37 +171,63 @@ Credit to the original submission is nevertheless expected, and the specific
 accession behind each sequence is recorded in `provenance.tsv` and in each
 record's `boundary_evidence` field.
 
---------------------------------------------------------------------------------
-Sources not yet used, listed so their absence is deliberate and legible
---------------------------------------------------------------------------------
-
-UniProt (CC BY 4.0), Rfam (CC0 1.0, with enforced exclusions), and EMBL-EBI/ENA
-are cleared in `SOURCING.md` and will require attribution here when rows derived
-from them are added.
+================================================================================
+Sources not used, listed so their absence is deliberate and legible
+================================================================================
 
 The following are NOT used, and their absence is a decision rather than an
 oversight -- see `SOURCING.md` for the evidence behind each:
 
   * SnapGene Common Features, and pLannotate's snapgene.csv derived from it
-  * GenoLIB
   * Addgene bulk records
-  * PlasMapper 3.0 FeatureDB
+  * PlasMapper 3.0 FeatureDB (its own scrapeFeatures.py shows it is
+    Addgene-scraped)
   * SEVA
+  * UniVec, as a coordinate source
   * FPbase sequence data (its name-to-accession index only, pending resolution)
   * Sequence Ontology terms (pending resolution of a CC BY / CC BY-SA conflict
     between its LICENSE file and its README)
+  * The Barrick et al. S1 variant sequences (extracted from Addgene plasmids;
+    Addgene's terms permit noncommercial informational use only)
 
---------------------------------------------------------------------------------
+GenoLIB is deliberately absent from that list, because it was never assessed:
+`SOURCING.md` contains no evidence about it either way, and listing it among
+decisions would have implied one was made.
+
+A CI taint gate transiently fetches pLannotate's `snapgene.csv` at a pinned
+immutable commit, compares our description prose against it, and deletes it. No
+byte of that file is committed or redistributed: the filename is in
+`.gitignore`, and `tools/hooks/pre-commit` refuses any staged blob whose sha256
+matches the pinned one, so renaming it does not get it in. It is implemented in
+`features/build/taint_gate.py`, it runs in `.github/workflows/ci.yml`, and it
+fails CLOSED -- a network error exits with the status `taint-gate-unavailable`
+rather than passing.
+
+Its result at the time of writing, over all 70 descriptions against all 1,367
+of theirs: no row shares a contiguous five-token run, and no row reaches 60%
+containment. Two rows exceed the 30% warning threshold, PLF:0002 and PLF:0003,
+whose longest shared runs are one and two tokens; they are the two
+aminoglycoside phosphotransferases, and what they share is the vocabulary of
+the subject (kanamycin, neomycin, phosphotransferase, resistance), not phrasing.
+
+Disclosing the gate is the point: it is the concrete evidence behind this
+project's premise.
+
+================================================================================
 Changes made
---------------------------------------------------------------------------------
+================================================================================
 
 CC BY 4.0 requires that changes be indicated. This dataset transforms its
 sources rather than reproducing them:
 
-  * Sequences are extracted from larger records and paired nucleotide-to-protein.
+  * Sequences are extracted from larger records and paired
+    nucleotide-to-protein.
   * Every coding sequence is verified by translation against its reference
     protein; entries that do not translate exactly are dropped, not corrected.
-  * Feature boundaries are computed from reading frames, not inherited.
+  * Feature boundaries are computed from reading frames where they can be, and
+    otherwise cite the publication that stipulated them.
+  * Rfam seed rows are alignment rows, not sequences: they are degapped, and
+    RNA is transformed to DNA (U -> T) unconditionally.
   * All names, aliases and descriptions are written by the Polylinker
     contributors, and are marked `own-work` per field in `provenance.tsv`.
 

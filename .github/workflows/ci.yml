@@ -60,6 +60,23 @@ jobs:
       - name: Corpus tests (skip without a corpus)
         run: cargo test -p pl-fileio --test corpus -- --nocapture
 
+      # `--lib --bins` above excludes every integration suite, and this is the
+      # one that independently validates the shipped data: the nt->aa
+      # translation of every coding row, and the schema, duplicate and
+      # licensed-provenance audit. Both were green locally and absent from CI,
+      # and the gap widened five-fold when the table grew from 8 rows to 70.
+      # Two of its four tests are PL_CORPUS-gated and skip cleanly here, the
+      # same pattern as the step above; the other two read features.tsv
+      # directly and do the work.
+      - name: Feature database, against the shipped table
+        run: cargo test -p pl-features --test corpus -- --nocapture
+
+      # The two schema definitions, in two languages, compared directly. The
+      # pin used to work only through the generated header, so a Python-side
+      # column rename left the whole suite green until somebody rebuilt.
+      - name: The Python builder and the Rust loader agree on the schema
+        run: cargo test -p pl-features --test schema_pin -- --nocapture
+
   wasm:
     name: wasm32 build
     runs-on: ubuntu-latest
@@ -135,3 +152,36 @@ jobs:
           python bench/generate.py > /tmp/regen.json
           diff -q bench/polylinker-bench.json /tmp/regen.json \
             || { echo "::error::generate.py is no longer deterministic"; exit 1; }
+
+      # "AI may propose, never assert", checked against the files on disk by a
+      # program that knows nothing about how they were written, and that plants
+      # each forbidden edit into the real table first and requires itself to
+      # catch it. It was local-only; a rule nobody runs is a rule.
+      - name: Every feature row is proposed, with no curator
+        run: python features/build/check_proposed.py
+
+      # features/SOURCING.md section 0.4. Fetches pLannotate's snapgene.csv at a
+      # pinned immutable commit, asserts its sha256, measures containment
+      # against our descriptions, and deletes it. No byte is committed: the
+      # filename is in .gitignore and tools/hooks/pre-commit rejects the blob by
+      # content hash, so a rename does not defeat it.
+      #
+      # Fails CLOSED. A network error exits 3 with `taint-gate-unavailable`,
+      # because "could not check" and "checked and clean" are different results.
+      # This step is the concrete evidence behind the project's central claim
+      # that this database is not derived from SnapGene's list, and the NOTICE
+      # discloses it -- so it has to exist, and it has to run.
+      - name: Taint gate -- our descriptions vs pLannotate's snapgene.csv
+        run: python features/build/taint_gate.py
+
+      # The taint gate brought an unlicensed file onto the runner. Prove the
+      # working tree is clean of it afterwards, by content and not by name.
+      - name: Nothing from the taint gate survived
+        run: |
+          git status --porcelain > /tmp/tree.txt
+          if [ -s /tmp/tree.txt ]; then
+            echo "::error::the working tree is dirty after the taint gate:"
+            cat /tmp/tree.txt
+            exit 1
+          fi
+          echo "working tree clean"

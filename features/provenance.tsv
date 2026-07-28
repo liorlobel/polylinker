@@ -2,56 +2,818 @@ record_id	field	source_db	source_accession	licence	url	retrieved	sha256
 PLF:0001	reference_nt	amrfinderplus	WP_000027057.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
 PLF:0001	reference_aa	amrfinderplus	WP_000027057.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
 PLF:0001	boundary_evidence	amrfinderplus	NG_050145.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
-PLF:0001	aliases	polylinker	-	own-work	-	2026-07-27	
-PLF:0001	boundary_rule	polylinker	-	own-work	-	2026-07-27	
-PLF:0001	description	polylinker	-	own-work	-	2026-07-27	
-PLF:0001	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0001	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0001	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0001	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0001	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0001	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0001	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0001	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0001	notes	polylinker	-	own-work	-	2026-07-28	
 PLF:0002	reference_nt	amrfinderplus	WP_063841683.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
 PLF:0002	reference_aa	amrfinderplus	WP_063841683.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
 PLF:0002	boundary_evidence	amrfinderplus	NG_047429.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
-PLF:0002	aliases	polylinker	-	own-work	-	2026-07-27	
-PLF:0002	boundary_rule	polylinker	-	own-work	-	2026-07-27	
-PLF:0002	description	polylinker	-	own-work	-	2026-07-27	
-PLF:0002	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0002	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0002	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0002	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0002	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0002	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0002	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0002	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0002	notes	polylinker	-	own-work	-	2026-07-28	
 PLF:0003	reference_nt	amrfinderplus	WP_000572405.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
 PLF:0003	reference_aa	amrfinderplus	WP_000572405.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
 PLF:0003	boundary_evidence	amrfinderplus	NG_047417.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
-PLF:0003	aliases	polylinker	-	own-work	-	2026-07-27	
-PLF:0003	boundary_rule	polylinker	-	own-work	-	2026-07-27	
-PLF:0003	description	polylinker	-	own-work	-	2026-07-27	
-PLF:0003	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0003	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0003	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0003	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0003	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0003	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0003	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0003	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0003	notes	polylinker	-	own-work	-	2026-07-28	
 PLF:0004	reference_nt	amrfinderplus	WP_001206316.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
 PLF:0004	reference_aa	amrfinderplus	WP_001206316.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
 PLF:0004	boundary_evidence	amrfinderplus	NG_047324.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
-PLF:0004	aliases	polylinker	-	own-work	-	2026-07-27	
-PLF:0004	boundary_rule	polylinker	-	own-work	-	2026-07-27	
-PLF:0004	description	polylinker	-	own-work	-	2026-07-27	
-PLF:0004	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0004	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0004	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0004	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0004	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0004	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0004	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0004	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0004	notes	polylinker	-	own-work	-	2026-07-28	
 PLF:0005	reference_nt	amrfinderplus	WP_000412211.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
 PLF:0005	reference_aa	amrfinderplus	WP_000412211.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
 PLF:0005	boundary_evidence	amrfinderplus	NG_047582.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
-PLF:0005	aliases	polylinker	-	own-work	-	2026-07-27	
-PLF:0005	boundary_rule	polylinker	-	own-work	-	2026-07-27	
-PLF:0005	description	polylinker	-	own-work	-	2026-07-27	
-PLF:0005	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0005	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0005	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0005	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0005	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0005	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0005	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0005	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0005	notes	polylinker	-	own-work	-	2026-07-28	
 PLF:0006	reference_nt	amrfinderplus	WP_011645018.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
 PLF:0006	reference_aa	amrfinderplus	WP_011645018.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
 PLF:0006	boundary_evidence	amrfinderplus	NG_048148.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
-PLF:0006	aliases	polylinker	-	own-work	-	2026-07-27	
-PLF:0006	boundary_rule	polylinker	-	own-work	-	2026-07-27	
-PLF:0006	description	polylinker	-	own-work	-	2026-07-27	
-PLF:0006	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0006	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0006	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0006	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0006	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0006	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0006	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0006	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0006	notes	polylinker	-	own-work	-	2026-07-28	
 PLF:0007	reference_nt	amrfinderplus	WP_022542381.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
 PLF:0007	reference_aa	amrfinderplus	WP_022542381.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
 PLF:0007	boundary_evidence	amrfinderplus	NG_047232.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
-PLF:0007	aliases	polylinker	-	own-work	-	2026-07-27	
-PLF:0007	boundary_rule	polylinker	-	own-work	-	2026-07-27	
-PLF:0007	description	polylinker	-	own-work	-	2026-07-27	
-PLF:0007	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0007	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0007	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0007	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0007	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0007	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0007	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0007	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0007	notes	polylinker	-	own-work	-	2026-07-28	
 PLF:0008	reference_nt	amrfinderplus	WP_000131935.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
 PLF:0008	reference_aa	amrfinderplus	WP_000131935.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
 PLF:0008	boundary_evidence	amrfinderplus	NG_047555.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
-PLF:0008	aliases	polylinker	-	own-work	-	2026-07-27	
-PLF:0008	boundary_rule	polylinker	-	own-work	-	2026-07-27	
-PLF:0008	description	polylinker	-	own-work	-	2026-07-27	
-PLF:0008	name	polylinker	-	own-work	-	2026-07-27	
+PLF:0008	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0008	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0008	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0008	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0008	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0008	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0008	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0008	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0009	reference_nt	amrfinderplus	WP_000027050.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0009	reference_aa	amrfinderplus	WP_000027050.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0009	boundary_evidence	amrfinderplus	NG_050162.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0009	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0009	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0009	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0009	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0009	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0009	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0009	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0009	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0010	reference_nt	amrfinderplus	WP_001096887.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0010	reference_aa	amrfinderplus	WP_001096887.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0010	boundary_evidence	amrfinderplus	NG_047418.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0010	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0010	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0010	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0010	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0010	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0010	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0010	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0010	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0011	reference_nt	amrfinderplus	WP_000067268.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0011	reference_aa	amrfinderplus	WP_000067268.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0011	boundary_evidence	amrfinderplus	NG_047397.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0011	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0011	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0011	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0011	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0011	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0011	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0011	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0011	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0012	reference_nt	amrfinderplus	WP_002570989.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0012	reference_aa	amrfinderplus	WP_002570989.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0012	boundary_evidence	amrfinderplus	NG_047623.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0012	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0012	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0012	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0012	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0012	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0012	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0012	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0012	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0013	reference_nt	amrfinderplus	WP_031942563.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0013	reference_aa	amrfinderplus	WP_031942563.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0013	boundary_evidence	amrfinderplus	NG_048160.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0013	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0013	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0013	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0013	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0013	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0013	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0013	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0013	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0014	reference_nt	amrfinderplus	WP_010891057.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0014	reference_aa	amrfinderplus	WP_010891057.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0014	boundary_evidence	amrfinderplus	NG_048174.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0014	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0014	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0014	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0014	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0014	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0014	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0014	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0014	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0015	reference_nt	amrfinderplus	WP_000492283.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0015	reference_aa	amrfinderplus	WP_000492283.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0015	boundary_evidence	amrfinderplus	NG_048200.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0015	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0015	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0015	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0015	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0015	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0015	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0015	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0015	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0016	reference_nt	amrfinderplus	WP_063856107.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0016	reference_aa	amrfinderplus	WP_063856107.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0016	boundary_evidence	amrfinderplus	NG_048211.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0016	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0016	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0016	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0016	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0016	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0016	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0016	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0016	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0017	reference_nt	amrfinderplus	WP_001199192.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0017	reference_aa	amrfinderplus	WP_001199192.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0017	boundary_evidence	amrfinderplus	NG_047253.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0017	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0017	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0017	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0017	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0017	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0017	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0017	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0017	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0018	reference_nt	amrfinderplus	WP_063842998.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0018	reference_aa	amrfinderplus	WP_063842998.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0018	boundary_evidence	amrfinderplus	NG_047556.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0018	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0018	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0018	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0018	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0018	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0018	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0018	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0018	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0019	reference_nt	amrfinderplus	WP_000742814.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0019	reference_aa	amrfinderplus	WP_000742814.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0019	boundary_evidence	amrfinderplus	NG_047456.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0019	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0019	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0019	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0019	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0019	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0019	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0019	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0019	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0020	reference_nt	amrfinderplus	WP_063842185.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0020	reference_aa	amrfinderplus	WP_063842185.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0020	boundary_evidence	amrfinderplus	NG_047472.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0020	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0020	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0020	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0020	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0020	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0020	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0020	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0020	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0021	reference_nt	amrfinderplus	WP_063844601.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0021	reference_aa	amrfinderplus	WP_063844601.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0021	boundary_evidence	amrfinderplus	NG_047793.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0021	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0021	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0021	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0021	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0021	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0021	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0021	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0021	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0022	reference_nt	amrfinderplus	WP_007410443.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0022	reference_aa	amrfinderplus	WP_007410443.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0022	boundary_evidence	amrfinderplus	NG_047805.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0022	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0022	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0022	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0022	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0022	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0022	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0022	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0022	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0023	reference_nt	amrfinderplus	WP_010890156.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0023	reference_aa	amrfinderplus	WP_010890156.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0023	boundary_evidence	amrfinderplus	NG_047412.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0023	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0023	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0023	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0023	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0023	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0023	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0023	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0023	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:0024	reference_nt	amrfinderplus	WP_000480968.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0024	reference_aa	amrfinderplus	WP_000480968.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMRProt.fa	2026-07-27	dc21f47094024efb9bd46a7e239933323fe0eb24190185847e1f426f1696fe56
+PLF:0024	boundary_evidence	amrfinderplus	NG_047464.1	INSDC-free	https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/AMRFinderPlus/database/latest/AMR_CDS.fa	2026-07-27	ddf349431ba155c268fbd70f0acf78390734f4b026a70ed7c3a340c841b4bb8b
+PLF:0024	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:0024	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:0024	description	polylinker	-	own-work	-	2026-07-28	
+PLF:0024	name	polylinker	-	own-work	-	2026-07-28	
+PLF:0024	class	polylinker	-	own-work	-	2026-07-28	
+PLF:0024	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:0024	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:0024	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1000	name	uniprot	P03023	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03023.json	2026-07-28	bd0916e1ae4b5ef3e15c5403e220c25a97c989c6f01f75102b77bd5f1146e508
+PLF:1000	aliases	uniprot	P03023	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03023.json	2026-07-28	bd0916e1ae4b5ef3e15c5403e220c25a97c989c6f01f75102b77bd5f1146e508
+PLF:1000	reference_aa	uniprot	P03023	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03023.json	2026-07-28	bd0916e1ae4b5ef3e15c5403e220c25a97c989c6f01f75102b77bd5f1146e508
+PLF:1000	reference_nt	ena	AAC73448.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAC73448.1	2026-07-28	bd5800c860afc04c9a0419e0039a6fb1ce711b9f8541c0be5b59f847ff5e33d5
+PLF:1000	boundary_evidence	ena	U00096.3	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAC73448.1	2026-07-28	590c85b7941307bbc733eb45978dd331391d17cb47127577ebdc669ff3375162
+PLF:1000	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1000	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1000	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1000	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1000	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1000	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1001	name	uniprot	P00722	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P00722.json	2026-07-28	824f30f2fd032161305141c088873b5f9a9dc141a12a6ac338bcbbf3def9fe11
+PLF:1001	aliases	uniprot	P00722	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P00722.json	2026-07-28	824f30f2fd032161305141c088873b5f9a9dc141a12a6ac338bcbbf3def9fe11
+PLF:1001	reference_aa	uniprot	P00722	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P00722.json	2026-07-28	824f30f2fd032161305141c088873b5f9a9dc141a12a6ac338bcbbf3def9fe11
+PLF:1001	reference_nt	ena	AAA24053.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAA24053.1	2026-07-28	a0dfd5e714a2d41ca0c47194dd940822d28a8b00a86602ce3e94ff4fe265c68f
+PLF:1001	boundary_evidence	ena	J01636.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAA24053.1	2026-07-28	0d86d6a0883c455b69a13662c632cbbbb3d2f8bd3835df50c10838b761b6ab73
+PLF:1001	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1001	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1001	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1001	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1001	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1001	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1002	name	uniprot	P0A9E0	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P0A9E0.json	2026-07-28	85216bee0533c7f4815aa196ba99c3e8a9372c60d47c824213b00b7cceb2c681
+PLF:1002	aliases	uniprot	P0A9E0	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P0A9E0.json	2026-07-28	85216bee0533c7f4815aa196ba99c3e8a9372c60d47c824213b00b7cceb2c681
+PLF:1002	reference_aa	uniprot	P0A9E0	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P0A9E0.json	2026-07-28	85216bee0533c7f4815aa196ba99c3e8a9372c60d47c824213b00b7cceb2c681
+PLF:1002	reference_nt	ena	AAC73175.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAC73175.1	2026-07-28	238cb0c75d4d12b2f32afeac32a4c9132cf623bfff1f541dcbea046674406d01
+PLF:1002	boundary_evidence	ena	U00096.3	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAC73175.1	2026-07-28	ea49db35bfef3f2c2641dc64d23e7aba58464929a3700449022d5ab60282544b
+PLF:1002	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1002	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1002	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1002	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1002	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1002	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1003	name	uniprot	P03034	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03034.json	2026-07-28	3d9714db32a2345ec4b86ccfeb1f765c7488ea6ae8127002a93c62dbaafae132
+PLF:1003	aliases	uniprot	P03034	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03034.json	2026-07-28	3d9714db32a2345ec4b86ccfeb1f765c7488ea6ae8127002a93c62dbaafae132
+PLF:1003	reference_aa	uniprot	P03034	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03034.json	2026-07-28	3d9714db32a2345ec4b86ccfeb1f765c7488ea6ae8127002a93c62dbaafae132
+PLF:1003	reference_nt	ena	AAA96581.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAA96581.1	2026-07-28	37f99cdbbaaa00bdd40b05cbcc28f9ce72da94a5587e1b84a4366a36c03af78b
+PLF:1003	boundary_evidence	ena	J02459.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAA96581.1	2026-07-28	7a5dc2c2eeafc5dc41ecc74de1906a18c702db409355a3ca4fd7a810d5449ebe
+PLF:1003	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1003	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1003	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1003	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1003	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1003	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1004	name	uniprot	P00573	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P00573.json	2026-07-28	4593fc18bb3cb86cac4f14977fb82eff219cba7afd9bb6ac3efab50a666785ae
+PLF:1004	aliases	uniprot	P00573	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P00573.json	2026-07-28	4593fc18bb3cb86cac4f14977fb82eff219cba7afd9bb6ac3efab50a666785ae
+PLF:1004	reference_aa	uniprot	P00573	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P00573.json	2026-07-28	4593fc18bb3cb86cac4f14977fb82eff219cba7afd9bb6ac3efab50a666785ae
+PLF:1004	reference_nt	ena	CAA24390.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/CAA24390.1	2026-07-28	51902667baa0d96bcba43d65be4425ef05dbd5f9894020c9ab4bd15ba8d7580c
+PLF:1004	boundary_evidence	ena	V01146.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/CAA24390.1	2026-07-28	15453eb41dc886c88800bd96ab2f3ad9abe7f9245b11db4368969bbea737ed1a
+PLF:1004	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1004	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1004	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1004	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1004	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1004	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1005	name	uniprot	P06956	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P06956.json	2026-07-28	2f29a3e4e6bb07ba8e1e8687177e577ba5d1854c82cb28a5e77d14e2045637f2
+PLF:1005	aliases	uniprot	P06956	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P06956.json	2026-07-28	2f29a3e4e6bb07ba8e1e8687177e577ba5d1854c82cb28a5e77d14e2045637f2
+PLF:1005	reference_aa	uniprot	P06956	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P06956.json	2026-07-28	2f29a3e4e6bb07ba8e1e8687177e577ba5d1854c82cb28a5e77d14e2045637f2
+PLF:1005	reference_nt	ena	AAQ13978.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAQ13978.1	2026-07-28	c68e8929be1d18d03c14dab3f9978dbf366f6e4bd010dbe28b36aa2d147f83c5
+PLF:1005	boundary_evidence	ena	AF234172.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAQ13978.1	2026-07-28	65cd0356c1d2473d2fecc95bff143cc9a08bbdd03a271645c20321745e91492f
+PLF:1005	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1005	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1005	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1005	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1005	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1005	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1006	name	uniprot	P03870	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03870.json	2026-07-28	c1503cae114081c203205a95b71d2fd29349689c0caed52a08ccadbd1a3b4ad3
+PLF:1006	aliases	uniprot	P03870	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03870.json	2026-07-28	c1503cae114081c203205a95b71d2fd29349689c0caed52a08ccadbd1a3b4ad3
+PLF:1006	reference_aa	uniprot	P03870	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03870.json	2026-07-28	c1503cae114081c203205a95b71d2fd29349689c0caed52a08ccadbd1a3b4ad3
+PLF:1006	reference_nt	ena	AAB59340.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAB59340.1	2026-07-28	c243c624a8472bc24fccf4bd3324cd017a4d90f3139e41cfd391905e6812a9e5
+PLF:1006	boundary_evidence	ena	J01347.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAB59340.1	2026-07-28	8d0c41fe16d51ca31851e7106e46ac36b8d0fa5c0b3601394f986310fc0d365b
+PLF:1006	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1006	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1006	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1006	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1006	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1006	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1007	name	uniprot	Q9T221	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q9T221.json	2026-07-28	facf0e65832e7725a124d73c74cbf39dd30de6e9f6f805172e95fce70363e61b
+PLF:1007	aliases	uniprot	Q9T221	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q9T221.json	2026-07-28	facf0e65832e7725a124d73c74cbf39dd30de6e9f6f805172e95fce70363e61b
+PLF:1007	reference_aa	uniprot	Q9T221	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q9T221.json	2026-07-28	facf0e65832e7725a124d73c74cbf39dd30de6e9f6f805172e95fce70363e61b
+PLF:1007	reference_nt	ena	CAA07153.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/CAA07153.1	2026-07-28	2d088d5fb56e7d14619c3d2f8cf6f534b8c8ee44b32729aef05e698b2f661fbe
+PLF:1007	boundary_evidence	ena	AJ006589.3	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/CAA07153.1	2026-07-28	c834ac6ad34fabc83228c1615ce5b989c80ea609d6ef82f57d536b1169562db3
+PLF:1007	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1007	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1007	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1007	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1007	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1007	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1008	name	uniprot	P05655	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P05655.json	2026-07-28	fa6015b77c059c569eb4bc5b915bd96d9ac0977ba7946af756f06fe6f3048eb5
+PLF:1008	aliases	uniprot	P05655	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P05655.json	2026-07-28	fa6015b77c059c569eb4bc5b915bd96d9ac0977ba7946af756f06fe6f3048eb5
+PLF:1008	reference_aa	uniprot	P05655	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P05655.json	2026-07-28	fa6015b77c059c569eb4bc5b915bd96d9ac0977ba7946af756f06fe6f3048eb5
+PLF:1008	reference_nt	ena	CAB15450.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/CAB15450.1	2026-07-28	23e68e9ed5b8e2a926e44055876055042d83a302bc86f89da87fcfd1bdd267a6
+PLF:1008	boundary_evidence	ena	AL009126.3	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/CAB15450.1	2026-07-28	421affeafc4d58360d21d908ba58f4386c162b02facde19567996bea6cf60b05
+PLF:1008	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1008	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1008	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1008	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1008	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1008	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1009	name	uniprot	P62554	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P62554.json	2026-07-28	5071650ecd30a56d63cc9e8b14df63df5a826aa139849f4644fb122272bb67ba
+PLF:1009	aliases	uniprot	P62554	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P62554.json	2026-07-28	5071650ecd30a56d63cc9e8b14df63df5a826aa139849f4644fb122272bb67ba
+PLF:1009	reference_aa	uniprot	P62554	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P62554.json	2026-07-28	5071650ecd30a56d63cc9e8b14df63df5a826aa139849f4644fb122272bb67ba
+PLF:1009	reference_nt	ena	AAA24899.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAA24899.1	2026-07-28	4e71e03a5d65221482c77b65d3036953fe566d63430361b4e76c5cda2712ad0b
+PLF:1009	boundary_evidence	ena	M12987.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAA24899.1	2026-07-28	59bf88e2f60f56d319afb676a1c9ee6efea384bfe4ffedf161364c3f8eaac29f
+PLF:1009	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1009	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1009	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1009	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1009	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1009	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1010	name	uniprot	P08515	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P08515.json	2026-07-28	a9d4d74234461532fe98e1a684c878edb3904108663cd5d90b3fac3efd841f09
+PLF:1010	aliases	uniprot	P08515	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P08515.json	2026-07-28	a9d4d74234461532fe98e1a684c878edb3904108663cd5d90b3fac3efd841f09
+PLF:1010	reference_aa	uniprot	P08515	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P08515.json	2026-07-28	a9d4d74234461532fe98e1a684c878edb3904108663cd5d90b3fac3efd841f09
+PLF:1010	reference_nt	ena	AAB59203.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAB59203.1	2026-07-28	9d796eff9ddcec06fe3e1ecfc77d13704b61c585c3e1261c59239d6310a7061c
+PLF:1010	boundary_evidence	ena	M14654.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAB59203.1	2026-07-28	f40620eccfd687ac6835a9ffeb42874c7324960feb78e5d40327152c0974eaf5
+PLF:1010	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1010	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1010	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1010	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1010	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1010	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1011	name	uniprot	P0AEX9	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P0AEX9.json	2026-07-28	fdea7df0d5dd869fc3383e5ad9e9634e656a6b77c74f72f1030cdc6a7bacc0d2
+PLF:1011	aliases	uniprot	P0AEX9	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P0AEX9.json	2026-07-28	fdea7df0d5dd869fc3383e5ad9e9634e656a6b77c74f72f1030cdc6a7bacc0d2
+PLF:1011	reference_aa	uniprot	P0AEX9	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P0AEX9.json	2026-07-28	fdea7df0d5dd869fc3383e5ad9e9634e656a6b77c74f72f1030cdc6a7bacc0d2
+PLF:1011	reference_nt	ena	AAC77004.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAC77004.1	2026-07-28	4828432f3770ae51072622fb1fa2c964c560daca0f75e8a7388857c052452398
+PLF:1011	boundary_evidence	ena	U00096.3	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAC77004.1	2026-07-28	4a2d47e94391a4fa6ee0dcc97635f296b90ab6c3540e862a5adaf82f364d92cd
+PLF:1011	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1011	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1011	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1011	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1011	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1011	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1012	name	uniprot	P42212	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P42212.json	2026-07-28	aad567abb00545381f83daaa8ba940a253427b797e8a6a5ec917547a11db1803
+PLF:1012	aliases	uniprot	P42212	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P42212.json	2026-07-28	aad567abb00545381f83daaa8ba940a253427b797e8a6a5ec917547a11db1803
+PLF:1012	reference_aa	uniprot	P42212	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P42212.json	2026-07-28	aad567abb00545381f83daaa8ba940a253427b797e8a6a5ec917547a11db1803
+PLF:1012	reference_nt	ena	AAA27721.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAA27721.1	2026-07-28	4b177018fefc18ff77243a9e0f0f0b97a5769e84ea535bab29316bbf2a9f25d7
+PLF:1012	boundary_evidence	ena	M62653.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAA27721.1	2026-07-28	6832ad50d7a4a4bd6256a1252b97f5961ae1a01bb182560eff715d80cc75ccc0
+PLF:1012	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1012	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1012	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1012	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1012	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1012	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:1013	name	uniprot	Q9U6Y8	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q9U6Y8.json	2026-07-28	bb2a2f3e75121d915262621ecd9dcbd154de751dbd158bec83485407db717dde
+PLF:1013	aliases	uniprot	Q9U6Y8	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q9U6Y8.json	2026-07-28	bb2a2f3e75121d915262621ecd9dcbd154de751dbd158bec83485407db717dde
+PLF:1013	reference_aa	uniprot	Q9U6Y8	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q9U6Y8.json	2026-07-28	bb2a2f3e75121d915262621ecd9dcbd154de751dbd158bec83485407db717dde
+PLF:1013	reference_nt	ena	AAF03369.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAF03369.1	2026-07-28	8a497ba7d83ab312baa20ecfbc00988e425492b1cb9ac0a8f73cf0e1ce8ad92f
+PLF:1013	boundary_evidence	ena	AF168419.2	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AAF03369.1	2026-07-28	f35b234641be75b778c55633013a29a96fecac8f00f5729f1a22307215e34f13
+PLF:1013	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:1013	description	polylinker	-	own-work	-	2026-07-28	
+PLF:1013	class	polylinker	-	own-work	-	2026-07-28	
+PLF:1013	genbank_key	insdc-ft	CDS	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:1013	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:1013	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2000	reference_nt	ena	S42973.1:3-107	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/S42973.1?range=3-107	2026-07-28	46af52645e153c64bb88fda2481d35ceaf90d0f95d961a9e7378950f36283113
+PLF:2000	reference_nt	rfam	RF00106:S42973.1/3-107	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2000	boundary_evidence	rfam	RF00106:S42973.1/3-107	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2000	class	rfam	RF00106	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2000	notes	rfam	RF00106;PMID:7523833	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2000	notes	ena	S42973.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/S42973.1?range=3-107	2026-07-28	46af52645e153c64bb88fda2481d35ceaf90d0f95d961a9e7378950f36283113
+PLF:2000	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2000	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2000	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2000	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2000	description	polylinker	PMID:7523833	own-work	-	2026-07-28	
+PLF:2000	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2000	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2001	reference_nt	ena	AB040415.1:24427-24516	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB040415.1?range=24427-24516	2026-07-28	fb28b50525c58260c90adaeb5c78cc6abaeff50c2b44dc245aa79d9f51628906
+PLF:2001	reference_nt	rfam	RF00042:AB040415.1/24427-24516	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2001	boundary_evidence	rfam	RF00042:AB040415.1/24427-24516	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2001	class	rfam	RF00042	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2001	notes	rfam	RF00042;PMID:2421250	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2001	notes	ena	AB040415.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB040415.1?range=24427-24516	2026-07-28	fb28b50525c58260c90adaeb5c78cc6abaeff50c2b44dc245aa79d9f51628906
+PLF:2001	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2001	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2001	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2001	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2001	description	polylinker	PMID:2421250	own-work	-	2026-07-28	
+PLF:2001	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2001	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2002	reference_nt	ena	Z47410.1:1220-1294	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/Z47410.1?range=1220-1294	2026-07-28	6454eedf697f8ed5f2ef70114806d2c27d89590d623fabc092da37936a6616dc
+PLF:2002	reference_nt	rfam	RF00043:Z47410.1/1220-1294	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2002	boundary_evidence	rfam	RF00043:Z47410.1/1220-1294	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2002	class	rfam	RF00043	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2002	notes	rfam	RF00043;PMID:2430262	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2002	notes	ena	Z47410.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/Z47410.1?range=1220-1294	2026-07-28	6454eedf697f8ed5f2ef70114806d2c27d89590d623fabc092da37936a6616dc
+PLF:2002	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2002	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2002	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2002	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2002	description	polylinker	PMID:2430262	own-work	-	2026-07-28	
+PLF:2002	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2002	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2003	reference_nt	ena	AB037671.1:30845-30939	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB037671.1?range=30845-30939	2026-07-28	04efcbb85cb4967f669b12386e1504646d2f9cbcbab97ff02768747f560a99eb
+PLF:2003	reference_nt	rfam	RF00242:AB037671.1/30845-30939	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2003	boundary_evidence	rfam	RF00242:AB037671.1/30845-30939	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2003	class	rfam	RF00242	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2003	notes	rfam	RF00242;PMID:2478296	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2003	notes	ena	AB037671.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB037671.1?range=30845-30939	2026-07-28	04efcbb85cb4967f669b12386e1504646d2f9cbcbab97ff02768747f560a99eb
+PLF:2003	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2003	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2003	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2003	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2003	description	polylinker	PMID:2478296	own-work	-	2026-07-28	
+PLF:2003	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2003	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2004	reference_nt	ena	X17655.1:336-463	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/X17655.1?range=336-463	2026-07-28	485849b7fd5bf7188043aaba72ca5d11830e4b1624f27ffb8b3bc69cb7be41dc
+PLF:2004	reference_nt	rfam	RF00235:X17655.1/463-336	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2004	boundary_evidence	rfam	RF00235:X17655.1/463-336	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2004	class	rfam	RF00235	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2004	notes	rfam	RF00235;PMID:14583190	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2004	notes	ena	X17655.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/X17655.1?range=336-463	2026-07-28	485849b7fd5bf7188043aaba72ca5d11830e4b1624f27ffb8b3bc69cb7be41dc
+PLF:2004	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2004	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2004	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2004	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2004	description	polylinker	PMID:14583190	own-work	-	2026-07-28	
+PLF:2004	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2004	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2005	reference_nt	ena	AB021078.1:294-442	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB021078.1?range=294-442	2026-07-28	55d1b7c574944bc9e4bf4b1fbddd7cee5f81d2a4d9375967da82b1996cf59ec2
+PLF:2005	reference_nt	rfam	RF01087:AB021078.1/294-442	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2005	boundary_evidence	rfam	RF01087:AB021078.1/294-442	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2005	class	rfam	RF01087	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2005	notes	rfam	RF01087;PMID:9565606	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2005	notes	ena	AB021078.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB021078.1?range=294-442	2026-07-28	55d1b7c574944bc9e4bf4b1fbddd7cee5f81d2a4d9375967da82b1996cf59ec2
+PLF:2005	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2005	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2005	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2005	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2005	description	polylinker	PMID:9565606	own-work	-	2026-07-28	
+PLF:2005	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2005	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2006	reference_nt	ena	AAMK02000020.1:20388-20545	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAMK02000020.1?range=20388-20545	2026-07-28	508d095df3d843dd3ad18f57f52b4d39e40f5d3e1a557d1af513c262e4e57238
+PLF:2006	reference_nt	rfam	RF01794:AAMK02000020.1/20388-20545	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2006	boundary_evidence	rfam	RF01794:AAMK02000020.1/20388-20545	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2006	class	rfam	RF01794	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2006	notes	rfam	RF01794;PMID:3049248	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2006	notes	ena	AAMK02000020.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAMK02000020.1?range=20388-20545	2026-07-28	508d095df3d843dd3ad18f57f52b4d39e40f5d3e1a557d1af513c262e4e57238
+PLF:2006	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2006	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2006	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2006	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2006	description	polylinker	PMID:3049248	own-work	-	2026-07-28	
+PLF:2006	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2006	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2007	reference_nt	ena	AF389529.1:1037-1113	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF389529.1?range=1037-1113	2026-07-28	6353a13a076ab56fbd98ec0f9e3b86bbcf4324adec0bb101d7b6ce0c221a1e2a
+PLF:2007	reference_nt	rfam	RF00107:AF389529.1/1113-1037	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2007	boundary_evidence	rfam	RF00107:AF389529.1/1113-1037	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2007	class	rfam	RF00107	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2007	notes	rfam	RF00107;PMID:9917389	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2007	notes	ena	AF389529.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF389529.1?range=1037-1113	2026-07-28	6353a13a076ab56fbd98ec0f9e3b86bbcf4324adec0bb101d7b6ce0c221a1e2a
+PLF:2007	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2007	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2007	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2007	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2007	description	polylinker	PMID:9917389	own-work	-	2026-07-28	
+PLF:2007	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2007	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2008	reference_nt	ena	AF389529.1:1005-1112	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF389529.1?range=1005-1112	2026-07-28	3f33755f5fd06d9799175b5757a67450ec4a045657cd40c92d16c842de104674
+PLF:2008	reference_nt	rfam	RF00243:AF389529.1/1005-1112	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2008	boundary_evidence	rfam	RF00243:AF389529.1/1005-1112	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2008	class	rfam	RF00243	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2008	notes	rfam	RF00243;PMID:14633993	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2008	notes	ena	AF389529.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF389529.1?range=1005-1112	2026-07-28	3f33755f5fd06d9799175b5757a67450ec4a045657cd40c92d16c842de104674
+PLF:2008	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2008	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2008	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2008	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2008	description	polylinker	PMID:14633993	own-work	-	2026-07-28	
+PLF:2008	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2008	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2009	reference_nt	ena	AF025751.1:1486-1822	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF025751.1?range=1486-1822	2026-07-28	08309b19a097a096c3b28e7bcbdcb8c622df37cc3e974c0f7722a2fc25f5c0e4
+PLF:2009	reference_nt	rfam	RF00036:AF025751.1/1486-1822	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2009	boundary_evidence	rfam	RF00036:AF025751.1/1486-1822	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2009	class	rfam	RF00036	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2009	notes	rfam	RF00036;PMID:12177299	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2009	notes	ena	AF025751.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF025751.1?range=1486-1822	2026-07-28	08309b19a097a096c3b28e7bcbdcb8c622df37cc3e974c0f7722a2fc25f5c0e4
+PLF:2009	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2009	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2009	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2009	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2009	description	polylinker	PMID:12177299	own-work	-	2026-07-28	
+PLF:2009	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2009	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2010	reference_nt	ena	AF003887.1:579-677	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF003887.1?range=579-677	2026-07-28	fe9d9f88e81f1fcbab7778239920b8f88536f323e3c6e2fd466d177cd04da21f
+PLF:2010	reference_nt	rfam	RF00375:AF003887.1/579-677	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2010	boundary_evidence	rfam	RF00375:AF003887.1/579-677	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2010	class	rfam	RF00375	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2010	notes	rfam	RF00375;PMID:14757051	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2010	notes	ena	AF003887.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF003887.1?range=579-677	2026-07-28	fe9d9f88e81f1fcbab7778239920b8f88536f323e3c6e2fd466d177cd04da21f
+PLF:2010	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2010	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2010	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2010	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2010	description	polylinker	PMID:14757051	own-work	-	2026-07-28	
+PLF:2010	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2010	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2011	reference_nt	ena	AF042100.1:762-784	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF042100.1?range=762-784	2026-07-28	8b4f647c2d10cee3325d0375642436130a87dc55cdcf90162ec704350e65e536
+PLF:2011	reference_nt	rfam	RF01381:AF042100.1/762-784	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2011	boundary_evidence	rfam	RF01381:AF042100.1/762-784	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2011	class	rfam	RF01381	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2011	notes	rfam	RF01381;PMID:18713870	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2011	notes	ena	AF042100.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF042100.1?range=762-784	2026-07-28	8b4f647c2d10cee3325d0375642436130a87dc55cdcf90162ec704350e65e536
+PLF:2011	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2011	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2011	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2011	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2011	description	polylinker	PMID:18713870	own-work	-	2026-07-28	
+PLF:2011	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2011	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2012	reference_nt	ena	AF033811.1:12-112	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF033811.1?range=12-112	2026-07-28	b010f35118b664d8366f0cc6d82ee8642d0b45d11349ccac72a790a8af4773af
+PLF:2012	reference_nt	rfam	RF00374:AF033811.1/12-112	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2012	boundary_evidence	rfam	RF00374:AF033811.1/12-112	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2012	class	rfam	RF00374	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2012	notes	rfam	RF00374;PMID:15003457	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2012	notes	ena	AF033811.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF033811.1?range=12-112	2026-07-28	b010f35118b664d8366f0cc6d82ee8642d0b45d11349ccac72a790a8af4773af
+PLF:2012	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2012	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2012	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2012	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2012	description	polylinker	PMID:15003457	own-work	-	2026-07-28	
+PLF:2012	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2012	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2013	reference_nt	ena	MH590700.1:3-352	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/MH590700.1?range=3-352	2026-07-28	5f19898a7b8044e0db69e8b62fd80d209556466762d1e1a6192203a9ff99d31d
+PLF:2013	reference_nt	rfam	RF00061:MH590700.1/3-352	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2013	boundary_evidence	rfam	RF00061:MH590700.1/3-352	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2013	class	rfam	RF00061	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2013	notes	rfam	RF00061;PMID:25775547	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2013	notes	ena	MH590700.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/MH590700.1?range=3-352	2026-07-28	5f19898a7b8044e0db69e8b62fd80d209556466762d1e1a6192203a9ff99d31d
+PLF:2013	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2013	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2013	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2013	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2013	description	polylinker	PMID:25775547	own-work	-	2026-07-28	
+PLF:2013	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2013	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2014	reference_nt	ena	AF218039.1:6028-6223	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF218039.1?range=6028-6223	2026-07-28	825b1b06f59eacb0d2ab62b6df71b7138120250d4d47dbbf79c6a1aa9c90edd9
+PLF:2014	reference_nt	rfam	RF00458:AF218039.1/6028-6223	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2014	boundary_evidence	rfam	RF00458:AF218039.1/6028-6223	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2014	class	rfam	RF00458	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2014	notes	rfam	RF00458;PMID:11233983	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2014	notes	ena	AF218039.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF218039.1?range=6028-6223	2026-07-28	825b1b06f59eacb0d2ab62b6df71b7138120250d4d47dbbf79c6a1aa9c90edd9
+PLF:2014	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2014	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2014	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2014	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2014	description	polylinker	PMID:11233983	own-work	-	2026-07-28	
+PLF:2014	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2014	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2015	reference_nt	ena	AB037947.1:685-775	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB037947.1?range=685-775	2026-07-28	09fdc6e6c9c023285a09b7b3fb7705ca6ed679e39b3d9c7b84485389babc07ff
+PLF:2015	reference_nt	rfam	RF00094:AB037947.1/685-775	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2015	boundary_evidence	rfam	RF00094:AB037947.1/685-775	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2015	class	rfam	RF00094	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2015	notes	rfam	RF00094;PMID:9783582	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2015	notes	ena	AB037947.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB037947.1?range=685-775	2026-07-28	09fdc6e6c9c023285a09b7b3fb7705ca6ed679e39b3d9c7b84485389babc07ff
+PLF:2015	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2015	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2015	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2015	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2015	description	polylinker	PMID:9783582	own-work	-	2026-07-28	
+PLF:2015	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2015	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2016	reference_nt	ena	AF170499.1:3-56	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF170499.1?range=3-56	2026-07-28	e5290f0a3576edede97f9490c9854d8ca6dd85b4dddbe146645084db5ecf34f3
+PLF:2016	reference_nt	rfam	RF00008:AF170499.1/56-3	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2016	boundary_evidence	rfam	RF00008:AF170499.1/56-3	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2016	class	rfam	RF00008	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2016	notes	rfam	RF00008;PMID:7969422	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2016	notes	ena	AF170499.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF170499.1?range=3-56	2026-07-28	e5290f0a3576edede97f9490c9854d8ca6dd85b4dddbe146645084db5ecf34f3
+PLF:2016	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2016	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2016	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2016	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2016	description	polylinker	PMID:7969422	own-work	-	2026-07-28	
+PLF:2016	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2016	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2017	reference_nt	ena	CP000557.1:163698-163870	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/CP000557.1?range=163698-163870	2026-07-28	b4690d7cd2196103db3c4369de2a1cea4e823d66576ace1da0022152243971d7
+PLF:2017	reference_nt	rfam	RF00234:CP000557.1/163698-163870	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2017	boundary_evidence	rfam	RF00234:CP000557.1/163698-163870	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2017	class	rfam	RF00234	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2017	notes	rfam	RF00234;PMID:15029187	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2017	notes	ena	CP000557.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/CP000557.1?range=163698-163870	2026-07-28	b4690d7cd2196103db3c4369de2a1cea4e823d66576ace1da0022152243971d7
+PLF:2017	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2017	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2017	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2017	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2017	description	polylinker	PMID:15029187	own-work	-	2026-07-28	
+PLF:2017	genbank_key	insdc-ft	regulatory	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2017	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2018	reference_nt	ena	AAEK01000033.1:47712-47817	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAEK01000033.1?range=47712-47817	2026-07-28	f84be1dc09110bdf45a33e2c26428e0966e1ae99c46473e3af1f0e69054c8bea
+PLF:2018	reference_nt	rfam	RF00059:AAEK01000033.1/47712-47817	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2018	boundary_evidence	rfam	RF00059:AAEK01000033.1/47712-47817	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2018	class	rfam	RF00059	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2018	notes	rfam	RF00059;PMID:12410317	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2018	notes	ena	AAEK01000033.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAEK01000033.1?range=47712-47817	2026-07-28	f84be1dc09110bdf45a33e2c26428e0966e1ae99c46473e3af1f0e69054c8bea
+PLF:2018	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2018	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2018	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2018	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2018	description	polylinker	PMID:12410317	own-work	-	2026-07-28	
+PLF:2018	genbank_key	insdc-ft	regulatory	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2018	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2019	reference_nt	ena	AF269712.1:1300-1435	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF269712.1?range=1300-1435	2026-07-28	79078514e50547eb8844dd1508deb199187a05fb2e941ff94eb615293338e722
+PLF:2019	reference_nt	rfam	RF00050:AF269712.1/1300-1435	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2019	boundary_evidence	rfam	RF00050:AF269712.1/1300-1435	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2019	class	rfam	RF00050	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2019	notes	rfam	RF00050;PMID:12456892	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2019	notes	ena	AF269712.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AF269712.1?range=1300-1435	2026-07-28	79078514e50547eb8844dd1508deb199187a05fb2e941ff94eb615293338e722
+PLF:2019	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2019	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2019	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2019	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2019	description	polylinker	PMID:12456892	own-work	-	2026-07-28	
+PLF:2019	genbank_key	insdc-ft	regulatory	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2019	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2020	reference_nt	ena	BA000034.2:1153816-1153905	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/BA000034.2?range=1153816-1153905	2026-07-28	1a3400ff8edbd9a67f6d5ee2579d459e09d53b5a49335ef9d1c0bde97d7b0ccd
+PLF:2020	reference_nt	rfam	RF02348:BA000034.2/1153816-1153905	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2020	boundary_evidence	rfam	RF02348:BA000034.2/1153816-1153905	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2020	class	rfam	RF02348	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2020	notes	rfam	RF02348;PMID:22745249	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2020	notes	ena	BA000034.2	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/BA000034.2?range=1153816-1153905	2026-07-28	1a3400ff8edbd9a67f6d5ee2579d459e09d53b5a49335ef9d1c0bde97d7b0ccd
+PLF:2020	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2020	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2020	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2020	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2020	description	polylinker	PMID:22745249	own-work	-	2026-07-28	
+PLF:2020	genbank_key	insdc-ft	ncRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2020	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2021	reference_nt	ena	EF108464.1:1729-1764	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/EF108464.1?range=1729-1764	2026-07-28	351cd3db60cb416b5dc3ecd0f5a7ccc3f0f56af2f32e93fac20c14dd9f8571c6
+PLF:2021	reference_nt	rfam	RF02359:EF108464.1/1729-1764	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2021	boundary_evidence	rfam	RF02359:EF108464.1/1729-1764	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2021	class	rfam	RF02359	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2021	notes	rfam	RF02359;PMID:11095669	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2021	notes	ena	EF108464.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/EF108464.1?range=1729-1764	2026-07-28	351cd3db60cb416b5dc3ecd0f5a7ccc3f0f56af2f32e93fac20c14dd9f8571c6
+PLF:2021	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2021	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2021	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2021	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2021	description	polylinker	PMID:11095669	own-work	-	2026-07-28	
+PLF:2021	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2021	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2022	reference_nt	ena	AB031211.1:8065-8137	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB031211.1?range=8065-8137	2026-07-28	ccfba07c201d570953ed40f16b3cf1391a831907765a76672d19997de32e2fb7
+PLF:2022	reference_nt	rfam	RF00005:AB031211.1/8065-8137	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2022	boundary_evidence	rfam	RF00005:AB031211.1/8065-8137	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2022	class	rfam	RF00005	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2022	notes	rfam	RF00005;PMID:8256282	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2022	notes	ena	AB031211.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB031211.1?range=8065-8137	2026-07-28	ccfba07c201d570953ed40f16b3cf1391a831907765a76672d19997de32e2fb7
+PLF:2022	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2022	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2022	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2022	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2022	description	polylinker	PMID:8256282	own-work	-	2026-07-28	
+PLF:2022	genbank_key	insdc-ft	tRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2022	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:2023	reference_nt	ena	AB001721.1:2735-2851	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB001721.1?range=2735-2851	2026-07-28	5f2f6bbb2be2963d6e68f4154bc7cdcbd06f151c11428cde88868c1f4e7cd361
+PLF:2023	reference_nt	rfam	RF00001:AB001721.1/2735-2851	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2023	boundary_evidence	rfam	RF00001:AB001721.1/2735-2851	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2023	class	rfam	RF00001	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/database_files/family.txt.gz	2026-07-28	5662343d24b6f8dab566977fabebeb9df4bbec47fb8991400749fc642f03df69
+PLF:2023	notes	rfam	RF00001;PMID:11752286	CC0-1.0	https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.seed.gz	2026-07-28	41f014f4ab5628620935f089b1bb77987ebc162fda7c72bff368a32c9cccabac
+PLF:2023	notes	ena	AB001721.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AB001721.1?range=2735-2851	2026-07-28	5f2f6bbb2be2963d6e68f4154bc7cdcbd06f151c11428cde88868c1f4e7cd361
+PLF:2023	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:2023	name	polylinker	-	own-work	-	2026-07-28	
+PLF:2023	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:2023	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:2023	description	polylinker	PMID:11752286	own-work	-	2026-07-28	
+PLF:2023	genbank_key	insdc-ft	rRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:2023	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3002	reference_nt	ena	ABH05852.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/ABH05852.1	2026-07-28	24b5e2e99ca8e41cff430a5dc3f1025762676e3454ef410f134fbfd6ec12254c
+PLF:3002	reference_nt	uniprot	P03438	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03438.json	2026-07-28	da8a3dae35e216dd3fa7c7a371e76031823159cc6d7d40d1ac11b3556422ed65
+PLF:3002	boundary_evidence	polylinker	PMID:6204768 (1984, Cell 37:767-778) - the nine-residue immunodominant determinant of influenza A HA1	own-work	-	2026-07-28	
+PLF:3002	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3002	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3002	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3002	description	polylinker	PMID:6204768 (1984, Cell 37:767-778) - the nine-residue immunodominant determinant of influenza A HA1	own-work	-	2026-07-28	
+PLF:3002	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3002	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3002	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3002	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3003	reference_nt	ena	AAH00141.2	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAH00141.2	2026-07-28	43722dafc2b69132c966b02a7a2b926e0c63b31fa6322e7993d8eada2845ed0e
+PLF:3003	reference_nt	uniprot	P01106	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P01106.json	2026-07-28	1200eaad4d2871a6d58166ef02f2dad5c3b7554a63243fcfb9c1163ee39dc64c
+PLF:3003	boundary_evidence	polylinker	PMID:3915782 (1985, Mol Cell Biol 5:3610-3616) - the epitope of monoclonal 9E10	own-work	-	2026-07-28	
+PLF:3003	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3003	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3003	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3003	description	polylinker	PMID:3915782 (1985, Mol Cell Biol 5:3610-3616) - the epitope of monoclonal 9E10	own-work	-	2026-07-28	
+PLF:3003	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3003	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3003	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3003	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3005	reference_nt	ena	AAC95513.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAC95513.1	2026-07-28	318c8c0c9113bf7d2117d0d4aeb79950cc660ae8ab9412992334a5dadc17ca69
+PLF:3005	reference_nt	uniprot	P11208	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P11208.json	2026-07-28	779019b015add3cdf2e5ab7ef731df941e8202012d0be2cedeb341ac7dbfd0a9
+PLF:3005	boundary_evidence	polylinker	PMID:1713260 (1991, J Gen Virol 72:1551-1557) - the epitope shared by the PIV5 P and V proteins	own-work	-	2026-07-28	
+PLF:3005	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3005	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3005	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3005	description	polylinker	PMID:1713260 (1991, J Gen Virol 72:1551-1557) - the epitope shared by the PIV5 P and V proteins	own-work	-	2026-07-28	
+PLF:3005	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3005	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3005	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3005	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3014	reference_nt	ena	AAA60166.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAA60166.1	2026-07-28	f246b0c06ca48e8302e91ee04a09e0af1e420a276ee3ac047c581a8568bc163f
+PLF:3014	reference_nt	uniprot	P04070	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P04070.json	2026-07-28	4a7c1ea9a3f41645665db4fd94baae5f2d40a6377082d13456526c80be367347
+PLF:3014	boundary_evidence	polylinker	PMID:1283093 (1992, Protein Expr Purif 3:453-460); antibody from PMID:2447082 (1988, J Biol Chem 263:826-832)	own-work	-	2026-07-28	
+PLF:3014	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3014	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3014	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3014	description	polylinker	PMID:1283093 (1992, Protein Expr Purif 3:453-460); antibody from PMID:2447082 (1988, J Biol Chem 263:826-832)	own-work	-	2026-07-28	
+PLF:3014	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3014	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3014	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3014	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3021	reference_nt	ena	AAK12416.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAK12416.1	2026-07-28	ecbec8a9b6ebf77ee67404975880c87a028228f0a8b85c2e8490d21d437ea8a6
+PLF:3021	reference_nt	uniprot	Q99HP0	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q99HP0.json	2026-07-28	0294b2940ed722aeb35847cb4453cca21de026425fdd3459b4469de2791776eb
+PLF:3021	boundary_evidence	polylinker	PMID:21602908 (2011, PLoS ONE 6:e18556); the skip occurs between the terminal G and P, so the P is the first residue of the downstream protein	own-work	-	2026-07-28	
+PLF:3021	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3021	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3021	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3021	description	polylinker	PMID:21602908 (2011, PLoS ONE 6:e18556); the skip occurs between the terminal G and P, so the P is the first residue of the downstream protein	own-work	-	2026-07-28	
+PLF:3021	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3021	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3021	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3021	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3022	reference_nt	ena	AAC97195.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAC97195.1	2026-07-28	85a45f334e653ffb96cd5e10bacb47d424ec039a116e13c297e0c901ad40ec3b
+PLF:3022	reference_nt	uniprot	Q9YK87	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q9YK87.json	2026-07-28	fa406d5d8b966676d725232abeb4e8a3eeb7395eeba7534c78eb91430370280f
+PLF:3022	boundary_evidence	polylinker	PMID:15064769 (2004, Nat Biotechnol 22:589-594); skip between the terminal G and P	own-work	-	2026-07-28	
+PLF:3022	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3022	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3022	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3022	description	polylinker	PMID:15064769 (2004, Nat Biotechnol 22:589-594); skip between the terminal G and P	own-work	-	2026-07-28	
+PLF:3022	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3022	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3022	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3022	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3023	reference_nt	ena	CAA65613.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/CAA65613.1	2026-07-28	abde3e733fb470cbf8ea05facaab0b6b79872e3ef055dac3a62396a8d77c4dc1
+PLF:3023	reference_nt	uniprot	Q66774	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q66774.json	2026-07-28	3339d04f0ea5a517274c682894318e33dcc1d2677a70a560ab71fada1b42038c
+PLF:3023	boundary_evidence	polylinker	PMID:11297676 (2001, J Gen Virol 82:1013-1025); skip between the terminal G and P	own-work	-	2026-07-28	
+PLF:3023	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3023	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3023	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3023	description	polylinker	PMID:11297676 (2001, J Gen Virol 82:1013-1025); skip between the terminal G and P	own-work	-	2026-07-28	
+PLF:3023	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3023	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3023	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3023	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3024	reference_nt	ena	CAA25416.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/CAA25416.1	2026-07-28	0379d629514e5a3f1eda5c64bfb3e0cceb9da6e935068d73c98b5050869e5b8b
+PLF:3024	reference_nt	uniprot	P03305	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03305.json	2026-07-28	683ab6ceebd308127655bb919e292c39878efcd1554ffe27554ceceb52c0d16c
+PLF:3024	boundary_evidence	polylinker	PMID:11297676 (2001, J Gen Virol 82:1013-1025); skip between the terminal G and P	own-work	-	2026-07-28	
+PLF:3024	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3024	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3024	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3024	description	polylinker	PMID:11297676 (2001, J Gen Virol 82:1013-1025); skip between the terminal G and P	own-work	-	2026-07-28	
+PLF:3024	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3024	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3024	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3024	patent_flag	polylinker	-	own-work	-	2026-07-28	

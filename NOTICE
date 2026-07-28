@@ -41,9 +41,36 @@ this repository's code.
                         REBASE: a database for DNA restriction and modification.
                         Nucleic Acids Research.
 
-The planned annotation database (polylinker-features) will be CC BY 4.0 and
-will live in a separate repository, sourced from UniProt/Swiss-Prot, Rfam,
-FPbase and NCBI UniVec, with per-entry attribution.
+The annotation database (polylinker-features) is CC BY 4.0. It is IN THIS
+REPOSITORY, in `features/`, and `crates/pl-features` compiles both
+`features/features.tsv` and `features/provenance.tsv` into every binary via
+`include_str!` -- so `pl`, `pl-mcp` and the Python module all carry it and all
+carry its attribution obligations. `pl licences` prints this section from the
+compiled-in table.
+
+Sources actually in use, with the licence recorded per FIELD in
+`features/provenance.tsv` (a single record legitimately mixes several):
+
+  NCBI AMRFinderPlus       INSDC free-and-unrestricted, NLM attribution
+  UniProt Consortium       CC BY 4.0, (c) 2002-2024 UniProt Consortium
+  EMBL-EBI / ENA           INSDC free-and-unrestricted, credit to submitters
+  EMBL-EBI / Rfam          CC0 1.0, with per-family primary-source credit
+  INSDC feature table      licence UNRESOLVED; see SOURCING.md Risk 4
+
+  Courtesy of the U.S. National Library of Medicine.
+  https://www.ncbi.nlm.nih.gov/home/about/policies/
+
+  This dataset is a dated snapshot (retrieved 2026-07-28) and does not reflect
+  the most current data available from NLM.
+
+FPbase and NCBI UniVec appear nowhere in it and must not: `features/SOURCING.md`
+records FPbase as HOLD (its own page disclaims the power to grant a licence) and
+UniVec as NO-GO as a coordinate source. This paragraph named both of them as
+sources while the database was being built from neither.
+
+The full notice -- the UniProt statement of changes, the per-family Rfam credit
+table, and the list of sources deliberately not used -- is `features/NOTICE`,
+and it must be packaged with any distribution that includes the database.
 
 The planned correctness benchmark (polylinker-bench) will be CC0.
 

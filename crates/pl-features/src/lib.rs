@@ -123,6 +123,19 @@ impl Class {
 pub enum BoundaryRule {
     /// Start codon through stop codon of the frame translating to the verified
     /// reference protein. Nobody chose it; it is a property of the sequence.
+    ///
+    /// READ THE DEFINITION, NOT THE NAME. "Atg" in the identifier is narrower
+    /// than the rule: an initiation codon is whatever initiates, and `GTG` and
+    /// `TTG` are common real starts in transposon-borne markers — tet(A) begins
+    /// `GTG` — read as formyl-Met rather than as Val or Leu. Seven shipped rows
+    /// carry this rule over a sequence that does not begin `ATG`, all of them
+    /// correctly, and each states its initiator codon in `notes`.
+    ///
+    /// The string form is published, so it is not being renamed; the mismatch
+    /// is stated here and in `features/README.md` instead. It matters because
+    /// [`BoundaryRule::is_derived`] treats this as the strongest derivation
+    /// claim in the schema, and an auditor reading the label literally would
+    /// think those seven rows misclaim it.
     OrfAtgToStop,
     /// The mature peptide, i.e. the ORF minus a cleaved signal sequence.
     OrfMaturePeptide,
@@ -682,6 +695,52 @@ impl Db {
                 });
             }
         }
+        // A provenance row keyed on something that is not a column attributes
+        // nothing, and does so silently. Forty shipped rows once keyed on
+        // `citation` and `peptide_anchor`, neither of which is in the schema,
+        // while the column the sourced text actually landed in was labelled
+        // own-work. A misspelling would have behaved identically.
+        for p in &self.provenance {
+            if !FEATURE_COLUMNS.contains(&p.field.as_str()) {
+                out.push(LoadError {
+                    file: "provenance.tsv",
+                    line: 0,
+                    problem: format!(
+                        "{}: provenance names field {:?}, which is not a column of features.tsv",
+                        p.record_id, p.field
+                    ),
+                });
+            }
+        }
+
+        // Source and licence, against features/SOURCING.md section 1. Enforced
+        // here as well as in the builder because this table can be hand-edited,
+        // and it was: two provenance rows citing Addgene and PlasMapper were
+        // appended to a copy of the shipped file, and every check in the project
+        // passed them, counted them, and reported the result green. The NO_GO
+        // list was author discipline, and discipline is not a control.
+        for p in &self.provenance {
+            let ok = match p.source_db.as_str() {
+                "polylinker" => p.licence == "own-work",
+                "amrfinderplus" | "ena" | "genbank" => p.licence == "INSDC-free",
+                "uniprot" => p.licence == "CC-BY-4.0",
+                "rfam" => p.licence == "CC0-1.0",
+                "insdc-ft" => p.licence == "unresolved-see-SOURCING-Risk-4",
+                _ => false,
+            };
+            if !ok {
+                out.push(LoadError {
+                    file: "provenance.tsv",
+                    line: 0,
+                    problem: format!(
+                        "{} field {}: source {:?} under licence {:?} is not cleared for use \
+                         as data by features/SOURCING.md",
+                        p.record_id, p.field, p.source_db, p.licence
+                    ),
+                });
+            }
+        }
+
         // The rule the whole schema exists for: a sequence with no stated
         // origin must never ship.
         for r in &self.records {
@@ -695,6 +754,47 @@ impl Db {
                     line: 0,
                     problem: format!("{}: no provenance for reference_nt", r.id),
                 });
+            }
+        }
+
+        // ...and the same rule for every other populated field, because
+        // features/NOTICE promises "which source each individual field came
+        // from and under what licence" for every field of every row, and
+        // measured against that promise four populated columns had none at all
+        // -- including `genbank_key`, the one column SOURCING.md Risk 4 flags as
+        // legally unresolved.
+        //
+        // `reference_nt` is handled above so it is reported once, in the wording
+        // it has always had. `id`, `review_status`, `curator` and `date_added`
+        // are exempt by name: they are the build's own bookkeeping and the
+        // sign-off protocol, not sourced content.
+        for r in &self.records {
+            let covered: std::collections::BTreeSet<&str> = self
+                .provenance
+                .iter()
+                .filter(|p| p.record_id == r.id)
+                .map(|p| p.field.as_str())
+                .collect();
+            let populated: [(&str, bool); 10] = [
+                ("name", !r.name.is_empty()),
+                ("aliases", !r.aliases.is_empty()),
+                ("class", true),
+                ("genbank_key", !r.genbank_key.is_empty()),
+                ("reference_aa", r.reference_aa.is_some()),
+                ("boundary_rule", true),
+                ("boundary_evidence", !r.boundary_evidence.is_empty()),
+                ("description", !r.description.is_empty()),
+                ("patent_flag", true),
+                ("notes", !r.notes.is_empty()),
+            ];
+            for (field, is_populated) in populated {
+                if is_populated && !covered.contains(field) {
+                    out.push(LoadError {
+                        file: "features.tsv",
+                        line: 0,
+                        problem: format!("{}: no provenance for populated field {}", r.id, field),
+                    });
+                }
             }
         }
         out
@@ -843,9 +943,34 @@ mod tests {
         format!("{id}\tTest\t\tcds\tCDS\tATGACGT\tMT\torf_atg_to_stop\tJ01749.1:3293-4153:-\tA description\tproposed\t\t2026-07-27\t{flag}\t")
     }
 
+    /// Per-field provenance covering everything `feat` populates.
+    ///
+    /// It used to be the single `reference_nt` row, which was all `audit()`
+    /// asked for. That is no longer enough and should never have been: NOTICE
+    /// promises a source and a licence for every field of every row, and a
+    /// fixture that satisfies only the one rule under test lets the other ten
+    /// columns ship unattributed.
     fn prov(id: &str) -> String {
-        format!("{id}\treference_nt\tena\tAAB59737.1\tINSDC-free\thttps://www.ebi.ac.uk/ena/browser/api/fasta/AAB59737.1\t2026-07-27\tabc123")
+        let ena = |field: &str| {
+            format!("{id}\t{field}\tena\tAAB59737.1\tINSDC-free\thttps://www.ebi.ac.uk/ena/browser/api/fasta/AAB59737.1\t2026-07-27\tabc123")
+        };
+        let ours = |field: &str| format!("{id}\t{field}\tpolylinker\t-\town-work\t-\t2026-07-27\t");
+        [
+            ena("reference_nt"),
+            ena("reference_aa"),
+            ena("boundary_evidence"),
+            ours("name"),
+            ours("class"),
+            ours("genbank_key"),
+            ours("boundary_rule"),
+            ours("description"),
+            ours("patent_flag"),
+        ]
+        .join("\n")
     }
+
+    /// How many rows `prov` emits, so a count assertion names the reason.
+    const PROV_ROWS: usize = 9;
 
     #[test]
     fn a_well_formed_database_round_trips() {
@@ -858,7 +983,7 @@ mod tests {
         assert!(errs.is_empty(), "{errs:?}");
         assert_eq!(db.version, "2026.10");
         assert_eq!(db.records.len(), 1);
-        assert_eq!(db.provenance.len(), 1);
+        assert_eq!(db.provenance.len(), PROV_ROWS);
 
         let (f2, p2) = db.to_tsv();
         let (again, errs2) = Db::parse(&f2, &p2);
@@ -971,7 +1096,7 @@ mod tests {
         assert_eq!(ship.records.len(), 1);
         // Provenance for the dropped record must go with it, or the release
         // carries attribution obligations for data it does not contain.
-        assert_eq!(ship.provenance.len(), 1);
+        assert_eq!(ship.provenance.len(), PROV_ROWS);
         assert_eq!(ship.provenance[0].record_id, "PLF:0002");
     }
 
@@ -989,7 +1114,7 @@ mod tests {
         );
         let (db, errs) = Db::parse(&f, &p);
         assert!(errs.is_empty(), "{errs:?}");
-        assert_eq!(db.provenance_of("PLF:0001").len(), 3);
+        assert_eq!(db.provenance_of("PLF:0001").len(), PROV_ROWS + 2);
         let l = db.licences();
         assert_eq!(l.len(), 3, "three distinct licences in one row: {l:?}");
         assert!(
