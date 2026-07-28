@@ -532,12 +532,30 @@ mod tests {
 
     /// A file on disk holding `text`, for the tools that take a path.
     ///
-    /// Named per process so two test binaries running at once cannot read each
-    /// other's fixture half-written.
+    /// Named per process **and per call**. The per-process half was here first
+    /// and closed the race between two test binaries; the per-call half closes
+    /// the one inside a single binary, which is the one that actually bit.
+    /// `cargo test` runs a suite on several threads, four tests here ask for a
+    /// fixture called `orf.fa`, and `fs::write` truncates before it writes — so
+    /// one test can open the file in the instant another has emptied it and get
+    /// "unrecognised format -- expected SnapGene .dna, GenBank or FASTA".
+    ///
+    /// Observed **once**, during a `cargo test --workspace` run, as
+    /// `a_genetic_code_outside_a_byte_is_refused_rather_than_wrapped` failing
+    /// with an error that named neither a genetic code nor a race. Fifteen
+    /// consecutive runs of this suite alone did not reproduce it, which bounds
+    /// the window as narrow rather than showing it is not there: the four
+    /// writes carry identical bytes, so the only losing interleaving is a read
+    /// landing between the truncate and the write. The fix rests on that
+    /// structural argument and not on a frequency, because one observation
+    /// cannot support a frequency. A test that fails at random is worse than a
+    /// missing one — it teaches whoever reads the suite to re-run until green.
     fn fixture(name: &str, text: &str) -> String {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NTH: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!("pl-mcp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a temp directory");
-        let p = dir.join(name);
+        let p = dir.join(format!("{}-{name}", NTH.fetch_add(1, Ordering::Relaxed)));
         std::fs::write(&p, text).expect("a fixture");
         p.display().to_string()
     }
