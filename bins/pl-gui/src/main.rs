@@ -12,6 +12,7 @@ mod doc;
 mod library;
 mod map;
 mod recover;
+mod seqedit;
 mod theme;
 
 use std::path::PathBuf;
@@ -64,7 +65,18 @@ enum Tab {
 
 struct App {
     document: Option<Document>,
+    /// A file that could not be read. Renders as a full-screen takeover, which
+    /// is right for "there is no document" and wrong for anything else.
     error: Option<String>,
+    /// An edit that was refused, or a report about one that was not.
+    ///
+    /// Deliberately not `error`. A refused *edit* used to go there, so the
+    /// application answered "cannot delete 12 bp at 1,204" with a full-screen
+    /// "Could not read that file" and removed the map — telling the user their
+    /// file is unreadable when the document is fine and nothing was changed.
+    notice: Option<String>,
+    /// Caret, selection and the open typing run for the Sequence tab.
+    edit: seqedit::SeqEdit,
     tab: Tab,
     selected: Option<usize>,
     /// Feature under the pointer, from either the map or the list.
@@ -235,9 +247,8 @@ impl App {
             let title = snap.as_ref().map(|s| s.title.clone()).unwrap_or_default();
             match Document::from_bytes(body.as_bytes(), title, None) {
                 Ok(d) => {
+                    self.adopt(d);
                     self.status = format!("recovered from {}", path.display());
-                    self.error = None;
-                    self.document = Some(d);
                     // The path is deliberately dropped: a recovered document is
                     // unsaved, so Save has to ask where, and cannot overwrite
                     // the original with a draft the user has not looked at.
@@ -258,6 +269,39 @@ impl App {
     /// rewrites the original every few minutes has turned "close without
     /// saving" into a lie.
     fn autosave(&mut self) {
+        // THE THROTTLE COMES FIRST, and that ordering is the whole of a defect
+        // this shipped with.
+        //
+        // `settle` below is not a read: it turns the open typing run into an
+        // operation. `App::ui` calls this function on every frame, and the
+        // throttle used to sit thirty lines further down, so a run opened in
+        // frame N was committed at the top of frame N+1 — before the next
+        // keystroke was even read. Every keystroke became its own `InsertAt`,
+        // so coalescing — the load-bearing decision of this whole surface —
+        // never happened once. Forty characters typed into the running
+        // application now produce two operations (the one settle the throttle
+        // allows, and the run); the same forty through
+        // `a_typing_run_survives_the_autosave_that_runs_on_every_frame` with
+        // this ordering undone produce thirty-nine.
+        //
+        // With the order swapped, a run is forced closed at most once per
+        // `AUTOSAVE_EVERY` and otherwise closes on its own idle timer, which is
+        // the design. The invariant the settle exists for is untouched: it
+        // still runs before `here` is computed and before anything is written,
+        // so a recovery file can never be missing the user's last keystrokes.
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_autosave {
+            if now.duration_since(last) < Self::AUTOSAVE_EVERY {
+                return;
+            }
+        }
+        if self.document.is_none() || self.recovery.is_none() {
+            return;
+        }
+        // Design B's rule 6, and the one whose absence loses data: an autosave
+        // that wrote `log.current()` while a typing run was open would write a
+        // recovery file missing the user's last forty keystrokes.
+        self.settle();
         let Some(doc) = &self.document else { return };
         let here = Autosaved {
             original: doc.path.clone(),
@@ -286,12 +330,6 @@ impl App {
             return;
         }
         let ops = doc.log.path().len();
-        let now = std::time::Instant::now();
-        if let Some(last) = self.last_autosave {
-            if now.duration_since(last) < Self::AUTOSAVE_EVERY {
-                return;
-            }
-        }
         let Some(path) = self.recovery.clone() else {
             return;
         };
@@ -305,11 +343,15 @@ impl App {
             ops,
             genbank: pl_fileio::genbank::write(doc.molecule(), &doc.title, today()),
         };
+        // The clock is set either way. A failure that left it unset made the
+        // next frame due again, so a full disk retried a multi-megabyte write
+        // on every frame — and, now that the throttle also bounds the settle,
+        // would have taken run coalescing down with it. Thirty seconds is the
+        // right retry interval for the same reason it is the right write
+        // interval.
+        self.last_autosave = Some(now);
         match recover::write(&path, &snap) {
-            Ok(()) => {
-                self.autosaved = Some(here);
-                self.last_autosave = Some(now);
-            }
+            Ok(()) => self.autosaved = Some(here),
             // A failed autosave must not interrupt the work it exists to
             // protect, but it must not be silent either -- a user who thinks
             // they are covered and is not is worse off than one who knows.
@@ -327,6 +369,8 @@ impl App {
         App {
             document: None,
             error: None,
+            notice: None,
+            edit: seqedit::SeqEdit::new(),
             tab: Tab::Features,
             selected: None,
             hot: None,
@@ -394,6 +438,32 @@ impl App {
         app
     }
 
+    /// Take on a document, from wherever it came.
+    ///
+    /// The one place `self.document` is assigned, because two of the four
+    /// places that used to assign it forgot the second half. `load` reset the
+    /// editor with the comment "a caret from the previous document names bases
+    /// this one does not have"; the Recover banner and a dropped byte payload
+    /// did not, so a selection made on a 5 kb plasmid survived onto a 200 bp
+    /// recovered document as a highlight of its tail — and Backspace deletes
+    /// what is highlighted. The content-addressed `seen` map carried over too,
+    /// and its keys really do collide: two different documents circularised
+    /// from their base have the same `OpId`.
+    ///
+    /// It also starts this document's autosave clock. The recovery file is a
+    /// periodic snapshot and the period starts when the document opens; that
+    /// is what keeps `autosave` from forcing the very first typing run closed
+    /// on the frame after it opens.
+    fn adopt(&mut self, d: Document) {
+        self.document = Some(d);
+        self.error = None;
+        self.notice = None;
+        self.edit = seqedit::SeqEdit::new();
+        self.selected = None;
+        self.hot = None;
+        self.last_autosave = Some(std::time::Instant::now());
+    }
+
     fn load(&mut self, path: PathBuf) {
         match Document::open(&path) {
             Ok(d) => {
@@ -438,10 +508,9 @@ impl App {
                             .join("; ")
                     );
                 }
-                self.document = Some(d);
-                self.error = None;
-                self.selected = None;
-                self.hot = None;
+                // A caret from the previous document names bases this one does
+                // not have.
+                self.adopt(d);
             }
             Err(e) => {
                 self.error = Some(e);
@@ -467,6 +536,7 @@ impl App {
     }
 
     fn export(&mut self, as_fasta: bool) {
+        self.settle();
         let Some(d) = &self.document else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let (ext, filter) = if as_fasta {
@@ -515,6 +585,9 @@ impl App {
     /// embedded -- at the cost of WinAnsi, which has no Greek. Names that lose
     /// characters are listed rather than silently written with `?`.
     fn export_pdf(&mut self) {
+        // The map is drawn from `log.current()`, so an open run would be
+        // missing from it.
+        self.settle();
         let Some(d) = &self.document else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let Some(path) = rfd::FileDialog::new()
@@ -561,6 +634,7 @@ impl App {
     /// the same molecule. A figure that changes depending on which of the two
     /// you reached for is a figure you cannot cite.
     fn export_svg(&mut self) {
+        self.settle();
         let Some(d) = &self.document else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let Some(path) = rfd::FileDialog::new()
@@ -622,6 +696,11 @@ impl eframe::App for App {
     /// was clean, which is why nothing else needs to be written for recovery to
     /// work.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Before the recovery file goes, not after. Quitting is a durable
+        // action like any other, and this one deletes the only copy: an open
+        // run discarded here is gone from the log *and* from the file that
+        // exists to survive exactly this.
+        self.settle();
         if let Some(p) = &self.recovery {
             recover::clear(p);
         }
@@ -629,6 +708,48 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Close the open typing run before anything else in this frame can
+        // observe the document.
+        //
+        // While a run is open the log is deliberately one run behind the
+        // screen — that is what buys 500 keystrokes for one operation instead
+        // of five hundred, and 18 MB instead of a measured 197 MB. The cost is
+        // that `log.current()` is briefly not what the user is looking at, and
+        // *that* is the failure this call exists to bound: an autosave or an
+        // export running mid-run would write a file missing the last forty
+        // keystrokes.
+        //
+        // The condition is structural rather than a list of call sites: every
+        // durable action in this application is reached by a pointer press or a
+        // keyboard shortcut, and both settle the run here, before the frame's
+        // widgets are built. What is left open is a burst of ordinary typing,
+        // which closes on its own after `Run::IDLE_SECONDS`.
+        let now = ctx.input(|i| i.time);
+        let disturbed = ctx.input(|i| {
+            i.pointer.any_pressed()
+                || i.modifiers.command
+                || i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::WindowFocused(false)
+                            | egui::Event::Copy
+                            | egui::Event::Cut
+                            | egui::Event::Paste(_)
+                    )
+                })
+        });
+        let idle = self.edit.run().is_some_and(|r| r.is_idle(now));
+        if disturbed || idle {
+            self.settle();
+        }
+        // A run nothing else disturbs must still close on its own, and a
+        // timeout with nothing to wake it never fires on an idle app.
+        if let Some(r) = self.edit.run() {
+            let left = seqedit::Run::IDLE_SECONDS - (now - r.last_input);
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(left.max(0.0)));
+        }
+
         self.autosave();
 
         if debug_geometry() {
@@ -658,21 +779,26 @@ impl eframe::App for App {
             } else if let Some(bytes) = &f.bytes {
                 match Document::from_bytes(bytes, f.name.clone(), None) {
                     Ok(d) => {
-                        self.status = describe(d.molecule(), d.format);
-                        self.document = Some(d);
-                        self.error = None;
+                        let what = describe(d.molecule(), d.format);
+                        self.adopt(d);
+                        self.status = what;
                     }
                     Err(e) => self.error = Some(e),
                 }
             }
         }
 
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
+        // A paste is waiting on an answer, and these shortcuts are read
+        // straight off the context rather than from a widget, so no amount of
+        // modality in the dialog would stop them. Undoing while the question is
+        // on screen changes the document the question is about.
+        let asking = self.edit.pending_paste.is_some();
+        if !asking && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
             self.pick_file();
         }
         // Ctrl+Z / Ctrl+Y, plus Ctrl+Shift+Z for the mac-shaped habit.
         let (undo, redo) = ctx.input(|i| {
-            let cmd = i.modifiers.command;
+            let cmd = i.modifiers.command && !asking;
             (
                 cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
                 cmd && (i.key_pressed(egui::Key::Y)
@@ -710,6 +836,7 @@ impl eframe::App for App {
         self.top_bar(ui);
         self.side_panel(ui);
         self.central(ui);
+        self.paste_dialog(&ctx);
     }
 }
 
@@ -870,45 +997,100 @@ impl App {
         });
     }
 
+    /// Commit whatever the user has typed but not yet paid for.
+    ///
+    /// The one place a pending run becomes an operation. Every path that reads
+    /// the document for a durable purpose goes through here first.
+    fn settle(&mut self) {
+        let Some(d) = &mut self.document else { return };
+        if self.edit.run().is_none() {
+            return;
+        }
+        // Only a genuine commit failure is promoted to the strip above the map.
+        // The Sequence tab's own transient line — "'Z' is not a nucleotide" —
+        // belongs under the sequence and must survive the next click.
+        let held = self.edit.notice.take();
+        self.edit.commit(d);
+        match self.edit.notice.clone() {
+            Some(failed) => self.notice = Some(failed),
+            None => self.edit.notice = held,
+        }
+    }
+
     /// Run an edit and report a refusal instead of dropping it.
     fn edit(&mut self, kind: pl_core::OpKind) {
+        self.settle();
         let Some(d) = &mut self.document else { return };
         let what = kind.describe();
-        match d.apply(kind) {
+        let n_before = d.molecule().len();
+        match d.apply(kind.clone()) {
             Ok(()) => {
                 self.status = format!("{what} — Ctrl+Z to undo");
-                self.error = None;
+                self.notice = None;
+                // The bases moved under the caret, so move the caret with them.
+                // A caret that survives an edit still pointing at the base it
+                // named before is how an editor rots. Selections are collapsed
+                // on Rotate and on Circular->Linear because the arc they name
+                // may no longer exist.
+                self.edit.caret = seqedit::transport(self.edit.caret, &kind, n_before);
+                self.edit.sel = None;
+                self.edit.remember(d);
             }
             // The log refuses an edit that would leave the annotations
             // describing something the sequence does not contain. Saying which
             // edit and why is the whole point of refusing rather than
-            // corrupting.
-            Err(e) => self.error = Some(format!("cannot {what}: {e}")),
+            // corrupting — and it goes to `notice`, with the document still on
+            // screen, not to the "could not read that file" takeover.
+            Err(e) => self.notice = Some(format!("Cannot {what}: {e}.\nNothing was changed.")),
         }
     }
 
     fn do_undo(&mut self) {
+        self.settle();
+        // An edit across the origin is a rotate and then a range op, and both
+        // have to go. Stepping back over the range op alone leaves a whole,
+        // plausible plasmid whose every coordinate has moved — worse than an
+        // incomplete undo, because there is nothing on screen to say so.
+        let pair = self
+            .document
+            .as_ref()
+            .and_then(|d| self.edit.undo_over_pair(d.log.cursor()));
         if let Some(d) = &mut self.document {
-            match d.undo() {
-                Ok(()) => {
-                    self.status = "undone".into();
-                    self.error = None;
+            let done = match pair {
+                Some(before) => d
+                    .seek(before)
+                    .map(|()| "undone — the origin was put back too"),
+                None => d.undo().map(|()| "undone"),
+            };
+            match done {
+                Ok(what) => {
+                    self.status = what.into();
+                    self.notice = None;
                 }
-                Err(e) => self.error = Some(e.to_string()),
+                Err(e) => self.notice = Some(e.to_string()),
             }
+            self.edit.restore(d);
             self.selected = None;
         }
     }
 
     fn do_redo(&mut self) {
+        self.settle();
         if let Some(d) = &mut self.document {
             match d.redo() {
                 Ok(()) => {
                     self.status = "redone".into();
-                    self.error = None;
+                    self.notice = None;
                 }
-                Err(e) => self.error = Some(e.to_string()),
+                Err(e) => self.notice = Some(e.to_string()),
             }
+            // Both halves, the same way round.
+            if let Some(tail) = self.edit.redo_over_pair(d.log.cursor()) {
+                if d.seek(Some(tail)).is_ok() {
+                    self.status = "redone — the plasmid is renumbered again".into();
+                }
+            }
+            self.edit.restore(d);
             self.selected = None;
         }
     }
@@ -1321,7 +1503,7 @@ impl App {
                 ui.label(RichText::new(why).color(pal(ui).muted));
                 return;
             }
-            DigestState::Running(_) => {
+            DigestState::Running { .. } => {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(14.0));
                     ui.label(RichText::new("scanning…").color(pal(ui).muted));
@@ -1561,51 +1743,589 @@ impl App {
         });
     }
 
+    /// The editing surface.
+    ///
+    /// Virtualised: only the visible rows are built, so this costs the same on
+    /// a 4.6 Mb genome as on a 5 kb plasmid (measured flat at 0.001–0.002 ms
+    /// per frame from 10 kb to 50 Mb). The caret and the selection are
+    /// arithmetic against `show_rows`' row range, never widgets — one
+    /// `Response` per base would be 3,600 widget ids per frame on a 60-row
+    /// viewport, and a selection painted per base would be 4.6 million
+    /// rectangles for Ctrl+A. A contiguous base range meets a row in a
+    /// contiguous span, so a selection contributes at most one rectangle per
+    /// visible row: about forty, whatever the molecule.
     fn sequence_tab(&mut self, ui: &mut Ui) {
-        let d = self.document.as_ref().expect("checked by caller");
-        let seq = &d.molecule().seq;
-        if seq.is_empty() {
-            ui.add_space(8.0);
-            ui.label(RichText::new("This file carries no bases.").color(pal(ui).muted));
+        use seqedit::{Editability, Selection};
+
+        let now = ui.input(|i| i.time);
+        let gate = Editability::of(
+            self.document
+                .as_ref()
+                .expect("checked by caller")
+                .molecule(),
+        );
+
+        ui.add_space(4.0);
+        if !gate.is_editable() {
+            // No caret, no selection, no cursor. The engine would refuse a
+            // keystroke here too, but its message is about the consequence
+            // rather than the cause: a keystroke on an annotation track reads
+            // "feature 0 'orphan' segment 0 start: 101 is past the 1 bp
+            // molecule", which is a symptom of a question nobody should have
+            // been allowed to ask.
+            let why = gate.refusal().unwrap_or_default();
+            ui.label(RichText::new(why).color(pal(ui).muted).size(12.0));
             return;
         }
 
-        const PER_ROW: usize = 60;
-        let rows = seq.len().div_ceil(PER_ROW);
-        let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+        // ONE pitch, derived from the font the row is actually painted in, and
+        // used by `show_rows`, by the y -> row hit-test and by the painter.
+        //
+        // The old row was a `ui.horizontal` of two labels, which advanced
+        // 21.0 px against the 18.125 px `show_rows` was told to assume — the
+        // `interact_size` floor. Read-only that drift is cosmetic; the moment a
+        // click has to name a base it is 8 rows of overshoot at the bottom of a
+        // 60-row viewport, i.e. the user clicks one base and the caret lands
+        // 480 bases away.
+        let font = egui::FontId::monospace(11.5);
+        let gutter_font = egui::FontId::monospace(11.0);
+        let (row_h, advance) = ui.ctx().fonts_mut(|f| {
+            (
+                f.row_height(&font).max(1.0),
+                f.glyph_width(&font, 'A').max(1.0),
+            )
+        });
+        // The coordinate gutter, and then as many bases as are left over. The
+        // row width is measured, not assumed: sixty cells plus the gutter is
+        // wider than this panel, and a base that is off the edge cannot be
+        // clicked.
+        let gutter_w = 62.0;
+        let scrollbar = ui.spacing().scroll.bar_width + 4.0;
+        let per_row = seqedit::fit_per_row(ui.available_width() - gutter_w - scrollbar, advance);
+        self.edit.set_per_row(per_row);
 
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(format!(
-                "{} bp · {} rows · case preserved",
-                fmt_int(seq.len() as u64),
-                fmt_int(rows as u64)
-            ))
-            .color(pal(ui).muted)
-            .size(11.0),
-        );
-        ui.add_space(2.0);
+        let n = self
+            .edit
+            .effective_len(self.document.as_ref().unwrap().molecule());
+        let rows = (n.div_ceil(per_row).max(1)) as usize;
 
-        // Only the visible rows are laid out: a 4.6 Mb genome is 77,000 rows and
-        // building them all would stall for seconds.
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, row_h, rows, |ui, range| {
-                for r in range {
-                    let start = r * PER_ROW;
-                    let end = (start + PER_ROW).min(seq.len());
-                    let line = String::from_utf8_lossy(&seq[start..end]).into_owned();
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("{:>9}", fmt_int(start as u64 + 1)))
-                                .monospace()
-                                .size(11.0)
-                                .color(pal(ui).muted),
+        self.sequence_header(ui, n, rows);
+        self.sequence_keys(ui, now);
+
+        // `show_rows` computes its pitch as `row_height + item_spacing.y` from
+        // the *enclosing* ui, so zeroing the spacing here makes pitch == row_h
+        // and leaves one number for the renderer, the hit-test and the caret.
+        // Set after the header, which wants its ordinary spacing.
+        ui.spacing_mut().item_spacing.y = 0.0;
+
+        // Reserve the readout: it is the number a biologist reads out loud when
+        // they order a primer, so it does not scroll away.
+        let readout_h = 30.0;
+        let grid_h = (ui.available_height() - readout_h).max(60.0);
+
+        let mut click: Option<(u64, bool)> = None;
+        let mut drag_to: Option<u64> = None;
+        let mut released = false;
+        let mut double: Option<u64> = None;
+        let mut visible = 1u64;
+
+        {
+            let d = self.document.as_ref().expect("checked by caller");
+            let mol = d.molecule();
+            let edit = &self.edit;
+            let p = pal(ui);
+            let sel = edit
+                .sel
+                .map(|s| s.canonical(mol.len(), mol.topology.is_circular()));
+            let caret = edit.caret.min(n);
+            let mut line = String::with_capacity(per_row as usize);
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(grid_h)
+                .show_rows(ui, row_h, rows, |ui, range| {
+                    visible = (range.end - range.start).max(1) as u64;
+                    let first = range.start as u64;
+                    let band = ui.max_rect();
+                    let height = (range.end - range.start) as f32 * row_h;
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(band.width(), height), Sense::hover());
+                    // A stable id, not the auto id: `show_rows` shifts auto ids
+                    // by the first visible row, so an auto id would change
+                    // identity on every scroll and drop the drag mid-gesture.
+                    let resp = ui.interact(
+                        rect,
+                        egui::Id::new("pl-sequence-grid"),
+                        Sense::click_and_drag(),
+                    );
+                    let x0 = rect.left() + gutter_w;
+                    let painter = ui.painter_at(rect);
+                    if debug_geometry() {
+                        // The grid's own numbers, because a screenshot cannot
+                        // settle whether a base sits inside the panel: this
+                        // helper process is not per-monitor DPI aware, so
+                        // Windows tells anything measuring the window
+                        // *virtualised* coordinates.
+                        eprintln!(
+                            "seqgrid: rect={:?} clip={:?} x0={x0:.1} advance={advance:.2} \
+                             row_h={row_h:.2} per_row={per_row} right_edge={:.1}",
+                            rect,
+                            ui.clip_rect(),
+                            x0 + per_row as f32 * advance
                         );
-                        ui.label(RichText::new(line).monospace().size(11.5));
-                    });
+                    }
+
+                    let hit = |pos: egui::Pos2| -> u64 {
+                        let r = (((pos.y - rect.top()) / row_h).floor() as i64)
+                            .clamp(0, (range.end - range.start) as i64 - 1)
+                            as u64
+                            + first;
+                        let col = (((pos.x - x0) / advance).round() as i64).clamp(0, per_row as i64)
+                            as u64;
+                        (r * per_row + col).min(n)
+                    };
+
+                    for r in range.clone() {
+                        let r = r as u64;
+                        let start = r * per_row;
+                        let end = (start + per_row).min(n);
+                        let y = rect.top() + (r - first) as f32 * row_h;
+
+                        // Selection: one rectangle per row per contiguous
+                        // range, clipped against this row. Nothing iterates the
+                        // selection itself.
+                        if let Some(s) = sel {
+                            let spans: [(u64, u64); 2] = if s.through_origin {
+                                [(0, s.lo()), (s.hi(), n)]
+                            } else {
+                                [(s.lo(), s.hi()), (0, 0)]
+                            };
+                            for (a, b) in spans {
+                                let a = a.max(start);
+                                let b = b.min(end);
+                                if b > a {
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(x0 + (a - start) as f32 * advance, y),
+                                            egui::pos2(
+                                                x0 + (b - start) as f32 * advance,
+                                                y + row_h,
+                                            ),
+                                        ),
+                                        0.0,
+                                        p.selection(),
+                                    );
+                                }
+                            }
+                        }
+
+                        painter.text(
+                            egui::pos2(rect.left() + gutter_w - 6.0, y),
+                            egui::Align2::RIGHT_TOP,
+                            fmt_int(start + 1),
+                            gutter_font.clone(),
+                            p.muted,
+                        );
+                        edit.row_text(mol, start, end, &mut line);
+                        painter.text(
+                            egui::pos2(x0, y),
+                            egui::Align2::LEFT_TOP,
+                            &line,
+                            font.clone(),
+                            p.ink,
+                        );
+
+                        // The caret sits on the row that contains the gap. At
+                        // the very end of the molecule that is the last row's
+                        // right edge, not the first column of a row that does
+                        // not exist.
+                        let on_this_row = (start..end).contains(&caret)
+                            || (caret == end && (end == n || end == start));
+                        if on_this_row && sel.is_none_or(|s| s.is_empty(mol.len())) {
+                            let x = x0 + (caret - start) as f32 * advance;
+                            painter.vline(x, y..=(y + row_h), egui::Stroke::new(1.5, p.accent));
+                        }
+                    }
+
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        if resp.drag_started() || resp.clicked() {
+                            click = Some((hit(pos), ui.input(|i| i.modifiers.shift)));
+                        } else if resp.dragged() {
+                            drag_to = Some(hit(pos));
+                            // The only scroll machinery this feature owes: a
+                            // drag that leaves the viewport has to keep going,
+                            // or an origin-crossing selection cannot be made by
+                            // the gesture that unambiguously carries the fact.
+                            if pos.y < rect.top() {
+                                ui.scroll_with_delta(egui::vec2(0.0, row_h * 2.0));
+                            } else if pos.y > rect.top() + height {
+                                ui.scroll_with_delta(egui::vec2(0.0, -row_h * 2.0));
+                            }
+                        }
+                        if resp.double_clicked() {
+                            double = Some(hit(pos));
+                        }
+                    }
+                    released = resp.drag_stopped();
+                });
+        }
+
+        self.edit.visible_rows = visible;
+
+        // -- apply the pointer, now that the borrows are done --------------
+        if let Some((to, shift)) = click {
+            let d = self.document.as_mut().expect("checked by caller");
+            self.edit.place(d, to, shift);
+            if !shift {
+                self.edit.dragging = true;
+            }
+        }
+        if let Some(to) = drag_to {
+            let d = self.document.as_mut().expect("checked by caller");
+            let circular = d.molecule().topology.is_circular();
+            let anchor = self.edit.sel.map_or(self.edit.caret, |s| s.anchor);
+            let n_committed = d.molecule().len();
+            // The head running off the end of the text and reappearing on the
+            // first row is the user physically travelling across the origin.
+            // Nothing is guessed, which is why this and Shift+Arrow are the only
+            // two gestures allowed to set the bit — and once set it is sticky
+            // for the rest of the drag, which is what `clamped` (rather than
+            // canonical form) below preserves.
+            //
+            // Landing on the first row is required as well as `to < anchor`,
+            // because without it an overshoot past the last base followed by a
+            // correction back above the anchor — an ordinary, clumsy drag — is
+            // textually identical to a wrap and was read as one.
+            let wrapped = self.edit.dragging
+                && self.edit.caret == n_committed
+                && to < anchor
+                && to < self.edit.per_row();
+            let crossing = self.edit.sel.is_some_and(|s| s.through_origin) || (circular && wrapped);
+            self.edit.sel = Some(
+                Selection {
+                    anchor,
+                    head: to,
+                    through_origin: crossing && circular,
                 }
+                .clamped(n_committed, circular),
+            );
+            self.edit.caret = to;
+        }
+        if released {
+            self.edit.dragging = false;
+        }
+        if let Some(at) = double {
+            self.select_feature_under(at);
+        }
+
+        // -- the readout ---------------------------------------------------
+        ui.add_space(3.0);
+        let (mol_line, other_arc) = {
+            let d = self.document.as_ref().expect("checked by caller");
+            let mol = d.molecule();
+            let n_c = mol.len();
+            // Offered only when there really are two arcs to choose between.
+            let two_arcs = mol.topology.is_circular()
+                && self
+                    .edit
+                    .sel
+                    .map(|s| s.canonical(n_c, true))
+                    .is_some_and(|s| !s.is_empty(n_c) && s.base_count(n_c) < n_c);
+            let alt = two_arcs.then(|| {
+                let s = self.edit.sel.unwrap().canonical(n_c, true);
+                n_c - s.base_count(n_c)
             });
+            (self.edit.readout(mol), alt)
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(mol_line)
+                    .monospace()
+                    .size(11.5)
+                    .color(pal(ui).ink2),
+            );
+            // The explicit way to flip a bit that Shift+click cannot infer,
+            // because a click has no direction of travel. Both lengths are on
+            // screen so the choice is visible, and there is no shortest-arc
+            // heuristic: a tool that silently picks the 60 bp arc because it is
+            // shorter will one day silently pick the 4,921 bp one.
+            //
+            // A button rather than a shortcut because the obvious shortcut,
+            // Ctrl+O, is already Open File — bound globally, before this tab
+            // ever sees the event, so the "toggle" would have opened a file
+            // dialog and flipped the arc at the same time.
+            if let Some(alt) = other_arc {
+                if ui
+                    .button(
+                        RichText::new(format!("take the other arc ({} bp)", fmt_int(alt)))
+                            .size(11.0),
+                    )
+                    .on_hover_text(
+                        "Two carets on a circle name two arcs. This takes the other one.",
+                    )
+                    .clicked()
+                {
+                    // Flipped and stored raw. Canonical form is what the op
+                    // derivation and the painter ask for, and it is lossy about
+                    // the direction of travel this button exists to state.
+                    if let Some(s) = &mut self.edit.sel {
+                        s.through_origin = !s.through_origin;
+                    }
+                }
+            }
+        });
+        if let Some(msg) = self.edit.notice.clone() {
+            ui.label(RichText::new(msg).color(pal(ui).warn).size(11.0));
+        }
+    }
+
+    fn sequence_header(&mut self, ui: &mut Ui, n: u64, rows: usize) {
+        let d = self.document.as_ref().expect("checked by caller");
+        let pending = self.edit.run().is_some();
+        // Wrapped, not `horizontal`: a `Label` inside a plain horizontal layout
+        // extends past the panel and is clipped, so the origin note lost its
+        // second half in a 380 px panel — a sentence explaining the one
+        // genuinely confusing thing about a circular sequence, cut off.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} bp · {} rows · case preserved · editable",
+                    fmt_int(n),
+                    fmt_int(rows as u64)
+                ))
+                .color(pal(ui).muted)
+                .size(11.0),
+            );
+            if pending {
+                // Saying so is not decoration: between keystrokes the enzyme
+                // list and the map describe the document *before* this run.
+                ui.label(RichText::new("· typing").color(pal(ui).accent).size(11.0));
+            }
+            if d.molecule().topology.is_circular() {
+                ui.label(
+                    RichText::new("· circular: row 1 and the last row meet at the origin")
+                        .color(pal(ui).muted)
+                        .size(11.0),
+                );
+            }
+        });
+        ui.add_space(2.0);
+    }
+
+    /// Ctrl+C. Returns what belongs on the clipboard.
+    ///
+    /// Split out of the event arm so it can be tested: the whole of what these
+    /// two do wrong is in what they say afterwards, and a body inside a `match`
+    /// over `egui::Event` can only be exercised by driving a window.
+    fn do_copy(&mut self) -> Option<String> {
+        let d = self.document.as_ref()?;
+        match self.edit.copy(d.molecule()) {
+            Some((s, skipped)) => {
+                self.edit.say(format!(
+                    "copied {} bases{}",
+                    fmt_int(s.len() as u64),
+                    not_copied(skipped)
+                ));
+                Some(s)
+            }
+            None => {
+                self.edit.say("Nothing is selected.");
+                None
+            }
+        }
+    }
+
+    /// Ctrl+X.
+    ///
+    /// The delete speaks first, and what it has to say outranks the count. This
+    /// assigned the notice unconditionally, so the one edit in this surface
+    /// that silently renumbers the whole molecule — a cut across the origin —
+    /// was the one that said nothing about it: `apply_gesture` set "the plasmid
+    /// was renumbered ... Ctrl+Z twice" and the next line replaced it with
+    /// "cut 4 bases". A cut that destroyed a feature lost that sentence the
+    /// same way, and the identical delete by Backspace reported both.
+    fn do_cut(&mut self, now: f64) -> Option<String> {
+        let d = self.document.as_mut()?;
+        let Some((s, skipped)) = self.edit.copy(d.molecule()) else {
+            self.edit.say("Nothing is selected.");
+            return None;
+        };
+        self.edit.notice = None;
+        let removed = self.edit.backspace(d, now);
+        let said = self.edit.notice.take();
+        if !removed {
+            // Refused, or there was nothing to take. The bases are on the
+            // clipboard and the molecule is untouched; "cut" would be false.
+            self.edit.notice = said;
+            return Some(s);
+        }
+        let head = format!(
+            "cut {} bases{}",
+            fmt_int(s.len() as u64),
+            not_copied(skipped)
+        );
+        self.edit.say(match said {
+            Some(more) => format!("{head} · {more}"),
+            None => head,
+        });
+        Some(s)
+    }
+
+    /// Double-click selects the smallest feature covering the base.
+    ///
+    /// DNA has no words, so word-select needs a DNA-meaningful analogue and
+    /// this is it. If nothing covers that base it places the caret and selects
+    /// nothing, rather than inventing a span. A linear scan is fine even at
+    /// MG1655's ~9,000 features: it happens on a click, not per frame.
+    fn select_feature_under(&mut self, caret: u64) {
+        let Some(d) = &self.document else { return };
+        let base = caret.max(1);
+        let mut best: Option<(u64, usize, u64, u64)> = None;
+        for (i, f) in d.molecule().features.iter().enumerate() {
+            for s in &f.segments {
+                let covers = if s.end < s.start {
+                    base >= s.start || base <= s.end
+                } else {
+                    base >= s.start && base <= s.end
+                };
+                if covers {
+                    // A wrapped segment's real length needs the molecule;
+                    // `Segment::len` deliberately answers 0 rather than guess.
+                    let len = if s.end < s.start {
+                        d.molecule().len() - s.start + 1 + s.end
+                    } else {
+                        s.len()
+                    };
+                    if best.is_none_or(|(b, ..)| len < b) {
+                        best = Some((len, i, s.start, s.end));
+                    }
+                }
+            }
+        }
+        if let Some((_, i, start, end)) = best {
+            let n = d.molecule().len();
+            let circular = d.molecule().topology.is_circular();
+            // `saturating_sub`, because `start` can be 0. The SnapGene reader
+            // parses `<Segment range="0-4"/>` with a bare `parse()` and
+            // deliberately carries the zero through rather than dropping it —
+            // `Molecule::rotate` carries a regression test named for the same
+            // underflow — and nothing validates a molecule on the way into this
+            // window. `start - 1` panicked in a debug build and, with overflow
+            // checks off in release, wrapped to `u64::MAX`, which the clamp
+            // then pulled down to `n`: double-clicking a feature covering bases
+            // 1..4 selected bases 5..12, the ones it does not cover, and the
+            // next Backspace deleted them. Raising 0 to 1 is what `rotate`'s own
+            // remap does, and for the same reason.
+            let sel = seqedit::Selection {
+                anchor: start.saturating_sub(1),
+                head: end,
+                through_origin: end < start && circular,
+            };
+            let head = end.min(n);
+            let d = self.document.as_mut().expect("checked at the top");
+            self.edit.set_selection(d, sel, head);
+            self.selected = Some(i);
+        }
+    }
+
+    /// Keyboard and clipboard for the sequence view.
+    ///
+    /// Events are consumed only while this tab is showing and nothing else has
+    /// focus, so a keystroke meant for the feature filter or the library query
+    /// never lands in the sequence.
+    fn sequence_keys(&mut self, ui: &mut Ui, now: f64) {
+        if ui.ctx().memory(|m| m.focused()).is_some() {
+            return;
+        }
+        // A paste is waiting on an answer. `egui::Window` is not modal and
+        // `Button` never takes keyboard focus, so without this the document
+        // stays fully live underneath a dialog asking about it: arrow keys move
+        // the caret, Backspace deletes, and a second Ctrl+V silently replaces
+        // the question.
+        if self.edit.pending_paste.is_some() {
+            return;
+        }
+        let events = ui.input(|i| i.events.clone());
+        // The same number the renderer and the hit-test use, measured last
+        // frame. Two different row widths in one frame is how Up/Down and a
+        // click end up disagreeing about which base is under the pointer.
+        let per_row = self.edit.per_row();
+        let per_page = self.edit.visible_rows.max(1) * per_row;
+
+        for ev in events {
+            let Some(d) = self.document.as_mut() else {
+                return;
+            };
+            let n = d.molecule().len();
+            match ev {
+                egui::Event::Text(t) => self.edit.type_text(d, &t, now),
+                // A paste that needs consent parks itself in `pending_paste`
+                // and the dialog goes up at the end of this frame; one that
+                // does not is already applied, as a single operation.
+                egui::Event::Paste(t) => {
+                    let _needs_consent = self.edit.paste(d, &t);
+                }
+                egui::Event::Copy => {
+                    if let Some(s) = self.do_copy() {
+                        ui.ctx().copy_text(s);
+                    }
+                }
+                egui::Event::Cut => {
+                    if let Some(s) = self.do_cut(now) {
+                        ui.ctx().copy_text(s);
+                    }
+                }
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
+                    let shift = modifiers.shift;
+                    let cmd = modifiers.command;
+                    match key {
+                        egui::Key::A if cmd => {
+                            let all = seqedit::Selection {
+                                anchor: 0,
+                                head: n,
+                                through_origin: false,
+                            };
+                            self.edit.set_selection(d, all, n);
+                        }
+                        egui::Key::Backspace if !cmd => {
+                            self.edit.backspace(d, now);
+                        }
+                        egui::Key::Delete if !cmd => {
+                            self.edit.delete_forward(d, now);
+                        }
+                        egui::Key::ArrowLeft if !cmd => self.edit.step(d, -1, shift),
+                        egui::Key::ArrowRight if !cmd => self.edit.step(d, 1, shift),
+                        egui::Key::ArrowUp if !cmd => self.edit.step(d, -(per_row as i64), shift),
+                        egui::Key::ArrowDown if !cmd => self.edit.step(d, per_row as i64, shift),
+                        egui::Key::PageUp => self.edit.step(d, -(per_page as i64), shift),
+                        egui::Key::PageDown => self.edit.step(d, per_page as i64, shift),
+                        egui::Key::Home => {
+                            let to = if cmd {
+                                0
+                            } else {
+                                (self.edit.caret / per_row) * per_row
+                            };
+                            self.edit.place(d, to, shift);
+                        }
+                        egui::Key::End => {
+                            let to = if cmd {
+                                n
+                            } else {
+                                ((self.edit.caret / per_row + 1) * per_row).min(n)
+                            };
+                            self.edit.place(d, to, shift);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn file_tab(&mut self, ui: &mut Ui) {
@@ -1775,8 +2495,45 @@ impl App {
             String::new()
         };
 
+        let notice = self.notice.clone();
+        let mut dismiss = false;
+
         egui::CentralPanel::default().show(ui, |ui| {
             self.recovery_banner(ui);
+            // A refused *edit*, with the document still on screen.
+            //
+            // This used to go to `self.error`, which renders as a full-screen
+            // takeover captioned "Could not read that file" and removes the
+            // map: the application answered "that deletion would orphan two
+            // features" by telling the user their file was unreadable and
+            // hiding it. The message itself was always good — `OpError` names
+            // the feature, its index and the numbers — the presentation was the
+            // bug, and it already shipped for the four ops that were wired.
+            if let Some(msg) = &notice {
+                egui::Frame::NONE
+                    .fill(pal(ui).selection())
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(msg).color(pal(ui).ink));
+                                // Literally true: `OpLog::apply` works on a
+                                // clone and returns before touching `current`.
+                                // Say it, because a user who sees an error
+                                // assumes something half-happened and goes
+                                // hunting for it.
+                                ui.label(
+                                    RichText::new("Nothing was changed.")
+                                        .color(pal(ui).muted)
+                                        .size(11.0),
+                                );
+                            });
+                            if ui.button("Dismiss").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                    });
+            }
             if let Some(err) = &error {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -1820,6 +2577,9 @@ impl App {
             clicked_out = r.clicked;
         });
 
+        if dismiss {
+            self.notice = None;
+        }
         if hovered_out.is_some() {
             self.hot = hovered_out;
         }
@@ -1830,6 +2590,91 @@ impl App {
                 Some(i)
             };
             self.tab = Tab::Features;
+        }
+    }
+
+    /// The one modal in the editing surface, and it only appears when a paste
+    /// would either drop characters the user did not ask to lose or change the
+    /// size of the document beyond recognition.
+    ///
+    /// A confirmation, never a refusal: somebody assembling a synthetic
+    /// chromosome legitimately pastes megabases, and a hard cap makes the tool
+    /// useless to them while a confirm costs one keypress. The real safety net
+    /// is still undo — one paste is one operation, and the log forks rather
+    /// than truncates, so the pasted branch stays reachable even afterwards.
+    fn paste_dialog(&mut self, ctx: &egui::Context) {
+        // The selection the question was asked about, not wherever the caret
+        // has since got to. It was stored and then thrown away: with the
+        // document still live behind a non-modal window, one click was enough
+        // to make the paste land somewhere else while the dialog's own text
+        // described the old target.
+        let Some((report, target)) = self.edit.pending_paste.clone() else {
+            return;
+        };
+        let n = self.document.as_ref().map_or(0, |d| d.molecule().len());
+        let added = report.bases.len() as u64;
+        let mut go = false;
+        let mut cancel = false;
+
+        // `Modal`, not `Window`. A plain window is not modal in egui and
+        // `Button` registers focus interest without ever taking focus, so the
+        // document behind this one stayed fully live: the caret could be moved,
+        // and the toolbar clicked, between the question and the answer.
+        egui::Modal::new(egui::Id::new("pl-paste-consent")).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.heading("Paste");
+            ui.add_space(6.0);
+            if seqedit::is_a_lot(added, n) {
+                ui.label(RichText::new(paste_size_question(added, n)));
+                ui.add_space(6.0);
+            }
+            if report.needs_consent() {
+                ui.label(RichText::new(report.consent_question()).size(11.5));
+                ui.add_space(6.0);
+            }
+            if !report.dropped.is_empty() {
+                ui.label(
+                    RichText::new(format!("Also dropped: {}", report.dropped.join(", ")))
+                        .color(pal(ui).muted)
+                        .size(11.0),
+                );
+                ui.add_space(6.0);
+            }
+            ui.horizontal(|ui| {
+                // Cancel first, and it is what Escape does.
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                // The total, not the sum over the kinds that fit in the
+                // dialog: the tally is capped and this number is a promise
+                // about the whole paste.
+                let dropping = report.rejected_total;
+                let label = if dropping > 0 {
+                    format!(
+                        "Paste {} bases, discarding {dropping} characters",
+                        fmt_int(added)
+                    )
+                } else {
+                    format!("Paste {} bases", fmt_int(added))
+                };
+                if ui.button(label).clicked() {
+                    go = true;
+                }
+            });
+        });
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if cancel {
+            self.edit.pending_paste = None;
+            self.edit.say("Paste cancelled. Nothing was changed.");
+        } else if go {
+            self.edit.pending_paste = None;
+            if let Some(d) = &mut self.document {
+                let target = target.unwrap_or_else(|| self.edit.target(d));
+                self.edit.insert_paste(d, &report, target);
+            }
         }
     }
 }
@@ -1848,6 +2693,44 @@ fn association_note(owner: Option<&str>) -> String {
         ),
         _ => String::new(),
     }
+}
+
+/// The large-paste question, in the units that make the mistake obvious.
+///
+/// There is no ratio when there is nothing to take a ratio of. `checked_div`
+/// returned `None` on the zero divisor and `unwrap_or` handed back the absolute
+/// length as if it were one, so pasting 80,000 bases into an empty document
+/// read "the document becomes 80,000 bp — 80000x longer".
+fn paste_size_question(added: u64, n: u64) -> String {
+    let after = n + added;
+    match n {
+        0 => format!(
+            "Paste {} bases into an empty document?
+It becomes {} bp.",
+            fmt_int(added),
+            fmt_int(after)
+        ),
+        n => format!(
+            "Paste {} bases into a {} bp molecule?
+             The document becomes {} bp — {}x longer.",
+            fmt_int(added),
+            fmt_int(n),
+            fmt_int(after),
+            after / n
+        ),
+    }
+}
+
+/// What the clipboard did not get, when the sequence holds bytes that are not
+/// nucleotide codes. Empty in the ordinary case, which is every real file.
+fn not_copied(skipped: usize) -> String {
+    if skipped == 0 {
+        return String::new();
+    }
+    format!(
+        " · {} byte(s) are not nucleotide codes and were left out",
+        fmt_int(skipped as u64)
+    )
 }
 
 fn strand_glyph(s: Strand) -> &'static str {
@@ -2204,6 +3087,17 @@ mod tests {
     }
 
     #[test]
+    fn the_large_paste_question_does_not_divide_by_an_empty_document() {
+        let q = paste_size_question(80_000, 0);
+        assert!(q.contains("empty document"), "{q}");
+        assert!(!q.contains("80000x"), "there is no ratio to state: {q}");
+        // The ordinary case is unchanged.
+        let q = paste_size_question(6_000, 3_000);
+        assert!(q.contains("9,000 bp"), "{q}");
+        assert!(q.contains("3x longer"), "{q}");
+    }
+
+    #[test]
     fn the_welcome_screen_names_another_owner_and_stays_quiet_otherwise() {
         // Saying who owns the extension is the whole point of reading it;
         // saying it about ourselves, or about nobody, is noise.
@@ -2212,5 +3106,273 @@ mod tests {
         assert!(note.contains("does not change that"), "{note}");
         assert!(association_note(Some("Polylinker.dna")).is_empty());
         assert!(association_note(None).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // the frame loop, which is where coalescing was lost
+    // -----------------------------------------------------------------------
+
+    /// One frame's worth of what `App::ui` does around a keystroke.
+    ///
+    /// Not the whole frame — `ui` needs an `eframe::Frame` nobody can build
+    /// outside eframe — but the two calls whose ORDER is the defect: the
+    /// frame-top settle rule, and then `autosave`.
+    fn frame(app: &mut App, typed: Option<&str>, now: f64) {
+        let idle = app.edit.run().is_some_and(|r| r.is_idle(now));
+        if idle {
+            app.settle();
+        }
+        app.autosave();
+        if let (Some(t), Some(d)) = (typed, app.document.as_mut()) {
+            app.edit.type_text(d, t, now);
+        }
+    }
+
+    #[test]
+    fn a_typing_run_survives_the_autosave_that_runs_on_every_frame() {
+        // THE defect this whole surface turned on. `autosave` began with an
+        // unconditional `settle`, and `App::ui` calls `autosave` every frame,
+        // so a run opened in frame N was committed at the top of frame N+1 —
+        // before the next keystroke was even read. Every keystroke became its
+        // own `InsertAt`. Measured in the running application on the 4.6 Mb
+        // genome: 300 typed characters gave "300 edit(s)" in the History tab
+        // and one Ctrl+Z gave back one base, so undoing a 300 bp cassette
+        // needed 300 presses; 23 s of typing burned 45 s of CPU and 60 MB.
+        //
+        // The throttle was thirty lines below the settle, so it throttled the
+        // disk write and never the commit.
+        let (mut app, _path) = app_with_recovery("coalesce");
+        app.adopt(Document::from_bytes(b">x\nAAAACCCCGGGGTTTT\n", "x.fa".into(), None).unwrap());
+
+        let mut t = 500.0;
+        for _ in 0..40 {
+            frame(&mut app, Some("a"), t);
+            t += 0.05; // well inside Run::IDLE_SECONDS
+        }
+        let d = app.document.as_ref().unwrap();
+        assert_eq!(
+            d.log.path().len(),
+            0,
+            "forty keystrokes inside one second are still one open run"
+        );
+        assert_eq!(app.edit.run().unwrap().inserted.len(), 40);
+
+        // And when the typing stops, the run closes on its own and becomes
+        // exactly one operation — one Ctrl+Z for the lot.
+        frame(&mut app, None, t + seqedit::Run::IDLE_SECONDS);
+        let d = app.document.as_ref().unwrap();
+        assert_eq!(d.log.path().len(), 1);
+        assert_eq!(d.molecule().len(), 16 + 40);
+        app.do_undo();
+        assert_eq!(app.document.as_ref().unwrap().molecule().len(), 16);
+    }
+
+    #[test]
+    fn an_autosave_that_writes_never_leaves_out_the_open_run() {
+        // The other half, and the reason the settle is there at all: a recovery
+        // file written from `log.current()` mid-run is missing the user's last
+        // keystrokes. Moving the throttle above the settle must not cost this.
+        let (mut app, path) = app_with_recovery("midrun");
+        app.adopt(Document::from_bytes(b">x\nAAAACCCCGGGGTTTT\n", "x.fa".into(), None).unwrap());
+        let d = app.document.as_mut().unwrap();
+        app.edit.caret = 16;
+        app.edit.type_text(d, "gggg", 500.0);
+        assert!(app.edit.run().is_some(), "the premise: a run is open");
+
+        // The autosave falls due.
+        app.last_autosave = None;
+        app.autosave();
+
+        let (mol, _) = autosaved(&path);
+        assert_eq!(
+            String::from_utf8(mol.seq).unwrap().to_ascii_uppercase(),
+            "AAAACCCCGGGGTTTTGGGG",
+            "the file holds what is on screen"
+        );
+        assert!(
+            app.edit.run().is_none(),
+            "and the run was settled to get it"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Ctrl+X
+    // -----------------------------------------------------------------------
+
+    /// A circular document holding `seq`, with the named feature over `a..b`.
+    fn circle_with(seq: &str, name: &str, a: u64, b: u64) -> Document {
+        let mut mol = pl_core::Molecule {
+            seq: seq.as_bytes().to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let mut f = pl_core::Feature::new(name, "misc_feature");
+        f.segments.push(pl_core::Segment::new(a, b));
+        mol.features.push(f);
+        Document::from_bytes(
+            pl_fileio::genbank::write(&mol, "x", (1, 0, 2026)).as_bytes(),
+            "x.gb".into(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cutting_across_the_origin_still_says_the_plasmid_was_renumbered() {
+        // The Cut arm assigned the notice unconditionally, so the one edit in
+        // this surface that silently renumbers the whole molecule was the one
+        // that said nothing about it: `apply_gesture` set "the plasmid was
+        // renumbered ... Ctrl+Z twice" and the next line replaced it with
+        // "cut 4 bases". The identical delete by Backspace reported both.
+        let mut app = App::blank();
+        app.document = Some(circle_with("ABCDEFGHIJKL", "inner", 5, 8));
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 10,
+            head: 2,
+            through_origin: true,
+        });
+
+        let clip = app.do_cut(500.0).expect("four bases on the clipboard");
+        assert_eq!(clip, "KLAB", "read across the origin, in reading order");
+        assert_eq!(
+            app.document.as_ref().unwrap().molecule().seq,
+            b"CDEFGHIJ".to_vec()
+        );
+        let said = app.edit.notice.clone().unwrap_or_default();
+        assert!(said.contains("cut 4 bases"), "said {said:?}");
+        assert!(said.contains("renumbered"), "said {said:?}");
+    }
+
+    #[test]
+    fn cutting_a_whole_feature_away_still_names_it() {
+        let mut app = App::blank();
+        app.document = Some(circle_with("AAAACCCCGGGGTTTTAAGG", "AmpR", 5, 8));
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 4,
+            head: 8,
+            through_origin: false,
+        });
+
+        app.do_cut(500.0).expect("four bases");
+        assert!(app
+            .document
+            .as_ref()
+            .unwrap()
+            .molecule()
+            .features
+            .is_empty());
+        let said = app.edit.notice.clone().unwrap_or_default();
+        assert!(said.contains("cut 4 bases"), "said {said:?}");
+        assert!(said.contains("AmpR"), "said {said:?}");
+    }
+
+    #[test]
+    fn a_cut_with_nothing_selected_removes_nothing_and_says_so() {
+        let mut app = App::blank();
+        app.document = Some(circle_with("AAAACCCCGGGGTTTTAAGG", "f", 1, 4));
+        app.edit.caret = 5;
+        assert_eq!(app.do_cut(500.0), None);
+        assert_eq!(app.document.as_ref().unwrap().molecule().len(), 20);
+        assert!(app.edit.notice.as_deref().unwrap().contains("Nothing"));
+    }
+
+    // -----------------------------------------------------------------------
+    // undo over a two-operation gesture
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn undoing_an_origin_crossing_cut_puts_the_origin_back_too() {
+        // Deleting across the origin is a rotate and then a range op. One
+        // Ctrl+Z over the range op alone gave back all twelve bases with the
+        // origin still moved — "KLABCDEFGHIJ", a numbering that matches neither
+        // the state before the edit nor the state after it, with the feature
+        // sitting at 6..10 instead of 4..8. That is not a partial undo anyone
+        // can recognise; it is a plausible plasmid that is wrong.
+        let mut app = App::blank();
+        app.document = Some(circle_with("ABCDEFGHIJKL", "inner", 5, 8));
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 10,
+            head: 2,
+            through_origin: true,
+        });
+        app.do_cut(500.0).unwrap();
+        let d = app.document.as_ref().unwrap();
+        assert_eq!(d.log.path().len(), 2, "the premise: two operations");
+        assert_eq!(d.molecule().seq, b"CDEFGHIJ".to_vec());
+
+        app.do_undo();
+        let d = app.document.as_ref().unwrap();
+        assert_eq!(
+            d.molecule().seq,
+            b"ABCDEFGHIJKL".to_vec(),
+            "one press, and the numbering is the one the file had"
+        );
+        assert_eq!(d.molecule().features[0].start(), 5, "and so is the feature");
+        assert!(app.status.contains("origin"), "status {:?}", app.status);
+
+        // And forward again, both halves together.
+        app.do_redo();
+        let d = app.document.as_ref().unwrap();
+        assert_eq!(d.molecule().seq, b"CDEFGHIJ".to_vec());
+    }
+
+    // -----------------------------------------------------------------------
+    // a document arriving with coordinates the readers deliberately keep
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn double_clicking_a_feature_that_starts_at_base_zero_selects_the_feature() {
+        // `<Segment range="0-4"/>` is parsed verbatim by the SnapGene reader,
+        // which deliberately carries the zero rather than dropping it, and
+        // nothing validates a molecule on the way into this window. `start - 1`
+        // panicked in a debug build; in release, with overflow checks off, it
+        // wrapped to u64::MAX and clamped to n, so double-clicking a feature
+        // covering bases 1..4 selected bases 5..12 — the ones it does not cover
+        // — and the next Backspace deleted them.
+        let mut mol = pl_core::Molecule {
+            seq: b"ABCDEFGHIJKL".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let mut f = pl_core::Feature::new("zero", "misc_feature");
+        f.segments.push(pl_core::Segment::new(0, 4));
+        mol.features.push(f);
+
+        let mut app = App::blank();
+        app.document = Some(Document::of_molecule(mol));
+        app.select_feature_under(2);
+
+        let s = app.edit.sel.expect("the feature under the pointer");
+        assert!(!s.through_origin);
+        assert_eq!(
+            (s.lo(), s.hi()),
+            (0, 4),
+            "the bases it names, not their complement"
+        );
+    }
+
+    #[test]
+    fn a_recovered_document_does_not_inherit_the_previous_documents_caret() {
+        // `load` reset the editor with the comment "a caret from the previous
+        // document names bases this one does not have". The Recover banner and
+        // a dropped byte payload assigned `self.document` without it, so a
+        // selection made on a 5 kb plasmid survived onto a 200 bp recovered
+        // document as a highlight of its tail — and Backspace deletes what is
+        // highlighted.
+        let mut app = App::blank();
+        app.document =
+            Some(Document::from_bytes(b">a\nAAAACCCCGGGGTTTT\n", "a.fa".into(), None).unwrap());
+        app.edit.caret = 16;
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 8,
+            head: 16,
+            through_origin: false,
+        });
+        app.selected = Some(0);
+
+        app.adopt(Document::from_bytes(b">b\nACGT\n", "b.fa".into(), None).unwrap());
+        assert_eq!(app.edit.caret, 0);
+        assert_eq!(app.edit.sel, None);
+        assert_eq!(app.selected, None);
     }
 }

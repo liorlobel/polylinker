@@ -1,18 +1,35 @@
 //! The loaded document, and the work that must not happen on the UI thread.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
 
 use pl_core::oplog::{OpError, OpKind, OpLog};
 use pl_core::{Molecule, Topology};
 use pl_enzymes::Digest;
 use pl_fileio::{snapgene, Format};
 
-/// Digestion is O(sequence x enzymes) and takes about 600 ms on a 4.6 Mb
-/// genome. That is four dropped frames at 60 Hz, so it runs on a worker and the
-/// UI says so meanwhile.
+/// Digestion is O(sequence x enzymes). Measured at 1,712 ms for all 58 enzymes
+/// on the 4.6 Mb NC_000913.3 in the benchmark corpus — this docstring said
+/// "about 600 ms" until somebody timed it — so it runs on a worker and the UI
+/// says so meanwhile.
 pub enum DigestState {
-    Running(Receiver<Vec<Digest>>),
+    Running {
+        rx: Receiver<Vec<Digest>>,
+        /// Set when a later edit supersedes this scan.
+        ///
+        /// Dropping the `Receiver` alone does not stop the worker: its `send`
+        /// fails, but only *after* it has finished the whole scan. Measured on
+        /// a 4.6 Mb genome, one full 58-enzyme digest is 1,712 ms of CPU — the
+        /// docstring's "about 600 ms" is off by 2.9x — and simulated typing
+        /// spawned 30 workers with 16 live at once, 29 of whose results were
+        /// superseded before anyone could see them, still draining 2.2 s after
+        /// the last keystroke. Coalescing cuts the spawn rate about a
+        /// hundredfold; this is what stops the ones that do get superseded from
+        /// burning a core to produce an answer nobody will read.
+        cancel: Arc<AtomicBool>,
+    },
     Done(Vec<Digest>),
     /// No bases to digest, with the reason.
     Unavailable(String),
@@ -26,13 +43,19 @@ impl DigestState {
         }
     }
     pub fn is_running(&self) -> bool {
-        matches!(self, DigestState::Running(_))
+        matches!(self, DigestState::Running { .. })
+    }
+    /// Tell whatever is still scanning that its answer is no longer wanted.
+    pub fn cancel(&self) {
+        if let DigestState::Running { cancel, .. } = self {
+            cancel.store(true, Ordering::Relaxed);
+        }
     }
     /// Collect the worker's result if it has finished. Returns true if the
     /// state changed, so the caller knows to repaint.
     pub fn poll(&mut self) -> bool {
         let done = match self {
-            DigestState::Running(rx) => rx.try_recv().ok(),
+            DigestState::Running { rx, .. } => rx.try_recv().ok(),
             _ => None,
         };
         if let Some(v) = done {
@@ -87,6 +110,26 @@ impl Document {
         })
     }
 
+    /// A document around a molecule that came from no file.
+    ///
+    /// Test-only, and it exists because the editing model in `seqedit` needs
+    /// fixtures with awkward topologies and origin-crossing features that no
+    /// short file literal expresses cleanly. It goes through the same
+    /// `OpLog::new` as everything else, so the log is not special-cased.
+    #[cfg(test)]
+    pub fn of_molecule(mol: Molecule) -> Self {
+        Document {
+            path: None,
+            title: "test".into(),
+            digest: start_digest(&mol),
+            log: OpLog::new(mol),
+            format: Format::GenBank,
+            container: None,
+            records_in_file: 1,
+            unrepresentable_locations: Vec::new(),
+        }
+    }
+
     /// The molecule as it stands. Always the log's current state.
     pub fn molecule(&self) -> &Molecule {
         self.log.current()
@@ -102,20 +145,38 @@ impl Document {
     /// presented as a current one.
     pub fn apply(&mut self, kind: OpKind) -> Result<(), OpError> {
         self.log.apply(kind, "you")?;
-        self.digest = start_digest(self.log.current());
+        self.restart_digest();
         Ok(())
     }
 
     pub fn undo(&mut self) -> Result<(), OpError> {
         self.log.undo()?;
-        self.digest = start_digest(self.log.current());
+        self.restart_digest();
         Ok(())
     }
 
     pub fn redo(&mut self) -> Result<(), OpError> {
         self.log.redo()?;
-        self.digest = start_digest(self.log.current());
+        self.restart_digest();
         Ok(())
+    }
+
+    /// Move to any point in the log, on any branch.
+    ///
+    /// The GUI needs this for the one gesture that is two operations: deleting
+    /// across the origin is a rotate and then a range op, and stepping back over
+    /// only the second leaves a plasmid that is whole, plausible, and renumbered
+    /// — a state the user never asked for and never saw.
+    pub fn seek(&mut self, to: Option<pl_core::oplog::OpId>) -> Result<(), OpError> {
+        self.log.seek(to)?;
+        self.restart_digest();
+        Ok(())
+    }
+
+    /// Start a fresh digest, and tell the previous one to give up.
+    fn restart_digest(&mut self) {
+        self.digest.cancel();
+        self.digest = start_digest(self.log.current());
     }
 
     /// Has anything been edited since the file was opened?
@@ -158,21 +219,29 @@ fn start_digest(mol: &Molecule) -> DigestState {
     let seq = mol.seq.clone();
     let topology = mol.topology;
     let (tx, rx) = channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancel);
     std::thread::Builder::new()
         .name("digest".into())
         .spawn(move || {
-            let out = pl_enzymes::ENZYMES
-                .iter()
-                .map(|e| Digest {
+            // Checked once per enzyme: 58 relaxed loads against a scan that
+            // takes seconds, so the check itself is free, and a superseded
+            // worker stops within one enzyme instead of finishing the genome.
+            let mut out = Vec::with_capacity(pl_enzymes::ENZYMES.len());
+            for e in pl_enzymes::ENZYMES.iter() {
+                if flag.load(Ordering::Relaxed) {
+                    return;
+                }
+                out.push(Digest {
                     enzyme: e,
                     positions: pl_enzymes::cut_positions(&seq, topology, e),
-                })
-                .collect();
+                });
+            }
             // Send failing means the document was replaced; that is fine.
             let _ = tx.send(out);
         })
         .expect("spawn digest worker");
-    DigestState::Running(rx)
+    DigestState::Running { rx, cancel }
 }
 
 /// Human-readable summary of what a molecule is, for the title bar.
