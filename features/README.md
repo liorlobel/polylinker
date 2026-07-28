@@ -6,12 +6,14 @@ An openly licensed, provenance-tracked database of common plasmid features.
 this carries, and [`SOURCING.md`](SOURCING.md) for how each source was cleared
 and by what evidence.
 
-> **Status: v0.1 pre-release, 84 records. Every row is `proposed` —
-> machine-assembled, with no human sign-off. Nothing here is shippable yet.**
+> **Status: v0.1 pre-release, 89 records. 84 carry a curator sign-off dated
+> 2026-07-28; the other 5 are `proposed` — machine-assembled, unread by any
+> human, and not shippable.**
 > `Db::reviewed()` ships only the rows [`SIGNOFF.tsv`](SIGNOFF.tsv) names with a
-> content digest that still matches, and that file holds no signatures today. A
-> sign-off lapses automatically the moment the row it approves changes. That is
-> the intended state, not an unfinished one; see *Rule 6* below.
+> content digest that still matches. A sign-off lapses automatically the moment
+> the row it approves changes — including a change to its prose, because
+> `description` and `notes` are both in `SIGNED_COLUMNS`. That is the intended
+> state, not an unfinished one; see *Rule 6* below.
 >
 > **This is a dated snapshot** (sources retrieved 2026-07-27 and 2026-07-28) and
 > does not reflect the most current data available from NLM, UniProt, EMBL-EBI,
@@ -116,15 +118,17 @@ comes from **where it is declared**, never from where it landed in the output:
 | `PLF:0001`–`PLF:0999` | AMRFinderPlus resistance and selection markers | 24 |
 | `PLF:1000`–`PLF:1999` | UniProt → ENA natural proteins | 14 |
 | `PLF:2000`–`PLF:2999` | Rfam structured RNA | 24 |
-| `PLF:3000`–`PLF:3999` | Hand-curated designed parts | 22 of 28 declared |
+| `PLF:3000`–`PLF:3999` | Hand-curated designed parts | 27 of 28 declared |
 
 A candidate that fails verification leaves its number unissued rather than
 pulling every later id down by one. That mechanism has now been exercised for
 real: `PLF:3000` was reserved for FLAG and sat empty for a release, and when the
 schema learned to carry a peptide, FLAG took **that** id and nothing already
-published moved. Six numbers are still reserved and empty — `PLF:3004`,
-`3015`, `3016`, `3018`, `3019`, `3020` — held by the peptide length floor rather
-than by sourcing. The build re-reads the previous `features.tsv` and refuses to
+published moved. One number is still reserved and empty — `PLF:3019`, factor Xa
+— held by its occurrence record rather than by sourcing or by length; the five
+that used to sit beside it (`PLF:3004`, `3015`, `3016`, `3018`, `3020`) were
+issued on 2026-07-28 and ship `proposed`. The build re-reads the previous
+`features.tsv` and refuses to
 write if any published id has come to mean a different sequence.
 
 TSV rather than JSON, and normalised across two files, on purpose. This is a
@@ -146,7 +150,7 @@ what changed between releases.
    commit, compares, and deletes — no byte is ever committed, enforced by
    `.gitignore` on the name and by `tools/hooks/pre-commit` on the content hash.
    It is `features/build/taint_gate.py`, it runs in CI, and it fails **closed**
-   on a network error. Its measured result over all 84 descriptions: no shared
+   on a network error. Its measured result over all 89 descriptions: no shared
    five-token run anywhere, no row above 60% containment, and two rows above the
    30% warning line — PLF:0002 and PLF:0003, longest shared runs of one and two
    tokens, which is the shared vocabulary of two aminoglycoside
@@ -186,9 +190,9 @@ what changed between releases.
 
 ## Honest coverage
 
-**polylinker-features v0.1 contains 84 feature records: 24 antibiotic-resistance
+**polylinker-features v0.1 contains 89 feature records: 24 antibiotic-resistance
 and selection markers, 14 natural regulatory and enzyme proteins, 24 structured
-RNA elements, and 22 designed parts (epitope tags, protease sites, 2A peptides
+RNA elements, and 27 designed parts (epitope tags, protease sites, 2A peptides
 and linkers). Every record carries an explicit boundary rule, at least one
 `boundary_evidence` pointer, and a per-field provenance chain with licence. It is
 released under CC BY 4.0, with attribution notices for the U.S. National Library
@@ -204,17 +208,20 @@ Composition, measured from the shipped file:
 | UniProt → ENA proteins | 14 | `cds` | nt + protein | `orf_atg_to_stop`, translation-verified |
 | Rfam structured RNA | 24 | `regulatory` (19), `misc` (5) | nt | `consensus_of_insdc` |
 | Curated designed parts | 8 | `synthetic_part` | nt | codons from a natural parent |
-| Curated designed parts | 14 | `synthetic_part` | **peptide only** | `designed_sequence` (12), `literature_defined` (10) across all 22 |
+| Curated designed parts | 19 | `synthetic_part` | **peptide only** | `designed_sequence` (13), `literature_defined` (6); across all 27, 13 and 14 |
 
-38 of 84 rows are coding and carry a protein reference verified by exact
-translation from their own nucleotides. **14 rows carry a peptide and no
+38 of 89 rows are coding and carry a protein reference verified by exact
+translation from their own nucleotides. **19 rows carry a peptide and no
 nucleotides at all** — the shape decision 1 created — and each was verified by
-locating its residue string, exactly once, in a wwPDB polymer entity fetched at
-build time. 17 rows carry `patent_flag = 1`. **Five** licences are in play across
-958 provenance rows: our own work (558), INSDC-free (156), CC0-1.0 (110),
-`unresolved-see-SOURCING-Risk-4` (84) and CC BY 4.0 (50); by source, polylinker
-558, Rfam 96, ENA 84, the INSDC feature-table specification 84, AMRFinderPlus 72,
-UniProt 50 and the wwPDB 14.
+locating its residue string, exactly once, in a sequence fetched at build time:
+a wwPDB polymer entity for 18 of them, and the UniProt canonical of its own
+declared parent for the nineteenth (enterokinase, whose five residues are below
+`MIN_NT` and so cannot take codons from that parent even though it has one).
+17 rows carry `patent_flag = 1`. **Five** licences are in play across
+1,008 provenance rows: our own work (598), INSDC-free (156), CC0-1.0 (114),
+`unresolved-see-SOURCING-Risk-4` (89) and CC BY 4.0 (51); by source, polylinker
+598, Rfam 96, the INSDC feature-table specification 89, ENA 84, AMRFinderPlus 72,
+UniProt 51 and the wwPDB 18.
 
 Two of those numbers are new and both were previously absent rather than wrong.
 `genbank_key` had **no** provenance at all on any row, and it is the one column
@@ -275,7 +282,7 @@ states its initiator codon in `notes`, measured rather than assumed.
 ### What this is not
 
 It is **not** a drop-in replacement for pLannotate or SnapGene Common Features:
-at 84 rows against their 1,367 it is about 6% of the row count, and it covers
+at 89 rows against their 1,367 it is about 7% of the row count, and it covers
 partly different ground. It is **not** complete or comprehensive, and it does not
 cover all common plasmid features. It carries **no** coverage claim for
 commercial catalogue vectors — pET-28a, pGEX-4T-1 and pMAL-c2 return `Count=0`
@@ -291,28 +298,39 @@ claimed here.
 
 All measured, not assumed, and all documented in `SOURCING.md`.
 
-- **Six designed parts are still held, and now by LENGTH rather than by the
-  schema.** 28 tags, linkers, protease sites and 2A peptides are declared in
-  `build/stage_curated.py`; 22 are now rows. The six that are not are
-  `PLF:3004` His6 (6 aa), `PLF:3015`/`3016` the two TEV sites (7 aa),
-  `PLF:3018` thrombin (6 aa), `PLF:3019` factor Xa (4 aa) and `PLF:3020`
-  enterokinase (5 aa), all below `MIN_PEPTIDE_AA = 8`.
+- **One designed part is still held, and by a MEASUREMENT rather than by
+  length.** 28 tags, linkers, protease sites and 2A peptides are declared in
+  `build/stage_curated.py`; 27 are now rows. The one that is not is `PLF:3019`
+  factor Xa (`IEGR`, 4 aa).
 
-  That floor is derived from two numbers that agree. `SOURCING.md` §3 published
-  its false-positive budget on exactly eight residues (~4e-7 per 5 kb plasmid;
-  at seven, 7.8e-6; at six, 1.6e-4). And the tier-2 chainer cannot form a chain
-  below seven residues at all — `K_PROTEIN = 5` with `min_seeds = 3` needs seven
-  to make three windows — while `Index::short()` reports only records that
-  seeded *nothing*, so a six-residue peptide would be seeded, unchainable, and
-  reported unreachable by nothing. Silently unfindable is worse than held.
+  The floor that used to hold six of them, `MIN_PEPTIDE_AA = 8`, is gone.
+  It measured the wrong thing: every peptide in this table was counted against
+  73 real plasmid and contig files, 17,061,931 residues of ORFs, counting only
+  occurrences the shipped fusion gate would report — and `DDDDK` at five
+  residues occurred **zero** times while `IEGR` at four occurred **154**. No
+  value of a length floor separates those two, because length is not the
+  property being tested. What replaced it is a per-part occurrence record and a
+  three-clause gate: a measurement must exist, every occurrence must have been
+  read by a human, and none may have turned out to be something else. Factor Xa
+  fails the second clause — its 154 hits are unexamined, not shown to be noise —
+  and it ships the day somebody reads them.
 
-  **His6 and TEV are the two most-used items in the table and holding them is
-  the real cost.** Lowering the floor to 7 releases both TEV sites for one order
-  of magnitude of false-positive budget; it is one constant in
-  `stage_curated.py` and the build prints the trade-off on every run. His6 would
-  still fail at any floor: a histidine run's frequency is not modelled by
-  20⁻ᴸ at all, and this table's own witness for it records **6,783** PDB
-  entities carrying `HHHHHHHH`.
+  The seeding half of the old argument was a real defect and was fixed in the
+  code, which is where it belonged: `K_PROTEIN = 5` with `min_seeds = 3` needs
+  seven residues to make three windows, and `Index::short()` reported only
+  records that seeded *nothing*, so a six-residue peptide was seeded,
+  unchainable, absent from every report and never found. `Index::unchainable()`
+  now routes any record with fewer indexed words than the caller's `min_seeds`
+  to an exact substring scan, so "too few words to chain" is a route rather than
+  a hole — and it stays one as `min_seeds` rises, which no constant in the
+  builder could have bought.
+
+  **His6 was the most valuable row the floor was holding.** It occurred eight
+  times in the corpus and all eight are real tags: C-terminal at exactly -0
+  residues from the stop, behind a `GG` linker, in files whose names say the
+  construct carries one. Zero measured false positives, eight true positives the
+  shipped tool could not find. The `20⁻ᴸ` argument had ranked it the *most*
+  suspect row in the table.
 - **The 8 designed parts with a natural parent carry one natural encoding
   each**, taken from the gene the peptide belongs to and verified by
   translation. Vector versions of these elements are routinely re-coded, so

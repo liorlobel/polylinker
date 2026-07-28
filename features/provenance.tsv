@@ -771,6 +771,16 @@ PLF:3003	notes	polylinker	-	own-work	-	2026-07-28
 PLF:3003	class	polylinker	-	own-work	-	2026-07-28	
 PLF:3003	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
 PLF:3003	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3004	reference_aa	wwpdb	1KTR_2	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/1KTR/2	2026-07-28	25f5451bdc4c66b52ccc3c9b6e646a2bc9636dfa45c92cceb5767cf37f3c3f08
+PLF:3004	boundary_evidence	polylinker	DOI:10.1038/nbt1188-1321 (1988, Bio/Technology 6:1321-1325)	own-work	-	2026-07-28	
+PLF:3004	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3004	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3004	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3004	description	polylinker	DOI:10.1038/nbt1188-1321 (1988, Bio/Technology 6:1321-1325)	own-work	-	2026-07-28	
+PLF:3004	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3004	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3004	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3004	patent_flag	polylinker	-	own-work	-	2026-07-28	
 PLF:3005	reference_nt	ena	AAC95513.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAC95513.1	2026-07-28	318c8c0c9113bf7d2117d0d4aeb79950cc660ae8ab9412992334a5dadc17ca69
 PLF:3005	reference_nt	uniprot	P11208	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P11208.json	2026-07-28	779019b015add3cdf2e5ab7ef731df941e8202012d0be2cedeb341ac7dbfd0a9
 PLF:3005	boundary_evidence	polylinker	PMID:1713260 (1991, J Gen Virol 72:1551-1557) - the epitope shared by the PIV5 P and V proteins	own-work	-	2026-07-28	
@@ -873,6 +883,26 @@ PLF:3014	notes	polylinker	-	own-work	-	2026-07-28
 PLF:3014	class	polylinker	-	own-work	-	2026-07-28	
 PLF:3014	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
 PLF:3014	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3015	reference_aa	wwpdb	10GW_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/10GW/1	2026-07-28	b1ade27251cdebbff2719c801d1591b6292b5ea798bc6929f2b12aa1965bfe9c
+PLF:3015	boundary_evidence	polylinker	PMID:3285343 (Carrington & Dougherty 1988, PNAS 85:3391-3395) - the E-X-X-Y-X-Q/(S or G) consensus; the scissile bond is between Q6 and G7	own-work	-	2026-07-28	
+PLF:3015	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3015	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3015	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3015	description	polylinker	PMID:3285343 (Carrington & Dougherty 1988, PNAS 85:3391-3395) - the E-X-X-Y-X-Q/(S or G) consensus; the scissile bond is between Q6 and G7	own-work	-	2026-07-28	
+PLF:3015	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3015	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3015	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3015	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3016	reference_aa	wwpdb	10HA_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/10HA/1	2026-07-28	15e11de5fbdf3324d933301ca2e5beb653e15aeb5d2de828c4539f39e9514fc4
+PLF:3016	boundary_evidence	polylinker	PMID:3285343 (Carrington & Dougherty 1988, PNAS 85:3391-3395); scissile bond between Q and S	own-work	-	2026-07-28	
+PLF:3016	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3016	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3016	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3016	description	polylinker	PMID:3285343 (Carrington & Dougherty 1988, PNAS 85:3391-3395); scissile bond between Q and S	own-work	-	2026-07-28	
+PLF:3016	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3016	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3016	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3016	patent_flag	polylinker	-	own-work	-	2026-07-28	
 PLF:3017	reference_aa	wwpdb	10HM_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/10HM/1	2026-07-28	ebd309499b59f786c76b0347b46ad067707d74bd4f8c990853f4ab9f0b10e16c
 PLF:3017	boundary_evidence	polylinker	PMID:2160953 (1990, J Biol Chem 265:9062-9065) for the natural consensus; the vector octamer is a P4 variant of it and is published by no paper located in this work	own-work	-	2026-07-28	
 PLF:3017	name	polylinker	-	own-work	-	2026-07-28	
@@ -883,6 +913,26 @@ PLF:3017	notes	polylinker	-	own-work	-	2026-07-28
 PLF:3017	class	polylinker	-	own-work	-	2026-07-28	
 PLF:3017	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
 PLF:3017	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3018	reference_aa	wwpdb	10EE_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/10EE/1	2026-07-28	fd2e21c5056c8ff972d1361b1955db4df492da7e222244047a69a5858e055d74
+PLF:3018	boundary_evidence	polylinker	PMID:2863141 (Chang 1985, Eur J Biochem 151:217-224) for the apolar P4-P1 requirement; scissile bond between R and G	own-work	-	2026-07-28	
+PLF:3018	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3018	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3018	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3018	description	polylinker	PMID:2863141 (Chang 1985, Eur J Biochem 151:217-224) for the apolar P4-P1 requirement; scissile bond between R and G	own-work	-	2026-07-28	
+PLF:3018	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3018	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3018	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3018	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3020	reference_aa	uniprot	P00760	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P00760.json	2026-07-28	dc6c30440eb8de932456b84f1e5590591f6fb1ad0d5034367beb62063e5f0d15
+PLF:3020	boundary_evidence	polylinker	PMID:5570436 (1971, J Biol Chem 246:5031-5039); scissile bond immediately after K, leaving no residual residues	own-work	-	2026-07-28	
+PLF:3020	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3020	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3020	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3020	description	polylinker	PMID:5570436 (1971, J Biol Chem 246:5031-5039); scissile bond immediately after K, leaving no residual residues	own-work	-	2026-07-28	
+PLF:3020	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3020	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3020	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3020	patent_flag	polylinker	-	own-work	-	2026-07-28	
 PLF:3021	reference_nt	ena	AAK12416.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAK12416.1	2026-07-28	ecbec8a9b6ebf77ee67404975880c87a028228f0a8b85c2e8490d21d437ea8a6
 PLF:3021	reference_nt	uniprot	Q99HP0	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q99HP0.json	2026-07-28	0294b2940ed722aeb35847cb4453cca21de026425fdd3459b4469de2791776eb
 PLF:3021	boundary_evidence	polylinker	PMID:21602908 (2011, PLoS ONE 6:e18556); the skip occurs between the terminal G and P, so the P is the first residue of the downstream protein	own-work	-	2026-07-28	

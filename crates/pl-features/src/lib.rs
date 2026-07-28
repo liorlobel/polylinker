@@ -845,9 +845,18 @@ impl Db {
             // peptide-only row it is the entire record, so an unchecked cell is
             // the whole sequence unchecked. `*` is refused by name: a stop codon
             // is meaningless in a tag, and unlike `X` — which `index::seedable`
-            // already excludes, so it degrades honestly into "unseedable" — a
-            // `*` would be indexed and could only ever match a query frame at a
-            // position the frame renders as a terminator.
+            // excludes, so a window carrying one is simply not indexed and the
+            // record is routed to the annotator's exact scan instead, matching
+            // an `X` the query's own translation produced — a `*` would be
+            // indexed and could only ever match a query frame at a position the
+            // frame renders as a terminator.
+            //
+            // That sentence used to end "so it degrades honestly into
+            // 'unseedable'", which stopped being true on 2026-07-28: an
+            // all-`X` peptide is now scanned rather than written off, and
+            // `Annotator::unseedable` no longer consults `protein.short()` at
+            // all. See `a_peptide_that_indexes_no_word_is_scanned_rather_than_
+            // written_off`.
             if let Some(p) = aa.as_ref() {
                 if let Some(b) = p.iter().find(|c| !b"ACDEFGHIKLMNPQRSTVWYX".contains(c)) {
                     bad(format!("{:?} is not an amino-acid code", *b as char));

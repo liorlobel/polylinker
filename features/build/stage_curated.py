@@ -36,10 +36,12 @@ with or without nucleotides, so this stage emits two shapes:
                      re-translated; `reference_aa` stays empty. Eight rows,
                      unchanged from before, byte for byte in their sequences.
 
-  PEPTIDE ROUTE      the part has no gene, and clears MIN_PEPTIDE_AA.
-                     `reference_aa` is the residue string, verified against a
-                     wwPDB polymer entity fetched at build time; `reference_nt`
-                     is empty. Fourteen rows, new.
+  PEPTIDE ROUTE      the part has no usable gene, and clears the
+                     measured-occurrence gate (see `Part.occurrences`).
+                     `reference_aa` is the residue string, verified at build
+                     time against a fetched record -- a wwPDB polymer entity,
+                     or the UniProt parent for a part that has one but is too
+                     short for MIN_NT; `reference_nt` is empty. Nineteen rows.
 
 Never both. A row carrying nucleotides is matched by the tier-1 index and, if it
 had a peptide, by the ungated tier-2 scan as well -- and the annotator's
@@ -49,15 +51,20 @@ epitope matchable with no ORF requirement at all, which is a behaviour change
 nobody asked for. It is a separate decision with its own tests; see
 features/README.md, "Known gaps".
 
-Six of the twenty-eight still emit nothing, and the reason changed
-------------------------------------------------------------------
+One of the twenty-eight still emits nothing, and the reason is a measurement
+---------------------------------------------------------------------------
 
-It used to be "there is no gene to take codons from". That stopped being the
-reason on 2026-07-28. Six parts are now held by MIN_PEPTIDE_AA instead --
-His6 (6 aa), both TEV sites (7), thrombin (6), factor Xa (4) and enterokinase
-(5). Two of those, His6 and TEV, are the most-used items in the whole table, and
-holding them is the real cost of that floor. See MIN_PEPTIDE_AA for the
-arithmetic and for the one constant that would change it.
+It was "there is no gene to take codons from" until 2026-07-28, then a flat
+peptide length floor of eight residues, which held six parts including His6 and
+both TEV sites. Both reasons are gone. The floor measured a proxy: DDDDK at five
+residues is perfectly specific and IEGR at four is unusable, so length does not
+carry the answer and no value of it could. Specificity does, and specificity can
+be measured -- see `Part.occurrences` for what was measured and the gate that
+reads it.
+
+Under the measurement five of those six ship and one is held: factor Xa, whose
+four residues occurred 154 times in the corpus, in 16.4% of the files, none of
+them read by anybody. It ships the day somebody reads them.
 
 Every declared part keeps its ordinal whether or not it emits
 -------------------------------------------------------------
@@ -81,12 +88,20 @@ sequence fetched at build time.**
   NUCLEOTIDE ROUTE   located in a UniProt canonical, then the codons sliced out
                      of the ENA CDS must re-translate to it.
   PEPTIDE ROUTE      located in the deposited one-letter sequence of the wwPDB
-                     polymer entity named in `pdb_entity`.
+                     polymer entity named in `pdb_entity`, or -- for a part that
+                     has a verified parent but is too short for MIN_NT to take
+                     codons from it -- in that parent's UniProt canonical.
+
+The second half of that clause is new, and it exists for exactly one row.
+Enterokinase declares parent P00760 and is witnessed on it; the parent cannot
+supply fifteen base pairs of reference, but it can and does supply the check.
+Refusing the row for want of a *wwPDB* witness when a fetched witness is right
+there would have been the letter of the rule against its point.
 
 A single wrong residue in this table drops the row; it cannot ship. That is what
 makes a hand-written sequence table safe to have at all — and it is why the
 peptide route was not simply switched on when the schema allowed it. Without a
-fetchable witness the fourteen new rows would go from "declared but unissued" to
+fetchable witness the peptide rows would go from "declared but unissued" to
 "shipped, unverified", which is worse than the status quo it replaced.
 
 Usage
@@ -101,7 +116,7 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -140,52 +155,100 @@ PLF_BLOCK_SIZE = 1000
 # back by this rule even though both have a clean natural parent.
 MIN_NT = 27
 
-# A peptide reference shorter than this is held. The loader enforces no length
-# floor of its own — a 3-residue reference_aa loads clean — so the floor lives
-# here, beside MIN_NT, in the same shape and for the same kind of reason.
+# THERE IS NO PEPTIDE LENGTH FLOOR ANY MORE, and this comment is what used to
+# be one. `MIN_PEPTIDE_AA = 8` held six parts, including His6 and both TEV
+# sites, on two arguments that both looked sound:
 #
-# Derived from two independent numbers that happen to agree, which is why it is
-# 8 and not something rounder:
+#   (a) A FALSE-POSITIVE BUDGET computed as 20^-L against the residue positions
+#       of a translated 5 kb plasmid.
+#   (b) A SEEDING CLIFF: K_PROTEIN = 5 with Config::min_seeds = 3 needs 7
+#       residues to make three windows, `Index::build` listed a record in
+#       `short()` only when it indexed ZERO words, and so a 6-residue peptide
+#       was seeded, unchainable, unreported and never found. The floor sat one
+#       residue above that cliff.
 #
-#   (a) FALSE-POSITIVE BUDGET. SOURCING.md §3 published its budget on exactly
-#       this length: 8 residues over a 20-letter alphabet against the ~10,000
-#       residue positions of a six-frame-translated 5 kb plasmid is ~4e-7 per
-#       plasmid. At 7 residues the same arithmetic gives 7.8e-6 and at 6 it
-#       gives 1.6e-4 — one spurious call per 6,000 plasmids, which is alarming
-#       for anyone annotating a library.
+# (b) IS FIXED IN THE CODE, which is where it always belonged.
+# `Index::unchainable` routes any record with fewer indexed words than the
+# caller's `min_seeds` to an exact substring scan, so "too few words to chain"
+# is a route rather than a hole, and it stays a route as `min_seeds` rises. No
+# constant here could do that: at min_seeds = 5 the eight-residue FLAG row --
+# already shipped and signed -- fell down the same cliff.
 #
-#   (b) THE SEEDING CLIFF. The tier-2 chainer cannot form a chain below 7
-#       residues at all: K_PROTEIN = 5 (crates/pl-features/src/index.rs) and
-#       Config::min_seeds = 3 (annotate.rs) together need k + min_seeds - 1 = 7
-#       residues to produce three windows. Worse, `Index::build` pushes a record
-#       to `short()` only when it indexed ZERO words, so a 6-residue peptide
-#       yields two windows, never chains, and is reported unreachable by
-#       nothing — silently unfindable, which is the failure index.rs's own
-#       header apologises for. A floor of 8 sits one residue above that cliff
-#       rather than on it, which matters because `min_seeds` is user-adjustable
-#       and a floor equal to the cliff would stop matching if anyone raised it.
+# (a) IS THE WRONG QUESTION, and the measurement says so. Every peptide in this
+# table was counted against 73 real plasmid and contig files from the PI's own
+# machine, 17,061,931 residues of ORFs, counting only occurrences the shipped
+# fusion gate would report. Against 20^-L over that corpus:
 #
-# WHAT IT COSTS, and it is not small. Six parts are held by this floor and two
-# of them are the most-used items in the whole table:
+#                    expected by chance   observed   O/E
+#     IEGR      4          106.6            154      1.4
+#     DDDDK     5            5.33             0      0
+#     HHHHHH    6            0.267            8     30
+#     LVPRGS    6            0.267            0      0
+#     ENLYFQG   7            0.0133           0      0
+#     DYKDDDDK  8            0.00067          0      0    (shipped, control)
+#     (GGGGS)3 15          ~0                 0      0    (shipped, control)
 #
-#   PLF:3004 His6            HHHHHH    6 aa
-#   PLF:3015 TEV site        ENLYFQG   7 aa
-#   PLF:3016 TEV site (Ser)  ENLYFQS   7 aa
-#   PLF:3018 thrombin site   LVPRGS    6 aa
-#   PLF:3019 factor Xa       IEGR      4 aa
-#   PLF:3020 enterokinase    DDDDK     5 aa
+# The model is not badly calibrated -- within 1.5x on IEGR, correctly ~0 from
+# six residues up. It fails for a different reason and the reason is fatal: it
+# estimates CHANCE OCCURRENCE, and what a curator needs is the fraction of the
+# hits the tool actually produces that are wrong. It labels the row with 8 hits
+# (His6, O/E 30) as the marginal one and the row with 0 hits (DDDDK) as twenty
+# times cleaner. Reading the hits says the opposite on both counts: all eight
+# His6 occurrences are real tags -- C-terminal at -0 residues from the stop,
+# behind a GG linker, in files named for the tag -- and DDDDK did not occur at
+# all. No calibration of 20^-L produces that answer, because the model has no
+# term for design, and design is what a tag IS.
 #
-# Lowering it to 7 would release both TEV sites and costs one order of magnitude
-# of false-positive budget, recovered only partly by the annotator's ORF gate
-# (worth ~4.7x, measured). That is a one-constant change and should be presented
-# to the curator as such rather than argued about.
+# The old comment already half-knew this. It said His6 "deserves a refusal
+# INDEPENDENT of length" because a homopolymer is not modelled by 20^-L, citing
+# 6,783 PDB entities carrying HHHHHHHH. That observation is correct about
+# composition and produced the wrong shipping decision: composition predicts
+# noise, and the measurement found eight true positives and zero false ones.
 #
-# His6 deserves a refusal INDEPENDENT of length and would keep one at any floor:
-# a homopolymer's occurrence is not modelled by 20^-L at all, and this table's
-# own witness for it records 6,783 PDB entities carrying HHHHHHHH. Histidine
-# runs are common in deposited sequence, measured rather than assumed, so
-# "HHHHHH is here" is a much weaker claim than its length suggests.
-MIN_PEPTIDE_AA = 8
+# So length stops being a gate. What replaces it is a per-part record of what
+# was measured and what was read -- see `Part.occurrences` and the gate in
+# `build_peptide` -- and one STRUCTURAL floor that is not about specificity at
+# all:
+
+# The shortest peptide the annotator will accept, and it must agree with
+# MIN_PART_AA in crates/pl-features/src/annotate.rs, which refuses anything
+# below it out loud.
+#
+# Not a specificity rule. ORF_MIN_AA = MIN_PART_AA + PARTNER_MIN = 25 is the
+# `Params::min_aa` handed to `find_orfs`, while the fusion predicate itself only
+# asks for `aa_len >= tag_aa + PARTNER_MIN`. A shorter part would therefore be
+# findable inside a 25-residue ORF and silently invisible inside a 24-residue
+# one, because no ORF that short is ever searched. Admitting one means moving
+# ORF_MIN_AA with it, in that file, and saying so here.
+MIN_PART_AA = 5
+
+# The floor that was retired above, kept for one job: deciding which rows the
+# measurement ADMITS, as opposed to which rows it merely describes.
+#
+# Two things forced this to be a constant rather than a paragraph applied to
+# every peptide row.
+#
+# It is a SIGNATURE boundary. `notes` is in SIGNED_COLUMNS, so a sentence
+# appended to a row already signed lapses that signature. Appending the
+# occurrence paragraph to all twenty peptide rows lapsed fourteen of Dr Lobel's
+# eighty-four, dropped FLAG, Strep-tag, AviTag, SBP-tag, both GGGGS linkers and
+# eight others out of the default search, and turned six tests red. The rows the
+# measurement admits are exactly the rows the retired floor held, so the same
+# number that used to hold them now scopes the sentence that releases them.
+#
+# It is also a TRUTH boundary, and that is the reason it must not simply be
+# `False`. The sentence says the measurement "is what admits the row, in place
+# of the peptide length floor this table used to carry". That is true of His6,
+# both TEV sites, thrombin and enterokinase, all of which the floor held. It is
+# false of FLAG at eight residues and of SBP-tag at thirty-eight: those cleared
+# the floor and were admitted by it, and writing otherwise would put a false
+# claim about a row's grounds into the column a curator signs.
+#
+# A part of eight residues or more that is added from here on is admitted the
+# same way FLAG was and records its occurrences the same way FLAG does: in
+# `Part.occurrences`, which `occurrence_verdict` reads for every peptide row
+# regardless of length. Only the prose is scoped, never the gate.
+RETIRED_PEPTIDE_FLOOR = 8
 
 # RCSB's data API. One endpoint, one field: the deposited one-letter sequence of
 # a named polymer entity. SOURCING.md §1 clears `wwpdb / CC0-1.0` narrowly — the
@@ -261,6 +324,93 @@ class Part:
     """Something the curator must decide or must not assume. Appended to
     `notes`, where it will be read."""
 
+    # ----------------------------------------------------------------
+    # The measured-occurrence record. Required for anything on the peptide
+    # route; `build_peptide` refuses a part that has none. This is what
+    # replaced MIN_PEPTIDE_AA, and the six fields are separate on purpose: a
+    # count, a count of how many of them a human read, and a count of how many
+    # of those were wrong are three different claims, and collapsing them is
+    # how "nobody looked" comes to read as "nothing was wrong".
+
+    occurrence_corpus: str = ""
+    """What was searched, named precisely enough to be re-run.
+
+    Including the gate it was counted under. Without that the number is
+    unfalsifiable the first time anything changes: the annotator scans all six
+    frames of the doubled text, most of which is outside any ORF, so any future
+    diagnostic that reports pre-gate hits produces numbers far larger than
+    these with nothing marking them stale."""
+
+    occurrences: int = -1
+    """Exact in-frame occurrences inside an ORF with at least PARTNER_MIN
+    residues of partner -- i.e. only where the shipped fusion gate would REPORT
+    the part. -1 means no measurement exists, which is not the same as zero and
+    is why the default is not 0."""
+
+    occurrence_files: str = ""
+    """How the occurrences were distributed, e.g. "8 of 73 files (11.0%)".
+    A count concentrated in one file is a different fact from the same count
+    spread over the corpus."""
+
+    adjudicated: int = -1
+    """How many of `occurrences` a human actually read. The gate requires this
+    to equal `occurrences`: a part is held because the reading has not been
+    done, not because anyone has shown it noisy."""
+
+    spurious: int = -1
+    """How many of the adjudicated occurrences were NOT this part. Must be 0 to
+    ship. -1 means nothing was adjudicated, so the question is open."""
+
+    occurrence_note: str = ""
+    """What the reading found, in prose, for the curator. Goes into `notes`."""
+
+
+# The population every occurrence count below was taken over, named so it can be
+# re-run. Named in the row's notes too, because a count without its denominator
+# and its gate is not a measurement.
+#
+# ATG-to-stop under the standard code is NARROWER than the annotator's shipped
+# default, which is table 11 and admits seven initiators. Stated rather than
+# smoothed over: the corpus therefore under-counts slightly relative to what the
+# tool would report, in the direction that makes a shipped row look better than
+# it is. It does not change any verdict here -- the only two parts that occurred
+# at all are one that ships on adjudication and one that is held -- but the next
+# person to re-run this should widen the ORF caller before comparing.
+CORPUS = (
+    "73 plasmid and contig files from the PI's own machine, 17,061,931 residues "
+    "of ATG-to-stop ORFs of >= 25 aa on both strands under the standard code; an "
+    "occurrence is an exact in-frame match with >= 20 residues of the ORF outside "
+    "the part, i.e. only where the shipped fusion gate would report it "
+    "(K_PROTEIN=5, ORF_MIN_AA=25, PARTNER_MIN=20, exact and whole). "
+    "Measured 2026-07-28."
+)
+
+
+def measured(occurrences: int, files: str, adjudicated: int, spurious: int,
+             note: str = "") -> dict:
+    """The six occurrence fields as keyword arguments.
+
+    One line in a Part literal rather than six, and — the reason it is a
+    function and not a tuple — positional order that a reader can check against
+    a signature instead of against a comment.
+    """
+    return {
+        "occurrence_corpus": CORPUS,
+        "occurrences": occurrences,
+        "occurrence_files": files,
+        "adjudicated": adjudicated,
+        "spurious": spurious,
+        "occurrence_note": note,
+    }
+
+
+# Seventeen of the twenty peptide-route parts. Zero occurrences passes the gate
+# vacuously and correctly: nothing to read, nothing spurious.
+NONE_FOUND = measured(
+    0, "0 of 73 files (0.0%)", 0, 0,
+    "Did not occur anywhere in the corpus, so there was nothing to adjudicate.",
+)
+
 
 # ORDER IS IDENTITY. `ordinal` is this list's index, and a PLF id is a permanent
 # name. Append; never insert, never reorder, never delete a line — retire a part
@@ -270,6 +420,7 @@ PARTS: tuple[Part, ...] = (
         name="FLAG tag",
         aliases=("FLAG", "FLAG epitope", "DYKDDDDK tag"),
         aa="DYKDDDDK",
+        **NONE_FOUND,
         pdb_entity="8RMO_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -297,6 +448,7 @@ PARTS: tuple[Part, ...] = (
         name="3xFLAG tag",
         aliases=("3XFLAG", "triple FLAG", "3x FLAG epitope"),
         aa="DYKDHDGDYKDHDIDYKDDDDK",
+        **NONE_FOUND,
         pdb_entity="21VV_8",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -372,6 +524,17 @@ PARTS: tuple[Part, ...] = (
         aliases=("His tag", "His6", "6xHis", "His8", "His10", "10xHis",
                  "hexahistidine", "polyHis"),
         aa="HHHHHH",
+        **measured(
+            8, "8 of 73 files (11.0%)", 8, 0,
+            "Eight occurrences, all eight read, none of them chance. Every one is "
+            "C-terminal at exactly -0 residues from the stop, behind a GG linker, in "
+            "files whose names say the construct carries a His tag; two distinct "
+            "constructs, whose ORFs pl reports as 258 aa and 3796 aa under table 11 "
+            "(the shorter one opens on an ATT initiator 98 codons upstream of its first "
+            "ATG, so an ATG-only reading of it gives 160). So this row has zero measured "
+            "false positives and eight true positives the shipped tool could not find - "
+            "which is the opposite of what its length, and the 20^-L model, predicted.",
+        ),
         pdb_entity="1KTR_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -392,8 +555,23 @@ PARTS: tuple[Part, ...] = (
         caveat="DESIGN DECISION, deliberately one row and not three: His6, His8 and His10 "
                "are the same feature at different run lengths, no paper stipulates 8 or "
                "10, and three rows would all match the same locus and compete in the "
-               "annotator's output. The matcher should extend the histidine run greedily "
-               "and report the length it observed.",
+               "annotator's output. "
+               "WHAT THAT COSTS ON A LONGER TRACT, and it is visible on a map: this "
+               "record means SIX histidines and its extent is the record's length, not "
+               "the tract's. A tract of N histidines contains N-5 overlapping exact "
+               "matches, and the annotator reports the leftmost of each overlapping "
+               "group - so a His8 is drawn as an 18 bp Polyhistidine tag inside a 24 bp "
+               "run, at identity 1.000 and coverage 1.000, a wrong extent wearing a "
+               "perfect score, and a His12 is drawn as the two disjoint His6 it really "
+               "contains. Measured over tract lengths 6 to 14 in the annotator's own test "
+               "suite; before that collapse was written, His10 through His13 were drawn "
+               "as TWO OVERLAPPING boxes and His14 as three, which is the failure that "
+               "put this paragraph here. All eight measured corpus occurrences are "
+               "exactly six residues, so the corpus does not exercise any of it; the "
+               "witness above records 6,783 PDB entities carrying HHHHHHHH and 174 "
+               "carrying HHHHHHHHHH, so it is not rare. Extending the run greedily and "
+               "reporting the length observed is the fix, and it is a matcher change with "
+               "its own tests, not a table change.",
     ),
     Part(
         name="V5 tag",
@@ -425,6 +603,7 @@ PARTS: tuple[Part, ...] = (
         name="Strep-tag",
         aliases=("Strep-tag I", "AWRHPQFGG", "original Strep-tag"),
         aa="AWRHPQFGG",
+        **NONE_FOUND,
         pdb_entity="1RST_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -451,6 +630,7 @@ PARTS: tuple[Part, ...] = (
         name="Strep-tag II",
         aliases=("StrepII", "Strep II", "WSHPQFEK"),
         aa="WSHPQFEK",
+        **NONE_FOUND,
         pdb_entity="1KL3_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -474,6 +654,7 @@ PARTS: tuple[Part, ...] = (
         name="Twin-Strep-tag",
         aliases=("Twin Strep", "2xStrep-tag II", "One-STrEP-tag"),
         aa="WSHPQFEKGGGSGGGSGGSAWSHPQFEK",
+        **NONE_FOUND,
         pdb_entity="6SOS_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -500,6 +681,7 @@ PARTS: tuple[Part, ...] = (
         name="S-tag",
         aliases=("S-peptide", "RNase S peptide", "KETAAAKFERQHMDS"),
         aa="KETAAAKFERQHMDS",
+        **NONE_FOUND,
         pdb_entity="1A2W_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -547,6 +729,7 @@ PARTS: tuple[Part, ...] = (
         aliases=("Avi tag", "BAP", "biotin acceptor peptide", "BirA substrate peptide",
                  "GLNDIFEAQKIEWHE"),
         aa="GLNDIFEAQKIEWHE",
+        **NONE_FOUND,
         pdb_entity="11ZV_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -593,6 +776,7 @@ PARTS: tuple[Part, ...] = (
         name="SBP-tag",
         aliases=("SBP", "streptavidin-binding peptide"),
         aa="MDEKTTGWRGGHVVEGLAGELEQLRARLEHHPQGQREP",
+        **NONE_FOUND,
         pdb_entity="4JO6_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -627,6 +811,7 @@ PARTS: tuple[Part, ...] = (
         name="Calmodulin-binding peptide",
         aliases=("CBP", "CBP tag", "MLCK M13 peptide"),
         aa="KRRWKKNFIAVSAANRFKKISSSGAL",
+        **NONE_FOUND,
         pdb_entity="2BBM_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -671,6 +856,7 @@ PARTS: tuple[Part, ...] = (
         name="ALFA-tag",
         aliases=("ALFA", "SRLEEELRRRLTE"),
         aa="SRLEEELRRRLTE",
+        **NONE_FOUND,
         pdb_entity="6I2G_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -723,6 +909,7 @@ PARTS: tuple[Part, ...] = (
         name="TEV protease cleavage site",
         aliases=("TEV site", "ENLYFQG", "ENLYFQ/G", "TEV recognition sequence"),
         aa="ENLYFQG",
+        **NONE_FOUND,
         pdb_entity="10GW_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -745,20 +932,20 @@ PARTS: tuple[Part, ...] = (
                 "His6-TEV cassette.",
         no_gene="parent is the TEV polyprotein, but no accession for it was established "
              "from a fetched record; one lookup away",
-        caveat="HELD, and the reason changed on 2026-07-28. It is no longer the missing "
-               "parent - the peptide route needs none - it is length: seven residues is "
-               "below MIN_PEPTIDE_AA = 8, and at seven the tier-2 chainer produces exactly "
-               "three seed windows with no margin at all. TEV is one of the two most-used "
-               "items in this table and holding it is a real cost; lowering the floor to 7 "
-               "releases it and both TEV variants for one order of magnitude of "
-               "false-positive budget. A curator decision, not a build fix. Separately, no "
-               "UniProt accession for the TEV polyprotein was ever established from a "
-               "fetched record, so it has no nucleotide route either.",
+        caveat="SHIPS ON A MEASUREMENT, having been held twice on other grounds. It was "
+               "held first for a missing parent - which the peptide route does not need - "
+               "and then by a flat 8-residue floor. Seven residues is exactly three seed "
+               "windows, so it chains today with no margin at all: raise Config::min_seeds "
+               "to 4 and this row moves to the annotator's exact-scan route by itself. "
+               "That migration is the point of routing on indexed words rather than on "
+               "length. Separately, no UniProt accession for the TEV polyprotein was ever "
+               "established from a fetched record, so it still has no nucleotide route.",
     ),
     Part(
         name="TEV protease cleavage site (Ser variant)",
         aliases=("ENLYFQS", "ENLYFQ/S", "TEV site S variant"),
         aa="ENLYFQS",
+        **NONE_FOUND,
         pdb_entity="10HA_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -776,12 +963,14 @@ PARTS: tuple[Part, ...] = (
                 "GSHHHHHH. RCSB seqmotif returns 3,891 entities.",
         no_gene="same as the Gly variant: the TEV polyprotein accession was not "
              "established from a fetched record",
-        caveat="HELD: same reason as the Gly variant - seven residues, below MIN_PEPTIDE_AA = 8.",
+        caveat="SHIPS: same position as the Gly variant - seven residues, zero occurrences "
+               "in the corpus, and the same no-margin three seed windows.",
     ),
     Part(
         name="HRV 3C protease cleavage site",
         aliases=("PreScission site", "3C site", "LEVLFQGP", "LEVLFQ/GP"),
         aa="LEVLFQGP",
+        **NONE_FOUND,
         pdb_entity="10HM_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -815,6 +1004,7 @@ PARTS: tuple[Part, ...] = (
         name="Thrombin cleavage site",
         aliases=("thrombin site", "LVPRGS", "LVPR/GS"),
         aa="LVPRGS",
+        **NONE_FOUND,
         pdb_entity="10EE_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -840,17 +1030,25 @@ PARTS: tuple[Part, ...] = (
                "human prothrombin (P00734), fibrinogen alpha (P02671), factor XIII A "
                "(P00488), PAR1 (P25116) and factor V (P12259), all checked. Sequence "
                "verified; attribution unresolved; and with no natural parent there are no "
-               "codons to take. HELD on length rather than on sourcing: six residues is "
-               "below MIN_PEPTIDE_AA = 8, and at six the tier-2 chainer cannot form a "
-               "chain at all, so the row would be shipped and silently unfindable. Note "
-               "for whenever the floor is revisited: LVPRGS is the noisiest item this "
-               "table would admit, at roughly one spurious exact hit per 2,300 random "
-               "5 kb plasmids even with the ORF gate on.",
+               "codons to take. THAT is what the curator has to weigh here, and it is the "
+               "only thing left to weigh: the row was previously held on length as well, "
+               "with a note calling LVPRGS 'the noisiest item this table would admit' at "
+               "roughly one spurious hit per 2,300 random 5 kb plasmids. That estimate was "
+               "20^-L arithmetic and the corpus disagrees with it - zero occurrences in "
+               "17,061,931 ORF residues of real sequence, where the same model predicted "
+               "0.27. Six residues is two seed windows, so this row reaches the annotator "
+               "by the exact-scan route rather than by chaining.",
     ),
     Part(
         name="Factor Xa cleavage site",
         aliases=("factor Xa site", "IEGR", "Ile-Glu-Gly-Arg"),
         aa="IEGR",
+        **measured(
+            154, "12 of 73 files (16.4%)", 0, -1,
+            "154 occurrences and not one of them read. That is why the row is held: not "
+            "because anybody has shown the 154 are chance, but because the work has not "
+            "been done. It ships the day somebody reads them.",
+        ),
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="literature_defined",
@@ -870,17 +1068,27 @@ PARTS: tuple[Part, ...] = (
                 "carries IEGR at 311-314 with an annotated factor Xa cleavage site at "
                 "314-315.",
         parent_uniprot="P00734",
-        caveat="HELD by BOTH floors, and it would fail either alone: the parent is "
-               "clean, but four residues is twelve base pairs. As protein it is ~60,000x "
-               "over the false-positive budget SOURCING.md sets; as nucleotide it is "
-               "shorter than any k-mer seed a tier-1 index would use. It must never be "
-               "indexed standalone - index the SSGHIEGRHM-style cassette context, or "
-               "suppress it unless it abuts another annotated feature.",
+        caveat="THE ONLY PART IN THIS TABLE STILL HELD, and the reason is now a "
+               "measurement rather than a length. 154 in-frame occurrences across 73 real "
+               "plasmids, in 12 of them (16.4%), every one of which would have been "
+               "reported under the shipped fusion gate - against zero for the five parts "
+               "that ship alongside it. Note what that does NOT claim: nobody has shown "
+               "the 154 are chance. The gate is 'every occurrence read, none of them "
+               "spurious', so this row is held because the reading has not been done, and "
+               "it ships the day somebody does it. 'IEGR is noisy' is not a claim this "
+               "evidence supports; 'IEGR has 154 unexamined hits' is. "
+               "Separately and independently, four residues is twelve base pairs, below "
+               "MIN_NT, so the clean parent P00734 cannot supply a nucleotide reference "
+               "either; and four residues is below MIN_PART_AA, so the annotator would "
+               "refuse it outright. Whoever adjudicates the 154 must move ORF_MIN_AA in "
+               "crates/pl-features/src/annotate.rs as well, or index the SSGHIEGRHM-style "
+               "cassette context instead.",
     ),
     Part(
         name="Enterokinase cleavage site",
         aliases=("enteropeptidase site", "DDDDK", "Asp4-Lys"),
         aa="DDDDK",
+        **NONE_FOUND,
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="literature_defined",
@@ -895,13 +1103,22 @@ PARTS: tuple[Part, ...] = (
                 "18-23 as VDDDDK, immediately followed by the mature chain beginning IVGG "
                 "at 24 - the scissile bond read off the record rather than recalled.",
         parent_uniprot="P00760",
-        caveat="HELD by BOTH floors: five residues is fifteen base pairs, below MIN_NT, "
-               "and five residues is below MIN_PEPTIDE_AA. "
-               "SECOND PROBLEM the annotator must handle regardless of how this row is "
-               "eventually sourced: DDDDK is the C-terminal half of the FLAG tag, so in "
-               "any FLAG-tagged construct it will always co-hit FLAG and report a protease "
-               "site the designer never put there. That needs an explicit containment "
-               "rule.",
+        caveat="SHIPS, and it is the shortest row in this table: five residues, which is "
+               "exactly MIN_PART_AA. Fifteen base pairs is below MIN_NT, so the clean "
+               "parent P00760 cannot supply a nucleotide reference - it supplies the "
+               "verification instead, which is why this is the one row witnessed on a "
+               "UniProt canonical rather than a wwPDB entity. Five residues is ONE seed "
+               "window, so it reaches the annotator only by the exact-scan route. "
+               "THE CONTAINMENT PROBLEM, unchanged by the measurement and not solved by "
+               "it: DDDDK is the C-terminal half of FLAG and of 3xFLAG, so in a "
+               "FLAG-tagged construct both records fire on one locus. Where both are "
+               "reported the annotator resolves it correctly and keeps FLAG. Where it does "
+               "NOT is an ORF of 25, 26 or 27 residues: DDDDK clears the fusion gate at 25 "
+               "and FLAG only at 28, so such a construct is annotated 'Enterokinase "
+               "cleavage site' and no FLAG. Declared in DECLARED_CONTAINMENT and read from "
+               "the code, not from a run - and the corpus cannot settle it, because it "
+               "contains no FLAG-tagged construct at all (FLAG measured zero occurrences), "
+               "which is the one construct class where this row is known to misfire.",
     ),
     Part(
         name="P2A self-cleaving peptide",
@@ -1021,6 +1238,7 @@ PARTS: tuple[Part, ...] = (
         name="(GGGGS)3 flexible linker",
         aliases=("G4S linker", "(G4S)3", "15-residue scFv linker", "212 linker"),
         aa="GGGGSGGGGSGGGGS",
+        **NONE_FOUND,
         pdb_entity="1DZB_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -1050,6 +1268,7 @@ PARTS: tuple[Part, ...] = (
         name="(GGGGS)4 flexible linker",
         aliases=("(G4S)4", "20-residue GS linker"),
         aa="GGGGSGGGGSGGGGSGGGGS",
+        **NONE_FOUND,
         pdb_entity="1H8N_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -1072,6 +1291,7 @@ PARTS: tuple[Part, ...] = (
         name="A(EAAAK)3A rigid helical linker",
         aliases=("EAAAK linker", "alpha-helical linker", "rigid linker"),
         aa="AEAAAKEAAAKEAAAKA",
+        **NONE_FOUND,
         pdb_entity="8E4C_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
@@ -1096,6 +1316,49 @@ PARTS: tuple[Part, ...] = (
                "the flanked form. The abstract quote is the primary evidence for this row, "
                "and the flanking alanines are part of the published design, not padding.",
     ),
+)
+
+
+# Every pair where one part's residues are a substring of another's, DECLARED,
+# with what happens when both fire on one locus. Checked in self_test() against
+# the pairs actually present, so a new part cannot introduce an undeclared one.
+#
+# Why declared rather than banned: three of these five already ship and are
+# signed. A ban would retroactively condemn them, and it would be wrong to —
+# FLAG really is inside 3xFLAG, and a tool that refused to say so would be
+# hiding a true thing about the construct.
+#
+# The measurement is silent on all of this. It counts occurrences of one part at
+# a time; it cannot see two records competing, and the corpus contains no
+# FLAG-tagged construct at all (FLAG measured zero occurrences), which is
+# precisely the case where the DDDDK pair fires.
+DECLARED_CONTAINMENT: tuple[tuple[str, str, str], ...] = (
+    ("FLAG tag", "3xFLAG tag",
+     "Ships and is signed. The two compete rather than nest: after the 15% "
+     "overlap trim, FLAG's core runs past the end of 3xFLAG's, so `contained_in` "
+     "is false and `resolve_overlaps` keeps the higher-scoring 22-residue row."),
+    ("Strep-tag II", "Twin-Strep-tag",
+     "Ships and is signed. Twin-Strep carries TWO copies of Strep-tag II, one at "
+     "each end, so the same trim argument applies at both and the 28-residue row "
+     "wins the span."),
+    ("(GGGGS)3 flexible linker", "(GGGGS)4 flexible linker",
+     "Ships and is signed. Same shape, and the reason the repeat family is "
+     "represented by two rows rather than a wildcard."),
+    ("Enterokinase cleavage site", "FLAG tag",
+     "NEW, and the one with an unresolved edge. On a locus where both are "
+     "reported the pair resolves correctly: DDDDK is FLAG's last five residues, "
+     "its trimmed core hangs off FLAG's 3' end, so the two compete and FLAG wins "
+     "on score (24 against 15). BUT they clear the fusion gate at different ORF "
+     "sizes -- DDDDK needs aa_len >= 25 and FLAG needs >= 28 -- so in an ORF of "
+     "25, 26 or 27 residues a FLAG-tagged construct is annotated 'Enterokinase "
+     "cleavage site' and no FLAG. That window is declared here rather than fixed "
+     "here: fixing it means a containment rule inside the annotator, which is a "
+     "behaviour change with its own tests. Read from the code, not demonstrated "
+     "by a run, and the corpus cannot demonstrate it either."),
+    ("Enterokinase cleavage site", "3xFLAG tag",
+     "NEW, same relationship one level out: 3xFLAG's third unit is a whole FLAG, "
+     "so it ends in DDDDK too. 3xFLAG needs an ORF of >= 42 residues, so the "
+     "window above is wider here, not narrower."),
 )
 
 
@@ -1224,42 +1487,191 @@ def dropped_from_the_allow_list() -> list[str]:
 # Stage 5
 
 
+def takes_peptide_route(p: Part) -> bool:
+    """Will this stage try to build a peptide row for `p`?
+
+    One definition, because three places used to spell it out and a fourth was
+    about to. A part takes the peptide route when it has no verified parent, or
+    when it has one but is too short for MIN_NT to slice codons out of.
+    """
+    return not p.parent_uniprot or 3 * len(p.aa) < MIN_NT
+
+
+def on_peptide_route(parts) -> list:
+    """`parts`, filtered by [`takes_peptide_route`]."""
+    return [p for p in parts if takes_peptide_route(p)]
+
+
+def occurrence_verdict(p: Part) -> str:
+    """Why this part may or may not ship, on the measured record. "" means ship.
+
+    THE GATE THAT REPLACED MIN_PEPTIDE_AA, and it is three clauses because it is
+    three different claims:
+
+        a measurement exists at all       occurrences >= 0
+        every occurrence was read         adjudicated == occurrences
+        none of them was a chance hit     spurious == 0
+
+    `occurrences == 0` passes vacuously and correctly: nothing to read, nothing
+    spurious. That is the whole reason this is not a length rule — DDDDK at five
+    residues occurred zero times and IEGR at four occurred 154, and no floor can
+    tell those apart because length is not the property being tested.
+
+    A pure function of the part, so `self_test` can prove each clause fails.
+    """
+    if p.occurrences < 0:
+        return ("no occurrence measurement, so nothing is known about how often it "
+                "would fire; run features/build's corpus count and record it")
+    if p.adjudicated != p.occurrences:
+        return (f"{p.occurrences} occurrence(s) in {p.occurrence_files or 'the corpus'}, "
+                f"of which {max(p.adjudicated, 0)} were read. A part ships when every "
+                f"occurrence has been read, not when somebody has argued it is rare")
+    if p.spurious != 0:
+        return (f"{max(p.spurious, 0)} of {p.adjudicated} adjudicated occurrence(s) were "
+                f"not this part")
+    return ""
+
+
+def admitted_by_measurement(p: Part) -> bool:
+    """Is the occurrence record what lets this part into the table?
+
+    True only for a part the retired `MIN_PEPTIDE_AA = 8` held. Every peptide
+    row is *gated* by `occurrence_verdict`, but only these five are *admitted*
+    by it; the rest cleared the floor and were admitted by that. See
+    RETIRED_PEPTIDE_FLOOR for why the distinction is load-bearing rather than
+    pedantic — one half of it is a false claim in a signed column and the other
+    half is fourteen lapsed signatures.
+    """
+    return len(p.aa) < RETIRED_PEPTIDE_FLOOR
+
+
+def measurement_paragraph(p: Part) -> str:
+    """The occurrence record as it goes into `notes`, or "" for a row that does
+    not need it.
+
+    Empty for every part the retired floor already admitted, and that emptiness
+    is what keeps their `notes` byte-identical and their signatures alive. The
+    measurement itself is not lost for those rows: `occurrence_verdict` reads it
+    on every peptide row, and the build report prints `occ=/adj=/spurious=` for
+    all of them.
+    """
+    if not admitted_by_measurement(p):
+        return ""
+    return (
+        f"HOW OFTEN IT WOULD FIRE ON SEQUENCE NOBODY TAGGED, measured rather than "
+        f"modelled - this is what admits the row, in place of the peptide length floor "
+        f"this table used to carry. {p.occurrences} occurrence(s), "
+        f"{p.occurrence_files}, of which {p.adjudicated} were read by a human and "
+        f"{p.spurious} turned out not to be this part. Corpus: {p.occurrence_corpus} "
+        f"{p.occurrence_note} "
+    )
+
+
 def build_peptide(p: Part, rid: str, ordinal: int, refresh: bool,
                   report: list) -> "Row | None":
-    """The peptide route: a residue string verified against a wwPDB entity.
+    """The peptide route: a residue string verified against a fetched record.
 
-    Taken by a part with no gene to slice codons out of. The gate is the same
-    shape as the nucleotide route's — locate the peptide, exactly once, in a
-    sequence fetched at build time — because without it the `aa=` literal in
-    PARTS would go straight into features.tsv and the row would be shipped,
-    unverified. That is worse than the unissued state it replaces.
+    Taken by a part with no gene to slice codons out of, or one whose gene is
+    too short for MIN_NT. The gate is the same shape as the nucleotide route's —
+    locate the peptide, exactly once, in a sequence fetched at build time —
+    because without it the `aa=` literal in PARTS would go straight into
+    features.tsv and the row would be shipped, unverified. That is worse than
+    the unissued state it replaces.
     """
     tag = f"{rid} {p.name}"
-    if len(p.aa) < MIN_PEPTIDE_AA:
-        report.append(
-            f"  HOLD {rid} {p.name:40s} {len(p.aa)} aa, below the {MIN_PEPTIDE_AA} aa "
-            f"peptide floor. {p.no_gene}"
-        )
+    # THE MEASUREMENT FIRST, and the order is the point. A row held on evidence
+    # about what it would do should say so, not report whichever mechanical
+    # floor happens to be checked earliest -- that is how "shorter than the
+    # floor" came to be the recorded reason for holding His6, which the
+    # measurement says was the most valuable row in the table.
+    held = occurrence_verdict(p)
+    if held:
+        report.append(f"  HOLD {rid} {p.name:40s} {held}")
+        if len(p.aa) < MIN_PART_AA:
+            report.append(
+                f"       ...and, independently, {len(p.aa)} aa is below MIN_PART_AA = "
+                f"{MIN_PART_AA}, so the annotator would refuse it outright. Whoever "
+                f"clears the occurrences must move ORF_MIN_AA in "
+                f"crates/pl-features/src/annotate.rs too."
+            )
         return None
-    if not p.pdb_entity:
+    # STRUCTURAL, and not the specificity gate. See MIN_PART_AA: a shorter part
+    # is findable in a 25-residue ORF and silently invisible in a 24-residue
+    # one, and the annotator refuses it outright.
+    if len(p.aa) < MIN_PART_AA:
         report.append(
-            f"  DROP {tag}: no pdb_entity, so the residue string could only be taken on "
-            f"trust. A declared row is better than an unverified one."
+            f"  HOLD {rid} {p.name:40s} {len(p.aa)} aa, below MIN_PART_AA = "
+            f"{MIN_PART_AA}; the annotator refuses it. Move ORF_MIN_AA in "
+            f"crates/pl-features/src/annotate.rs to admit it."
         )
         return None
 
-    try:
-        deposited, desc, meta = rcsb_entity(p.pdb_entity, refresh)
-    except Exception as e:  # noqa: BLE001 — one bad part must not kill the stage
-        report.append(f"  DROP {tag}: wwPDB fetch failed for {p.pdb_entity}: {e}")
-        return None
-    if not deposited:
-        report.append(f"  DROP {tag}: {p.pdb_entity} carries no one-letter sequence")
+    # WHERE THE RESIDUES ARE CHECKED. A wwPDB polymer entity for a designed part
+    # with no gene; the UniProt parent for a part that HAS one but is too short
+    # for MIN_NT to slice codons out of it. The second exists for exactly one row
+    # (enterokinase), and it is not a loosening: the requirement was always "a
+    # sequence fetched at build time", and refusing a fetched UniProt canonical
+    # in favour of no witness at all would have been the letter of the rule
+    # against its point.
+    if p.pdb_entity:
+        try:
+            deposited, desc, meta = rcsb_entity(p.pdb_entity, refresh)
+        except Exception as e:  # noqa: BLE001 — one bad part must not kill the stage
+            report.append(f"  DROP {tag}: wwPDB fetch failed for {p.pdb_entity}: {e}")
+            return None
+        if not deposited:
+            report.append(f"  DROP {tag}: {p.pdb_entity} carries no one-letter sequence")
+            return None
+        witness_kind = f"wwPDB polymer entity {p.pdb_entity}"
+        # BYTE-IDENTICAL to what this template rendered before the UniProt
+        # branch existed, and that is a requirement rather than a preference.
+        # `notes` is in SIGNED_COLUMNS, so rewording it moves
+        # `Db::content_digest` and lapses the signature on every row it touches.
+        # Folding this phrase into the shared `{witness_kind}` dropped the words
+        # "deposited one-letter" and took fourteen of Dr Lobel's eighty-four
+        # signatures with it: `the_shipped_database_parses_and_ships_only_what_
+        # is_signed` and all five corpus tests went red, and FLAG, Strep-tag and
+        # twelve others stopped being searched by default.
+        witness_phrase = (
+            f"deposited one-letter sequence of wwPDB polymer entity {p.pdb_entity}"
+        )
+        witness_prov = (rid, "reference_aa", "wwpdb", p.pdb_entity, "CC0-1.0",
+                        RCSB_ENTITY.format(*p.pdb_entity.split("_")),
+                        meta.get("retrieved", TODAY), meta.get("sha256", ""))
+    elif p.parent_uniprot:
+        try:
+            raw = json.loads(fetch(
+                UNIPROT_JSON.format(p.parent_uniprot),
+                f"uniprot_{p.parent_uniprot}.json",
+                refresh,
+            ))
+        except Exception as e:  # noqa: BLE001
+            report.append(f"  DROP {tag}: UniProt fetch failed for "
+                          f"{p.parent_uniprot}: {e}")
+            return None
+        entry = pick_uniprot(raw)
+        deposited = entry.get("sequence", {}).get("value", "").upper()
+        desc = entry.get("primaryAccession", p.parent_uniprot)
+        meta = cached_meta(f"uniprot_{p.parent_uniprot}.json")
+        if not deposited:
+            report.append(f"  DROP {tag}: {p.parent_uniprot} carries no canonical sequence")
+            return None
+        witness_kind = f"UniProt canonical {p.parent_uniprot}"
+        witness_phrase = f"canonical sequence of UniProt {p.parent_uniprot}"
+        witness_prov = (rid, "reference_aa", "uniprot", p.parent_uniprot, "CC-BY-4.0",
+                        UNIPROT_JSON.format(p.parent_uniprot),
+                        meta.get("retrieved", TODAY), meta.get("sha256", ""))
+    else:
+        report.append(
+            f"  DROP {tag}: neither a pdb_entity nor a parent_uniprot, so the residue "
+            f"string could only be taken on trust. A declared row is better than an "
+            f"unverified one."
+        )
         return None
     try:
         offset = locate_unique(deposited, p.aa)
     except ValueError as e:
-        report.append(f"  DROP {tag}: in wwPDB {p.pdb_entity}: {e}")
+        report.append(f"  DROP {tag}: in {witness_kind}: {e}")
         return None
 
     for a in (p.name, *p.aliases):
@@ -1273,8 +1685,8 @@ def build_peptide(p: Part, rid: str, ordinal: int, refresh: bool,
         f"any one of them would be an arbitrary choice that misses every re-coded copy "
         f"(features/SOURCING.md section 3). "
         f"reference_aa is {len(p.aa)} residues, located by exact search - found once - "
-        f"at residue {offset + 1} of the {len(deposited)}-residue deposited one-letter "
-        f"sequence of wwPDB polymer entity {p.pdb_entity}, fetched at build time. "
+        f"at residue {offset + 1} of the {len(deposited)}-residue {witness_phrase}, "
+        f"fetched at build time. "
         f"Verified for this table against: {p.witness} "
         f"HOW THIS ROW IS MATCHED, which is not how the nucleotide rows are matched: "
         f"only by six-frame translation, only at zero edit distance over the whole "
@@ -1285,7 +1697,9 @@ def build_peptide(p: Part, rid: str, ordinal: int, refresh: bool,
         f"'add these sequences, but make sure they are fused to an ORF, otherwise "
         f"ignored'. So this row will NOT fire on an empty tagging vector whose "
         f"polylinker meets a stop within 20 codons, and will NOT fire on a 5'-truncated "
-        f"fragment with no initiator. Citation: {p.citation}"
+        f"fragment with no initiator. "
+        + measurement_paragraph(p)
+        + f"Citation: {p.citation}"
     )
     if p.caveat:
         notes += " " + p.caveat
@@ -1301,8 +1715,9 @@ def build_peptide(p: Part, rid: str, ordinal: int, refresh: bool,
             )
 
     report.append(
-        f"  OK   {rid} {p.name:34s} {len(p.aa):4d} aa  wwPDB {p.pdb_entity} residue "
-        f"{offset + 1}  ({desc[:38]!r})"
+        f"  OK   {rid} {p.name:34s} {len(p.aa):4d} aa  {witness_kind} residue "
+        f"{offset + 1}  ({desc[:38]!r})  occ={p.occurrences} adj={p.adjudicated} "
+        f"spurious={p.spurious}"
     )
     return Row(
         id=rid,
@@ -1320,12 +1735,10 @@ def build_peptide(p: Part, rid: str, ordinal: int, refresh: bool,
         notes=notes,
         patent_flag=p.patent_flag,
         provenance=[
-            # The bytes the residues were read out of. `wwpdb` and not `rcsb`:
-            # the CC0 dedication is the wwPDB's, over the archive, and RCSB's
-            # own website layer is separately CC BY 4.0.
-            (rid, "reference_aa", "wwpdb", p.pdb_entity, "CC0-1.0",
-             RCSB_ENTITY.format(*p.pdb_entity.split("_")),
-             meta.get("retrieved", TODAY), meta.get("sha256", "")),
+            # The bytes the residues were read out of. For a wwPDB witness that
+            # is `wwpdb` and not `rcsb`: the CC0 dedication is the wwPDB's, over
+            # the archive, and RCSB's own website layer is separately CC BY 4.0.
+            witness_prov,
             # For Class C the citation IS the provenance of the boundary.
             (rid, "boundary_evidence", "polylinker", p.boundary_evidence,
              "own-work", "-", TODAY, ""),
@@ -1355,7 +1768,7 @@ def build(refresh: bool) -> tuple[list, list]:
         # only to peptide-only rows. Giving the eight nucleotide rows a peptide
         # as well would make a nine-residue epitope matchable with no ORF
         # requirement at all, which is a behaviour change nobody asked for.
-        if not p.parent_uniprot or 3 * len(p.aa) < MIN_NT:
+        if takes_peptide_route(p):
             if p.parent_uniprot:
                 report.append(
                     f"       {rid} {p.name:40s} {len(p.aa)} aa = {3 * len(p.aa)} bp is "
@@ -1575,18 +1988,18 @@ def build(refresh: bool) -> tuple[list, list]:
         f"{built_nt + built_aa} built, {blocked} declared and held. The held rows keep "
         f"their ordinals, so their PLF ids stay reserved and unissued."
     )
-    held = [p.name for p in PARTS
-            if (not p.parent_uniprot or 3 * len(p.aa) < MIN_NT)
-            and len(p.aa) < MIN_PEPTIDE_AA]
+    held = [(p.name, occurrence_verdict(p)) for p in on_peptide_route(PARTS)
+            if occurrence_verdict(p)]
     if held:
         report.append(
-            f"  -- CURATOR: the {len(held)} held row(s) are held by MIN_PEPTIDE_AA = "
-            f"{MIN_PEPTIDE_AA}, not by sourcing: {', '.join(held)}. His6 and the TEV "
-            f"sites are the two most-used items in this table. Lowering the floor to 7 "
-            f"releases both TEV sites and costs one order of magnitude of false-positive "
-            f"budget; His6 would still fail, because a histidine run's frequency is not "
-            f"modelled by 20^-L and 6,783 PDB entities carry HHHHHHHH. One constant, in "
-            f"this file."
+            f"  -- CURATOR: {len(held)} row(s) held, and every one is held by the "
+            f"occurrence record rather than by sourcing or by length. A held row needs "
+            f"somebody to READ its occurrences, not an argument about its length:"
+        )
+        for name, why in held:
+            report.append(f"       {name}: {why}")
+        report.append(
+            "       Corpus for all of these: " + CORPUS
         )
     report.append(
         f"  -- {len(dropped_from_the_allow_list())} named candidate(s) are deliberately "
@@ -1653,38 +2066,97 @@ def self_test() -> list[str]:
         raise SystemExit(f"SELF-TEST FAILED: the MIN_NT floor now excludes {short}")
     out.append(f"  SELFTEST MIN_NT={MIN_NT} bp excludes exactly {short}")
 
-    # The MIN_PEPTIDE_AA floor must exclude exactly the six parts named in its
-    # own comment, and no others. Pinned by name rather than by count, because a
-    # count would stay green if the floor released one part and caught another.
-    on_peptide_route = [p for p in PARTS if not p.parent_uniprot or 3 * len(p.aa) < MIN_NT]
-    held = sorted(p.name for p in on_peptide_route if len(p.aa) < MIN_PEPTIDE_AA)
-    expected = sorted([
-        "Polyhistidine tag",
-        "TEV protease cleavage site",
-        "TEV protease cleavage site (Ser variant)",
-        "Thrombin cleavage site",
-        "Factor Xa cleavage site",
-        "Enterokinase cleavage site",
-    ])
+    # The occurrence gate must hold exactly one part, and hold it for the reason
+    # recorded. Pinned by name rather than by count, because a count would stay
+    # green if the gate released one part and caught another.
+    peptide_route = on_peptide_route(PARTS)
+    held = sorted(p.name for p in peptide_route if occurrence_verdict(p))
+    expected = ["Factor Xa cleavage site"]
     if held != expected:
         raise SystemExit(
-            f"SELF-TEST FAILED: MIN_PEPTIDE_AA={MIN_PEPTIDE_AA} now holds {held}, "
-            f"not {expected}. Changing that floor is a curator decision -- update the "
-            f"list here, the comment on MIN_PEPTIDE_AA and features/README.md together."
+            f"SELF-TEST FAILED: the occurrence gate now holds {held}, not {expected}. "
+            f"Releasing or adding a hold is a curator decision -- update the list here, "
+            f"the part's own occurrence fields and features/README.md together."
         )
-    out.append(f"  SELFTEST MIN_PEPTIDE_AA={MIN_PEPTIDE_AA} holds exactly {held}")
+    out.append(f"  SELFTEST the occurrence gate holds exactly {held}")
 
-    # ...and the floor is not below the cliff the tier-2 chainer falls off.
-    # K_PROTEIN=5 with min_seeds=3 needs 7 residues to make three seed windows,
-    # and a record that seeds SOME words but too few is reported unreachable by
-    # nothing -- it is silently unfindable. The floor must sit above 7, not on it.
-    if MIN_PEPTIDE_AA <= 5 + 3 - 1:
+    # ...and each of its three clauses must be able to fire on its own. A gate
+    # that only ever fails as a whole cannot be shown to be three claims.
+    probe = PARTS[0]
+    clauses = [
+        ("no measurement", {"occurrences": -1, "adjudicated": -1, "spurious": -1}),
+        ("unread occurrences", {"occurrences": 3, "adjudicated": 0, "spurious": 0}),
+        ("a spurious hit", {"occurrences": 3, "adjudicated": 3, "spurious": 1}),
+    ]
+    for label, kw in clauses:
+        if not occurrence_verdict(replace(probe, **kw)):
+            raise SystemExit(
+                f"SELF-TEST FAILED: the occurrence gate accepted a part with {label}, "
+                f"so that clause of it does nothing"
+            )
+    if occurrence_verdict(replace(probe, occurrences=0, adjudicated=0, spurious=0)):
         raise SystemExit(
-            f"SELF-TEST FAILED: MIN_PEPTIDE_AA={MIN_PEPTIDE_AA} is at or below the "
-            f"seeding cliff at 7 residues, so a shipped row could be silently "
-            f"unfindable -- seeded, unchainable, and absent from Index::short()"
+            "SELF-TEST FAILED: the occurrence gate rejected a part that occurred zero "
+            "times; nothing to read and nothing spurious must pass vacuously"
         )
-    out.append("  SELFTEST the peptide floor sits above the tier-2 seeding cliff")
+    out.append(f"  SELFTEST each clause of the occurrence gate fires on its own "
+               f"({', '.join(c[0] for c in clauses)}), and zero passes vacuously")
+
+    # Every part on the peptide route must carry the measurement, whether or not
+    # it ships. A part with no occurrence record is not a part with a clean one.
+    unmeasured = sorted(p.name for p in peptide_route if p.occurrences < 0)
+    if unmeasured:
+        raise SystemExit(
+            f"SELF-TEST FAILED: {unmeasured} take the peptide route with no occurrence "
+            f"measurement. Count them over the corpus and record the result; there is "
+            f"no length below which the question stops needing an answer."
+        )
+    out.append(f"  SELFTEST all {len(peptide_route)} peptide-route parts carry a "
+               f"measured occurrence record")
+
+    # The structural floor, which is NOT the specificity gate and must not be
+    # confused with it. MIN_PART_AA has to agree with the Rust constant of the
+    # same name, because ORF_MIN_AA = MIN_PART_AA + PARTNER_MIN is what the ORF
+    # search is given and a shorter part is silently invisible in ORFs one
+    # residue below it.
+    rust = (Path(__file__).resolve().parents[2] / "crates" / "pl-features" / "src"
+            / "annotate.rs")
+    m = re.search(r"const MIN_PART_AA: usize = (\d+);", rust.read_text(encoding="utf-8"))
+    if not m:
+        raise SystemExit(f"SELF-TEST FAILED: MIN_PART_AA not found in {rust}")
+    if int(m.group(1)) != MIN_PART_AA:
+        raise SystemExit(
+            f"SELF-TEST FAILED: MIN_PART_AA is {MIN_PART_AA} here and {m.group(1)} in "
+            f"{rust}. The annotator refuses anything below its own value, so a table "
+            f"with a lower floor ships rows that make Annotator::new panic."
+        )
+    tooshort = sorted(p.name for p in peptide_route if len(p.aa) < MIN_PART_AA)
+    if tooshort != ["Factor Xa cleavage site"]:
+        raise SystemExit(
+            f"SELF-TEST FAILED: MIN_PART_AA={MIN_PART_AA} now excludes {tooshort}. "
+            f"Admitting a shorter part means moving ORF_MIN_AA in {rust.name} with it."
+        )
+    out.append(f"  SELFTEST MIN_PART_AA={MIN_PART_AA} agrees with {rust.name} and "
+               f"excludes exactly {tooshort}")
+
+    # Containment must be DECLARED, not discovered. Three of these pairs already
+    # ship and are signed, so containment cannot be a ban; what it can be is a
+    # relationship nobody is allowed to introduce silently.
+    found = {(a.name, b.name) for a in PARTS for b in PARTS
+             if a is not b and a.aa in b.aa}
+    declared = {(inner, outer) for inner, outer, _ in DECLARED_CONTAINMENT}
+    if found != declared:
+        raise SystemExit(
+            f"SELF-TEST FAILED: containment among PARTS is {sorted(found)}, declared is "
+            f"{sorted(declared)}. A new part whose residues sit inside another's -- or "
+            f"contain another's -- changes what the annotator reports on one locus, and "
+            f"must be declared in DECLARED_CONTAINMENT with its resolution."
+        )
+    for _, _, why in DECLARED_CONTAINMENT:
+        if not why:
+            raise SystemExit("SELF-TEST FAILED: a declared containment has no resolution")
+    out.append(f"  SELFTEST all {len(declared)} containment pair(s) are declared with a "
+               f"stated resolution")
 
     # Every part must be internally coherent, checked here rather than trusted.
     for i, p in enumerate(PARTS):
@@ -1696,14 +2168,18 @@ def self_test() -> list[str]:
             raise SystemExit(f"SELF-TEST FAILED: {p.name} lacks a citation, boundary "
                              f"evidence or witness; Class C requires all three")
         # A peptide row's residues are the whole record, so they may not be
-        # taken on trust. Anything the peptide route will try to build must name
-        # a fetchable wwPDB entity, or `build_peptide` drops it -- and a part
+        # taken on trust. Anything the peptide route will actually build must
+        # name a fetchable witness -- a wwPDB entity, or the UniProt parent for
+        # a part too short for MIN_NT -- or `build_peptide` drops it, and a part
         # that would be dropped for a reason this file can see at import time is
         # a declaration error, not a build outcome.
-        if p in on_peptide_route and len(p.aa) >= MIN_PEPTIDE_AA and not p.pdb_entity:
+        will_build = (p in peptide_route and not occurrence_verdict(p)
+                      and len(p.aa) >= MIN_PART_AA)
+        if will_build and not (p.pdb_entity or p.parent_uniprot):
             raise SystemExit(
-                f"SELF-TEST FAILED: {p.name} takes the peptide route but names no "
-                f"pdb_entity, so its residue string could only ship unverified"
+                f"SELF-TEST FAILED: {p.name} takes the peptide route but names neither "
+                f"a pdb_entity nor a parent_uniprot, so its residue string could only "
+                f"ship unverified"
             )
         if p.pdb_entity and not re.fullmatch(r"[0-9A-Za-z]{4}_\d+", p.pdb_entity):
             raise SystemExit(
@@ -1713,8 +2189,8 @@ def self_test() -> list[str]:
         # A peptide-only row may not claim a boundary derived from a reading
         # frame it does not carry -- the loader refuses it (lib.rs), and a row
         # refused by the loader is a build defect rather than a data question.
-        if p in on_peptide_route and p.boundary_rule in ("orf_atg_to_stop",
-                                                         "orf_mature_peptide"):
+        if p in peptide_route and p.boundary_rule in ("orf_atg_to_stop",
+                                                      "orf_mature_peptide"):
             raise SystemExit(
                 f"SELF-TEST FAILED: {p.name} would be a peptide-only row claiming "
                 f"boundary_rule {p.boundary_rule!r}, which is a claim about bases it "

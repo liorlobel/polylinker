@@ -47,13 +47,31 @@
 //! correct — with the protein index never consulted they really cannot be
 //! found by anything.
 //!
-//! The failure this arrangement does **not** catch, and which is why the
-//! builder carries a peptide length floor rather than trusting the index to
-//! complain: `short` reports records with *no* seedable word, not records with
-//! *too few*. A 6-residue peptide yields two 5-mer windows, never reaches
-//! `Config::min_seeds = 3`, and is therefore seeded, unchainable, absent from
-//! `short`, absent from `unseedable`, and never found. Silent. See
-//! `MIN_PEPTIDE_AA` in `features/build/stage_curated.py`.
+//! # Too few words is not the same failure as no words, and it used to be silent
+//!
+//! `short` reports records with *no* seedable word, not records with *too few*.
+//! A 6-residue peptide yields two 5-mer windows, never reaches
+//! `Config::min_seeds = 3`, and was therefore seeded, unchainable, absent from
+//! `short`, absent from `unseedable`, and never found. Silent — the paragraph
+//! that used to sit here described exactly that and pointed at a length floor in
+//! `features/build/stage_curated.py` as the mitigation.
+//!
+//! [`Index::unchainable`] closes it, and closes it on the count of words a
+//! record actually indexed rather than on its length. `Annotator::scan_protein`
+//! routes every record it yields to an exact substring scan, so "seeded but
+//! unchainable" is a *route*, not a hole. `short` is unchanged and is the
+//! `min_seeds == 1` case of the same predicate.
+//!
+//! Length would have been the wrong predicate even for the peptides that
+//! motivated it: `len < k + min_seeds - 1` assumes every window is seedable, and
+//! [`seedable`] rejects `X`, so a 12-residue peptide with an `X` at offset 5
+//! indexes 3 of its 8 windows and is unchainable at `min_seeds = 4` while
+//! passing any length test. Length bounds the count; the count is the property.
+//!
+//! The DNA side keeps `short`'s current meaning and its current unclosed gap:
+//! widening the routing to nucleotides needs its own IUPAC-aware scan
+//! ([`pl_core::iupac::find_all`], above) and its own tests, and must not ride in
+//! behind this.
 
 use std::collections::HashMap;
 
@@ -197,6 +215,14 @@ pub struct Index {
     /// Records too short or too degenerate to seed, with their lengths.
     short: Vec<u32>,
     lengths: Vec<usize>,
+    /// Seedable windows each record contributed to `map`.
+    ///
+    /// `Index::build` already computed this and threw all of it away except the
+    /// `== 0` bit. Keeping it is the whole fix: it is the exact number
+    /// [`Index::chain`] compares against `min_seeds`, so it is the only value
+    /// that can say "no query will ever chain this record" without assuming
+    /// every window was seedable. 4 bytes per record — 336 for the shipped 84.
+    words: Vec<u32>,
 }
 
 impl Index {
@@ -207,6 +233,7 @@ impl Index {
     pub fn build(db: &Db, protein: bool, k: usize) -> Index {
         let mut map: HashMap<u64, Vec<(u32, u32)>> = HashMap::new();
         let mut short = Vec::new();
+        let mut words = vec![0u32; db.records.len()];
         let lengths: Vec<usize> = db
             .records
             .iter()
@@ -237,6 +264,7 @@ impl Index {
                     }
                 }
             }
+            words[i] = indexed as u32;
             // No seedable word anywhere means seeding cannot find it at all.
             if indexed == 0 {
                 short.push(i as u32);
@@ -249,6 +277,7 @@ impl Index {
             map,
             short,
             lengths,
+            words,
         }
     }
 
@@ -257,8 +286,64 @@ impl Index {
     }
 
     /// Records this index cannot seed, which a caller must handle another way.
+    ///
+    /// [`Index::unchainable`] at `min_seeds == 1`, **plus** the records this
+    /// index holds no reference for at all — a peptide-only row is in the DNA
+    /// index's `short` and not in its `unchainable`, because the second is a
+    /// statement about seeding a reference and the first is also the answer for
+    /// having none. Kept as its own method for that difference: "nothing here to
+    /// seed on" and "too few words to chain at the threshold you asked for" are
+    /// different claims, and only the first is a property of the record alone.
+    ///
+    /// Its one non-test caller is `Annotator::unseedable`, on the DNA side only.
+    /// The protein side stopped consulting it on 2026-07-28, because the exact
+    /// scan reaches a zero-word protein record and reporting it as unreachable
+    /// would repeat the failure annotate.rs records as "a well-formed 5-codon
+    /// CDS was reported unsearchable and then found at coverage 1.0".
     pub fn short(&self) -> &[u32] {
         &self.short
+    }
+
+    /// Records no query can ever chain at this `min_seeds`, so a caller must
+    /// reach them some other way or admit it cannot reach them.
+    ///
+    /// # Why this is a biconditional and not a conservative bound
+    ///
+    /// NECESSARY: [`Index::build`] gates on `seq.len() >= k` and each indexed
+    /// window contributes one distinct `record_pos`, so a record has exactly
+    /// `words[i]` distinct record positions. [`collinear_runs`] extends a run
+    /// only while `record_pos` strictly increases, so `run.len() <= words[i]`,
+    /// and [`Index::chain`] drops any run below `min_seeds`. Fewer indexed
+    /// words than `min_seeds` therefore means no query whatsoever produces a
+    /// supported chain.
+    ///
+    /// SUFFICIENT, so this does not over-route: a query equal to the record's
+    /// own sequence yields the seed `(off, off)` at every seedable offset,
+    /// which strictly increases in both coordinates and forms a single run of
+    /// length `words[i]`. Repeated k-mers do not break it — `HHHHHHHH` has one
+    /// distinct hash, 4 offsets and 16 seeds, and the greedy assignment above
+    /// still yields a run of 4.
+    ///
+    /// # Why the count and not the length
+    ///
+    /// `len < k + min_seeds - 1` is the same predicate only when every window
+    /// is seedable, and [`seedable`] rejects `X` for protein. A 12-residue
+    /// peptide with an `X` at offset 5 indexes 3 of its 8 windows: it passes
+    /// any length test and is unchainable the moment a caller sets
+    /// `min_seeds = 4`. `Config::min_seeds` is a public field with no clamp, so
+    /// this is reachable, not hypothetical — and because the predicate is
+    /// evaluated with the caller's value, records migrate to the caller's
+    /// fallback by themselves as it rises. At `min_seeds = 5` the shipped,
+    /// signed 8-residue FLAG row migrates. No constant in the feature builder
+    /// can do that, which is why this lives here.
+    pub fn unchainable(&self, min_seeds: usize) -> impl Iterator<Item = u32> + '_ {
+        (0..self.lengths.len() as u32).filter(move |&i| {
+            // `lengths` is 0 for a record with no reference in this alphabet —
+            // a peptide-only row in the DNA index, a DNA-only row in the
+            // protein index. Those were never indexed here and are not this
+            // index's to hand to anybody.
+            self.lengths[i as usize] > 0 && (self.words[i as usize] as usize) < min_seeds
+        })
     }
 
     /// Distinct words held.
@@ -685,5 +770,106 @@ mod tests {
         for _ in 0..20 {
             assert_eq!(idx.chain(&seeds, query.len(), 40, 3), first);
         }
+    }
+
+    /// The twelve-residue peptide `Index::unchainable`'s own documentation
+    /// argues about: three of its eight windows are seedable, because
+    /// [`seedable`] rejects `X` and one sits at offset 5.
+    ///
+    /// Built by substitution from [`SBP`]-shaped residues rather than invented,
+    /// and it is a fixture, not a claim about any real part. What matters here
+    /// is only the arithmetic: 12 residues, 8 windows, 3 of them `X`-free.
+    const X_AT_FIVE: &str = "MDEKTXGWRGGH";
+
+    #[test]
+    fn unchainable_counts_indexed_words_and_a_length_test_would_disagree() {
+        // The central claim of this module's routing change, which nothing
+        // exercised: `unchainable` takes the number of words a record actually
+        // indexed, not its length. The two predicates are identical only when
+        // every window is seedable.
+        //
+        // Replacing `words[i] < min_seeds` with `lengths[i] < K_PROTEIN +
+        // min_seeds - 1` turns this test red and no other: at min_seeds = 4 the
+        // length form asks `12 < 8`, says the record chains fine, and leaves it
+        // with no route at all.
+        let db = db_of(vec![rec("pf:x", X_AT_FIVE, true)]);
+        let idx = Index::build(&db, true, K_PROTEIN);
+        assert_eq!(
+            idx.unchainable(3).collect::<Vec<_>>(),
+            Vec::<u32>::new(),
+            "3 indexed words is enough support at min_seeds = 3"
+        );
+        assert_eq!(
+            idx.unchainable(4).collect::<Vec<_>>(),
+            vec![0],
+            "3 indexed words can never make a run of 4, whatever the length says"
+        );
+        assert_eq!(idx.unchainable(5).collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
+    fn unchainable_is_short_at_min_seeds_one_and_never_names_the_other_alphabet() {
+        // Two properties in one fixture because they are the same invariant
+        // seen from two sides: `unchainable` speaks only for records THIS index
+        // was given something to index.
+        //
+        // Dropping the `lengths[i] > 0` guard turns the second assertion red.
+        // The DNA-only record has no residues, was never in the protein index,
+        // and handing it to a protein scan is the protein index answering for a
+        // record it knows nothing about — `Annotator::scan_protein_exact` then
+        // relies on `reference_aa` being `Some`, which for that record it is
+        // not.
+        let mut rng = Rng(0x0777_0001_0002_0003);
+        // `rec(.., true)` gives every protein record a 3-base `ATG` so the
+        // schema's "at least one reference" rule holds, so a peptide-ONLY row
+        // has to be made by hand. It is what the mirror assertion needs: the
+        // DNA index must be silent about a record it was given no bases for.
+        let peptide_only = Record {
+            reference_nt: Vec::new(),
+            ..rec("pf:peptide-only", X_AT_FIVE, true)
+        };
+        let db = db_of(vec![
+            rec("pf:dna-only", &rng.seq(300), false),
+            rec("pf:tiny-peptide", "HGS", true),
+            rec("pf:x", X_AT_FIVE, true),
+            peptide_only,
+        ]);
+        let prot = Index::build(&db, true, K_PROTEIN);
+
+        // `short()` is exactly `unchainable(1)`: a record with zero indexed
+        // words and nothing else. `pf:tiny-peptide` is 3 residues, below
+        // K_PROTEIN, so it indexes none.
+        assert_eq!(prot.short(), &[1]);
+        assert_eq!(prot.unchainable(1).collect::<Vec<_>>(), vec![1]);
+
+        // The DNA-only record is never named, at any threshold, because this
+        // index has no reference for it.
+        for min_seeds in [1usize, 2, 3, 4, 99] {
+            assert!(
+                !prot.unchainable(min_seeds).any(|i| i == 0),
+                "min_seeds={min_seeds}: the protein index named a DNA-only record"
+            );
+        }
+
+        // And the mirror, so the guard is not just "never yield index 0". The
+        // DNA index names all three records that carry bases at a threshold
+        // nothing can meet, and stays silent about the peptide-only one.
+        let dna = Index::build(&db, false, K_DNA);
+        assert_eq!(
+            dna.unchainable(1).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the two 3-base `ATG` references index no 12-mer; the 300-base one does"
+        );
+        // ...and this is where `short()` and `unchainable(1)` differ, which is
+        // the whole reason both exist. `short()` also answers for the record
+        // this index was given nothing to index.
+        assert_eq!(dna.short(), [1, 2, 3]);
+        // Above the 289 words the 300-base record contributes, so the only
+        // record left out is the one this index was given no bases for.
+        assert_eq!(
+            dna.unchainable(400).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "the DNA index must speak for exactly the records it was given bases for"
+        );
     }
 }

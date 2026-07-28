@@ -55,19 +55,42 @@ use crate::align;
 use crate::index::{Index, K_DNA, K_PROTEIN};
 use crate::{Db, Record};
 
-/// Shortest peptide the fusion predicate is required to be able to accept.
+/// Shortest `reference_aa` this annotator will accept **on any record**,
+/// enforced in [`Annotator::new`].
 ///
-/// Derived from [`K_PROTEIN`] rather than picked: a peptide shorter than one
-/// seed word produces no window at all, lands in the protein index's `short`
-/// list, and is honestly reported unreachable — so nothing below this length
-/// can reach the predicate by any route, whatever a database says.
+/// Named for the designed parts it was written for, and applied to every class
+/// because the route it guards is blind to class — see
+/// [`Annotator::new`]'s own docs for the `cds` row that walked through the
+/// class-keyed version of this floor.
 ///
-/// Deliberately **lower** than the builder's own `MIN_PEPTIDE_AA = 8`
-/// (`features/build/stage_curated.py`). The loader enforces no length floor at
-/// all, so a hand-authored table may carry a shorter peptide than the build
-/// would issue, and the annotator must not silently discard an ORF such a row
-/// could legitimately have used.
-const MIN_PART_AA: usize = K_PROTEIN;
+/// It used to be inherited rather than enforced, and the derivation was: a
+/// peptide shorter than one seed word produces no window at all, lands in the
+/// protein index's `short` list, and is honestly reported unreachable — so
+/// nothing below this length could reach the predicate by any route, whatever a
+/// database said.
+///
+/// [`Index::unchainable`] and the exact scan in [`Annotator::scan_protein`]
+/// falsified that sentence: a 4-residue peptide is now matched exactly, in every
+/// frame, like any other. What did **not** move is [`ORF_MIN_AA`], which is the
+/// `Params::min_aa` handed to [`orf::find_orfs`] — while [`fused_orf`] itself
+/// only asks for `aa_len >= tag_aa + PARTNER_MIN`. A 4-residue part in a 24 aa
+/// ORF therefore satisfies the predicate over an ORF the search was told not to
+/// return, and is dropped with no diagnostic: findable at 25 residues of ORF,
+/// invisible at 24. A length-dependent hole, opened by a derivation nobody
+/// updated.
+///
+/// So the floor is now a refusal rather than a fact about the index. Admitting
+/// a shorter part means moving [`ORF_MIN_AA`] with it and saying so in
+/// `features/build/stage_curated.py`'s `self_test`; the const assert below ties
+/// the two numbers together so the pair cannot drift.
+///
+/// The value is the shortest part the builder issues — enterokinase's `DDDDK`,
+/// five residues — and no longer [`K_PROTEIN`], which it used to equal and which
+/// it no longer has any reason to. The loader enforces no length floor at all,
+/// so a hand-authored table may carry a shorter peptide than the build would
+/// issue, and refusing it out loud is the only answer that is neither a silent
+/// drop nor a silent hole.
+const MIN_PART_AA: usize = 5;
 
 /// Residues of the ORF that must be something **other than** the tag.
 ///
@@ -128,11 +151,19 @@ const ORF_MIN_AA: usize = MIN_PART_AA + PARTNER_MIN;
 
 // Tied together rather than written as a literal, because the two numbers that
 // decide it live thirty lines apart and a literal would drift from them.
+//
+// The second clause used to be `MIN_PART_AA >= K_PROTEIN`, on the grounds that
+// no peptide below one seed word could reach the predicate by any route. The
+// exact scan makes that false, so the clause is gone and `Annotator::new`
+// enforces the floor instead. What survives is the relation that actually
+// matters: the ORF search must not discard an ORF the predicate would accept,
+// and it does not, because the shortest acceptable ORF is the shortest
+// acceptable tag plus its shortest acceptable partner.
 const _: () = assert!(
-    ORF_MIN_AA == MIN_PART_AA + PARTNER_MIN && MIN_PART_AA >= K_PROTEIN,
+    ORF_MIN_AA == MIN_PART_AA + PARTNER_MIN,
     "the ORF floor must be exactly the shortest acceptable tag plus its \
-     shortest acceptable partner, and no peptide below one seed word can reach \
-     the predicate at all"
+     shortest acceptable partner, or a part is findable in a 25-residue ORF and \
+     silently invisible in a 24-residue one"
 );
 
 /// Knobs, all with the plan's defaults.
@@ -364,7 +395,65 @@ pub struct Annotator<'a> {
 }
 
 impl<'a> Annotator<'a> {
+    /// # Panics
+    ///
+    /// If `db` carries **any** record whose `reference_aa` is shorter than
+    /// [`MIN_PART_AA`], whatever its class.
+    ///
+    /// Loud on purpose, and this is the one place that can be loud. Such a row
+    /// is not unmatchable — the exact scan finds it in every frame — it is
+    /// matchable *inconsistently*: [`fused_orf`] would admit it in an ORF of
+    /// `len + PARTNER_MIN` residues, but [`ORF_MIN_AA`] means no ORF that short
+    /// is ever searched, so the row works in a 25 aa ORF and vanishes in a 24 aa
+    /// one with nothing said. `unseedable()` cannot report it, because it is not
+    /// unreachable; returning a `Result` would make every caller in the tree
+    /// handle a case no shipped table can produce. So it refuses.
+    ///
+    /// # Why it is not keyed on `Record::is_designed_peptide`
+    ///
+    /// It was, and the two keys did not line up: the refusal read
+    /// `is_designed_peptide()` (`synthetic_part` only) while
+    /// [`Annotator::scan_protein_exact`] is driven by [`Index::unchainable`],
+    /// which is blind to class. A `cds` row carrying a 4-residue
+    /// `reference_aa` — which [`Db::parse`] admits, checking the alphabet and
+    /// nothing else — therefore slipped past the floor and into the scan, and
+    /// `make` applies neither the exactness rule nor the fusion gate to a
+    /// non-designed row. Measured: on a molecule of pure `GCC` filler with the
+    /// four residues spliced in, a `cds` row carrying `reference_aa` of length 4
+    /// was reported at `91..102`, `via_protein`, identity 1.000, coverage 1.000,
+    /// `fusion_orf: None` — an ungated six-frame call on twelve bases. At
+    /// b340b18 the same row was found nowhere, for the reason this whole change
+    /// is about: four residues index no 5-mer at all, so there were no seeds,
+    /// no chain, and no scan to fall back on.
+    ///
+    /// The floor is deliberately *not* the whole answer for a `cds` row: at 5
+    /// and 6 residues such a row is now scanned and reported ungated, where at
+    /// b340b18 it was silently unfindable. That is the same treatment a 7 aa
+    /// `cds` peptide already got by seed-and-chain at b340b18, extended down two
+    /// residues by this change and not a new kind of behaviour. What the floor
+    /// buys is that no class gets a reference so short that an exact six-frame
+    /// match means nothing.
     pub fn new(db: &'a Db, config: Config) -> Annotator<'a> {
+        if let Some(r) = db.records.iter().find(|r| {
+            r.reference_aa
+                .as_ref()
+                .is_some_and(|p| !p.is_empty() && p.len() < MIN_PART_AA)
+        }) {
+            panic!(
+                "{}: class {} carries a protein reference of {} residue(s), below \
+                 MIN_PART_AA = {MIN_PART_AA}. A designed peptide that short would be \
+                 findable inside an ORF of {} residues and silently invisible inside \
+                 one of {}, because ORF_MIN_AA = {ORF_MIN_AA} is what the ORF search \
+                 is given; on any other class it is worse, because the fusion gate \
+                 does not apply at all and the exact scan would report it in six \
+                 frames of everything. Lower ORF_MIN_AA with it, or leave the row out.",
+                r.id,
+                r.class.as_str(),
+                r.reference_aa.as_ref().map_or(0, |p| p.len()),
+                ORF_MIN_AA,
+                ORF_MIN_AA - 1,
+            );
+        }
         Annotator {
             dna: Index::build(db, false, K_DNA),
             protein: Index::build(db, true, K_PROTEIN),
@@ -382,34 +471,43 @@ impl<'a> Annotator<'a> {
     /// Reported rather than swallowed: a caller that believes it searched the
     /// whole database when it did not will report a confident empty result.
     pub fn unseedable(&self) -> Vec<&Record> {
-        // The **intersection**, not the union. A record only one index can
-        // reach is still reachable, and listing it here was worse than saying
-        // nothing: a well-formed 5-codon CDS was reported unsearchable and then
-        // found at coverage 1.0 in the same run.
+        // `dna.short()` narrowed by `has_protein()`, and NOT by
+        // `protein.short()`. A record only one route can reach is still
+        // reachable, and listing it here was worse than saying nothing: a
+        // well-formed 5-codon CDS was reported unsearchable and then found at
+        // coverage 1.0 in the same run.
+        //
+        // This used to intersect the two indexes' short lists, and that formula
+        // stopped being true when the exact scan landed. `scan_protein` reaches
+        // a record either by seed-and-chain (`words >= min_seeds`) or by the
+        // scan (`Index::unchainable`, evaluated at `min_seeds.max(1)`), and
+        // those two are exhaustive over records with residues: `has_protein()`
+        // means `lengths > 0` in the protein index, so every such record has
+        // either `words >= min_seeds` or `words < min_seeds.max(1)`. There is
+        // no third case. So "the protein index cannot seed it" is no longer a
+        // reason it cannot be found, and `protein.short()` is no longer the
+        // rescue predicate. `has_protein()` is.
+        //
+        // The case that makes the difference concrete, and it is not
+        // hypothetical: a peptide whose every 5-residue window carries an `X`
+        // indexes zero words, so `protein.short()` holds it and the old formula
+        // reported it "too short to seed and cannot be found". The scan searches
+        // for it in all six frames and finds it wherever the query really
+        // translates to those residues — an `NNN` codon translates to `X` — so
+        // the old answer was false, in the same shape as the 5-codon CDS failure
+        // above. That is why this is a narrowing rather than a widening.
         //
         // Gated on `config.protein`, because with translated matching switched
         // off the protein index is never consulted and a record the DNA index
         // cannot seed really is unreachable. Under-reporting is the worse of
-        // the two failures.
+        // the two failures. A peptide-only synthetic part is in `dna.short()`
+        // **always**, having no bases to seed, so under `--no-protein` every
+        // one of them is reported — true, and alarming to anyone who does not
+        // know that translation is their only route.
         let dna: std::collections::BTreeSet<u32> = self.dna.short().iter().copied().collect();
         let kept: Vec<u32> = if self.config.protein {
-            let protein: std::collections::BTreeSet<u32> =
-                self.protein.short().iter().copied().collect();
             dna.into_iter()
-                .filter(|i| {
-                    // A record with no protein reference was never in the
-                    // protein index, so that index cannot rescue it.
-                    //
-                    // The mirror case now exists and is common: a peptide-only
-                    // synthetic part is in `dna.short()` **always**, because it
-                    // has no bases to seed. That is not a defect and the
-                    // intersection is what keeps it from being reported as one.
-                    // With `config.protein` off, the branch below reports every
-                    // such row as unreachable — which is true, and will look
-                    // alarming to anyone who passes `--no-protein` and sees a
-                    // list of named tags they thought were searchable.
-                    !self.db.records[*i as usize].has_protein() || protein.contains(i)
-                })
+                .filter(|i| !self.db.records[*i as usize].has_protein())
                 .collect()
         } else {
             dna.into_iter().collect()
@@ -547,6 +645,24 @@ impl<'a> Annotator<'a> {
     /// It is also the only route to a peptide-only synthetic part, which is
     /// why `orfs` is threaded down here and nowhere else: those records are
     /// adjudicated by the fusion rule inside [`Annotator::make`].
+    ///
+    /// # Two routes, and why the second one exists
+    ///
+    /// Seed-and-chain reaches a record only if it indexed at least
+    /// [`Config::min_seeds`] words. [`Index::unchainable`] names the rest, and
+    /// they get an exact substring scan of the same frame. Before that scan a
+    /// 6-residue peptide indexed two 5-mers, needed three, was absent from
+    /// `Index::short` because two is not zero, and was therefore shipped,
+    /// seeded, unchainable and never found — with nothing anywhere reporting it
+    /// unreachable.
+    ///
+    /// The scan is exact substring search and nothing else, per
+    /// `features/SOURCING.md` §3 ("features under ~15 aa are matched exactly,
+    /// never by scored alignment"). It hands `make` the same [`Match`] shape
+    /// `verify` produces for an exact whole hit, so the exactness assertion, the
+    /// fusion rule, `min_coverage`, the `min_match_len` floor, [`dedupe`] and
+    /// [`resolve_overlaps`] all apply unchanged and nothing downstream learns a
+    /// second route exists.
     fn scan_protein(
         &self,
         doubled: &[u8],
@@ -555,10 +671,30 @@ impl<'a> Annotator<'a> {
         circular: bool,
         out: &mut Vec<Annotation>,
     ) {
-        if self.protein.words() == 0 {
-            return;
-        }
         for frame in translate::six_frames(doubled, self.config.code) {
+            let strand = if frame.reverse {
+                Strand::Reverse
+            } else {
+                Strand::Forward
+            };
+            self.scan_protein_exact(&frame, doubled, len, strand, orfs, circular, out);
+            // NOT an early return above this line, and the reachable case is
+            // narrower than the one first written here. It is *not* "a table of
+            // only short peptides": `Annotator::new` refuses anything below
+            // MIN_PART_AA = K_PROTEIN, so the shortest peptide that gets this
+            // far indexes one word and `words()` is 1.
+            //
+            // What does reach it is a peptide every one of whose 5-residue
+            // windows carries an `X` — [`seedable`] rejects `X`, so such a row
+            // indexes zero words however long it is, and a deposited sequence
+            // with an unassigned position is where they come from. A one-row
+            // table of such a peptide has `words() == 0`, is yielded by
+            // `Index::unchainable`, and the guard that used to sit at the top of
+            // this function skipped its scan entirely while every mixed-database
+            // test stayed green.
+            if self.protein.words() == 0 {
+                continue;
+            }
             let seeds = self.protein.seeds(&frame.protein);
             if seeds.is_empty() {
                 continue;
@@ -575,11 +711,6 @@ impl<'a> Annotator<'a> {
                     continue;
                 };
                 let span = residues_to_bases(&frame, m.span.0, m.span.1, doubled.len());
-                let strand = if frame.reverse {
-                    Strand::Reverse
-                } else {
-                    Strand::Forward
-                };
                 if let Some(mut a) = self.make(
                     Candidate {
                         record: chain.record as usize,
@@ -595,6 +726,88 @@ impl<'a> Annotator<'a> {
                 ) {
                     a.via_protein = true;
                     out.push(a);
+                }
+            }
+        }
+    }
+
+    /// The exact-scan half of [`Annotator::scan_protein`], for one frame.
+    ///
+    /// Driven by [`Index::unchainable`] — by the number of words a record
+    /// indexed, not by its length and not by `Record::is_designed_peptide`.
+    /// Keying on the shape of a row is the hole that predicate's own
+    /// documentation warns about, and keying on length silently mis-answers for
+    /// a peptide carrying an `X`.
+    ///
+    /// `min_seeds.max(1)` so that a record with **zero** indexed words — the
+    /// `Index::short` case — is always scanned, whatever a caller sets. At
+    /// `min_seeds = 0` the raw predicate yields nothing, and a record with no
+    /// seedable word produces no seeds either, so the two together would leave
+    /// it unreachable with nothing saying so. That is the defect this whole
+    /// route exists to close, one layer up.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_protein_exact(
+        &self,
+        frame: &Frame,
+        doubled: &[u8],
+        len: usize,
+        strand: Strand,
+        orfs: &[Orf],
+        circular: bool,
+        out: &mut Vec<Annotation>,
+    ) {
+        for i in self.protein.unchainable(self.config.min_seeds.max(1)) {
+            let record = i as usize;
+            // Non-empty by construction: `unchainable` only yields records the
+            // protein index gave a non-zero length, which is `reference_aa`'s.
+            let Some(aa) = self.db.records[record].reference_aa.as_deref() else {
+                continue;
+            };
+            // One record overlapping itself is one call, not competing calls,
+            // and this is the only place that can say so. `resolve_overlaps`
+            // cannot: it compares `core()` intervals shrunk by `overlap_trim`,
+            // and `contained_in` is gated on `k.record != h.record`, so two
+            // 18 bp hits of the same record 12 bp apart no longer meet once
+            // trimmed and both survive. Measured on a synthetic ORF ending in a
+            // histidine tract, with the shipped 6-residue row: His6, His7, His8
+            // and His9 gave one annotation, His10 through His13 gave **two**
+            // overlapping boxes and His14 three — and `His10`/`10xHis` is an
+            // alias this very row advertises, so pET-16b would have been drawn
+            // with the tag annotated twice.
+            //
+            // Advanced only on an occurrence that actually became an
+            // annotation, not on every occurrence: the gate rejects a hit whose
+            // ORF does not contain it, and the leftmost copy of a tract that
+            // begins just before an ORF's initiator is exactly that hit. Letting
+            // it suppress the copy one residue along would trade a duplicate for
+            // a miss.
+            let mut next_free = 0usize;
+            for pos in exact_occurrences(&frame.protein, aa) {
+                if pos < next_free {
+                    continue;
+                }
+                let m = Match {
+                    span: (pos, pos + aa.len()),
+                    aligned: aa.len(),
+                    identity: 1.0,
+                };
+                let span = residues_to_bases(frame, m.span.0, m.span.1, doubled.len());
+                if let Some(mut a) = self.make(
+                    Candidate {
+                        record,
+                        span,
+                        strand,
+                        m,
+                        db_units: aa.len(),
+                        protein: true,
+                    },
+                    len,
+                    orfs,
+                    circular,
+                ) {
+                    a.via_protein = true;
+                    out.push(a);
+                    next_free = pos + aa.len();
                 }
             }
         }
@@ -915,6 +1128,51 @@ fn fused_orf(
     })
 }
 
+/// Every start offset at which `needle` occurs in `hay`, **overlaps included**.
+///
+/// Reporting the overlaps is this function's job and collapsing them is not:
+/// stepping by `needle.len()` here would make the answer depend on where the
+/// scan started, and on the doubled text of a circle that is origin-dependent —
+/// the class of bug [`dedupe`] exists for. The caller
+/// ([`Annotator::scan_protein_exact`]) takes the leftmost of each overlapping
+/// group *after* the fusion gate has spoken, which is the only point at which
+/// "this hit survived" is known.
+///
+/// It used to be [`resolve_overlaps`] that was expected to collapse them, and
+/// that was wrong from a 10-residue tract upward — the note is left here because
+/// the mistake is easy to make twice. `resolve_overlaps` compares `core()`
+/// intervals shrunk by `overlap_trim`, so at 15% two 18 bp hits 12 bp apart stop
+/// meeting; `contained_in` cannot rescue them because it is gated on
+/// `k.record != h.record`. Measured: His6 through His9 collapsed to one
+/// annotation, His10 through His13 to two, His14 to three.
+///
+/// A hand-written double loop. No external crate is permitted in this workspace
+/// and `memchr` is one; the needles here are at most 38 residues, where KMP buys
+/// nothing worth its complexity.
+///
+/// Case-insensitive, like [`walk`] and like the index's own hash. Honest status:
+/// unreachable through [`Db::parse`], which upper-cases `reference_aa`, and
+/// through [`translate::six_frames`], whose residues come from the code table
+/// and are upper-case. It is reachable through a hand-constructed [`Record`] —
+/// the fields are public — and that is what the test pins. Cheaper than a rule
+/// somebody has to remember.
+fn exact_occurrences(hay: &[u8], needle: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return out;
+    }
+    for start in 0..=hay.len() - needle.len() {
+        if hay[start..start + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            out.push(start);
+        }
+    }
+    out
+}
+
 /// Everything needed to decide whether a verified match becomes an annotation.
 ///
 /// A struct rather than seven positional arguments, because two of them are
@@ -1215,6 +1473,54 @@ mod tests {
     /// initiator, which is the `d == 0` boundary of the containment test.
     const SBP: &str = "MDEKTTGWRGGHVVEGLAGELEQLRARLEHHPQGQREP";
 
+    /// The polyhistidine tag, six residues, as `features/build/stage_curated.py`
+    /// declares it and as wwPDB polymer entity 1KTR_2 ("Oligohistidine peptide
+    /// Antigen") carries it — the entire entity.
+    ///
+    /// Not recalled: the build locates this string in that entity at fetch time
+    /// before it will issue the row, and this constant is the same six residues.
+    /// The row is the one this change issues.
+    const HIS6: &str = "HHHHHH";
+
+    /// The thrombin cleavage site, six residues, from
+    /// `features/build/stage_curated.py`; witnessed by wwPDB 10EE_1, which
+    /// carries the pET-28a cassette around it.
+    ///
+    /// Used here for a mechanical property rather than a biological one: six
+    /// residues is two 5-mer windows, one short of `Config::min_seeds`, so it is
+    /// the middle of the band that used to be silently unfindable. Unlike
+    /// [`HIS6`] it contains no residue whose codons are all table-11
+    /// initiators, so [`encode`]'s strict start-free constraint can express it —
+    /// which the "outside any ORF" case needs.
+    const THROMBIN: &str = "LVPRGS";
+
+    /// The fourteen residues immediately upstream of a His6 tag on the
+    /// maintainer's own plasmids.
+    ///
+    /// Measured, not recalled. Every peptide in the shipped table was counted
+    /// against 73 real plasmid and contig files from this machine —
+    /// 17,061,931 residues of ATG-to-stop ORFs of at least 25 aa on both
+    /// strands — counting only occurrences the shipped fusion gate would report.
+    /// Two peptides occurred at all: `IEGR` 154 times, and this tag 8 times.
+    /// All eight were the same shape — the tag at exactly -0 residues from the
+    /// stop, behind a GG linker, in files named for it — across two constructs,
+    /// one ending in this context and one a 3796 aa ORF. Zero were chance.
+    ///
+    /// TWO ORF LENGTHS, and they are not the same measurement. `pl annotate
+    /// --include-proposed "pKoV with His decR.dna"` reports the tag at
+    /// 5885..5902 "in frame with a **258 aa** ORF at 5129..5905 +". That ORF
+    /// opens on `ATT`, one of table 11's seven initiators, which is the code
+    /// [`Config::default`] uses. The first `ATG` in the same frame is 98 codons
+    /// further in, leaving **160** residues to the stop — so 160 is the ATG-only
+    /// reading and 258 is what this tool says. The fixture below builds its own
+    /// ATG-started ORF and is therefore 160 aa by construction; that number
+    /// describes the fixture, not the file.
+    ///
+    /// That measurement is why the row ships, and this fixture is the reason
+    /// the whole change exists: at HEAD the shipped tool cannot find any of the
+    /// eight.
+    const HIS6_CONTEXT: &str = "EQIKYTTSLPIEGG";
+
     /// (GGGGS)4, the flexible linker shipped as PLF:3026.
     ///
     /// Here for one mechanical property rather than a biological one: 20
@@ -1375,11 +1681,26 @@ mod tests {
             }
             let p = dna.len();
             dna.extend_from_slice(&options[at][choice[at]]);
+            // The join into the TRAILING pad, checked while the search can
+            // still back out of it. Nothing checked it before: the pad is
+            // appended after the loop, so the final codon's two overhanging
+            // frames were constrained by nothing and the definitive assertion
+            // below was the first thing to see them. `LVPRGS` is the peptide
+            // that exposed it — the search committed to `...AGT` for the serine,
+            // which spells `GTG` against the pad, and the helper reported the
+            // peptide unencodable when four of its six serine codons are fine.
+            // Every encoding this helper had produced until then was clean by
+            // luck at that one join.
+            let tail_clean = at + 1 < options.len() || {
+                let mut probe = dna.clone();
+                probe.extend_from_slice(pad.as_bytes());
+                joins_clean(&probe, p + 3)
+            };
             // `rev_clean` is re-checked over the whole prefix rather than
             // incrementally: reverse-complementing reverses the codon
             // boundaries, so appending three bases changes which reverse codons
             // exist from the front, not only at the end.
-            if joins_clean(&dna, p) && rev_clean(&dna[pad.len()..]) {
+            if tail_clean && joins_clean(&dna, p) && rev_clean(&dna[pad.len()..]) {
                 at += 1;
             } else {
                 dna.truncate(p);
@@ -2790,5 +3111,564 @@ mod tests {
         let un = ann.unseedable();
         assert_eq!(un.len(), 1);
         assert_eq!(un[0].id, "pf:minus35");
+    }
+
+    /// Build the standard three-case fixture around `peptide_aa`.
+    ///
+    /// Returns `(molecule_in_frame, molecule_out_of_frame, molecule_outside,
+    /// flank_len, orf_aa_len)`. The same shape
+    /// `a_tag_is_found_in_frame_in_an_orf_and_nowhere_else` uses, factored out
+    /// because the routing change needs it for a second peptide and copying it
+    /// would let the two drift.
+    fn three_cases(
+        peptide_aa: &str,
+        rng: &mut Rng,
+    ) -> (Molecule, Molecule, Molecule, usize, usize) {
+        let code = fixture_code();
+        let tag = encode(peptide_aa, code, rng);
+        let flank = FILLER.repeat(30); // 90 bases, no start and no stop
+        let orf = format!("ATG{}TAA", FILLER.repeat(80));
+        let base = format!("{flank}{orf}{flank}");
+        let at = |pos: usize| mol(&format!("{}{tag}{}", &base[..pos], &base[pos..]), false);
+        let in_frame = flank.len() + 3 + 120;
+        (
+            at(in_frame),
+            at(in_frame + 1),
+            at(45),
+            flank.len(),
+            1 + 80 + peptide_aa.len(),
+        )
+    }
+
+    #[test]
+    fn a_six_residue_peptide_is_found_in_frame_in_an_orf_and_nowhere_else() {
+        // THE defect, and its guard rail in the same test.
+        //
+        // Six residues is two 5-mer windows. `Config::min_seeds` is 3, so no
+        // query could ever chain it; and `Index::short` lists records that
+        // indexed ZERO words, so two is not zero and nothing reported it either.
+        // Shipped, seeded, unchainable, unreported, never found. At b340b18 the
+        // first case below returns no annotation at all.
+        //
+        // The other two cases are the guard rail: the fusion gate is untouched
+        // by the new route, so the same peptide one base out of frame, and the
+        // same peptide outside any ORF, must still be nothing.
+        //
+        // THE SEED IS CHOSEN, not arbitrary. `encode`'s trailing-pad fix landed
+        // in the same change as the routing, and 347 of 1024 seeds make the two
+        // versions of that helper disagree. `0x..0011`, which this test was
+        // first written with, is one of them: at b340b18 the encoder commits to
+        // `...AGT` for the serine and its own definitive assertion fires with
+        // "the encoding of LVPRGS spells GTG in frame 1" before `annotate` is
+        // ever called, so the test would have died in its fixture builder and
+        // proved nothing about the annotator. This seed is one of the 677 where
+        // both versions of `encode` return the same eighteen bases, so at
+        // b340b18 the fixture builds and the failure is the missing annotation,
+        // which is the claim. The pad fix keeps its own regression test:
+        // `the_encoder_constrains_the_join_into_the_trailing_pad`.
+        let mut rng = Rng(0x0f1a_0000_0000_0021);
+        let (inf, off, outside, flank, orf_aa) = three_cases(THROMBIN, &mut rng);
+        assert_eq!(orf_aa, 87, "1 initiator + 80 filler + 6 tag");
+
+        let db = db_of(vec![peptide("pf:thrombin", THROMBIN)]);
+        let ann = Annotator::new(&db, Config::default());
+        for (label, m, want) in [
+            ("in frame inside the ORF", &inf, true),
+            ("one base out of frame", &off, false),
+            ("outside any ORF", &outside, false),
+        ] {
+            // Without this the negative cases are equally consistent with "the
+            // matcher never saw it", which is what they used to mean.
+            assert!(
+                six_frame_contains(&m.seq, THROMBIN),
+                "{label}: the fixture does not contain the peptide at all"
+            );
+            let found = ann.annotate(m);
+            assert_eq!(
+                !found.is_empty(),
+                want,
+                "{label}: expected found={want}, got {found:?}"
+            );
+            if want {
+                let f = &found[0];
+                assert!(f.via_protein, "the only route to a peptide-only row");
+                assert_eq!(f.strand, Strand::Forward);
+                assert_eq!(f.len(m.seq.len() as u64), 18, "six residues of bases");
+                assert_eq!(f.identity, 1.0, "exact, as the scan emits it");
+                assert_eq!(f.coverage, 1.0, "and whole");
+                assert!(!f.is_fragment);
+                let ev = f.fusion_orf.expect("the ORF it was admitted on");
+                assert_eq!(ev.aa_len, orf_aa);
+                assert_eq!(ev.start, flank as u64 + 1);
+            }
+        }
+
+        // Guard for the out-of-frame case: the ORF is still there and still
+        // spans the displaced tag, so the fixture is testing the frame rule and
+        // not an accidentally truncated ORF.
+        let orfs = orf::find_orfs(
+            &off.seq,
+            fixture_code(),
+            false,
+            &Params {
+                min_aa: ORF_MIN_AA,
+                include_incomplete: true,
+                require_start: true,
+                nested: false,
+            },
+        );
+        let covering = orfs
+            .iter()
+            .find(|o| {
+                o.strand == Strand::Forward
+                    && (o.start as usize) <= flank + 124
+                    && flank + 124 + 18 <= o.end as usize
+            })
+            .expect("the ORF must still span the tag; it was truncated");
+        assert_eq!(covering.aa_len, orf_aa, "and must still be full length");
+
+        // Guard for the outside case: nothing grew an ORF of its own there.
+        let orfs = orf::find_orfs(
+            &outside.seq,
+            fixture_code(),
+            false,
+            &Params {
+                min_aa: ORF_MIN_AA,
+                include_incomplete: true,
+                require_start: true,
+                nested: false,
+            },
+        );
+        // Forward only, and that is not laxity. `encode` constrains the forward
+        // frames alone, on the stated grounds that a reverse-strand start can
+        // only produce a reverse ORF and `fused_orf`'s first clause refuses an
+        // ORF whose strand differs from the hit's. The tag here reads forward,
+        // so a reverse ORF over it cannot admit it — and this fixture does grow
+        // one.
+        assert!(
+            !orfs.iter().any(|o| o.strand == Strand::Forward
+                && (o.start as usize) <= 46
+                && 46 + 18 <= o.end as usize),
+            "the outside case grew a forward ORF of its own: {orfs:?}"
+        );
+    }
+
+    #[test]
+    fn the_his6_tag_on_a_real_construct_of_the_maintainers_is_found() {
+        // The measurement that drove this change, turned into a fixture.
+        //
+        // 73 real plasmids, 17,061,931 ORF residues: His6 occurred eight times
+        // and every one was a genuine tag — C-terminal at exactly -0 residues
+        // from the stop, behind a GG linker. This rebuilds the shorter of the
+        // two constructs from the context read off the file (see
+        // `HIS6_CONTEXT`), as an ATG-started ORF of 160 residues ending
+        // `...EQIKYTTSLPIEGG` + six histidines + stop.
+        //
+        // 160 is this FIXTURE's length, not the file's. On the real file `pl`
+        // reports a 258 aa ORF, because table 11 opens it at an `ATT` 98 codons
+        // upstream of the first `ATG`; `HIS6_CONTEXT`'s docs carry the
+        // measurement. What the two share is the property under test — the tag
+        // is the last thing before the stop — and that is what is asserted
+        // below.
+        //
+        // At b340b18 this returns nothing, which is the whole point: the
+        // shipped tool could not find a single one of the eight.
+        //
+        // It also pins the `<=` in `fused_orf`'s containment clause. The tag
+        // ends on the last coding base, so `d + 3 * tag_aa == 3 * aa_len`
+        // exactly; tightening that to `<` looks like an off-by-one tidy-up and
+        // would delete all eight measured true positives.
+        let mut rng = Rng(0x0f1a_0000_0000_0012);
+        let code = fixture_code();
+        // `encode_stopless`, not `encode`: the context carries an isoleucine,
+        // and all three of its codons are table-11 initiators, so no start-free
+        // encoding of it exists. The weaker guarantee is enough here because
+        // frame 0 of this fixture spells no methionine after the initiator, so
+        // the ORF the predicate uses is the one the ATG below opens; a start in
+        // another frame yields an ORF the predicate cannot use (`d % 3 == 0` is
+        // asked in the ORF's own frame) and a later start in this frame is
+        // nested and suppressed by `Params::nested: false`.
+        let tail = encode_stopless(&format!("{HIS6_CONTEXT}{HIS6}"), code, &mut rng);
+        // 1 initiator + 139 filler + 14 context + 6 histidines = 160 residues.
+        let cds = format!("ATG{}{tail}TAA", FILLER.repeat(139));
+        let flank = FILLER.repeat(30);
+        let m = mol(&format!("{flank}{cds}{flank}"), false);
+        assert!(
+            six_frame_contains(&m.seq, HIS6),
+            "the fixture does not contain the tag at all"
+        );
+
+        let db = db_of(vec![peptide("pf:his6", HIS6)]);
+        let found = Annotator::new(&db, Config::default()).annotate(&m);
+        assert_eq!(found.len(), 1, "one tag, one annotation: {found:?}");
+        let f = &found[0];
+        assert!(f.via_protein);
+        assert_eq!(f.strand, Strand::Forward);
+        assert_eq!(f.identity, 1.0);
+        assert_eq!(f.coverage, 1.0);
+        // Residues 155..160 of the ORF, 1-based inclusive in the molecule.
+        assert_eq!(f.start, (flank.len() + 3 * 154) as u64 + 1);
+        assert_eq!(f.end, (flank.len() + 3 * 160) as u64);
+        let ev = f.fusion_orf.expect("the ORF it was admitted on");
+        assert_eq!(
+            ev.aa_len, 160,
+            "the fixture's own ORF length; the real file reads 258 under table 11"
+        );
+        assert_eq!(ev.start, flank.len() as u64 + 1);
+        assert_eq!(
+            f.end as usize,
+            flank.len() + 3 * ev.aa_len,
+            "the tag must end on the ORF's last coding base — the boundary all \
+             eight measured occurrences sit on"
+        );
+    }
+
+    #[test]
+    fn no_record_is_both_unfindable_and_unreported() {
+        // The invariant the whole routing change exists to restore, asserted
+        // rather than described: every record is EITHER reachable by some route
+        // OR named by `unseedable()`. Never neither.
+        //
+        // At b340b18 the peptide row below is neither. It is not in
+        // `dna.short()`'s rescue path (it has residues), it is not in
+        // `protein.short()` (two windows is not zero), and it cannot chain
+        // (two is fewer than three). It is simply absent, and nothing says so.
+        //
+        // The DNA row is the control: it really is unreachable — six bases
+        // against a 12-mer index, no residues — and must stay in the report.
+        //
+        // Seed chosen for the same reason as
+        // `a_six_residue_peptide_is_found_in_frame_in_an_orf_and_nowhere_else`:
+        // one of the 677 in 1024 where `encode` returns the same bases before
+        // and after its trailing-pad fix, so this fails at b340b18 on the
+        // invariant rather than inside the fixture builder.
+        let mut rng = Rng(0x0f1a_0000_0000_001d);
+        let (inf, ..) = three_cases(THROMBIN, &mut rng);
+        let db = db_of(vec![
+            peptide("pf:thrombin", THROMBIN),
+            rec("pf:minus35", "TTGACA", false),
+        ]);
+        let ann = Annotator::new(&db, Config::default());
+
+        let reported: Vec<&str> = ann.unseedable().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            reported,
+            vec!["pf:minus35"],
+            "the DNA-only row is unreachable and must be named; the peptide row \
+             is reachable and must not be"
+        );
+
+        let found = ann.annotate(&inf);
+        let reachable: std::collections::BTreeSet<usize> = found.iter().map(|a| a.record).collect();
+        for (i, r) in db.records.iter().enumerate() {
+            assert!(
+                reachable.contains(&i) || reported.contains(&r.id.as_str()),
+                "{} is neither findable nor reported unreachable — the exact \
+                 failure this route closes: {found:?}",
+                r.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_shipped_tag_stays_findable_when_min_seeds_is_raised() {
+        // `Config::min_seeds` is a public field with no clamp and no validation
+        // anywhere, and nothing in this tree raises it — which is precisely why
+        // nobody would write this test. Raise it to 5 and FLAG, eight residues
+        // and four windows, stops chaining: at b340b18 it becomes silently
+        // unfindable, exactly like a 6-residue peptide at the default, and it
+        // is a row that has already shipped and been signed.
+        //
+        // This is what makes the fix `min_seeds`-correct rather than merely
+        // 7-correct. No constant in the feature builder could have bought it.
+        let mut rng = Rng(0x0f1a_0000_0000_0014);
+        let (inf, off, outside, _, orf_aa) = three_cases(FLAG, &mut rng);
+        assert_eq!(orf_aa, 89);
+
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        for min_seeds in [3usize, 4, 5, 9] {
+            let cfg = Config {
+                min_seeds,
+                ..Config::default()
+            };
+            let ann = Annotator::new(&db, cfg);
+            assert!(
+                ann.unseedable().is_empty(),
+                "min_seeds={min_seeds}: the row is reachable and must not be \
+                 reported unreachable"
+            );
+            let found = ann.annotate(&inf);
+            assert_eq!(
+                found.len(),
+                1,
+                "min_seeds={min_seeds}: FLAG must not stop being findable \
+                 because a caller asked for more seed support: {found:?}"
+            );
+            assert_eq!(found[0].identity, 1.0);
+            // And the gate is not weakened on the way past: the same tag out of
+            // frame and outside any ORF stays nothing at every setting.
+            assert!(ann.annotate(&off).is_empty(), "min_seeds={min_seeds}");
+            assert!(ann.annotate(&outside).is_empty(), "min_seeds={min_seeds}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "below MIN_PART_AA")]
+    fn a_designed_peptide_below_the_part_floor_is_refused_rather_than_half_supported() {
+        // Not unmatchable — the scan would find a 4-mer in every frame — but
+        // matchable inconsistently. `fused_orf` would admit it in an ORF of 24
+        // residues, and `ORF_MIN_AA = 25` is what `find_orfs` is given, so no
+        // such ORF is ever offered: findable at 25 and invisible at 24, with
+        // nothing said. `unseedable()` cannot report it, because it is not
+        // unreachable. So the constructor refuses it instead.
+        let db = db_of(vec![peptide("pf:xa", "IEGR")]);
+        let _ = Annotator::new(&db, Config::default());
+    }
+
+    #[test]
+    fn the_encoder_constrains_the_join_into_the_trailing_pad() {
+        // A test of the fixture builder, not of the annotator, and it earns its
+        // place because two regression tests above depend on the builder being
+        // right about exactly this.
+        //
+        // `encode_in` appends the trailing pad AFTER its search finishes, so the
+        // final codon's two overhanging frames used to be constrained by
+        // nothing and the definitive assertion was the first thing to see them.
+        // At b340b18 this call panics inside `encode` with "the encoding of
+        // LVPRGS spells GTG in frame 1": the search commits to `...AGT` for the
+        // serine, which spells `GTG` against the pad, and the helper declares
+        // the peptide unencodable when four of its six serine codons are fine.
+        // This is the seed that exposed it.
+        let mut rng = Rng(0x0f1a_0000_0000_0011);
+        let code = fixture_code();
+        let dna = encode(THROMBIN, code, &mut rng);
+        assert_eq!(code.translate(dna.as_bytes()), THROMBIN.as_bytes());
+
+        // Stated here rather than left to the helper's internal assertion, so
+        // the property is a claim this test makes and not one it borrows.
+        let padded = format!("{}{dna}{}", FILLER.repeat(2), FILLER.repeat(2));
+        for f in 0..3 {
+            for c in padded.as_bytes()[f..].chunks_exact(3) {
+                assert!(
+                    !code.is_stop(c) && !code.is_start(c),
+                    "frame {f} of the padded encoding spells {}",
+                    String::from_utf8_lossy(c)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_histidine_tract_longer_than_the_record_is_not_annotated_twice() {
+        // A shipped alias of the row this change issues is `His10`, and a
+        // 10-histidine tract was drawn as TWO overlapping "Polyhistidine tag"
+        // boxes 12 bases apart, neither of them covering the tract.
+        //
+        // `resolve_overlaps` was expected to collapse them and cannot: it
+        // compares `core()` intervals shrunk by `overlap_trim`, so at 15% an
+        // 18 bp hit loses 2 bases at each end and two such hits 12 bases apart
+        // stop meeting; `contained_in` is gated on `k.record != h.record` and so
+        // never fires between two copies of one record. Measured before the fix,
+        // tract length -> annotations: 6,7,8,9 -> 1; 10,11,12,13 -> 2; 14 -> 3.
+        //
+        // What is asserted is `n / 6`: the number of DISJOINT copies of a
+        // six-residue record the tract really contains. Tiling rather than
+        // collapsing to one box is deliberate -- the same rule over a (GGGGS)8
+        // stretch reports the two (GGGGS)4 copies that are genuinely there.
+        // Reporting the tract's own length instead of the record's needs greedy
+        // run extension in the matcher, which is a separate change with its own
+        // tests; PLF:3004's caveat says so.
+        let code = fixture_code();
+        for n in 6usize..=14 {
+            let mut rng = Rng(0x0f1a_0000_0000_0015 + n as u64);
+            let tail = encode_stopless(&format!("{HIS6_CONTEXT}{}", "H".repeat(n)), code, &mut rng);
+            let cds = format!("ATG{}{tail}TAA", FILLER.repeat(139));
+            let flank = FILLER.repeat(30);
+            let m = mol(&format!("{flank}{cds}{flank}"), false);
+            assert!(six_frame_contains(&m.seq, &"H".repeat(n)));
+
+            let db = db_of(vec![peptide("pf:his6", HIS6)]);
+            let found = Annotator::new(&db, Config::default()).annotate(&m);
+            assert_eq!(
+                found.len(),
+                n / HIS6.len(),
+                "a {n}-histidine tract: {found:?}"
+            );
+            // Whatever the count, no two of them may overlap.
+            let mut spans: Vec<(u64, u64)> = found.iter().map(|a| (a.start, a.end)).collect();
+            spans.sort();
+            for w in spans.windows(2) {
+                assert!(
+                    w[0].1 < w[1].0,
+                    "a {n}-histidine tract produced overlapping boxes: {spans:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "below MIN_PART_AA")]
+    fn a_short_protein_reference_is_refused_on_a_cds_row_too() {
+        // The floor used to be keyed on `Record::is_designed_peptide`, which is
+        // `synthetic_part` only, while the route it guards --
+        // `Index::unchainable` -> `scan_protein_exact` -- is blind to class.
+        // `Db::parse` checks `reference_aa`'s alphabet and nothing else, so a
+        // `cds` row could carry four residues, walk past the floor, and be
+        // reported by an exact six-frame scan with neither the exactness rule
+        // nor the fusion gate applied to it: measured at 91..102 with
+        // `fusion_orf: None` on a molecule of pure filler with no ATG anywhere,
+        // where b340b18 reported nothing at all.
+        //
+        // Without the widening this constructor returns normally and the test
+        // fails for want of a panic.
+        let db = db_of(vec![rec("pf:cds-with-a-tetrapeptide", "IEGR", true)]);
+        let _ = Annotator::new(&db, Config::default());
+    }
+
+    #[test]
+    fn a_peptide_that_indexes_no_word_is_scanned_rather_than_written_off() {
+        // `unseedable()` says "nothing can find this". For a record with
+        // residues that claim has to be checked against the scan, not against
+        // the protein index's seed list, and this is the record where the two
+        // disagree: `index::seedable` rejects `X`, so a peptide of nothing but
+        // `X` indexes ZERO words and sits in `protein.short()` -- while the
+        // exact scan searches for it in all six frames and finds it wherever the
+        // query really translates to those residues, which an `NNN` codon does.
+        //
+        // Three mutations die here. Restoring `unseedable()`'s old
+        // `dna.short() & protein.short()` intersection reports this row as "too
+        // short to seed and cannot be found" while the run below is finding it.
+        // Restoring the `return` on `words() == 0` at the top of `scan_protein`
+        // skips the scan entirely, because this one-row table indexes no words
+        // at all. And dropping `.max(1)` from `unchainable(min_seeds.max(1))`
+        // leaves the record with no route at `min_seeds = 0`, which is the
+        // original defect reopened at a setting a caller may legitimately pick.
+        let x8 = "XXXXXXXX";
+        // 1 initiator + 20 filler + 8 X = 29 residues, and the fusion gate wants
+        // 8 + PARTNER_MIN = 28.
+        let cds = format!("ATG{}{}TAA", FILLER.repeat(20), "NNN".repeat(8));
+        let flank = FILLER.repeat(30);
+        let m = mol(&format!("{flank}{cds}{flank}"), false);
+        assert!(
+            six_frame_contains(&m.seq, x8),
+            "NNN must translate to X, or this fixture tests nothing"
+        );
+
+        let db = db_of(vec![peptide("pf:all-x", x8)]);
+        let protein = Index::build(&db, true, K_PROTEIN);
+        assert_eq!(protein.words(), 0, "the premise: seedable() rejects X");
+        assert_eq!(
+            protein.short(),
+            [0],
+            "and so the old rescue predicate held it"
+        );
+
+        for min_seeds in [0usize, 1, 3, 9] {
+            let ann = Annotator::new(
+                &db,
+                Config {
+                    min_seeds,
+                    ..Config::default()
+                },
+            );
+            assert!(
+                ann.unseedable().is_empty(),
+                "min_seeds={min_seeds}: the scan reaches this row, so nothing may \
+                 call it unreachable"
+            );
+            let found = ann.annotate(&m);
+            assert_eq!(
+                found.len(),
+                1,
+                "min_seeds={min_seeds}: and the scan must actually reach it: {found:?}"
+            );
+            assert!(found[0].via_protein);
+            assert_eq!(found[0].identity, 1.0);
+            assert!(
+                found[0].fusion_orf.is_some(),
+                "still gated on the ORF, like every other designed peptide"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_is_on_indexed_words_and_a_length_test_would_lose_this_one() {
+        // `Index::unchainable` takes a word count rather than a length, and the
+        // difference is only visible on a peptide that indexes fewer words than
+        // its length implies. `X_AT_FIVE` is twelve residues and eight 5-mer
+        // windows, of which the five covering offset 5 are rejected by
+        // `seedable`, leaving 3 indexed words.
+        //
+        // At `min_seeds = 4` it cannot chain and must be scanned. The length
+        // form of the predicate, `len < K_PROTEIN + min_seeds - 1`, asks
+        // `12 < 8`, answers "this chains fine", and leaves the row with no route
+        // at all -- the same silent hole this whole change closes, at a
+        // different residue count.
+        const X_AT_FIVE: &str = "MDEKTXGWRGGH";
+        let mut rng = Rng(0x0f1a_0000_0000_0031);
+        let code = fixture_code();
+        // `encode_stopless`: the peptide starts with M, whose only codon is a
+        // start. The nested ATG is harmless here for the same reason as in
+        // `the_his6_tag_on_a_real_construct_of_the_maintainers_is_found` --
+        // `Params::nested: false` suppresses a later start in this frame.
+        let head = encode_stopless(&X_AT_FIVE[..5], code, &mut rng);
+        let tail = encode_stopless(&X_AT_FIVE[6..], code, &mut rng);
+        // 1 initiator + 20 filler + 12 tag = 33 residues; the gate wants 32.
+        let cds = format!("ATG{}{head}NNN{tail}TAA", FILLER.repeat(20));
+        let flank = FILLER.repeat(30);
+        let m = mol(&format!("{flank}{cds}{flank}"), false);
+        assert!(six_frame_contains(&m.seq, X_AT_FIVE));
+
+        let db = db_of(vec![peptide("pf:x-at-five", X_AT_FIVE)]);
+        assert_eq!(
+            Index::build(&db, true, K_PROTEIN)
+                .unchainable(4)
+                .collect::<Vec<_>>(),
+            [0],
+            "3 indexed words cannot make a run of 4"
+        );
+        for min_seeds in [3usize, 4, 5] {
+            let ann = Annotator::new(
+                &db,
+                Config {
+                    min_seeds,
+                    ..Config::default()
+                },
+            );
+            let found = ann.annotate(&m);
+            assert_eq!(
+                found.len(),
+                1,
+                "min_seeds={min_seeds}: chaining at 3, scanning from 4, findable \
+                 at every setting: {found:?}"
+            );
+            assert!(ann.unseedable().is_empty(), "min_seeds={min_seeds}");
+        }
+    }
+
+    #[test]
+    fn a_lower_cased_reference_still_matches() {
+        // `exact_occurrences` compares case-insensitively, and nothing showed
+        // that it had to: `Db::parse` upper-cases `reference_aa` and
+        // `translate::six_frames` reads its residues out of the code table, so
+        // through the shipped path both sides are already upper-case. The state
+        // is reachable anyway -- `Record`'s fields are public and this workspace
+        // constructs them directly -- so the property is pinned rather than left
+        // as an assumption a `==` would quietly break.
+        let mut rng = Rng(0x0f1a_0000_0000_0032);
+        let (inf, ..) = three_cases(THROMBIN, &mut rng);
+        let lower = Record {
+            reference_aa: Some(THROMBIN.to_ascii_lowercase().into_bytes()),
+            ..peptide("pf:thrombin", THROMBIN)
+        };
+        let db = db_of(vec![lower]);
+        let found = Annotator::new(&db, Config::default()).annotate(&inf);
+        assert_eq!(
+            found.len(),
+            1,
+            "a lower-cased cell must still match: {found:?}"
+        );
+        assert_eq!(found[0].identity, 1.0);
+        assert_eq!(found[0].coverage, 1.0);
     }
 }
