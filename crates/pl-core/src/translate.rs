@@ -319,6 +319,33 @@ impl Code {
     pub fn translate(&self, seq: &[u8]) -> Vec<u8> {
         seq.chunks_exact(3).map(|c| self.codon(c)).collect()
     }
+
+    /// Translate a span that is known to *begin at an initiator*, the way
+    /// GenBank writes `/translation`: the first residue is `M` whatever the
+    /// codon spells.
+    ///
+    /// [`Code::translate`] is a raw per-codon primitive and is deliberately so —
+    /// it has no idea whether position 0 is an initiation site. This is the
+    /// wrapper for callers that do know, and it is a different answer, not a
+    /// cosmetic one: `tet(A)` starts `GTG`, and table 11 — the default for
+    /// plasmid work, chosen precisely so GTG- and TTG-started bacterial markers
+    /// are found — translates that codon as valine. Printing `VKPNIPLI...` for a
+    /// protein whose reference is `MKPNIPLI...` gives anyone who pastes it into
+    /// BLAST a leading mismatch.
+    ///
+    /// The substitution is conditioned on [`Code::is_start`] rather than applied
+    /// to whatever sits first, because a stop-to-stop reading (`require_start`
+    /// off) hands over spans whose first codon is an ordinary sense codon, and
+    /// calling one of those Met would be an invention.
+    pub fn translate_cds(&self, seq: &[u8]) -> Vec<u8> {
+        let mut out = self.translate(seq);
+        if seq.len() >= 3 && self.is_start(&seq[..3]) {
+            if let Some(first) = out.first_mut() {
+                *first = b'M';
+            }
+        }
+        out
+    }
 }
 
 /// One reading frame of a molecule.
@@ -699,5 +726,36 @@ mod tests {
         let p = TABLE1.translate(b"ATGAGTATTCAACATTTCCGTGTCGCCCTTATTCC");
         assert_eq!(p[0], b'M');
         assert!(!p[..p.len() - 1].contains(&b'*'));
+    }
+
+    #[test]
+    fn an_alternative_initiator_translates_as_met_the_way_genbank_writes_it() {
+        // `tet(A)` starts GTG, and table 11 is the default here precisely so
+        // GTG- and TTG-started bacterial markers are found at all. Reporting
+        // that first residue as valine gives anyone pasting the protein into
+        // BLAST a leading mismatch against the reference — the project's own
+        // features.tsv stores `MKPNIPLI...` for PLF:0006, not `VKPNIPLI...`.
+        let cds = format!("GTG{}TAA", "GCC".repeat(20));
+        let got = TABLE11.translate_cds(cds.as_bytes());
+        assert_eq!(got[0], b'M', "{}", String::from_utf8_lossy(&got));
+        assert_eq!(
+            String::from_utf8_lossy(&got),
+            format!("M{}*", "A".repeat(20))
+        );
+
+        // The raw primitive is unchanged: it does not know whether position 0
+        // is an initiation site, and it is not this wrapper's job to teach it.
+        assert_eq!(TABLE11.translate(cds.as_bytes())[0], b'V');
+
+        // Only the FIRST codon. An internal GTG is a valine like any other.
+        let internal = format!("ATGGTG{}TAA", "GCC".repeat(5));
+        let got = TABLE11.translate_cds(internal.as_bytes());
+        assert_eq!((got[0], got[1]), (b'M', b'V'));
+
+        // And a span that does not begin at an initiator is left alone, which
+        // is what a stop-to-stop reading (`require_start` off) hands over.
+        let not_a_start = format!("CCC{}TAA", "GCC".repeat(5));
+        assert!(!TABLE11.is_start(b"CCC"));
+        assert_eq!(TABLE11.translate_cds(not_a_start.as_bytes())[0], b'P');
     }
 }

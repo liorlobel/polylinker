@@ -353,23 +353,66 @@ mod tests {
         assert_eq!(roots, 2, "both first-edits are kept");
     }
 
-    #[test]
-    fn editing_re_digests_rather_than_showing_a_stale_answer() {
-        // Cut sites are a function of the sequence. A stale enzyme list after
-        // an edit is a wrong answer presented as a current one.
-        let mut d = doc_of("AAAAGAATTCCCCGGGGTTTT", true);
+    /// Where EcoRI cuts, once the worker has finished.
+    ///
+    /// The answer has to be read off a *position*, not off `results().len()`.
+    /// `start_digest` emits one `Digest` per entry of the fixed `ENZYMES`
+    /// table whether or not the enzyme cuts anything, so the length of the
+    /// results is a compile-time constant that carries no information about
+    /// the sequence at all: it is `ENZYMES.len()` in `Done` and 0 in the other
+    /// two states. Asserting on it cannot tell a recomputed digest from a
+    /// stale one — which is exactly what the test below used to do.
+    fn ecori_sites(d: &mut Document) -> Vec<u64> {
         while d.digest.is_running() {
             d.digest.poll();
             std::thread::yield_now();
         }
-        let before = d.digest.results().len();
-        assert!(before > 0);
+        d.digest
+            .results()
+            .iter()
+            .find(|x| x.enzyme.name == "EcoRI")
+            .expect("EcoRI is in the shipped table")
+            .positions
+            .clone()
+    }
+
+    #[test]
+    fn editing_re_digests_rather_than_showing_a_stale_answer() {
+        // Cut sites are a function of the sequence. A stale enzyme list after
+        // an edit is a wrong answer presented as a current one.
+        //
+        // The edit deletes the one GAATTC, so the enzyme list before and after
+        // genuinely disagree. The previous form of this test asserted
+        // `is_running() || results().len() == before`, and both disjuncts hold
+        // in every reachable state: deleting the re-digest from `apply` left
+        // `Done(old)`, whose length is still `ENZYMES.len()`. It survived the
+        // exact mutation it exists to catch.
+        let mut d = doc_of("AAAAGAATTCCCCGGGGTTTT", true);
+        assert_eq!(ecori_sites(&mut d), vec![6], "the premise: one EcoRI site");
 
         d.apply(OpKind::DeleteRange { start: 5, len: 6 }).unwrap();
-        // A fresh worker, not the old results.
+        assert!(d.digest.is_running(), "a fresh worker, not the old results");
         assert!(
-            d.digest.is_running() || d.digest.results().len() == before,
-            "the digest must be recomputed after an edit"
+            ecori_sites(&mut d).is_empty(),
+            "the site was deleted, so the digest must no longer report it"
         );
+    }
+
+    #[test]
+    fn undo_and_redo_re_digest_as_well() {
+        // Same reason, and neither had any coverage at all: the enzyme list
+        // after an undo has to describe the molecule the undo brought back.
+        let mut d = doc_of("AAAAGAATTCCCCGGGGTTTT", true);
+        assert_eq!(ecori_sites(&mut d), vec![6]);
+        d.apply(OpKind::DeleteRange { start: 5, len: 6 }).unwrap();
+        assert!(ecori_sites(&mut d).is_empty());
+
+        d.undo().unwrap();
+        assert!(d.digest.is_running(), "undo starts a fresh digest");
+        assert_eq!(ecori_sites(&mut d), vec![6], "the site is back");
+
+        d.redo().unwrap();
+        assert!(d.digest.is_running(), "and so does redo");
+        assert!(ecori_sites(&mut d).is_empty());
     }
 }

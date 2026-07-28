@@ -58,8 +58,19 @@ pub fn write(mol: &Molecule, title: &str, line_width: usize) -> String {
         mol.span(),
         mol.topology.as_str()
     );
-    for chunk in mol.seq.chunks(width) {
-        out.push_str(&String::from_utf8_lossy(chunk));
+    // Decoded once, then wrapped — the same rule as the GenBank ORIGIN writer,
+    // and for the same reason. `seq.chunks(width)` cut the raw bytes first, so
+    // a multi-byte character landing on a line boundary was decoded as a lone
+    // lead byte at the end of one line and a lone continuation byte at the
+    // start of the next, and `from_utf8_lossy` turned each half into its own
+    // U+FFFD: one character in, two replacement characters out, and a sequence
+    // three bytes longer than it started. Wrapping decoded characters cannot
+    // split one.
+    let decoded = String::from_utf8_lossy(&mol.seq);
+    let mut chars = decoded.chars().peekable();
+    while chars.peek().is_some() {
+        let line: String = chars.by_ref().take(width).collect();
+        out.push_str(&line);
         out.push('\n');
     }
     out
@@ -106,6 +117,28 @@ mod tests {
         let f = write(&m, "t.dna", 10);
         let body: Vec<&str> = f.lines().skip(1).collect();
         assert_eq!(body, vec!["AAAAAAAAAA", "AAAAAAAAAA", "AAAAA"]);
+    }
+
+    #[test]
+    fn wrapping_never_splits_a_multibyte_character() {
+        // `seq.chunks(width)` cut the raw bytes, so a character landing on a
+        // line boundary was decoded as a lone lead byte at the end of one line
+        // and a lone continuation byte at the start of the next, and each half
+        // became its own U+FFFD: one character in, two out, and a file three
+        // bytes longer than the sequence it claims to hold.
+        let mut seq = b"a".repeat(9);
+        seq.extend_from_slice("µ".as_bytes());
+        seq.extend_from_slice(&b"c".repeat(15));
+        let m = Molecule {
+            seq: seq.clone(),
+            ..Default::default()
+        };
+        let text = write(&m, "x", 10);
+        assert!(
+            !text.contains('\u{FFFD}'),
+            "the character was split across two lossy decodes:\n{text}"
+        );
+        assert_eq!(parse(&text).seq, seq, "the exported sequence changed");
     }
 
     #[test]

@@ -15,11 +15,21 @@ Three independent things are asserted:
      offset produces a file that looks fine to `strings` and opens in nothing.
   2. **Nothing is missing.** Every string the SVG draws appears in the PDF's
      extracted text.
-  3. **Text lands in the same place.** Each string's position is compared
-     against the SVG's, with the SVG's `text-anchor` resolved using the same
-     measurement the PDF back end claims to use. This is the assertion that
-     actually exercises the Helvetica width table -- a table off by one entry
-     would shift centred text and nothing else would notice.
+  3. **Text lands in the same place.** Each string's *anchor point* is
+     compared: the left edge for `text-anchor="start"`, the centre for
+     `middle`, the right edge for `end`, taken from the box PyMuPDF reports for
+     the glyphs as actually rendered.
+
+     Comparing the anchor rather than the left edge is what makes this exercise
+     the width tables at all, and it took a real defect to notice. This file
+     used to compute the left edge itself from `fitz.Font("helv")` and compare
+     that -- so it measured every string in *regular* Helvetica, including the
+     centre title, which the PDF draws in Helvetica-Bold. Both sides made the
+     same mistake and agreed, and when the Rust side was corrected to measure
+     bold text with bold widths, the oracle called the fix a regression: 5.0 pt
+     on the title of every map. The anchor point needs no width table on this
+     side at all, so the Rust tables are checked against where the glyphs
+     landed instead of against a transcription of themselves.
 
 Exits 1 on any disagreement and on comparing nothing.
 """
@@ -61,7 +71,13 @@ TEXT_RE = re.compile(
 
 
 def svg_texts(svg):
-    """Every string the SVG draws, with the x of its left edge."""
+    """Every string the SVG draws, with its anchor point and which end it is.
+
+    No width is computed here on purpose: see the module docstring. The anchor
+    is the one thing both formats agree the scene specified, and comparing it
+    against the rendered box is what tests the PDF's own measurement rather
+    than re-deriving it from a second copy of the same table.
+    """
     out = []
     for m in TEXT_RE.finditer(svg):
         x, y, size, anchor, text = (
@@ -77,9 +93,7 @@ def svg_texts(svg):
             .replace("&gt;", ">")
             .replace("&quot;", '"')
         )
-        w = width(text, size)
-        left = {"start": x, "middle": x - w / 2, "end": x - w}[anchor]
-        out.append((text, left, y, size))
+        out.append((text, x, anchor, y, size))
     return out
 
 
@@ -126,7 +140,7 @@ def check(exe, src, outdir):
     # PyMuPDF splits on spaces; join the page's words back into one haystack.
     got_words = page.get_text("words")
     haystack = " ".join(w[4] for w in got_words)
-    for text, _, _, _ in wanted:
+    for text, _, _, _, _ in wanted:
         for token in text.split():
             if token not in haystack:
                 problems.append(f"{src}: {token!r} is drawn in the SVG and absent from the PDF")
@@ -142,12 +156,20 @@ def check(exe, src, outdir):
     for x0, y0, x1, y1, w, *_ in got_words:
         by_word.setdefault(w, []).append((x0, y0, x1, y1))
     checked = 0
-    for text, left, mid_y, size in wanted:
+    for text, anchor_x, anchor, mid_y, size in wanted:
         if " " in text or text not in by_word:
             continue
+
+        def point(b, anchor=anchor):
+            """The rendered box's anchor point, matching the SVG's."""
+            return {"start": b[0], "middle": (b[0] + b[2]) / 2, "end": b[2]}[anchor]
+
         # Nearest candidate, so repeated strings do not pair up wrongly.
-        best = min(by_word[text], key=lambda b: abs(b[0] - left) + abs((b[1] + b[3]) / 2 - mid_y))
-        dx = best[0] - left
+        best = min(
+            by_word[text],
+            key=lambda b: abs(point(b) - anchor_x) + abs((b[1] + b[3]) / 2 - mid_y),
+        )
+        dx = point(best) - anchor_x
         dy = (best[1] + best[3]) / 2 - mid_y
         checked += 1
         # A point of slack on x: the extractor reports the inked box, and a
@@ -155,8 +177,10 @@ def check(exe, src, outdir):
         # vertical centring of a line is a convention, not a measurement.
         if abs(dx) > 2.5 or abs(dy) > 3.5:
             problems.append(
-                f"{src}: {text!r} at ({best[0]:.1f}, {(best[1]+best[3])/2:.1f}) "
-                f"but the SVG puts it at ({left:.1f}, {mid_y:.1f}) -- off by ({dx:+.1f}, {dy:+.1f})"
+                f"{src}: {text!r} anchored ({anchor}) at "
+                f"({point(best):.1f}, {(best[1]+best[3])/2:.1f}) "
+                f"but the SVG puts it at ({anchor_x:.1f}, {mid_y:.1f}) "
+                f"-- off by ({dx:+.1f}, {dy:+.1f})"
             )
     return problems, checked
 

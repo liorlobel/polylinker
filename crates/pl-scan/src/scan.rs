@@ -33,7 +33,7 @@ use pl_index::codec::Library;
 use pl_index::{nibble, Row};
 
 use crate::walk::walk;
-use crate::{content_id, rows_for_file, ScanOptions, ScanReport};
+use crate::{content_id, rows_for_file, ScanOptions, ScanReport, MAX_BYTES};
 
 /// Build or refresh the library for `root`.
 ///
@@ -90,6 +90,32 @@ pub fn scan(root: &Path, now_ns: u128, opts: &ScanOptions) -> (Library, ScanRepo
                 problem: "a cloud placeholder that is not stored locally".into(),
                 ..Default::default()
             });
+            report.records += 1;
+            continue;
+        }
+
+        // The byte cap, applied where the size is known and before a byte is
+        // read. `rows_for_file` also checks it, but it only ever sees bytes,
+        // and getting them means `std::fs::read` on the whole file: on the
+        // corpus this design is written against that is a 1.39 GB allocation
+        // plus a SHA-1 pass over all 1.39 GB, on the first index and again
+        // after every mtime change, to produce a row that carries no bases
+        // either way. The row is deliberately left without a content hash --
+        // hashing is the expensive half of what we are refusing to do -- and
+        // `pl verify` already skips rows whose `content` is empty.
+        if f.size > MAX_BYTES {
+            rows.push(Row {
+                path: f.rel.clone(),
+                state: pl_index::State::TooLarge,
+                size: f.size,
+                mtime_ns: f.mtime_ns,
+                problem: format!("{} bytes; the cap is {MAX_BYTES}", f.size),
+                ..Default::default()
+            });
+            // Counted as parsed because the row was derived here rather than
+            // reused; the file itself is reported through the row's TooLarge
+            // state, which is what `pl library --problems` lists.
+            report.parsed += 1;
             report.records += 1;
             continue;
         }
@@ -301,6 +327,106 @@ mod tests {
             pl_index::scan::hit_bases(&lib.packed, b, &hits[0], 6),
             b"GAATTC".to_vec()
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_depth_truncated_rescan_drops_nothing_and_never_claims_to_be_complete() {
+        // The whole failure, end to end. `--max-depth` is one documented flag
+        // away (bins/pl exposes it), and an ACL change or a network sub-tree
+        // that drops gets here by itself. With the truncation recorded only in
+        // `errors`, this rescan reported `removed = 1`, dropped `sub/b.gb` from
+        // the rebuilt library and wrote `complete: 1` — after which `pl find`
+        // answers "not in my library" for a plasmid still on disk and
+        // `pl library` has nothing to warn about.
+        let root = tmp("depth-truncated");
+        write(&root, "a.gb", &gb("a", "GAATTCAAAA", true));
+        write(&root, "sub/b.gb", &gb("b", "GGGGAATTCC", true));
+        let (lib, first) = scan(&root, 1, &opts());
+        assert_eq!(lib.rows.len(), 2);
+        assert!(lib.complete);
+        assert_eq!(first.removed, 0);
+
+        let shallow = ScanOptions {
+            walk: WalkOptions {
+                max_depth: 0,
+                ..Default::default()
+            },
+            previous: Some(lib.clone()),
+        };
+        let (after, report) = scan(&root, 2, &shallow);
+        assert!(report.incomplete.is_some(), "the walk did not finish");
+        assert_eq!(
+            report.removed, 0,
+            "nothing may be dropped on a partial walk"
+        );
+        assert!(!after.complete, "and the index must say so on disk");
+        let mut paths: Vec<&str> = after.rows.iter().map(|r| r.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec!["a.gb", "sub/b.gb"],
+            "the unreached row survives"
+        );
+
+        // And it survived with its bases, so it still answers.
+        let motif = pl_index::scan::Motif::new("GAATTC").unwrap();
+        let b = after.rows.iter().find(|r| r.path == "sub/b.gb").unwrap();
+        assert_eq!(
+            pl_index::scan::find_in_row(&motif, &after.packed, b).len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_over_cap_file_is_neither_read_nor_hashed() {
+        // The observable proof that the file was not opened is the *absence*
+        // of a content hash: `content_id` cannot run without the bytes, so an
+        // empty `content` on a TooLarge row means no 1.39 GB allocation and no
+        // SHA-1 pass over it. Before the gate moved ahead of the read, this row
+        // came back carrying a 40-character hash of 64 MB of zeroes.
+        let root = tmp("toolarge");
+        let p = crate::abs(&root, "huge.fa");
+        let f = std::fs::File::create(&p).unwrap();
+        // `set_len` rather than writing 64 MB: the size in the directory entry
+        // is what the gate reads, and the test should not itself cost the
+        // allocation it is asserting against.
+        f.set_len(crate::MAX_BYTES + 1).unwrap();
+        drop(f);
+
+        let (lib, report) = scan(&root, 1, &opts());
+        assert_eq!(lib.rows.len(), 1);
+        let row = &lib.rows[0];
+        assert_eq!(row.state, pl_index::State::TooLarge);
+        assert!(
+            row.content.is_empty(),
+            "a hash means the whole file was read: {:?}",
+            row.content
+        );
+        assert!(row.problem.contains("the cap is"), "{:?}", row.problem);
+        assert_eq!(
+            row.size,
+            crate::MAX_BYTES + 1,
+            "the stamp is still recorded"
+        );
+        assert!(row.mtime_ns > 0, "and so is the mtime, for the next rescan");
+        assert_eq!(lib.packed_bases, 0, "an over-cap file contributes no bases");
+        assert_eq!(report.records, 1, "and it is reported, never silent");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_under_the_cap_is_still_read_and_hashed() {
+        // The control for the gate above: moving it ahead of the read must not
+        // cost every ordinary file its content hash, which is what lets a
+        // sync-client mtime bump skip the parse.
+        let root = tmp("undercap");
+        write(&root, "a.gb", &gb("a", "GAATTCAAAA", true));
+        let (lib, _) = scan(&root, 1, &opts());
+        assert_eq!(lib.rows[0].state, pl_index::State::Ok);
+        assert_eq!(lib.rows[0].content.len(), 40, "SHA-1, in hex");
         let _ = std::fs::remove_dir_all(&root);
     }
 

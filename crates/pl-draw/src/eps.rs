@@ -23,9 +23,13 @@
 //! a quick look at a thumbnail.
 //!
 //! **Text has no `text-anchor`.** SVG centres a string declaratively.
-//! PostScript must measure it, which is what [`crate::pdf::text_width`] is for
-//! — the same metrics, so a centred label lands in the same place in all three
-//! formats.
+//! PostScript must measure it, which is what [`crate::pdf::text_width_in`] is
+//! for — the same metrics *and the same weight*, so a centred label lands in
+//! the same place in all three formats. Both halves of that are load-bearing
+//! and both were once wrong here: the baseline offset was a private 0.36
+//! against the PDF's 0.2615, and bold strings were measured with the regular
+//! widths. Colours go through [`crate::pdf::rgb`] for the same reason — the
+//! copy that lived here understood fewer hex forms than the original.
 //!
 //! # What EPS cannot carry
 //!
@@ -33,7 +37,7 @@
 //! information survives in the file for a human reading it, but nothing renders
 //! them. That is stated rather than silently true.
 
-use crate::pdf::{encode, text_width, Report};
+use crate::pdf::{encode, rgb, text_width_in, Report, BASELINE_DROP_EM};
 use crate::scene::{arc_to_beziers, Anchor, Item, Scene, Seg};
 
 /// Render a scene as EPS at a physical size.
@@ -175,7 +179,12 @@ pub fn to_eps(scene: &Scene, scale: f64) -> (String, Report) {
                     continue;
                 }
                 let pts = size * scale;
-                let width = text_width(text, pts);
+                // Measured in the weight `font` selects two lines down.
+                // Measuring bold text with the regular widths put every
+                // anchored bold string — the centre title of every map — off
+                // its anchor by half the difference, 3.34 pt at 15 pt for
+                // "pcDNA3.1(+)-mCherry-WPRE".
+                let width = text_width_in(text, pts, *bold);
                 let x0 = match anchor {
                     Anchor::Start => tx(*x),
                     Anchor::Middle => tx(*x) - width / 2.0,
@@ -183,10 +192,12 @@ pub fn to_eps(scene: &Scene, scale: f64) -> (String, Report) {
                 };
                 // The scene's baseline is the middle of the glyphs, matching
                 // SVG's `dominant-baseline: middle`. PostScript's is the
-                // alphabetic baseline, so it moves down by roughly a third of
-                // the type size — the same 0.36 the PDF writer uses, so the
-                // three formats agree.
-                let y0 = ty(*y) - pts * 0.36;
+                // alphabetic baseline, so it moves down by half the x-height.
+                // The constant is the PDF writer's, shared rather than copied:
+                // this line held its own 0.36 under a comment saying it was the
+                // PDF's number, and it put every EPS label 0.0985 em — 1.18 pt
+                // at size 12 — below the same label in the PDF and the SVG.
+                let y0 = ty(*y) - pts * BASELINE_DROP_EM;
                 let font = if *bold { "Helvetica-Bold" } else { "Helvetica" };
                 let (r, g, b) = rgb(color);
                 s.push_str(&format!(
@@ -256,26 +267,6 @@ fn n(v: f64) -> String {
     let r = (v * 100.0).round() / 100.0;
     let r = if r == 0.0 { 0.0 } else { r };
     format!("{r}")
-}
-
-fn rgb(colour: &str) -> (f64, f64, f64) {
-    let hex = colour.strip_prefix('#').unwrap_or("");
-    let v = |a: usize, b: usize| -> f64 {
-        u8::from_str_radix(hex.get(a..b).unwrap_or("0"), 16).unwrap_or(0) as f64 / 255.0
-    };
-    match hex.len() {
-        6 => (v(0, 2), v(2, 4), v(4, 6)),
-        3 => {
-            let d = |i: usize| {
-                let c = u8::from_str_radix(hex.get(i..i + 1).unwrap_or("0"), 16).unwrap_or(0);
-                (c * 17) as f64 / 255.0
-            };
-            (d(0), d(1), d(2))
-        }
-        // Already through `safe_color`, so anything else is a named CSS colour.
-        // Black is better than no figure.
-        _ => (0.0, 0.0, 0.0),
-    }
 }
 
 /// A PostScript string literal.
@@ -398,11 +389,141 @@ mod tests {
             })
             .collect();
         assert_eq!(xs.len(), 3);
-        let w = text_width(text, 10.0);
+        let w = text_width_in(text, 10.0, false);
         assert!((xs[0] - 100.0).abs() < 0.01, "start at x");
         assert!((xs[1] - (100.0 - w / 2.0)).abs() < 0.01, "middle: {:?}", xs);
         assert!((xs[2] - (100.0 - w)).abs() < 0.01, "end: {:?}", xs);
         assert!(w > 0.0);
+    }
+
+    /// The y of the `moveto` before a `show`, in PostScript points.
+    fn eps_text_y(eps: &str) -> f64 {
+        let line = eps
+            .lines()
+            .find(|l| l.contains("moveto") && l.contains("show"))
+            .expect("the label");
+        let t: Vec<&str> = line.split_whitespace().collect();
+        let i = t.iter().position(|x| *x == "moveto").unwrap();
+        t[i - 1].parse().unwrap()
+    }
+
+    #[test]
+    fn a_label_sits_on_the_same_baseline_in_the_eps_as_in_the_pdf() {
+        // At scale 1.0 the two writers work in the same units from the same
+        // scene, so the baseline they compute must be the same number. This
+        // file carried its own 0.36 against the PDF's 0.523/2 = 0.2615, under a
+        // comment claiming it was the PDF's constant: every EPS label sat
+        // 0.0985 em lower than the same label in the PDF and the SVG, which is
+        // 1.18 pt at size 12 and 1.48 pt on the 15 pt title.
+        let s = Scene {
+            width: 720.0,
+            height: 720.0,
+            title: "map".into(),
+            items: vec![Item::Text {
+                x: 100.0,
+                y: 300.0,
+                size: 12.0,
+                anchor: Anchor::Start,
+                color: "#000000".into(),
+                bold: false,
+                text: "AmpR".into(),
+            }],
+        };
+        let (eps, _) = to_eps(&s, 1.0);
+        let (pdf_bytes, _) = crate::pdf::to_pdf(&s);
+        let pdf = String::from_utf8_lossy(&pdf_bytes);
+        let td = pdf.find(" Td").expect("Td");
+        let line: &str = pdf[..td].rsplit('\n').next().unwrap();
+        let pdf_y: f64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let eps_y = eps_text_y(&eps);
+        assert!(
+            (eps_y - pdf_y).abs() < 0.01,
+            "EPS baseline {eps_y}, PDF baseline {pdf_y}"
+        );
+        // And it is the x-height rule, not some third number: 720 - 300 - 3.138.
+        assert!((eps_y - 416.862).abs() < 0.01, "{eps_y}");
+    }
+
+    #[test]
+    fn a_bold_label_is_measured_in_the_font_it_is_drawn_in() {
+        // `Helvetica-Bold` is selected on the same line that positions the
+        // string, so measuring with the regular widths puts every anchored bold
+        // string off its anchor -- 3.34 pt for a centred title, and the whole
+        // 6.7 pt for an `Anchor::End` one.
+        let name = "pcDNA3.1(+)-mCherry-WPRE";
+        let mk = |anchor: Anchor| Scene {
+            width: 400.0,
+            height: 100.0,
+            title: "map".into(),
+            items: vec![Item::Text {
+                x: 200.0,
+                y: 50.0,
+                size: 15.0,
+                anchor,
+                color: "#000000".into(),
+                bold: true,
+                text: name.into(),
+            }],
+        };
+        let x_of = |eps: &str| -> f64 {
+            let line = eps
+                .lines()
+                .find(|l| l.contains("moveto") && l.contains("show"))
+                .expect("the label");
+            let t: Vec<&str> = line.split_whitespace().collect();
+            let i = t.iter().position(|x| *x == "moveto").unwrap();
+            t[i - 2].parse().unwrap()
+        };
+        let bold_w = text_width_in(name, 15.0, true);
+        let regular_w = text_width_in(name, 15.0, false);
+        assert!(bold_w > regular_w + 6.0, "the two weights differ by 6.7 pt");
+        let (mid, _) = to_eps(&mk(Anchor::Middle), 1.0);
+        assert!(
+            (x_of(&mid) - (200.0 - bold_w / 2.0)).abs() < 0.01,
+            "{}",
+            x_of(&mid)
+        );
+        let (end, _) = to_eps(&mk(Anchor::End), 1.0);
+        assert!(
+            (x_of(&end) - (200.0 - bold_w)).abs() < 0.01,
+            "{}",
+            x_of(&end)
+        );
+        assert!(mid.contains("/Helvetica-Bold findfont"), "{mid}");
+    }
+
+    #[test]
+    fn an_eight_digit_hex_colour_is_the_same_colour_here_as_in_the_pdf() {
+        // A SnapGene segment can carry `color="#4f7fd0ff"` and `safe_color`
+        // passes 4- and 8-digit hex through unnormalised, on purpose. This
+        // file's own parser understood only 3 and 6, so that feature drew blue
+        // in the SVG, blue in the PDF and solid black in the EPS the author
+        // submitted -- with nothing in any `Report` to say so.
+        for (with_alpha, without) in [("#4f7fd0ff", "#4f7fd0"), ("#4f7d", "#4f7d")] {
+            let s = scene(vec![Item::Path {
+                segs: vec![Seg::Move(0.0, 0.0), Seg::Line(10.0, 10.0)],
+                fill: Some(with_alpha.into()),
+                stroke: None,
+                stroke_width: 1.0,
+                title: None,
+            }]);
+            let (eps, _) = to_eps(&s, 1.0);
+            assert!(
+                !eps.contains("0 0 0 setrgbcolor fill"),
+                "{with_alpha} came out black: {eps}"
+            );
+            let (r, g, b) = crate::pdf::rgb(with_alpha);
+            assert!(
+                eps.contains(&format!("{} {} {} setrgbcolor fill", n(r), n(g), n(b))),
+                "{with_alpha} disagrees with the PDF writer: {eps}"
+            );
+            // The alpha nibble is dropped, not mixed into a channel.
+            if with_alpha != without {
+                assert_eq!(crate::pdf::rgb(with_alpha), crate::pdf::rgb(without));
+            }
+        }
+        // Control: the six-digit form this file always handled is unchanged.
+        assert_eq!(crate::pdf::rgb("#336699"), (0.2, 0.4, 0.6));
     }
 
     #[test]

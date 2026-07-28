@@ -36,6 +36,12 @@
 //! three times. That case runs a single pass here and labels each ORF by its
 //! offset from the origin, because the alternative — triplicating every hit —
 //! is the kind of wrong that looks like thoroughness.
+//!
+//! The second consequence of the same arithmetic: one turn of such a frame is
+//! `n` codons, so it walks `3n` bases — three physical laps — and an ORF may
+//! genuinely be longer than the molecule it sits on. A pair of positions on a
+//! circle cannot say that, so [`Orf::laps`] does, and [`Orf::bases`] rather than
+//! `end - start + 1` is the length.
 
 use crate::translate::Code;
 use crate::Strand;
@@ -47,10 +53,32 @@ pub struct Orf {
     /// the stop codon when there is one.
     ///
     /// For a reverse-strand ORF these still read low-to-high on the plus
-    /// strand; `strand` says which way it is read. On a circular molecule
-    /// `end < start` means it crosses the origin.
+    /// strand; `strand` says which way it is read.
+    ///
+    /// On a circular molecule `end < start` means it crosses the origin — but
+    /// the converse is false, so `end < start` is not a test for
+    /// origin-crossing. [`Orf::wrapped`] is. And the inclusive range
+    /// `start..end` is **not** the ORF's extent whenever [`laps`](Self::laps)
+    /// is non-zero: a position on a circle cannot encode more than one lap of
+    /// it, so `laps` carries the rest. [`Orf::bases`] is always the length.
     pub start: u64,
     pub end: u64,
+    /// Complete laps of a circular molecule the ORF makes before it reaches
+    /// `end`. Always 0 on a linear molecule.
+    ///
+    /// Non-zero only when the length is not a multiple of three, which is the
+    /// case where stepping by codons visits every position rather than a third
+    /// of them: one turn of the frame is `n` codons — three physical laps — so
+    /// an ORF can be up to `3n` bases long. Both endpoints are reduced modulo
+    /// `n`, because there is nowhere else for them to go, and without this
+    /// field the whole laps were simply lost: a 33-base ORF on a 19 bp circle
+    /// reported `start: 5, end: 18`, an inclusive range of 14 bases, with
+    /// `start < end` so nothing looked wrong. The invariant to rely on is
+    ///
+    /// ```text
+    /// bases() == inclusive span of start..end round the circle + laps * n
+    /// ```
+    pub laps: u32,
     pub strand: Strand,
     /// 0, 1 or 2 — the offset of this frame from the start of the strand it is
     /// read on.
@@ -70,6 +98,10 @@ pub struct Orf {
 
 impl Orf {
     /// Length in bases, including the stop codon when present.
+    ///
+    /// This, not `end - start + 1`, is the authoritative extent: see
+    /// [`Orf::laps`] for the circular case where the two disagree by whole laps
+    /// of the molecule.
     pub fn bases(&self) -> usize {
         self.aa_len * 3 + if self.complete { 3 } else { 0 }
     }
@@ -91,6 +123,27 @@ pub struct Params {
     /// the stop-to-stop reading, offered because some workflows want it, but
     /// never the default.
     pub require_start: bool,
+    /// Report an ORF for *every* in-frame start codon, not only the outermost
+    /// one in each stop-delimited window.
+    ///
+    /// Off by default, which is the conventional "longest ORF only" reading and
+    /// what `docs/PLAN.md` asks for as a toggle. It has to be a toggle rather
+    /// than a hard-coded rule: an internal `ATG` genuinely "begins at a start
+    /// codon and ends at the first in-frame stop", which is this module's own
+    /// definition of an ORF, and someone hunting for an alternative initiation
+    /// site is looking for exactly the hit the default suppresses. With the
+    /// switch absent, `ATG (GCC x10) ATG (GCC x10) TAA` reported only
+    /// `1..69, 22 aa` and there was no way to tell "there is no internal start"
+    /// from "internal starts are hidden".
+    ///
+    /// A suppressed ORF is always a suffix of a reported one, so no coding
+    /// region disappears either way; what the default costs is internal start
+    /// sites and the ORF count.
+    ///
+    /// Ignored when `require_start` is false: in a stop-to-stop reading every
+    /// non-stop codon would open a window, which is not a nested ORF but a
+    /// quadratic pile of suffixes of the same run.
+    pub nested: bool,
 }
 
 impl Default for Params {
@@ -99,6 +152,7 @@ impl Default for Params {
             min_aa: 30,
             include_incomplete: true,
             require_start: true,
+            nested: false,
         }
     }
 }
@@ -154,7 +208,13 @@ pub fn find_orfs(seq: &[u8], code: Code, circular: bool, p: &Params) -> Vec<Orf>
                 None => frame as usize,
             };
             let mut k = 0usize; // codons consumed
-            let mut open: Option<(usize, [u8; 3])> = None;
+                                // Starts awaiting a stop, outermost first.
+                                //
+                                // A single `Option` here made the start-codon test unreachable for
+                                // as long as anything was open, so every downstream in-frame start
+                                // was skipped with nothing said about it — "longest ORF only" hard
+                                // coded on. See `Params::nested`.
+            let mut open: Vec<(usize, [u8; 3])> = Vec::new();
             loop {
                 if circular {
                     // Exactly one turn. Starting just past a stop, the last
@@ -174,9 +234,11 @@ pub fn find_orfs(seq: &[u8], code: Code, circular: bool, p: &Params) -> Vec<Orf>
                     [s[i], s[i + 1], s[i + 2]]
                 };
 
-                if let Some((from, start_codon)) = open {
-                    if code.is_stop(&c3) {
-                        open = None;
+                if !open.is_empty() && code.is_stop(&c3) {
+                    // One stop closes everything it is in frame with, which is
+                    // the whole point: each of those starts really does end
+                    // here.
+                    for (from, start_codon) in open.drain(..) {
                         let aa_len = (i - from) / 3;
                         if aa_len >= p.min_aa {
                             out.push(make(
@@ -193,14 +255,16 @@ pub fn find_orfs(seq: &[u8], code: Code, circular: bool, p: &Params) -> Vec<Orf>
                             ));
                         }
                     }
-                } else if !circular || k < per_turn {
+                } else if (open.is_empty() || (p.nested && p.require_start))
+                    && (!circular || k < per_turn)
+                {
                     let is_start = if p.require_start {
                         code.is_start(&c3)
                     } else {
                         !code.is_stop(&c3)
                     };
                     if is_start {
-                        open = Some((i, c3));
+                        open.push((i, c3));
                     }
                 }
 
@@ -217,8 +281,8 @@ pub fn find_orfs(seq: &[u8], code: Code, circular: bool, p: &Params) -> Vec<Orf>
             // makes the answer change when the same plasmid is rotated.
             // [`stopless_frames`] names those frames instead, which is the part
             // that is actually true.
-            if let Some((from, start_codon)) = open {
-                if p.include_incomplete && !circular {
+            if p.include_incomplete && !circular {
+                for (from, start_codon) in open.drain(..) {
                     let usable = ((n - from) / 3) * 3;
                     let aa_len = usable / 3;
                     if aa_len >= p.min_aa {
@@ -303,9 +367,33 @@ fn make(
     } else {
         ((n - 1 - ((to - 1) % n)) % n, (n - 1 - (from % n)) % n)
     };
+    // How much of the ORF the reduced endpoints cannot express.
+    //
+    // Both are taken modulo `n`, which throws away whole laps — and when 3 does
+    // not divide `n` there really are whole laps to throw away, because one turn
+    // of the frame is `n` codons and the scan may therefore run to `3n` bases.
+    // On the 19 bp circle `CGTAATGCCTTTCCCTAAC` the tool reported
+    // `start: 5, end: 18` for a 33-base, 10 aa ORF: fourteen inclusive bases,
+    // with `start < end` so even the origin-crossing convention gave no hint.
+    // The crate's own 145 bp rotation fixture printed `91..94` — four bases —
+    // for a 294-base ORF. Counting the laps here is what makes `start`, `end`
+    // and `laps` together reconstruct the span the scan actually walked.
+    let laps = if circular {
+        let f0 = from % n;
+        let t0 = (to - 1) % n;
+        let inclusive = if t0 >= f0 {
+            t0 - f0 + 1
+        } else {
+            n - f0 + t0 + 1
+        };
+        ((to - from - inclusive) / n) as u32
+    } else {
+        0
+    };
     Orf {
         start: s0 as u64 + 1,
         end: e0 as u64 + 1,
+        laps,
         strand,
         // When the frames merge there is no frame number to report, so the
         // offset from the origin stands in for one.
@@ -627,6 +715,162 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(find_orfs(seq.as_bytes(), TABLE11, true, &p(10)), first);
         }
+    }
+
+    /// The property that must hold for every reported ORF: the coordinates plus
+    /// the laps account for exactly the bases the scan walked.
+    fn span_accounts_for_every_base(o: &Orf, n: u64) {
+        let inclusive = if o.end >= o.start {
+            o.end - o.start + 1
+        } else {
+            n - o.start + 1 + o.end
+        };
+        assert_eq!(
+            inclusive + o.laps as u64 * n,
+            o.bases() as u64,
+            "start {} end {} laps {} do not account for {} bases on a {n} bp molecule",
+            o.start,
+            o.end,
+            o.laps,
+            o.bases()
+        );
+    }
+
+    #[test]
+    fn an_orf_that_goes_round_the_circle_more_than_once_says_how_many_laps() {
+        // When 3 does not divide the length, one turn of the frame is `n`
+        // codons, so the scan walks up to `3n` bases and a real ORF can be
+        // longer than the molecule. `make` reduces both endpoints modulo `n`,
+        // which is all a pair of positions on a circle can express — and the
+        // whole laps were simply dropped. This 19 bp circle carries a 10 aa,
+        // 33-base ORF and was reported as `start: 5, end: 18`: fourteen
+        // inclusive bases, `start < end`, so not even the origin-crossing
+        // convention hinted that anything was missing. A Python caller slicing
+        // 5..18 got four codons of a ten-residue protein.
+        let seq = b"CGTAATGCCTTTCCCTAAC";
+        let n = seq.len() as u64;
+        assert_eq!(n % 3, 1, "the merged-frame case is the point");
+        let orfs = find_orfs(seq, TABLE1, true, &p(1));
+        let o = orfs
+            .iter()
+            .find(|o| o.strand == Strand::Forward && o.start == 5)
+            .unwrap_or_else(|| panic!("the 10 aa ORF: {orfs:?}"));
+        assert_eq!((o.end, o.aa_len, o.wrapped), (18, 10, true));
+        assert_eq!(o.bases(), 33);
+        assert_eq!(o.laps, 1, "33 bases is one whole lap plus 14");
+        span_accounts_for_every_base(o, n);
+
+        // ...and the accounting holds for every ORF the scan reports, on both
+        // strands, including the ones whose reported range does read backwards.
+        for o in &orfs {
+            span_accounts_for_every_base(o, n);
+        }
+    }
+
+    #[test]
+    fn the_rotation_fixture_reports_the_two_laps_it_really_walks() {
+        // The crate's own 145 bp fixture, which printed `+ 91..94 97 aa` — four
+        // bases for a 294-base ORF, 2.03 laps of the circle — and
+        // `- 74..2 72 aa`, 74 wrapped bases for 219. The rotation test below
+        // could not catch either, because reduction modulo `n` is exactly what
+        // rotation-equivariance preserves.
+        let seq = format!(
+            "{}{}{}",
+            gene("ATG", 20, "TAA"),
+            "GGCACGTTCAGGCATTAGCCAGGCTTGACAT",
+            gene("GTG", 14, "TGA")
+        );
+        let n = seq.len() as u64;
+        assert_eq!(n, 145);
+        let orfs = find_orfs(seq.as_bytes(), TABLE11, true, &p(5));
+        for o in &orfs {
+            span_accounts_for_every_base(o, n);
+        }
+        assert!(
+            orfs.iter().any(|o| o.laps == 2),
+            "the 97 aa ORF laps the molecule twice: {orfs:?}"
+        );
+    }
+
+    #[test]
+    fn an_orf_that_fits_in_one_lap_reports_no_laps() {
+        // The guard against over-correcting: `laps` must stay 0 for every
+        // ordinary ORF, or every reader of a coordinate has to start doing
+        // arithmetic it never needed.
+        let g = gene("ATG", 30, "TAA");
+        let half = g.len() / 2;
+        let rotated = format!("{}TTTTTTTTT{}", &g[half..], &g[..half]);
+        let n = rotated.len() as u64;
+        assert_eq!(n % 3, 0, "distinct frames, so no ORF can exceed one lap");
+        for o in find_orfs(rotated.as_bytes(), TABLE1, true, &p(10)) {
+            assert_eq!(o.laps, 0, "{o:?}");
+            span_accounts_for_every_base(&o, n);
+        }
+        // And a linear molecule has no laps to make.
+        let seq = format!("TTTTT{}TTTTT", gene("ATG", 40, "TAA"));
+        for o in find_orfs(seq.as_bytes(), TABLE1, false, &p(10)) {
+            assert_eq!(o.laps, 0, "{o:?}");
+        }
+    }
+
+    #[test]
+    fn every_internal_start_codon_is_reported_when_nested_orfs_are_asked_for() {
+        // Once anything was open the start-codon test was unreachable until a
+        // stop cleared it, so the internal ATG at base 34 — which "begins at a
+        // start codon and ends at the first in-frame stop", this module's own
+        // definition — was skipped, uncounted and unmentioned. There was no
+        // switch, so a user could not tell "no internal start" from "internal
+        // starts hidden".
+        let seq = format!("ATG{}ATG{}TAA", FILLER.repeat(10), FILLER.repeat(10));
+        assert_eq!(seq.len(), 69);
+
+        let nested = Params {
+            nested: true,
+            ..p(1)
+        };
+        let got = find_orfs(seq.as_bytes(), TABLE1, false, &nested);
+        let inner = got
+            .iter()
+            .find(|o| o.strand == Strand::Forward && o.start == 34)
+            .unwrap_or_else(|| panic!("the internal ATG: {got:?}"));
+        assert_eq!((inner.end, inner.aa_len, inner.complete), (69, 11, true));
+        assert_eq!(&inner.start_codon, b"ATG");
+        // The outermost one is still there, unchanged.
+        let outer = got
+            .iter()
+            .find(|o| o.strand == Strand::Forward && o.start == 1)
+            .unwrap_or_else(|| panic!("the outermost ORF: {got:?}"));
+        assert_eq!((outer.end, outer.aa_len), (69, 22));
+    }
+
+    #[test]
+    fn nested_orfs_stay_hidden_unless_they_are_asked_for() {
+        // The guard against over-correcting. The default reading is unchanged,
+        // so nothing downstream starts seeing extra hits it did not ask for.
+        let seq = format!("ATG{}ATG{}TAA", FILLER.repeat(10), FILLER.repeat(10));
+        let default = find_orfs(seq.as_bytes(), TABLE1, false, &p(1));
+        assert!(
+            !default
+                .iter()
+                .any(|o| o.strand == Strand::Forward && o.start == 34),
+            "the default is outermost-only: {default:?}"
+        );
+
+        // And `nested` is inert under a stop-to-stop reading, where every
+        // non-stop codon would otherwise open a window and the "nested ORFs"
+        // would be a quadratic pile of suffixes of one run.
+        let loose = Params {
+            require_start: false,
+            ..p(1)
+        };
+        let loose_nested = Params {
+            nested: true,
+            ..loose
+        };
+        assert_eq!(
+            find_orfs(seq.as_bytes(), TABLE1, false, &loose),
+            find_orfs(seq.as_bytes(), TABLE1, false, &loose_nested)
+        );
     }
 
     #[test]

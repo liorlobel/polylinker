@@ -44,6 +44,56 @@ pub enum Error {
     /// No base calls at all — an `.fsa` fragment-analysis file, typically,
     /// which is a real thing to be handed and is not a chromatogram.
     NoBaseCalls,
+    /// A base-call tag is in the directory but its data is not in the file.
+    ///
+    /// Refused rather than worked around, because the two workarounds are both
+    /// substitutions. Dropping `PBAS2` and falling through to `PBAS1` hands
+    /// back the *human-edited* sequence labelled as the basecaller's, with
+    /// [`Trace::edited`] reading `false` — the exact substitution the module
+    /// header says this project keeps refusing, in a file format where the two
+    /// differ 58% of the time. Dropping `PBAS1` instead reports a file as
+    /// unedited when it records an edit. Either way the caller is shown a
+    /// sequence under the wrong name, which is worse than being shown none.
+    BaseCallsOutsideFile {
+        /// `PBAS1` or `PBAS2`.
+        key: String,
+        /// The `dataoffset` the directory gave.
+        offset: i64,
+        /// The `datasize` it claimed.
+        size: usize,
+        /// How many bytes the file actually has.
+        file: usize,
+    },
+}
+
+/// A directory entry whose data was not in the file, and so was not read.
+///
+/// Carried on [`Trace::dropped`] rather than discarded: a `.ab1` with a
+/// truncated `PCON2` parses perfectly well and comes back with no qualities at
+/// all, and "this file has no quality values" and "this file's quality values
+/// were unreadable" are different sentences. The first is what a caller says
+/// when it is handed an empty `quality` and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dropped {
+    /// The tag as `NAME` + number, e.g. `PCON2`.
+    pub key: String,
+    /// The `dataoffset` field, as written — negative offsets occur and are not
+    /// small ones.
+    pub offset: i64,
+    /// The `datasize` the directory claimed.
+    pub size: usize,
+    /// How many bytes the file actually has.
+    pub file: usize,
+}
+
+impl std::fmt::Display for Dropped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} claims {} bytes at offset {}, which is outside this {}-byte file",
+            self.key, self.size, self.offset, self.file
+        )
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -69,6 +119,18 @@ impl std::fmt::Display for Error {
                 f,
                 "no base calls in this file; it is probably fragment analysis \
                  (.fsa) rather than a sequencing read"
+            ),
+            Error::BaseCallsOutsideFile {
+                key,
+                offset,
+                size,
+                file,
+            } => write!(
+                f,
+                "{key} claims {size} bytes at offset {offset}, which is outside \
+                 this {file}-byte file; the file is damaged or truncated. \
+                 Reading the other base-call tag instead would report one \
+                 sequence under the other's name"
             ),
         }
     }
@@ -111,6 +173,15 @@ pub struct Trace {
     pub machine: String,
     pub run_start: String,
     pub abif_version: u16,
+    /// Directory entries whose data lay outside the file and were therefore not
+    /// read. Empty for an intact file.
+    ///
+    /// Every other field here is "what the file said"; this one is "what the
+    /// file said and we could not get". Without it a truncated `PCON2` is
+    /// indistinguishable from a file that never carried qualities, and the
+    /// caller prints *no quality values in this file* about a file that has
+    /// them.
+    pub dropped: Vec<Dropped>,
 }
 
 impl Trace {
@@ -143,11 +214,27 @@ impl Trace {
             .count()
     }
     /// Mean quality over the read, or `None` when the file carries none.
+    ///
+    /// `None` here means *no number*, not *no qualities in the file*. Check
+    /// [`Trace::quality_was_dropped`] before saying the second out loud.
     pub fn mean_quality(&self) -> Option<f64> {
         if self.quality.is_empty() {
             return None;
         }
         Some(self.quality.iter().map(|&q| q as f64).sum::<f64>() / self.quality.len() as f64)
+    }
+
+    /// Was [`Trace::quality`] empty because the file carries no qualities, or
+    /// because the ones it carries could not be read?
+    ///
+    /// The difference matters to what a caller is entitled to print. A dropped
+    /// `PCON2` makes every discrepancy come back at unknown confidence, which
+    /// is the conservative direction — but announcing "no quality values in
+    /// this file" about a file that has them is simply false.
+    pub fn quality_was_dropped(&self) -> bool {
+        self.dropped
+            .iter()
+            .any(|d| d.key == "PCON2" || d.key == "PCON1")
     }
 }
 
@@ -158,8 +245,17 @@ fn be_i32(b: &[u8], at: usize) -> i32 {
     i32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
-/// Every directory entry in an ABIF file.
-pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>), Error> {
+/// Every directory entry in an ABIF file, and every entry that had to be
+/// dropped because its data was not in the file.
+///
+/// The third element is not optional decoration. The `end > data.len()` check
+/// below validates the extent of the *directory* and says nothing about each
+/// entry's own `dataoffset`, so a file whose directory precedes its data — the
+/// layout this module's own test fixtures use — survives a tail truncation with
+/// an intact directory pointing at bytes that are gone. Chopping ten bytes off
+/// such a file is enough. Returning the surviving tags and nothing else made
+/// that indistinguishable from a file that never had them.
+pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>, Vec<Dropped>), Error> {
     if data.len() < 34 {
         return Err(Error::Truncated {
             need: 34,
@@ -197,6 +293,7 @@ pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>), Error> {
     }
 
     let mut out = Vec::with_capacity(count);
+    let mut dropped = Vec::new();
     for i in 0..count {
         let o = offset + i * 28;
         let mut name = [0u8; 4];
@@ -212,6 +309,15 @@ pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>), Error> {
         // it. Reading them as a pointer gives a plausible offset into the file
         // and four bytes of unrelated data -- and for the short tags that
         // matters most (`FWO_`, run dates) it would be wrong every time.
+        let note = |dropped: &mut Vec<Dropped>| {
+            dropped.push(Dropped {
+                key: format!("{}{}", String::from_utf8_lossy(&name), number),
+                offset: where_ as i64,
+                size,
+                file: data.len(),
+            });
+        };
+
         let bytes: Vec<u8> = if size <= 4 {
             where_.to_be_bytes()[..size].to_vec()
         } else {
@@ -219,14 +325,20 @@ pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>), Error> {
             // tag whose pointer sits before the start of the file read the
             // first `size` bytes instead — so a damaged .ab1 came back Ok with
             // its "sequence" set to the literal bytes "ABIF...". A pointer
-            // outside the file is dropped whichever end it falls off.
+            // outside the file is dropped whichever end it falls off — and
+            // recorded, because a tag that was there and could not be read is
+            // not the same thing as a tag that was never there.
             if where_ < 0 {
+                note(&mut dropped);
                 continue;
             }
             let start = where_ as usize;
             match start.checked_add(size).and_then(|end| data.get(start..end)) {
                 Some(s) => s.to_vec(),
-                None => continue, // a tag pointing outside the file is dropped
+                None => {
+                    note(&mut dropped);
+                    continue;
+                }
             }
         };
         out.push(Tag {
@@ -238,7 +350,7 @@ pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>), Error> {
             data: bytes,
         });
     }
-    Ok((version, out))
+    Ok((version, out, dropped))
 }
 
 fn find<'a>(tags: &'a [Tag], key: &str) -> Option<&'a Tag> {
@@ -269,7 +381,27 @@ fn as_u16s(t: Option<&Tag>) -> Vec<u16> {
 
 /// Parse a chromatogram.
 pub fn parse(data: &[u8]) -> Result<Trace, Error> {
-    let (version, tags) = tags(data)?;
+    let (version, tags, dropped) = tags(data)?;
+
+    // A dropped base-call tag is refused outright rather than worked around.
+    // Everything else that goes missing costs the caller information; losing
+    // one of these two changes what the *other* one is called. With `PBAS2`
+    // gone and `PBAS1` intact the match below falls into `(None, Some(e))` and
+    // hands back the human's edited sequence as the machine's read, with
+    // `edited()` reading false — and the two differ in 58% of real files, so
+    // this is not a corner. Chopping ten bytes off a file whose directory
+    // precedes its data is enough to trigger it.
+    if let Some(d) = dropped
+        .iter()
+        .find(|d| d.key == "PBAS2" || d.key == "PBAS1")
+    {
+        return Err(Error::BaseCallsOutsideFile {
+            key: d.key.clone(),
+            offset: d.offset,
+            size: d.size,
+            file: d.file,
+        });
+    }
 
     let called = find(&tags, "PBAS2").map(|t| t.data.clone());
     let edited = find(&tags, "PBAS1").map(|t| t.data.clone());
@@ -312,6 +444,7 @@ pub fn parse(data: &[u8]) -> Result<Trace, Error> {
         abif_version: version,
         sequence,
         edited_sequence,
+        dropped,
     })
 }
 
@@ -500,12 +633,99 @@ mod tests {
         let at = 128 + 20;
         f[at..at + 4].copy_from_slice(&(-1i32).to_be_bytes());
         match parse(&f) {
-            Err(Error::NoBaseCalls) => {}
+            // This used to be `NoBaseCalls`, which was true but incurious: the
+            // file does have base calls, they are just not where it says. The
+            // property being pinned is unchanged -- no sequence comes back --
+            // and the error now names the tag and the offset.
+            Err(Error::BaseCallsOutsideFile { key, offset, .. }) => {
+                assert_eq!(key, "PBAS2");
+                assert_eq!(offset, -1);
+            }
             Ok(t) => panic!(
                 "a negative offset must not yield a sequence, got {:?}",
                 String::from_utf8_lossy(&t.sequence)
             ),
             Err(e) => panic!("unexpected error {e:?}"),
         }
+    }
+
+    #[test]
+    fn a_quality_tag_whose_data_is_gone_is_reported_and_not_read_as_no_quality() {
+        // A plain tail truncation of a file whose directory precedes its data
+        // -- which is what `build` emits, and what a partial write produces.
+        // The directory extent check passes, because the directory is intact;
+        // it is PCON2's own payload that is off the end. Before this was
+        // recorded, `parse` returned Ok with an empty `quality`, and the only
+        // sentence a caller could form about that was "no quality values in
+        // this file", about a file that has them.
+        let mut f = build(&[
+            (b"PBAS", 2, 2, b"ACGTACGTAC"),
+            (b"PCON", 2, 2, &[20, 30, 40, 50, 60, 60, 60, 60, 60, 60]),
+        ]);
+        let whole = f.len();
+        f.truncate(whole - 1); // PCON2's payload is the last thing in the file
+
+        let t = parse(&f).expect("the read itself is still intact");
+        assert_eq!(t.sequence, b"ACGTACGTAC".to_vec());
+        assert!(t.quality.is_empty(), "the payload really is gone");
+        assert_eq!(t.mean_quality(), None);
+
+        assert_eq!(t.dropped.len(), 1, "{:?}", t.dropped);
+        assert_eq!(t.dropped[0].key, "PCON2");
+        assert_eq!(t.dropped[0].size, 10);
+        assert_eq!(t.dropped[0].file, whole - 1);
+        assert!(t.quality_was_dropped(), "and it is attributable to PCON2");
+        let said = t.dropped[0].to_string();
+        assert!(said.contains("PCON2"), "{said}");
+        assert!(said.contains("outside"), "{said}");
+    }
+
+    #[test]
+    fn a_lost_basecaller_sequence_is_refused_not_answered_with_the_human_edit() {
+        // The serious half. PBAS1 is the human's edit and PBAS2 the machine's,
+        // and they differ in 58% of real files. With PBAS2's payload truncated
+        // away, falling through to PBAS1 returns a *different sequence* under
+        // the basecaller's name with `edited()` reading false -- one person's
+        // correction presented as what the machine read.
+        let mut f = build(&[
+            (b"PBAS", 1, 2, b"ACGTACGTAA"),
+            (b"PBAS", 2, 2, b"ACGTACGTNN"),
+        ]);
+        let whole = f.len();
+        f.truncate(whole - 1); // PBAS2's payload is the last thing in the file
+
+        match parse(&f) {
+            Err(Error::BaseCallsOutsideFile {
+                key, size, file, ..
+            }) => {
+                assert_eq!(key, "PBAS2");
+                assert_eq!(size, 10);
+                assert_eq!(file, whole - 1);
+            }
+            Ok(t) => panic!(
+                "returned {:?} as the basecaller's sequence with edited() = {}",
+                String::from_utf8_lossy(&t.sequence),
+                t.edited()
+            ),
+            Err(e) => panic!("unexpected error {e:?}"),
+        }
+        let said = parse(&f).unwrap_err().to_string();
+        assert!(said.contains("PBAS2"), "{said}");
+    }
+
+    #[test]
+    fn an_intact_file_reports_nothing_dropped() {
+        // The control for the two above: the report channel must stay empty
+        // when there is nothing to report, or it means nothing when it is not.
+        let f = build(&[
+            (b"PBAS", 1, 2, b"ACGTACGTAA"),
+            (b"PBAS", 2, 2, b"ACGTACGTNN"),
+            (b"PCON", 2, 2, &[40u8; 10]),
+        ]);
+        let t = parse(&f).unwrap();
+        assert!(t.dropped.is_empty(), "{:?}", t.dropped);
+        assert!(!t.quality_was_dropped());
+        assert_eq!(t.mean_quality(), Some(40.0));
+        assert!(t.edited(), "and the edit is still carried");
     }
 }

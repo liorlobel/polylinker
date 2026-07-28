@@ -95,10 +95,53 @@ struct App {
     /// there at startup is by definition an unclean exit.
     recovery: Option<std::path::PathBuf>,
     stale: Vec<(std::path::PathBuf, Result<recover::Snapshot, String>)>,
-    /// Ops in the log when the last autosave was written, so an idle window
-    /// does not rewrite the same bytes forever.
-    autosaved_at_ops: usize,
+    /// What the recovery file on disk already holds, so an idle window does not
+    /// rewrite the same bytes forever.
+    autosaved: Option<Autosaved>,
     last_autosave: Option<std::time::Instant>,
+    /// Which application owns `.dna` on this machine, read at most once.
+    ///
+    /// `None` means "not asked yet"; `Some(None)` means nothing owns it. The
+    /// answer is a machine-wide registry setting that cannot change between
+    /// frames, and it used to be read live inside the welcome screen's paint
+    /// closure — a `cmd /C assoc .dna` child process spawned on every repaint,
+    /// blocking the UI thread on `.output()` until cmd.exe exited. Moving the
+    /// pointer across the empty window drove dozens of those a second, which is
+    /// what made the welcome screen stutter.
+    dna_owner: Option<Option<String>>,
+}
+
+/// Which document the recovery file holds, and exactly where in its history.
+///
+/// An op *count* is not a document identity, and using one silently kept the
+/// wrong molecule. [`pl_core::oplog::OpLog::path`] shrinks on undo and regrows
+/// when the next edit forks from the same parent, so "circularise, undo,
+/// reverse-complement" lands back on a path length of 1 with a different
+/// molecule: the old `ops == autosaved_at_ops` gate then returned on every
+/// frame and the recovery file kept the abandoned branch, with the Recover
+/// banner showing a matching op count so the staleness was invisible. The same
+/// collision crossed documents, because opening a second file left the counter
+/// alone: edit A once, open B and edit it once inside the thirty-second window,
+/// and the single recovery file still held A under A's title.
+///
+/// The cursor is content-addressed, so two different edits from the same parent
+/// cannot share it, and the path and title separate two documents that happen
+/// to sit at the same point in their own histories.
+#[derive(PartialEq, Eq)]
+struct Autosaved {
+    original: Option<std::path::PathBuf>,
+    title: String,
+    cursor: Option<pl_core::oplog::OpId>,
+}
+
+impl Autosaved {
+    /// The same document, wherever its history has since got to.
+    ///
+    /// The title is part of it because a document that was never saved has no
+    /// path, and two of those are not the same document.
+    fn same_document(&self, other: &Autosaved) -> bool {
+        self.original == other.original && self.title == other.title
+    }
 }
 
 impl App {
@@ -216,10 +259,33 @@ impl App {
     /// saving" into a lie.
     fn autosave(&mut self) {
         let Some(doc) = &self.document else { return };
-        let ops = doc.log.path().len();
-        if ops == self.autosaved_at_ops {
+        let here = Autosaved {
+            original: doc.path.clone(),
+            title: doc.title.clone(),
+            cursor: doc.log.cursor(),
+        };
+        // Already on disk, byte for byte. See [`Autosaved`] for why this is a
+        // cursor and not the op count it used to be.
+        if self.autosaved.as_ref() == Some(&here) {
             return;
         }
+        // An unedited document has nothing to protect: the user's own file
+        // already holds it. Writing one anyway would also let merely *opening*
+        // a second file discard the first one's unsaved draft, which is the
+        // opposite of this function's job.
+        //
+        // Undoing back to the base of the document already in the recovery file
+        // is a different case: that really is the state on screen, so it is
+        // written, and the file stops offering a branch the user has stepped
+        // off.
+        let same_document = self
+            .autosaved
+            .as_ref()
+            .is_some_and(|a| a.same_document(&here));
+        if here.cursor.is_none() && !same_document {
+            return;
+        }
+        let ops = doc.log.path().len();
         let now = std::time::Instant::now();
         if let Some(last) = self.last_autosave {
             if now.duration_since(last) < Self::AUTOSAVE_EVERY {
@@ -241,7 +307,7 @@ impl App {
         };
         match recover::write(&path, &snap) {
             Ok(()) => {
-                self.autosaved_at_ops = ops;
+                self.autosaved = Some(here);
                 self.last_autosave = Some(now);
             }
             // A failed autosave must not interrupt the work it exists to
@@ -251,15 +317,14 @@ impl App {
         }
     }
 
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Styles are per-theme in egui 0.35, so adjust both rather than
-        // stamping one over the user's light/dark preference.
-        cc.egui_ctx.all_styles_mut(|style| {
-            theme::apply(&mut style.visuals);
-            style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        });
-
-        let mut app = App {
+    /// An app with nothing open and nothing scanned.
+    ///
+    /// Split out of [`App::new`] so the state machine can be exercised without
+    /// an egui context: everything below this line is plain data, and the parts
+    /// that decide whether a recovery file is written are worth testing without
+    /// a window on the screen.
+    fn blank() -> Self {
+        App {
             document: None,
             error: None,
             tab: Tab::Features,
@@ -274,9 +339,34 @@ impl App {
             lib_absent: false,
             recovery: None,
             stale: Vec::new(),
-            autosaved_at_ops: 0,
+            autosaved: None,
             last_autosave: None,
-        };
+            dna_owner: None,
+        }
+    }
+
+    /// Who owns `.dna` on this machine, asked at most once per window.
+    ///
+    /// `read` is a parameter so the memo itself can be tested: the defect this
+    /// replaces was not a wrong answer but the *number of times* the answer was
+    /// fetched, and a test that cannot count the reads cannot see it.
+    fn dna_owner_with(&mut self, read: impl FnOnce() -> Option<String>) -> Option<&str> {
+        self.dna_owner.get_or_insert_with(read).as_deref()
+    }
+
+    fn dna_owner(&mut self) -> Option<&str> {
+        self.dna_owner_with(|| recover::association("dna"))
+    }
+
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Styles are per-theme in egui 0.35, so adjust both rather than
+        // stamping one over the user's light/dark preference.
+        cc.egui_ctx.all_styles_mut(|style| {
+            theme::apply(&mut style.visuals);
+            style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        });
+
+        let mut app = App::blank();
         // Anything left in the recovery directory by another process is an
         // unclean exit. Listed, never auto-restored: which of two drafts is the
         // wanted one is something the user knows and this program does not.
@@ -1296,16 +1386,19 @@ impl App {
         // matter most and indicative for the rest.
         let mol = d.molecule();
         let verdict = |dg: &pl_enzymes::Digest| -> Option<pl_enzymes::methylation::SiteEffect> {
-            let first = *dg.positions.first()? as usize;
-            // `positions` are 1-based cut sites; recover the site start.
-            let start = first
-                .saturating_sub(1)
-                .saturating_sub(dg.enzyme.fst5 as usize)
-                % mol.seq.len().max(1);
+            // Ask the digester where the site was rather than deriving it back
+            // from the cut. `cut_sites` carries `site_start` alongside the
+            // position because it already knows both, so there is exactly one
+            // mapping from a match to a cut in the tree. Recomputing it here
+            // was a second one, and the two disagreed on any site wrapping the
+            // origin.
+            let site = pl_enzymes::cut_sites(&mol.seq, mol.topology, dg.enzyme)
+                .into_iter()
+                .next()?;
             pl_enzymes::methylation::site_effect(
                 dg.enzyme,
                 &mol.seq,
-                start,
+                (site.site_start - 1) as usize,
                 mol.topology,
                 &mol.methylation,
             )
@@ -1631,6 +1724,18 @@ impl App {
         let mut hovered_out = None;
         let mut clicked_out = None;
 
+        // Asked here, outside the paint closure, and answered from a memo.
+        // Which application owns the extension is *read*, never changed —
+        // claiming .dna at install time is how two plasmid editors end up
+        // fighting over double-click — but reading it live inside the closure
+        // spawned a `cmd /C assoc .dna` child process on every repaint and
+        // blocked the UI thread on it until cmd.exe exited.
+        let association = if self.error.is_none() && self.document.is_none() {
+            association_note(self.dna_owner())
+        } else {
+            String::new()
+        };
+
         egui::CentralPanel::default().show(ui, |ui| {
             self.recovery_banner(ui);
             if let Some(err) = &error {
@@ -1648,20 +1753,7 @@ impl App {
                     ui.label(
                         RichText::new(format!(
                             "Drop a .dna, GenBank or FASTA file here\n\n\
-                             Nothing leaves this machine.{}",
-                            // Which application owns the extension is *read*,
-                            // never changed. Claiming .dna at install time is
-                            // how two plasmid editors end up fighting over
-                            // double-click, and doing it unasked is worse than
-                            // not doing it: say who owns it, and leave the
-                            // decision where it belongs.
-                            match recover::association("dna") {
-                                Some(h) if !h.contains("Polylinker") => format!(
-                                    "\n\n.dna files currently open in {h}.\n\
-                                     Polylinker does not change that."
-                                ),
-                                _ => String::new(),
-                            }
+                             Nothing leaves this machine.{association}"
                         ))
                         .color(pal(ui).muted)
                         .size(14.0),
@@ -1700,6 +1792,22 @@ impl App {
             };
             self.tab = Tab::Features;
         }
+    }
+}
+
+/// The line under the welcome text naming whoever currently owns `.dna`.
+///
+/// Doing it unasked is worse than not doing it: say who owns the extension, and
+/// leave the decision where it belongs. Silent when Polylinker already owns it,
+/// and silent when nothing does — there is nothing to tell the user in either
+/// case.
+fn association_note(owner: Option<&str>) -> String {
+    match owner {
+        Some(h) if !h.contains("Polylinker") => format!(
+            "\n\n.dna files currently open in {h}.\n\
+             Polylinker does not change that."
+        ),
+        _ => String::new(),
     }
 }
 
@@ -1815,5 +1923,255 @@ mod tests {
         ] {
             assert!(!strand_glyph(s).is_empty());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // autosave
+    // -----------------------------------------------------------------------
+
+    /// An app with a recovery file of its own, in the temp directory.
+    fn app_with_recovery(name: &str) -> (App, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pl-gui-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let path = dir.join(format!("{name}.recover"));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App::blank();
+        app.recovery = Some(path.clone());
+        (app, path)
+    }
+
+    /// A document holding `seq`, circularised, so it has exactly one edit.
+    fn edited_doc(name: &str, seq: &str) -> Document {
+        let mut d =
+            Document::from_bytes(format!(">x\n{seq}\n").as_bytes(), name.into(), None).unwrap();
+        d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        d
+    }
+
+    /// What the recovery file actually holds, read back as a molecule.
+    fn autosaved(path: &std::path::Path) -> (pl_core::Molecule, String) {
+        let text = std::fs::read_to_string(path).expect("a recovery file");
+        let snap = recover::decode(&text).expect("a readable header");
+        let (mol, _, _) =
+            pl_fileio::load_with_report(snap.genbank.as_bytes()).expect("a readable body");
+        (mol, snap.title)
+    }
+
+    #[test]
+    fn an_undo_then_a_different_edit_is_not_mistaken_for_the_autosaved_state() {
+        // The op *count* is not a document identity. Circularise (one op on the
+        // path), undo (none), reverse-complement (one again) — and the old
+        // `ops == autosaved_at_ops` gate returned on every frame from then on,
+        // so the recovery file kept the abandoned circular branch while the
+        // reverse-complemented molecule on screen was never written. The
+        // Recover banner showed a matching op count, so it looked right.
+        const SEQ: &str = "AAAACCCCGGGGTTTTAAGG";
+        let (mut app, path) = app_with_recovery("fork");
+        app.document = Some(edited_doc("x.fa", SEQ));
+        app.autosave();
+        assert_eq!(
+            autosaved(&path).0.topology,
+            pl_core::Topology::Circular,
+            "the premise: the first edit was written"
+        );
+
+        let d = app.document.as_mut().unwrap();
+        d.undo().unwrap();
+        d.apply(pl_core::OpKind::ReverseComplement).unwrap();
+        assert_eq!(d.log.path().len(), 1, "the collision this test is about");
+        // The thirty-second throttle is a separate question. Clear it so this
+        // is about identity and nothing else.
+        app.last_autosave = None;
+        app.autosave();
+
+        let (mol, _) = autosaved(&path);
+        assert_eq!(
+            mol.seq.to_ascii_uppercase(),
+            pl_core::reverse_complement(SEQ.as_bytes()),
+            "the molecule on screen, not the branch that was abandoned"
+        );
+        assert_eq!(mol.topology, pl_core::Topology::Linear);
+    }
+
+    #[test]
+    fn opening_a_second_document_does_not_inherit_the_first_ones_autosave_state() {
+        // Both documents are circularised from their base, and the log is
+        // content-addressed, so both cursors are the *same* OpId — which is
+        // why the identity carries the title and path as well. Before, editing
+        // A once and then B once left the single recovery file holding A's
+        // molecule under A's title, and B's work was never written at all.
+        let (mut app, path) = app_with_recovery("swap");
+        app.document = Some(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.autosave();
+        assert_eq!(autosaved(&path).1, "a.fa", "the premise");
+
+        app.document = Some(edited_doc("b.fa", "GGGGGGGGTTTTTTTTAACC"));
+        app.last_autosave = None;
+        app.autosave();
+
+        let (mol, title) = autosaved(&path);
+        assert_eq!(title, "b.fa", "the recovery file follows the open document");
+        assert_eq!(
+            mol.seq.to_ascii_uppercase(),
+            b"GGGGGGGGTTTTTTTTAACC".to_vec()
+        );
+    }
+
+    #[test]
+    fn an_idle_window_does_not_rewrite_the_same_bytes() {
+        // The control, and the reason the gate exists: `autosave` runs on every
+        // frame. Nothing changed, so nothing may be written.
+        let (mut app, path) = app_with_recovery("idle");
+        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.autosave();
+        assert!(path.exists());
+        std::fs::remove_file(&path).unwrap();
+        app.last_autosave = None;
+        for _ in 0..100 {
+            app.autosave();
+        }
+        assert!(!path.exists(), "an unchanged document was rewritten");
+    }
+
+    #[test]
+    fn merely_opening_another_file_does_not_discard_an_unsaved_draft() {
+        // The other half of "an unedited document has nothing to protect". A
+        // file that has only been *looked at* must not overwrite somebody's
+        // unsaved edits, however stale the identity check thinks they are.
+        let (mut app, path) = app_with_recovery("browse");
+        app.document = Some(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.autosave();
+
+        app.document = Some(Document::from_bytes(b">b\nTTTTTTTT\n", "b.fa".into(), None).unwrap());
+        app.last_autosave = None;
+        for _ in 0..10 {
+            app.autosave();
+        }
+        assert_eq!(autosaved(&path).1, "a.fa", "the draft was thrown away");
+    }
+
+    #[test]
+    fn undoing_back_to_the_base_leaves_the_recovery_file_showing_the_base() {
+        // The case the "unedited" gate must not swallow: this is the same
+        // document, and the base really is what is on screen, so the recovery
+        // file must stop offering the branch the user has just stepped off.
+        const SEQ: &str = "AAAACCCCGGGGTTTTAAGG";
+        let (mut app, path) = app_with_recovery("rewound");
+        app.document = Some(edited_doc("x.fa", SEQ));
+        app.autosave();
+        assert_eq!(autosaved(&path).0.topology, pl_core::Topology::Circular);
+
+        app.document.as_mut().unwrap().undo().unwrap();
+        app.last_autosave = None;
+        app.autosave();
+        assert_eq!(autosaved(&path).0.topology, pl_core::Topology::Linear);
+    }
+
+    #[test]
+    fn an_unedited_document_is_not_autosaved_at_all() {
+        // The other control. The user's own file already holds this, and a
+        // recovery file that exists is this program's only record of an
+        // unclean exit.
+        let (mut app, path) = app_with_recovery("unedited");
+        app.document =
+            Some(Document::from_bytes(b">x\nAAAACCCCGGGG\n", "x.fa".into(), None).unwrap());
+        for _ in 0..10 {
+            app.autosave();
+        }
+        assert!(!path.exists(), "nothing had been edited");
+    }
+
+    // -----------------------------------------------------------------------
+    // methylation verdicts, and the welcome screen
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_site_wrapping_the_origin_keeps_its_methylation_verdict() {
+        // ApaI's GGGCCC starts at 0-based 15 on this 20 bp circle and runs off
+        // the end, so `cut_positions` reports the cut at 1. Recovering the site
+        // start with `saturating_sub` clamped 1 - 1 - 5 to 0 — five bases to
+        // the right of the real site — and `site_effect` there finds nothing,
+        // so the Enzymes row showed a clean unique cutter for a site Dcm
+        // blocks: no strikethrough, no "Dcm blocked" label.
+        const SEQ: &[u8] = b"CAAAAAAAAAAACCAGGGCC";
+        let apai = pl_enzymes::by_name("ApaI").expect("ApaI ships");
+        let cuts = pl_enzymes::cut_positions(SEQ, pl_core::Topology::Circular, apai);
+        assert_eq!(cuts, vec![1], "the premise: one cut, on the origin");
+
+        // Asked of `cut_sites`, which is the mapping the app now uses, so this
+        // pins the live path rather than a second copy of the arithmetic.
+        let site = pl_enzymes::cut_sites(SEQ, pl_core::Topology::Circular, apai)
+            .into_iter()
+            .next()
+            .expect("one site");
+        assert_eq!(site.position, 1);
+        let start = (site.site_start - 1) as usize;
+        assert_eq!(start, 15, "the site starts where the site starts");
+
+        let meth = pl_core::Methylation {
+            dcm: true,
+            ..Default::default()
+        };
+        let effect = pl_enzymes::methylation::site_effect(
+            apai,
+            SEQ,
+            start,
+            pl_core::Topology::Circular,
+            &meth,
+        )
+        .expect("Dcm blocks this site");
+        assert_eq!(effect.effect, pl_enzymes::methylation::Effect::Blocked);
+        assert_eq!(effect.methylase, pl_enzymes::methylation::Methylase::Dcm);
+    }
+
+    #[test]
+    fn a_site_that_does_not_wrap_is_recovered_exactly_as_before() {
+        // The control. Modular arithmetic must not move a site that never
+        // needed it, on either topology.
+        const SEQ: &[u8] = b"AAAAGGGCCCAAAAAAAAAA";
+        let apai = pl_enzymes::by_name("ApaI").unwrap();
+        for topo in [pl_core::Topology::Circular, pl_core::Topology::Linear] {
+            let cuts = pl_enzymes::cut_positions(SEQ, topo, apai);
+            assert_eq!(cuts, vec![10], "{topo:?}");
+            let site = pl_enzymes::cut_sites(SEQ, topo, apai)
+                .into_iter()
+                .next()
+                .expect("one site");
+            assert_eq!(site.site_start, 5, "1-based, so 0-based 4  ({topo:?})");
+        }
+        // A molecule with no bases has no site to report, and inventing one
+        // would be a claim about a sequence there is nothing to say about.
+        assert!(pl_enzymes::cut_sites(b"", pl_core::Topology::Circular, apai).is_empty());
+    }
+
+    #[test]
+    fn the_file_association_is_read_once_and_not_on_every_repaint() {
+        // It was read live inside the welcome screen's paint closure, so every
+        // repaint spawned `cmd /C assoc .dna` and blocked the UI thread on
+        // `.output()` until cmd.exe exited. Pointer motion over the empty
+        // window drove dozens of those a second. The answer is a machine-wide
+        // registry setting; it cannot change between frames.
+        let mut app = App::blank();
+        let reads = std::cell::Cell::new(0);
+        for _ in 0..50 {
+            let owner = app.dna_owner_with(|| {
+                reads.set(reads.get() + 1);
+                Some("SnapGene.Document".to_string())
+            });
+            assert_eq!(owner, Some("SnapGene.Document"));
+        }
+        assert_eq!(reads.get(), 1, "one process, not fifty");
+    }
+
+    #[test]
+    fn the_welcome_screen_names_another_owner_and_stays_quiet_otherwise() {
+        // Saying who owns the extension is the whole point of reading it;
+        // saying it about ourselves, or about nobody, is noise.
+        let note = association_note(Some("SnapGene.Document"));
+        assert!(note.contains("SnapGene.Document"), "{note}");
+        assert!(note.contains("does not change that"), "{note}");
+        assert!(association_note(Some("Polylinker.dna")).is_empty());
+        assert!(association_note(None).is_empty());
     }
 }

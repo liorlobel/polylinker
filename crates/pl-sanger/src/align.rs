@@ -21,6 +21,22 @@
 //! Affine gaps, because one 12 bp deletion is one event and not twelve. Scores
 //! are kept two rows at a time; only the traceback is materialised in full, at
 //! one byte per cell per matrix.
+//!
+//! # Three bytes a cell has a ceiling, and it is asked for
+//!
+//! "Only the traceback" is still `3·(read+1)·(reference+1)` bytes, and until
+//! 2026-07-28 nothing bounded it. That is fine for the plasmid this crate was
+//! written against and is not fine one level up: when [`locate`] cannot place a
+//! read — the ordinary outcome of a failed sequencing reaction — the caller
+//! falls back to aligning against the *whole* reference, doubled first if it is
+//! circular. A 700 nt read against a 4.6 Mb circular genome asks for 19.3 GB in
+//! three allocations, and `vec![0u8; …]` does not return an error for that: it
+//! trips Rust's allocation error hook and aborts the process, with no report,
+//! no error and nothing naming the read or the reference.
+//!
+//! So the size is checked before it is asked for, and refused by name. A
+//! refusal that says *19.3 GB for a 700 nt read against 9.2 Mb of reference* is
+//! a different thing from a process that vanishes.
 
 use std::collections::HashMap;
 
@@ -86,23 +102,139 @@ impl Alignment {
 
 const NEG: i32 = i32::MIN / 4; // room to add penalties without overflowing
 
-/// Align `read` somewhere in `reference`.
+/// Why an alignment was not produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlignError {
+    /// The read or the reference was empty.
+    Empty,
+    /// The traceback would need more memory than it was allowed.
+    ///
+    /// Named rather than approximated, because "this read could not be placed"
+    /// and "this reference is too big to align exhaustively against" are
+    /// different answers and only one of them is about the read.
+    TracebackTooLarge {
+        read: usize,
+        reference: usize,
+        /// Bytes the three traceback matrices would need.
+        need: usize,
+        budget: usize,
+    },
+    /// The traceback fits the budget and the allocator still refused it.
+    ///
+    /// Reached through `try_reserve`, so this is a value and not an abort.
+    OutOfMemory { need: usize },
+}
+
+impl std::fmt::Display for AlignError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AlignError::Empty => write!(f, "nothing to align"),
+            AlignError::TracebackTooLarge {
+                read,
+                reference,
+                need,
+                budget,
+            } => write!(
+                f,
+                "aligning a {read} nt read against {reference} nt of reference \
+                 needs {} of traceback, over the {} allowed",
+                mib(*need),
+                mib(*budget)
+            ),
+            AlignError::OutOfMemory { need } => {
+                write!(f, "could not allocate {} of traceback", mib(*need))
+            }
+        }
+    }
+}
+
+fn mib(bytes: usize) -> String {
+    if bytes >= 1 << 30 {
+        format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1u64 << 20) as f64)
+    }
+}
+
+/// What [`semiglobal`] will spend on traceback unless told otherwise.
 ///
-/// `window` bounds the reference region considered; pass the whole reference to
-/// consider all of it. Returns `None` only for an empty read or reference.
-pub fn semiglobal(read: &[u8], reference: &[u8], sc: &Scoring) -> Option<Alignment> {
+/// 512 MiB, which at three bytes a cell buys a 1 kb read against about 175 kb
+/// of reference — every plasmid, cosmid and fosmid, and a doubled 85 kb circle.
+/// Past that the exhaustive fallback is not a slow right answer, it is an
+/// allocation the machine will not survive: the 4.6 Mb E. coli genome the
+/// fallback was reachable with wants 19.3 GB.
+pub const DEFAULT_TRACEBACK_BUDGET: usize = 512 << 20;
+
+/// Bytes of traceback an alignment of these lengths needs.
+///
+/// `None` on overflow, which is itself an answer: a size that does not fit a
+/// `usize` is not one to allocate.
+pub fn traceback_bytes(read: usize, reference: usize) -> Option<usize> {
+    read.checked_add(1)?
+        .checked_mul(reference.checked_add(1)?)?
+        .checked_mul(3)
+}
+
+/// A zeroed buffer, or `None` rather than a dead process.
+///
+/// `vec![0u8; n]` has no failure mode short of `handle_alloc_error`, which
+/// aborts. `try_reserve_exact` followed by `resize` cannot reallocate, so the
+/// resize cannot fail either.
+fn zeroed(n: usize) -> Option<Vec<u8>> {
+    let mut v: Vec<u8> = Vec::new();
+    v.try_reserve_exact(n).ok()?;
+    v.resize(n, 0);
+    Some(v)
+}
+
+/// Align `read` somewhere in `reference`, spending at most
+/// [`DEFAULT_TRACEBACK_BUDGET`] on the traceback.
+///
+/// `reference` bounds the region considered; pass the whole reference to
+/// consider all of it.
+pub fn semiglobal(read: &[u8], reference: &[u8], sc: &Scoring) -> Result<Alignment, AlignError> {
+    semiglobal_within(read, reference, sc, DEFAULT_TRACEBACK_BUDGET)
+}
+
+/// [`semiglobal`] with the traceback budget named explicitly.
+pub fn semiglobal_within(
+    read: &[u8],
+    reference: &[u8],
+    sc: &Scoring,
+    budget: usize,
+) -> Result<Alignment, AlignError> {
     let m = read.len();
     let n = reference.len();
     if m == 0 || n == 0 {
-        return None;
+        return Err(AlignError::Empty);
+    }
+
+    // Checked *before* anything is asked for. Asking and finding out is not an
+    // option here: the failure mode of an oversized `vec![0u8; …]` is an
+    // aborted process, which cannot be caught, reported or attributed to the
+    // read that caused it.
+    let need = traceback_bytes(m, n).ok_or(AlignError::TracebackTooLarge {
+        read: m,
+        reference: n,
+        need: usize::MAX,
+        budget,
+    })?;
+    if need > budget {
+        return Err(AlignError::TracebackTooLarge {
+            read: m,
+            reference: n,
+            need,
+            budget,
+        });
     }
 
     // Traceback, one byte per cell per matrix. 0 = came from M, 1 = from X
     // (gap in the read), 2 = from Y (gap in the reference).
     let w = n + 1;
-    let mut tb_m = vec![0u8; (m + 1) * w];
-    let mut tb_x = vec![0u8; (m + 1) * w];
-    let mut tb_y = vec![0u8; (m + 1) * w];
+    let cells = (m + 1) * w;
+    let mut tb_m = zeroed(cells).ok_or(AlignError::OutOfMemory { need })?;
+    let mut tb_x = zeroed(cells).ok_or(AlignError::OutOfMemory { need })?;
+    let mut tb_y = zeroed(cells).ok_or(AlignError::OutOfMemory { need })?;
 
     // Row 0. A leading run of reference with no read against it is free, which
     // is what lets the read sit anywhere.
@@ -225,7 +357,7 @@ pub fn semiglobal(read: &[u8], reference: &[u8], sc: &Scoring) -> Option<Alignme
         .iter()
         .filter(|o| matches!(o, Op::Match | Op::Mismatch | Op::Deletion))
         .count();
-    Some(Alignment {
+    Ok(Alignment {
         ref_start: j,
         ref_end: j + consumed,
         score: best,
@@ -423,5 +555,65 @@ mod tests {
         // Nothing in common: say so rather than guess.
         let junk = b"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
         assert!(locate(junk, &reference, 12, 100).is_none());
+    }
+
+    #[test]
+    fn a_traceback_too_big_to_allocate_is_named_and_not_attempted() {
+        // `vec![0u8; n]` has no error path: an oversized one aborts the
+        // process through `handle_alloc_error`, which no caller can catch,
+        // report or attribute. So the size is computed and compared first,
+        // and the refusal names the two lengths that produced it.
+        let reference = b"GGCCAATTCCGGAATTCCGGTTAACCGGTTAACCGGATCGATCGATCGTAG";
+        let read = &reference[10..40];
+        // 30 x 51 x 3 is 4743 bytes; a 1 kB budget cannot hold it.
+        let e = semiglobal_within(read, reference, &Scoring::default(), 1024).unwrap_err();
+        match e {
+            AlignError::TracebackTooLarge {
+                read: r,
+                reference: n,
+                need,
+                budget,
+            } => {
+                assert_eq!(r, 30);
+                assert_eq!(n, reference.len());
+                assert_eq!(need, traceback_bytes(30, reference.len()).unwrap());
+                assert_eq!(budget, 1024);
+            }
+            other => panic!("{other:?}"),
+        }
+        let said = e.to_string();
+        assert!(said.contains("30 nt read"), "{said}");
+        assert!(said.contains("51"), "{said}");
+
+        // The arithmetic the check runs on, at the size that made this matter:
+        // a 700 nt read against a doubled 4.6 Mb genome. Computed, never
+        // allocated -- if this test allocated it, it would be the bug.
+        assert_eq!(traceback_bytes(700, 9_200_000), Some(19_347_602_103));
+        assert!(traceback_bytes(700, 9_200_000).unwrap() > DEFAULT_TRACEBACK_BUDGET);
+        // And a size that does not fit a usize is an answer, not a panic.
+        assert_eq!(traceback_bytes(usize::MAX, usize::MAX), None);
+    }
+
+    #[test]
+    fn an_alignment_that_fits_the_budget_is_unchanged_by_the_check() {
+        // The control. The budget must not perturb any alignment that was
+        // always affordable, and the default must comfortably hold the
+        // plasmid-sized work this crate exists for.
+        let reference = b"TTTTTTTTTTGGCCAATTCCGGAATTCCGGTTAACCGGTTAAAAAAAAAA";
+        let read = &reference[10..40];
+        let a = semiglobal(read, reference, &Scoring::default()).unwrap();
+        let b = semiglobal_within(read, reference, &Scoring::default(), 1 << 20).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.ref_start, 10);
+        assert_eq!(a.identity(), 1.0);
+
+        // A 1 kb read against a doubled 85 kb plasmid still fits the default.
+        assert!(traceback_bytes(1_000, 170_000).unwrap() < DEFAULT_TRACEBACK_BUDGET);
+
+        // An empty input is still its own answer and not a size complaint.
+        assert_eq!(
+            semiglobal(b"", reference, &Scoring::default()).unwrap_err(),
+            AlignError::Empty
+        );
     }
 }

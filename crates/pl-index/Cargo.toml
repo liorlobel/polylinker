@@ -9,8 +9,11 @@ repository.workspace = true
 
 # Zero dependencies, like the rest of the correctness layer -- and enforced
 # rather than merely intended: `tools/ci.ps1` builds this crate for
-# wasm32-unknown-unknown, which fails the moment a storage or filesystem
-# concern leaks into the search engine. All I/O lives in `pl-scan`.
+# wasm32-unknown-unknown, which fails the moment a *dependency* that cannot
+# build for wasm32, or a platform-specific std API, is added. It does not fail
+# on a hand-written `std::fs` call -- wasm32-unknown-unknown compiles those
+# through its `unsupported` platform layer -- so `tests/purity.rs` reads the
+# source and fails on those. All I/O lives in `pl-scan`.
 [dependencies]
 pl-core.workspace = true
 

@@ -205,7 +205,10 @@ impl Method {
 }
 
 /// Why a Tm could not be computed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent: [`TmError::SaltUndefined`] carries the
+/// concentration it was handed, and one of the values that reaches it is NaN.
+#[derive(Debug, Clone, PartialEq)]
 pub enum TmError {
     /// Fewer than two bases: there is no stack to sum.
     TooShort,
@@ -218,6 +221,18 @@ pub enum TmError {
     NotUnambiguous(usize, u8),
     /// The denominator vanished, which no real oligo produces.
     Undefined,
+    /// A salt correction was asked for at a sodium concentration where it is
+    /// not defined. `.0` is that concentration, molar.
+    ///
+    /// Both corrections take a logarithm of `[Na⁺]`, which zero, a negative and
+    /// NaN all fail to have. Skipping the correction instead — which this did
+    /// until 2026-07-28 — does not fall back to *nothing*, it falls back to the
+    /// published parameters' own 1 M Na⁺ condition, and then reports that
+    /// number under a [`Method::describe`] line still naming the correction.
+    /// For ACGTACGTACGTACGTACGT that is 68.5 °C against 54.0 °C at the 50 mM
+    /// default: 14.5 degrees, beside the words "SantaLucia 1998 salt
+    /// correction, 0 mM Na+".
+    SaltUndefined(f64),
 }
 
 impl std::fmt::Display for TmError {
@@ -232,6 +247,13 @@ impl std::fmt::Display for TmError {
                 *b as char
             ),
             TmError::Undefined => write!(f, "the entropy term cancelled; no Tm is defined"),
+            TmError::SaltUndefined(na) => write!(
+                f,
+                "the salt correction needs a positive sodium concentration and \
+                 was given {} mM; a Tm computed without it would be the 1 M \
+                 Na+ number reported under the corrected model's name",
+                na * 1e3
+            ),
         }
     }
 }
@@ -292,9 +314,31 @@ pub fn tm(seq: &[u8], m: &Method) -> Result<Tm, TmError> {
         ds += m.table.sym.1;
     }
 
+    // A salt correction that cannot be computed is refused, not skipped.
+    //
+    // The guard here used to be `&& m.na_molar > 0.0`, which reads as caution
+    // and is not: it does not disable the correction, it substitutes a
+    // *different model* — the parameters as published, at 1 M Na+ — and hands
+    // the answer back under `describe()`'s unchanged "SantaLucia 1998 salt
+    // correction, 0 mM Na+". `pl tm --na 0 ACGTACGTACGTACGTACGT` reported
+    // 68.5 C where 50 mM gives 54.0 C. `--na nan` parses, fails `NaN > 0.0`,
+    // and printed the same 68.5 C beside "NaN mM Na+". A negative --na is the
+    // clearest of the three: without the guard, `ln` of a negative makes the
+    // denominator non-finite and the check below already returns `Undefined`,
+    // so the guard converted a working refusal into a plausible wrong number.
+    //
+    // Written as a positive test rather than `x <= 0.0`, because NaN fails
+    // every comparison and would slip past that one. `is_finite` also refuses
+    // an infinite concentration, which `--na inf` parses to and which has no
+    // more of a logarithm than the rest.
+    let na_usable = m.na_molar.is_finite() && m.na_molar > 0.0;
+    if m.salt != SaltCorrection::None && !na_usable {
+        return Err(TmError::SaltUndefined(m.na_molar));
+    }
+
     // Salt, on the entropy where the model puts it.
     let mut ds_corrected = ds;
-    if m.salt == SaltCorrection::SantaLucia1998 && m.na_molar > 0.0 {
+    if m.salt == SaltCorrection::SantaLucia1998 {
         ds_corrected += 0.368 * (up.len() as f64 - 1.0) * m.na_molar.ln();
     }
 
@@ -318,7 +362,9 @@ pub fn tm(seq: &[u8], m: &Method) -> Result<Tm, TmError> {
     }
     let mut celsius = (dh * 1000.0) / denom - 273.15;
 
-    if m.salt == SaltCorrection::SchildkrautLifson && m.na_molar > 0.0 {
+    if m.salt == SaltCorrection::SchildkrautLifson {
+        // Guarded above, together with SantaLucia1998: log10 of zero or a
+        // negative is no more defined than ln of one.
         celsius += 16.6 * m.na_molar.log10();
     }
 
@@ -538,6 +584,87 @@ mod tests {
         assert!(d.contains("50 mM"), "{d}");
         let d = Method::santalucia_2004().describe();
         assert!(d.contains("2004"), "{d}");
+    }
+
+    #[test]
+    fn a_salt_correction_at_zero_or_negative_or_nan_sodium_is_refused() {
+        // The guard here used to be `&& m.na_molar > 0.0`, which does not
+        // disable the correction: it reverts to the published parameters' own
+        // 1 M Na+ condition and reports that under `describe()`'s unchanged
+        // "SantaLucia 1998 salt correction". `pl tm --na 0` on this oligo
+        // printed 68.5 C where the 50 mM default gives 54.0 C, beside the
+        // words "0 mM Na+" -- a method line that does not describe the number
+        // next to it. Nothing upstream range-checks --na, and Rust's f64
+        // FromStr accepts "nan" and "inf".
+        let seq = b"ACGTACGTACGTACGTACGT";
+        // "inf" parses too, and has no more of a logarithm than the rest.
+        for na in [0.0, -50e-3, f64::NAN, f64::INFINITY] {
+            for salt in [
+                SaltCorrection::SantaLucia1998,
+                SaltCorrection::SchildkrautLifson,
+            ] {
+                let m = Method {
+                    salt,
+                    na_molar: na,
+                    ..Default::default()
+                };
+                match tm(seq, &m) {
+                    Err(TmError::SaltUndefined(got)) => {
+                        assert_eq!(got.is_nan(), na.is_nan());
+                        if !na.is_nan() {
+                            assert_eq!(got, na, "the message must name what it was given");
+                        }
+                    }
+                    other => panic!("{salt:?} at {na} molar Na+ gave {other:?}"),
+                }
+            }
+        }
+        // And the refusal says which quantity is at fault.
+        let m = Method {
+            na_molar: 0.0,
+            ..Default::default()
+        };
+        let msg = tm(seq, &m).unwrap_err().to_string();
+        assert!(msg.contains("sodium"), "{msg}");
+        assert!(msg.contains("0 mM"), "{msg}");
+    }
+
+    #[test]
+    fn asking_for_no_salt_correction_is_not_the_same_as_a_bad_concentration() {
+        // The control, and the reason the refusal is conditioned on the
+        // correction rather than on the concentration alone. `SaltCorrection::
+        // None` is a real, honestly-labelled model -- the parameters as
+        // published, at 1 M Na+ -- and `na_molar` is simply not read, so a
+        // nonsense value there must not stop it.
+        let seq = b"ACGTACGTACGTACGTACGT";
+        let none = Method {
+            salt: SaltCorrection::None,
+            na_molar: 0.0,
+            ..Default::default()
+        };
+        let a = tm(seq, &none).expect("no correction needs no concentration");
+        let also_none = Method {
+            na_molar: f64::NAN,
+            ..none
+        };
+        let b = tm(seq, &also_none).unwrap();
+        approx(a.tm, b.tm, 1e-12, "na is not read when unused");
+        assert!(
+            none.describe().contains("no salt correction"),
+            "{}",
+            none.describe()
+        );
+
+        // And an ordinary concentration is still corrected, in the direction
+        // it must be: the uncorrected 1 M number is the higher one.
+        let fifty = Method::default();
+        let c = tm(seq, &fifty).unwrap();
+        assert!(
+            a.tm > c.tm + 10.0,
+            "1 M Na+ ({}) must sit far above 50 mM ({})",
+            a.tm,
+            c.tm
+        );
     }
 
     #[test]

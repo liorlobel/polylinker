@@ -20,8 +20,23 @@
 //! real corpus is about a megabyte and a substring pass over it takes tens of
 //! microseconds, so there is nothing here for an index to speed up.
 
-use crate::scan::{find_in_row, Hit, Motif};
+use crate::scan::{find_in_row_capped, Hit, Motif};
 use crate::{Row, State, Topology};
+
+/// Hit coordinates one result set will keep, across every match in it.
+///
+/// **A bound on memory, never on the answer.** `total_hits` and
+/// [`Match::hits_total`] are exact past this point; what stops is the storing.
+///
+/// The number is 24 MB of `Hit` at 24 bytes each, and it is set against the
+/// biology rather than against a display. Over the 24 Mbase corpus this is
+/// built for, a fully specified 6-mer yields about 5,700 hits, a 5-mer with one
+/// degenerate position about 47,000, a 4-cutter like `GATC` about 94,000 and a
+/// 3-mer about 375,000 — so every motif anyone is actually cloning with fits
+/// whole, several times over. Past that, one- and two-base patterns yield
+/// 12,002,567 and 24,000,000 hits and used to retain 299.8 MB and 590.0 MB, on
+/// the UI thread, in a Library tab that re-runs its query on every repaint.
+pub const MAX_RETAINED_HITS: u64 = 1_000_000;
 
 /// What a query looked at, and what it could not.
 ///
@@ -181,7 +196,16 @@ pub fn contains_fold(haystack: &str, needle: &str) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Match<'a> {
     pub row: &'a Row,
+    /// Hit coordinates in `(start, strand)` order — **the first `n` of them**,
+    /// where `n` is whatever [`MAX_RETAINED_HITS`] left for this record.
+    /// Usually all of them; see `hits_total` before printing a count.
     pub hits: Vec<Hit>,
+    /// How many hits this record really has.
+    ///
+    /// Equal to `hits.len()` unless the result set exhausted its retention
+    /// budget. A caller that prints `hits.len()` as "the number of sites" is
+    /// printing a display artefact as a fact about a plasmid.
+    pub hits_total: u64,
 }
 
 /// Everything a search returns.
@@ -193,6 +217,13 @@ pub struct Results<'a> {
     /// because "showing 200 of 6,088,143" is a different statement from
     /// "showing 200".
     pub total_hits: u64,
+    /// Hits that were found and counted but whose coordinates were not kept,
+    /// because the result set reached [`MAX_RETAINED_HITS`].
+    ///
+    /// Non-zero means some `Match::hits` is a prefix of that record's sites,
+    /// and a caller drawing them has to say so. Zero for every query anyone
+    /// runs on purpose.
+    pub dropped_hits: u64,
 }
 
 /// A whole-library query.
@@ -224,6 +255,8 @@ pub fn run<'a>(rows: &'a [Row], packed: &[u8], q: &Query) -> Results<'a> {
     let mut buckets: Vec<(State, usize)> = Vec::new();
     let mut matches = Vec::new();
     let mut total_hits = 0u64;
+    let mut retained = 0u64;
+    let mut dropped_hits = 0u64;
 
     for row in rows {
         // Filters and text criteria apply to every record, searchable or not:
@@ -251,6 +284,7 @@ pub fn run<'a>(rows: &'a [Row], packed: &[u8], q: &Query) -> Results<'a> {
             matches.push(Match {
                 row,
                 hits: Vec::new(),
+                hits_total: 0,
             });
             continue;
         };
@@ -273,13 +307,26 @@ pub fn run<'a>(rows: &'a [Row], packed: &[u8], q: &Query) -> Results<'a> {
             cov.assumed_circular += 1;
         }
 
-        let hits = find_in_row(motif, packed, row);
-        let found = !hits.is_empty();
+        // `--absent` needs to know whether there is a site, not where: one hit
+        // is enough to answer, and the count comes back exact regardless.
+        // Without this an inverted query over a poly-N record still built --
+        // and threw away -- millions of coordinates.
+        let cap = if q.absent {
+            1
+        } else {
+            (MAX_RETAINED_HITS - retained) as usize
+        };
+        let (hits, n_hits) = find_in_row_capped(motif, packed, row, cap);
+        let found = n_hits > 0;
         if found != q.absent {
-            total_hits += hits.len() as u64;
+            total_hits += n_hits;
+            let kept = if q.absent { Vec::new() } else { hits };
+            retained += kept.len() as u64;
+            dropped_hits += n_hits - kept.len() as u64;
             matches.push(Match {
                 row,
-                hits: if q.absent { Vec::new() } else { hits },
+                hits: kept,
+                hits_total: n_hits,
             });
         }
     }
@@ -291,6 +338,7 @@ pub fn run<'a>(rows: &'a [Row], packed: &[u8], q: &Query) -> Results<'a> {
         matches,
         coverage: cov,
         total_hits,
+        dropped_hits,
     }
 }
 
@@ -636,6 +684,135 @@ mod tests {
         // strand of a poly-A is poly-T and matches nothing.
         assert_eq!(r.total_hits, 500);
         assert_eq!(r.matches[0].hits.len(), 500);
+    }
+
+    #[test]
+    fn a_result_set_stops_retaining_hits_past_its_budget_and_says_how_many_it_dropped() {
+        // The Library tab re-runs its query on the UI thread on every repaint,
+        // and a one-base motif over the 24 Mbase corpus used to build a
+        // 12,002,567-element `Vec<Hit>` -- 299.8 MB -- before a single row was
+        // drawn. Only the display was ever capped. Nothing may be lost to the
+        // bound except coordinates: the counts stay exact.
+        let half = (MAX_RETAINED_HITS / 2) as usize;
+        let seq = vec![b'A'; half];
+        let mut all = Vec::new();
+        let mut rows = Vec::new();
+        for i in 0..3 {
+            all.extend_from_slice(&seq);
+            rows.push(Row {
+                path: format!("poly{i}.gb"),
+                state: State::Ok,
+                topology: Topology::Linear,
+                length: half as u64,
+                seq_off: (i * half) as u64,
+                seq_bases: half as u64,
+                ..Default::default()
+            });
+        }
+        let packed = nibble::pack(&all);
+        let r = run(
+            &rows,
+            &packed,
+            &Query {
+                // Not palindromic: the minus strand of a poly-A is poly-T and
+                // matches nothing, so the arithmetic below is one hit per base.
+                motif: Some(Motif::new("A").unwrap()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(r.matches.len(), 3, "every record still matched");
+        assert_eq!(
+            r.total_hits,
+            MAX_RETAINED_HITS + half as u64,
+            "the count is exact past the bound; it is the storing that stops"
+        );
+        for m in &r.matches {
+            assert_eq!(
+                m.hits_total, half as u64,
+                "{}: its own count must be exact too",
+                m.row.path
+            );
+        }
+        let kept: u64 = r.matches.iter().map(|m| m.hits.len() as u64).sum();
+        assert_eq!(kept, MAX_RETAINED_HITS, "retention stopped at the bound");
+        assert_eq!(
+            r.dropped_hits, half as u64,
+            "and the drop is reported rather than swallowed"
+        );
+        // The kept ones are a prefix, not an arbitrary sample.
+        assert_eq!(r.matches[0].hits[0].start, 1);
+        assert!(r.matches[2].hits.is_empty(), "the budget was already spent");
+    }
+
+    #[test]
+    fn a_query_within_the_budget_keeps_every_hit_and_drops_nothing() {
+        // The control. The bound must be invisible to every query anyone runs
+        // on purpose -- a 6-mer over the whole measured corpus is about 5,700
+        // hits -- or it has traded one silent wrong answer for another.
+        let (rows, packed) = library();
+        let r = run(
+            &rows,
+            &packed,
+            &Query {
+                motif: Some(Motif::new("GAATTC").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.matches.len(), 1);
+        assert_eq!(r.matches[0].hits.len(), 1);
+        assert_eq!(r.matches[0].hits_total, 1);
+        assert_eq!(r.total_hits, 1);
+        assert_eq!(r.dropped_hits, 0, "nothing was near the bound");
+    }
+
+    #[test]
+    fn capping_a_single_record_keeps_the_first_hits_and_still_counts_them_all() {
+        // Directly against `find_in_row_capped`, because `run`'s budget only
+        // ever exercises the cap at one boundary.
+        let seq = b"GAATTCGAATTCGAATTCGAATTC";
+        let packed = nibble::pack(seq);
+        let row = Row {
+            state: State::Ok,
+            topology: Topology::Linear,
+            length: seq.len() as u64,
+            seq_bases: seq.len() as u64,
+            ..Default::default()
+        };
+        let motif = Motif::new("GAATTC").unwrap();
+        let full = crate::scan::find_in_row(&motif, &packed, &row);
+        assert_eq!(full.len(), 4, "the uncapped call is unchanged");
+
+        let (hits, total) = crate::scan::find_in_row_capped(&motif, &packed, &row, 2);
+        assert_eq!(total, 4, "every hit is counted, capped or not");
+        assert_eq!(hits, full[..2].to_vec(), "and the kept ones are the first");
+
+        let (hits, total) = crate::scan::find_in_row_capped(&motif, &packed, &row, 0);
+        assert!(hits.is_empty());
+        assert_eq!(total, 4, "a cap of zero still counts");
+
+        // Two strands, collected separately: each is capped on its own, so the
+        // merged list has to be cut again or a cap of 2 returns 4.
+        //          1234567890123456789012
+        let seq = b"ATGATGAAAAAACATCATAAAA";
+        let packed = nibble::pack(seq);
+        let row = Row {
+            state: State::Ok,
+            topology: Topology::Linear,
+            length: seq.len() as u64,
+            seq_bases: seq.len() as u64,
+            ..Default::default()
+        };
+        let motif = Motif::new("ATG").unwrap();
+        let full = crate::scan::find_in_row(&motif, &packed, &row);
+        assert_eq!(full.len(), 4, "two on each strand");
+        let (hits, total) = crate::scan::find_in_row_capped(&motif, &packed, &row, 2);
+        assert_eq!(total, 4);
+        assert_eq!(
+            hits,
+            full[..2].to_vec(),
+            "a cap of 2 is 2, not 2 per strand"
+        );
     }
 
     #[test]

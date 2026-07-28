@@ -12,11 +12,20 @@ Concentrations are the fiddly part and the reason this is worth doing.
 Biopython takes two strand concentrations in nM and forms
 `k = (dnac1 - dnac2/2) * 1e-9` for a non-self-complementary duplex, and
 `k = dnac1 * 1e-9` for a self-complementary one. Our model takes a single total
-strand concentration `C_T` and divides by `x`, where `x` is 4 for a palindrome
-and 1 otherwise. Those agree when `dnac1 = dnac2 = C_T` for the palindrome case
-and `dnac1 = 2*C_T`, `dnac2 = 0` otherwise -- a translation that is easy to get
-subtly wrong and would shift every number by a fraction of a degree, which is
-exactly the size of error nobody notices.
+strand concentration `C_T` and divides by `x`, where `x` is 1 for a palindrome
+and 4 otherwise. Those agree when `dnac1 = dnac2 = C_T` for the palindrome case
+and `dnac1 = dnac2 = C_T/2` otherwise, which gives `k = C_T/4` -- a translation
+that is easy to get subtly wrong and would shift every number by a fraction of
+a degree, which is exactly the size of error nobody notices.
+
+That first sentence read `x` is 4 for a palindrome and 1 otherwise until
+2026-07-28. It was a surviving copy of the pre-correction `docs/PLAN.md` §7.2
+wording, sitting in the very oracle that caught the error -- see the correction
+note at docs/PLAN.md:580. The code below has always been right (`theirs` sets
+`dnac1 = dnac2 = oligo_nM / 2` on line 69, i.e. `k = C_T/4`) and CI has always
+passed; the risk was someone reinstating the model or the translation from the
+prose above it and putting every palindrome back about 8 C out and every
+ordinary oligo about 4 C out.
 
 Exits 1 on any disagreement and on comparing nothing.
 """

@@ -98,6 +98,72 @@ fn seedable(word: &[u8], protein: bool) -> bool {
     })
 }
 
+/// Split one diagonal bucket's seeds into runs that are genuinely collinear.
+///
+/// # The failure this exists to prevent
+///
+/// Bucketing a diagonal as `d / bucket_width` is a fixed grid, and a grid
+/// cannot separate two copies of a record that happen to land in one cell. A
+/// 60 bp feature in direct tandem puts its copies on diagonals 60 apart; the
+/// DNA scan's `slack = 40` makes the cell 80 wide, so diagonals 160/220 share
+/// cell 2 while 140/200 straddle cells 1 and 2. The trigger was therefore grid
+/// alignment, not distance. When two copies did share a cell, the group was
+/// reduced to a single median diagonal, so only the copy nearest that diagonal
+/// was aligned and the other was dropped with no diagnostic at all: measured,
+/// 160 bp of leading filler reported one annotation and 140 bp reported two, on
+/// the same molecule. Worse on a circle, where absolute position depends on the
+/// file's origin — a 580 bp circle carrying one 60 bp tandem repeat reported 1
+/// annotation for 160 of its 580 rotations and 2 for the other 420, so the
+/// feature count changed with nothing but which base the file numbers 1. The
+/// records this bites are exactly the repeat-bearing ones (tetO7, lacO, 5xUAS,
+/// TALE, ITR) that PLAN §8.3 plans to add.
+///
+/// # Why the split is on collinearity and not on distance
+///
+/// Widening or narrowing the bucket cannot fix it, because distance does not
+/// carry the answer: one copy carrying a 60 bp insertion spreads its diagonals
+/// exactly as far as two copies 60 bp apart, and holding the insertion case
+/// together is the entire reason the bucketing exists
+/// (`an_indel_does_not_split_a_chain_into_unsupported_halves`).
+///
+/// What separates them is collinearity. A second copy walks record positions
+/// the first copy has already walked; a single copy with an indel never walks
+/// backwards through the record, however far its diagonal drifts. So a run
+/// accepts a seed only while *both* coordinates advance, and a seed that would
+/// step backwards in the record opens a new run rather than being averaged into
+/// the median of the old one.
+///
+/// Support is then counted per run, not per bucket, which is the honest count:
+/// a chain's evidence is the seeds that actually line up with it.
+fn collinear_runs<'a>(group: &[&'a Seed]) -> Vec<Vec<&'a Seed>> {
+    let mut seeds: Vec<&Seed> = group.to_vec();
+    // Deterministic, and the greedy assignment below depends on it: seeds are
+    // distinct `(query_pos, record_pos)` pairs, so this order is total.
+    seeds.sort_unstable_by_key(|s| (s.query_pos, s.record_pos));
+
+    let mut runs: Vec<Vec<&Seed>> = Vec::new();
+    for s in seeds {
+        // Extend the run whose tail sits *closest below* this seed. Taking the
+        // first run that merely could take it is what re-creates the bug on the
+        // small scale: the leading copy would swallow the trailing copy's first
+        // seeds and drag its median diagonal back onto itself.
+        let best = runs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                let tail = r[r.len() - 1];
+                tail.query_pos < s.query_pos && tail.record_pos < s.record_pos
+            })
+            .max_by_key(|(_, r)| r[r.len() - 1].record_pos)
+            .map(|(i, _)| i);
+        match best {
+            Some(i) => runs[i].push(s),
+            None => runs.push(vec![s]),
+        }
+    }
+    runs
+}
+
 /// A seed index over one alphabet's worth of database records.
 #[derive(Debug, Clone)]
 pub struct Index {
@@ -208,6 +274,11 @@ impl Index {
     /// indel shifts every subsequent seed onto a neighbouring diagonal — the
     /// exact case a purely-collinear chainer would split in two and then
     /// under-support.
+    ///
+    /// Bucketing alone is not enough to say "one place", though, because a
+    /// bucket is a fixed grid cell and two copies of a short feature can share
+    /// one. Each bucket is therefore split into collinear runs before a chain
+    /// is emitted; `collinear_runs` below carries the measurements.
     pub fn chain(
         &self,
         seeds: &[Seed],
@@ -243,41 +314,44 @@ impl Index {
 
         let mut out = Vec::new();
         for ((record, _), group) in merged {
-            if group.len() < min_seeds {
-                continue;
-            }
-            let mut diags: Vec<i64> = group
-                .iter()
-                .map(|s| s.query_pos as i64 - s.record_pos as i64)
-                .collect();
-            diags.sort_unstable();
-            let diagonal = diags[diags.len() / 2];
+            // One bucket is not one place. See [`collinear_runs`]: a group that
+            // holds two copies of the record must yield two chains, or the
+            // median below picks one copy's diagonal and the other copy is
+            // dropped without a word.
+            for run in collinear_runs(&group) {
+                if run.len() < min_seeds {
+                    continue;
+                }
+                let mut diags: Vec<i64> = run
+                    .iter()
+                    .map(|s| s.query_pos as i64 - s.record_pos as i64)
+                    .collect();
+                diags.sort_unstable();
+                let diagonal = diags[diags.len() / 2];
 
-            let rec_len = self.lengths[record as usize];
-            let rlo = group
-                .iter()
-                .map(|s| s.record_pos as usize)
-                .min()
-                .unwrap_or(0);
-            let rhi = group
-                .iter()
-                .map(|s| s.record_pos as usize + self.k)
-                .max()
-                .unwrap_or(rec_len)
-                .min(rec_len);
+                let rec_len = self.lengths[record as usize];
+                let rlo = run.iter().map(|s| s.record_pos as usize).min().unwrap_or(0);
+                let rhi = run
+                    .iter()
+                    .map(|s| s.record_pos as usize + self.k)
+                    .max()
+                    .unwrap_or(rec_len)
+                    .min(rec_len);
 
-            let lo = (diagonal - slack as i64).max(0) as usize;
-            let hi = ((diagonal + rec_len as i64 + slack as i64).max(0) as usize).min(query_len);
-            if lo >= hi || rlo >= rhi {
-                continue;
+                let lo = (diagonal - slack as i64).max(0) as usize;
+                let hi =
+                    ((diagonal + rec_len as i64 + slack as i64).max(0) as usize).min(query_len);
+                if lo >= hi || rlo >= rhi {
+                    continue;
+                }
+                out.push(Chain {
+                    record,
+                    diagonal,
+                    seeds: run.len(),
+                    window: (lo, hi),
+                    record_span: (rlo, rhi),
+                });
             }
-            out.push(Chain {
-                record,
-                diagonal,
-                seeds: group.len(),
-                window: (lo, hi),
-                record_span: (rlo, rhi),
-            });
         }
 
         // Deterministic order, so annotation output is stable between runs.
@@ -409,6 +483,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tandem_repeat_landing_in_one_diagonal_bucket_still_gives_two_chains() {
+        // The bucket grid, not the distance, used to decide this. A 60 bp
+        // feature in direct tandem has diagonals 60 apart; with slack 40 the
+        // bucket is 80 wide, so `pad = 160` puts diagonals 160 and 220 both in
+        // bucket 2 and the group collapsed to its median diagonal 220 — one
+        // chain, and the copy at 161..220 gone with no diagnostic. `pad = 140`
+        // (diagonals 140 and 200, Δ = 60, *smaller* than the bucket) straddled
+        // buckets 1 and 2 and reported both. Sweeping the pad is what shows it
+        // is grid alignment rather than proximity, so the test sweeps it.
+        let mut rng = Rng(0x7a4d_0000_1111_2222);
+        let feature = rng.seq(60);
+        let db = db_of(vec![rec("pf:a", &feature, false)]);
+        let idx = Index::build(&db, false, K_DNA);
+
+        for pad in [140usize, 150, 160, 170, 180, 190, 200, 210, 220] {
+            let query = format!("{}{feature}{feature}{}", rng.seq(pad), rng.seq(160));
+            let chains = idx.chain(&idx.seeds(query.as_bytes()), query.len(), 40, 3);
+            let mut ds: Vec<i64> = chains.iter().map(|c| c.diagonal).collect();
+            ds.sort_unstable();
+            ds.dedup();
+            assert_eq!(
+                ds,
+                vec![pad as i64, pad as i64 + 60],
+                "pad={pad}: a tandem repeat is two placements, not one: {chains:?}"
+            );
+        }
+    }
+
+    #[test]
     fn an_indel_does_not_split_a_chain_into_unsupported_halves() {
         // The bucketing exists for this case: after an insertion every later
         // seed sits on a different diagonal.
@@ -429,6 +532,30 @@ mod tests {
         );
         let (lo, hi) = chains[0].window;
         assert!(lo <= 200 && hi >= 501);
+    }
+
+    #[test]
+    fn a_single_copy_with_a_large_insertion_keeps_one_whole_record_chain() {
+        // The control for the tandem split above. Sixty bases inserted into the
+        // middle of a 200 bp feature spread its diagonals by exactly the 60 the
+        // tandem pair spreads by, so any rule that split on *distance* would cut
+        // this copy into two half-supported chains and report a feature twice at
+        // half coverage. The record coordinate is what tells them apart: here it
+        // never walks backwards, so all 179 seeds stay in one chain spanning the
+        // whole record.
+        let mut rng = Rng(0x51de_0000_3333_4444);
+        let feature = rng.seq(200);
+        let db = db_of(vec![rec("pf:a", &feature, false)]);
+        let idx = Index::build(&db, false, K_DNA);
+
+        let mut planted = feature.clone();
+        planted.insert_str(100, &rng.seq(60));
+        let query = format!("{}{planted}{}", rng.seq(200), rng.seq(200));
+
+        let chains = idx.chain(&idx.seeds(query.as_bytes()), query.len(), 40, 3);
+        assert_eq!(chains.len(), 1, "one copy, one chain: {chains:?}");
+        assert_eq!(chains[0].record_span, (0, 200));
+        assert_eq!(chains[0].seeds, 179, "no seed was split off: {chains:?}");
     }
 
     #[test]

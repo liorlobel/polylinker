@@ -17,9 +17,17 @@
 //!
 //! Every fragment may be used in either orientation, because nothing about a
 //! PCR product or a gel-purified band tells you which strand the tube contains.
-//! Products are deduplicated by `cdseguid`, which is invariant to both rotation
-//! and strand — so the same construct discovered by two different routes is
-//! reported once, and reported as the same thing.
+//! Products are deduplicated by a checksum of the finished molecule, so the same
+//! construct discovered by two different routes is reported once, and reported
+//! as the same thing.
+//!
+//! The two topologies do not get the same checksum and do not have the same
+//! symmetries. A circular product is keyed by `cdseguid`, which is invariant to
+//! rotation *and* strand; a linear one by `ldseguid`, which is invariant to
+//! strand alone, because a line has no rotation to be invariant to. Reading
+//! `cdseguid`'s guarantee on to the linear case is what once justified pinning
+//! the first fragment and silently dropping every arrangement that did not begin
+//! with it.
 //!
 //! # What this deliberately does not do
 //!
@@ -96,8 +104,14 @@ pub struct Product {
 }
 
 impl Product {
-    /// Rotation- and strand-invariant identity. Two routes to the same
-    /// construct give the same value.
+    /// The identity of the finished molecule. Two routes to the same construct
+    /// give the same value.
+    ///
+    /// `cdseguid` for a circular product, which is invariant to rotation and
+    /// strand; `ldseguid` for a linear one, which is invariant to strand only.
+    /// The difference is not a detail: a linear product has no rotation, so
+    /// nothing here can collapse two arrangements that differ by where the
+    /// molecule was started, and the search must not assume otherwise.
     ///
     /// `None` when the product contains anything outside `ACGT` — the SEGUID
     /// reference rejects ambiguity codes rather than guessing what they mean,
@@ -190,26 +204,51 @@ pub fn assemble(
     let mut out: Vec<Product> = Vec::new();
     let mut seen: std::collections::BTreeSet<String> = Default::default();
 
-    // Fragment 0 is pinned in the forward orientation. Every arrangement is
-    // reachable that way once products are deduplicated by a checksum that is
-    // itself rotation- and strand-invariant, and pinning removes the n·2
-    // symmetric copies of each answer.
+    // Which starts have to be tried is a question about the symmetries of the
+    // *product*, and the two topologies do not have the same ones.
+    //
+    // A circle can be rotated. Every cyclic arrangement therefore has an equal
+    // representative beginning with fragment 0 forward — rotate until it is
+    // first, reverse-complement the whole cycle if it is flipped — and
+    // `cdseguid` is invariant to both operations, so pinning fragment 0 there
+    // loses nothing and removes the n·2 symmetric copies of each answer.
+    //
+    // A line cannot be rotated. Its only symmetry is a global reverse
+    // complement, and `ldseguid` — what a linear product is keyed by — is
+    // strand-invariant and nothing more. The same pin therefore *deleted
+    // answers*: every arrangement with fragment 0 interior, or first and
+    // flipped, or last and forward, was unreachable. With A = H(30) + M1(100)
+    // and B = M2(100) + H(30), whose sole overlap is suffix(B) == prefix(A),
+    // `assemble(&[A, B], false, ..)` returned no product at all while
+    // `assemble(&[B, A], false, ..)` returned the 230 bp one — an ordinary
+    // two-fragment Gibson whose answer depended on the order the user happened
+    // to list the fragments in, reported as `error=no assembly`.
+    let starts: Vec<(usize, bool)> = if circular {
+        vec![(0, false)]
+    } else {
+        (0..n).flat_map(|i| [(i, false), (i, true)]).collect()
+    };
+
     let mut used = vec![false; n];
     let mut path: Vec<(usize, bool)> = Vec::new();
     let mut junctions: Vec<usize> = Vec::new();
-    used[0] = true;
-    path.push((0, false));
 
-    walk(
-        &seqs,
-        circular,
-        opts,
-        &mut used,
-        &mut path,
-        &mut junctions,
-        &mut out,
-        &mut seen,
-    );
+    for (start, flipped) in starts {
+        used[start] = true;
+        path.push((start, flipped));
+        walk(
+            &seqs,
+            circular,
+            opts,
+            &mut used,
+            &mut path,
+            &mut junctions,
+            &mut out,
+            &mut seen,
+        );
+        path.pop();
+        used[start] = false;
+    }
 
     out.sort_by_key(|p| p.identity());
     Ok(out)
@@ -228,7 +267,7 @@ fn walk(
 ) {
     let n = seqs.len();
     if path.len() == n {
-        if let Some(p) = finish(seqs, circular, path, junctions) {
+        if let Some(p) = finish(seqs, circular, opts, path, junctions) {
             let ck = p.identity();
             if seen.insert(ck) {
                 out.push(p);
@@ -264,6 +303,7 @@ fn walk(
 fn finish(
     seqs: &[[String; 2]],
     circular: bool,
+    opts: Options,
     path: &[(usize, bool)],
     junctions: &[usize],
 ) -> Option<Product> {
@@ -278,9 +318,20 @@ fn finish(
         // The last fragment must run back into the first, and that closing
         // homology is present twice in `acc` — once at each end — so one copy
         // comes off.
+        //
+        // It is held to the same `opts.limit` as every other junction. It used
+        // to be held to 1, which is not a weaker check but no check: with
+        // f1 = A + M1(100) + X(30) and f2 = X(30) + M2(100) + A, the walk took
+        // the real 30 bp homology and then "closed the circle" because f2's
+        // last base happened to equal f1's first — a 1-in-4 coincidence for any
+        // random pair of fragments. `assemble` returned one circular product of
+        // length 231 with `junctions == [30, 1]` and a valid cdseguid, and
+        // `pl bench-adapter` printed it as a finished construct for a reaction
+        // that has no second junction at all. The caller's `min_homology` was
+        // silently ignored at exactly the junction hardest to verify on a gel.
         let first = &seqs[path[0].0][path[0].1 as usize];
         let last = &seqs[path[path.len() - 1].0][path[path.len() - 1].1 as usize];
-        let k = terminal_overlap(last, first, 1)?;
+        let k = terminal_overlap(last, first, opts.limit)?;
         if k > acc.len() {
             return None;
         }
@@ -301,8 +352,17 @@ mod tests {
 
     /// Deterministic non-repeating DNA. Assembly fixtures must not repeat, or
     /// every fragment overlaps every other and the test measures nothing.
+    ///
+    /// The generator needs an odd state, and seeding it with `seed | 1` collided
+    /// on every adjacent even/odd pair: `0x56 | 1` and `0x57 | 1` are both
+    /// `0x57`, so `dna(0x56, 200)` and `dna(0x57, 200)` were byte-identical.
+    /// `homology_below_the_limit_is_not_a_junction` was built from exactly that
+    /// pair and so handed the assembler two fragments sharing a 200 bp terminal
+    /// run it was never meant to see -- a fixture that could only pass while the
+    /// search was too narrow to look. Doubling first keeps the state odd and
+    /// makes distinct seeds distinct streams.
     fn dna(seed: u64, n: usize) -> String {
-        let mut x = seed | 1;
+        let mut x = seed.wrapping_mul(2) | 1;
         (0..n)
             .map(|_| {
                 x ^= x << 13;
@@ -477,6 +537,129 @@ mod tests {
             assemble(&frags[..1], true, Options::default()),
             Err(AssemblyError::NotEnoughFragments)
         ));
+    }
+
+    #[test]
+    fn the_junction_that_closes_a_circle_is_held_to_the_same_limit_as_the_rest() {
+        // One designed homology and no second one. f2's last base equals f1's
+        // first, which is a 1-in-4 coincidence between any two fragments, and
+        // the closing junction used to accept it: `assemble` returned a
+        // circular product with `junctions == [30, 1]` and a confident
+        // cdseguid for a reaction that cannot circularise.
+        let x = dna(0xf00d, 30);
+        let f1 = format!("A{}{x}", dna(0xc0de, 100));
+        let f2 = format!("{x}{}A", dna(0xbeef, 100));
+
+        let p = assemble(
+            &[Dseq::new(&f1, false), Dseq::new(&f2, false)],
+            true,
+            Options::default(),
+        )
+        .unwrap();
+        assert!(
+            p.is_empty(),
+            "one junction does not close a circle: {:?}",
+            p.iter().map(|q| q.junctions.clone()).collect::<Vec<_>>()
+        );
+
+        // No product may ever carry a junction shorter than the limit asked
+        // for -- the closing one included.
+        for limit in [10usize, 20, 25, 30] {
+            let opts = Options {
+                limit,
+                ..Options::default()
+            };
+            for prod in
+                assemble(&[Dseq::new(&f1, false), Dseq::new(&f2, false)], true, opts).unwrap()
+            {
+                assert!(
+                    prod.junctions.iter().all(|&k| k >= limit),
+                    "limit {limit} but junctions {:?}",
+                    prod.junctions
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_linear_assembly_does_not_depend_on_which_fragment_was_listed_first() {
+        // The only overlap is suffix(B) == prefix(A), so the product is B->A.
+        // Pinning fragment 0 first and forward made that unreachable whenever
+        // the user happened to type A first, and `assemble` answered `Ok(vec![])`
+        // -- "no assembly" for an ordinary two-fragment Gibson.
+        let h = dna(0x2b2b, 30);
+        let a = format!("{h}{}", dna(0x3c3c, 100));
+        let b = format!("{}{h}", dna(0x4d4d, 100));
+
+        let ab = assemble(
+            &[Dseq::new(&a, false), Dseq::new(&b, false)],
+            false,
+            Options::default(),
+        )
+        .unwrap();
+        let ba = assemble(
+            &[Dseq::new(&b, false), Dseq::new(&a, false)],
+            false,
+            Options::default(),
+        )
+        .unwrap();
+
+        assert_eq!(ab.len(), 1, "listing A first must not lose the product");
+        assert_eq!(ba.len(), 1);
+        assert_eq!(ab[0].seq.watson.len(), 100 + 30 + 100);
+        assert_eq!(
+            ab[0].identity(),
+            ba[0].identity(),
+            "the same molecule, whichever order it was listed in"
+        );
+
+        // Fragment 0 interior, not merely last: C -> B -> A, so fragment 0 (A)
+        // is at the far end and fragment 1 (B) is in the middle.
+        let g = dna(0x5e5e, 30);
+        let c = format!("{}{g}", dna(0x6f6f, 100));
+        let b2 = format!("{g}{}{h}", dna(0x4d4d, 100));
+        let p = assemble(
+            &[
+                Dseq::new(&a, false),
+                Dseq::new(&b2, false),
+                Dseq::new(&c, false),
+            ],
+            false,
+            Options::default(),
+        )
+        .unwrap();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].seq.watson.len(), 100 + 30 + 100 + 30 + 100);
+    }
+
+    #[test]
+    fn opening_the_search_to_every_start_does_not_invent_products() {
+        // The control for the two fixes above. Trying every start and both
+        // orientations enumerates far more arrangements, and the dedup by
+        // `identity` is now doing real work: a linear assembly and its global
+        // reverse complement are one answer, not two, and fragments that share
+        // nothing must still share nothing.
+        let h = dna(0x7a7a, 30);
+        let a = format!("{h}{}", dna(0x8b8b, 100));
+        let b = format!("{}{h}", dna(0x9c9c, 100));
+        let p = assemble(
+            &[Dseq::new(&a, false), Dseq::new(&b, false)],
+            false,
+            Options::default(),
+        )
+        .unwrap();
+        assert_eq!(p.len(), 1, "one molecule, not it and its own rc: {p:?}");
+
+        let none = assemble(
+            &[
+                Dseq::new(&dna(0xd00d, 300), false),
+                Dseq::new(&dna(0xd00e, 300), false),
+            ],
+            false,
+            Options::default(),
+        )
+        .unwrap();
+        assert!(none.is_empty(), "{none:?}");
     }
 
     #[test]

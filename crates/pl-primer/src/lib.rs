@@ -246,14 +246,58 @@ pub fn find_bindings(primer: &[u8], template: &[u8], circular: bool, p: &Params)
                 (k, m, i)
             } else {
                 let back = i + seed.len();
-                let avail = back.min(oriented.len());
-                let region: Vec<u8> = ext[back - avail..back].to_vec();
+                // How much template we may look at 5' of the seed. On a line
+                // that is bounded by the start of the template; on a circle it
+                // is not, because "before position 1" is the end of the plasmid.
+                //
+                // Clamping the window at index 0 of the doubled buffer -- which
+                // this did until 2026-07-28 -- does not merely shorten the
+                // search, it *fabricates a tail*. For the 31 bp circle
+                // CAAATGGTGTGCACGAATGAGAACAGAACCA and the primer
+                // AACCACAAATGGTGTGCAC, a perfect 19/19 match to positions
+                // 27..31 + 1..14, the seed hit at i = 0 could see only 14
+                // template bases, so the five bases before the origin fell out
+                // of the window: the footprint came back as the bare 14 nt
+                // seed, five genuinely-annealing bases were reported as a 5'
+                // tail, start was 1 instead of 27, and the reported Tm was the
+                // 14-mer's -- 40.0 C against the true 51.2 C. Too *cold*, so
+                // the anneal step is run 11 degrees under and primes wherever
+                // it likes rather than failing loudly. Rotating the same
+                // plasmid so the site did not cross the origin gave the right
+                // answer, which is what made it an origin-dependent result.
+                //
+                // The reverse branch above never had this bug: it extends
+                // rightwards, and the doubled buffer already extends that way.
+                // The asymmetry was the tell.
+                let avail = if circular {
+                    // Never more than one turn of the circle, or a primer
+                    // longer than the plasmid would pair with the same bases
+                    // twice.
+                    oriented.len().min(n)
+                } else {
+                    back.min(oriented.len())
+                };
+                let region: Vec<u8> = if circular {
+                    // `back + n >= avail` because `avail <= n`, so this does
+                    // not underflow the way `back - avail` does.
+                    (0..avail)
+                        .map(|d| template[(back + n - avail + d) % n])
+                        .collect()
+                } else {
+                    ext[back - avail..back].to_vec()
+                };
                 let (k, m) = extend(
                     &oriented[oriented.len() - avail..],
                     &region,
                     p.extend_mismatches,
                 );
-                (k, m, back - k)
+                let start0 = if circular {
+                    // Same reason: the footprint may begin before the origin.
+                    (back + n - k) % n
+                } else {
+                    back - k
+                };
+                (k, m, start0)
             };
             if footprint_len < p.seed_len {
                 continue;
@@ -448,6 +492,69 @@ mod tests {
             "a circle should find at least the wrapping site: {circ:?} vs {lin:?}"
         );
         assert!(circ.iter().any(|b| b.end < b.start), "a wrapped footprint");
+    }
+
+    #[test]
+    fn a_footprint_reaching_back_over_the_origin_is_not_reported_as_a_tail() {
+        // The one existing circular test happens to exercise the case where the
+        // *seed itself* straddles the origin, which was always right because
+        // `back = i + seed_len` then runs past `n` and the window is big enough.
+        // The broken case is the other one: the seed lies wholly after the
+        // origin and only the 5' extension needs bases from before it.
+        //
+        // This primer is a perfect 19/19 match to positions 27..31 + 1..14. The
+        // clamp at index 0 of the doubled buffer returned start 1, a bare 14 nt
+        // footprint and a fabricated 5 nt tail "AACCA", with the 14-mer's Tm
+        // (40.0 C) standing in for the real 19-mer's (51.2 C) -- eleven degrees
+        // *low*, so the anneal step is run cold and primes everywhere.
+        //                1234567890123456789012345678901
+        let template = b"CAAATGGTGTGCACGAATGAGAACAGAACCA";
+        let primer = b"AACCACAAATGGTGTGCAC";
+        // Params::default(), not p(): seed_len 14 is what ships, and the bug
+        // needs the seed to be shorter than the primer.
+        let b = find_bindings(primer, template, true, &Default::default());
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert_eq!(b[0].strand, Strand::Forward);
+        assert_eq!(b[0].start, 27, "the site begins before the origin");
+        assert_eq!(b[0].end, 14, "and wraps past it");
+        assert_eq!(b[0].footprint, primer.to_vec(), "all 19 bases pair");
+        assert!(!b[0].has_tail(), "fabricated tail {:?}", b[0].tail_str());
+        let whole = tm(primer, &Method::default()).unwrap().tm;
+        assert!(
+            (b[0].tm.unwrap() - whole).abs() < 1e-9,
+            "the Tm must be the 19-mer's, got {:?} against {whole}",
+            b[0].tm
+        );
+
+        // Control: the clamp is *correct* on a line. There really is no
+        // template before position 1, so those five bases really are a tail,
+        // and the linear answer must not change.
+        let lin = find_bindings(primer, template, false, &Default::default());
+        assert_eq!(lin.len(), 1, "{lin:?}");
+        assert_eq!(lin[0].start, 1);
+        assert_eq!(lin[0].footprint.len(), 14);
+        assert_eq!(lin[0].tail_str(), "AACCA");
+    }
+
+    #[test]
+    fn rotating_the_plasmid_does_not_change_where_a_primer_anneals() {
+        // The same molecule with the origin moved: an answer that depends on
+        // where someone happened to rotate the map is not an answer.
+        let primer = b"AACCACAAATGGTGTGCAC";
+        let across = b"CAAATGGTGTGCACGAATGAGAACAGAACCA";
+        let clear = b"AACCACAAATGGTGTGCACGAATGAGAACAG";
+
+        let a = find_bindings(primer, across, true, &Default::default());
+        let c = find_bindings(primer, clear, true, &Default::default());
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].start, 1, "the control site does not cross the origin");
+        assert_eq!(c[0].end, 19);
+        assert_eq!(a[0].footprint, c[0].footprint);
+        assert_eq!(a[0].tail, c[0].tail);
+        assert_eq!(a[0].tm, c[0].tm);
+        // The span is the same length whichever side of the origin it starts.
+        assert_eq!(a[0].footprint.len(), 19);
     }
 
     #[test]

@@ -175,6 +175,177 @@ fn an_origin_spanning_feature_is_two_arcs_and_one_label() {
     well_formed(&svg).expect("malformed svg");
 }
 
+/// Where a named label ended up, as (x, anchor).
+fn label_at(sc: &Scene, name: &str) -> (f64, Anchor) {
+    sc.items
+        .iter()
+        .find_map(|i| match i {
+            Item::Text {
+                x, anchor, text, ..
+            } if text == name => Some((*x, *anchor)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no label {name}"))
+}
+
+#[test]
+fn a_wrapping_features_label_points_at_the_middle_of_the_whole_feature() {
+    // 502 bp on a 1000 bp plasmid, in two parts: [(999, 1000), (1, 500)]. The
+    // middle is base 250, a quarter turn clockwise, which is the right-hand
+    // label column. Adding half the total span to the first part and clamping
+    // it to that part's width pinned the anchor to base 1000 instead -- 359.6
+    // degrees, and since the column is chosen by `sin >= 0` and sin is -0.006
+    // there, the label went to the LEFT column with a leader across the figure
+    // pointing at 2 bases of the 502.
+    let mut wrapped = plasmid(1000, true);
+    wrapped.features.push(feat("bla", "CDS", 999, 500));
+    let (sc, _) = scene(&wrapped, Options::default());
+    let (x, anchor) = label_at(&sc, "bla");
+
+    // The same 502 bp feature that does not cross the origin, which was always
+    // anchored correctly. Identical name, identical size, so identical ring
+    // radius: the two must land in the same column, or the picture depends on
+    // where the origin happens to sit.
+    let mut straight = plasmid(1000, true);
+    straight.features.push(feat("bla", "CDS", 100, 601));
+    let (sc2, _) = scene(&straight, Options::default());
+    let (x2, anchor2) = label_at(&sc2, "bla");
+
+    assert_eq!(
+        anchor,
+        Anchor::Start,
+        "the middle is at 89.6 degrees: right"
+    );
+    assert_eq!((x, anchor), (x2, anchor2), "the origin moved the label");
+    assert!(x > sc.width / 2.0, "left of centre: {x}");
+}
+
+#[test]
+fn a_single_part_features_anchor_is_where_it_always_was() {
+    // The control for the accumulator: for a feature in one piece it must
+    // compute exactly what the old clamp did, or every existing map moves.
+    for (start, end) in [(100u64, 600u64), (1, 1000), (7, 7), (250, 251)] {
+        let parts = ranges(start, end, 1000, true);
+        let span: u64 = parts.iter().map(|(a, b)| b - a + 1).sum();
+        let old = parts[0].0 + (span / 2).min(parts[0].1 - parts[0].0);
+        assert_eq!(mid_base(&parts, span), old, "{start}..{end}");
+    }
+}
+
+#[test]
+fn a_segment_past_the_end_is_reported_even_when_a_sibling_segment_is_drawable() {
+    // `CDS join(100..200,5000..6000)` on a 1000 bp plasmid, which is how a
+    // feature copied out of a larger parent record arrives. The map can draw
+    // only the first exon, and a 101 bp single-exon `orfX` is indistinguishable
+    // from a real one -- so the loss has to be named. The all-or-nothing check
+    // could not see it: `parts` was non-empty, so nothing was reported.
+    let mut m = plasmid(1000, true);
+    let mut f = Feature::new("orfX", "CDS");
+    f.segments.push(Segment::new(100, 200));
+    f.segments.push(Segment::new(5000, 6000));
+    m.features.push(f);
+    let (svg, report) = circular_svg(&m, Options::default());
+    assert_eq!(report.partly_drawn, vec!["orfX".to_string()]);
+    // It *was* drawn, in part, so it is not malformed -- the CLI says
+    // "not drawn" about that list and that would be a second untruth.
+    assert!(report.malformed.is_empty(), "{:?}", report.malformed);
+    assert!(svg.contains("orfX"), "the surviving exon is still drawn");
+}
+
+#[test]
+fn a_feature_wholly_inside_the_molecule_is_not_called_partly_drawn() {
+    // The control: ordinary features, single- and multi-segment, report
+    // nothing. Over-reporting a loss that did not happen would train the reader
+    // to ignore the message.
+    let mut m = plasmid(1000, true);
+    m.features.push(feat("whole", "CDS", 100, 200));
+    let mut j = Feature::new("spliced", "CDS");
+    j.segments.push(Segment::new(100, 200));
+    j.segments.push(Segment::new(400, 500));
+    m.features.push(j);
+    m.features.push(feat("wraps", "CDS", 950, 50));
+    let (_, report) = circular_svg(&m, Options::default());
+    assert!(report.partly_drawn.is_empty(), "{:?}", report.partly_drawn);
+    assert!(report.malformed.is_empty());
+}
+
+#[test]
+fn no_label_is_drawn_past_the_edge_of_the_canvas() {
+    // The radius reserves room for the widest label, but that reservation is
+    // capped at 30% of the canvas so one long name cannot collapse the ring --
+    // and past the cap the name no longer fits in what was reserved. A 31-char
+    // name at the defaults put the label's right edge at 734.6 against a
+    // 720-wide canvas, where the viewBox, the /MediaBox and the %%BoundingBox
+    // all crop it silently.
+    let long = "TetR-P2A-EGFP-WPRE-polyA-signal";
+    let mut m = plasmid(1000, true);
+    m.features.push(feat(long, "CDS", 100, 500));
+    m.features.push(feat("ori", "rep_origin", 600, 700));
+    let (sc, report) = scene(&m, Options::default());
+    for item in &sc.items {
+        if let Item::Text {
+            x,
+            size,
+            anchor,
+            text,
+            ..
+        } = item
+        {
+            let w = label_width(text, *size);
+            let (l, r) = match anchor {
+                Anchor::Start => (*x, x + w),
+                Anchor::Middle => (x - w / 2.0, x + w / 2.0),
+                Anchor::End => (x - w, *x),
+            };
+            assert!(
+                l >= 0.0 && r <= sc.width,
+                "{text:?} runs from {l} to {r} on a canvas 0..{}",
+                sc.width
+            );
+        }
+    }
+    assert_eq!(report.labels_truncated, vec![long.to_string()]);
+    // Shortened, not dropped: the reader can still tell which feature it is.
+    assert!(sc.items.iter().any(|i| matches!(
+        i,
+        Item::Text { text, .. } if text.starts_with("TetR-P2A") && text.ends_with("...")
+    )));
+}
+
+#[test]
+fn a_name_that_fits_is_left_exactly_as_it_is() {
+    // The control for the shortening: it must fire only where the cap binds.
+    // Every name on an ordinary map goes out whole and nothing is reported.
+    let mut m = plasmid(5386, true);
+    m.features.push(feat("bla", "CDS", 100, 960));
+    m.features
+        .push(feat("AmpR-promoter", "promoter", 1200, 1400));
+    let (svg, report) = circular_svg(&m, Options::default());
+    assert!(report.labels_truncated.is_empty());
+    assert!(svg.contains(">AmpR-promoter<"), "{svg}");
+    assert!(!svg.contains("..."));
+}
+
+#[test]
+fn the_agreement_harness_is_described_as_the_check_it_actually_is() {
+    // The crate doc used to say the harness "renders the same molecule through
+    // both and asserts they describe the same picture". It does not: it replays
+    // scalar fixtures through ten standalone helpers and never builds a
+    // Molecule. Believing otherwise is what left `scene` with no oracle at all,
+    // which is how the origin-spanning anchor above survived. If anyone
+    // restores the picture-level claim, the harness has to grow a picture.
+    const DOC: &str = include_str!("lib.rs");
+    const HARNESS: &str = include_str!("../tests/agreement.rs");
+    let doc = DOC.split("\npub ").next().unwrap_or(DOC);
+    let claims_a_picture = doc.contains("describe the same picture")
+        || doc.contains("renders the same molecule through both");
+    let checks_a_picture = HARNESS.contains("scene(") || HARNESS.contains("circular_svg");
+    assert!(
+        !claims_a_picture || checks_a_picture,
+        "the crate doc claims a picture-level cross-check that agreement.rs does not make"
+    );
+}
+
 #[test]
 fn degenerate_molecules_do_not_panic() {
     let mut track = Molecule {
@@ -249,12 +420,46 @@ fn a_negative_zero_formats_as_zero() {
     assert_eq!(n(12.3456), "12.35");
 }
 
+/// The `to` of the first arc in an `Arrow::End` path: the arrowhead's base.
+///
+/// The shape is `Move(ro, a0)`, `Arc(ro, a0 -> base)`, then the barbs, so the
+/// first arc's far end *is* the base angle. Reading it back out of the emitted
+/// segments is the only way to assert where the arrowhead starts without
+/// re-implementing `arc_segs` in the test.
+fn first_arc_to(segs: &[Seg]) -> f64 {
+    segs.iter()
+        .find_map(|s| match *s {
+            Seg::Arc { to, .. } => Some(to),
+            _ => None,
+        })
+        .expect("an arc")
+}
+
 #[test]
 fn a_short_feature_degrades_to_a_triangle_not_a_bow_tie() {
     // The arrowhead is clamped to half the arc; unclamped it would start before
     // the arc did and the path would cross itself.
-    let segs = arc_segs(100.0, 100.0, 80.0, 98.0, 0.0, 0.01, Arrow::End);
+    //
+    // Asserting that the coordinates are finite does not test this: with the
+    // clamp deleted, head = 8/89 = 0.0899 against a sweep of 0.01, so the base
+    // lands at -0.0799 -- before the arc starts, self-intersecting -- and every
+    // coordinate is still a perfectly finite `polar` of a finite angle. The
+    // assertion that catches it is where the base sits.
+    let (a0, a1) = (0.0, 0.01);
+    let segs = arc_segs(100.0, 100.0, 80.0, 98.0, a0, a1, Arrow::End);
     assert!(!segs.is_empty());
+    let base = first_arc_to(&segs);
+    assert!(
+        base > a0,
+        "the arrowhead starts at {base}, before the arc's own start {a0}: a bow tie"
+    );
+    assert!(
+        base <= a1,
+        "the arrowhead starts past the arc's end: {base}"
+    );
+    // Half the arc exactly, which is what "degrades to a triangle" means: the
+    // head takes as much as it may and the shaft keeps the rest.
+    assert!((base - (a0 + a1) / 2.0).abs() < 1e-12, "{base}");
     for s in &segs {
         let finite = match *s {
             Seg::Move(x, y) | Seg::Line(x, y) => x.is_finite() && y.is_finite(),
@@ -278,4 +483,17 @@ fn a_short_feature_degrades_to_a_triangle_not_a_bow_tie() {
     // And the same shape reaches both back ends.
     let d = svg_path(&segs);
     assert!(!d.contains("NaN"), "{d}");
+}
+
+#[test]
+fn a_feature_long_enough_for_a_full_arrowhead_keeps_one() {
+    // The control for the clamp: it must bind only where it has to. A 1 radian
+    // arc is far longer than the 8/89 radians the arrowhead wants, so the head
+    // is its full size and the base is a1 - 8/mid, not the midpoint.
+    let (ri, ro, a0, a1) = (80.0, 98.0, 0.0, 1.0);
+    let segs = arc_segs(100.0, 100.0, ri, ro, a0, a1, Arrow::End);
+    let mid = (ri + ro) / 2.0;
+    let base = first_arc_to(&segs);
+    assert!((base - (a1 - 8.0 / mid)).abs() < 1e-12, "{base}");
+    assert!(base > a0 && base < a1);
 }

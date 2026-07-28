@@ -53,6 +53,114 @@ impl Default for Options {
 
 const TOP: f64 = 34.0; // room for the lane labels and the wells
 const PAD: f64 = 18.0;
+/// How far outside the lane a band's size label is set.
+const LABEL_OFFSET: f64 = 4.0;
+const BAND_LABEL_SIZE: f64 = 9.0;
+const NOTE_SIZE: f64 = 8.5;
+
+/// Width of a string in points, from Helvetica's advance widths.
+///
+/// pl-gel takes no dependencies, so there is no font metric table to consult —
+/// but a band label is only ever digits and `/`, and Helvetica's digits are all
+/// 0.556 em (they are tabular by design, so a size label cannot surprise us)
+/// with `/` at 0.278 em. Anything else in a caption is charged 0.6 em, which
+/// over-estimates for the lower case that dominates English prose; the estimate
+/// erring wide is the direction that keeps text inside the page.
+fn text_width(s: &str, size: f64) -> f64 {
+    size * s
+        .chars()
+        .map(|c| match c {
+            '0'..='9' => 0.556,
+            '/' | ' ' | ',' | '.' | 'i' | 'l' | 'j' | 't' | 'f' => 0.278,
+            _ => 0.6,
+        })
+        .sum::<f64>()
+}
+
+/// Where the lanes sit and how wide the picture has to be to hold them.
+///
+/// Split out because the geometry has to be computed once and *used* twice —
+/// by the renderer and by the tests. `lanes_do_not_overlap` re-derived the lane
+/// positions from a formula copied out of `to_scene`, checked the lane
+/// rectangles and nothing else, and so stayed green while every band label ran
+/// off the edge of the viewBox.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Layout {
+    /// Left edge of lane 0.
+    left: f64,
+    /// Centre-to-centre spacing minus the lane width. At least
+    /// `Options::lane_gap`, wider when the size labels need the room.
+    gap: f64,
+    width: f64,
+}
+
+impl Layout {
+    fn x_of(&self, i: usize, o: &Options) -> f64 {
+        self.left + i as f64 * (o.lane_width + self.gap)
+    }
+}
+
+/// Reserve room for the text, not just for the rectangles.
+///
+/// Band size labels are drawn *outside* the lane: to the right for a sample
+/// lane, to the left for a ladder. Nothing used to add their extents to the
+/// scene, so the two outermost columns of labels were cut off by the SVG
+/// viewBox and the PDF MediaBox alike — `pl gel demo.gb --cut EcoRI --svg`
+/// emitted `viewBox="0 0 200 424"` with `<text x="186" …>3180</text>`, which
+/// needs about 20 pt and had 14. The label was not missing but *truncated*, so
+/// the reader saw a partial, entirely plausible fragment size. The same 4 pt
+/// offset put a `2000/2100` label about 29 pt into the neighbouring lane
+/// whenever more than one lane was drawn.
+fn layout(lanes: &[Lane], o: &Options) -> Layout {
+    let widest = |ladder: bool| -> f64 {
+        lanes
+            .iter()
+            .filter(|l| l.is_ladder == ladder)
+            .flat_map(|l| l.sim.groups.iter())
+            .map(|g| text_width(&label_of(g), BAND_LABEL_SIZE))
+            .fold(0.0f64, f64::max)
+    };
+    let sample = widest(false);
+    let ladder = widest(true);
+
+    // The unplaced-fragment captions are centred under their lane, so only the
+    // half that hangs past the lane edge needs reserving.
+    let note_over = if o.note_unplaced {
+        lanes
+            .iter()
+            .flat_map(notes_for)
+            .map(|n| (text_width(&n, NOTE_SIZE) - o.lane_width) / 2.0)
+            .fold(0.0f64, f64::max)
+            .max(0.0)
+    } else {
+        0.0
+    };
+
+    let left = (LABEL_OFFSET + ladder + 2.0).max(PAD).max(PAD + note_over);
+    let right = (LABEL_OFFSET + sample + 2.0).max(PAD).max(PAD + note_over);
+    // A ladder in the middle of a gel puts its labels in the gap to its left,
+    // so the gap has to hold whichever kind of label is wider.
+    let gap = o.lane_gap.max(LABEL_OFFSET * 2.0 + sample.max(ladder));
+    let width = left
+        + right
+        + lanes.len() as f64 * o.lane_width
+        + (lanes.len().saturating_sub(1)) as f64 * gap;
+    Layout { left, gap, width }
+}
+
+/// The captions for the fragments this lane's gel cannot place.
+fn notes_for(lane: &Lane) -> Vec<String> {
+    let mut notes = Vec::new();
+    let big = lane.sim.too_large();
+    let small = lane.sim.too_small();
+    if !big.is_empty() {
+        notes.push(format!("{} too large to place", join(&big)));
+    }
+    if !small.is_empty() {
+        notes.push(format!("{} too small to place", join(&small)));
+    }
+    notes
+}
 
 /// Draw a set of lanes.
 pub fn to_scene(lanes: &[Lane], o: &Options, title: &str) -> Scene {
@@ -67,9 +175,8 @@ pub fn to_scene(lanes: &[Lane], o: &Options, title: &str) -> Scene {
         })
         .fold(80.0f64, f64::max);
     let gel_h = run_mm * o.scale + 24.0;
-    let width = PAD * 2.0
-        + lanes.len() as f64 * o.lane_width
-        + (lanes.len().saturating_sub(1)) as f64 * o.lane_gap;
+    let lay = layout(lanes, o);
+    let width = lay.width;
     let note_h = if o.note_unplaced { 46.0 } else { 14.0 };
     let height = TOP + gel_h + note_h;
 
@@ -88,7 +195,7 @@ pub fn to_scene(lanes: &[Lane], o: &Options, title: &str) -> Scene {
     }];
 
     for (i, lane) in lanes.iter().enumerate() {
-        let x = PAD + i as f64 * (o.lane_width + o.lane_gap);
+        let x = lay.x_of(i, o);
         // The well.
         items.push(Item::Path {
             segs: rect(x, TOP - 8.0, o.lane_width, 6.0),
@@ -121,14 +228,14 @@ pub fn to_scene(lanes: &[Lane], o: &Options, title: &str) -> Scene {
             // their sizes to the right of the lane so they do not sit on top of
             // the band itself.
             let (lx, anchor) = if lane.is_ladder {
-                (x - 4.0, Anchor::End)
+                (x - LABEL_OFFSET, Anchor::End)
             } else {
-                (x + o.lane_width + 4.0, Anchor::Start)
+                (x + o.lane_width + LABEL_OFFSET, Anchor::Start)
             };
             items.push(Item::Text {
                 x: lx,
                 y,
-                size: 9.0,
+                size: BAND_LABEL_SIZE,
                 anchor,
                 color: if g.is_merged() { text } else { dim }.into(),
                 bold: g.is_merged(),
@@ -137,20 +244,12 @@ pub fn to_scene(lanes: &[Lane], o: &Options, title: &str) -> Scene {
         }
 
         if o.note_unplaced {
-            let mut notes = Vec::new();
-            let big = lane.sim.too_large();
-            let small = lane.sim.too_small();
-            if !big.is_empty() {
-                notes.push(format!("{} too large to place", join(&big)));
-            }
-            if !small.is_empty() {
-                notes.push(format!("{} too small to place", join(&small)));
-            }
+            let notes = notes_for(lane);
             for (k, n) in notes.iter().enumerate() {
                 items.push(Item::Text {
                     x: x + o.lane_width / 2.0,
                     y: TOP + gel_h + 12.0 + k as f64 * 12.0,
-                    size: 8.5,
+                    size: NOTE_SIZE,
                     anchor: Anchor::Middle,
                     color: dim.into(),
                     bold: false,
@@ -268,6 +367,16 @@ mod tests {
         assert!(big < small, "8 kb at {big} must sit above 1 kb at {small}");
     }
 
+    /// Left and right edge of a piece of text, in scene coordinates.
+    fn extent(x: f64, size: f64, anchor: Anchor, text: &str) -> (f64, f64) {
+        let w = text_width(text, size);
+        match anchor {
+            Anchor::Start => (x, x + w),
+            Anchor::Middle => (x - w / 2.0, x + w / 2.0),
+            Anchor::End => (x - w, x),
+        }
+    }
+
     #[test]
     fn lanes_do_not_overlap() {
         let lanes = vec![
@@ -277,11 +386,139 @@ mod tests {
         ];
         let o = Options::default();
         let sc = to_scene(&lanes, &o, "t");
+        // The lane positions come from `layout`, the same function the
+        // renderer uses. They used to be re-derived here from a copy of the
+        // width formula, which is how this test kept passing while the picture
+        // it describes had its labels cut off.
+        let lay = layout(&lanes, &o);
         for i in 0..lanes.len() {
-            let x = PAD + i as f64 * (o.lane_width + o.lane_gap);
+            let x = lay.x_of(i, &o);
             assert!(x + o.lane_width <= sc.width - PAD + 1e-9);
+            if i + 1 < lanes.len() {
+                assert!(
+                    x + o.lane_width <= lay.x_of(i + 1, &o) + 1e-9,
+                    "lane {i} runs into lane {}",
+                    i + 1
+                );
+            }
         }
         assert!(sc.width > 0.0 && sc.height > 0.0);
+    }
+
+    #[test]
+    fn every_label_is_inside_the_picture_it_is_drawn_on() {
+        // pl_draw emits `viewBox="0 0 width height"` and an SVG clips at its
+        // viewport, so anything past `sc.width` is not merely close to the
+        // edge, it is gone. The shipped CLI reproduced this exactly: a gel of
+        // demo-construct.gb cut with EcoRI came out `viewBox="0 0 200 424"`
+        // with `<text x="186" … text-anchor="start">3180</text>` — 14 pt of
+        // room for a label needing 20. The trailing digit fell off, so the
+        // reader saw "318", a perfectly plausible fragment size that is not
+        // the one on the gel.
+        let cases = vec![
+            vec![lane(&[2_000, 2_100, 6_000], "digest", false)],
+            vec![
+                lane(&[500, 1_000, 3_000, 10_000], "ladder", true),
+                lane(&[3_180, 1_120], "EcoRI", false),
+            ],
+            // A gel with unplaceable fragments, whose caption is the widest
+            // text on the picture.
+            vec![Lane {
+                label: "d".into(),
+                sim: Gel::modelled(Conditions {
+                    agarose_percent: 2.0,
+                    ..Default::default()
+                })
+                .run(&[20, 800, 40_000]),
+                is_ladder: false,
+            }],
+        ];
+        for lanes in cases {
+            let sc = to_scene(&lanes, &Options::default(), "t");
+            for item in &sc.items {
+                let Item::Text {
+                    x,
+                    size,
+                    anchor,
+                    text,
+                    ..
+                } = item
+                else {
+                    continue;
+                };
+                let (l, r) = extent(*x, *size, *anchor, text);
+                assert!(l >= -1e-9, "{text:?} starts at {l}, off the left edge");
+                assert!(
+                    r <= sc.width + 1e-9,
+                    "{text:?} ends at {r}, past the {} pt edge",
+                    sc.width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_band_label_does_not_sit_over_the_next_lane() {
+        // The other half of the same 4 pt offset: with the default 16 pt gap a
+        // "2000/2100" label is about 45 pt wide and runs 29 pt into whatever
+        // is drawn beside it.
+        let lanes = vec![
+            lane(&[2_000, 2_100], "a", false),
+            lane(&[900, 4_000], "b", false),
+            lane(&[6_000], "c", false),
+        ];
+        let o = Options::default();
+        let sc = to_scene(&lanes, &o, "t");
+        let lay = layout(&lanes, &o);
+        let band_labels: Vec<(f64, f64, String)> = sc
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Text {
+                    x,
+                    size,
+                    anchor,
+                    text,
+                    ..
+                } if *size == BAND_LABEL_SIZE => {
+                    let (l, r) = extent(*x, *size, *anchor, text);
+                    Some((l, r, text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!band_labels.is_empty(), "the fixture must draw labels");
+        for (l, r, text) in band_labels {
+            let next = (0..lanes.len())
+                .map(|i| lay.x_of(i, &o))
+                .find(|&x| x > l + 1e-9);
+            if let Some(next) = next {
+                assert!(
+                    r <= next + 1e-9,
+                    "{text:?} runs to {r}, over the lane starting at {next}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_gel_with_no_labels_to_place_is_not_padded_for_them() {
+        // The control. Reserving room for text must be driven by the text that
+        // is actually there: an empty gel keeps the plain PAD margins, so the
+        // fix cannot be "make everything wider and hope".
+        let o = Options::default();
+        let sc = to_scene(&[lane(&[], "empty", false)], &o, "t");
+        assert_eq!(sc.width, PAD * 2.0 + o.lane_width);
+        // And a one-lane gel whose only label is narrow gets a narrow margin,
+        // not the widest one any gel might need.
+        let narrow = to_scene(&[lane(&[2_000], "a", false)], &o, "t");
+        let wide = to_scene(&[lane(&[2_000, 2_100], "a", false)], &o, "t");
+        assert!(
+            narrow.width < wide.width,
+            "{} vs {}",
+            narrow.width,
+            wide.width
+        );
     }
 
     #[test]

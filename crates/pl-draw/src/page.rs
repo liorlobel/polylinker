@@ -263,8 +263,28 @@ mod tests {
         // 85 mm at 300 dpi is 85/25.4*300 = 1003.9 px.
         assert_eq!(f.pixels(300.0), (1004, 502));
         assert_eq!(f.pixels(600.0), (2008, 1004));
-        // Never zero, however small the figure.
-        assert_eq!(Fit::to_width_mm(&s, 0.01).pixels(72.0).0.max(1), 1);
+        // Never zero, however small the figure: 0.01 mm at 72 dpi is 0.028 px,
+        // which rounds to nothing, and a raster export of zero by zero pixels
+        // is a file that no viewer will open.
+        //
+        // The `.max(1)` guard belongs on the *left* of this comparison and used
+        // to be: `pixels().0.max(1) == 1` is true whether `pixels` returns 0 or
+        // 1, so the guard it exists to protect could be deleted with the suite
+        // still green. Both dimensions are read, because only the width was.
+        assert_eq!(Fit::to_width_mm(&s, 0.01).pixels(72.0), (1, 1));
+    }
+
+    #[test]
+    fn a_raster_export_is_never_zero_pixels_in_either_dimension() {
+        // The height guard is a separate line of code from the width guard and
+        // needs its own case: a scene 4000 units wide and 1 unit tall, printed
+        // at 85 mm, is 0.02 mm tall.
+        let tall = scene_with(4000.0, 1.0, &[]);
+        let f = Fit::to_width_mm(&tall, 85.0);
+        assert!(f.height_mm < 0.03, "{} mm", f.height_mm);
+        let (w, h) = f.pixels(300.0);
+        assert!(w >= 1 && h >= 1, "{w} x {h}");
+        assert_eq!(h, 1, "rounded away to nothing, then floored to one");
     }
 
     #[test]

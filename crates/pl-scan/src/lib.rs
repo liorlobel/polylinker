@@ -73,8 +73,15 @@ use pl_index::{codec::Library, Row, State, Topology};
 /// every coverage footer — never silence. `pl library --problems` lists them.
 pub const MAX_BASES: u64 = 2_000_000;
 
-/// The same cap in bytes, applied before reading, since we cannot count bases
-/// in a file we have not opened.
+/// The same cap in bytes, since we cannot count bases in a file we have not
+/// opened.
+///
+/// Applied in **two** places, and the first one is the one that matters:
+/// `scan` compares the walk's `size` against it *before* `std::fs::read`, so an
+/// over-cap file is never allocated and never hashed. `rows_for_file` checks it
+/// again because that function is pure and only ever sees bytes — a caller
+/// handing it a 1.39 GB buffer has already paid, and the row it gets back must
+/// still say `TooLarge` rather than attempt the parse.
 pub const MAX_BYTES: u64 = 64_000_000;
 
 /// Records one file may contribute before it is refused as a reference set.

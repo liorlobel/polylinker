@@ -543,8 +543,6 @@ impl Molecule {
         self.validate().is_empty()
     }
 
-    /// Rotate a circular molecule so that 1-based position `origin` becomes 1,
-    /// moving every annotation with it. No-op on a linear molecule.
     /// Features whose strand GenBank cannot express.
     ///
     /// A GenBank location is either plain or wrapped in `complement()`, so
@@ -567,6 +565,12 @@ impl Molecule {
             .collect()
     }
 
+    /// Rotate a circular molecule so that 1-based position `origin` becomes 1,
+    /// moving every annotation with it. No-op on a linear molecule.
+    ///
+    /// A coordinate that does not name a real base is left exactly where it is
+    /// rather than being moved onto one; see the note on `remap` below for the
+    /// fabrication that prevents.
     pub fn rotate(&mut self, origin: u64) -> bool {
         let n = self.len();
         if !self.topology.is_circular() || n == 0 || origin == 0 || origin > n {
@@ -577,17 +581,34 @@ impl Molecule {
             return true;
         }
         self.seq.rotate_left(shift as usize);
-        // Coordinates are clamped into `1..=n` before the arithmetic.
+        // The two out-of-range directions are NOT symmetric, and treating them
+        // as one `clamp(1, n)` was a fabrication.
         //
-        // `p - 1` underflowed on `start == 0`, which the SnapGene reader can
-        // produce and deliberately carries through rather than dropping
-        // (`<Segment range="0-4"/>`). In debug that panicked; under the wasm
-        // profile, which disables overflow checks and aborts on panic, it
+        // Below 1: `p - 1` underflowed on `start == 0`, which the SnapGene
+        // reader can produce and deliberately carries through rather than
+        // dropping (`<Segment range="0-4"/>`). In debug that panicked; under the
+        // wasm profile, which disables overflow checks and aborts on panic, it
         // instead silently relocated the annotation somewhere else entirely.
-        // Clamping rather than mapping 0 to 0 preserves the span's *length*,
-        // which is the property a reader would notice going wrong.
+        // Raising it to 1 is defensible because 0 is *adjacent* to a real
+        // coordinate: base 0 does not exist, so `0-4` describes the four bases
+        // 1..4, and raising preserves the span's *length*, which is the property
+        // a reader would notice going wrong.
+        //
+        // Past the end: there is no such adjacency and nothing to preserve.
+        // Clamping 999 down to n on a 16 bp circle turned segment `4..999` —
+        // which `validate()` reports as `PastEnd { end: 999, len: 16 }` — into
+        // `16..12`, a perfectly legal 13 bp wrap, so the defect report vanished
+        // and the operation log committed the edit (its gate only refuses
+        // problem kinds whose count went *up*). Worse, `20..25`, where both ends
+        // are past the end, collapsed to a 1 bp segment at base 12 — a base the
+        // feature never named. A coordinate past the end names no base, so
+        // rotating it onto one invents coverage; it is left alone, which keeps
+        // `validate()` reporting it and keeps the loss visible.
         let remap = |p: u64| -> u64 {
-            let p = p.clamp(1, n);
+            if p > n {
+                return p;
+            }
+            let p = p.max(1);
             ((p - 1 + n - shift) % n) + 1
         };
         for f in &mut self.features {
@@ -712,6 +733,133 @@ mod tests {
         assert!(s.start >= 1, "start {} is not a real coordinate", s.start);
         assert_eq!(s.len(), 4);
         assert!(m.is_valid(), "{:?}", m.validate());
+    }
+
+    #[test]
+    fn rotating_does_not_quietly_repair_a_coordinate_past_the_end() {
+        // `remap` clamped BOTH ends into `1..=n`, and a clamp downwards is a
+        // fabrication. On this 16 bp circle a segment `4..999` — which
+        // `validate()` reports as `PastEnd { end: 999, len: 16 }`, and which a
+        // real `.dna` can carry because `<Segment range="4-999"/>` is parsed
+        // verbatim — came out of `rotate(5)` as `16..12`: a legal 13 bp wrap.
+        // The defect report disappeared, and the operation log committed the
+        // edit because its gate only refuses problem kinds whose count rose.
+        let mut m = circular(b"AAAACCCCGGGGTTTT");
+        let mut f = Feature::new("past the end", "misc_feature");
+        f.segments.push(Segment::new(4, 999));
+        m.features.push(f);
+        assert_eq!(m.validate().len(), 1, "{:?}", m.validate());
+
+        assert!(m.rotate(5));
+        let s = &m.features[0].segments[0];
+        assert_eq!(
+            s.end, 999,
+            "a coordinate naming no base names no base after a rotation either"
+        );
+        assert_eq!(
+            s.start, 16,
+            "the end that IS real still moves with its bases"
+        );
+        assert!(
+            m.validate().iter().any(|p| matches!(
+                p,
+                Invalid::PastEnd {
+                    end: 999,
+                    len: 16,
+                    ..
+                }
+            )),
+            "the report must survive the rotation: {:?}",
+            m.validate()
+        );
+    }
+
+    #[test]
+    fn rotating_a_segment_entirely_past_the_end_does_not_collapse_it_onto_a_real_base() {
+        // The worse half of the same clamp: with BOTH ends past the end, both
+        // clamped to 16 and then remapped to the same base, leaving a 1 bp
+        // segment sitting on base 12 — a base the feature never described —
+        // while `validate()` went from two `PastEnd`s to none. Fabricated
+        // coverage under a real feature's name is this project's own
+        // worst-defect category (docs/AUDIT-2026-07.md).
+        let mut m = circular(b"AAAACCCCGGGGTTTT");
+        let mut f = Feature::new("entirely past the end", "misc_feature");
+        f.segments.push(Segment::new(20, 25));
+        m.features.push(f);
+        assert_eq!(m.validate().len(), 2, "{:?}", m.validate());
+
+        assert!(m.rotate(5));
+        let s = &m.features[0].segments[0];
+        assert_eq!(
+            (s.start, s.end),
+            (20, 25),
+            "nothing here names a base, so nothing here may be moved onto one"
+        );
+        assert_eq!(m.validate().len(), 2, "{:?}", m.validate());
+    }
+
+    #[test]
+    fn rotating_an_in_range_segment_is_unaffected_by_the_past_the_end_rule() {
+        // The guard against over-correcting. Every ordinary coordinate must
+        // still move with its bases, or "set origin" stops working.
+        let mut m = circular(b"AAAACCCCGGGGTTTT");
+        let mut f = Feature::new("gg", "misc_feature");
+        f.segments.push(Segment::new(9, 12)); // the GGGG
+        m.features.push(f);
+        // The boundary is `n` itself, which is a real base and must move.
+        let mut edge = Feature::new("last base", "misc_feature");
+        edge.segments.push(Segment::new(16, 16));
+        m.features.push(edge);
+
+        assert!(m.rotate(9));
+        assert_eq!(
+            (
+                m.features[0].segments[0].start,
+                m.features[0].segments[0].end
+            ),
+            (1, 4)
+        );
+        assert_eq!(m.subseq(1, 4).unwrap(), b"GGGG".to_vec());
+        assert_eq!(
+            (
+                m.features[1].segments[0].start,
+                m.features[1].segments[0].end
+            ),
+            (8, 8),
+            "base n is in range and must rotate like any other"
+        );
+        assert!(m.is_valid(), "{:?}", m.validate());
+    }
+
+    #[test]
+    fn rotates_own_documentation_sits_on_rotate_and_not_on_the_strand_query() {
+        // A doc comment is a claim the code has to keep. These two lines sat in
+        // the same `///` block as `features_without_expressible_orientation`, so
+        // rustdoc printed "Rotate a circular molecule so that 1-based position
+        // `origin` becomes 1" as the method-index summary for a read-only `&self`
+        // query that takes no origin, mutates nothing and returns
+        // `Vec<(usize, &Feature)>` — while `rotate`, the only "set origin" entry
+        // point, was listed with no description at all. Asserted rather than
+        // eyeballed, because nothing else in the build reads doc comments.
+        let src = include_str!("lib.rs");
+        let sentence =
+            "/// Rotate a circular molecule so that 1-based position `origin` becomes 1,";
+        let query = src
+            .find("pub fn features_without_expressible_orientation")
+            .expect("the strand query is still here");
+        let rotate = src
+            .find("pub fn rotate(&mut self")
+            .expect("rotate is still here");
+        let doc = src.find(sentence).expect("rotate still describes itself");
+        assert!(
+            doc > query && doc < rotate,
+            "rotate's summary must attach to rotate, not to the item above it"
+        );
+        // ...and the strand query keeps its own.
+        let strand_doc = src
+            .find("/// Features whose strand GenBank cannot express.")
+            .expect("the strand query still describes itself");
+        assert!(strand_doc < query);
     }
 
     #[test]

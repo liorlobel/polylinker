@@ -80,6 +80,13 @@ export function segmentRanges(
   if (!Number.isFinite(seg.start) || !Number.isFinite(seg.end)) return [];
   if (!Number.isFinite(length) || length <= 0) return [];
   if (seg.start > length && seg.end > length) return [];
+  // The mirror image of the line above, and it was missing. A segment wholly
+  // *below* base 1 — `0-0`, or a negative pair from an importer that wrote
+  // 0-based coordinates — names no base either, but `Math.max(1, ...)` on both
+  // endpoints collapsed it onto a 1 bp range at base 1 and drew it there under
+  // the real feature's name. The same fabrication as the past-the-end case, at
+  // the other end of the molecule.
+  if (seg.start < 1 && seg.end < 1) return [];
   const s = Math.max(1, Math.min(seg.start, length));
   const e = Math.max(1, Math.min(seg.end, length));
   if (s <= e) return [{ from: s - 1, to: e }];

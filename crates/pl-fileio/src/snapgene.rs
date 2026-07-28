@@ -133,6 +133,30 @@ impl Document {
     }
 }
 
+/// Does a block body of `len` bytes starting at `body` run past the end of an
+/// `n`-byte file?
+///
+/// A subtraction, never `body + len > n`. `usize` is 32 bits on wasm32, where a
+/// declared length of 0xFFFFFFFB wraps the sum back below `n`, the guard passes,
+/// and the payload slice becomes `data[5..4]` — a trap that killed the shipped
+/// module on a 19-byte file. `body <= n` is guaranteed by the `TruncatedHeader`
+/// check at the call site, so the subtraction cannot underflow.
+///
+/// Generic purely so a test can run it at **32-bit width on a 64-bit machine**.
+/// Every CI runner is 64-bit and the wasm32 job runs `cargo build` rather than
+/// `cargo test`, so an integer bug that only exists at 32 bits had nowhere to be
+/// executed: the file-level test that claims to cover it feeds a 28-byte fixture
+/// whose 64-bit sums top out at 4,294,967,319 — no wrap, no overflow, and the
+/// pre-fix code returns the identical error. Only calling this at `u32` can tell
+/// the two implementations apart. See
+/// `the_block_length_guard_is_a_subtraction_and_cannot_wrap_at_32_bit_width`.
+fn overruns<T>(n: T, body: T, len: T) -> bool
+where
+    T: Copy + PartialOrd + core::ops::Sub<Output = T>,
+{
+    len > n - body
+}
+
 /// Split the byte stream into blocks, validating framing as we go.
 pub fn read_blocks(data: &[u8]) -> Result<Vec<Block>, Error> {
     let n = data.len();
@@ -148,13 +172,8 @@ pub fn read_blocks(data: &[u8]) -> Result<Vec<Block>, Error> {
         let len = u32::from_be_bytes([data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4]]);
         let body = pos + 5;
         let len_us = len as usize;
-        // Compared by subtraction, not by `body + len_us > n`. `usize` is 32
-        // bits on wasm32, where a declared length of 0xFFFFFFFB wraps the sum
-        // back below `n`, this guard passes, and line 170 then slices
-        // `data[5..4]` — a trap that kills the module. `body <= n` is already
-        // guaranteed by the `TruncatedHeader` check above, so the subtraction
-        // cannot underflow.
-        if len_us > n - body {
+        // See `overruns`: a subtraction, because the addition wrapped on wasm32.
+        if overruns(n, body, len_us) {
             return Err(Error::ShortBlock {
                 kind,
                 offset: pos,
@@ -444,6 +463,26 @@ fn parse_primers(x: &str) -> Vec<Primer> {
     out
 }
 
+/// Read block 6 as ordered key/value pairs.
+///
+/// # What this loses, and why it is not fixed here
+///
+/// Element **attributes are discarded**: `<Created UTC="22:0:0">2022.12.13`
+/// reads as the date alone, so the recorded time of day is gone, and
+/// `from_molecule` then writes `<Created>2022.12.13</Created>`. `xml::scan`
+/// parses the attributes perfectly well — the `..` in the pattern below throws
+/// them away — but `Molecule::notes` is `Vec<(String, String)>` and `notes_xml`
+/// has no attribute channel, so there is nowhere to put them and nothing that
+/// could re-emit them. Carrying them needs `Molecule::notes` to hold a note with
+/// attributes, which is a `pl-core` change plus the three places that render
+/// notes (`pl-scan`, `pl-wasm`, `pl-gui`); encoding them into the key here would
+/// invent a syntax those three would display raw.
+///
+/// Anything nested deeper than a direct child of `<Notes>` is dropped for the
+/// same reason. No corpus file has one.
+///
+/// `snapgene::write` is unaffected: it re-emits the original block verbatim, so
+/// the loss appears only on the `from_molecule` path.
 fn parse_notes(x: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut stack: Vec<String> = Vec::new();
@@ -499,7 +538,8 @@ pub fn write(doc: &Document, drop_derived: bool) -> Vec<u8> {
 /// # What is written, and what is deliberately not
 ///
 /// Written: the header, the sequence block with its topology and methylation
-/// flags, the feature XML, primers, and notes.
+/// flags, the feature XML, the primer XML, and the notes — the last of these
+/// without element attributes, see "Known gap" below.
 ///
 /// **Not written: blocks 2 and 3.** Measured across a 41-file corpus, they are
 /// 78% of a typical file and up to 96%, and both are pure caches — block 3 is
@@ -520,16 +560,54 @@ pub fn write(doc: &Document, drop_derived: bool) -> Vec<u8> {
 /// `<Segment range="a-b">` is **1-based inclusive**, which is the model's own
 /// convention, so nothing shifts on the way out. Note that this is *not* the
 /// convention `<BindingSite location>` uses in the same file — that one is
-/// 0-based — and conflating them is the format's worst trap.
+/// 0-based — and conflating them is the format's worst trap. `parse_primers`
+/// adds one on the way in and [`primers_xml`] takes it back off on the way out,
+/// in the same file, deliberately.
+///
+/// # Known gap
+///
+/// **Note *attributes* are not carried.** `<Created UTC="22:0:0">` reads as the
+/// date alone, because `Molecule::notes` is `Vec<(String, String)>` and has
+/// nowhere to put the time. Written here rather than left to be discovered,
+/// because a `.dna` that lost its recorded creation time and said nothing is
+/// the kind of quiet loss this section exists to prevent.
 pub fn from_molecule(mol: &Molecule) -> Vec<u8> {
+    from_molecule_reporting(mol).0
+}
+
+/// The same, plus anything the container could not carry.
+///
+/// The report is empty for every molecule that came from a real file. It is not
+/// empty for a binding site starting before base 1, which has no 0-based
+/// `location` form at all — and writing `location="-1-16"` to avoid saying so
+/// would put a coordinate in the file that nothing ever recorded.
+pub fn from_molecule_reporting(mol: &Molecule) -> (Vec<u8>, Vec<String>) {
+    let mut unwritable: Vec<String> = Vec::new();
     let mut blocks = Vec::new();
 
-    // Block 9. `exportVersion`/`importVersion` of 14 is what the files in the
-    // corpus carry; fileType 1 is DNA.
+    // Block 9. fileType 1 is DNA.
+    //
+    // The version pair was 14/14, under a comment claiming that is what the
+    // corpus carries. It is not, and the project's own record says so:
+    // `docs/DNA-FORMAT.md` §1 observed export versions {10, 11, 13, 15} and
+    // import versions {5, 7, 10, 11, 12, 18, 19}, in the pairs 10/5, 10/7,
+    // 11/10, 11/11, 13/12 and 15/18-19. 14 appears in neither set — it is the
+    // header payload *length*, 0x0E, mistaken for a version — so every file we
+    // wrote carried a version pair no real file was ever seen to use, in a
+    // project whose whole provenance argument is that its format claims are
+    // empirical. The test fixture in this very file already used the observed
+    // pair 15/19, so the two sites disagreed.
+    //
+    // 10/5 is the observed pair with the lowest import version, and import
+    // version is the *minimum reader required*: writing the lowest one observed
+    // asks the least of whatever opens the file, which is the right trade for a
+    // writer that deliberately emits only the long-stable blocks.
+    const EXPORT_VERSION: u16 = 10;
+    const IMPORT_VERSION: u16 = 5;
     let mut header = b"SnapGene".to_vec();
     header.extend_from_slice(&1u16.to_be_bytes());
-    header.extend_from_slice(&14u16.to_be_bytes());
-    header.extend_from_slice(&14u16.to_be_bytes());
+    header.extend_from_slice(&EXPORT_VERSION.to_be_bytes());
+    header.extend_from_slice(&IMPORT_VERSION.to_be_bytes());
     blocks.push(Block {
         kind: block::HEADER,
         payload: header,
@@ -566,13 +644,28 @@ pub fn from_molecule(mol: &Molecule) -> Vec<u8> {
             payload: features_xml(&mol.features).into_bytes(),
         });
     }
+    // Block 5. The reader has always populated `mol.primers` from it — 12 of
+    // the 41 corpus files carry one — and this writer never emitted it, so
+    // `pl convert --to dna` dropped every primer name, sequence, description,
+    // bound strand and recorded melting temperature, printed nothing to stderr
+    // and exited 0. The doc comment above said primers were written, and the
+    // "deliberately not written" list named only blocks 2, 3 and 7, so nothing
+    // in the file or the program disclosed it. `--to genbank` kept them, which
+    // is how the two output formats came to disagree about whether a primer is
+    // part of the molecule.
+    if !mol.primers.is_empty() {
+        blocks.push(Block {
+            kind: block::PRIMERS,
+            payload: primers_xml(&mol.primers, &mut unwritable).into_bytes(),
+        });
+    }
     if !mol.notes.is_empty() || !mol.description.is_empty() {
         blocks.push(Block {
             kind: block::NOTES,
             payload: notes_xml(mol).into_bytes(),
         });
     }
-    write_blocks(&blocks)
+    (write_blocks(&blocks), unwritable)
 }
 
 fn features_xml(features: &[Feature]) -> String {
@@ -615,6 +708,58 @@ fn features_xml(features: &[Feature]) -> String {
         x.push_str("</Feature>");
     }
     x.push_str("</Features>");
+    x
+}
+
+/// The primer block, block 5.
+///
+/// `<HybridizationParams>` is **not** written. It records the search settings a
+/// binding-site scan was run with, and this program did not run that scan; a
+/// fabricated `minContinuousMatchLen` would be a claim about how these sites
+/// were found. The sites themselves came from the file and are re-emitted.
+///
+/// No `simplified="1"` duplicate is written either. Real files carry one per
+/// site and the reader drops it as a duplicate, so writing one back would make
+/// every primer appear to bind twice on the next read.
+fn primers_xml(primers: &[Primer], unwritable: &mut Vec<String>) -> String {
+    let mut x = String::from("<Primers>");
+    for (i, p) in primers.iter().enumerate() {
+        x.push_str(&format!(
+            "<Primer recentID=\"{i}\" name=\"{}\" sequence=\"{}\"",
+            xml::escape(&p.name),
+            xml::escape(&p.seq)
+        ));
+        if !p.description.is_empty() {
+            x.push_str(&format!(" description=\"{}\"", xml::escape(&p.description)));
+        }
+        x.push('>');
+        for s in &p.sites {
+            // Back to 0-based, undoing the +1 `parse_primers` applied. This is
+            // the format's worst trap and the two halves live twenty lines
+            // apart on purpose: `location` is 0-based inclusive while the
+            // identical-looking `range` on a Segment is 1-based, and a writer
+            // that forgets to subtract shifts every primer by one base in a way
+            // no byte-exact round-trip can see.
+            let (Some(a), Some(b)) = (s.start.checked_sub(1), s.end.checked_sub(1)) else {
+                unwritable.push(format!(
+                    "primer {:?}: binding site {}..{} starts before base 1 and has no \
+                     0-based `location` form; not written",
+                    p.name, s.start, s.end
+                ));
+                continue;
+            };
+            x.push_str(&format!(
+                "<BindingSite location=\"{a}-{b}\" boundStrand=\"{}\"",
+                u8::from(s.strand.is_reverse())
+            ));
+            if let Some(tm) = s.tm {
+                x.push_str(&format!(" meltingTemperature=\"{tm}\""));
+            }
+            x.push_str("/>");
+        }
+        x.push_str("</Primer>");
+    }
+    x.push_str("</Primers>");
     x
 }
 
@@ -666,11 +811,53 @@ mod tests {
     }
 
     #[test]
-    fn a_huge_declared_block_length_does_not_wrap_on_32_bit() {
-        // `body + len_us > n` was computed in usize, which is 32 bits on
-        // wasm32. A declared length of 0xFFFFFFFB wrapped the sum back under
-        // `n`, the guard passed, and the payload slice became `data[5..4]` —
-        // a trap that killed the shipped module on a 19-byte file.
+    fn the_block_length_guard_is_a_subtraction_and_cannot_wrap_at_32_bit_width() {
+        // The file-level test below cannot fail for the bug it was written
+        // for. Its fixture is 28 bytes with the over-declaring block at offset
+        // 19, so `body` is 24 and the pre-fix `body + len_us > n` gives
+        // 2,147,483,672 through 4,294,967,319 on a 64-bit runner: no wrap, no
+        // debug overflow, the guard fires anyway and returns the very same
+        // `ShortBlock { claimed }`. Reverting the guard leaves it green. And
+        // there is nowhere else the arithmetic runs at 32 bits — ci.yml's three
+        // runners are all 64-bit, and the wasm32 job runs `cargo build`, never
+        // `cargo test`.
+        //
+        // So the guard itself is exercised here at `u32`, which is the width
+        // `usize` has on wasm32.
+        let (n, body) = (28u32, 24u32);
+
+        // These three genuinely wrap a 32-bit sum back under `n` — the second
+        // is the 0xFFFFFFFB that killed the shipped module on a 19-byte file,
+        // by turning the payload slice into `data[5..4]`.
+        for claimed in [u32::MAX, 0xFFFF_FFFB, 0xFFFF_FFF0] {
+            assert!(
+                overruns(n, body, claimed),
+                "{claimed:#x} bytes cannot fit in a 28-byte file"
+            );
+            assert!(
+                body.wrapping_add(claimed) <= n,
+                "{claimed:#x} was supposed to wrap under {n}; the fixture no longer \
+                 demonstrates the bug"
+            );
+        }
+        // ...and this one does not wrap even at 32 bits, which is precisely why
+        // a fixture built from values like it proves nothing.
+        assert!(overruns(n, body, 0x8000_0000));
+        assert!(body.wrapping_add(0x8000_0000) > n);
+
+        // Control: ordinary lengths still answer correctly, at both widths.
+        assert!(!overruns(28u32, 24u32, 4), "exactly fits");
+        assert!(overruns(28u32, 24u32, 5), "one byte too many");
+        assert!(!overruns(28usize, 24usize, 4));
+        assert!(overruns(28usize, 24usize, 5));
+    }
+
+    #[test]
+    fn a_huge_declared_block_length_is_rejected_rather_than_read() {
+        // Renamed: it never covered the 32-bit wrap its old name advertised
+        // (see the test above, which does). What it does cover is that the
+        // guard exists at all and names the length the file claimed, which is
+        // worth keeping.
         for claimed in [u32::MAX, 0xFFFF_FFFB, 0xFFFF_FFF0, 0x8000_0000] {
             let mut f = header_block();
             let mut raw = vec![block::HEADER];
@@ -1018,6 +1205,186 @@ mod tests {
         let mut m = mol_with_feature();
         m.features[0].name = "lacZ<alpha> & \"friends\"".into();
         assert_eq!(round_trip(&m).features[0].name, m.features[0].name);
+    }
+
+    #[test]
+    fn a_synthesised_file_keeps_its_primers() {
+        // `from_molecule` emitted blocks 9, 0, 10 and 6 and never block 5, so
+        // `pl convert --to dna` dropped every primer name, sequence,
+        // description, bound strand and recorded melting temperature — 12 of
+        // the 41 corpus files carry a primer block — printed nothing to stderr
+        // and exited 0. The doc comment said primers were written and the
+        // "deliberately not written" list named only blocks 2, 3 and 7, so
+        // nothing anywhere disclosed it. `--to genbank` kept them the whole
+        // time, so the two output formats disagreed about whether a primer is
+        // part of the molecule.
+        let mut m = mol_with_feature();
+        m.primers.push(Primer {
+            name: "Fab2_D_SalI".into(),
+            seq: "atatGTCGACTTAGAATATAACTCTTAGTCCTACTCCACC".into(),
+            description: "reverse screening primer".into(),
+            sites: vec![
+                BindingSite {
+                    start: 3,
+                    end: 12,
+                    strand: Strand::Reverse,
+                    tm: Some(53.0),
+                },
+                BindingSite {
+                    start: 1,
+                    end: 8,
+                    strand: Strand::Forward,
+                    tm: None,
+                },
+            ],
+        });
+
+        let (bytes, report) = from_molecule_reporting(&m);
+        assert!(
+            report.is_empty(),
+            "nothing was lost, so nothing to report: {report:?}"
+        );
+        let kinds: Vec<u8> = read_blocks(&bytes)
+            .unwrap()
+            .iter()
+            .map(|b| b.kind)
+            .collect();
+        assert!(kinds.contains(&block::PRIMERS), "no block 5: {kinds:?}");
+
+        let back = parse(&bytes).unwrap().molecule;
+        assert_eq!(back.primers, m.primers, "the primer block did not survive");
+        // Spelled out, because `PartialEq` passing on an empty Vec is exactly
+        // how this went unnoticed for so long.
+        assert_eq!(back.primers.len(), 1);
+        assert_eq!(back.primers[0].name, "Fab2_D_SalI");
+        assert_eq!(back.primers[0].description, "reverse screening primer");
+        assert_eq!(
+            back.primers[0].sites.len(),
+            2,
+            "the sites, not just the primer"
+        );
+        assert_eq!(back.primers[0].sites[0].strand, Strand::Reverse);
+        assert_eq!(back.primers[0].sites[0].tm, Some(53.0));
+        assert_eq!(back.primers[0].sites[1].tm, None);
+    }
+
+    #[test]
+    fn a_written_binding_site_goes_back_to_zero_based_coordinates() {
+        // The format's worst trap, in the direction only a writer can hit.
+        // `location` is 0-based inclusive while the identical-looking `range`
+        // on a Segment is 1-based, so the writer must take back the +1 the
+        // reader applied. Getting it wrong shifts every primer by one base, and
+        // a byte-exact round-trip cannot see it because the error cancels.
+        let mut m = mol_with_feature();
+        m.primers.push(Primer {
+            name: "M13F".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: String::new(),
+            // The first 17 bases of the molecule, 1-based inclusive.
+            sites: vec![BindingSite {
+                start: 1,
+                end: 17,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+        });
+        let (bytes, _) = from_molecule_reporting(&m);
+        let xml = read_blocks(&bytes)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.kind == block::PRIMERS)
+            .map(|b| String::from_utf8_lossy(&b.payload).to_string())
+            .expect("a primer block");
+        assert!(
+            xml.contains(r#"location="0-16""#),
+            "1..17 must be written 0-based, as 0-16:\n{xml}"
+        );
+        // A Segment in the same file is written at face value: 3-12, not 2-11.
+        let feats = read_blocks(&bytes)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.kind == block::FEATURES)
+            .map(|b| String::from_utf8_lossy(&b.payload).to_string())
+            .unwrap();
+        assert!(feats.contains(r#"range="3-12""#), "{feats}");
+    }
+
+    #[test]
+    fn a_binding_site_starting_before_base_one_is_reported_not_shifted() {
+        // There is no 0-based form of base 0, and `location="-1-16"` would put
+        // a coordinate in the file that nothing ever recorded. Saturating to 0
+        // would be worse still: a silent one-base shift.
+        let mut m = mol_with_feature();
+        m.primers.push(Primer {
+            name: "impossible".into(),
+            seq: "ACGT".into(),
+            description: String::new(),
+            sites: vec![BindingSite {
+                start: 0,
+                end: 17,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+        });
+        let (bytes, report) = from_molecule_reporting(&m);
+        let xml = read_blocks(&bytes)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.kind == block::PRIMERS)
+            .map(|b| String::from_utf8_lossy(&b.payload).to_string())
+            .expect("the primer itself is still written");
+        assert!(
+            !xml.contains("-1"),
+            "a negative coordinate reached the file:\n{xml}"
+        );
+        assert_eq!(report.len(), 1, "{report:?}");
+        assert!(report[0].contains("impossible"), "{report:?}");
+    }
+
+    #[test]
+    fn a_primerless_molecule_gets_no_primer_block() {
+        // Control: an empty `<Primers/>` block is not invented for a molecule
+        // that has none, which would make the writer's output disagree with the
+        // 29 corpus files that carry no block 5.
+        let bytes = from_molecule(&mol_with_feature());
+        let kinds: Vec<u8> = read_blocks(&bytes)
+            .unwrap()
+            .iter()
+            .map(|b| b.kind)
+            .collect();
+        assert!(!kinds.contains(&block::PRIMERS), "{kinds:?}");
+    }
+
+    #[test]
+    fn the_written_header_carries_a_version_pair_the_corpus_actually_uses() {
+        // It carried 14/14 under a comment claiming that is what the corpus
+        // holds. `docs/DNA-FORMAT.md` §1 says otherwise: export versions
+        // {10, 11, 13, 15}, import versions {5, 7, 10, 11, 12, 18, 19}. 14 is
+        // the header payload length, 0x0E, mistaken for a version — so every
+        // file this program wrote declared a version pair no observed file
+        // uses, in a project whose format claims are meant to be empirical.
+        const OBSERVED_EXPORT: [u16; 4] = [10, 11, 13, 15];
+        const OBSERVED_IMPORT: [u16; 7] = [5, 7, 10, 11, 12, 18, 19];
+
+        let doc = parse(&from_molecule(&mol_with_feature())).unwrap();
+        assert!(
+            OBSERVED_EXPORT.contains(&doc.export_version),
+            "export version {} is in no corpus file",
+            doc.export_version
+        );
+        assert!(
+            OBSERVED_IMPORT.contains(&doc.import_version),
+            "import version {} is in no corpus file",
+            doc.import_version
+        );
+        assert_eq!(doc.file_type, 1, "fileType 1 is DNA");
+        // Import version is the minimum reader required, so the lowest observed
+        // one is the friendliest thing to declare.
+        assert_eq!(
+            doc.import_version,
+            *OBSERVED_IMPORT.iter().min().unwrap(),
+            "asking for a newer reader than we need locks out files we modelled on"
+        );
     }
 
     #[test]

@@ -19,6 +19,11 @@ pub struct WalkOptions {
     /// 68,811 of 68,813 files are reparse points — OneDrive tags every file it
     /// manages — so a walker that skipped reparse points would skip the entire
     /// library and report nothing, with no error.
+    ///
+    /// When it is on, `max_depth` is the only thing standing between a link
+    /// cycle and an endless walk — and hitting that bound marks the walk
+    /// incomplete, so a cycle costs a truncated index that says it is
+    /// truncated, never a silently emptied one.
     pub follow_links: bool,
     /// A hard bound, so a link cycle or a pathological tree terminates.
     pub max_depth: usize,
@@ -68,8 +73,21 @@ pub struct WalkReport {
     /// Set when the walk did not finish. **The caller must not remove any
     /// rows** when this is set: a partial walk read as a mass deletion is how
     /// a library empties itself because a share blinked.
+    ///
+    /// Set by every path that did not look at something it was asked to look
+    /// at: a directory that could not be listed — the root or any other — a
+    /// depth bound that cut a sub-tree off, and an entry the directory iterator
+    /// failed on.
     pub incomplete: Option<String>,
     pub placeholders: usize,
+    /// Symbolic links and Windows junctions that were not followed because
+    /// `follow_links` is off.
+    ///
+    /// Not an error: it is the default and it is what keeps a link back to an
+    /// ancestor from making the walk unbounded. It is counted rather than
+    /// invisible because the entry is skipped whole, and on the other side of
+    /// one of these there may be a folder of constructs.
+    pub links_skipped: usize,
 }
 
 /// Enumerate candidate sequence files under `root`.
@@ -88,10 +106,15 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> (Vec<Found>, WalkReport) {
 
     while let Some((dir, depth)) = stack.pop() {
         if depth > opts.max_depth {
-            report.errors.push((
-                dir.display().to_string(),
-                format!("deeper than --max-depth {}", opts.max_depth),
-            ));
+            let why = format!("deeper than --max-depth {}", opts.max_depth);
+            report.errors.push((dir.display().to_string(), why.clone()));
+            // Truncation is a partial walk, and a partial walk must never read
+            // as a deletion. `--max-depth 0` over `root/{a.gb, sub/b.gb}` used
+            // to return one file with `incomplete = None`, so the caller
+            // dropped `sub/b.gb` from the index, wrote `complete: 1`, and every
+            // later `pl find` answered "not in my library" for a plasmid still
+            // sitting on disk.
+            report.incomplete = Some(format!("{}: {why}", dir.display()));
             continue;
         }
         let entries = match std::fs::read_dir(&dir) {
@@ -100,12 +123,14 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> (Vec<Found>, WalkReport) {
                 report
                     .errors
                     .push((dir.display().to_string(), e.to_string()));
-                // A root that cannot be listed at all is not a partial answer,
-                // it is no answer; the caller must not treat it as "everything
-                // was deleted".
-                if dir == root {
-                    report.incomplete = Some(format!("{}: {e}", dir.display()));
-                }
+                // Any directory, not only the root. A sub-tree that cannot be
+                // listed -- an ACL change, a network share that dropped -- is
+                // no answer about *that sub-tree*, and the caller must not
+                // treat it as "everything under it was deleted". The cost of
+                // the conservative reading is that a permanently unreadable
+                // sub-directory keeps deletions from ever being recorded; the
+                // cost of the other reading is a library that empties itself.
+                report.incomplete = Some(format!("{}: {e}", dir.display()));
                 continue;
             }
         };
@@ -123,11 +148,49 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> (Vec<Found>, WalkReport) {
                 }
             };
             let path = entry.path();
-            let Ok(meta) = entry.metadata() else {
+            let Ok(link_meta) = entry.metadata() else {
                 report
                     .errors
                     .push((path.display().to_string(), "metadata unavailable".into()));
                 continue;
+            };
+
+            // `DirEntry::metadata` does not traverse links on **any** platform,
+            // and `FileType`'s three predicates are mutually exclusive — so a
+            // symlink, or a Windows junction, pointing at a directory answers
+            // `false` to `is_dir()` *and* `false` to `is_file()`. It used to
+            // fall through to the `!is_file()` skip below and disappear with no
+            // error and no count, which made `--follow-links` a complete no-op
+            // on every platform and left the `is_dir() && is_symlink()` test
+            // that was meant to guard it unreachable. A link to a directory of
+            // 400 `.gb` files contributed nothing while the index still claimed
+            // to be complete.
+            //
+            // Resolving the target costs a second `stat`, but only for the
+            // entries that really are links: OneDrive tags 68,811 of the
+            // corpus's 68,813 files as reparse points, and none of those carry
+            // the name-surrogate bit that `is_symlink()` tests, so the
+            // enumerate-once cost of a real lab drive is unchanged.
+            let meta = if link_meta.is_symlink() {
+                if !opts.follow_links {
+                    // Documented behaviour rather than a failure — a link back
+                    // to an ancestor makes the walk unbounded — but counted, so
+                    // an absent sub-tree is at least a number the caller has.
+                    report.links_skipped += 1;
+                    continue;
+                }
+                match std::fs::metadata(&path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        // A dangling link, or one whose target we may not stat.
+                        report
+                            .errors
+                            .push((path.display().to_string(), e.to_string()));
+                        continue;
+                    }
+                }
+            } else {
+                link_meta
             };
 
             if meta.is_dir() {
@@ -135,13 +198,12 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> (Vec<Found>, WalkReport) {
                 if opts.skip_dirs.contains(&name) {
                     continue;
                 }
-                if meta.is_symlink() && !opts.follow_links {
-                    continue;
-                }
                 stack.push((path, depth + 1));
                 continue;
             }
             if !meta.is_file() {
+                // Neither a file, nor a directory, nor a link: a device node, a
+                // FIFO, a socket. There is nothing here to parse.
                 continue;
             }
             report.files_considered += 1;
@@ -283,6 +345,124 @@ mod tests {
             report.errors.iter().any(|(_, e)| e.contains("max-depth")),
             "a truncated walk must say so: {:?}",
             report.errors
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_depth_truncated_walk_is_incomplete_and_not_merely_noted() {
+        // The `errors` entry is transient: it goes to stderr once. `incomplete`
+        // is what the caller reads to decide whether the files it did not see
+        // were deleted, and what gets written into the index as `complete: 0`.
+        // With it left unset, `--max-depth 0` over `root/{a.gb, sub/b.gb}`
+        // dropped `sub/b.gb` and stamped the index complete.
+        let root = tmp("depth-incomplete");
+        write(&root, "a.gb", "x");
+        write(&root, "sub/b.gb", "x");
+        let opts = WalkOptions {
+            max_depth: 0,
+            ..Default::default()
+        };
+        let (found, report) = walk(&root, &opts);
+        let rels: Vec<&str> = found.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels, vec!["a.gb"], "the depth bound did cut the sub-tree");
+        assert!(
+            report.incomplete.is_some(),
+            "a walk that did not descend has not finished: {:?}",
+            report.errors
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_walk_that_reached_everything_is_not_marked_incomplete() {
+        // The control for the two `incomplete` paths above: over-reporting it
+        // would make every scan refuse to record a deletion, which is the same
+        // library-never-converges failure from the other side.
+        let root = tmp("complete");
+        write(&root, "a.gb", "x");
+        write(&root, "sub/deep/b.gb", "x");
+        let (found, report) = walk(&root, &WalkOptions::default());
+        assert_eq!(found.len(), 2);
+        assert!(report.incomplete.is_none(), "{:?}", report.incomplete);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Make `link` a link to the directory `target`.
+    ///
+    /// A junction on Windows rather than a symbolic link: `mklink /D` needs
+    /// elevation or Developer Mode, `mklink /J` needs neither, and Rust reports
+    /// both as `is_symlink()` because both carry the name-surrogate bit.
+    #[cfg(windows)]
+    fn link_dir(target: &Path, link: &Path) {
+        let out = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.display().to_string(),
+                &target.display().to_string(),
+            ])
+            .output()
+            .expect("mklink");
+        assert!(
+            out.status.success(),
+            "could not create a junction: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn link_dir(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("symlink");
+    }
+
+    #[test]
+    fn a_link_to_a_directory_is_walked_when_following_is_asked_for() {
+        // `DirEntry::metadata` never traverses a link, and `is_dir`/`is_file`/
+        // `is_symlink` are mutually exclusive, so a link to a directory answers
+        // false to both of the first two. It fell through the `!is_file()` skip
+        // and was dropped with no error, which made `--follow-links` a no-op
+        // and silently lost the linked sub-tree from the index.
+        let root = tmp("followlinks");
+        write(&root, "plain.gb", "x");
+        write(&root, "realdir/a.gb", "x");
+        link_dir(&crate::abs(&root, "realdir"), &crate::abs(&root, "linkdir"));
+
+        let opts = WalkOptions {
+            follow_links: true,
+            ..Default::default()
+        };
+        let (found, report) = walk(&root, &opts);
+        let rels: Vec<&str> = found.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(
+            rels,
+            vec!["linkdir/a.gb", "plain.gb", "realdir/a.gb"],
+            "the file behind the link is indexed under the path the user gave"
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.links_skipped, 0, "nothing was skipped");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_link_is_not_followed_by_default_and_the_skip_is_counted() {
+        // The control: following links unconditionally is how a link back to an
+        // ancestor makes a walk unbounded, so the default must still refuse —
+        // and the refusal must be a number rather than a silent `continue`.
+        let root = tmp("nofollowlinks");
+        write(&root, "plain.gb", "x");
+        write(&root, "realdir/a.gb", "x");
+        link_dir(&crate::abs(&root, "realdir"), &crate::abs(&root, "linkdir"));
+
+        let (found, report) = walk(&root, &WalkOptions::default());
+        let rels: Vec<&str> = found.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels, vec!["plain.gb", "realdir/a.gb"]);
+        assert_eq!(
+            report.links_skipped, 1,
+            "a skipped link must be countable, not invisible"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

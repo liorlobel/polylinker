@@ -178,6 +178,21 @@ pub fn check(overhangs: &[Overhang]) -> Report {
     }
 
     for (i, o) in overhangs.iter().enumerate() {
+        if o.bases.is_empty() {
+            // An end that reports an overhang with no bases in it is not blunt
+            // -- a blunt end is `None` and never reaches here. It is an end
+            // whose designed overhang could not form because the enzyme's
+            // second-strand nick fell outside the fragment, and that is a fatal
+            // Golden Gate design fault (too few spacer bases past the Type IIS
+            // site). It has to be said out loud: dropping the end instead let
+            // `pl goldengate --enzyme BsaI` print "no structural fault found"
+            // and `"usable": true` for a digest with no usable junction at all.
+            faults.push(Fault::Incompatible {
+                detail: "an end reports an overhang with no bases: the enzyme's second-strand \
+                         nick fell outside the fragment, so that junction cannot form"
+                    .into(),
+            });
+        }
         if o.is_palindromic() {
             faults.push(Fault::Palindromic {
                 overhang: names[i].clone(),
@@ -206,21 +221,29 @@ pub fn check(overhangs: &[Overhang]) -> Report {
     // pair of positions. A set holding `AATG` twice would otherwise report the
     // same near neighbour against every copy, and a real design with three
     // repeats of one overhang would bury its own diagnosis.
-    let mut pairs_done: Vec<(String, String)> = Vec::new();
-    for i in 0..overhangs.len() {
-        for j in (i + 1)..overhangs.len() {
-            if names[i] == names[j] {
-                continue; // already reported as a repeat
-            }
-            let key = if names[i] < names[j] {
-                (names[i].clone(), names[j].clone())
-            } else {
-                (names[j].clone(), names[i].clone())
-            };
-            if pairs_done.contains(&key) {
-                continue;
-            }
-            pairs_done.push(key);
+    //
+    // Collapsing to one index per distinct overhang *before* the loop is also
+    // what bounds the work, and that is not a micro-optimisation. A four-base
+    // overhang has 256 possible values, so the answer can never hold more than
+    // C(256,2) = 32,640 distinct pairs however many fragments the digest
+    // produced -- but the loop used to walk all n^2 positions and screen each
+    // against a linear scan of a `Vec` of the pairs already done. Measured on
+    // the release binary that was 3.4 s at 500 overhangs, 16.3 s at 1,000,
+    // 67.2 s at 2,000 and 276.5 s at 4,000, and `pl goldengate --enzyme BsaI`
+    // on a 10 Mb record (4,991 fragments) took 137.7 s. Nothing caps the
+    // fragment count and nothing refuses, unlike `assembly::Options::
+    // max_fragments`, so a genome-sized record simply stalled. Deduplicating
+    // first makes the loop O(D^2) with D bounded by the alphabet, and reports
+    // exactly the same faults: pairs of equal name were skipped anyway.
+    let mut distinct: std::collections::BTreeSet<&str> = Default::default();
+    let mut uniq: Vec<usize> = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        if distinct.insert(name.as_str()) {
+            uniq.push(i);
+        }
+    }
+    for (rank, &i) in uniq.iter().enumerate() {
+        for &j in &uniq[rank + 1..] {
             // One overhang pairing with another's partner is the same
             // collision as a repeat, seen from the other strand -- and it is
             // the one a designer reading a list of overhangs will not spot.
@@ -262,11 +285,35 @@ pub fn check(overhangs: &[Overhang]) -> Report {
 
 /// The single-stranded end at the left of a fragment, if it has one.
 ///
-/// A `Dseq` records its left overhang as `ovhg`: negative means the watson
-/// strand starts later than the crick one, which is a 5' overhang on the left.
+/// A `Dseq` records its left overhang as `ovhg`, and the sign says which strand
+/// protrudes: **negative means watson protrudes**, which is a 5' overhang on the
+/// top strand, and positive means crick does, which is a 3' one. That is the
+/// convention the diagram at `lib.rs` 15-17 draws, the doc at `lib.rs` 42-44
+/// states, and [`Dseq::left_end`] implements.
+///
+/// This function used to read the *other* strand in both branches, and the
+/// header above it said so ("negative means the watson strand starts later than
+/// the crick one", which is false). That is not an off-by-one; it is a different
+/// four bases. On the crate's own pydna fixture
+/// `{watson:"GATCCTTTT", crick:"AAAAG", ovhg:-4}` it returned `AAAG` -- the
+/// reverse complement of the four *duplex* bases sitting four nt inside the
+/// fragment -- where the BamHI overhang is `GATC`. Every junction that
+/// `pl goldengate --enzyme BsaI <file>` reported was therefore the wrong four
+/// bases, and the whole [`check`] report was computed over strings that are not
+/// overhangs: a fatal design passed as clean, and unrelated fragments that
+/// happened to share those interior bases were reported as `Repeated`.
+///
 /// Blunt ends give `None` — not an empty overhang, because "this end cannot
 /// direct an assembly" and "this end pairs with nothing" are different
-/// statements and only one of them is a fault.
+/// statements and only one of them is a fault. `None` now means blunt and
+/// nothing else. An end whose carrying strand is shorter than `|ovhg|` — the
+/// enzyme's second-strand nick fell outside the fragment, so the designed
+/// overhang never forms — returns the single-stranded bases that are really
+/// there, which is shorter than every other overhang in the set and so reaches
+/// the reader as a fatal [`Fault::Incompatible`]. It used to return `None` and
+/// vanish: the sole caller is a bare `if let Some(o) = … { push }`, so the
+/// junction was deleted from the set and the CLI printed "no structural fault
+/// found" with `"usable": true` over what was left.
 pub fn left_overhang(f: &Dseq) -> Option<Overhang> {
     let n = f.ovhg;
     if n == 0 {
@@ -274,20 +321,16 @@ pub fn left_overhang(f: &Dseq) -> Option<Overhang> {
     }
     let k = n.unsigned_abs() as usize;
     let bases: Vec<u8> = if n < 0 {
-        // Watson starts later than crick, so the crick strand carries the
-        // single-stranded bases at this end -- and they are its *last* k, since
-        // crick runs the other way.
-        let c = f.crick.as_bytes();
-        if c.len() < k {
-            return None;
-        }
-        c[c.len() - k..].to_vec()
-    } else {
+        // Watson protrudes on the left, so watson carries the single-stranded
+        // bases -- and they are its *first* k, because watson runs left to
+        // right and this is its 5' end.
         let w = f.watson.as_bytes();
-        if w.len() < k {
-            return None;
-        }
-        w[..k].to_vec()
+        w[..k.min(w.len())].to_vec()
+    } else {
+        // Crick protrudes on the left, which is crick's 3' side, so the bases
+        // are its *last* k: crick runs the other way.
+        let c = f.crick.as_bytes();
+        c[c.len() - k.min(c.len())..].to_vec()
     };
     Some(Overhang {
         bases,
@@ -432,6 +475,136 @@ mod tests {
             .filter(|f| matches!(f, Fault::Repeated { .. }))
             .count();
         assert_eq!(rep, 1, "one repeat fault, naming the count");
+    }
+
+    #[test]
+    fn a_left_overhang_is_read_off_the_strand_that_actually_protrudes() {
+        // The crate's own pydna-oracle fixture (`lib.rs`
+        // `cutting_matches_the_pydna_reference_shape`): the second BamHI
+        // fragment of `AAAAGGATCCTTTT` is
+        // `{watson:"GATCCTTTT", crick:"AAAAG", ovhg:-4}` and the overhang is
+        // `GATC`. Reading it off crick instead gave `AAAG` -- the reverse
+        // complement of the four duplex bases four nt inside the fragment --
+        // so every junction in a `pl goldengate --enzyme BsaI` report was the
+        // wrong four bases and every fault was computed over strings that are
+        // not overhangs.
+        let f = Dseq::from_parts("GATCCTTTT", "AAAAG", -4, false);
+        let o = left_overhang(&f).expect("a -4 end is not blunt");
+        assert_eq!(o.as_str(), "GATC");
+        assert!(o.five_prime, "a watson protrusion on the left is 5'");
+
+        // A 3' end reads off crick, and the two branches must not simply have
+        // been swapped: `PstI` on `AAAACTGCAGTTTT` leaves `TGCA` on crick.
+        let frags = crate::cut(
+            &Dseq::new("AAAACTGCAGTTTT", false),
+            pl_enzymes::by_name("PstI").unwrap(),
+        );
+        let three = left_overhang(&frags[1]).expect("a PstI end is not blunt");
+        assert_eq!(three.as_str(), "TGCA");
+        assert!(!three.five_prime, "PstI leaves a 3' overhang");
+    }
+
+    #[test]
+    fn a_left_overhang_says_the_same_thing_as_the_end_it_describes() {
+        // The control, and the reason the bug survived: `Dseq::left_end` was
+        // right all along, so the two functions were strand-swapped mirrors of
+        // each other. Nothing pins them together but this.
+        for (seq, enzyme) in [
+            ("AAAAGGATCCTTTTGGATCCGGGGCCCC", "BamHI"),
+            ("TTTTGAATTCAAAAGAATTCCCCCGGGG", "EcoRI"),
+            ("AAAACTGCAGTTTTCTGCAGGGGGCCCC", "PstI"),
+            ("AAAAGATATCTTTTGATATCGGGGCCCC", "EcoRV"), // blunt: None
+        ] {
+            let frags = crate::cut(&Dseq::new(seq, true), pl_enzymes::by_name(enzyme).unwrap());
+            for f in &frags {
+                match (left_overhang(f), f.left_end()) {
+                    (None, crate::End::Blunt) => {}
+                    (
+                        Some(o),
+                        crate::End::Overhang {
+                            five_prime,
+                            ref bases,
+                        },
+                    ) => {
+                        assert_eq!(o.as_str(), *bases, "{enzyme} {f:?}");
+                        assert_eq!(o.five_prime, five_prime, "{enzyme} {f:?}");
+                    }
+                    (a, b) => panic!("{enzyme}: {a:?} disagrees with {b:?} for {f:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_end_whose_overhang_cannot_form_is_reported_rather_than_dropped() {
+        // The enzyme's second-strand nick fell outside the fragment, so the
+        // designed overhang never forms. That is a fatal design fault -- too
+        // few spacer bases past the Type IIS site -- and it used to return the
+        // same `None` that means "blunt", so the sole caller's bare
+        // `if let Some(o) = ... { push }` deleted the junction from the set and
+        // the CLI printed "no structural fault found" over what was left.
+        let starved = Dseq::from_parts("", "", -4, false);
+        let o = left_overhang(&starved).expect("an unformed end is not a blunt end");
+        assert!(o.bases.is_empty());
+
+        let r = check(&[oh("AATG"), o]);
+        assert!(
+            !r.is_usable(),
+            "an unformed junction is fatal: {:?}",
+            r.faults
+        );
+        let f = r
+            .faults
+            .iter()
+            .find(|f| matches!(f, Fault::Incompatible { .. }))
+            .expect("the unformed end must be named, not swallowed");
+        assert!(f.to_string().contains("cannot form"), "{f}");
+
+        // A partly-formed end keeps the bases that really are single-stranded,
+        // and its length disagreeing with the rest of the set is itself the
+        // fatal report.
+        let short = Dseq::from_parts("C", "", -4, false);
+        let p = left_overhang(&short).expect("not blunt");
+        assert_eq!(p.as_str(), "C");
+        assert!(!check(&[oh("AATG"), p]).is_usable());
+    }
+
+    #[test]
+    fn checking_a_genome_sized_overhang_set_finishes_in_bounded_time() {
+        // A 1 Mb record gives ~500 BsaI fragments and a 10 Mb one ~5,000, and
+        // nothing caps the input, so this loop is the whole cost of
+        // `pl goldengate --enzyme BsaI`. Screening every one of the n^2
+        // position pairs against a linear scan of a `Vec` of the pairs already
+        // done measured 3.4 s at 500 overhangs and 276.5 s at 4,000 on the
+        // *release* binary -- for a result that can hold at most
+        // C(256,2) = 32,640 distinct pairs. There are only 256 four-base
+        // overhangs, so the work is bounded by the alphabet, not by the digest.
+        let alphabet: Vec<String> = (0..256usize)
+            .map(|v| {
+                (0..4)
+                    .map(|p| b"ACGT"[(v >> (2 * p)) & 3] as char)
+                    .collect()
+            })
+            .collect();
+        let set: Vec<Overhang> = (0..600).map(|i| oh(&alphabet[i % 256])).collect();
+
+        let t0 = std::time::Instant::now();
+        let r = check(&set);
+        let dt = t0.elapsed();
+        assert!(
+            dt < std::time::Duration::from_secs(5),
+            "check() took {dt:?} for 600 overhangs drawn from 256 values"
+        );
+        // ...and it is still the same answer: every value repeats, so every
+        // one of them is a repeat.
+        assert!(!r.is_usable());
+        assert_eq!(
+            r.faults
+                .iter()
+                .filter(|f| matches!(f, Fault::Repeated { .. }))
+                .count(),
+            256
+        );
     }
 
     #[test]

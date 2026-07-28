@@ -297,10 +297,22 @@ pub fn stale(dir: &Path) -> Vec<(PathBuf, Result<Snapshot, String>)> {
 /// asking is worse than not doing it. Reporting who currently owns the
 /// extension lets the app *say* "SnapGene opens these" and leave the decision
 /// where it belongs.
+/// Ask the shell without flashing a console window over the app.
+///
+/// `CREATE_NO_WINDOW`. Without it a windowed build pops a black cmd.exe window
+/// in front of the user for as long as `assoc` takes to run — which looked like
+/// the app launching something, on the welcome screen, unprompted.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Read once per process by the caller. This spawns a child process and blocks
+/// until it exits, so it must never be called from a paint closure.
 #[cfg(windows)]
 pub fn association(ext: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
     let out = std::process::Command::new("cmd")
         .args(["/C", "assoc", &format!(".{ext}")])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);

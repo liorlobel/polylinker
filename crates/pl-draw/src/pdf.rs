@@ -10,8 +10,8 @@
 //! outputs from drifting, because there is only one geometry.
 //!
 //! A plasmid map needs exactly three things from PDF: filled and stroked paths,
-//! cubic Béziers, and text in one font. It needs no images, no transparency, no
-//! shading and no layers.
+//! cubic Béziers, and text in two weights of one face. It needs no images, no
+//! transparency, no shading and no layers.
 //!
 //! # The font
 //!
@@ -26,6 +26,14 @@
 //! be centred by measurement. They were **derived, not recalled**: taken from
 //! PyMuPDF's base-14 Helvetica and independently from Arial's `hmtx` table via
 //! fontTools, which agreed on all 95 printable ASCII characters.
+//!
+//! **There are two tables, because there are two fonts.** The centre title is
+//! drawn in Helvetica-Bold, and measuring it with the regular widths is not a
+//! near-enough approximation: "pcDNA3.1(+)-mCherry-WPRE" is 13306/1000 em
+//! regular and 13751/1000 em bold, so a title centred on the regular
+//! measurement sat 3.34 pt right of centre at 15 pt while the SVG — which has a
+//! real font and a real `text-anchor` — centred it properly. With
+//! `Anchor::End` the whole 6.7 pt difference lands in the label's position.
 //!
 //! # What is not carried across
 //!
@@ -53,21 +61,66 @@ const HELVETICA: [u16; 95] = [
     500, 334, 260, 334, 584, // z{|}~
 ];
 
+/// Advance widths for Helvetica-Bold, U+0020..U+007E, in 1/1000 em.
+///
+/// The Adobe base-14 `Helvetica-Bold.afm` values, cross-checked against Arial
+/// Bold's `hmtx` the same way the regular table was. Bold is not the regular
+/// table scaled: `c` is 500 regular and 556 bold, `r` is 333 and 389, `y` is
+/// 500 and 556, while every digit is 556 in both — so no single factor
+/// reproduces it and the second table has to be a table.
+const HELVETICA_BOLD: [u16; 95] = [
+    278, 333, 474, 556, 556, 889, 722, 238, 333, 333, //  !"#$%&'()
+    389, 584, 278, 333, 278, 278, 556, 556, 556, 556, // *+,-./0123
+    556, 556, 556, 556, 556, 556, 333, 333, 584, 584, // 456789:;<=
+    584, 611, 975, 722, 722, 722, 722, 667, 611, 778, // >?@ABCDEFG
+    722, 278, 556, 722, 611, 833, 722, 778, 667, 778, // HIJKLMNOPQ
+    722, 667, 611, 722, 667, 944, 667, 667, 611, 333, // RSTUVWXYZ[
+    278, 333, 584, 556, 333, 556, 611, 556, 611, 556, // \]^_`abcde
+    333, 611, 611, 278, 278, 556, 278, 889, 611, 611, // fghijklmno
+    611, 611, 389, 556, 333, 611, 556, 778, 556, 556, // pqrstuvwxy
+    500, 389, 280, 389, 584, // z{|}~
+];
+
 /// The width of one WinAnsi byte, in 1/1000 em.
 ///
 /// Outside printable ASCII this is an estimate, and deliberately a middling one
 /// rather than zero: a wrong width nudges a label, a zero width stacks glyphs.
-fn width_of(b: u8) -> f64 {
+fn width_of(b: u8, bold: bool) -> f64 {
+    let table = if bold { &HELVETICA_BOLD } else { &HELVETICA };
     match b {
-        0x20..=0x7E => HELVETICA[(b - 0x20) as usize] as f64,
+        0x20..=0x7E => table[(b - 0x20) as usize] as f64,
         _ => 556.0,
     }
 }
 
-/// How wide a string will be, in points.
+/// How wide a string will be, in points, in the regular weight.
 pub fn text_width(s: &str, size: f64) -> f64 {
-    encode(s).0.iter().map(|&b| width_of(b)).sum::<f64>() * size / 1000.0
+    text_width_in(s, size, false)
 }
+
+/// How wide a string will be, in points, in the weight it is actually drawn in.
+///
+/// Measuring bold text with the regular table and then drawing it in
+/// Helvetica-Bold is how the centre title came to sit off centre; every
+/// anchored string must be measured in the font that will render it.
+pub fn text_width_in(s: &str, size: f64, bold: bool) -> f64 {
+    encode(s).0.iter().map(|&b| width_of(b, bold)).sum::<f64>() * size / 1000.0
+}
+
+/// How far below the visual middle of the glyphs the alphabetic baseline sits,
+/// as a fraction of the type size.
+///
+/// The scene's `y` for a string is the middle of its glyphs, matching SVG's
+/// `dominant-baseline: middle`; PDF and PostScript both position the alphabetic
+/// baseline instead. Helvetica's x-height is 0.523 em and half of it is the
+/// conventional centre, so this is 0.2615.
+///
+/// **One constant, because three formats that disagree about it are three
+/// different figures.** The EPS writer used to carry its own 0.36 next to a
+/// comment claiming it was "the same 0.36 the PDF writer uses" — it was not,
+/// and every label in an EPS export sat 0.0985 em (1.18 pt at size 12) below
+/// where the PDF and the SVG put it.
+pub const BASELINE_DROP_EM: f64 = 0.523 / 2.0;
 
 /// A string as WinAnsi bytes, and whether anything had to be replaced.
 ///
@@ -140,21 +193,38 @@ fn n(v: f64) -> String {
     format!("{r}")
 }
 
-/// `#rrggbb` and friends as PDF's 0..1 components.
+/// `#rrggbb` and friends as 0..1 components, for PDF and for EPS alike.
 ///
-/// Falls back to black rather than failing: the colour has already passed
-/// `safe_color`, so anything unparsed here is a named CSS colour, and a black
-/// feature is better than no figure.
-fn rgb(colour: &str) -> (f64, f64, f64) {
+/// Falls back to black rather than failing, because a black feature is better
+/// than no figure. That fallback is not as narrow as it looks: `safe_color`
+/// admits `rgb()`, `rgba()`, `hsl()` and `hsla()` on purpose, and none of them
+/// is parsed here, so a map coloured by another tool in functional notation
+/// comes out black in both vector formats while the SVG shows it correctly.
+/// That is a known gap, written down rather than implied by a comment claiming
+/// "anything else is a named CSS colour" — which is what both writers used to
+/// say, and it was false.
+///
+/// **Shared, because two copies drifted.** The EPS writer kept its own version
+/// that matched only 3 and 6 hex digits, so a feature carrying
+/// `#4f7fd0ff` — 8-digit hex with alpha, exactly what a SnapGene `.dna`
+/// segment can hold and what `safe_color` passes through unnormalised — drew
+/// blue in the SVG, blue in the PDF and solid black in the EPS the author sent
+/// to the journal.
+///
+/// The alpha nibble is measured and discarded: PDF and PostScript both need a
+/// graphics state or a transparency group to honour it, and a figure is opaque.
+pub(crate) fn rgb(colour: &str) -> (f64, f64, f64) {
     let hex = colour.strip_prefix('#').unwrap_or("");
+    // `get`, not `&hex[a..b]`: the length is a *byte* count, and a two-byte
+    // character would put the slice boundary inside it and panic.
     let v = |a: usize, b: usize| -> f64 {
-        u8::from_str_radix(&hex[a..b], 16).unwrap_or(0) as f64 / 255.0
+        u8::from_str_radix(hex.get(a..b).unwrap_or("0"), 16).unwrap_or(0) as f64 / 255.0
     };
     match hex.len() {
         6 | 8 => (v(0, 2), v(2, 4), v(4, 6)),
         3 | 4 => {
             let d = |i: usize| {
-                let x = u8::from_str_radix(&hex[i..i + 1], 16).unwrap_or(0);
+                let x = u8::from_str_radix(hex.get(i..i + 1).unwrap_or("0"), 16).unwrap_or(0);
                 (x * 17) as f64 / 255.0
             };
             (d(0), d(1), d(2))
@@ -162,7 +232,6 @@ fn rgb(colour: &str) -> (f64, f64, f64) {
         _ => match colour {
             "white" => (1.0, 1.0, 1.0),
             "red" => (1.0, 0.0, 0.0),
-            "none" => (0.0, 0.0, 0.0),
             _ => (0.0, 0.0, 0.0),
         },
     }
@@ -321,7 +390,8 @@ pub fn to_pdf(scene: &Scene) -> (Vec<u8>, Report) {
                 if bytes.is_empty() {
                     continue;
                 }
-                let w = bytes.iter().map(|&b| width_of(b)).sum::<f64>() * size / 1000.0;
+                // Measured in the weight it is drawn in, three lines down.
+                let w = bytes.iter().map(|&b| width_of(b, *bold)).sum::<f64>() * size / 1000.0;
                 let tx = match anchor {
                     Anchor::Start => *x,
                     Anchor::Middle => x - w / 2.0,
@@ -329,10 +399,9 @@ pub fn to_pdf(scene: &Scene) -> (Vec<u8>, Report) {
                 };
                 // The scene's `y` is the visual middle of the glyphs, matching
                 // SVG's `dominant-baseline: middle`. PDF positions the
-                // baseline, so drop by roughly a third of the size — Helvetica's
-                // cap height is 0.717 em and its x-height 0.523, and half the
-                // x-height is the conventional centre.
-                let baseline = fy(*y) - size * 0.523 / 2.0;
+                // baseline, so drop by half the x-height — see
+                // [`BASELINE_DROP_EM`], which the EPS writer shares.
+                let baseline = fy(*y) - size * BASELINE_DROP_EM;
                 let (rr, gg, bb) = rgb(color);
                 c.push_str(&format!(
                     "BT\n/{} {} Tf\n{} {} {} rg\n{} {} Td\n{} Tj\nET\n",
@@ -445,16 +514,100 @@ mod tests {
         // Spot checks against values that are the same in every Helvetica and
         // Arial metric file. If the table were shifted by one, these would be
         // the first casualties.
-        assert_eq!(width_of(b' '), 278.0);
-        assert_eq!(width_of(b'A'), 667.0);
-        assert_eq!(width_of(b'W'), 944.0);
-        assert_eq!(width_of(b'i'), 222.0);
-        assert_eq!(width_of(b'l'), 222.0);
-        assert_eq!(width_of(b'1'), 556.0);
-        assert_eq!(width_of(b'.'), 278.0);
-        assert_eq!(width_of(b'@'), 1015.0);
-        assert_eq!(width_of(b'~'), 584.0);
+        assert_eq!(width_of(b' ', false), 278.0);
+        assert_eq!(width_of(b'A', false), 667.0);
+        assert_eq!(width_of(b'W', false), 944.0);
+        assert_eq!(width_of(b'i', false), 222.0);
+        assert_eq!(width_of(b'l', false), 222.0);
+        assert_eq!(width_of(b'1', false), 556.0);
+        assert_eq!(width_of(b'.', false), 278.0);
+        assert_eq!(width_of(b'@', false), 1015.0);
+        assert_eq!(width_of(b'~', false), 584.0);
         assert_eq!(HELVETICA.len(), 95, "U+0020..U+007E inclusive");
+    }
+
+    #[test]
+    fn the_bold_width_table_matches_helvetica_bolds_published_metrics() {
+        // The same spot checks against `Helvetica-Bold.afm`. A table shifted by
+        // one, or the regular table copied, shows up here first.
+        assert_eq!(width_of(b' ', true), 278.0);
+        assert_eq!(width_of(b'A', true), 722.0);
+        assert_eq!(width_of(b'W', true), 944.0);
+        assert_eq!(width_of(b'i', true), 278.0);
+        assert_eq!(width_of(b'l', true), 278.0);
+        assert_eq!(width_of(b'1', true), 556.0);
+        assert_eq!(width_of(b'.', true), 278.0);
+        assert_eq!(width_of(b'@', true), 975.0);
+        assert_eq!(width_of(b'~', true), 584.0);
+        assert_eq!(HELVETICA_BOLD.len(), 95, "U+0020..U+007E inclusive");
+        // Bold is wider than regular for the letters and the same for the
+        // digits, which is what makes it a second table rather than a factor.
+        for c in b'a'..=b'z' {
+            assert!(
+                width_of(c, true) >= width_of(c, false),
+                "bold {} is narrower than regular",
+                c as char
+            );
+        }
+        for c in b'0'..=b'9' {
+            assert_eq!(width_of(c, true), width_of(c, false), "{}", c as char);
+        }
+    }
+
+    #[test]
+    fn a_bold_string_is_measured_in_bold_not_in_the_regular_weight() {
+        // The map's centre title is bold and `Anchor::Middle`, so half of any
+        // measurement error moves it off centre. This is the title of a real
+        // plasmid: 13306/1000 em regular, 13751/1000 em bold, which is 3.34 pt
+        // of offset at the 15 pt the title is drawn at.
+        let name = "pcDNA3.1(+)-mCherry-WPRE";
+        let regular = text_width_in(name, 1000.0, false);
+        let bold = text_width_in(name, 1000.0, true);
+        assert!((regular - 13306.0).abs() < 1e-9, "{regular}");
+        assert!((bold - 13751.0).abs() < 1e-9, "{bold}");
+        // The default entry point stays the regular one.
+        assert_eq!(text_width(name, 15.0), text_width_in(name, 15.0, false));
+        let half = (bold - regular) / 2000.0 * 15.0;
+        assert!((half - 3.3375).abs() < 1e-4, "{half}");
+    }
+
+    #[test]
+    fn a_centred_bold_title_is_centred_on_the_glyphs_that_are_drawn() {
+        // The whole point, at the emitter: the `Td` x for a bold Middle-anchored
+        // string must be `x - bold_width/2`, not `x - regular_width/2`. It was
+        // the latter, and the title sat 3.34 pt right of centre in every PDF
+        // while the SVG -- which has a real font and a real text-anchor --
+        // centred it correctly.
+        let name = "pcDNA3.1(+)-mCherry-WPRE";
+        let sc = Scene {
+            width: 720.0,
+            height: 720.0,
+            title: name.into(),
+            items: vec![Item::Text {
+                x: 360.0,
+                y: 356.0,
+                size: 15.0,
+                anchor: Anchor::Middle,
+                color: "#16191c".into(),
+                bold: true,
+                text: name.into(),
+            }],
+        };
+        let (bytes, _) = to_pdf(&sc);
+        let text = String::from_utf8_lossy(&bytes);
+        let td = text.find(" Td").expect("Td");
+        let line: &str = text[..td].rsplit('\n').next().unwrap();
+        let x: f64 = line.split_whitespace().next().unwrap().parse().unwrap();
+        let want = 360.0 - text_width_in(name, 15.0, true) / 2.0;
+        assert!(
+            (x - want).abs() < 0.01,
+            "centred at {x}, should be {want} (the regular table would say {})",
+            360.0 - text_width_in(name, 15.0, false) / 2.0
+        );
+        // And the glyphs really do come from the bold font, or the measurement
+        // would be the wrong one in the other direction.
+        assert!(text.contains("/F2 15 Tf"), "the title is drawn in F2");
+        assert!(text.contains("/BaseFont /Helvetica-Bold"));
     }
 
     #[test]

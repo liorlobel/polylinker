@@ -13,9 +13,18 @@
 //!
 //! That is a cost, and the way to make it pay is to treat the two as
 //! independent implementations of one specification rather than as a copy:
-//! `crates/pl-draw/tests/agreement.rs` renders the same molecule through both
-//! and asserts they describe the same picture. Two renderers that agree are
-//! better evidence than one that nobody checks.
+//! `crates/pl-draw/tests/agreement.rs` replays a fixture generated from the
+//! TypeScript through this crate's helpers — `angle`, `polar`, `ranges`,
+//! `place_column`, `isotonic`, `safe_color`, `nice_step`, `commas`, `esc`, `n`
+//! — and checks that the two compute the same numbers. Two renderers that agree
+//! about their arithmetic are better evidence than one that nobody checks.
+//!
+//! **It is a helper-level check and not a picture-level one.** It never builds a
+//! [`Molecule`], never calls [`scene`], and never compares an arc, a radius, an
+//! arrowhead or a label column, so a swapped `Arrow::Start`/`Arrow::End` or a
+//! moved label anchor passes it untouched. Until 2026-07 this paragraph said the
+//! harness rendered the same molecule through both renderers, which is how the
+//! origin-spanning label anchor in `mid_base` survived: there was no oracle.
 //!
 //! # What is guaranteed
 //!
@@ -72,17 +81,66 @@ impl Default for Options {
     }
 }
 
+/// The ink this crate chooses itself, as opposed to a colour out of a file.
+///
+/// Named rather than spelled out at each use site because they are audited:
+/// `contrast::tests::every_colour_this_crate_chooses_meets_wcag_aa_on_white`
+/// measures these constants, and a literal repeated at the use site is a
+/// literal the audit cannot see. Changing the feature-label fill to `#a0a0a0`
+/// (2.61:1 on white) used to leave every gate green.
+///
+/// Each is the twin of a key in the TypeScript renderer's `DEFAULT_THEME`;
+/// `contrast::tests::the_typescript_palette_matches_ours_and_also_passes` pins
+/// the pairs together so one side cannot be fixed without the other.
+pub mod ink {
+    /// `labelFill` — feature label text, the most numerous text in a map.
+    pub const LABEL_FILL: &str = "#22262a";
+    /// `titleFill` — the molecule name at the centre.
+    pub const TITLE_FILL: &str = "#16191c";
+    /// `subtitleFill`/`tickStroke` — the bp count and the ruler numbers.
+    pub const SUBTITLE_FILL: &str = "#6b7280";
+    /// `backboneStroke` — the ring itself.
+    pub const BACKBONE_STROKE: &str = "#33383d";
+    /// `featureStroke` — the outline around a feature arrow.
+    pub const FEATURE_STROKE: &str = "#2b2f34";
+    /// `leaderStroke` — the line from the ring to a label.
+    pub const LEADER_STROKE: &str = "#868d95";
+}
+
 /// What was drawn, and what could not be.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
     pub labels_placed: usize,
-    /// Labels that would have overlapped and were dropped.
+    /// Labels that would have overlapped, or that had no room for even one
+    /// character, and were dropped.
     ///
     /// Returned rather than silently omitted: a map missing three labels looks
     /// exactly like a plasmid with three fewer features.
     pub labels_hidden: Vec<String>,
     /// Features whose coordinates describe nothing drawable.
     pub malformed: Vec<String>,
+    /// Features drawn from only *some* of their segments, by full name.
+    ///
+    /// A joined feature copied out of a larger parent record —
+    /// `CDS join(100..200,5000..6000)` on a 1000 bp plasmid — keeps one segment
+    /// that describes something and one that does not. The map can only draw
+    /// the first, and a 101 bp single-exon arrow labelled `orfX` is
+    /// indistinguishable from a real 101 bp `orfX`. Half a feature is a worse
+    /// lie than no feature, so it is named here.
+    pub partly_drawn: Vec<String>,
+    /// Labels shortened with a trailing `...` because the canvas was too narrow
+    /// for the whole name, by full name.
+    ///
+    /// The ring's radius reserves room for the widest label, but that
+    /// reservation is capped at 30% of the canvas so that one 60-character name
+    /// cannot collapse the map to nothing. Past the cap the name no longer fits
+    /// in what was reserved, and the choice is a clipped label or a shortened
+    /// one. A clipped label is cropped by the `viewBox`, the `/MediaBox` and the
+    /// `%%BoundingBox` alike — silently, in the typesetter's hands — so it is
+    /// shortened here and said so. The feature's own `<title>` still carries
+    /// the whole name, so nothing is lost from the SVG itself — only from what
+    /// a reader of the printed figure can see, which is why it is reported.
+    pub labels_truncated: Vec<String>,
 }
 
 /// Round to two decimals. Float noise triples an SVG's size and destroys
@@ -198,6 +256,15 @@ pub fn ranges(start: u64, end: u64, len: u64, circular: bool) -> Vec<(u64, u64)>
     if start > len && end > len {
         return Vec::new();
     }
+    // The mirror image, which was missing on both renderers. A segment wholly
+    // below base 1 — `0-0`, which the SnapGene reader produces from an importer
+    // that wrote 0-based coordinates — names no base either, and
+    // `clamp(1, len)` on both endpoints collapsed it onto a 1 bp arc at base 1
+    // under the real feature's name. The same fabrication as above, at the
+    // other end of the molecule.
+    if start < 1 && end < 1 {
+        return Vec::new();
+    }
     let s = start.clamp(1, len);
     let e = end.clamp(1, len);
     if s <= e {
@@ -209,6 +276,81 @@ pub fn ranges(start: u64, end: u64, len: u64, circular: bool) -> Vec<(u64, u64)>
         return vec![(e.min(s), s.max(e))];
     }
     vec![(s, len), (1, e)]
+}
+
+/// The base a feature's label should point at: the middle of its whole extent.
+///
+/// Accumulated across the parts, because half the *total* span added to the
+/// first part is not the same thing and the difference is a quarter turn. The
+/// old form was `parts[0].0 + (span / 2).min(parts[0].1 - parts[0].0)`: for a
+/// 502 bp feature at 999..500 on a 1000 bp plasmid the parts are
+/// `[(999, 1000), (1, 500)]`, so the clamp pinned the anchor to base 1000 —
+/// 359.6 degrees, twelve o'clock — and because the column is chosen by
+/// `angle.sin() >= 0.0` and sin(359.6°) is -0.006, the label went to the *left*
+/// column with a leader pointing at 2 bases of the 502. The middle is base 250,
+/// at 89.6 degrees, in the right column. The identical feature at 100..601
+/// anchored correctly, so the picture depended on where the origin happened to
+/// sit, which it must never do.
+///
+/// `featureMidBase` in the TypeScript renderer accumulates the same way. The
+/// half is floored rather than rounded, which keeps a single-part feature's
+/// anchor bit-identical to what this crate has always drawn and leaves the two
+/// renderers at most one base apart at a part boundary.
+fn mid_base(parts: &[(u64, u64)], span: u64) -> u64 {
+    let half = span / 2;
+    let mut acc = 0u64;
+    for &(a, b) in parts {
+        let w = b - a + 1;
+        // `acc <= half` at every iteration, so the subtraction cannot wrap:
+        // the loop only continues while `acc + w < half`.
+        if acc + w >= half {
+            return a + (half - acc);
+        }
+        acc += w;
+    }
+    parts.first().map_or(1, |p| p.0)
+}
+
+/// How wide a label is going to be, in scene units.
+///
+/// The estimate, not Helvetica's real advances: it is what the ring radius
+/// reserves room with and what the TypeScript renderer measures with, and the
+/// invariant that a label ends inside the canvas has to be stated in one unit
+/// or the other. Both call sites use this so they cannot drift apart.
+fn label_width(name: &str, font_size: f64) -> f64 {
+    name.chars().count() as f64 * font_size * 0.55
+}
+
+/// A label shortened to what the canvas can actually hold, or `None` if not
+/// even one character and an ellipsis fit.
+///
+/// `Some(name.to_string())` when the whole name fits, which is the case for
+/// every map where the radius reservation was not capped — the caller compares
+/// against the original to decide whether anything was lost.
+///
+/// The ellipsis is three ASCII full stops, not U+2026: the PDF writer would
+/// carry the real character as WinAnsi 0x85, but the EPS writer asks the viewer
+/// for `Helvetica` with its own StandardEncoding, where 0x85 is not an ellipsis
+/// at all. Three dots are the same three dots in all three formats.
+fn fit_label(name: &str, room: f64, font_size: f64) -> Option<String> {
+    if label_width(name, font_size) <= room {
+        return Some(name.to_string());
+    }
+    const ELLIPSIS: &str = "...";
+    let mut kept = String::new();
+    for c in name.chars() {
+        let mut trial = kept.clone();
+        trial.push(c);
+        if label_width(&(trial.clone() + ELLIPSIS), font_size) > room {
+            break;
+        }
+        kept = trial;
+    }
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept + ELLIPSIS)
+    }
 }
 
 /// Build the device-independent picture.
@@ -229,10 +371,18 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     let widest = mol
         .features
         .iter()
-        .map(|f| f.name.chars().count() as f64 * opts.font_size * 0.55)
+        .map(|f| label_width(&f.name, opts.font_size))
         .fold(0.0_f64, f64::max);
     let margin = (widest + 34.0).min(opts.width.min(opts.height) * 0.3);
     let ro = (opts.width.min(opts.height) / 2.0 - margin).max(40.0);
+    // What is left for a label once the ring has taken its radius, on either
+    // side: a label runs outward from `cx ± (ro + 26)`, so both columns have the
+    // same room. Uncapped the reservation closes with 8 units to spare whatever
+    // the name, but the `.min(30%)` cap above drops the `widest` term from `ro`
+    // while the label still grows with it, and the `.max(40)` floor does the
+    // same on a small canvas. Past either, the name no longer fits in what was
+    // reserved and gets shortened below rather than cropped by the viewBox.
+    let room = cx - (ro + 26.0);
     let ri = ro - opts.ring_width;
     let mid_r = (ro + ri) / 2.0;
 
@@ -242,7 +392,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
             cx,
             cy,
             r: mid_r,
-            stroke: "#33383d".into(),
+            stroke: ink::BACKBONE_STROKE.into(),
             stroke_width: 1.25,
         });
     } else {
@@ -262,7 +412,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                 },
             ],
             fill: None,
-            stroke: Some("#33383d".into()),
+            stroke: Some(ink::BACKBONE_STROKE.into()),
             stroke_width: 1.25,
             title: None,
         });
@@ -279,7 +429,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
             items.push(Item::Path {
                 segs: vec![Seg::Move(x0, y0), Seg::Line(x1, y1)],
                 fill: None,
-                stroke: Some("#6b7280".into()),
+                stroke: Some(ink::SUBTITLE_FILL.into()),
                 stroke_width: 1.0,
                 title: None,
             });
@@ -289,7 +439,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                 y: ty,
                 size: opts.font_size * 0.72,
                 anchor: Anchor::Middle,
-                color: "#6b7280".into(),
+                color: ink::SUBTITLE_FILL.into(),
                 bold: false,
                 text: commas(base),
             });
@@ -306,14 +456,27 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     let mut anchors: Vec<Label> = Vec::new();
 
     for f in &mol.features {
-        let parts: Vec<(u64, u64)> = f
-            .segments
-            .iter()
-            .flat_map(|s| ranges(s.start, s.end, len, circular))
-            .collect();
+        let mut parts: Vec<(u64, u64)> = Vec::with_capacity(f.segments.len());
+        // Counted per segment, not over the whole feature. `ranges` returns
+        // nothing for a segment lying wholly past the end, and a feature with
+        // one such segment and one good one still has a non-empty `parts` — so
+        // the all-or-nothing check below never fired for it and half of
+        // `CDS join(100..200,5000..6000)` on a 1000 bp plasmid went out as a
+        // whole 101 bp `orfX` with nothing said.
+        let mut lost_segments = 0usize;
+        for s in &f.segments {
+            let r = ranges(s.start, s.end, len, circular);
+            if r.is_empty() {
+                lost_segments += 1;
+            }
+            parts.extend(r);
+        }
         if parts.is_empty() {
             report.malformed.push(f.name.clone());
             continue;
+        }
+        if lost_segments > 0 {
+            report.partly_drawn.push(f.name.clone());
         }
         let colour = safe_color(f.color(), colour_for(&f.kind));
         let span: u64 = parts.iter().map(|(a, b)| b - a + 1).sum();
@@ -350,14 +513,14 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                 items.push(Item::Path {
                     segs: arc_segs(cx, cy, ri, ro, angle(a, len), angle(b + 1, len), arrow),
                     fill: Some(colour.clone()),
-                    stroke: Some("#2b2f34".into()),
+                    stroke: Some(ink::FEATURE_STROKE.into()),
                     stroke_width: 0.6,
                     title: Some(f.name.clone()),
                 });
             }
         }
 
-        let mid = parts[0].0 + (span / 2).min(parts[0].1 - parts[0].0);
+        let mid = mid_base(&parts, span);
         anchors.push(Label {
             text: f.name.clone(),
             angle: angle(mid, len),
@@ -389,6 +552,22 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
             let Some(y) = placed.positions[k] else {
                 continue;
             };
+            let text = match fit_label(&anchors[i].text, room, opts.font_size) {
+                Some(t) => {
+                    if t != anchors[i].text {
+                        report.labels_truncated.push(anchors[i].text.clone());
+                    }
+                    t
+                }
+                None => {
+                    // Not even one character and an ellipsis fit. Drawing the
+                    // leader with nothing on the end of it would look like a
+                    // renderer bug rather than a canvas too small to hold the
+                    // name, so the label goes, and it is named.
+                    report.labels_hidden.push(anchors[i].text.clone());
+                    continue;
+                }
+            };
             let dir = if right { 1.0 } else { -1.0 };
             let lx = cx + dir * (ro + 26.0);
             let (tx, ty) = polar(cx, cy, ro + 2.0, anchors[i].angle);
@@ -400,7 +579,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                     Seg::Line(lx - dir * 4.0, y),
                 ],
                 fill: None,
-                stroke: Some("#868d95".into()),
+                stroke: Some(ink::LEADER_STROKE.into()),
                 stroke_width: 0.9,
                 title: None,
             });
@@ -409,9 +588,9 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                 y,
                 size: opts.font_size,
                 anchor: if right { Anchor::Start } else { Anchor::End },
-                color: "#22262a".into(),
+                color: ink::LABEL_FILL.into(),
                 bold: false,
-                text: anchors[i].text.clone(),
+                text,
             });
             report.labels_placed += 1;
         }
@@ -428,7 +607,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
         y: cy - 4.0,
         size: opts.font_size * 1.25,
         anchor: Anchor::Middle,
-        color: "#16191c".into(),
+        color: ink::TITLE_FILL.into(),
         bold: true,
         text: title.clone(),
     });
@@ -437,7 +616,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
         y: cy + opts.font_size + 2.0,
         size: opts.font_size * 0.9,
         anchor: Anchor::Middle,
-        color: "#6b7280".into(),
+        color: ink::SUBTITLE_FILL.into(),
         bold: false,
         text: format!("{} bp", commas(len)),
     });

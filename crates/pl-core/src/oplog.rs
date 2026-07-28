@@ -259,6 +259,29 @@ pub enum OpError {
     /// an accepted cost, paid back here: an operation that would corrupt the
     /// annotations is refused rather than recorded.
     WouldCorrupt(Vec<crate::Invalid>),
+    /// A reverse complement was asked to reflect a coordinate that has no
+    /// reflection.
+    ///
+    /// Reversing is reflection across the molecule's length: position `p`
+    /// becomes `n + 1 - p`. A coordinate outside `1..=n` has no image under
+    /// that map, and `n.saturating_sub(p).saturating_add(1)` answered 1 for
+    /// every one of them — so a segment `4..9000` on 8 bases became `1..5`,
+    /// `validate()` went from one `PastEnd` to clean, and `is_valid()` flipped
+    /// from false to true. The log's own gate cannot catch that: it compares
+    /// per-kind problem counts and only refuses *increases*, and an edit that
+    /// erases a problem by inventing an in-range coordinate is precisely what
+    /// it waves through. The `n == 0` case is worse still — a standalone
+    /// annotation track (features, no bases, no declared length; UGENE and
+    /// SnapGene both export them) collapsed every feature and every primer site
+    /// to `1..1`, destroying a 774 bp and an 834 bp annotation with `apply`
+    /// returning `Ok`, and reverse-complementing again did not bring them back.
+    /// Refusing is a loss the user can see and undo; the alternative was a
+    /// fabrication they could not.
+    CannotReflect {
+        what: String,
+        at: u64,
+        len: u64,
+    },
     /// Two different operations derived the same identity.
     ///
     /// Should be unreachable: `OpKind::content` is length-prefixed and covers
@@ -292,6 +315,19 @@ impl std::fmt::Display for OpError {
                     write!(f, "; and {} more", v.len() - 3)?;
                 }
                 Ok(())
+            }
+            OpError::CannotReflect { what, at, len } => {
+                if *len == 0 {
+                    write!(
+                        f,
+                        "there is nothing to reverse complement against: this file carries annotations but neither bases nor a declared length, so {what} at {at} has no reflection"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{what} at {at} lies outside the {len} bp being reverse complemented, so it has no reflection"
+                    )
+                }
             }
             OpError::IdCollision { id } => write!(
                 f,
@@ -373,14 +409,53 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
             // `annotation_span()`, so the two disagreed and a molecule
             // `is_valid()` accepted could still panic here.
             let n = mol.span();
+            // Every coordinate is checked BEFORE a single base moves, because
+            // saturating arithmetic cannot keep an out-of-range coordinate
+            // out of range and pretending otherwise destroyed data.
+            //
+            // `flip(p) = n + 1 - p` has no answer for `p` outside `1..=n`, and
+            // `n.saturating_sub(p).saturating_add(1)` gave 1 for every such p.
+            // Two measured consequences. A segment `4..9000` on 8 bases became
+            // `1..5`: `validate()` went from `[PastEnd]` to `[]` and
+            // `is_valid()` from false to true, so the comment that used to sit
+            // here — claiming saturation "keeps the existing problem visible" —
+            // was not merely inaccurate but unachievable, since `flip` maps
+            // every input into `[1, n]` by construction. And on a standalone
+            // annotation track (`span() == 0`; the UGENE file pinned by
+            // pl-fileio's `standalone_annotation_tracks_are_read`, features at
+            // 242..1015 and 1118..1951) EVERY segment and EVERY primer site
+            // collapsed to `1..1`, `annotation_span()` fell from 1951 to 1,
+            // `validate()` returned clean, and `apply` returned `Ok`. Neither
+            // was catchable downstream: the log's gate compares per-kind problem
+            // counts and only refuses increases.
+            for (i, f) in mol.features.iter().enumerate() {
+                for (j, s) in f.segments.iter().enumerate() {
+                    for p in [s.start, s.end] {
+                        if p < 1 || p > n {
+                            return Err(OpError::CannotReflect {
+                                what: format!("feature {i} '{}' segment {j}", f.name),
+                                at: p,
+                                len: n,
+                            });
+                        }
+                    }
+                }
+            }
+            for (i, pr) in mol.primers.iter().enumerate() {
+                for (j, s) in pr.sites.iter().enumerate() {
+                    for p in [s.start, s.end] {
+                        if p < 1 || p > n {
+                            return Err(OpError::CannotReflect {
+                                what: format!("primer {i} '{}' site {j}", pr.name),
+                                at: p,
+                                len: n,
+                            });
+                        }
+                    }
+                }
+            }
             mol.seq = crate::reverse_complement(&mol.seq);
-            // A coordinate already past the end cannot be reflected onto a
-            // real position. Saturating rather than wrapping keeps the
-            // *existing* problem visible to `validate()` instead of turning it
-            // into a fresh one at 18446744073709550634 — and the operation-log
-            // gate only refuses newly introduced problems, so a wrapped value
-            // would have committed.
-            let flip = |p: u64| -> u64 { n.saturating_sub(p).saturating_add(1) };
+            let flip = |p: u64| -> u64 { n + 1 - p };
             // Everything flips end for end, and each feature changes strand.
             for f in &mut mol.features {
                 for s in &mut f.segments {
@@ -467,11 +542,37 @@ fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64)
     // to 1..16.
     let interior_survives = new_len > 0 && new_len == old_len;
 
+    // `(p as i64 + delta) as u64` was two failures in one expression, and `p`
+    // comes straight off disk: `snapgene.rs` parses `<Segment range="a-b"/>`
+    // with an unbounded `parse::<u64>()` and `pl-gui`'s document never calls
+    // `Molecule::validate()` on the way in.
+    //
+    // With `range="1-9223372036854775807"` and a 12 bp insertion, `i64::MAX + 12`
+    // panicked "attempt to add with overflow" in any checked build. With
+    // `range="1-18446744073709551615"` and checks off — the workspace release
+    // profile sets none — `u64::MAX as i64` is -1, so the END came back as 11
+    // while the start moved to 13, `b >= a` failed, and the whole feature was
+    // deleted with `apply` returning `Ok`: measured, features after = 0, no
+    // error and no report.
+    //
+    // Saturating in u64 keeps an absurd coordinate absurd, which is exactly
+    // what `validate()` needs in order to go on reporting it as `PastEnd`. The
+    // only values that saturate are ones already within `delta` of `u64::MAX`,
+    // i.e. ones that named no base to begin with. `Segment::len` already
+    // defends the identical threat the identical way.
+    let shift = |p: u64| -> u64 {
+        if delta >= 0 {
+            p.saturating_add(delta as u64)
+        } else {
+            p.saturating_sub(delta.unsigned_abs())
+        }
+    };
+
     let map_start = |p: u64| -> Option<u64> {
         if p < start {
             Some(p)
         } else if p >= old_end {
-            Some((p as i64 + delta) as u64)
+            Some(shift(p))
         } else if interior_survives {
             Some(p)
         } else {
@@ -482,7 +583,7 @@ fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64)
         if p < start {
             Some(p)
         } else if p >= old_end {
-            Some((p as i64 + delta) as u64)
+            Some(shift(p))
         } else if interior_survives {
             Some(p)
         } else {
@@ -512,6 +613,22 @@ fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64)
         let a = map_start(*s_start).or_else(|| (*s_end >= old_end).then_some(start + new_len));
         let b = map_end(*s_end).or_else(|| (*s_start < start).then_some(start - 1));
         match (a, b) {
+            // A segment the remap did not move is handed back exactly as it
+            // arrived, whatever coordinate it carries. This is the docstring's
+            // first case — "entirely before the edit: unchanged" — spelled out,
+            // and it has to come first because the `a >= 1` conjunct below
+            // contradicted it. Trace the four branches that produce `a` and
+            // none of them can compute 0: `InsertAt`, `DeleteRange` and
+            // `ReplaceRange` all validate `start >= 1` before they get here, so
+            // `a == 0` only ever meant a start of 0 that the SnapGene reader
+            // carried through from `<Segment range="0-4"/>` — a state
+            // `Molecule::rotate` goes out of its way to preserve. The conjunct
+            // therefore did nothing but delete such a feature outright on the
+            // first unrelated length-changing edit: measured, an
+            // `InsertAt { at: 10 }` six bases away removed it and `apply`
+            // returned `Ok`, because the vanished `ZeroStart` made the gate see
+            // an improvement rather than a loss.
+            (Some(a), Some(b)) if a == *s_start && b == *s_end => true,
             // `b >= a` is right for an ordinary segment and wrong for a wrapped
             // one, whose end is *supposed* to sit below its start. Without the
             // exception, ANY edit anywhere on a circular molecule silently
@@ -1652,5 +1769,268 @@ mod tests {
             .expect("delete");
         let seg = &log.current().features[0].segments[0];
         assert_eq!((seg.start, seg.end), (10, 25));
+    }
+
+    #[test]
+    fn reverse_complementing_a_standalone_annotation_track_is_refused_not_collapsed() {
+        // Features, no bases, no declared length — UGENE and SnapGene both
+        // export this, pl-fileio pins the exact file with
+        // `standalone_annotation_tracks_are_read`, and pl-gui offers
+        // Edit -> "Reverse complement" on it with no further predicate.
+        // `span()` is 0 there, so `n.saturating_sub(p).saturating_add(1)` gave 1
+        // for every coordinate: a 774 bp and an 834 bp annotation were both
+        // replaced by 1 bp annotations at base 1, `validate()` stayed clean
+        // because it measures against `annotation_span()` and only reports
+        // `PastEnd` when `n > 0`, `apply` returned `Ok`, and doing it twice did
+        // not undo it.
+        let mut m = Molecule::default();
+        for (name, a, b) in [("orf1", 242u64, 1015u64), ("orf2", 1118, 1951)] {
+            let mut f = Feature::new(name, "CDS");
+            f.segments.push(Segment::new(a, b));
+            m.features.push(f);
+        }
+        assert!(m.is_annotation_track());
+        assert_eq!(m.span(), 0);
+        assert_eq!(m.annotation_span(), 1951);
+
+        let mut log = OpLog::new(m);
+        let e = log.apply(OpKind::ReverseComplement, "t").unwrap_err();
+        assert!(
+            matches!(e, OpError::CannotReflect { len: 0, .. }),
+            "expected a refusal naming the missing length, got {e:?}"
+        );
+        let f = log.current();
+        assert_eq!(
+            (
+                f.features[0].segments[0].start,
+                f.features[0].segments[0].end
+            ),
+            (242, 1015),
+            "a refused operation must leave the document untouched"
+        );
+        assert_eq!(
+            (
+                f.features[1].segments[0].start,
+                f.features[1].segments[0].end
+            ),
+            (1118, 1951)
+        );
+        assert_eq!(log.all_ops().len(), 0, "a refused edit is not history");
+    }
+
+    #[test]
+    fn a_coordinate_past_the_end_survives_a_reverse_complement_instead_of_being_erased() {
+        // `flip` maps EVERY input into `[1, n]`, so a `PastEnd` could never
+        // survive the operation for any molecule and any out-of-range value.
+        // On these 8 bases the segment `4..9000` came back as `1..5`,
+        // `validate()` went from one `PastEnd` to none, and `is_valid()` flipped
+        // from false to true — the feature then made a confident, wrong claim
+        // about bases 1..5. The log's gate cannot see it: it compares per-kind
+        // problem counts and refuses only increases.
+        let mut m = Molecule {
+            seq: b"ACGTACGT".to_vec(),
+            ..Default::default()
+        };
+        let mut f = Feature::new("bad", "misc_feature");
+        f.segments.push(Segment::new(4, 9_000));
+        m.features.push(f);
+        assert_eq!(m.validate().len(), 1, "{:?}", m.validate());
+
+        let mut log = OpLog::new(m);
+        let e = log.apply(OpKind::ReverseComplement, "t").unwrap_err();
+        assert!(
+            matches!(
+                e,
+                OpError::CannotReflect {
+                    at: 9_000,
+                    len: 8,
+                    ..
+                }
+            ),
+            "expected a refusal naming the coordinate, got {e:?}"
+        );
+        let s = &log.current().features[0].segments[0];
+        assert_eq!((s.start, s.end), (4, 9_000));
+        assert!(
+            !log.current().is_valid(),
+            "the problem the file arrived with must still be reported"
+        );
+        assert_eq!(log.current().seq, b"ACGTACGT".to_vec(), "no bases moved");
+    }
+
+    #[test]
+    fn a_reverse_complement_of_coordinates_that_all_exist_is_unchanged() {
+        // The guard against over-correcting: refusing must apply only where
+        // there is genuinely nothing to reflect onto. Both endpoints of a legal
+        // origin-crossing wrap are real positions, as is every primer site here,
+        // so this must still commit — and still be an involution.
+        let mut m = Molecule {
+            seq: b"AAAACCCCGGGGTTTT".to_vec(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let mut wrapped = Feature::new("crosses the origin", "misc_feature");
+        wrapped.segments.push(Segment::new(15, 2));
+        m.features.push(wrapped);
+        m.primers.push(crate::Primer {
+            name: "p".into(),
+            seq: "AAAA".into(),
+            description: String::new(),
+            sites: vec![crate::BindingSite {
+                start: 1,
+                end: 4,
+                strand: crate::Strand::Forward,
+                tm: None,
+            }],
+        });
+
+        let mut log = OpLog::new(m);
+        log.apply(OpKind::ReverseComplement, "t")
+            .expect("every coordinate here names a real base");
+        let s = &log.current().features[0].segments[0];
+        assert_eq!((s.start, s.end), (15, 2), "the wrap reflects onto itself");
+        let site = &log.current().primers[0].sites[0];
+        assert_eq!((site.start, site.end), (13, 16));
+        assert_eq!(site.strand, crate::Strand::Reverse);
+
+        log.apply(OpKind::ReverseComplement, "t").unwrap();
+        let site = &log.current().primers[0].sites[0];
+        assert_eq!((site.start, site.end), (1, 4), "an involution");
+        assert_eq!(site.strand, crate::Strand::Forward);
+    }
+
+    #[test]
+    fn an_edit_elsewhere_does_not_delete_a_feature_the_importer_gave_a_zero_start() {
+        // `snapgene.rs` parses `<Segment range="0-4"/>` verbatim, and
+        // `Molecule::rotate` deliberately preserves such a start rather than
+        // dropping it. `remap`'s `a >= 1` conjunct did the opposite: it deleted
+        // the whole feature on the first length-changing edit anywhere in the
+        // molecule — here an insertion six bases away — and `apply` returned
+        // `Ok`, because removing the sole `ZeroStart` made the gate see an
+        // improvement rather than a loss.
+        let mut m = mol("AAAACCCCGGGGTTTT", false);
+        let mut zero = Feature::new("zero start", "misc_feature");
+        zero.segments.push(Segment::new(0, 4));
+        let mut ordinary = Feature::new("ordinary", "misc_feature");
+        ordinary.segments.push(Segment::new(12, 14));
+        m.features.push(zero);
+        m.features.push(ordinary);
+        assert_eq!(m.validate().len(), 1, "{:?}", m.validate());
+
+        let mut log = OpLog::new(m);
+        log.apply(
+            OpKind::InsertAt {
+                at: 10,
+                seq: "GG".into(),
+            },
+            "t",
+        )
+        .expect("an insert at 10 touches neither feature");
+
+        let after = log.current();
+        assert_eq!(
+            after.features.len(),
+            2,
+            "the zero-start feature must not vanish: {:?}",
+            after.features
+        );
+        assert_eq!(after.features[0].name, "zero start");
+        assert_eq!(
+            (
+                after.features[0].segments[0].start,
+                after.features[0].segments[0].end
+            ),
+            (0, 4),
+            "entirely before the edit means unchanged, exactly as documented"
+        );
+        assert_eq!(
+            (
+                after.features[1].segments[0].start,
+                after.features[1].segments[0].end
+            ),
+            (14, 16),
+            "the control feature still follows its bases"
+        );
+        assert!(
+            after
+                .validate()
+                .iter()
+                .any(|p| matches!(p, crate::Invalid::ZeroStart { .. })),
+            "the importer's problem is reported, not quietly repaired: {:?}",
+            after.validate()
+        );
+    }
+
+    #[test]
+    fn a_zero_start_feature_whose_bases_are_deleted_is_still_deleted() {
+        // The guard against over-correcting the above. `0-4` really describes
+        // bases 1..4; delete those four bases and there is nothing left to point
+        // at, so the feature goes — a 1 bp stub would be valid, plausible and
+        // false.
+        let mut m = mol("AAAACCCCGGGGTTTT", false);
+        let mut zero = Feature::new("zero start", "misc_feature");
+        zero.segments.push(Segment::new(0, 4));
+        m.features.push(zero);
+
+        let mut log = OpLog::new(m);
+        log.apply(OpKind::DeleteRange { start: 1, len: 4 }, "t")
+            .expect("delete");
+        assert!(
+            log.current().features.is_empty(),
+            "{:?}",
+            log.current().features
+        );
+    }
+
+    #[test]
+    fn a_hostile_coordinate_neither_overflows_nor_vanishes_when_the_length_changes() {
+        // `(p as i64 + delta) as u64` on a value straight off disk.
+        // `snapgene.rs` parses `<Segment range="a-b"/>` with an unbounded
+        // `parse::<u64>()` and pl-gui never validates on the way in.
+        //
+        // At `i64::MAX` a 12 bp insertion panicked "attempt to add with
+        // overflow" in any checked build. At `u64::MAX`, with checks off,
+        // `u64::MAX as i64` is -1 so the end came back as 11 while the start
+        // moved to 13; `b >= a` failed and the entire feature was deleted with
+        // `apply` returning `Ok` and reporting nothing.
+        for end in [i64::MAX as u64, u64::MAX] {
+            let mut m = mol("AAAACCCCGGGGTTTT", false);
+            let mut f = Feature::new("hostile", "misc_feature");
+            f.segments.push(Segment::new(1, end));
+            m.features.push(f);
+            assert_eq!(m.validate().len(), 1, "one PastEnd on arrival");
+
+            let mut log = OpLog::new(m);
+            log.apply(
+                OpKind::InsertAt {
+                    at: 1,
+                    seq: "GAATTCGGATCC".into(),
+                },
+                "t",
+            )
+            .expect("an insertion elsewhere must not be blamed on the importer");
+
+            let after = log.current();
+            assert_eq!(
+                after.features.len(),
+                1,
+                "a coordinate the file supplied must not delete the feature"
+            );
+            let s = &after.features[0].segments[0];
+            assert_eq!(s.start, 13, "the real end of the segment moved by 12");
+            assert!(
+                s.end > after.len(),
+                "an absurd coordinate stays absurd so `validate` goes on reporting it: {}",
+                s.end
+            );
+            assert!(
+                after
+                    .validate()
+                    .iter()
+                    .any(|p| matches!(p, crate::Invalid::PastEnd { .. })),
+                "{:?}",
+                after.validate()
+            );
+        }
     }
 }

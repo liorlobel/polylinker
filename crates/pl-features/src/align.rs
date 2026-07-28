@@ -54,6 +54,22 @@ impl Hit {
     /// curated-library matcher is actually asking, and it makes a hit that
     /// deletes half the feature score 0.5 rather than 1.0 — which is what
     /// dividing by the alignment length would have given.
+    ///
+    /// # The annotator deliberately does not call this
+    ///
+    /// [`crate::annotate::Annotation::identity`] is a *local* identity and is
+    /// computed separately, because the annotator never aligns the whole
+    /// record: it aligns the seed-supported core, so a truncated feature has no
+    /// alignment against its missing part to score at all. The truncation is
+    /// carried by `coverage` there, and applying this denominator on top would
+    /// count it twice — the same 300-of-600 fragment would report 0.5 identity
+    /// *and* 0.5 coverage, and a threshold on identity would then drop every
+    /// fragment the fragment logic exists to report. So the two conventions are
+    /// both right, for different questions, and the only mistake would be
+    /// reading one of the numbers as the other.
+    ///
+    /// Kept rather than deleted because a caller aligning a whole feature — the
+    /// tests below, and any future whole-record path — needs this denominator.
     pub fn identity(&self, feature_len: usize) -> f64 {
         if feature_len == 0 {
             return 0.0;

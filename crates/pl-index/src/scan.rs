@@ -193,9 +193,31 @@ impl Motif {
 /// `packed` is the whole library store; `row` names the slice. Hits come back
 /// ordered by `(start, strand)`, which is what makes a whole-library result
 /// deterministic without a sort at the end.
+///
+/// **Unbounded, deliberately.** A caller that needs every coordinate of a
+/// single record — `pl find --in <file>` printing a table — should have them.
+/// A caller sweeping a whole library must not: see [`find_in_row_capped`], and
+/// the arithmetic on [`crate::query::MAX_RETAINED_HITS`].
 pub fn find_in_row(motif: &Motif, packed: &[u8], row: &Row) -> Vec<Hit> {
+    find_in_row_capped(motif, packed, row, usize::MAX).0
+}
+
+/// The same search, keeping at most `cap` hits — and **counting all of them**.
+///
+/// Returns the first `cap` hits in `(start, strand)` order, and how many hits
+/// there really were. The count is exact whatever the cap: the scan visits
+/// every start either way, so the only thing a cap costs is coordinates, never
+/// a number. Telling a user "3 hits" about a record holding 12,002,567 would be
+/// the same silent lie this crate rejected FTS5 for.
+///
+/// The cap exists because nothing bounded the vector and `Hit` is 24 bytes.
+/// Measured on the 24 Mbase scale fixture: pattern `G` yields 12,002,567 hits
+/// and retains 299.8 MB, and `N` — palindromic, so one hit per base — yields
+/// 24,000,000 and 590.0 MB, against a design note that calls memory a
+/// non-issue. Only the *display* was ever capped.
+pub fn find_in_row_capped(motif: &Motif, packed: &[u8], row: &Row, cap: usize) -> (Vec<Hit>, u64) {
     if !row.state.searchable() || row.seq_bases == 0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let n = row.seq_bases as usize;
     let circular = row.topology.scan_as_circular();
@@ -226,29 +248,30 @@ pub fn find_in_row(motif: &Motif, packed: &[u8], row: &Row) -> Vec<Hit> {
         }
     };
 
+    let mut total = 0u64;
     if motif.palindromic {
         // One scan. Two would return every site twice, and "GAATTC found in
         // 2,576 files" reads exactly the same whether each site was counted
         // once or twice.
-        push(
-            slice.find(&motif.masks, n, circular),
-            Strand::Both,
-            &mut out,
-        );
+        let (starts, found) = slice.find(&motif.masks, n, circular, cap);
+        total += found;
+        push(starts, Strand::Both, &mut out);
     } else {
-        push(
-            slice.find(&motif.masks, n, circular),
-            Strand::Forward,
-            &mut out,
-        );
-        push(
-            slice.find(&motif.rc_masks, n, circular),
-            Strand::Reverse,
-            &mut out,
-        );
+        let (fwd, found) = slice.find(&motif.masks, n, circular, cap);
+        total += found;
+        push(fwd, Strand::Forward, &mut out);
+        let (rev, found) = slice.find(&motif.rc_masks, n, circular, cap);
+        total += found;
+        push(rev, Strand::Reverse, &mut out);
     }
     out.sort_by_key(|h| (h.start, h.strand as u8));
-    out
+    // Each strand was collected to `cap` independently and each is ascending,
+    // so the merged list is a superset of the true first `cap` in this order.
+    // Truncating here therefore yields exactly that prefix rather than an
+    // arbitrary sample — a caller showing "the first 500 hits" must be shown
+    // the first ones.
+    out.truncate(cap);
+    (out, total)
 }
 
 /// A record's window onto the shared packed store.
@@ -258,13 +281,20 @@ struct Slice<'a> {
 }
 
 impl Slice<'_> {
-    fn find(&self, masks: &[u8], n: usize, circular: bool) -> Vec<u64> {
+    /// Starts of every match, of which at most `cap` are kept, and the true
+    /// number of them.
+    ///
+    /// The cap is applied at the `push`, not at the loop bound: stopping the
+    /// scan early would make the count a floor rather than a count, and a
+    /// floor printed as a total is the kind of number nobody can check.
+    fn find(&self, masks: &[u8], n: usize, circular: bool, cap: usize) -> (Vec<u64>, u64) {
         let k = masks.len();
         if n == 0 || k == 0 || k > n {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let starts = if circular { n } else { n - k + 1 };
         let mut out = Vec::new();
+        let mut total = 0u64;
         for i in 0..starts {
             let hit = (0..k).all(|j| {
                 let idx = if circular { (i + j) % n } else { i + j };
@@ -272,10 +302,13 @@ impl Slice<'_> {
                 s != 0 && (s & !masks[j]) == 0
             });
             if hit {
-                out.push(i as u64 + 1);
+                total += 1;
+                if out.len() < cap {
+                    out.push(i as u64 + 1);
+                }
             }
         }
-        out
+        (out, total)
     }
 }
 

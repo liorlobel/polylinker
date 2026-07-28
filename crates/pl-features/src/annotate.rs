@@ -98,9 +98,28 @@ pub struct Annotation {
     /// 1-based inclusive.
     pub end: u64,
     pub strand: Strand,
-    /// Fraction of the database feature reproduced. See [`Hit::identity`].
+    /// Fraction of the *aligned region* that matched — a **local** identity.
+    ///
+    /// Not the fraction of the database feature reproduced; that is
+    /// [`coverage`](Self::coverage), and the two only mean anything together.
+    /// The denominator is the seed-supported core plus whatever the outward
+    /// `walk` added, so a plasmid carrying the first 300 bp of a 600 bp
+    /// marker exactly reports `identity = 1.0` alongside `coverage = 0.50`:
+    /// 300 bases of the feature, reproduced perfectly. A caller that prints
+    /// one of these without the other is not saying anything.
+    ///
+    /// This line used to read "Fraction of the database feature reproduced.
+    /// See [`Hit::identity`](crate::align::Hit::identity)", which is the opposite convention and describes
+    /// a function nothing on this path calls — [`Hit::identity`](crate::align::Hit::identity) divides by the
+    /// feature length *precisely so* a half-deleted feature scores 0.5. Under
+    /// that sentence the shipped fixture
+    /// `a_truncated_feature_is_reported_as_a_fragment_not_dropped` reads as a
+    /// bug rather than the intended result, and a UI trusting it would label a
+    /// half-length fragment 100%.
     pub identity: f64,
-    /// How much of the database feature this hit spans.
+    /// How much of the database feature this hit spans: aligned symbols over
+    /// the record's length. This is the number that falls when a feature is
+    /// truncated; [`identity`](Self::identity) does not.
     pub coverage: f64,
     /// `match_length × identity × coverage`, per §7.7 step 7.
     pub score: f64,
@@ -893,6 +912,46 @@ mod tests {
     }
 
     #[test]
+    fn a_fragments_identity_is_local_and_its_coverage_carries_the_truncation() {
+        // Pins which of the two numbers means what, because the doc on
+        // `Annotation::identity` used to describe `coverage` instead and point
+        // at `Hit::identity`, which divides by the feature length — the
+        // opposite convention, and one nothing on this path calls. Half a
+        // 600 bp marker reproduced perfectly is identity 1.0 with coverage
+        // 0.50, and a reader who believed the old sentence would have called
+        // that a bug or, worse, printed "100% identity" under the label
+        // "fraction of the feature reproduced".
+        let mut rng = Rng(0x7777_0000_0000_0107);
+        let feature = rng.dna(600);
+        let db = db_of(vec![rec("pf:a", &feature, false)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        let half = mol(
+            &format!("{}{}{}", rng.dna(300), &feature[..300], rng.dna(300)),
+            false,
+        );
+        let found = ann.annotate(&half);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            (found[0].identity - 1.0).abs() < 1e-9,
+            "identity is local: the 300 bases present matched exactly, so it is \
+             1.0 and not 0.5: {:?}",
+            found[0]
+        );
+        assert!((found[0].coverage - 0.5).abs() < 0.02, "{:?}", found[0]);
+        assert!(found[0].is_fragment);
+
+        // The control: whole feature, same identity, coverage now 1.0. So the
+        // truncation moves `coverage` and only `coverage`.
+        let whole = mol(&format!("{}{feature}{}", rng.dna(300), rng.dna(300)), false);
+        let found = ann.annotate(&whole);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!((found[0].identity - 1.0).abs() < 1e-9, "{:?}", found[0]);
+        assert!((found[0].coverage - 1.0).abs() < 1e-9, "{:?}", found[0]);
+        assert!(!found[0].is_fragment);
+    }
+
+    #[test]
     fn a_feature_below_the_identity_threshold_is_not_reported() {
         let mut rng = Rng(0x8888_0000_0000_0008);
         let feature = rng.dna(400);
@@ -1083,6 +1142,61 @@ mod tests {
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(found[0].start, 301);
         assert_eq!(found[1].start, 1051);
+    }
+
+    #[test]
+    fn a_tandem_repeat_is_counted_the_same_from_every_origin_of_a_circle() {
+        // A circle has no first base, so the feature count must not depend on
+        // which base the file numbers 1. It did: seeds were grouped by
+        // `diagonal / bucket_width`, a fixed grid, and two copies of a 60 bp
+        // feature sit 60 apart on the diagonal — inside one 80-wide cell for
+        // some rotations and across two for others. When they shared a cell the
+        // group was reduced to its median diagonal and one copy was dropped
+        // with no diagnostic. Measured on this molecule before the fix: 160 of
+        // the 580 rotations reported one copy, the other 420 reported two.
+        let mut rng = Rng(0x7a4d_0000_0000_0011);
+        let feature = rng.dna(60);
+        let filler = rng.dna(460);
+        let db = db_of(vec![rec("pf:a", &feature, false)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        let base = format!("{feature}{feature}{filler}");
+        assert_eq!(base.len(), 580);
+        let mut counts: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
+        for r in 0..base.len() {
+            let rotated = format!("{}{}", &base[r..], &base[..r]);
+            *counts
+                .entry(ann.annotate(&mol(&rotated, true)).len())
+                .or_insert(0) += 1;
+        }
+        assert_eq!(
+            counts,
+            [(2usize, 580usize)].into_iter().collect(),
+            "feature count changed with the origin: {counts:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_copy_is_rotation_invariant_too() {
+        // The control: one copy of the same feature on the same size of circle.
+        // If the count above had wobbled for some unrelated reason — a seeding
+        // artefact at the origin, say — this would wobble with it.
+        let mut rng = Rng(0x7a4d_0000_0000_0012);
+        let feature = rng.dna(60);
+        let filler = rng.dna(520);
+        let db = db_of(vec![rec("pf:a", &feature, false)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        let base = format!("{feature}{filler}");
+        for r in 0..base.len() {
+            let rotated = format!("{}{}", &base[r..], &base[..r]);
+            assert_eq!(
+                ann.annotate(&mol(&rotated, true)).len(),
+                1,
+                "rotation {r} of a single-copy molecule"
+            );
+        }
     }
 
     #[test]

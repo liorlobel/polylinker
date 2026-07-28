@@ -37,7 +37,45 @@
 
 pub mod align;
 
-pub use align::{Alignment, Op, Scoring};
+pub use align::{AlignError, Alignment, Op, Scoring};
+
+/// Why a read produced no [`Report`].
+///
+/// [`compare`] returns `Option` and throws this away, which is fine for a
+/// caller that only wants the report; [`compare_reporting`] keeps it. The
+/// distinction it exists for is between *this read is not from this reference*
+/// and *this reference is too large to align exhaustively against*: the first
+/// is an answer about a clone, the second is an answer about a limit, and
+/// before 2026-07-28 the second was not an answer at all but an aborted
+/// process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unplaced {
+    /// The read or the reference was empty.
+    Empty,
+    /// The seeds did not agree on a diagonal and the exhaustive fallback found
+    /// nothing either. The ordinary "this is not that clone" answer.
+    NotFound,
+    /// The seeds did not agree, and the reference is too large for the
+    /// exhaustive fallback within [`Params::max_traceback_bytes`].
+    ///
+    /// Distinct from [`Unplaced::NotFound`] on purpose: nothing was ruled out
+    /// here, the search was declined.
+    RefusedTooLarge(AlignError),
+}
+
+impl std::fmt::Display for Unplaced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unplaced::Empty => write!(f, "nothing to compare"),
+            Unplaced::NotFound => write!(f, "the read could not be placed on this reference"),
+            Unplaced::RefusedTooLarge(e) => write!(
+                f,
+                "the read shares too few seeds with this reference to be \
+                 placed, and it was not aligned against all of it: {e}"
+            ),
+        }
+    }
+}
 
 /// How much to believe a difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +119,14 @@ pub struct Params {
     pub min_quality: u8,
     /// k-mer length for placing the read before aligning it.
     pub seed_k: usize,
+    /// Ceiling on the traceback the exhaustive fallback may allocate.
+    ///
+    /// The fallback aligns against the entire reference, doubled first if it is
+    /// circular, and its traceback is `3·(read+1)·(reference+1)` bytes. Nothing
+    /// upstream bounds the reference, so on a genome-scale one this was 19 GB
+    /// and an aborted process. Raise it if you genuinely want to align a read
+    /// against a chromosome and have the memory for it.
+    pub max_traceback_bytes: usize,
 }
 
 impl Default for Params {
@@ -89,6 +135,7 @@ impl Default for Params {
             scoring: Scoring::default(),
             min_quality: 20,
             seed_k: 12,
+            max_traceback_bytes: align::DEFAULT_TRACEBACK_BUDGET,
         }
     }
 }
@@ -136,7 +183,7 @@ impl Report {
 /// Compare one read to one reference.
 ///
 /// `quality` may be empty. Returns `None` when either sequence is empty or the
-/// read cannot be placed at all.
+/// read cannot be placed at all; [`compare_reporting`] says which.
 pub fn compare(
     read: &[u8],
     quality: &[u8],
@@ -144,10 +191,21 @@ pub fn compare(
     circular: bool,
     p: &Params,
 ) -> Option<Report> {
+    compare_reporting(read, quality, reference, circular, p).ok()
+}
+
+/// [`compare`], keeping the reason there is no report.
+pub fn compare_reporting(
+    read: &[u8],
+    quality: &[u8],
+    reference: &[u8],
+    circular: bool,
+    p: &Params,
+) -> Result<Report, Unplaced> {
     let m = read.len();
     let n = reference.len();
     if m == 0 || n == 0 {
-        return None;
+        return Err(Unplaced::Empty);
     }
 
     // A read crossing the origin is ordinary on a plasmid; doubling the
@@ -163,25 +221,48 @@ pub fn compare(
 
     let rc = pl_core::reverse_complement(read);
     let mut best: Option<(Alignment, bool)> = None;
+    // Kept so that "we declined to search" is never reported as "we searched
+    // and found nothing". It only survives if *neither* orientation produced
+    // an alignment.
+    let mut refused: Option<AlignError> = None;
     for (seq, reversed) in [(read, false), (rc.as_slice(), true)] {
         // Place the read cheaply first, then align inside that window. Falling
         // back to the whole reference when the seeds do not agree keeps a poor
-        // read slow rather than unplaced.
+        // read slow rather than unplaced — up to the point where "slow" stops
+        // being the cost. The windowed path is bounded by the window (a read's
+        // length plus 200), so only the fallback can exceed the budget.
         let a = match align::locate(seq, target, p.seed_k, 100) {
-            Some((lo, hi)) => align::semiglobal(seq, &target[lo..hi], &p.scoring).map(|mut a| {
-                a.ref_start += lo;
-                a.ref_end += lo;
-                a
-            }),
-            None => align::semiglobal(seq, target, &p.scoring),
-        };
-        if let Some(a) = a {
-            if best.as_ref().is_none_or(|(b, _)| a.score > b.score) {
-                best = Some((a, reversed));
+            Some((lo, hi)) => {
+                align::semiglobal_within(seq, &target[lo..hi], &p.scoring, p.max_traceback_bytes)
+                    .map(|mut a| {
+                        a.ref_start += lo;
+                        a.ref_end += lo;
+                        a
+                    })
             }
+            None => align::semiglobal_within(seq, target, &p.scoring, p.max_traceback_bytes),
+        };
+        match a {
+            Ok(a) => {
+                if best.as_ref().is_none_or(|(b, _)| a.score > b.score) {
+                    best = Some((a, reversed));
+                }
+            }
+            Err(e @ (AlignError::TracebackTooLarge { .. } | AlignError::OutOfMemory { .. })) => {
+                refused.get_or_insert(e);
+            }
+            Err(AlignError::Empty) => {}
         }
     }
-    let (alignment, reversed) = best?;
+    let (alignment, reversed) = match best {
+        Some(b) => b,
+        None => {
+            return Err(match refused {
+                Some(e) => Unplaced::RefusedTooLarge(e),
+                None => Unplaced::NotFound,
+            })
+        }
+    };
 
     // Quality belongs to the read as sequenced, so reversing the read reverses
     // it too. Forgetting this puts every confidence flag at the wrong end.
@@ -262,7 +343,7 @@ pub fn compare(
         (alignment.ref_start % n) as u64 + 1,
         ((alignment.ref_end + n - 1) % n) as u64 + 1,
     );
-    Some(Report {
+    Ok(Report {
         identity: alignment.identity(),
         reliable: reliable_window(quality, p),
         alignment,
@@ -528,5 +609,64 @@ mod tests {
     fn an_empty_read_or_reference_is_not_an_answer() {
         assert!(compare(b"", &[], REF, false, &Params::default()).is_none());
         assert!(compare(b"ACGT", &[], b"", false, &Params::default()).is_none());
+        assert_eq!(
+            compare_reporting(b"", &[], REF, false, &Params::default()).unwrap_err(),
+            Unplaced::Empty
+        );
+    }
+
+    #[test]
+    fn a_reference_too_large_for_the_fallback_is_refused_by_name_not_by_aborting() {
+        // The path: a failed sequencing reaction returns junk, `locate` finds
+        // fewer than three agreeing seeds, and `compare` falls back to
+        // aligning against the *whole* reference -- doubled first, because the
+        // reference is circular. On a 4.6 Mb genome that fallback asked for
+        // 19 GB in three `vec![0u8; ...]` calls and the process aborted: no
+        // report, no error, nothing naming the read or the reference.
+        //
+        // The budget is set low here so the shape is testable at a size that
+        // fits in a test. What is being pinned is that exceeding it produces a
+        // *distinguishable* answer, not silence and not "could not be placed".
+        let junk = vec![b'C'; 300];
+        // Between the two: the doubled reference needs 3 x 301 x 401 =
+        // 362,103 bytes, a seeded 100 nt read's window at most 60,903.
+        let p = Params {
+            max_traceback_bytes: 200_000,
+            ..Default::default()
+        };
+        assert!(align::locate(&junk, REF, p.seed_k, 100).is_none());
+        match compare_reporting(&junk, &[], REF, true, &p) {
+            Err(Unplaced::RefusedTooLarge(e)) => {
+                let said = e.to_string();
+                assert!(said.contains("300 nt read"), "{said}");
+                assert!(said.contains("over the"), "{said}");
+            }
+            // Not `{other:?}`: a Report here is 20 kB of ops and discrepancies
+            // in the failure output, which buries the one fact that matters.
+            Ok(r) => panic!(
+                "the fallback ran rather than being refused: {} columns at {:.2} identity",
+                r.alignment.ops.len(),
+                r.identity
+            ),
+            Err(e) => panic!("wrong reason: {e:?}"),
+        }
+        // The lossy wrapper still returns None, so no existing caller breaks.
+        assert!(compare(&junk, &[], REF, true, &p).is_none());
+
+        // Control 1: the same junk read against the same reference with the
+        // shipped budget still goes down the fallback and still comes back
+        // with a real (bad) alignment. "Keeps a poor read slow rather than
+        // unplaced" is unchanged at every size that can actually be run.
+        let ok = compare_reporting(&junk, &[], REF, true, &Params::default())
+            .expect("the fallback still runs when it fits");
+        assert!(ok.identity < 0.8, "junk aligns badly: {}", ok.identity);
+
+        // Control 2: a read the seeds *do* place is bounded by its window, so
+        // the fallback budget never comes into it.
+        let read = REF[40..140].to_vec();
+        let placed = compare_reporting(&read, &q(100, 50), REF, false, &p)
+            .expect("a seeded read is not affected by the fallback budget");
+        assert!(placed.clean());
+        assert_eq!(placed.covered.0, 41);
     }
 }

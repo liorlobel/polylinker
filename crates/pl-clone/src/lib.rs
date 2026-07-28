@@ -254,11 +254,35 @@ pub fn cut(seq: &Dseq, enzyme: &Enzyme) -> Vec<Dseq> {
         // On a linear molecule the outermost boundaries are the molecule's own
         // ends, on both strands. Using `start + ovhg` there would invent an
         // overhang the molecule does not have, and lose the bases beyond it.
+        //
+        // A cut also needs *both* nicks to land on the molecule. `cut_positions`
+        // already drops a top nick that reaches past a linear end -- "it binds;
+        // there is nothing there to cut", `pl-enzymes/src/lib.rs` 644-652 -- but
+        // the bottom nick at `t + ovhg` had no equivalent test, and `fragment`'s
+        // `take` then clamped it back on to the molecule while `ovhg` was still
+        // computed from the *unclamped* value. Linear `AAAAAAAAAAAAGGTCTCAC`
+        // (n = 20) cut with BsaI (top nick 19, bottom nick 23) came out as
+        // `{watson:"C", crick:"", ovhg:-4}`: a one-base strand claiming a
+        // four-base overhang, whose `len()` said 4 while `to_string_full()`
+        // returned one character, and whose `left_end()` panicked with "end byte
+        // index 4 is out of bounds for string of length 1". The sibling fragment
+        // was corrupted too -- 19 nt of watson against 20 nt of crick with
+        // `ovhg == 0`, a phantom flush end where BsaI leaves four bases -- so the
+        // whole digest was wrong, not just its last piece. Half a cut is not a
+        // cut, and the honest answer is the one pl-enzymes already gives.
+        let usable: Vec<i64> = tops
+            .iter()
+            .copied()
+            .filter(|t| (0..=n).contains(&(t + ovhg)))
+            .collect();
+        if usable.is_empty() {
+            return vec![seq.clone()];
+        }
         let mut t = vec![0i64];
-        t.extend(tops.iter().copied());
+        t.extend(usable.iter().copied());
         t.push(n);
         let mut b = vec![0i64];
-        b.extend(tops.iter().map(|x| x + ovhg));
+        b.extend(usable.iter().map(|x| x + ovhg));
         b.push(n);
         (t, b)
     };
@@ -309,13 +333,6 @@ pub enum PcrError {
     ReverseNotFound,
     /// The reverse primer anneals before the forward one, so there is no product.
     Inverted,
-    /// A primer anneals in more than one place.
-    ///
-    /// This is an error, not a detail. A reaction whose primer binds three
-    /// sites gives a smear or the wrong band, and a tool that answers with one
-    /// confident product has told the user their experiment worked when it did
-    /// not. `docs/PLAN.md` §7.12.2 puts this in hazard tier 1: silent,
-    /// expensive, and hard to notice until the gel.
     /// A primer or the template contains something that is not DNA.
     ///
     /// Checked before any searching: `rc()` decodes through
@@ -327,6 +344,20 @@ pub enum PcrError {
         what: &'static str,
         found: char,
     },
+    /// A primer anneals in more than one place.
+    ///
+    /// This is an error, not a detail. A reaction whose primer binds three
+    /// sites gives a smear or the wrong band, and a tool that answers with one
+    /// confident product has told the user their experiment worked when it did
+    /// not. `docs/PLAN.md` §7.12.2 puts this in hazard tier 1: silent,
+    /// expensive, and hard to notice until the gel.
+    ///
+    /// This paragraph used to sit above `NotDna` in one unbroken `///` block,
+    /// so rustdoc and every IDE hover summarised `NotDna` -- returned only for
+    /// non-ASCII input -- as "A primer anneals in more than one place", and
+    /// `NotSpecific`, the variant it was written for, rendered with no doc at
+    /// all. A caller matching on the wrong variant to decide how to report a
+    /// failure was reading a false statement about it.
     NotSpecific {
         /// Which primer: "forward" or "reverse".
         primer: &'static str,
@@ -514,7 +545,16 @@ pub fn pcr(forward: &str, reverse: &str, template: &Dseq) -> Result<Dseq, PcrErr
 /// returned, not just the first, because how many there are decides whether
 /// the reaction has a product at all.
 fn anneal(tmpl: &str, primer: &str, circular: bool) -> Option<(usize, usize, Vec<usize>)> {
-    for take in (MIN_ANNEAL.min(primer.len())..=primer.len()).rev() {
+    // `MIN_ANNEAL` is a floor, not a suggestion. This loop used to start at
+    // `MIN_ANNEAL.min(primer.len())`, which exempted from the floor exactly the
+    // primers the floor exists for: an 8 nt primer annealed over its whole
+    // length, and `pcr("ACGGTTAC", "TGACCTGA", ...)` on a 36 nt template
+    // returned a confident, checksummed 36 bp product where pydna -- the oracle
+    // this crate is differential-tested against -- raises "No PCR product!
+    // ... limit=13". The clamp was not defensive, either: unclamped,
+    // `(12..=8).rev()` is simply an empty range in Rust, so `anneal` returns
+    // `None` and `pcr` answers `ForwardNotFound`, which is pydna's answer.
+    for take in (MIN_ANNEAL..=primer.len()).rev() {
         let foot = &primer[primer.len() - take..];
         let sites = find_all(tmpl, foot, circular);
         if !sites.is_empty() {
@@ -527,7 +567,9 @@ fn anneal(tmpl: &str, primer: &str, circular: bool) -> Option<(usize, usize, Vec
 /// As [`anneal`], but for a probe matched by its 5' end — the reverse
 /// primer's 3' end is the *start* of its reverse complement in the top strand.
 fn anneal_last(tmpl: &str, probe: &str, circular: bool) -> Option<(usize, usize, Vec<usize>)> {
-    for take in (MIN_ANNEAL.min(probe.len())..=probe.len()).rev() {
+    // Unclamped for the same reason as [`anneal`]: a reverse primer below
+    // `MIN_ANNEAL` does not anneal, it is not exempted from the floor.
+    for take in (MIN_ANNEAL..=probe.len()).rev() {
         let foot = &probe[..take];
         let sites = find_all(tmpl, foot, circular);
         if !sites.is_empty() {
@@ -715,6 +757,83 @@ mod tests {
                 "len() and the full sequence disagree for {f:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_cut_whose_second_nick_falls_off_a_linear_end_is_not_a_cut() {
+        // BsaI binds `GGTCTC` at 0-based 12 and nicks the top strand at 19,
+        // which is on the molecule; the bottom nick is four bases further along
+        // at 23, which is not. `cut_positions` already refuses to report a top
+        // nick that reaches past a linear end -- "it binds; there is nothing
+        // there to cut" -- and a bottom nick past the end is the same statement.
+        // It used to be clamped back to 20, manufacturing
+        // `{watson:"C", crick:"", ovhg:-4}`: a one-base strand claiming a
+        // four-base overhang, whose `len()` said 4 while `to_string_full()`
+        // returned one character, and whose `left_end()` panicked with "end byte
+        // index 4 is out of bounds for string of length 1".
+        let d = Dseq::new("AAAAAAAAAAAAGGTCTCAC", false);
+        let frags = cut(&d, by_name("BsaI").unwrap());
+        assert_eq!(frags.len(), 1, "half a cut is not a cut: {frags:?}");
+        assert_eq!(frags[0], d, "an uncut molecule comes back unchanged");
+
+        // The corruption was never confined to the last fragment: the sibling
+        // came out 19 nt of watson against 20 nt of crick with `ovhg == 0`, a
+        // phantom flush end where BsaI leaves four bases. No fragment of any
+        // digest may lie about its own ends.
+        for f in &frags {
+            assert_eq!(
+                f.len(),
+                f.to_string_full().len(),
+                "len() and the full sequence disagree for {f:?}"
+            );
+            let _ = f.left_end(); // both of these used to panic on the
+            let _ = f.right_end(); // fragment this input produced
+        }
+    }
+
+    #[test]
+    fn a_type_iis_cut_with_room_for_both_nicks_still_cuts() {
+        // The control for dropping half-cuts: a BsaI site with its full reach
+        // on the molecule must still cut, and still leave the four-base 5'
+        // overhang, or the fix above has simply disabled Type IIS digestion.
+        let d = Dseq::new("AAAAAAAAAAAAGGTCTCACGTGCCCCCCCC", false);
+        let frags = cut(&d, by_name("BsaI").unwrap());
+        assert_eq!(frags.len(), 2, "{frags:?}");
+        assert_eq!(frags[1].ovhg, -4, "BsaI leaves four bases");
+        for f in &frags {
+            assert_eq!(f.len(), f.to_string_full().len(), "{f:?}");
+        }
+        assert!(
+            frags[0].right_end().ligates_with(&frags[1].left_end()),
+            "a real cut re-closes"
+        );
+    }
+
+    #[test]
+    fn a_primer_shorter_than_the_annealing_floor_does_not_anneal() {
+        // `MIN_ANNEAL` used to be clamped with `.min(primer.len())`, which
+        // exempted from the floor exactly the primers the floor exists for.
+        // pydna answers this input with "No PCR product! ... limit=13"; we
+        // answered with a confident, checksummed 36 bp product built from two
+        // 8 nt primers -- below any usable Tm.
+        let tmpl = Dseq::new("ACGGTTACGGGGGGGGGGGGGGGGGGGGTCAGGTCA", false);
+        assert_eq!(
+            pcr("ACGGTTAC", "TGACCTGA", &tmpl),
+            Err(PcrError::ForwardNotFound)
+        );
+    }
+
+    #[test]
+    fn a_primer_exactly_at_the_annealing_floor_still_anneals() {
+        // The control: 12 is the floor, not the first value above it. Removing
+        // the clamp must not cost a primer that sits exactly on it.
+        assert_eq!(MIN_ANNEAL, 12);
+        let tmpl = dna(0x51de_0003, 400);
+        let fwd = &tmpl[100..112];
+        let rev = rc(&tmpl[300..312]);
+        let p =
+            pcr(fwd, &rev, &Dseq::new(&tmpl, false)).expect("12 nt is on the floor, not below it");
+        assert_eq!(p.watson, tmpl[100..312].to_ascii_uppercase());
     }
 
     #[test]

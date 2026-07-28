@@ -5,7 +5,10 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use pl_fileio::{detect, fasta, genbank, load, load_with_report, snapgene, Format};
+// `load` is deliberately absent: it drops the `LoadReport` by construction, and
+// every verb here that used it answered about record 1 of a multi-record file
+// with nothing to say so. Import `load_with_report` and report, or refuse.
+use pl_fileio::{detect, fasta, genbank, load_with_report, snapgene, Format};
 
 const USAGE: &str = "\
 pl -- Polylinker command line
@@ -175,6 +178,14 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let (cmd, rest) = args.split_first().unwrap();
+    // `--help` after the verb, not just before it. Every verb now rejects an
+    // option it does not know (see `parse_args`), and `pl convert --help` is a
+    // habit, not a typo -- answering it with "unknown option" would be a worse
+    // reply than the silent shrug it replaced.
+    if rest.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     let result = match cmd.as_str() {
         "info" => cmd_info(rest),
         "convert" => cmd_convert(rest),
@@ -225,7 +236,22 @@ struct Args {
     flags: Vec<(String, Option<String>)>,
 }
 
-fn parse_args(args: &[String], valued: &[&str]) -> Result<Args, String> {
+/// Split arguments into positional files and flags.
+///
+/// `valued` names the options that consume the next argv token, `boolean` the
+/// rest; together they are the verb's whole vocabulary, and anything else is a
+/// hard error.
+///
+/// It used to accept any `-`/`--` token with no allowed-name list, and no verb
+/// ever looked at `Args.flags` for names it did not recognise, so a mistyped
+/// option was dropped and the command answered with its defaults. `pl orfs
+/// plasmid.gb --min-a 50` made `min-a` a flag nobody reads and pushed `"50"`
+/// onto `files`, where `a.files.first()` discarded it: `min_aa` stayed at the
+/// default 30 and every 30-49 aa ORF the user had just asked to exclude was
+/// printed, exit 0. `pl digest x.gb --uniqe` listed every cut site instead of
+/// the unique cutters, leaving no stray positional to notice. A typo that
+/// changes the answer must not be indistinguishable from the answer.
+fn parse_args(args: &[String], valued: &[&str], boolean: &[&str]) -> Result<Args, String> {
     let mut files = Vec::new();
     let mut flags = Vec::new();
     let mut i = 0;
@@ -236,6 +262,22 @@ fn parse_args(args: &[String], valued: &[&str]) -> Result<Args, String> {
                 Some((n, v)) => (n, Some(v.to_string())),
                 None => (name, None),
             };
+            if !valued.contains(&name) && !boolean.contains(&name) {
+                let mut known: Vec<String> = valued
+                    .iter()
+                    .chain(boolean.iter())
+                    .map(|n| format!("--{n}"))
+                    .collect();
+                known.sort();
+                return Err(format!(
+                    "unknown option '{a}'; this command takes {}",
+                    if known.is_empty() {
+                        "no options".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                ));
+            }
             let value = if inline.is_some() {
                 inline
             } else if valued.contains(&name) {
@@ -363,6 +405,48 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Say so when a file held more records than the verb looked at.
+///
+/// `load` returns record 1 and every verb below then analyses it as though it
+/// were the file. Nine of them bound the `LoadReport` to `_`, so `pl digest
+/// multi.gbk --json` emitted `{"file":…, "bp":…, "circular":…, "digests":[…]}`
+/// and the text path asserted "N unique cutter(s)" — statements true of one
+/// record, presented as facts about the file, with no record count and no
+/// warning. 8 of 303 GenBank files and 351 FASTA files in this project's corpus
+/// hold more than one record, and `pl-fileio`'s own worked example is a
+/// 124-record `.gbk`. `convert` and `export` refuse outright; these verbs
+/// answer about record 1, which is defensible only if they say so.
+///
+/// stderr, not stdout, so a `--json` consumer still gets one parseable document
+/// and the warning is not swallowed by a redirect of the answer.
+fn note_first_record_only(label: &str, report: &pl_fileio::LoadReport, what: &str) {
+    if report.truncated() {
+        eprintln!(
+            "pl: {label}: {} records in this file; only the first was {what}",
+            report.records
+        );
+    }
+}
+
+/// Which input, if any, this destination would land on top of.
+///
+/// The whole input list, not just the file being converted right now: `pl
+/// convert seqA.fa seqA.gb --to genbank` derives `seqA.gb` from `seqA.fa`, and
+/// the file it would clobber is one the run has not opened yet.
+fn collides_with_input(dest: &Path, inputs: &[PathBuf]) -> Option<PathBuf> {
+    inputs.iter().find(|i| same_file(i, dest)).cloned()
+}
+
+/// Where a per-input output goes: `--outdir` if given, beside the input if not.
+fn destination_dir(input: &Path, outdir: &Option<PathBuf>) -> PathBuf {
+    outdir.clone().unwrap_or_else(|| {
+        input
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    })
+}
+
 fn title_of(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -372,7 +456,7 @@ fn title_of(path: &Path) -> String {
 // ---------------------------------------------------------------------------
 
 fn cmd_info(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &[])?;
+    let a = parse_args(args, &[], &["json"])?;
     a.require_files()?;
 
     if a.has("json") {
@@ -476,8 +560,26 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    // A file that cannot be read is reported and the run carries on, exactly as
+    // the `--json` branch above does.
+    //
+    // `read(path)?` propagated out of the loop, so `pl info missing.fa pUC19.gb
+    // pET28a.gb` printed one OS error and summarised neither readable plasmid,
+    // while the same argv with `--json` reported the failure *and* both records.
+    // The parse-failure arm three lines below has always been per-file, so the
+    // asymmetry lived inside one loop body. docs/AUDIT-2026-07.md:165 asks for
+    // both branches to be fixed together "or you create a new asymmetry".
+    // The exit status is unchanged: a read failure still ends non-zero.
+    let mut failed = false;
     for path in &a.files {
-        let data = read(path)?;
+        let data = match read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("pl: {e}");
+                failed = true;
+                continue;
+            }
+        };
         match load_with_report(&data) {
             Err(e) => println!("{}\n   ERROR: {e}\n", path.display()),
             Ok((mol, fmt, report)) => {
@@ -559,11 +661,14 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
             }
         }
     }
+    if failed {
+        return Err("one or more files could not be read".into());
+    }
     Ok(())
 }
 
 fn cmd_convert(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["to", "outdir", "o"])?;
+    let a = parse_args(args, &["to", "outdir", "o"], &["stdout"])?;
     a.require_files()?;
 
     let to = a.get("to").unwrap_or("genbank").to_ascii_lowercase();
@@ -590,6 +695,57 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
     let mut claimed: Vec<PathBuf> = Vec::new();
     let mut converted = 0usize;
     let mut renamed = 0usize;
+
+    // One SnapGene container per stream.
+    //
+    // `--stdout` writes each payload back to back with no separator, which is
+    // meaningful for GenBank and FASTA -- both are record streams -- and
+    // silently corrupting for `.dna`. `snapgene::read_blocks` checks the HEADER
+    // kind and magic only for the *first* block, so `pl convert a.gb b.gb --to
+    // dna --stdout > merged.dna` parses without error: b's header is absorbed
+    // as an ordinary block of a's document and `parse` applies blocks
+    // last-writer-wins, leaving a's title over b's sequence and features. The
+    // run printed nothing at all, because the summary below is inside
+    // `if !to_stdout`.
+    if to_stdout && out_fmt == Out::Dna && a.files.len() > 1 {
+        return Err(format!(
+            "--stdout would write {} SnapGene containers into one stream, and a reader takes the \
+             result for one valid document with the first file's name over the last file's \
+             sequence. Convert one file at a time, or drop --stdout.",
+            a.files.len()
+        ));
+    }
+
+    // Never write over a file that is still on the command line.
+    //
+    // The guard inside the loop compared the destination only against `path`,
+    // the input of *that* iteration, and `claimed` only ever compared output
+    // against output. Inputs are read and written one at a time, and
+    // `locus_name` strips the extension, so `pl convert seqA.fa seqA.gb --to
+    // genbank` computed `seqA.gb` from `seqA.fa`, saw no collision, and wrote
+    // the FASTA-derived record over the user's `seqA.gb` -- which iteration 2
+    // then read back and refused. The original record was already gone,
+    // features and all, before the multi-record refusal above ever parsed it,
+    // and the run still ended with "nothing was overwritten". Checked for every
+    // input before anything is written, so a collision costs no files at all.
+    if !to_stdout {
+        for path in &a.files {
+            let dir = destination_dir(path, &outdir);
+            let dest = dir.join(format!("{}.{ext}", genbank::locus_name(&title_of(path))));
+            if let Some(victim) = collides_with_input(&dest, &a.files) {
+                return Err(format!(
+                    "{}: converting to {ext} here would overwrite {}. \
+                     Use --outdir <dir> to write elsewhere, or --stdout.",
+                    path.display(),
+                    if same_file(&victim, path) {
+                        "the input file".to_string()
+                    } else {
+                        format!("{}, which is also being converted", victim.display())
+                    }
+                ));
+            }
+        }
+    }
 
     for path in &a.files {
         let data = read(path)?;
@@ -650,37 +806,22 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
             continue;
         }
 
-        let dir = outdir.clone().unwrap_or_else(|| {
-            path.parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."))
-        });
+        let dir = destination_dir(path, &outdir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
         let stem = genbank::locus_name(&title);
         let mut dest = dir.join(format!("{stem}.{ext}"));
 
-        // Never write over the file we just read.
-        //
-        // Converting a `.gb` to genbank in place computes a destination equal
-        // to the input, and `claimed` only ever guarded output against other
-        // output. A multi-record file made that destructive rather than merely
-        // redundant: `load` keeps only the first record, so a 124-record 36 KB
-        // `.gbk` was rewritten as a 28 KB single-record file with 1,879
-        // features gone — and the CLI reported success.
-        if same_file(path, &dest) {
-            return Err(format!(
-                "{}: converting to {ext} here would overwrite the input file. \
-                 Use --outdir <dir> to write elsewhere, or --stdout.",
-                path.display()
-            ));
-        }
-
+        // The unsuffixed destination was cleared against every input before the
+        // loop started. A *suffixed* one has to be cleared here, because
+        // `seqA-2.gb` can be a file on the command line too.
         if claimed.contains(&dest) {
             let mut n = 2;
             loop {
                 let candidate = dir.join(format!("{stem}-{n}.{ext}"));
-                if !claimed.contains(&candidate) {
+                if !claimed.contains(&candidate)
+                    && collides_with_input(&candidate, &a.files).is_none()
+                {
                     dest = candidate;
                     break;
                 }
@@ -714,11 +855,13 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_digest(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["enzyme"])?;
+    let a = parse_args(args, &["enzyme"], &["unique", "non-cutters", "json"])?;
     a.require_files()?;
     let path = &a.files[0];
     let data = read(path)?;
-    let (mol, _) = load(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (mol, _, report) =
+        load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+    note_first_record_only(&path.display().to_string(), &report, "digested");
     if mol.seq.is_empty() {
         return Err(format!("{}: no bases to digest", path.display()));
     }
@@ -813,7 +956,7 @@ fn cmd_digest(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_blocks(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &[])?;
+    let a = parse_args(args, &[], &[])?;
     a.require_files()?;
     let path = &a.files[0];
     let data = read(path)?;
@@ -874,7 +1017,7 @@ fn cmd_blocks(args: &[String]) -> Result<(), String> {
 /// each. That mode exists for the cross-check against the reference
 /// implementation, not for interactive use.
 fn cmd_checksum(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &[])?;
+    let a = parse_args(args, &[], &["stdin-json"])?;
 
     if a.has("stdin-json") {
         let mut input = String::new();
@@ -911,13 +1054,28 @@ fn cmd_checksum(args: &[String]) -> Result<(), String> {
     a.require_files()?;
     for path in &a.files {
         let data = read(path)?;
-        let (mol, _) = load(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (mol, _, report) =
+            load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
         // SEGUID is defined over unambiguous uppercase DNA. Say what was done
         // rather than quietly folding case or dropping ambiguity codes: a
         // checksum is an identity claim, and a silently altered input makes it
         // a false one.
         let seq: String = String::from_utf8_lossy(&mol.seq).to_uppercase();
         println!("{}", title_of(path));
+        // Dropped records are exactly that kind of silent alteration, and this
+        // is the one identity-asserting verb that used to skip the check. An
+        // 8-contig Plasmidsaurus `assemblies.fa` printed the file's basename
+        // and one ldseguid/lsseguid pair from contig 1, shape-identical to a
+        // single-record file's output, and the user filed that checksum as the
+        // identity of the whole file. On stdout beside the checksum, not on
+        // stderr, because the claim and its scope have to travel together
+        // through a redirect.
+        if report.truncated() {
+            println!(
+                "   records    {} in this file; the checksum below covers only the first",
+                report.records
+            );
+        }
         if seq.is_empty() {
             println!("   no sequence to checksum");
             continue;
@@ -958,6 +1116,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
     let a = parse_args(
         args,
         &["outdir", "o", "width", "height", "mm", "journal", "column"],
+        &["pdf", "eps", "stdout", "no-ruler", "check-contrast"],
     )?;
     a.require_files()?;
 
@@ -1011,6 +1170,51 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
     let to_stdout = a.has("stdout");
     let mut claimed: Vec<PathBuf> = Vec::new();
     let (mut written, mut renamed) = (0usize, 0usize);
+
+    // One picture per stream, for every format this verb writes.
+    //
+    // `--stdout` wrote each payload back to back with no separator and no
+    // file-count check: two `<svg>` roots is not well-formed XML, a second PDF
+    // leaves a trailing xref pointing into the first document, and EPS is one
+    // document structure too. Nothing downstream reports the concatenation, and
+    // the run summary is inside `if !to_stdout`, so the whole run said nothing.
+    if to_stdout && a.files.len() > 1 {
+        return Err(format!(
+            "--stdout writes one figure to one stream, and {} inputs would be concatenated into a \
+             file no viewer reads as {} pictures. Export one file at a time, or use --outdir <dir>.",
+            a.files.len(),
+            a.files.len()
+        ));
+    }
+
+    // Never write over a file that is still on the command line. Same defect,
+    // same fix, same reasoning as `cmd_convert`: `pl export map.gb map.svg`
+    // wrote the map over the user's `map.svg` in iteration 1 and only then
+    // discovered, in iteration 2, that `map.svg` is not a sequence file.
+    if !to_stdout {
+        let ext = if a.has("eps") {
+            "eps"
+        } else if a.has("pdf") {
+            "pdf"
+        } else {
+            "svg"
+        };
+        for path in &a.files {
+            let dir = destination_dir(path, &outdir);
+            let dest = dir.join(format!("{}.{ext}", genbank::locus_name(&title_of(path))));
+            if let Some(victim) = collides_with_input(&dest, &a.files) {
+                return Err(format!(
+                    "{}: writing the map here would overwrite {}. Use --outdir <dir> or --stdout.",
+                    path.display(),
+                    if same_file(&victim, path) {
+                        "the input".to_string()
+                    } else {
+                        format!("{}, which is also an input", victim.display())
+                    }
+                ));
+            }
+        }
+    }
 
     for path in &a.files {
         let data = read(path)?;
@@ -1153,11 +1357,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             continue;
         }
 
-        let dir = outdir.clone().unwrap_or_else(|| {
-            path.parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."))
-        });
+        let dir = destination_dir(path, &outdir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
         let ext = if as_eps {
@@ -1169,17 +1369,15 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         };
         let stem = genbank::locus_name(&title_of(path));
         let mut dest = dir.join(format!("{stem}.{ext}"));
-        if same_file(path, &dest) {
-            return Err(format!(
-                "{}: writing the map here would overwrite the input. Use --outdir <dir> or --stdout.",
-                path.display()
-            ));
-        }
+        // The unsuffixed destination was cleared against every input before the
+        // loop started; a suffixed one has to be cleared here.
         if claimed.contains(&dest) {
             let mut k = 2;
             loop {
                 let candidate = dir.join(format!("{stem}-{k}.{ext}"));
-                if !claimed.contains(&candidate) {
+                if !claimed.contains(&candidate)
+                    && collides_with_input(&candidate, &a.files).is_none()
+                {
                     dest = candidate;
                     break;
                 }
@@ -1221,7 +1419,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
 /// shipped table is a non-degenerate palindrome, so nothing compared a
 /// degenerate pattern or a minus-strand hit against an outside implementation.
 fn cmd_find_motif(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["seq", "topology", "motif"])?;
+    let a = parse_args(args, &["seq", "topology", "motif"], &["json"])?;
 
     // The pattern is the first bare word, or `--motif`.
     let pattern = match a.get("motif") {
@@ -1251,8 +1449,9 @@ fn cmd_find_motif(args: &[String]) -> Result<(), String> {
                 .get(if a.get("motif").is_some() { 0 } else { 1 })
                 .ok_or("give a sequence with --seq, or a file")?;
             let data = read(path)?;
-            let (mol, _, _) =
+            let (mol, _, report) =
                 load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+            note_first_record_only(&path.display().to_string(), &report, "searched");
             (mol.seq.clone(), path.display().to_string())
         }
     };
@@ -1420,7 +1619,11 @@ fn report_size(lib: &pl_index::codec::Library) {
 
 /// Build or refresh a folder's index.
 fn cmd_index(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["index-at", "max-depth"])?;
+    let a = parse_args(
+        args,
+        &["index-at", "max-depth"],
+        &["rebuild", "verify", "follow-links"],
+    )?;
     a.require_files()?;
 
     for root in &a.files {
@@ -1548,6 +1751,7 @@ fn cmd_find(args: &[String]) -> Result<(), String> {
             "features",
             "limit",
         ],
+        &["absent", "no-index", "follow-links", "json"],
     )?;
     let root = a.files.first().ok_or("no folder given")?.clone();
     if !root.is_dir() {
@@ -1741,7 +1945,11 @@ fn cmd_find(args: &[String]) -> Result<(), String> {
 
 /// What is indexed, and what could not be.
 fn cmd_library(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["index-at", "max-depth"])?;
+    let a = parse_args(
+        args,
+        &["index-at", "max-depth"],
+        &["problems", "no-index", "follow-links", "json"],
+    )?;
     let root = a.files.first().ok_or("no folder given")?.clone();
     if !root.is_dir() {
         return Err(format!("{}: not a folder", root.display()));
@@ -1823,7 +2031,7 @@ fn cmd_library(args: &[String]) -> Result<(), String> {
 /// with a buffer correction folded in, because a number like that can never be
 /// explained when it differs from another tool's.
 fn cmd_tm(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["table", "na", "oligo", "salt"])?;
+    let a = parse_args(args, &["table", "na", "oligo", "salt"], &["json"])?;
 
     let mut m = match a.get("table").unwrap_or("1998") {
         "1998" => pl_thermo::Method::default(),
@@ -1879,6 +2087,16 @@ fn cmd_tm(args: &[String]) -> Result<(), String> {
     println!();
     println!("{:>8}  {:>6}  {:>9}  {:>9}  oligo", "Tm", "GC%", "dH", "dS");
     let mut tms = Vec::new();
+    // Counted, not cleared.
+    //
+    // The Err arm used to call `tms.clear()`, so a failure suppressed the advice
+    // only when it was the *last* oligo: later successes repopulated the vector
+    // and the "lowest Tm" was then minimised over the post-failure subset alone.
+    // `pl tm ATATATATATATATAT GGGGNGGGG GGGGGGCCGGGGCCGGGG` printed a 17.8C row
+    // and then advised "from the lowest Tm (69.2C)" with Phusion Ta 72C -- 50C
+    // above where the AT-rich primer anneals, and contradicting a number two
+    // lines above it. Deleting the middle oligo gave the correct 17.8C basis.
+    let mut unevaluated = 0usize;
     for s in &seqs {
         match pl_thermo::tm(s.as_bytes(), &m) {
             Ok(t) => {
@@ -1898,13 +2116,27 @@ fn cmd_tm(args: &[String]) -> Result<(), String> {
                 );
             }
             Err(e) => {
-                tms.clear();
+                unevaluated += 1;
                 println!(
                     "{:>8}  {:>6}  {:>9}  {:>9}  {s}  --  {e}",
                     "-", "-", "-", "-"
                 );
             }
         }
+    }
+
+    // An oligo with no Tm is a hole in the set, and the lowest Tm of a set with
+    // a hole in it is unknown. Withheld rather than guessed, and said out loud:
+    // a missing paragraph is easy to miss, and this one decides a thermocycler
+    // setting.
+    if unevaluated > 0 {
+        println!(
+            "
+no annealing advice: {unevaluated} of {} oligo(s) could not be evaluated, so the lowest Tm of \
+this set is unknown. Fix or drop them and run it again.",
+            seqs.len()
+        );
+        return Ok(());
     }
 
     // Annealing advice, separately and per polymerase, exactly as the plan
@@ -1938,7 +2170,7 @@ this is advice, not a measurement; the Tm above is the measurement"
 /// plainly that it is not reporting a fidelity percentage — the measured
 /// ligation rates that would justify one are not shipped.
 fn cmd_goldengate(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["enzyme"])?;
+    let a = parse_args(args, &["enzyme"], &["json"])?;
 
     // Either bare overhangs on the command line, or a file plus --enzyme.
     let mut overhangs: Vec<pl_clone::goldengate::Overhang> = Vec::new();
@@ -1966,8 +2198,9 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
             .find(|p| p.exists())
             .ok_or("give a file to digest with --enzyme")?;
         let data = read(path)?;
-        let (mol, _, _) =
+        let (mol, _, report) =
             load_with_report(&data).map_err(|f| format!("{}: {f}", path.display()))?;
+        note_first_record_only(&path.display().to_string(), &report, "digested");
         let seq = String::from_utf8_lossy(&mol.seq).to_string();
         let frags = pl_clone::cut(&pl_clone::Dseq::new(&seq, mol.topology.is_circular()), e);
         for f in &frags {
@@ -2068,7 +2301,7 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
 /// the code the first time a constant moves, and the drift is invisible: the
 /// sentence still reads correctly and is no longer true.
 fn cmd_methods(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &[])?;
+    let a = parse_args(args, &[], &[])?;
     let names: Vec<String> = a.files.iter().map(|p| p.display().to_string()).collect();
 
     if names.is_empty() {
@@ -2149,6 +2382,7 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
         &[
             "cut", "lane", "agarose", "ladder", "band-mm", "run-mm", "svg",
         ],
+        &[],
     )?;
     a.require_files()?;
 
@@ -2210,8 +2444,9 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
     let mut renamed = 0usize;
     for path in &a.files {
         let data = read(path)?;
-        let (mol, _, _) =
+        let (mol, _, report) =
             load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        note_first_record_only(&path.display().to_string(), &report, "run on the gel");
 
         let mut lanes = vec![pl_gel::render::Lane {
             label: format!("{} ladder", ladder.name),
@@ -2312,7 +2547,17 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_annotate(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["min-identity", "min-coverage"])?;
+    let a = parse_args(
+        args,
+        &["min-identity", "min-coverage"],
+        &[
+            "db",
+            "include-proposed",
+            "no-protein",
+            "fragments",
+            "genbank",
+        ],
+    )?;
 
     let (all, errors) = pl_features::Db::builtin();
     for e in &errors {
@@ -2402,8 +2647,9 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
 
     for path in &a.files {
         let data = read(path)?;
-        let (mol, _, _) =
+        let (mol, _, report) =
             load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        note_first_record_only(&path.display().to_string(), &report, "annotated");
         let found = annotator.annotate(&mol);
         let shown: Vec<&pl_features::annotate::Annotation> = found
             .iter()
@@ -2498,7 +2744,11 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_sanger(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["ref", "ref-seq", "read", "min-quality"])?;
+    let a = parse_args(
+        args,
+        &["ref", "ref-seq", "read", "min-quality"],
+        &["circular", "all", "json"],
+    )?;
 
     let mut p = pl_sanger::Params::default();
     if let Some(v) = a.get("min-quality") {
@@ -2517,8 +2767,13 @@ fn cmd_sanger(args: &[String]) -> Result<(), String> {
             let path = a.get("ref").ok_or("give --ref <file> or --ref-seq")?;
             let path = std::path::PathBuf::from(path);
             let data = read(&path)?;
-            let (mol, _, _) =
+            let (mol, _, report) =
                 load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+            note_first_record_only(
+                &path.display().to_string(),
+                &report,
+                "used as the reference",
+            );
             (
                 mol.seq.clone(),
                 mol.topology.is_circular(),
@@ -2606,12 +2861,22 @@ fn cmd_sanger(args: &[String]) -> Result<(), String> {
     );
 
     let mut worst = 0usize;
+    // A read that could not be placed is not a difference.
+    //
+    // `worst += 1` in this arm shared the accumulator with the discrepancy
+    // count below, so the closing line reported a base difference for a read
+    // where zero bases were ever compared: one perfect read plus one unplaced
+    // read printed "no difference worth acting on" and then "1 difference(s)
+    // not dismissible at Q20 across 2 read(s)", which reads as a mutation in
+    // the clone. The --json path of this same function has always reported
+    // these honestly as {"placed": false} with no differences.
+    let mut unplaced = 0usize;
     for (name, seq, qual) in &reads {
         let r = match pl_sanger::compare(seq, qual, &reference, circular, &p) {
             Some(r) => r,
             None => {
                 println!("{name}: could not be placed on this reference");
-                worst += 1;
+                unplaced += 1;
                 continue;
             }
         };
@@ -2672,14 +2937,56 @@ fn cmd_sanger(args: &[String]) -> Result<(), String> {
         println!(
             "{worst} difference(s) not dismissible at Q{} across {} read(s)",
             p.min_quality,
-            reads.len()
+            reads.len() - unplaced
+        );
+    }
+    if unplaced > 0 {
+        println!(
+            "{unplaced} read(s) could not be placed on this reference; no bases were compared for \
+             {}",
+            if unplaced == 1 { "it" } else { "them" }
         );
     }
     Ok(())
 }
 
+/// An ORF's protein, in the convention a CDS record uses.
+///
+/// Two departures from a raw per-codon translation, both following from the
+/// fact that an ORF has a *decided* beginning and end:
+///
+///   * The initiator becomes `M`. A ribosome starting at GTG, TTG or ATT still
+///     puts methionine there; GenBank CDS records show it, and Biopython does
+///     the same behind `cds=True`. `tet(A)` was being reported as starting with
+///     valine.
+///   * The terminal codon renders as `*`, not as its residue. That only differs
+///     in tables 27, 28 and 31, where a codon is both a stop and an amino acid
+///     — but there the ORF finder has already ruled that translation stops
+///     here, and printing `W` for the last codon would contradict the boundary
+///     the same table just drew.
+fn orf_protein(code: pl_core::translate::Code, bases: &[u8], complete: bool) -> Vec<u8> {
+    if !complete {
+        return code.translate_cds(bases);
+    }
+    let body = &bases[..bases.len().saturating_sub(3)];
+    let mut out = code.translate_cds(body);
+    out.push(b'*');
+    out
+}
+
 fn cmd_orfs(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["table", "min-aa", "seq"])?;
+    let a = parse_args(
+        args,
+        &["table", "min-aa", "seq"],
+        &[
+            "tables",
+            "any-start",
+            "complete-only",
+            "circular",
+            "translate",
+            "json",
+        ],
+    )?;
 
     if a.has("tables") {
         if a.has("json") {
@@ -2745,8 +3052,9 @@ fn cmd_orfs(args: &[String]) -> Result<(), String> {
         None => {
             let path = a.files.first().ok_or("give a file, or --seq")?;
             let data = read(path)?;
-            let (mol, _, _) =
+            let (mol, _, report) =
                 load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+            note_first_record_only(&path.display().to_string(), &report, "read for ORFs");
             (
                 mol.seq.clone(),
                 mol.topology.is_circular(),
@@ -2785,7 +3093,7 @@ fn cmd_orfs(args: &[String]) -> Result<(), String> {
                 json_str(&String::from_utf8_lossy(&o.start_codon)),
                 o.complete,
                 o.wrapped,
-                json_str(&String::from_utf8_lossy(&code.translate(&bases_of(o)))),
+                json_str(&String::from_utf8_lossy(&orf_protein(code, &bases_of(o), o.complete))),
                 if i + 1 == orfs.len() { "" } else { "," }
             );
             println!();
@@ -2822,7 +3130,7 @@ fn cmd_orfs(args: &[String]) -> Result<(), String> {
             }
         );
         if a.has("translate") {
-            let aa = code.translate(&bases_of(o));
+            let aa = orf_protein(code, &bases_of(o), o.complete);
             for chunk in aa.chunks(60) {
                 println!("      {}", String::from_utf8_lossy(chunk));
             }
@@ -2860,7 +3168,11 @@ fn cmd_orfs(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_primers(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["seed", "primer", "seq"])?;
+    let a = parse_args(
+        args,
+        &["seed", "primer", "seq"],
+        &["circular", "seed-mismatch", "exact", "json"],
+    )?;
 
     let mut params = pl_primer::Params::default();
     if let Some(v) = a.get("seed") {
@@ -2889,8 +3201,9 @@ fn cmd_primers(args: &[String]) -> Result<(), String> {
         None => {
             let path = a.files.first().ok_or("give a template file, or --seq")?;
             let data = read(path)?;
-            let (mol, _, _) =
+            let (mol, _, report) =
                 load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+            note_first_record_only(&path.display().to_string(), &report, "used as the template");
             (
                 mol.seq.clone(),
                 mol.topology.is_circular(),
@@ -2996,7 +3309,7 @@ Tm is over the annealed footprint only; a 5' tail never contributes to it"
 
 /// Read a Sanger chromatogram.
 fn cmd_trace(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &["svg", "bases", "width"])?;
+    let a = parse_args(args, &["svg", "bases", "width"], &["accessible", "json"])?;
     a.require_files()?;
     let mut claimed: Vec<PathBuf> = Vec::new();
     let mut renamed = 0usize;
@@ -3196,7 +3509,7 @@ fn cmd_cut_adapter(_args: &[String]) -> Result<(), String> {
 /// case this tool cannot attempt. Saying *unsupported* is a first-class answer:
 /// a benchmark that lets a tool quietly skip what it cannot do measures nothing.
 fn cmd_bench_adapter(args: &[String]) -> Result<(), String> {
-    let a = parse_args(args, &[])?;
+    let a = parse_args(args, &[], &["capabilities"])?;
 
     if a.has("capabilities") {
         println!("identity");
@@ -3416,6 +3729,7 @@ mod tests {
                 "--stdout".into(),
             ],
             &["to", "outdir"],
+            &["stdout"],
         )
         .unwrap();
         assert_eq!(a.files.len(), 1);
@@ -3434,6 +3748,7 @@ mod tests {
                 "BamHI".into(),
             ],
             &["enzyme"],
+            &[],
         )
         .unwrap();
         assert_eq!(a.get_all("enzyme"), vec!["EcoRI", "BamHI"]);
@@ -3441,7 +3756,72 @@ mod tests {
 
     #[test]
     fn a_valued_flag_without_its_value_is_an_error() {
-        assert!(parse_args(&["--to".into()], &["to"]).is_err());
+        assert!(parse_args(&["--to".into()], &["to"], &[]).is_err());
+    }
+
+    #[test]
+    fn an_option_the_verb_does_not_know_is_an_error_not_a_silent_default() {
+        // `pl orfs plasmid.gb --min-a 50`: "min-a" became a flag nobody reads
+        // and "50" a positional that `a.files.first()` threw away, so `min_aa`
+        // stayed at the default 30 and every 30-49 aa ORF the user had just
+        // asked to exclude was printed, exit 0.
+        let Err(e) = parse_args(
+            &["plasmid.gb".into(), "--min-a".into(), "50".into()],
+            &["table", "min-aa", "seq"],
+            &["any-start"],
+        ) else {
+            panic!("--min-a was accepted as if it were an option this verb has");
+        };
+        assert!(e.contains("--min-a"), "{e}");
+        // The reply has to say what the verb does take, or the user is left
+        // guessing which of --min-a/--min-aa/--minaa was meant.
+        assert!(e.contains("--min-aa"), "{e}");
+
+        // A mistyped *boolean* leaves no stray positional behind, so nothing
+        // downstream could ever have noticed it: `pl digest x.gb --uniqe`
+        // listed every cut site instead of only the unique cutters.
+        assert!(parse_args(
+            &["x.gb".into(), "--uniqe".into()],
+            &["enzyme"],
+            &["unique", "non-cutters", "json"],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_flag_the_verb_does_know_is_still_accepted_in_every_spelling() {
+        // The control on the check above: rejecting unknown names must not cost
+        // us the known ones, in any of the three spellings the parser supports.
+        let a = parse_args(
+            &[
+                "--min-aa".into(),
+                "50".into(),
+                "--table=11".into(),
+                "--any-start".into(),
+                "plasmid.gb".into(),
+            ],
+            &["table", "min-aa", "seq"],
+            &["any-start"],
+        )
+        .unwrap();
+        assert_eq!(a.get("min-aa"), Some("50"));
+        assert_eq!(a.get("table"), Some("11"));
+        assert!(a.has("any-start"));
+        assert_eq!(a.files.len(), 1);
+    }
+
+    #[test]
+    fn a_value_that_looks_like_a_flag_is_still_a_value() {
+        // `--name --absent` is a search for the literal text "--absent", not a
+        // second option: the value is taken by index, before any name check.
+        let a = parse_args(
+            &["--name".into(), "--absent".into()],
+            &["name"],
+            &["absent"],
+        )
+        .unwrap();
+        assert_eq!(a.get("name"), Some("--absent"));
+        assert!(!a.has("absent"));
     }
 
     #[test]

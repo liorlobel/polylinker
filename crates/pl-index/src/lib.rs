@@ -43,11 +43,26 @@
 //!
 //! # No I/O
 //!
-//! Nothing in this crate touches the filesystem; `pl-scan` does. That is
-//! enforced rather than intended: the gate builds this crate for
-//! `wasm32-unknown-unknown`, which fails the day a storage concern leaks in.
-//! It also means the browser tool can search an in-memory `Vec<Row>` through
-//! exactly this code.
+//! Nothing in this crate touches the filesystem; `pl-scan` does. It also means
+//! the browser tool can search an in-memory `Vec<Row>` through exactly this
+//! code.
+//!
+//! **What enforces that, and what does not.** The `wasm32-unknown-unknown`
+//! build in `tools/ci.ps1` is a real gate, but on a *weaker* property than the
+//! one it was described as enforcing. It goes red for a dependency that cannot
+//! build for wasm32 — rusqlite, memmap2, anything libc-bound — and for a
+//! platform-specific API such as `std::os::windows::fs::MetadataExt`. It does
+//! not go red for hand-written storage code: wasm32-unknown-unknown ships the
+//! whole of `std::fs`, `std::env`, `std::process` and `SystemTime` through the
+//! `unsupported` platform layer, so `std::fs::read("library.plx")` added to
+//! `codec.rs` compiles and links cleanly and fails only at run time, on a
+//! target this project never actually runs. "wasm32 has no filesystem" is not
+//! true in the sense that matters to a compiler.
+//!
+//! So the claim is split in two and both halves are enforced: dependencies and
+//! platform APIs by the wasm32 build, and the source itself by
+//! `tests/purity.rs`, which reads every file under `src/` and fails on the call
+//! — and which carries its own test that it would.
 
 pub mod codec;
 pub mod nibble;

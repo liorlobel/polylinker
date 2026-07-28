@@ -181,6 +181,30 @@ const LABEL_RESERVE: f32 = 132.0;
 /// How close a label may come to the edge of the panel.
 const LABEL_PAD: f32 = 6.0;
 
+/// The 1-based coordinate of the `i`th tenth-of-the-molecule ruler tick.
+///
+/// Multiplied in `u128`, because `span` is a coordinate straight out of a file
+/// and nothing on the open path has validated it. An annotation-only `.dna`
+/// carrying `range="1-18446744073709551615"` — the same 185-byte hostile file
+/// `lanes` and `arc_points` were hardened against — makes `annotation_span()`
+/// return `u64::MAX`, and `Molecule::validate` does not even flag it: its
+/// past-the-end check is gated on a non-empty sequence and there are no bases
+/// here, so the status bar stays silent too.
+///
+/// `span * i` then overflowed from `i = 2` on. Debug builds panicked with
+/// "attempt to multiply with overflow" and the window died on open; release
+/// ships with overflow-checks off, so it wrapped and every labelled tick
+/// printed 1,844,674,407,370,955,16x instead of 3.69, 7.38, 11.07 and 14.76
+/// x 10^18 — four near-identical fabricated coordinates that `angle_of` then
+/// placed on the same spoke, collapsing the whole ruler.
+fn tick_pos(span: u64, i: u64) -> u64 {
+    // The product needs 68 bits at most (u64::MAX x 10), and the quotient is
+    // never larger than `span`, so the narrowing back is exact. The final
+    // increment saturates for the one input that reaches the top: i = 10 on a
+    // span of u64::MAX, in `draw_linear`'s inclusive loop.
+    (((span as u128 * i as u128) / 10) as u64).saturating_add(1)
+}
+
 /// Position on the molecule to angle, starting at twelve o'clock and running
 /// clockwise, which is how every plasmid map in the literature is drawn.
 fn angle_of(pos: u64, span: u64) -> f32 {
@@ -223,7 +247,7 @@ fn draw_circular(
 
     // Ticks every 10% of the molecule, labelled in bp.
     for i in 0..10 {
-        let pos = span * i / 10 + 1;
+        let pos = tick_pos(span, i);
         let a = angle_of(pos, span);
         p.line_segment(
             [polar(center, r - 5.0, a), polar(center, r + 5.0, a)],
@@ -463,7 +487,7 @@ fn draw_linear(
     );
 
     for i in 0..=10 {
-        let pos = span * i / 10 + 1;
+        let pos = tick_pos(span, i);
         let x = x_of(pos);
         p.line_segment(
             [Pos2::new(x, y - 5.0), Pos2::new(x, y + 5.0)],
@@ -665,5 +689,45 @@ mod tests {
         }
         // Non-finite input must not produce a NaN-sized allocation either.
         assert!(arc_points(Pos2::ZERO, 100.0, 0.0, f32::INFINITY).len() <= 721);
+    }
+
+    #[test]
+    fn a_ruler_tick_on_a_hostile_span_is_computed_rather_than_wrapped() {
+        // The same 185-byte `.dna`, at the two sites the earlier hardening
+        // missed. An annotation-only record has no bases, so `Molecule::span`
+        // is 0, `annotation_span` falls through to the largest feature end, and
+        // `validate` cannot even warn about it — its past-the-end check is
+        // gated on a non-empty sequence.
+        //
+        // `span * i` then overflowed from i = 2 on: a panic in debug that took
+        // the window down on open, and in release four labelled ticks all
+        // reading 1,844,674,407,370,955,16x instead of 3.69, 7.38, 11.07 and
+        // 14.76 x 10^18, collapsed by `angle_of` onto a single spoke.
+        let span = u64::MAX;
+        assert_eq!(tick_pos(span, 0), 1);
+        assert_eq!(tick_pos(span, 2), 3_689_348_814_741_910_324);
+        assert_eq!(tick_pos(span, 4), 7_378_697_629_483_820_647);
+        assert_eq!(tick_pos(span, 6), 11_068_046_444_225_730_970);
+        assert_eq!(tick_pos(span, 8), 14_757_395_258_967_641_293);
+        // `draw_linear`'s loop is inclusive, so the last tick is the one where
+        // the trailing +1 would carry past the end of the type.
+        assert_eq!(tick_pos(span, 10), u64::MAX);
+        // Distinct and increasing is the property that keeps it a ruler.
+        for i in 1..=10 {
+            assert!(
+                tick_pos(span, i) > tick_pos(span, i - 1),
+                "tick {i} did not advance"
+            );
+        }
+    }
+
+    #[test]
+    fn ruler_ticks_on_an_ordinary_plasmid_are_where_they_have_always_been() {
+        // The control. pUC19 at 2,686 bp: hardening the arithmetic must not
+        // move a single tick on a file anyone actually opens.
+        let want = [1, 269, 538, 806, 1075, 1344, 1612, 1881, 2149, 2418, 2687];
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(tick_pos(2686, i as u64), *w, "tick {i}");
+        }
     }
 }

@@ -192,12 +192,30 @@ fn dna_survives_conversion_to_genbank_and_back() {
         }
         // GenBank has no separate primer object: each binding site becomes a
         // primer_bind feature, so the expected count includes them.
+        //
+        // This filter mirrors the writer's own rule and is a derived
+        // expectation, not a claim about what ought to be written. It used to
+        // read `s.end >= s.start`, which encoded the writer's old habit of
+        // skipping any site that crosses the origin — a shape `validate()`
+        // calls perfectly legal on a circle and `Molecule::rotate` produces
+        // routinely. Those are now written as a `join`, exactly as a feature
+        // segment at the same coordinates always was, so the count follows.
         let n = src.span();
         let sites = src
             .primers
             .iter()
             .flat_map(|p| &p.sites)
-            .filter(|s| s.start >= 1 && s.end <= n && s.end >= s.start)
+            .filter(|s| {
+                if s.start < 1 {
+                    return false; // base 0 does not exist in GenBank
+                }
+                if s.end < s.start {
+                    // A wrap, written only when there is an origin to split it
+                    // against.
+                    return n >= s.start;
+                }
+                s.end <= n
+            })
             .count();
         let want = src.features.len() + sites;
         if back.features.len() != want {
@@ -330,6 +348,23 @@ fn every_file_is_identified_from_content() {
 
     let mut counts = std::collections::BTreeMap::<String, usize>::new();
     let mut mismatched = Vec::new();
+    // The proposition in this test's name, which its body did not check.
+    //
+    // Everything below line 370 used to be `eprintln!` — output the runner
+    // hides unless `--nocapture` is passed — so the function was structurally
+    // incapable of failing: no `assert!`, no `panic!`, no `?`. A regression
+    // that made `detect` return `None` for every real file would tally them all
+    // under "unrecognised" and the test would still exit green, e.g. narrowing
+    // the `min(8192)` text window in `detect`, which every sub-60-byte unit
+    // fixture survives and no real GenBank file does.
+    //
+    // Scoped to extensions that have an expected format: `.seq` is in the list
+    // above and correctly detects as `None`, because a `.seq` really could be
+    // anything. The extension/content *mismatch* list stays a report, and
+    // deliberately so — that disagreement is the reason detection reads content
+    // in the first place.
+    let mut unidentified: Vec<String> = Vec::new();
+    let mut empty = 0usize;
 
     for path in &files {
         let Ok(raw) = std::fs::read(path) else {
@@ -356,19 +391,40 @@ fn every_file_is_identified_from_content() {
             "ztr" => Some(Format::Ztr),
             _ => None,
         };
-        if let (Some(exp), Some(g)) = (expected, got) {
-            if exp != g {
+        match (expected, got) {
+            (Some(exp), Some(g)) if exp != g => {
                 mismatched.push(format!(
                     "{}: .{ext} but content is {}",
                     path.display(),
                     g.name()
                 ));
             }
+            // The case the `if let` dropped on the floor: we know what this
+            // file is supposed to be and `detect` recognised nothing at all.
+            //
+            // A file with no bytes is exempt, and that is not a loophole. There
+            // is nothing in an empty file to identify, and answering "FASTA"
+            // from zero bytes would be inventing the one thing this test exists
+            // to check is read rather than assumed. The corpus has two: QIIME
+            // writes a zero-length `*_failures.fasta` when nothing failed.
+            // They are counted so the exemption cannot quietly grow.
+            (Some(_), None) if raw.is_empty() => empty += 1,
+            (Some(exp), None) => {
+                unidentified.push(format!(
+                    "{}: .{ext} should be {} and was not identified from content",
+                    path.display(),
+                    exp.name()
+                ));
+            }
+            _ => {}
         }
     }
 
     for (k, v) in &counts {
         eprintln!("  {v:>5}  {k}");
+    }
+    if empty > 0 {
+        eprintln!("  {empty:>5}  empty, so there was nothing to identify");
     }
     if !mismatched.is_empty() {
         // Not a failure: this is the reason detection reads content at all.
@@ -380,6 +436,17 @@ fn every_file_is_identified_from_content() {
             eprintln!("    {m}");
         }
     }
+    assert!(
+        unidentified.is_empty(),
+        "{} file(s) whose format we know and could not identify:\n  {}",
+        unidentified.len(),
+        unidentified
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
 }
 
 /// Rotating a real plasmid must not change what molecule it is.
@@ -819,6 +886,12 @@ fn digest_invariants_hold_on_real_plasmids() {
 /// was worked out records that byte-exact round-tripping on 41 files proved
 /// nothing about coordinate *interpretation*, because an off-by-one on read
 /// cancels on write. This test cannot cancel.
+///
+/// **"Everything" means every field of the molecule**, which it did not: it
+/// compared `seq`, `topology`, `methylation` and the features, and said nothing
+/// about `primers`, `notes`, `double_stranded` or `description`. A test named
+/// for a total claim that checks four fields out of eight is how block 5 came to
+/// be dropped by the writer on 12 of these 41 files while this stayed green.
 #[test]
 fn a_synthesised_dna_preserves_everything_the_model_holds() {
     let files = files_with(&["dna"]);
@@ -827,6 +900,7 @@ fn a_synthesised_dna_preserves_everything_the_model_holds() {
         return;
     }
     let (mut checked, mut features, mut quals) = (0usize, 0usize, 0usize);
+    let (mut primers, mut sites) = (0usize, 0usize);
     let mut problems: Vec<String> = Vec::new();
 
     for f in &files {
@@ -862,6 +936,50 @@ fn a_synthesised_dna_preserves_everything_the_model_holds() {
         if a.methylation != b.methylation {
             problems.push(format!("{}: methylation changed", f.display()));
         }
+        // Primers, notes, strandedness and description were never compared, so
+        // the test that advertises itself as the one that "cannot cancel" an
+        // on-read/on-write error gave no cover at all to block 5: the writer
+        // emitted blocks 9, 0, 10 and 6 and never a primer block, so every
+        // primer parsed from a real file was dropped on rebuild and this test
+        // still printed "synthesised 41 .dna file(s)" and passed. 12 of the 41
+        // corpus files carry a block 5, so this comparison would have failed on
+        // 12 of them the day it was written.
+        primers += a.primers.len();
+        sites += a.primers.iter().map(|p| p.sites.len()).sum::<usize>();
+        if a.primers != b.primers {
+            problems.push(format!(
+                "{}: {} primer(s) with {} binding site(s) became {} with {}",
+                f.display(),
+                a.primers.len(),
+                a.primers.iter().map(|p| p.sites.len()).sum::<usize>(),
+                b.primers.len(),
+                b.primers.iter().map(|p| p.sites.len()).sum::<usize>()
+            ));
+        }
+        if a.notes != b.notes {
+            problems.push(format!(
+                "{}: notes {:?} became {:?}",
+                f.display(),
+                a.notes,
+                b.notes
+            ));
+        }
+        if a.double_stranded != b.double_stranded {
+            problems.push(format!(
+                "{}: double_stranded {:?} became {:?}",
+                f.display(),
+                a.double_stranded,
+                b.double_stranded
+            ));
+        }
+        if a.description != b.description {
+            problems.push(format!(
+                "{}: description {:?} became {:?}",
+                f.display(),
+                a.description,
+                b.description
+            ));
+        }
         if a.features.len() != b.features.len() {
             problems.push(format!(
                 "{}: {} features became {}",
@@ -896,7 +1014,8 @@ fn a_synthesised_dna_preserves_everything_the_model_holds() {
     }
 
     eprintln!(
-        "synthesised {checked} .dna file(s) from the model alone:          {features} features, {quals} qualifiers preserved"
+        "synthesised {checked} .dna file(s) from the model alone:          {features} features, \
+         {quals} qualifiers, {primers} primers, {sites} binding sites preserved"
     );
     assert!(checked > 0, "no .dna files parsed");
     assert!(

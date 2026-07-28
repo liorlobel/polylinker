@@ -1,4 +1,4 @@
-"""Check the EPS emitter against the PDF emitter, and against PostScript itself.
+r"""Check the EPS emitter against the PDF emitter, and against PostScript itself.
 
     python xcheck_eps.py target/release/pl.exe <plasmid file>...
 
@@ -23,6 +23,26 @@ balanced and correctly escaped string literals, only Level-2 operators, and a
 smaller than the artwork crops the figure silently — in the typesetter's hands
 rather than on screen — which is the single most common way an EPS goes wrong.
 
+That last claim used to be false as written, and the wording is what gave it
+away. The box was compared against `eps_tokens`, and `eps_tokens` drops every
+line containing ` show` — which is every label, because the emitter writes each
+one as a single `... X Y moveto (text) show` line. So *no text coordinate was
+ever tested against the box*. It is not a hypothetical gap: `pl_draw`'s label
+gutter is capped at 30% of the canvas, so an ordinary GenBank file with feature
+names over roughly 28 characters overflows it. Measured on the shipped binary,
+a two-CDS file carrying `aph(3')-Ia aminoglycoside phosphotransferase gene`
+puts a label from x=530 to x=806.42 under `%%BoundingBox: 0 0 720 720` — 86
+points of gene name cropped off the plate, with this oracle printing
+`problems : 0`. The left-hand column fails the same way in mirror image, with a
+negative start x. That is a layout bug in `pl_draw` and is not fixed here; what
+is fixed is that the oracle can now see it.
+
+Labels are measured as ink boxes — origin, plus the advance width of the
+decoded bytes, plus Helvetica's ascent and descent — because the origin alone
+would have closed only half the hole. A right-column label is `Anchor::Start`,
+so its `moveto` stays inside the box while the string runs out of it, which is
+exactly the case above.
+
 A `)` inside a feature name is the specific hazard for the string check: this
 project's own feature database contains `aph(3')-Ia`, and an unescaped
 parenthesis ends the string and turns the rest of the program into garbage.
@@ -41,6 +61,120 @@ ALLOWED_OPS = {
     "fill", "stroke", "setlinewidth", "setrgbcolor", "setlinejoin", "setlinecap",
     "rectfill", "findfont", "scalefont", "setfont", "show", "showpage",
 }
+
+# Advance widths for Helvetica, U+0020..U+007E, in 1/1000 em. The same numbers
+# as `pl_draw::pdf::HELVETICA`, transcribed because this file takes no
+# dependencies -- and note what that does and does not buy: a label's *ink box*
+# is computed here from the emitter's own idea of how wide Helvetica is, so this
+# proves containment, not that the metrics are right. `text_width` is checked
+# for agreement between the three emitters on the Rust side; here the question
+# is only whether the box the emitter declares holds the box it drew.
+HELVETICA = [
+    278, 278, 355, 556, 556, 889, 667, 191, 333, 333,  #  !"#$%&'()
+    389, 584, 278, 333, 278, 278, 556, 556, 556, 556,  # *+,-./0123
+    556, 556, 556, 556, 556, 556, 278, 278, 584, 584,  # 456789:;<=
+    584, 556, 1015, 667, 667, 722, 722, 667, 611, 778,  # >?@ABCDEFG
+    722, 278, 500, 667, 556, 833, 722, 778, 667, 778,  # HIJKLMNOPQ
+    722, 667, 611, 722, 667, 944, 667, 667, 611, 278,  # RSTUVWXYZ[
+    278, 278, 469, 556, 333, 556, 556, 500, 556, 556,  # \]^_`abcde
+    278, 556, 556, 222, 222, 500, 222, 833, 556, 556,  # fghijklmno
+    556, 556, 333, 500, 278, 556, 500, 722, 500, 500,  # pqrstuvwxy
+    500, 334, 260, 334, 584,                           # z{|}~
+]
+
+# Helvetica's ascender and descender, in 1/1000 em. A label's ink is not on its
+# baseline: it reaches 0.718 em above and 0.207 em below, so a string whose
+# `moveto` sits exactly on the top edge of the box is already cropped through
+# the ascenders. Checking the origin alone was the mistake this whole section
+# is here to avoid.
+ASCENT = 0.718
+DESCENT = 0.207
+
+# The one shape the emitter writes a label as, in `pl_draw::eps`:
+#   /Helvetica findfont 12 scalefont setfont 0 0 0 setrgbcolor X Y moveto (s) show
+LABEL_RE = re.compile(
+    r"findfont\s+(-?[\d.]+)\s+scalefont\s+setfont\b[^()]*?"
+    r"(-?[\d.]+)\s+(-?[\d.]+)\s+moveto\s+(\((?:[^()\\]|\\.)*\))\s+show")
+
+
+def ps_unescape(lit):
+    """A PostScript string literal, back to the bytes it stands for.
+
+    The emitter writes non-ASCII as octal (`\\326` for O-diaeresis), so decoding
+    is not optional: measuring the literal's characters instead of its bytes
+    would count `\\326` as four glyphs wide and quietly overstate every Latin-1
+    label by three characters.
+    """
+    body = lit[1:-1]
+    out = bytearray()
+    i, n = 0, len(body)
+    while i < n:
+        c = body[i]
+        if c != "\\":
+            out.append(ord(c) & 0xFF)
+            i += 1
+            continue
+        i += 1
+        if i >= n:
+            break
+        d = body[i]
+        if d.isdigit():
+            oct_digits = ""
+            while i < n and len(oct_digits) < 3 and body[i] in "01234567":
+                oct_digits += body[i]
+                i += 1
+            out.append(int(oct_digits, 8) & 0xFF)
+        else:
+            out.append({"n": 10, "r": 13, "t": 9, "b": 8, "f": 12}.get(d, ord(d)) & 0xFF)
+            i += 1
+    return bytes(out)
+
+
+def text_width(lit, pts):
+    """How wide the label will actually be, in points."""
+    total = 0
+    for b in ps_unescape(lit):
+        # Outside printable ASCII the emitter itself estimates 556; matching
+        # that here keeps the two sides talking about the same box.
+        total += HELVETICA[b - 0x20] if 0x20 <= b <= 0x7E else 556
+    return total * pts / 1000.0
+
+
+def eps_text_boxes(text):
+    """Ink boxes for every label: (x0, y0, x1, y1), plus lines we could not read.
+
+    `eps_tokens` drops every line containing ` show` -- correctly, because PDF
+    positions a string with `Td` inside `BT`/`ET` rather than with `moveto`, so
+    feeding label origins into the path comparison would report a difference
+    that is only one of notation. The cost was that **no text coordinate was
+    ever compared against the BoundingBox at all**, while the docstring, the
+    summary banner and tools/ci.ps1 all said the box was proved to contain the
+    artwork. It did not: `pl_draw`'s label gutter is capped at 30% of the canvas
+    (`pl-draw/src/lib.rs`), so an ordinary GenBank file with feature names over
+    roughly 28 characters overflows it. Measured on the shipped binary with a
+    two-CDS file carrying `aph(3')-Ia aminoglycoside phosphotransferase gene`:
+    a label runs from x=530 to x=806.42 under `%%BoundingBox: 0 0 720 720`, so
+    86 points of gene name are cropped off the plate -- and this oracle printed
+    `problems : 0`. The left-hand column fails the same way in mirror image,
+    with a negative start x.
+    """
+    boxes = []
+    unreadable = []
+    for line in text.splitlines():
+        if line.startswith("%") or " show" not in line:
+            continue
+        m = LABEL_RE.search(line)
+        if not m:
+            # An unparsed label is an unchecked label, and this check exists
+            # because unchecked labels were the hole. Report it rather than
+            # skipping it: if the emitter's output shape changes, this oracle
+            # must go red, not quietly go back to measuring nothing.
+            unreadable.append(line[:70])
+            continue
+        pts, x0, y0, lit = float(m.group(1)), float(m.group(2)), float(m.group(3)), m.group(4)
+        w = text_width(lit, pts)
+        boxes.append((x0, y0 - DESCENT * pts, x0 + w, y0 + ASCENT * pts))
+    return boxes, unreadable
 
 
 def run(exe, args):
@@ -176,6 +310,22 @@ def check_structure(text, path):
             else:
                 continue
             break
+
+        # ... and the text too. Right-column labels are `Anchor::Start`, so
+        # their `moveto` stays inside while the string runs off the right edge:
+        # testing the origin alone would still pass a figure whose longest
+        # feature name is half outside the box.
+        boxes, unreadable = eps_text_boxes(text)
+        for line in unreadable:
+            problems.append(f"label line this check could not read: {line}")
+        for tx0, ty0, tx1, ty1 in boxes:
+            if not (x0 - 0.5 <= tx0 and tx1 <= x1 + 0.5
+                    and y0 - 0.5 <= ty0 and ty1 <= y1 + 0.5):
+                problems.append(
+                    f"a label's ink box ({tx0}, {ty0})-({tx1}, {ty1}) is outside "
+                    f"the BoundingBox {x0} {y0} {x1} {y1} — the label would be "
+                    f"cropped")
+                break
     return problems
 
 
@@ -190,6 +340,7 @@ def main(argv):
     compared = 0
     ops = 0
     strings = 0
+    label_boxes = 0
     bad = []
     for f in argv:
         if not os.path.isfile(f):
@@ -209,6 +360,7 @@ def main(argv):
 
         for p in check_structure(eps, f):
             bad.append((f, p))
+        label_boxes += len(eps_text_boxes(eps)[0])
 
         e, p = eps_tokens(eps), pdf_tokens(pdf)
         # The EPS paints a white background rectangle the PDF does not, so drop
@@ -248,13 +400,15 @@ def main(argv):
     print(f"figures compared     : {compared}")
     print(f"path operators agreed: {ops:,}")
     print(f"labels               : {strings:,}")
+    print(f"label ink boxes in box: {label_boxes:,}")
     print(f"problems             : {len(bad)}")
     print()
     print("No PostScript interpreter is installed here, so this does NOT prove a")
     print("renderer draws the file. It proves the geometry is point-for-point the")
     print("PDF's after the y-flip, that gsave/grestore and every string literal")
     print("balance, that only Level 2 operators appear, and that the BoundingBox")
-    print("contains the artwork -- a box smaller than the drawing crops it")
+    print("contains the artwork -- paths AND label ink boxes, origin plus advance")
+    print("width plus ascent and descent. A box smaller than the drawing crops it")
     print("silently, in the typesetter's hands rather than on screen.")
 
     for f, why in bad[:8]:
@@ -262,6 +416,12 @@ def main(argv):
 
     if compared == 0 or ops == 0:
         print("\nFAIL: compared nothing")
+        return 1
+    # Labels present but none measured means the bbox arm of this check has
+    # gone back to testing paths only, which is precisely the state it shipped
+    # in. Say so rather than reporting a clean run over half the figure.
+    if strings and not label_boxes:
+        print(f"\nFAIL: {strings} label(s) found and 0 bounds-checked")
         return 1
     if bad:
         print(f"\nFAIL: {len(bad)} problem(s)")

@@ -523,18 +523,106 @@ mod tests {
         }
 
         // Text drawn by the renderer itself.
-        for (what, hex) in [("ruler numbers", "#6b7280"), ("the title", "#33383d")] {
+        //
+        // Read out of `crate::ink`, not spelled out again here: this list used
+        // to hold two literals, one of which was the *backbone* stroke labelled
+        // "the title" and audited a second time three lines below as the
+        // backbone. The feature labels -- the most numerous text in any map --
+        // the real title and the feature outlines were in no Rust test at all,
+        // so changing the label fill to #a0a0a0 (2.61:1) left every gate green.
+        for (what, hex) in [
+            ("ruler numbers and the bp count", crate::ink::SUBTITLE_FILL),
+            ("feature labels", crate::ink::LABEL_FILL),
+            ("the title", crate::ink::TITLE_FILL),
+        ] {
             let r = ratio(parse_hex(hex).unwrap(), WHITE);
-            assert!(r >= Kind::Text.min_ratio(), "{what} is {r:.2}:1, needs 4.5");
+            assert!(
+                r >= Kind::Text.min_ratio(),
+                "{what} is {hex} at {r:.2}:1, needs 4.5"
+            );
         }
-        // Rules and leaders.
-        for (what, hex) in [("leader lines", "#868d95"), ("the backbone", "#33383d")] {
+        // Rules, leaders and outlines.
+        for (what, hex) in [
+            ("leader lines", crate::ink::LEADER_STROKE),
+            ("the backbone", crate::ink::BACKBONE_STROKE),
+            ("feature outlines", crate::ink::FEATURE_STROKE),
+        ] {
             let r = ratio(parse_hex(hex).unwrap(), WHITE);
             assert!(
                 r >= Kind::Graphic.min_ratio(),
-                "{what} is {r:.2}:1, needs 3.0"
+                "{what} is {hex} at {r:.2}:1, needs 3.0"
             );
         }
+    }
+
+    #[test]
+    fn every_colour_the_renderer_emits_is_one_of_the_audited_constants() {
+        // The audit above measures constants; this is what ties them to the
+        // ink that actually reaches a figure. A literal reintroduced at a use
+        // site in `scene` would be measured by nothing, which is the state the
+        // label fill was in.
+        use crate::{Item, Options};
+        let mut m = pl_core::Molecule {
+            name: "pTEST".into(),
+            seq: b"ACGT".iter().cycle().take(4000).copied().collect(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        for (i, kind) in ["CDS", "promoter", "rep_origin", "misc_feature"]
+            .iter()
+            .enumerate()
+        {
+            let mut f = pl_core::Feature::new(format!("f{i}"), *kind);
+            f.segments.push(pl_core::Segment::new(
+                i as u64 * 500 + 1,
+                i as u64 * 500 + 400,
+            ));
+            m.features.push(f);
+        }
+        let (sc, _) = crate::scene(&m, Options::default());
+
+        let ours = [
+            crate::ink::LABEL_FILL,
+            crate::ink::TITLE_FILL,
+            crate::ink::SUBTITLE_FILL,
+            crate::ink::BACKBONE_STROKE,
+            crate::ink::FEATURE_STROKE,
+            crate::ink::LEADER_STROKE,
+        ];
+        let feature_colours: Vec<&str> = [
+            "CDS",
+            "gene",
+            "promoter",
+            "RBS",
+            "terminator",
+            "polyA_signal",
+            "rep_origin",
+            "origin",
+            "primer_bind",
+            "protein_bind",
+            "misc_feature",
+            "anything else",
+        ]
+        .iter()
+        .map(|k| crate::colour_for(k))
+        .collect();
+        let known = |c: &str| ours.contains(&c) || feature_colours.contains(&c);
+
+        let mut seen = 0;
+        for item in &sc.items {
+            let colours: Vec<String> = match item {
+                Item::Circle { stroke, .. } => vec![stroke.clone()],
+                Item::Path { fill, stroke, .. } => {
+                    fill.iter().chain(stroke.iter()).cloned().collect()
+                }
+                Item::Text { color, .. } => vec![color.clone()],
+            };
+            for c in colours {
+                assert!(known(&c), "{c} is drawn but audited nowhere");
+                seen += 1;
+            }
+        }
+        assert!(seen > 10, "only {seen} colours in the scene");
     }
 
     /// The TypeScript renderer's palette, audited and compared with ours.
@@ -587,6 +675,31 @@ mod tests {
                 r >= need.min_ratio(),
                 "{k} = {hex} is {r:.2}:1 on white and needs {:.1}:1",
                 need.min_ratio()
+            );
+        }
+
+        // The renderer's own ink, key by key. The loop below can only compare
+        // feature *kinds*, because `colour_for` is all it has to compare
+        // against, and it skips anything that falls through to the default --
+        // so `labelFill`, `titleFill` and the rest were compared with nothing
+        // and the two palettes could drift apart one constant at a time.
+        for (key, ours) in [
+            ("labelFill", crate::ink::LABEL_FILL),
+            ("titleFill", crate::ink::TITLE_FILL),
+            ("subtitleFill", crate::ink::SUBTITLE_FILL),
+            ("tickStroke", crate::ink::SUBTITLE_FILL),
+            ("backboneStroke", crate::ink::BACKBONE_STROKE),
+            ("featureStroke", crate::ink::FEATURE_STROKE),
+            ("leaderStroke", crate::ink::LEADER_STROKE),
+        ] {
+            let theirs = entries
+                .iter()
+                .find(|(k, _)| k == key)
+                .unwrap_or_else(|| panic!("the TypeScript theme has no {key}"));
+            assert_eq!(
+                ours, theirs.1,
+                "the two renderers disagree about {key}: Rust {ours}, TypeScript {}",
+                theirs.1
             );
         }
 

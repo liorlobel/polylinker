@@ -228,6 +228,23 @@ fn tool_error(text: String) -> Value {
     ])
 }
 
+/// How many cut positions and fragment lengths one digest line lists.
+const SHOWN: usize = 8;
+
+/// What to append to a list of `n` things when only [`SHOWN`] of them are there.
+///
+/// `which` says *which* of them, because the two lists are ordered differently:
+/// cut positions come back ascending, so the survivors are the first eight,
+/// while fragments come back longest first, so they are the eight largest.
+/// Empty when nothing was dropped, so a complete answer reads as one.
+fn elided(n: usize, which: &str) -> String {
+    if n > SHOWN {
+        format!(" ({which} {SHOWN} of {n} shown)")
+    } else {
+        String::new()
+    }
+}
+
 fn call(params: &Value) -> Result<Value, String> {
     let name = params
         .get("name")
@@ -283,12 +300,24 @@ fn call(params: &Value) -> Result<Value, String> {
                         continue;
                     }
                     let f = d.fragments(m.len(), m.topology);
+                    // Both lists are capped, and a cap that does not say so is
+                    // the whole failure. `fragments` comes back largest first,
+                    // so the eight shown are the eight biggest bands and the
+                    // rest are invisible: an assistant asked what the gel will
+                    // look like reported eight bands for a digest that gives
+                    // thirteen. The CLI appends ", ..." past six positions and
+                    // heads its column "largest fragments"; nothing crossing
+                    // this process boundary may be less honest than the
+                    // terminal.
                     lines.push(format!(
-                        "{}: {} cut(s) at {:?}, fragments {:?}",
+                        "{}: {} cut(s) at {:?}{}, {} fragment(s) {:?}{}",
                         d.enzyme.name,
                         d.positions.len(),
-                        &d.positions[..d.positions.len().min(8)],
-                        &f[..f.len().min(8)]
+                        &d.positions[..d.positions.len().min(SHOWN)],
+                        elided(d.positions.len(), "first"),
+                        f.len(),
+                        &f[..f.len().min(SHOWN)],
+                        elided(f.len(), "largest"),
                     ));
                 }
                 if lines.is_empty() {
@@ -315,16 +344,43 @@ fn call(params: &Value) -> Result<Value, String> {
         "open_reading_frames" => match load(&arg("path")) {
             Err(e) => tool_error(e),
             Ok(m) => {
-                let id = a.get("table").and_then(Value::as_i64).unwrap_or(11) as u8;
-                let Some(code) = pl_core::translate::table(id) else {
+                // Checked *before* it is narrowed, and reported as the caller
+                // wrote it.
+                //
+                // `as u8` on the way in truncated to the low byte, so a request
+                // for table 267 silently became table 11 and -243 became 13 —
+                // both real NCBI codes, so the guard below never fired and the
+                // ORFs came back computed under a genetic code nobody asked
+                // for. Table 300 did reach the error, and named 44.
+                let id = a.get("table").and_then(Value::as_i64).unwrap_or(11);
+                let Some(code) = u8::try_from(id).ok().and_then(pl_core::translate::table) else {
                     return Ok(tool_error(format!("no NCBI code {id}")));
                 };
+                // Likewise: `-1 as usize` is 18,446,744,073,709,551,615, which
+                // no ORF can reach, and the reply was then byte-identical to a
+                // molecule that genuinely has no ORF at the threshold asked
+                // for.
+                let want = a.get("min_aa").and_then(Value::as_i64).unwrap_or(30);
+                let Ok(min_aa) = usize::try_from(want) else {
+                    return Ok(tool_error(format!(
+                        "min_aa must be zero or more, not {want}"
+                    )));
+                };
                 let p = pl_core::orf::Params {
-                    min_aa: a.get("min_aa").and_then(Value::as_i64).unwrap_or(30) as usize,
+                    min_aa,
                     ..Default::default()
                 };
                 let orfs = pl_core::orf::find_orfs(&m.seq, code, m.topology.is_circular(), &p);
                 let mut lines = vec![format!("table {id} — {}", code.name())];
+                // The empty case is a result, not the absence of one. Without
+                // this line the whole reply was the table header, which an
+                // assistant reads as "this plasmid has no open reading frames"
+                // — a claim about the molecule rather than about the threshold.
+                // The CLI prints it; a hedge that does not survive the process
+                // boundary is lost exactly where it matters most.
+                if orfs.is_empty() {
+                    lines.push(format!("no ORF of {min_aa} aa or more"));
+                }
                 for o in orfs.iter().take(40) {
                     lines.push(format!(
                         "{}..{} {} {} aa, starts {}{}",
@@ -457,6 +513,44 @@ mod tests {
 
     fn req(text: &str) -> Option<Value> {
         handle(&json::parse(text).expect(text))
+    }
+
+    /// A file on disk holding `text`, for the tools that take a path.
+    ///
+    /// Named per process so two test binaries running at once cannot read each
+    /// other's fixture half-written.
+    fn fixture(name: &str, text: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("pl-mcp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let p = dir.join(name);
+        std::fs::write(&p, text).expect("a fixture");
+        p.display().to_string()
+    }
+
+    /// Call one tool and return the text it replied with, error or not.
+    fn call_tool(name: &str, args: Vec<(&str, Value)>) -> String {
+        let call = json::write(&obj(vec![
+            ("jsonrpc", s("2.0")),
+            ("id", Value::Number(99.0)),
+            ("method", s("tools/call")),
+            (
+                "params",
+                obj(vec![("name", s(name)), ("arguments", obj(args))]),
+            ),
+        ]));
+        let r = req(&call).expect("a reply");
+        assert!(r.get("error").is_none(), "not a protocol error: {r:?}");
+        r.get("result")
+            .unwrap()
+            .get("content")
+            .unwrap()
+            .as_array()
+            .unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -650,5 +744,104 @@ mod tests {
             .unwrap();
         assert!(text.starts_with("Method:"), "{text}");
         assert!(text.contains("GTAAAACGACGGCCAGT"), "{text}");
+    }
+
+    /// A 1,300 bp record with a PvuII site every hundred bases: 13 cuts, and
+    /// 14 fragments once linear.
+    fn thirteen_cutter() -> String {
+        let unit = format!("CAGCTG{}", "A".repeat(94));
+        fixture("many-cuts.fa", &format!(">many\n{}\n", unit.repeat(13)))
+    }
+
+    #[test]
+    fn a_digest_that_lists_only_some_of_its_fragments_says_so() {
+        // Both lists stop at eight. The cut count made the position truncation
+        // inferable; the fragment count was never stated at all, so an
+        // assistant asked what the gel would look like reported eight bands
+        // for a digest that gives fourteen — a partial pattern that reads as
+        // complete.
+        let text = call_tool(
+            "digest",
+            vec![("path", s(thirteen_cutter())), ("enzymes", s("PvuII"))],
+        );
+        assert!(text.contains("13 cut(s)"), "{text}");
+        assert!(text.contains("first 8 of 13 shown"), "{text}");
+        assert!(text.contains("14 fragment(s)"), "{text}");
+        assert!(text.contains("largest 8 of 14 shown"), "{text}");
+    }
+
+    #[test]
+    fn a_digest_short_enough_to_show_whole_claims_no_truncation() {
+        // The control. A note on a complete list would be its own lie, and an
+        // assistant would hedge an answer that needs no hedging.
+        let path = fixture("one-cut.fa", ">one\nAAAACAGCTGAAAA\n");
+        let text = call_tool("digest", vec![("path", s(path)), ("enzymes", s("PvuII"))]);
+        assert!(text.contains("1 cut(s)"), "{text}");
+        assert!(text.contains("2 fragment(s)"), "{text}");
+        assert!(!text.contains("shown)"), "{text}");
+    }
+
+    #[test]
+    fn a_genetic_code_outside_a_byte_is_refused_rather_than_wrapped() {
+        // `as u8` truncated to the low byte, so 267 became 11 and -243 became
+        // 13 — both real NCBI codes. The guard never fired, and the ORFs came
+        // back computed under a genetic code the caller did not ask for. 300
+        // did reach the error and named 44, a number nobody sent.
+        let path = fixture("orf.fa", ">x\nATGAAACCCGGGTAA\n");
+        for n in [267.0, -243.0, 300.0, 1e19] {
+            let text = call_tool(
+                "open_reading_frames",
+                vec![("path", s(path.clone())), ("table", Value::Number(n))],
+            );
+            assert!(
+                text.starts_with("no NCBI code") && text.contains(&format!("{}", n as i64)),
+                "table {n} gave {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_genetic_code_is_still_accepted_and_named() {
+        // The control for the check above: narrowing was wrong, refusing
+        // everything would be worse.
+        let path = fixture("orf.fa", ">x\nATGAAACCCGGGTAA\n");
+        for n in [1.0, 2.0, 11.0, 33.0] {
+            let text = call_tool(
+                "open_reading_frames",
+                vec![("path", s(path.clone())), ("table", Value::Number(n))],
+            );
+            assert!(
+                text.starts_with(&format!("table {} — ", n as i64)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_min_aa_that_is_not_a_length_is_refused_rather_than_finding_nothing() {
+        // `-1 as usize` is 18,446,744,073,709,551,615, which no ORF can reach.
+        let path = fixture("orf.fa", ">x\nATGAAACCCGGGTAA\n");
+        let text = call_tool(
+            "open_reading_frames",
+            vec![("path", s(path)), ("min_aa", Value::Number(-1.0))],
+        );
+        assert!(
+            text.contains("min_aa must be zero or more, not -1"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_orf_search_that_finds_nothing_says_so_rather_than_stopping_at_the_header() {
+        // The reply used to be the table header alone — byte-identical to a
+        // molecule that genuinely has no ORF, with no echo of the threshold
+        // actually used. An assistant reads that as "this plasmid has no open
+        // reading frames", which is a claim about the molecule.
+        let path = fixture("orf.fa", ">x\nATGAAACCCGGGTAA\n");
+        let text = call_tool(
+            "open_reading_frames",
+            vec![("path", s(path)), ("min_aa", Value::Number(1000.0))],
+        );
+        assert!(text.contains("no ORF of 1000 aa or more"), "{text}");
     }
 }

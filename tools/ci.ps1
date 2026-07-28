@@ -234,6 +234,27 @@ Step 'the index agrees with the files' {
 }
 
 Write-Host "`noracles — our answers checked against tools that are not ours" -ForegroundColor Cyan
+
+# The oracles themselves, checked by injecting the fault they exist to catch.
+#
+# This gate has now shipped six checks that were green by construction, every
+# one found by reading rather than by a red gate: the bench step that reported
+# ok for a score of zero; validate_digest.py exiting 0 on both mismatches and an
+# empty run; "wasm module vs native binary" running with no corpus and comparing
+# nothing; test_roundtrip.py counting 344 problems and exiting 0; xcheck_eps.py
+# claiming the BoundingBox contained every coordinate while dropping every line
+# with ` show` on it, which is every label. The sixth was inside the meta-check
+# written for the fourth: it asserted `rc != 0`, and the broken main() returned
+# None, so it passed against the code it was written to catch.
+#
+# So this step injects the break and demands the oracle notice, with a control
+# beside each one. No fixtures, no corpus, no build -- it runs on a bare
+# checkout, which is the point: the cheapest step here should be the one that
+# says the expensive ones can fail.
+Step 'the oracles can fail' {
+    python reference/python/tests/xcheck_oracles.py
+} { Have python }
+
 Step 'SEGUID vs the reference' {
     if ([string]::IsNullOrWhiteSpace($Corpus)) {
         python reference/python/tests/xcheck_seguid.py target/release/pl.exe
@@ -358,15 +379,38 @@ Step 'Sanger placement vs Biopython' {
 # matters, because "the EPS oracle passes" would otherwise sound like more than
 # it is. What it does prove: the geometry is point-for-point the PDF's after the
 # y-flip (284 path operators), gsave/grestore and every string literal balance,
-# only Level 2 operators appear, and the BoundingBox contains the artwork.
+# only Level 2 operators appear, and the BoundingBox contains the artwork --
+# paths and all 79 label ink boxes.
+#
+# "and the labels" is new, and the old wording was false. The bbox arm compared
+# the box against `eps_tokens`, which skips every line containing ` show` -- and
+# the emitter writes each label as one `X Y moveto (text) show` line, so NO text
+# coordinate was ever tested against the box. The gap is live, not theoretical:
+# pl-draw's label gutter is capped at 30% of the canvas, so a feature name over
+# roughly 28 characters overflows it. A two-CDS GenBank file carrying
+# "aph(3')-Ia aminoglycoside phosphotransferase gene" makes the shipped binary
+# emit a right-column label running from x=530 to x=806.4 under
+# `%%BoundingBox: 0 0 720 720` -- 86 points of gene name cropped off the plate,
+# while this oracle printed `problems : 0`. That one is a LAYOUT bug in pl-draw
+# and is NOT fixed here; the check that finds it is. Every fixture in the gate
+# has names short enough to stay inside the box, which is precisely why the hole
+# went unnoticed: a check whose fixtures cannot exercise it proves nothing.
+#
+# Labels are measured as ink boxes -- origin, plus the advance width of the
+# decoded bytes, plus Helvetica's 0.718 ascent and 0.207 descent. The origin
+# alone would not do: right-column labels are `Anchor::Start`, so the `moveto`
+# stays inside the box while the string runs out of it, which is exactly the
+# case above.
 #
 # The circle is drawn as four Beziers rather than PostScript's native `arc`, on
 # purpose: PDF has no arc operator, and two formats that approximate a circle
 # differently are two slightly different figures.
 #
-# Verified it can fail three ways: not flipping the y axis (an upside-down but
+# Verified it can fail four ways: not flipping the y axis (an upside-down but
 # otherwise perfect figure) is caught at operator 0; a BoundingBox 20% too small
-# is caught as "the figure would be cropped"; and leaving ')' unescaped drops a
+# is caught as "the figure would be cropped"; a label outside the box is caught
+# as "the label would be cropped", proved on the long-name file above and pinned
+# without a fixture in `the oracles can fail`; and leaving ')' unescaped drops a
 # label. That third one needed a fixture -- `tests/export-fixture/hostile-names.gb`
 # exists because none of the other fixtures has a parenthesis in a feature name,
 # so the check could not fail and therefore proved nothing. The name in it is

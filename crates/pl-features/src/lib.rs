@@ -360,6 +360,29 @@ fn escape(s: &str) -> String {
     out
 }
 
+/// Parse a boolean cell, refusing anything not on the list.
+///
+/// `patent_flag` used to be `matches!(cell, "1" | "true" | "yes")`, which is a
+/// case-*sensitive* three-way match with no rejection path: a hand-authored row
+/// saying `TRUE`, `Yes`, `Y` or `T` loaded clean with the flag cleared, and
+/// `to_tsv` then wrote `0`, so one round trip through the tool erased it
+/// permanently. That is the one field where a silent clear is least
+/// affordable — `Record::patent_flag`'s own doc says CC BY 4.0 grants no patent
+/// rights and says so, so this cannot be waved away — and it was the only
+/// enumerated column in the row with no `LoadError` path, unlike `class`,
+/// `boundary_rule` and `review_status`, which all lowercase and all reject.
+///
+/// Empty is `false` and not an error: an unset optional column is a stated
+/// default, not a misspelling. Every other spelling is returned as `None` so
+/// the caller can refuse the row by name rather than guess at it.
+fn parse_flag(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" | "n" | "f" => Some(false),
+        "1" | "true" | "yes" | "y" | "t" => Some(true),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod escaping_tests {
     use super::{escape, unescape};
@@ -570,6 +593,16 @@ impl Db {
                 bad("boundary_evidence is required: a boundary with no evidence is the thing this database exists to replace".into());
                 continue;
             }
+            // Refused rather than defaulted. A cell this parser does not
+            // recognise is a curator saying something it failed to hear, and
+            // reading it as `false` clears a patent warning without a word.
+            let Some(patent_flag) = parse_flag(&get(13)) else {
+                bad(format!(
+                    "patent_flag {:?} is not a boolean; write 0 or 1",
+                    get(13)
+                ));
+                continue;
+            };
 
             db.records.push(Record {
                 id: get(0),
@@ -596,7 +629,7 @@ impl Db {
                 review_status: review,
                 curator: get(11),
                 date_added: get(12),
-                patent_flag: matches!(get(13).as_str(), "1" | "true" | "yes"),
+                patent_flag,
                 notes: unescape(&get(14)),
             });
         }
@@ -805,6 +838,11 @@ mod tests {
         format!("{id}\tTest\t\t{class}\tCDS\t{nt}\t{aa}\torf_atg_to_stop\tJ01749.1:3293-4153:-\tA description\t{status}\t{curator}\t2026-07-27\t0\t")
     }
 
+    /// `feat` with the patent_flag column under the caller's control.
+    fn feat_flagged(id: &str, flag: &str) -> String {
+        format!("{id}\tTest\t\tcds\tCDS\tATGACGT\tMT\torf_atg_to_stop\tJ01749.1:3293-4153:-\tA description\tproposed\t\t2026-07-27\t{flag}\t")
+    }
+
     fn prov(id: &str) -> String {
         format!("{id}\treference_nt\tena\tAAB59737.1\tINSDC-free\thttps://www.ebi.ac.uk/ena/browser/api/fasta/AAB59737.1\t2026-07-27\tabc123")
     }
@@ -827,6 +865,58 @@ mod tests {
         assert!(errs2.is_empty(), "{errs2:?}");
         assert_eq!(again.records, db.records);
         assert_eq!(again.provenance, db.provenance);
+    }
+
+    #[test]
+    fn a_patent_flag_is_read_however_a_curator_spells_it() {
+        // It was a case-sensitive `matches!` against exactly "1", "true" and
+        // "yes". A row saying `TRUE` loaded clean with the flag *cleared*, and
+        // `to_tsv` then wrote "0", so one round trip erased the warning.
+        for spelling in [
+            "1", "true", "TRUE", "True", "yes", "Yes", "Y", "y", "T", "t",
+        ] {
+            let f = format!("{FH}\n{}\n", feat_flagged("PLF:0001", spelling));
+            let (db, errs) = Db::parse(&f, &format!("{PH}\n{}\n", prov("PLF:0001")));
+            assert!(errs.is_empty(), "{spelling:?}: {errs:?}");
+            assert!(
+                db.records[0].patent_flag,
+                "{spelling:?} was read as not patented"
+            );
+
+            // ...and it survives the round trip that used to erase it.
+            let (f2, p2) = db.to_tsv();
+            let (again, errs2) = Db::parse(&f2, &p2);
+            assert!(errs2.is_empty(), "{spelling:?}: {errs2:?}");
+            assert!(
+                again.records[0].patent_flag,
+                "{spelling:?} lost in a round trip"
+            );
+        }
+
+        // The control: the false spellings, including the empty cell that
+        // `features.tsv` may legitimately carry, must stay false and must not
+        // start raising errors.
+        for spelling in ["", "0", "false", "FALSE", "No", "n", "F", " 0 "] {
+            let f = format!("{FH}\n{}\n", feat_flagged("PLF:0001", spelling));
+            let (db, errs) = Db::parse(&f, &format!("{PH}\n{}\n", prov("PLF:0001")));
+            assert!(errs.is_empty(), "{spelling:?}: {errs:?}");
+            assert!(!db.records[0].patent_flag, "{spelling:?} read as patented");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_patent_flag_is_refused_not_read_as_unpatented() {
+        // Nothing may fail silently, and this field least of all: guessing
+        // `false` is the answer that loses the warning.
+        for spelling in ["probably", "maybe", "2", "yes?"] {
+            let f = format!("{FH}\n{}\n", feat_flagged("PLF:0001", spelling));
+            let (db, errs) = Db::parse(&f, &format!("{PH}\n{}\n", prov("PLF:0001")));
+            assert_eq!(db.records.len(), 0, "{spelling:?} was accepted");
+            assert!(
+                errs.iter().any(|e| e.problem.contains("patent_flag")),
+                "{spelling:?}: no error names the column: {errs:?}"
+            );
+        }
     }
 
     #[test]

@@ -132,7 +132,20 @@ def check_orfs_translate(seq, table, doc):
     t = bio_table(table)
     for o in doc["orfs"]:
         s = span(seq, o)
-        want = str(Seq(s).translate(table=table))
+        # An ORF's protein is a CDS translation, not a raw one: a ribosome
+        # initiating at GTG, TTG or ATT still puts methionine there, GenBank CDS
+        # records show M, and Biopython implements the same convention behind
+        # `cds=True`. Comparing against a plain `translate()` asserted the raw
+        # residue and would fail every alternative-start marker on the shelf —
+        # tet(A) came out starting with V.
+        #
+        # `cds=True` also drops the terminal stop and refuses a sequence with no
+        # stop at all, so the two cases are spelled out rather than papered over.
+        if o["complete"]:
+            want = str(Seq(s).translate(table=table, cds=True)) + "*"
+        else:
+            raw = str(Seq(s).translate(table=table))
+            want = ("M" + raw[1:]) if raw else raw
         if want != o["protein"]:
             bad.append((o, "protein", o["protein"], want))
             continue

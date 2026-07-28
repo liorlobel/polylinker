@@ -6,6 +6,19 @@ Checks, per file:
   3. the sequence is valid IUPAC and matches the declared length
   4. every feature segment lies within the sequence (or wraps, if circular)
   5. dropping the derived cache blocks still produces a well-framed file
+
+    python test_roundtrip.py '<glob>' ...
+
+**This script used to be unable to fail**, in exactly the shape
+`validate_digest.py` was fixed for. It counted every parse error, every
+non-byte-exact round trip, every out-of-bounds segment into `total_problems`,
+printed the number, and then returned `None` to a `__main__` that discarded it:
+break `snapdna.dumps` and a run over the corpus prints `problems found : 344`
+and still exits 0. A glob matching nothing printed `files clean : 0/0` and
+exited 0 too, so verifying nothing looked exactly like verifying everything.
+README.md and CONTRIBUTING.md both name this beside `validate_digest.py` as a
+check to run yourself, so the two made the same promise and only one kept it.
+Both cases now exit 1.
 """
 import glob
 import os
@@ -101,6 +114,19 @@ def main(patterns):
         print(f"size saved by dropping derived caches: "
               f"mean {sum(savings)/len(savings):.0%}, max {max(savings):.0%}")
 
+    # Zero files is a failure, not a pass. A corpus check that quietly matched
+    # nothing reports success for having validated nothing at all -- and the
+    # glob is quoted precisely because the shell must NOT expand it, which is
+    # the one typo that turns a 344-file run into a 0-file run.
+    if not files:
+        print("\nFAIL: matched 0 files. Quote the glob, e.g."
+              "\n  python test_roundtrip.py 'corpus/**/*.dna'")
+        return 1
+    if total_problems:
+        print(f"\nFAIL: {total_problems} problem(s)")
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

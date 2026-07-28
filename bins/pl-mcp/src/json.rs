@@ -312,6 +312,24 @@ fn string(b: &[char], i: &mut usize) -> Result<String, String> {
                                     // else. Unpaired surrogates are real in the
                                     // wild; refusing the whole document over one
                                     // is worse than the replacement character.
+                                    //
+                                    // Rewind the six characters this branch
+                                    // consumed looking for a low surrogate, so
+                                    // the escape is read again as itself.
+                                    //
+                                    // It was being swallowed along with the
+                                    // surrogate. A high surrogate then an
+                                    // escaped "AB" came back as "\u{fffd}B",
+                                    // with the A gone; a high surrogate then an
+                                    // escaped 🧬 came back as two replacement
+                                    // characters, destroying the very surrogate
+                                    // pair the module header promises to
+                                    // preserve. A *literal* character after an
+                                    // unpaired surrogate was always safe — only
+                                    // a second `\u` escape reaches this branch,
+                                    // which is why the existing
+                                    // unpaired-surrogate test never saw it.
+                                    *i -= 6;
                                     '\u{fffd}'
                                 }
                             } else {
@@ -378,6 +396,35 @@ mod tests {
         // worse than the replacement character.
         assert_eq!(parse(r#""\ud83e""#).unwrap().as_str(), Some("\u{fffd}"));
         assert_eq!(parse(r#""a\udc00b""#).unwrap().as_str(), Some("a\u{fffd}b"));
+    }
+
+    #[test]
+    fn an_unpaired_surrogate_does_not_swallow_the_escape_that_follows_it() {
+        // The escape after a high surrogate was consumed while looking for a
+        // low surrogate and then never emitted, so one replacement character
+        // ate a second character with it.
+        assert_eq!(
+            parse(r#""\ud83e\u0041\u0042""#).unwrap().as_str(),
+            Some("\u{fffd}AB"),
+            "the A was being dropped"
+        );
+        assert_eq!(
+            parse(r#""x\ud83e\u0020y""#).unwrap().as_str(),
+            Some("x\u{fffd} y")
+        );
+        // Worst of all, the escape that followed could be a *valid* pair — the
+        // emoji the module header promises to preserve, destroyed by an
+        // unpaired surrogate in front of it.
+        assert_eq!(
+            parse(r#""\ud83e\ud83e\uddec""#).unwrap().as_str(),
+            Some("\u{fffd}🧬")
+        );
+        // A literal character after the surrogate always took the other branch
+        // and was always safe. It still is.
+        assert_eq!(
+            parse(r#""\ud83eC:\\x.gb""#).unwrap().as_str(),
+            Some("\u{fffd}C:\\x.gb")
+        );
     }
 
     #[test]

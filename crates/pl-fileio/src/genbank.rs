@@ -157,8 +157,37 @@ fn parse_record(lines: &[&str]) -> (Molecule, Vec<String>) {
         });
     }
 
-    if let Some(d) = lines.iter().find(|l| l.starts_with("DEFINITION")) {
-        mol.description = d[10..].trim().trim_end_matches('.').to_string();
+    // DEFINITION wraps, and the continuation lines are part of the value.
+    //
+    // A single-line `find` kept only the first physical line, and GenBank wraps
+    // DEFINITION near column 79, so this fired on ordinary NCBI records:
+    // `DEFINITION  Escherichia coli str. K-12 substr. MG1655, complete` +
+    // `            genome.` became "...MG1655, complete", and `write` then put a
+    // full stop after it so the truncation read as a finished sentence. The word
+    // that went missing is also the one a library search would match on, because
+    // `pl-scan` indexes this string. The FEATURES parser below already
+    // reassembles wrapped qualifier values and wrapped locations, so the header
+    // was the odd one out rather than a considered tradeoff.
+    if let Some(i) = lines.iter().position(|l| l.starts_with("DEFINITION")) {
+        let mut def = lines[i][10..].trim().to_string();
+        for line in &lines[i + 1..] {
+            // A GenBank continuation line leaves columns 1-10 blank; anything
+            // with text there is the next keyword and ends the DEFINITION.
+            // `get` rather than a slice: a multi-byte character straddling byte
+            // 10 would panic, and this runs inside wasm where a panic kills the
+            // module rather than one call.
+            let Some(head) = line.get(..10) else { break };
+            if !head.trim().is_empty() {
+                break;
+            }
+            let cont = line[10..].trim();
+            if cont.is_empty() {
+                break;
+            }
+            def.push(' ');
+            def.push_str(cont);
+        }
+        mol.description = def.trim().trim_end_matches('.').to_string();
     }
 
     // --- ORIGIN ---
@@ -418,13 +447,13 @@ fn parse_location(loc: &str) -> (Vec<Segment>, Strand, Vec<String>) {
             break;
         }
     }
-    // A complement() nested inside join() flips the whole feature for our model.
-    if s.contains("complement(") {
-        strand = Strand::Reverse;
-    }
-
     let mut segs = Vec::new();
     let mut unparsable = Vec::new();
+    // Whether any *representable* part named each strand, so a join that names
+    // both can be reported rather than flattened. Counted only for parts that
+    // actually yield a segment: `bond(5,10)` must not vote on strandedness.
+    let mut saw_forward_part = false;
+    let mut saw_reverse_part = false;
     for raw in s.split(',') {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -435,12 +464,12 @@ fn parse_location(loc: &str) -> (Vec<Segment>, Strand, Vec<String>) {
         // the comma it gives `bond(5` and `10)`, and stripping the stray paren
         // turned the second into a perfectly numeric `10` — a fabricated
         // `10..10` segment that `validate()` accepted.
-        let inner = match raw
+        let (inner, part_is_reverse) = match raw
             .strip_prefix("complement(")
             .and_then(|r| r.strip_suffix(')'))
         {
-            Some(i) => i,
-            None => raw,
+            Some(i) => (i, true),
+            None => (raw, false),
         };
         let part = inner.replace(['<', '>'], "");
 
@@ -465,10 +494,42 @@ fn parse_location(loc: &str) -> (Vec<Segment>, Strand, Vec<String>) {
         if let (Ok(start), Ok(end)) = (a.trim().parse::<u64>(), b.trim().parse::<u64>()) {
             if end >= start && start > 0 {
                 segs.push(Segment::new(start, end));
+                if part_is_reverse {
+                    saw_reverse_part = true;
+                } else {
+                    saw_forward_part = true;
+                }
             } else {
                 unparsable.push(raw.to_string());
             }
         }
+    }
+
+    // A complement() nested inside join() flips the whole feature for our model.
+    if saw_reverse_part {
+        strand = Strand::Reverse;
+    }
+    if saw_forward_part && saw_reverse_part {
+        // A mixed-strand join — `join(1..100,complement(500..600))`, which the
+        // spec permits and trans-spliced and organelle annotations really use.
+        //
+        // `Segment` carries no strand and `Feature` carries exactly one, so
+        // this is not a parse slip we could tighten up: it is a form the model
+        // cannot hold. Whatever strand we choose, some part of the file's own
+        // claim is contradicted, and a save then rewrites the location as
+        // `complement(join(1..100,500..600))` — so the *file* now says
+        // something it did not say before.
+        //
+        // The coordinates are kept, because losing an exon is worse than
+        // mislabelling its strand, and the reinterpretation is reported through
+        // the same channel as every other form we cannot express. Doing it
+        // silently is how a map arrow ends up pointing at the wrong template
+        // with nothing anywhere saying so.
+        unparsable.push(format!(
+            "{}: mixed-strand join, every part placed on the {} strand",
+            loc.trim(),
+            if strand.is_reverse() { "minus" } else { "plus" }
+        ));
     }
     (segs, strand, unparsable)
 }
@@ -501,43 +562,110 @@ pub fn locus_name(title: &str) -> String {
     name.chars().take(16).collect()
 }
 
-/// Render a feature's location.
+/// Render one interval as GenBank location parts, or `None` when the format
+/// cannot express it at all.
 ///
-/// `span` is the molecule length, needed only to split a segment that crosses
+/// `span` is the molecule length, needed only to split an interval that crosses
 /// the origin; pass 0 when there is nothing to split against.
 ///
 /// # The origin split belongs here
 ///
-/// The model writes an origin-spanning segment as `end < start`, which
+/// The model writes an origin-spanning interval as `end < start`, which
 /// `Molecule::subseq`, the annotator and the SVG renderer all understand.
 /// GenBank has no such form: `12..3` is not a location, and our own reader
 /// silently dropped it — one feature in, zero out, and the molecule still
 /// reported valid. So the wrap is expanded into `join(12..16,1..3)` at the
 /// format boundary, which is exactly where `docs/PLAN.md` §5.3.1 says
 /// coordinate conversions belong.
-fn format_location(f: &Feature, span: u64) -> String {
-    let parts: Vec<String> = f
-        .segments
-        .iter()
-        .flat_map(|s| {
-            if s.end < s.start && span >= s.start {
-                // Crosses the origin: two ranges, in reading order.
-                vec![format!("{}..{}", s.start, span), format!("1..{}", s.end)]
-            } else {
-                vec![format!("{}..{}", s.start, s.end)]
-            }
-        })
-        .collect();
+///
+/// # And what cannot be split has to be said out loud
+///
+/// Two shapes have no legal GenBank form and used to be written literally
+/// anyway, which is the same one-in-zero-out loss wearing a different hat:
+///
+/// - `start > span` with `end < start`. A `.dna` may carry
+///   `<Segment range="150-50"/>` on a 100 bp molecule — `snapgene.rs` takes the
+///   range at face value on purpose — and there is no origin to split against,
+///   so this used to emit ` misc_feature 150..50`. Reading that back,
+///   `parse_location` rejects it and `flush` drops the whole feature, and on a
+///   circle `validate()` reports nothing either side of the trip.
+/// - `start == 0`. GenBank numbers bases from 1, so `0..50` is rejected on
+///   re-read in exactly the same way.
+///
+/// Returning `None` puts the caller in a position to report it.
+fn location_parts(start: u64, end: u64, span: u64) -> Option<Vec<String>> {
+    if start < 1 {
+        return None;
+    }
+    if end < start {
+        if span >= start {
+            // Crosses the origin: two ranges, in reading order.
+            return Some(vec![format!("{start}..{span}"), format!("1..{end}")]);
+        }
+        return None;
+    }
+    Some(vec![format!("{start}..{end}")])
+}
+
+/// Wrap location parts in `join(...)` and `complement(...)` as needed.
+fn join_parts(parts: &[String], reverse: bool) -> String {
     let joined = if parts.len() > 1 {
         format!("join({})", parts.join(","))
     } else {
         parts.concat()
     };
-    if f.strand.is_reverse() {
+    if reverse {
         format!("complement({joined})")
     } else {
         joined
     }
+}
+
+/// Render a feature's location, reporting any segment GenBank cannot hold.
+///
+/// `None` means not one segment survived, so there is no location to write and
+/// the caller must skip the feature — loudly.
+fn format_location(f: &Feature, span: u64, unwritable: &mut Vec<String>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for s in &f.segments {
+        match location_parts(s.start, s.end, span) {
+            Some(p) => parts.extend(p),
+            None => unwritable.push(format!(
+                "feature {:?}: segment {}..{} has no GenBank form on a {span} bp molecule and was not written",
+                f.name, s.start, s.end
+            )),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(join_parts(&parts, f.strand.is_reverse()))
+}
+
+/// Is this the `/note="color: #rrggbb"` line that [`write`] generates itself?
+///
+/// `ApEinfo_fwdcolor` and `ApEinfo_revcolor` were already skipped on the way
+/// out for exactly this reason and `note` was simply missed. The reader stores
+/// qualifiers verbatim, so every save/load cycle wrote the stored copy *and* a
+/// freshly generated one: one colour note after the first export, five after
+/// five, in the file and in `Feature::qualifiers` alike. Nothing corrupted —
+/// the reader prefers the `ApEinfo` pair, so the colour never drifted — the
+/// file just grew for ever on input the user thought was idempotent, starting
+/// with any file that already carries an ApE colour note.
+///
+/// Matched on shape, not on the current colour: a stale note naming a colour
+/// the feature no longer has is superseded by the one being written, and only
+/// a note that is *nothing but* a colour is dropped. `color: #1a2b3c and then
+/// some prose` is a note somebody wrote and survives.
+fn is_generated_colour_note(key: &str, value: Option<&str>) -> bool {
+    if key != "note" {
+        return false;
+    }
+    let Some(rest) = value.and_then(|v| v.trim().strip_prefix("color:")) else {
+        return false;
+    };
+    let hex = rest.trim();
+    hex.len() == 7 && hex.starts_with('#') && hex[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn qualifier_lines(key: &str, value: &str, out: &mut String) {
@@ -618,7 +746,27 @@ fn locus_line(mol: &Molecule, name: &str, n: u64, date: &str) -> String {
 
 /// Render a molecule as GenBank. `date` is `(day, month_index_0_based, year)`;
 /// passing it in keeps this function pure and its output reproducible.
+///
+/// This drops the report. Prefer [`write_reporting`] anywhere the caller can
+/// tell the user what the format could not carry — an annotation GenBank has no
+/// form for leaves no trace in the file it is missing from.
 pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
+    write_reporting(mol, title, date).0
+}
+
+/// Render a molecule as GenBank, and say what the format could not hold.
+///
+/// The second value is empty for the overwhelming majority of molecules. It is
+/// not empty for the ones that matter: a feature segment or a primer binding
+/// site with no legal GenBank location, which is the class that used to be
+/// skipped by a bare `continue` with the function returning a `String` and so
+/// no channel to say anything at all.
+pub fn write_reporting(
+    mol: &Molecule,
+    title: &str,
+    date: (u32, usize, i32),
+) -> (String, Vec<String>) {
+    let mut unwritable: Vec<String> = Vec::new();
     let name = locus_name(title);
     let n = mol.span();
     let (d, m, y) = date;
@@ -653,8 +801,23 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
         // Truncate by character. A feature key is normally ASCII, but this must
         // not panic on one that is not.
         let key: String = kind.chars().take(15).collect();
-        out.push_str(&format!("     {:<15} {}\n", key, format_location(f, n)));
+        let Some(loc) = format_location(f, n, &mut unwritable) else {
+            // Every segment was unwritable and each one has already been named
+            // above. Writing the feature key with an empty location would
+            // produce a line no parser can read, so the feature is skipped —
+            // and the skip is said out loud, which is the whole difference
+            // between this and the `continue` it replaces.
+            unwritable.push(format!(
+                "feature {:?} was not written: no segment had a GenBank form",
+                f.name
+            ));
+            continue;
+        };
+        out.push_str(&format!("     {key:<15} {loc}\n"));
         qualifier_lines("label", &f.name, &mut out);
+        // Whether the colour block below will generate its own `/note="color:
+        // ..."`, in which case a stored one is a duplicate rather than content.
+        let writes_colour = f.color().is_some();
         for (k, v) in &f.qualifiers {
             // A key must be a legal GenBank qualifier name. The reader used to
             // manufacture keys out of prose when it mistook a continuation line
@@ -662,6 +825,7 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
             // malformed input from becoming malformed output.
             if k == "label"
                 || k.starts_with("ApEinfo")
+                || (writes_colour && is_generated_colour_note(k, v.as_deref()))
                 || k.is_empty()
                 || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             {
@@ -678,14 +842,34 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
 
     for p in &mol.primers {
         for s in &p.sites {
-            if s.start < 1 || s.end > n || s.end < s.start {
+            // A site past the end of the molecule is skipped rather than
+            // written, because a `primer_bind` at 5000..5100 on a 2686 bp
+            // record claims annealing to bases the file does not contain. It is
+            // reported, which is the part that was missing.
+            if s.end >= s.start && s.end > n {
+                unwritable.push(format!(
+                    "primer {:?}: binding site {}..{} lies past the end of a {n} bp molecule and was not written",
+                    p.name, s.start, s.end
+                ));
                 continue;
             }
-            let loc = if s.strand.is_reverse() {
-                format!("complement({}..{})", s.start, s.end)
-            } else {
-                format!("{}..{}", s.start, s.end)
+            // A site that crosses the origin arrives here as `end < start`,
+            // exactly as a feature segment does, and it is *valid*: `validate`
+            // calls a wrap legal on a circle, and `Molecule::rotate` produces
+            // one for any primer straddling the new origin — a 2686 bp circle
+            // carrying M13F at 100..116, rotated to origin 110, gives 2677..7.
+            // That used to hit `s.end < s.start` and vanish without a word,
+            // while a feature segment at the identical coordinates was written
+            // as `join(2677..2686,1..7)` two loops above. Features and primers
+            // now agree about what is expressible.
+            let Some(parts) = location_parts(s.start, s.end, n) else {
+                unwritable.push(format!(
+                    "primer {:?}: binding site {}..{} has no GenBank form on a {n} bp molecule and was not written",
+                    p.name, s.start, s.end
+                ));
+                continue;
             };
+            let loc = join_parts(&parts, s.strand.is_reverse());
             out.push_str(&format!("     {:<15} {}\n", "primer_bind", loc));
             qualifier_lines("label", &p.name, &mut out);
             let note = match s.tm {
@@ -697,29 +881,47 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
     }
 
     out.push_str("ORIGIN\n");
-    let seq = &mol.seq;
-    let mut i = 0usize;
-    while i < seq.len() {
-        let end = (i + 60).min(seq.len());
-        let mut line = format!("{:>9}", i + 1);
-        let mut j = i;
-        while j < end {
-            let k = (j + 10).min(end);
+    // Decoded ONCE, then grouped — never grouped and then decoded.
+    //
+    // Slicing the raw bytes into 10-byte groups first and calling
+    // `from_utf8_lossy` on each group meant no decode ever saw a multi-byte
+    // character that straddled a group or line boundary: it saw a lone lead
+    // byte at the end of one group and a lone continuation byte at the start of
+    // the next, and turned each into its own U+FFFD. `acgtacgta` + µ (U+00B5,
+    // C2 B5) + `cgtacgtac` is 20 bytes with C2 at index 9; it came back out as
+    // 18 ASCII bases plus two replacement characters, which re-parses to 24
+    // bytes. One base in, two mojibake characters out, and both the content and
+    // the length of the exported sequence changed with nothing said. Decoding
+    // the whole sequence first cannot split a character, because there is no
+    // boundary left to split on.
+    //
+    // Counting the base index in characters rather than bytes follows from the
+    // same decision, and is identical for the ASCII every real file holds.
+    let decoded = String::from_utf8_lossy(&mol.seq);
+    let mut chars = decoded.chars().peekable();
+    let mut pos = 0usize;
+    while chars.peek().is_some() {
+        let mut line = format!("{:>9}", pos + 1);
+        for _ in 0..6 {
+            let group: String = chars.by_ref().take(10).collect();
+            if group.is_empty() {
+                break;
+            }
+            pos += group.chars().count();
             line.push(' ');
-            line.push_str(&String::from_utf8_lossy(&seq[j..k]));
-            j = k;
+            line.push_str(&group);
         }
         out.push_str(&line);
         out.push('\n');
-        i = end;
     }
     out.push_str("//\n");
-    out
+    (out, unwritable)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pl_core::{BindingSite, Primer};
 
     /// A minimal record wrapping one feature's qualifier block.
     fn with_quals(quals: &str) -> Molecule {
@@ -1029,6 +1231,248 @@ mod tests {
     }
 
     #[test]
+    fn a_primer_binding_site_crossing_the_origin_is_written_as_a_join() {
+        // `Molecule::rotate` produces exactly this shape, and `validate()`
+        // calls it legal: on a circle `end < start` is not a mistake, it is an
+        // annotation running across the origin. A 2686 bp plasmid carrying
+        // M13F at 100..116, rotated to origin 110, gives a site of 2677..7 —
+        // and `write` hit `s.end < s.start`, skipped the site with a bare
+        // `continue`, and returned a `String` with no channel to mention it.
+        // The exported file simply had no primer_bind line for M13F, while a
+        // feature segment at the identical coordinates was written as
+        // join(2677..2686,1..7) the whole time.
+        let mut mol = Molecule {
+            seq: b"a".repeat(2686),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.primers.push(Primer {
+            name: "M13F".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: String::new(),
+            sites: vec![BindingSite {
+                start: 2677,
+                end: 7,
+                strand: Strand::Forward,
+                tm: Some(55.3),
+            }],
+        });
+
+        let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
+        assert!(
+            text.contains("join(2677..2686,1..7)"),
+            "the wrapping site must become a join:\n{text}"
+        );
+        assert!(
+            report.is_empty(),
+            "nothing was lost, so nothing to report: {report:?}"
+        );
+
+        let back = parse(&text);
+        let pb = back
+            .features
+            .iter()
+            .find(|f| f.kind == "primer_bind")
+            .expect("the primer_bind line was dropped");
+        assert_eq!(pb.name, "M13F");
+        assert_eq!(pb.segments.len(), 2);
+        assert_eq!((pb.segments[0].start, pb.segments[0].end), (2677, 2686));
+        assert_eq!((pb.segments[1].start, pb.segments[1].end), (1, 7));
+        // Seventeen bases, either way round -- the length of the primer.
+        assert_eq!(pb.segments.iter().map(|s| s.len()).sum::<u64>(), 17);
+
+        // A reverse-strand wrap keeps its complement wrapper.
+        mol.primers[0].sites[0].strand = Strand::Reverse;
+        let (rev, _) = write_reporting(&mol, "p.dna", (27, 6, 2026));
+        assert!(rev.contains("complement(join(2677..2686,1..7))"), "{rev}");
+    }
+
+    #[test]
+    fn an_ordinary_primer_binding_site_is_written_exactly_as_before() {
+        // Control for the origin split: the common case must not have moved.
+        let mut mol = Molecule {
+            seq: b"a".repeat(2686),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.primers.push(Primer {
+            name: "M13F".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: String::new(),
+            sites: vec![
+                BindingSite {
+                    start: 100,
+                    end: 116,
+                    strand: Strand::Forward,
+                    tm: Some(55.3),
+                },
+                BindingSite {
+                    start: 900,
+                    end: 916,
+                    strand: Strand::Reverse,
+                    tm: None,
+                },
+            ],
+        });
+        let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
+        assert!(report.is_empty(), "{report:?}");
+        assert!(text.contains("primer_bind     100..116"), "{text}");
+        assert!(
+            text.contains("primer_bind     complement(900..916)"),
+            "{text}"
+        );
+        assert!(text.contains("/note=\"primer GTAAAACGACGGCCAGT; Tm: 55.3 C\""));
+    }
+
+    #[test]
+    fn a_primer_binding_site_past_the_end_is_reported_not_silently_skipped() {
+        // The other limb of the same guard. A primer_bind at 5000..5100 on a
+        // 2686 bp record would claim annealing to bases the file does not
+        // contain, so it is still not written -- but the drop is now said out
+        // loud instead of being a bare `continue` behind a bare `String`.
+        let mut mol = Molecule {
+            seq: b"a".repeat(2686),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.primers.push(Primer {
+            name: "ghost".into(),
+            seq: "ACGT".into(),
+            description: String::new(),
+            sites: vec![BindingSite {
+                start: 5000,
+                end: 5100,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+        });
+        let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
+        assert!(!text.contains("primer_bind"), "{text}");
+        assert_eq!(report.len(), 1, "{report:?}");
+        assert!(report[0].contains("ghost"), "{report:?}");
+        assert!(report[0].contains("past the end"), "{report:?}");
+    }
+
+    #[test]
+    fn a_wrap_with_no_origin_to_split_against_is_reported_not_written_as_an_illegal_range() {
+        // `<Segment range="150-50"/>` on a 100 bp molecule is a shape the
+        // SnapGene reader carries at face value on purpose. `span >= s.start`
+        // is false, so the origin split was skipped and ` misc_feature 150..50`
+        // went into the file -- not a legal GenBank base range. Read back,
+        // `parse_location` rejects it and `flush` drops the whole feature: one
+        // feature in, zero out, and on a circle `validate()` reports nothing
+        // either side of the trip. That is precisely the silent loss the origin
+        // split was written to end.
+        let mut m = Molecule {
+            seq: b"a".repeat(100),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let mut f = Feature::new("ghost", "misc_feature");
+        f.segments.push(Segment::new(150, 50));
+        m.features.push(f);
+
+        let (text, report) = write_reporting(&m, "t", (27, 6, 2026));
+        assert!(
+            !text.contains("150..50"),
+            "an illegal base range reached the file:\n{text}"
+        );
+        assert!(
+            parse(&text).features.is_empty(),
+            "one feature in, zero out -- and it must say so"
+        );
+        assert_eq!(report.len(), 2, "{report:?}");
+        assert!(report.iter().any(|r| r.contains("150..50")), "{report:?}");
+        assert!(report.iter().any(|r| r.contains("ghost")), "{report:?}");
+
+        // Control: the same wrap on a molecule long enough to split against is
+        // still expanded, and reports nothing.
+        let mut ok = Molecule {
+            seq: b"a".repeat(200),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let mut f2 = Feature::new("real", "misc_feature");
+        f2.segments.push(Segment::new(150, 50));
+        ok.features.push(f2);
+        let (t2, r2) = write_reporting(&ok, "t", (27, 6, 2026));
+        assert!(t2.contains("join(150..200,1..50)"), "{t2}");
+        assert!(r2.is_empty(), "{r2:?}");
+    }
+
+    #[test]
+    fn a_mixed_strand_join_is_reported_rather_than_flattened_in_silence() {
+        // `join(1..100,complement(500..600))` is legal GenBank and real
+        // trans-spliced and organelle annotations use it. `Segment` carries no
+        // strand and `Feature` carries exactly one, so both parts land on
+        // whichever strand we pick: the 1..100 exon the file explicitly puts on
+        // the plus strand is reassigned, the map arrow points at the wrong
+        // template, and a save rewrites the location as
+        // complement(join(1..100,500..600)) -- the file now says something it
+        // never said. The naive `s.contains("complement(")` did all of that and
+        // put nothing in the report the doc comment designates for it.
+        let (segs, strand, bad) = parse_location("join(1..100,complement(500..600))");
+        assert_eq!(segs.len(), 2, "the coordinates must not be lost: {segs:?}");
+        assert_eq!(strand, Strand::Reverse);
+        assert_eq!(
+            bad.len(),
+            1,
+            "the reinterpretation went unreported: {bad:?}"
+        );
+        assert!(bad[0].contains("mixed-strand"), "{bad:?}");
+
+        // ...and it reaches the caller through the channel every other
+        // unrepresentable form uses.
+        let src = [
+            "LOCUS       test                      12 bp    DNA     linear   SYN 27-JUL-2026",
+            "FEATURES             Location/Qualifiers",
+            "     CDS             join(1..100,complement(500..600))",
+            "ORIGIN",
+            "//",
+        ]
+        .join("\n");
+        let (mols, warnings) = parse_all_reporting(&src);
+        assert_eq!(mols[0].features.len(), 1, "the feature itself still loads");
+        assert!(
+            warnings.iter().any(|w| w.contains("mixed-strand")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_join_that_names_only_one_strand_is_not_reported_as_mixed() {
+        // Control: the all-reverse case the flattening rule was written for,
+        // and its two neighbours, are unchanged and say nothing.
+        for loc in [
+            "join(complement(1..3),complement(7..9))",
+            "complement(join(1..3,7..9))",
+            "join(1..3,7..9)",
+        ] {
+            let (segs, _, bad) = parse_location(loc);
+            assert_eq!(segs.len(), 2, "{loc}");
+            assert!(bad.is_empty(), "{loc} reported {bad:?}");
+        }
+        assert_eq!(
+            parse_location("join(complement(1..3),complement(7..9))").1,
+            Strand::Reverse
+        );
+        assert_eq!(
+            parse_location("complement(join(1..3,7..9))").1,
+            Strand::Reverse
+        );
+        assert_eq!(parse_location("join(1..3,7..9)").1, Strand::Forward);
+        // An unparsable part must not vote on strandedness either.
+        let (_, strand, bad) = parse_location("join(1..3,complement(bond(5,10)))");
+        assert_eq!(
+            strand,
+            Strand::Forward,
+            "a form we cannot read is not a strand"
+        );
+        assert!(!bad.is_empty());
+        assert!(!bad.iter().any(|b| b.contains("mixed-strand")), "{bad:?}");
+    }
+
+    #[test]
     fn an_unrepresentable_location_is_reported_not_invented() {
         // `bond(5,10)` split on the comma into `bond(5` and `10)`. The first
         // failed to parse and vanished; the second became a FABRICATED 10..10
@@ -1151,6 +1595,174 @@ mod tests {
         assert_eq!((g.start(), g.end()), (5, 20));
         assert_eq!(g.color(), Some("#9a5b8c"));
         assert_eq!(g.qualifier("gene"), Some("bla"));
+    }
+
+    #[test]
+    fn repeated_exports_do_not_accumulate_colour_notes() {
+        // `write` generates /note="color: #rrggbb" and the reader stores every
+        // qualifier verbatim, so the stored copy was emitted again next time
+        // alongside a fresh one: one colour note after the first export, two
+        // after the second, five after five, in the file and in
+        // `Feature::qualifiers` alike. `ApEinfo_fwdcolor` and
+        // `ApEinfo_revcolor` were already skipped for exactly this hazard;
+        // `note` was simply missed. Nothing corrupted -- the reader prefers the
+        // ApEinfo pair, so the colour never drifted -- the file just grew for
+        // ever on an operation the user believes is idempotent.
+        let mut mol = Molecule {
+            seq: b"acgtacgtacgt".to_vec(),
+            ..Default::default()
+        };
+        let mut f = Feature::new("AmpR", "CDS");
+        let mut s = Segment::new(1, 12);
+        s.color = Some("#9a5b8c".into());
+        f.segments.push(s);
+        mol.features.push(f);
+
+        let mut cur = mol;
+        for cycle in 1..=5 {
+            let text = write(&cur, "t", (27, 6, 2026));
+            let emitted = text
+                .lines()
+                .filter(|l| l.trim() == "/note=\"color: #9a5b8c\"")
+                .count();
+            assert_eq!(
+                emitted, 1,
+                "cycle {cycle} wrote {emitted} colour notes:\n{text}"
+            );
+            cur = parse(&text);
+            let stored = cur.features[0]
+                .qualifiers
+                .iter()
+                .filter(|(k, v)| k == "note" && v.as_deref() == Some("color: #9a5b8c"))
+                .count();
+            assert_eq!(stored, 1, "cycle {cycle} stored {stored} colour notes");
+            assert_eq!(
+                cur.features[0].color(),
+                Some("#9a5b8c"),
+                "the colour itself must survive every cycle"
+            );
+        }
+    }
+
+    #[test]
+    fn a_note_that_says_more_than_a_colour_is_not_mistaken_for_a_generated_one() {
+        // Control for the de-duplication: only a note that is *nothing but* the
+        // colour line this writer generates is dropped. Prose somebody typed
+        // that happens to start with a colour is content.
+        let mut mol = Molecule {
+            seq: b"acgtacgtacgt".to_vec(),
+            ..Default::default()
+        };
+        let mut f = Feature::new("AmpR", "CDS");
+        let mut s = Segment::new(1, 12);
+        s.color = Some("#9a5b8c".into());
+        f.segments.push(s);
+        f.set_qualifier("note", "color: #9a5b8c chosen by hand");
+        f.set_qualifier("note", "beta-lactamase");
+        mol.features.push(f);
+
+        let text = write(&mol, "t", (27, 6, 2026));
+        assert!(text.contains("chosen by hand"), "{text}");
+        assert!(text.contains("beta-lactamase"), "{text}");
+        let back = parse(&text);
+        assert!(back.features[0]
+            .qualifiers
+            .iter()
+            .any(|(k, v)| k == "note" && v.as_deref() == Some("color: #9a5b8c chosen by hand")));
+        assert!(back.features[0]
+            .qualifiers
+            .iter()
+            .any(|(k, v)| k == "note" && v.as_deref() == Some("beta-lactamase")));
+    }
+
+    #[test]
+    fn a_wrapped_definition_keeps_its_continuation_lines() {
+        // GenBank wraps DEFINITION near column 79, so this is the ordinary NCBI
+        // record rather than an exotic one. Reading only the first physical
+        // line dropped the last word -- and `write` then put a full stop after
+        // the stump, so the truncation read as a finished sentence. It is also
+        // the string `pl-scan` indexes, so the missing words were unfindable in
+        // the library.
+        let gb =
+            "LOCUS       NC_000913            4641652 bp    DNA     circular BCT 30-MAR-2010\n\
+                  DEFINITION  Escherichia coli str. K-12 substr. MG1655, complete\n\
+                  \x20           genome.\n\
+                  ACCESSION   NC_000913\n\
+                  ORIGIN\n//\n";
+        let m = parse(gb);
+        assert_eq!(
+            m.description,
+            "Escherichia coli str. K-12 substr. MG1655, complete genome"
+        );
+        let out = write(&m, "t", (1, 0, 2026));
+        assert!(
+            out.contains("complete genome."),
+            "the round trip lost a word:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_definition_stops_at_the_next_keyword() {
+        // Control: continuation lines are the ones with columns 1-10 blank, so
+        // nothing after the DEFINITION block may be swallowed into it.
+        let gb = "LOCUS       x                        4 bp    DNA     linear   SYN 01-JAN-2026\n\
+                  DEFINITION  a short one.\n\
+                  ACCESSION   x\n\
+                  KEYWORDS    .\n\
+                  ORIGIN\n\
+                  \x20       1 acgt\n//\n";
+        assert_eq!(parse(gb).description, "a short one");
+
+        // ...including a FEATURES table, whose qualifier lines *are* indented
+        // past column 10 and would otherwise be read as continuations.
+        let straight_into_features =
+            "LOCUS       x                        4 bp    DNA     linear   SYN 01-JAN-2026\n\
+             DEFINITION  a short one.\n\
+             FEATURES             Location/Qualifiers\n\
+             \x20    gene            1..4\n\
+             \x20                    /label=\"g\"\n\
+             ORIGIN\n\
+             \x20       1 acgt\n//\n";
+        let m = parse(straight_into_features);
+        assert_eq!(m.description, "a short one");
+        assert_eq!(m.features.len(), 1);
+    }
+
+    #[test]
+    fn a_multibyte_base_straddling_a_group_boundary_is_not_split_into_two_replacements() {
+        // The ORIGIN writer chunked the raw bytes into 10-byte groups and
+        // decoded each group on its own, so no decode ever saw a character
+        // crossing a boundary whole: `acgtacgta` + µ (U+00B5 = C2 B5) +
+        // `cgtacgtac` is 20 bytes with C2 at index 9, and the two halves became
+        // two separate U+FFFD. One character in, two mojibake characters out,
+        // and a sequence that re-parsed to 24 bytes instead of 20.
+        let mut seq = b"acgtacgta".to_vec();
+        seq.extend_from_slice("µ".as_bytes());
+        seq.extend_from_slice(b"cgtacgtac");
+        assert_eq!(seq.len(), 20, "nine bases, a two-byte char, nine bases");
+
+        let mol = Molecule {
+            seq: seq.clone(),
+            ..Default::default()
+        };
+        let text = write(&mol, "t", (1, 0, 2026));
+        assert!(
+            !text.contains('\u{FFFD}'),
+            "the character was split across two lossy decodes:\n{text}"
+        );
+        assert_eq!(parse(&text).seq, seq, "the exported sequence changed");
+
+        // The 60-base line boundary is the same boundary.
+        let mut long = b"a".repeat(59);
+        long.extend_from_slice("µ".as_bytes());
+        long.extend_from_slice(&b"c".repeat(40));
+        let m2 = Molecule {
+            seq: long.clone(),
+            ..Default::default()
+        };
+        let t2 = write(&m2, "t", (1, 0, 2026));
+        assert!(!t2.contains('\u{FFFD}'), "{t2}");
+        assert_eq!(parse(&t2).seq, long);
     }
 
     #[test]

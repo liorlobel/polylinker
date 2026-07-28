@@ -19,7 +19,7 @@
 
 pub mod methylation;
 
-use pl_core::{iupac, Molecule, Topology};
+use pl_core::{iupac, Molecule, Strand, Topology};
 
 /// A restriction enzyme, in Biopython's coordinates.
 ///
@@ -52,7 +52,7 @@ pub struct Enzyme {
     /// blunt** — Biopython's sign convention.
     ///
     /// Stored rather than inferred. The geometric guess it replaces (a nick at
-    /// the centre of an even-length site means blunt) is right for all 51
+    /// the centre of an even-length site means blunt) is right for all 50
     /// Type IIP enzymes here and wrong for 5 of Biopython's 389, and it cannot
     /// be right at all for an enzyme that cuts outside its site.
     pub ovhg: i8,
@@ -213,9 +213,9 @@ impl Visibility {
 
 /// The shipped enzymes, sorted by name.
 ///
-/// Type IIP throughout, plus the eight Type IIS enzymes Golden Gate needs.
+/// 58 entries: 50 Type IIP, plus the eight Type IIS enzymes Golden Gate needs.
 /// Sites and cut geometry were verified against Biopython's REBASE-derived
-/// tables, which agreed with every one of the 51 already here; the `ovhg`
+/// tables, which agreed with every one of the 50 already here; the `ovhg`
 /// column and the Type IIS entries were taken from the same place. These are
 /// published facts about enzymes, not a copied database — see `PROVENANCE.md`.
 pub const ENZYMES: &[Enzyme] = &[
@@ -573,6 +573,28 @@ pub fn by_name(name: &str) -> Option<&'static Enzyme> {
     ENZYMES.iter().find(|e| e.name.eq_ignore_ascii_case(name))
 }
 
+/// One cut, together with the match that produced it.
+///
+/// [`cut_positions`] throws `site_start` away, and a caller that needs it back
+/// cannot recover it: for a non-palindromic Type IIS enzyme the two strands map
+/// a match to a cut through *different* offsets (`start + fst5` forward,
+/// `start + k - bottom_cut` reverse), so `position - fst5` is simply the wrong
+/// answer for half the hits. Methylation sensitivity is asked about the *site*,
+/// not the cut, so anything calling `methylation::site_effect` needs this
+/// rather than a reconstruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CutSite {
+    /// 1-based position of the base immediately 3' of the top-strand nick.
+    pub position: u64,
+    /// 1-based position of the first base of the recognition-site match.
+    ///
+    /// On a circle this is a real index in `1..=n` even when the site wraps the
+    /// origin, so it can be greater than `position`.
+    pub site_start: u64,
+    /// Which strand the enzyme bound. Only `Forward` and `Reverse` occur.
+    pub strand: Strand,
+}
+
 /// Every cut an enzyme makes, as 1-based positions (see module docs).
 ///
 /// On a circular molecule, sites spanning the origin are found and their cut
@@ -580,6 +602,24 @@ pub fn by_name(name: &str) -> Option<&'static Enzyme> {
 /// a unique cutter is reported as a non-cutter purely because the site
 /// happens to straddle base 1.
 pub fn cut_positions(seq: &[u8], topology: Topology, enzyme: &Enzyme) -> Vec<u64> {
+    // Two sites at different starts can nick the same bond once the offset has
+    // wrapped, so the sort and dedup stay. `find_all` returns ascending starts;
+    // the mapped cuts need not be ascending.
+    let mut out: Vec<u64> = cut_sites(seq, topology, enzyme)
+        .into_iter()
+        .map(|c| c.position)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Every cut an enzyme makes, each still carrying the site that produced it.
+///
+/// Unlike [`cut_positions`] this is neither sorted nor deduplicated: two
+/// distinct sites nicking the same bond are two binding events, and collapsing
+/// them here would lose the second site.
+pub fn cut_sites(seq: &[u8], topology: Topology, enzyme: &Enzyme) -> Vec<CutSite> {
     let n = seq.len();
     let k = enzyme.site.len();
     // A circular molecule shorter than the recognition site has no site.
@@ -628,28 +668,65 @@ pub fn cut_positions(seq: &[u8], topology: Topology, enzyme: &Enzyme) -> Vec<u64
     let k = enzyme.site.len() as i64;
     let back = enzyme.bottom_cut() - k;
 
-    let mut out: Vec<u64> = iupac::find_all(enzyme.site.as_bytes(), seq, circular)
+    // A cut needs *both* nicks, and on a linear molecule both have to land on a
+    // phosphodiester bond that exists.
+    //
+    // `cut0` is the top-strand nick, expressed as the 0-based index of the base
+    // 3' of it, so the bond it breaks is the one between bases `cut0 - 1` and
+    // `cut0`: real for `1 <= cut0 <= n - 1` and nowhere else. Its partner sits
+    // `-ovhg` away at `cut0 - ovhg` on both search paths — forward, the bottom
+    // nick is `bottom_cut - fst5 = -ovhg` past the top one; reverse, the
+    // reported nick is the bottom one and the enzyme's own top nick is
+    // `-ovhg` the other side of it — and it has to be a real bond too.
+    //
+    // Checking only `cut0`, and only against `0..n`, invented cuts at both ends
+    // of every linear molecule, in a window exactly `|ovhg|` wide:
+    //
+    //   * `AAAAAAAAAGGTCTCAAAAA` (20 bp, linear) reported BsaI at 17, but the
+    //     bottom nick would have to fall between bases 20 and 21. The molecule
+    //     is nicked, not cleaved, and `fragments` duly showed two bands — 16
+    //     and 4 — where a gel shows one 20 bp species. Site starts 10..=13 all
+    //     did this.
+    //   * `TTTTTGAGACCTTTTTTTTT` (20 bp, linear) reported BsaI at 1, and there
+    //     is no bond 5' of base 1. That is a bottom-strand-only nick, yet
+    //     `pl digest` filed BsaI as a *unique cutter* — a linearisation
+    //     candidate — while `fragments` returned a single full-length 20-mer,
+    //     so the fragment list silently contradicted the cut list.
+    //
+    // Biopython reports no cut for either, which is the biology: an enzyme that
+    // binds near the end and reaches past it binds, and finds nothing to cut.
+    // Only Type IIS enzymes can reach this window; every Type IIP entry in the
+    // table has `1 <= fst5 <= len - 1`, which puts both of its nicks inside the
+    // molecule at every match position, so nothing about the 50 Type IIP
+    // enzymes' behaviour changes here.
+    let bond_exists = |bond: i64| (1..n as i64).contains(&bond);
+    let ovhg = enzyme.ovhg as i64;
+    let place = |cut0: i64| -> Option<u64> {
+        if circular {
+            // Wrapped back into 1..=n. Note this project never had Biopython's
+            // too-short-doubling bug that `docs/PLAN.md` §7.1 warns about: the
+            // *site* search walks the circle itself, so a Type IIS enzyme
+            // reaching 11 bases past its site is found and placed correctly
+            // however close to the origin it sits. Every bond on a circle
+            // exists, so there is nothing to reject.
+            Some(cut0.rem_euclid(n as i64) as u64 + 1)
+        } else if bond_exists(cut0) && bond_exists(cut0 - ovhg) {
+            Some(cut0 as u64 + 1)
+        } else {
+            None
+        }
+    };
+
+    let mut out: Vec<CutSite> = iupac::find_all(enzyme.site.as_bytes(), seq, circular)
         .into_iter()
         // `find_all` gives the 1-based start of the site; the nick is `fst5`
         // further along.
         .filter_map(|start| {
-            let cut0 = start as i64 - 1 + enzyme.fst5 as i64;
-            if circular {
-                // Wrapped back into 1..=n. Note this project never had
-                // Biopython's too-short-doubling bug that `docs/PLAN.md` §7.1
-                // warns about: the *site* search walks the circle itself, so a
-                // Type IIS enzyme reaching 11 bases past its site is found and
-                // placed correctly however close to the origin it sits.
-                Some(cut0.rem_euclid(n as i64) as u64 + 1)
-            } else if (0..n as i64).contains(&cut0) {
-                Some(cut0 as u64 + 1)
-            } else {
-                // A Type IIS enzyme can bind near the end of a linear molecule
-                // and reach past it. It binds; there is nothing there to cut.
-                // Reporting a wrapped position would invent a cut on a
-                // molecule with no other end.
-                None
-            }
+            place(start as i64 - 1 + enzyme.fst5 as i64).map(|position| CutSite {
+                position,
+                site_start: start,
+                strand: Strand::Forward,
+            })
         })
         .collect();
 
@@ -658,23 +735,15 @@ pub fn cut_positions(seq: &[u8], topology: Topology, enzyme: &Enzyme) -> Vec<u64
             iupac::find_all(&rc_site, seq, circular)
                 .into_iter()
                 .filter_map(|start| {
-                    let cut0 = start as i64 - 1 - back;
-                    if circular {
-                        Some(cut0.rem_euclid(n as i64) as u64 + 1)
-                    } else if (0..n as i64).contains(&cut0) {
-                        Some(cut0 as u64 + 1)
-                    } else {
-                        None
-                    }
+                    place(start as i64 - 1 - back).map(|position| CutSite {
+                        position,
+                        site_start: start,
+                        strand: Strand::Reverse,
+                    })
                 }),
         );
     }
 
-    // Two sites at different starts can nick the same bond once the offset has
-    // wrapped, so the sort and dedup stay. `find_all` returns ascending starts;
-    // the mapped cuts need not be ascending.
-    out.sort_unstable();
-    out.dedup();
     out
 }
 
@@ -978,7 +1047,7 @@ mod tests {
     #[test]
     fn the_overhang_is_stored_rather_than_guessed_from_geometry() {
         // The heuristic this replaced -- a nick at the centre of an even-length
-        // site means blunt -- is right for all 51 Type IIP enzymes here and
+        // site means blunt -- is right for all 50 Type IIP enzymes here and
         // wrong for 5 of Biopython's 389. It also cannot be right at all for an
         // enzyme that cuts outside its site, which is why it had to go before
         // Type IIS could be added.
@@ -1227,5 +1296,226 @@ mod tests {
         let sorted = fragments_from_cuts(&[100, 300, 500, 800], 1000, Topology::Circular);
         let jumbled = fragments_from_cuts(&[800, 100, 500, 300], 1000, Topology::Circular);
         assert_eq!(sorted, jumbled);
+    }
+
+    #[test]
+    fn a_type_iis_bottom_nick_running_off_the_3_prime_end_is_not_a_cut() {
+        // BsaI 9 bases into a 20 bp linear duplex: the top nick lands on a real
+        // bond (between bases 16 and 17) but the bottom nick would have to fall
+        // between bases 20 and 21. The enzyme binds, reaches past the end and
+        // nicks one strand. That is not a double-strand break, and Biopython
+        // agrees it is not a cut.
+        //
+        // Reported as a cut it was worse than merely wrong: `fragments` turned
+        // it into two gel bands, 16 and 4, for a duplex that runs off the gel
+        // as a single 20 bp species, and `pl_clone::cut` handed back a 4-base
+        // watson with an empty crick as though it were a ligatable fragment.
+        let seq = b"AAAAAAAAAGGTCTCAAAAA";
+        assert_eq!(seq.len(), 20);
+        assert!(
+            cuts(seq, Topology::Linear, "BsaI").is_empty(),
+            "the bottom nick has no bond to break"
+        );
+
+        // The window is exactly |ovhg| = 4 wide. Every start inside it was
+        // wrong in the same way, so pin the whole window rather than one case.
+        for pad in 9..=12 {
+            let mut s = vec![b'A'; pad];
+            s.extend_from_slice(b"GGTCTC");
+            s.resize(20, b'A');
+            assert!(
+                cuts(&s, Topology::Linear, "BsaI").is_empty(),
+                "BsaI at 0-based {pad} of 20 reaches past the 3' end"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bottom_strand_only_nick_at_the_5_prime_end_is_not_a_cut() {
+        // The mirror image, on the antisense path. `GAGACC` is the reverse
+        // complement of `GGTCTC`, so BsaI binds the bottom strand here and
+        // reaches leftwards: its bottom nick lands on the real bond between
+        // bases 4 and 5, and its top nick falls off the 5' end entirely.
+        //
+        // The old guard admitted `cut0 == 0` and reported this as a cut at
+        // position 1, where there is no bond. `pl digest` then filed BsaI as a
+        // UNIQUE cutter -- i.e. offered it as a linearisation candidate for a
+        // molecule it cannot linearise -- while `Digest::fragments` returned a
+        // single full-length 20-mer, so the fragment list and the cut list
+        // disagreed with each other and neither said so.
+        let seq = b"TTTTTGAGACCTTTTTTTTT";
+        assert_eq!(seq.len(), 20);
+        let e = by_name("BsaI").unwrap();
+        let positions = cut_positions(seq, Topology::Linear, e);
+        assert!(positions.is_empty(), "got {positions:?}, expected no cut");
+
+        // And the two answers now agree, which is the property that failed.
+        let d = Digest {
+            enzyme: e,
+            positions,
+        };
+        assert!(!d.is_unique_cutter(), "not a linearisation candidate");
+        assert_eq!(
+            d.fragments(20, Topology::Linear),
+            vec![20],
+            "one band, and the cut list must say so too"
+        );
+    }
+
+    #[test]
+    fn a_type_iis_with_both_nicks_inside_a_linear_molecule_still_cuts() {
+        // The control for the two tests above: one base further from each end
+        // and both nicks land on real bonds, so the cut is real and must
+        // survive. Tightening the guard by one too many would silence these.
+        //
+        // Forward, 0-based 8 of 20: top nick between bases 15 and 16, bottom
+        // nick between 19 and 20 -- the last bond there is.
+        let fwd = b"AAAAAAAAGGTCTCAAAAAA";
+        assert_eq!(fwd.len(), 20);
+        assert_eq!(cuts(fwd, Topology::Linear, "BsaI"), vec![16]);
+
+        // Antisense, 0-based 6 of 20: top nick between bases 1 and 2, bottom
+        // nick between 5 and 6. A lopsided cut, but a cut.
+        let rev = b"TTTTTTGAGACCTTTTTTTT";
+        assert_eq!(rev.len(), 20);
+        assert_eq!(cuts(rev, Topology::Linear, "BsaI"), vec![2]);
+    }
+
+    #[test]
+    fn every_type_iip_enzyme_still_cuts_a_padded_copy_of_its_own_site() {
+        // The over-correction control. The end rule bounds *both* nicks, and a
+        // Type IIP enzyme's two nicks are both inside its site, so no entry in
+        // the table may lose a cut to it. If this ever fails, the guard has
+        // stopped being about the ends of the molecule.
+        let pad = 20; // wider than the longest reach in the table (AarI, 11)
+        for e in ENZYMES {
+            if e.cuts_outside_site() {
+                continue;
+            }
+            let flank = "A".repeat(pad);
+            let s = format!("{flank}{}{flank}", e.site);
+            let want = pad as u64 + e.fst5 as u64 + 1;
+            assert!(
+                cut_positions(s.as_bytes(), Topology::Linear, e).contains(&want),
+                "{} lost the cut at {want} in its own padded site",
+                e.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_circle_has_no_ends_so_no_type_iis_cut_is_ever_dropped() {
+        // The second control. The bond that does not exist is a property of a
+        // linear molecule; on a circle every bond exists, including the one
+        // that closes the origin. The same fixture that yields nothing linearly
+        // must yield a cut circularly, or the end rule has leaked across the
+        // topology boundary and plasmids would start losing sites.
+        let seq = b"AAAAAAAAAGGTCTCAAAAA";
+        assert!(cuts(seq, Topology::Linear, "BsaI").is_empty());
+        assert_eq!(
+            cuts(seq, Topology::Circular, "BsaI"),
+            vec![17],
+            "the bottom nick at 20 simply wraps to the origin on a 20 bp circle"
+        );
+    }
+
+    #[test]
+    fn a_cut_carries_the_site_that_produced_it_even_across_the_origin() {
+        // Why `CutSite` exists. The GUI needs a site start to ask
+        // `methylation::site_effect`, and reconstructing one from the cut
+        // position is not possible: the reverse-strand path maps a match
+        // through `start + k - bottom_cut`, not `start + fst5`, and
+        // `cut_positions` sorts and dedups so a caller cannot even tell which
+        // path a given position came from.
+        //
+        // The concrete failure: circular `CGATAAAAAAAAAGAT` carries a ClaI site
+        // starting 0-based at 14 and wrapping the origin, cut correctly at 1.
+        // Subtracting fst5 from that cut and clamping at 0 gave site start 0,
+        // whose window contains no `GATC`, so a Dam-blocked enzyme was shown as
+        // an unblocked unique cutter -- the panel offering to linearise a
+        // plasmid with an enzyme that will not cut it.
+        let seq = b"CGATAAAAAAAAAGAT";
+        assert_eq!(seq.len(), 16);
+        let e = by_name("ClaI").unwrap();
+
+        let sites = cut_sites(seq, Topology::Circular, e);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].position, 1);
+        assert_eq!(
+            sites[0].site_start, 15,
+            "1-based; the site wraps the origin"
+        );
+        assert_eq!(sites[0].strand, Strand::Forward);
+        assert_eq!(
+            cut_positions(seq, Topology::Circular, e),
+            vec![sites[0].position],
+            "the two entry points must not disagree"
+        );
+
+        let dam = pl_core::Methylation {
+            dam: true,
+            dcm: false,
+            cpg: false,
+            ecoki: false,
+        };
+        let verdict = methylation::site_effect(
+            e,
+            seq,
+            sites[0].site_start as usize - 1,
+            Topology::Circular,
+            &dam,
+        );
+        assert_eq!(
+            verdict.map(|v| v.effect),
+            Some(methylation::Effect::Blocked),
+            "GATC spans indices 13,14,15,0 with both methylated adenines in the site"
+        );
+
+        // The clamp this replaces, reproduced, so the difference is on record.
+        let clamped = (sites[0].position as usize)
+            .saturating_sub(1)
+            .saturating_sub(e.fst5 as usize);
+        assert_eq!(clamped, 0, "the old recovery landed here");
+        assert_eq!(
+            methylation::site_effect(e, seq, clamped, Topology::Circular, &dam),
+            None,
+            "and saw no methylation at all"
+        );
+    }
+
+    #[test]
+    fn a_reverse_strand_cut_is_labelled_as_one() {
+        // The control for the above: a forward site start must not be reported
+        // for a match the enzyme made on the bottom strand, or the site start
+        // would be right by accident on palindromes and wrong on every Type IIS.
+        let seq = b"TTTTTTTTTTGAGACCTTTTTTTTTT";
+        let e = by_name("BsaI").unwrap();
+        let sites = cut_sites(seq, Topology::Linear, e);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].strand, Strand::Reverse);
+        assert_eq!(sites[0].site_start, 11, "1-based start of GAGACC");
+        // 0-based 10, minus back = bottom_cut - k = 11 - 6 = 5, so cut0 = 5.
+        assert_eq!(sites[0].position, 6);
+        assert_ne!(
+            sites[0].site_start as i64,
+            sites[0].position as i64 - e.fst5 as i64,
+            "position - fst5 is the wrong recovery on this strand, which is the point"
+        );
+    }
+
+    #[test]
+    fn the_table_holds_fifty_type_iip_enzymes_and_eight_type_iis() {
+        // The prose said 51 Type IIP in four places (this file three times and
+        // PROVENANCE.md), while `methylation.rs`, the `checked >= 50` assertion
+        // there, and the independently transcribed oracle in
+        // `reference/python/tests/validate_digest.py` all said 50. Nothing read
+        // the number, so nothing failed; the cost was that anyone auditing the
+        // `ovhg` column against the stated verification scope came up one
+        // enzyme short and could not tell which claim was wrong. Pinned here so
+        // the number in the docs has something executable behind it.
+        let iis = ENZYMES.iter().filter(|e| e.cuts_outside_site()).count();
+        assert_eq!(ENZYMES.len(), 58);
+        assert_eq!(iis, 8);
+        assert_eq!(ENZYMES.len() - iis, 50, "the count the docs must quote");
     }
 }
