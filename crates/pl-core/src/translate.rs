@@ -193,8 +193,16 @@ fn codon_resolutions(codon: &[u8]) -> Vec<usize> {
     if codon.len() != 3 {
         return Vec::new();
     }
-    // ORDER is T,C,A,G; the mask bits are A,C,G,T. Map mask bit -> NCBI slot.
-    const SLOT: [usize; 4] = [2, 1, 3, 0]; // A->2, C->1, G->3, T->0
+    // A concrete codon is its own single resolution, and this keeps the common
+    // case on the same code path it has always used.
+    if let Some(i) = codon_index(codon) {
+        return vec![i];
+    }
+    // `code_mask`'s bits are A, C, G, T in that order; the NCBI slot for each
+    // is looked up in `ORDER` rather than written out, for the reason this
+    // module's own header gives — a second hand-written copy of the ordering is
+    // a second thing that can be silently wrong.
+    const MASK_BITS: [u8; 4] = *b"ACGT";
     let mut out = vec![0usize];
     for &b in codon {
         let mask = iupac::code_mask(b);
@@ -202,11 +210,16 @@ fn codon_resolutions(codon: &[u8]) -> Vec<usize> {
             return Vec::new();
         }
         let mut next = Vec::with_capacity(out.len() * 2);
-        for bit in 0..4 {
-            if mask & (1 << bit) != 0 {
-                for &acc in &out {
-                    next.push(acc * 4 + SLOT[bit]);
-                }
+        for (bit, &base) in MASK_BITS.iter().enumerate() {
+            if mask & (1 << bit) == 0 {
+                continue;
+            }
+            let slot = ORDER
+                .iter()
+                .position(|&o| o == base)
+                .expect("ORDER covers A, C, G and T");
+            for &acc in &out {
+                next.push(acc * 4 + slot);
             }
         }
         out = next;
