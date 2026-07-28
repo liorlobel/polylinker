@@ -179,6 +179,42 @@ fn codon_index(codon: &[u8]) -> Option<usize> {
     Some(idx)
 }
 
+/// Every concrete codon an ambiguous codon stands for, as NCBI indices.
+///
+/// Empty when any position is not a nucleotide code at all. `TAR` expands to
+/// `TAA` and `TAG`; `NNN` to all 64.
+///
+/// This exists because a codon carrying an ambiguity code still has a
+/// determinate meaning whenever every base it allows agrees. `TAR` terminates
+/// under both A and G, so it terminates — and treating it as "not a stop"
+/// because it is not one of the 64 literal codons made ORF finding read
+/// straight through it.
+fn codon_resolutions(codon: &[u8]) -> Vec<usize> {
+    if codon.len() != 3 {
+        return Vec::new();
+    }
+    // ORDER is T,C,A,G; the mask bits are A,C,G,T. Map mask bit -> NCBI slot.
+    const SLOT: [usize; 4] = [2, 1, 3, 0]; // A->2, C->1, G->3, T->0
+    let mut out = vec![0usize];
+    for &b in codon {
+        let mask = iupac::code_mask(b);
+        if mask == 0 {
+            return Vec::new();
+        }
+        let mut next = Vec::with_capacity(out.len() * 2);
+        for bit in 0..4 {
+            if mask & (1 << bit) != 0 {
+                for &acc in &out {
+                    next.push(acc * 4 + SLOT[bit]);
+                }
+            }
+        }
+        out = next;
+    }
+    out.sort_unstable();
+    out
+}
+
 impl Code {
     /// NCBI's name for this code, for a UI that has to say which one it used.
     pub fn name(&self) -> &'static str {
@@ -197,19 +233,35 @@ impl Code {
 
     /// Translate one codon. `None` becomes `X`, so the output length is always
     /// `seq.len() / 3` and a caller can index into it without special cases.
+    /// An ambiguous codon translates whenever every base it allows gives the
+    /// same residue — `CTN` is leucine under all four, and GenBank and
+    /// Biopython both translate it that way. Otherwise `X`, which is the honest
+    /// answer for a position that could be two different amino acids.
+    ///
+    /// Without this, a codon `is_stop` calls a terminator would translate to
+    /// `X`, so an ORF's own protein would disagree with where the ORF ended.
     pub fn codon(&self, codon: &[u8]) -> u8 {
-        match codon_index(codon) {
-            Some(i) => self.aas.as_bytes()[i],
+        let r = codon_resolutions(codon);
+        match r.first() {
             None => b'X',
+            Some(&first) => {
+                let aa = self.aas.as_bytes()[first];
+                if r.iter().all(|&i| self.aas.as_bytes()[i] == aa) {
+                    aa
+                } else {
+                    b'X'
+                }
+            }
         }
     }
 
     /// Is this a valid initiation codon for this code?
+    /// Same all-resolutions rule as [`Code::is_stop`]: an ambiguous codon
+    /// initiates only if every base it allows initiates. `ATG` does; `ATN` does
+    /// not, since `ATC` is isoleucine in table 1.
     pub fn is_start(&self, codon: &[u8]) -> bool {
-        match codon_index(codon) {
-            Some(i) => self.starts.as_bytes()[i] == b'M',
-            None => false,
-        }
+        let r = codon_resolutions(codon);
+        !r.is_empty() && r.iter().all(|&i| self.starts.as_bytes()[i] == b'M')
     }
 
     /// Does this codon terminate translation?
@@ -222,11 +274,14 @@ impl Code {
     /// `TGA` in table 27 is `W` *and* a terminator. Asking the amino-acid line
     /// whether something is a stop gets all three of those codes wrong, in
     /// opposite directions depending on which line you trust.
+    /// An ambiguous codon terminates only if it terminates under **every** base
+    /// it allows: `TAR` is `TAA` or `TAG`, both stops in table 1, so it is a
+    /// stop. `TAN` is not, because `TAC` is tyrosine. Reading it as "not a
+    /// stop" because it is not one of the 64 literal codons made `find_orfs`
+    /// run straight through a codon that terminates under every reading of it.
     pub fn is_stop(&self, codon: &[u8]) -> bool {
-        match codon_index(codon) {
-            Some(i) => self.starts.as_bytes()[i] == b'*',
-            None => false,
-        }
+        let r = codon_resolutions(codon);
+        !r.is_empty() && r.iter().all(|&i| self.starts.as_bytes()[i] == b'*')
     }
 
     /// A codon that both terminates and encodes a residue.
@@ -237,10 +292,10 @@ impl Code {
     /// is — so an ORF that ends at one is a guess. Callers that care should say
     /// so rather than present the boundary as settled.
     pub fn is_ambiguous_stop(&self, codon: &[u8]) -> bool {
-        match codon_index(codon) {
-            Some(i) => self.starts.as_bytes()[i] == b'*' && self.aas.as_bytes()[i] != b'*',
-            None => false,
-        }
+        let r = codon_resolutions(codon);
+        !r.is_empty()
+            && r.iter().all(|&i| self.starts.as_bytes()[i] == b'*')
+            && r.iter().all(|&i| self.aas.as_bytes()[i] != b'*')
     }
 
     /// Translate a sequence in frame 0. A trailing partial codon is dropped.
@@ -495,11 +550,52 @@ mod tests {
     }
 
     #[test]
-    fn ambiguity_does_not_invent_an_amino_acid() {
-        // GGN is unambiguously glycine, and we still refuse. See `codon_index`.
-        assert_eq!(TABLE1.codon(b"GGN"), b'X');
+    fn ambiguity_resolves_only_when_every_reading_agrees() {
+        // **This reverses an earlier decision, deliberately.** The previous rule
+        // was "GGN is unambiguously glycine, and we still refuse", on the same
+        // instinct as `iupac::matches` — an unknown base is not evidence.
+        //
+        // That instinct is right about *evidence* and wrong here. `matches`
+        // refuses to let an unknown subject satisfy a pattern, which is a claim
+        // about missing information. `GGN` is not missing information about the
+        // residue: every base N allows gives glycine, so glycine is a deduction
+        // rather than a guess. GenBank and Biopython both translate it that way.
+        //
+        // What forced the change is `is_stop`. `TAR` terminates under both A and
+        // G, so it must be a stop or `find_orfs` runs straight through it — and
+        // if it is a stop while `codon` returns `X`, an ORF's own protein
+        // disagrees with the boundary the same table just drew.
+        assert_eq!(TABLE1.codon(b"GGN"), b'G');
+        assert_eq!(TABLE1.codon(b"CTN"), b'L');
+        assert_eq!(TABLE1.codon(b"TAR"), b'*', "TAA and TAG are both stops");
+
+        // Still `X` wherever the readings genuinely disagree, or the input is
+        // not a codon at all.
         assert_eq!(TABLE1.codon(b"NNN"), b'X');
+        assert_eq!(TABLE1.codon(b"TAN"), b'X', "TAC is tyrosine, TAA is a stop");
         assert_eq!(TABLE1.codon(b"AT"), b'X');
+        assert_eq!(TABLE1.codon(b"AT-"), b'X');
+    }
+
+    #[test]
+    fn an_ambiguous_codon_stops_only_if_every_reading_stops() {
+        // The bug this was found by: `find_orfs` uses `is_stop` as its only
+        // terminator test, so an ORF read straight through `TAR` — a codon that
+        // terminates under both bases it allows — and ran on to the next
+        // literal stop, reporting a protein that does not exist.
+        assert!(TABLE1.is_stop(b"TAR"), "TAA and TAG");
+        assert!(TABLE1.is_stop(b"TRA"), "TAA and TGA");
+        assert!(!TABLE1.is_stop(b"TAN"), "TAC and TAT are tyrosine");
+        assert!(!TABLE1.is_stop(b"NNN"));
+        assert!(!TABLE1.is_stop(b"TA-"), "not a codon at all");
+
+        // The same rule for initiation, so `ATN` does not start an ORF.
+        assert!(TABLE1.is_start(b"ATG"));
+        assert!(!TABLE1.is_start(b"ATN"), "ATC and ATT are isoleucine");
+        assert!(
+            TABLE11.is_start(b"NTG"),
+            "GTG, TTG, CTG and ATG all initiate"
+        );
     }
 
     #[test]

@@ -490,14 +490,35 @@ fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64)
         }
     };
 
+    // A segment crossing the origin is written `end < start`, and on a circular
+    // molecule that is legal — `Molecule::validate` says so explicitly.
+    let circular = mol.topology.is_circular();
+
     let remap = |s_start: &mut u64, s_end: &mut u64| -> bool {
+        // Did this segment cross the origin *before* the edit? Then its
+        // remapped ends are still expected to read backwards.
+        let wrapped = circular && *s_end < *s_start;
+
         // A segment straddling the edit keeps whichever ends survive.
-        // A segment whose far end survives the edit keeps its near end pinned
-        // to where the replaced region begins.
-        let a = map_start(*s_start).or_else(|| (*s_end >= old_end).then_some(start));
+        //
+        // A segment whose far end survives keeps its near end pinned to where
+        // the replaced text *ends*, not where it begins. `start + new_len`
+        // collapses to `start` for a pure deletion, so deletions behave exactly
+        // as before; for a replacement it is the difference between the feature
+        // claiming all of the new text and claiming only what survived of
+        // itself. Replacing 5 bases at 10 with 20 used to move a feature that
+        // began at 12 back to 10, swallowing twenty bases it has no
+        // relationship to.
+        let a = map_start(*s_start).or_else(|| (*s_end >= old_end).then_some(start + new_len));
         let b = map_end(*s_end).or_else(|| (*s_start < start).then_some(start - 1));
         match (a, b) {
-            (Some(a), Some(b)) if b >= a && a >= 1 => {
+            // `b >= a` is right for an ordinary segment and wrong for a wrapped
+            // one, whose end is *supposed* to sit below its start. Without the
+            // exception, ANY edit anywhere on a circular molecule silently
+            // deleted every origin-crossing feature — including edits nowhere
+            // near them. A 15..2 feature on a 16 bp circle vanished when three
+            // bases were inserted at position 5, and `apply` still returned Ok.
+            (Some(a), Some(b)) if a >= 1 && (b >= a || wrapped) => {
                 *s_start = a;
                 *s_end = b;
                 true
@@ -1531,5 +1552,105 @@ mod tests {
             log.current().features[0].start(),
             original.features[0].start()
         );
+    }
+
+    #[test]
+    fn an_edit_elsewhere_does_not_delete_a_feature_that_crosses_the_origin() {
+        // A segment crossing the origin is written `end < start`, which
+        // `validate` calls legal on a circle. `remap` tested `b >= a`, which is
+        // right for an ordinary segment and false by construction for a wrapped
+        // one, so EVERY edit anywhere on a circular molecule silently deleted
+        // every origin-crossing feature -- including edits nowhere near them --
+        // and `apply` still returned Ok.
+        let mut mol = Molecule {
+            seq: b"AAAACCCCGGGGTTTT".to_vec(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let mut wrapped = Feature::new("crosses the origin", "misc_feature");
+        wrapped.segments.push(Segment::new(15, 2));
+        let mut control = Feature::new("ordinary", "misc_feature");
+        control.segments.push(Segment::new(9, 12));
+        mol.features.push(wrapped);
+        mol.features.push(control);
+
+        let mut log = OpLog::new(mol);
+        log.apply(
+            OpKind::InsertAt {
+                at: 5,
+                seq: "TTT".into(),
+            },
+            "test",
+        )
+        .expect("an insert at 5 touches neither feature");
+
+        let m = log.current();
+        assert_eq!(
+            m.features.len(),
+            2,
+            "neither feature may vanish: {:?}",
+            m.features
+        );
+        let w = &m.features[0];
+        assert_eq!(w.name, "crosses the origin");
+        // Three bases went in before it, so its start moves and its end does
+        // not -- it still crosses the origin.
+        assert_eq!((w.segments[0].start, w.segments[0].end), (18, 2));
+        let c = &m.features[1];
+        assert_eq!((c.segments[0].start, c.segments[0].end), (12, 15));
+    }
+
+    #[test]
+    fn a_replacement_does_not_hand_a_feature_the_text_that_replaced_it() {
+        // The near end of a straddling feature was pinned to where the replaced
+        // region BEGINS, so a feature starting inside the replacement was moved
+        // to the front of it and claimed every new base. The pin belongs at the
+        // end of the new text: `start + new_len`, which collapses to `start`
+        // for a pure deletion.
+        let mut mol = Molecule {
+            seq: b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT".to_vec(),
+            ..Default::default()
+        };
+        let mut f = Feature::new("straddles", "misc_feature");
+        f.segments.push(Segment::new(12, 30));
+        mol.features.push(f);
+
+        let mut log = OpLog::new(mol);
+        log.apply(
+            OpKind::ReplaceRange {
+                start: 10,
+                len: 5,
+                seq: "G".repeat(20),
+            },
+            "test",
+        )
+        .expect("a replacement overlapping the feature's start");
+
+        let seg = &log.current().features[0].segments[0];
+        // The replacement occupies 10..29. The feature's surviving part begins
+        // where that text ends, not where it starts.
+        assert_eq!(
+            seg.start, 30,
+            "pinned to the end of the new text, not its beginning"
+        );
+        assert_eq!(seg.end, 45, "its far end shifts by the length difference");
+    }
+
+    #[test]
+    fn a_pure_deletion_still_pins_a_straddling_feature_to_the_cut() {
+        // The guard against over-correcting: with new_len == 0 the new pin is
+        // identical to the old one, so deletions behave exactly as before.
+        let mut mol = Molecule {
+            seq: b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT".to_vec(),
+            ..Default::default()
+        };
+        let mut f = Feature::new("straddles", "misc_feature");
+        f.segments.push(Segment::new(12, 30));
+        mol.features.push(f);
+        let mut log = OpLog::new(mol);
+        log.apply(OpKind::DeleteRange { start: 10, len: 5 }, "test")
+            .expect("delete");
+        let seg = &log.current().features[0].segments[0];
+        assert_eq!((seg.start, seg.end), (10, 25));
     }
 }

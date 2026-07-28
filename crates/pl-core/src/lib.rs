@@ -299,7 +299,7 @@ impl std::fmt::Display for Invalid {
                 write!(f, "{what}: starts at 0, but coordinates are 1-based")
             }
             Invalid::PastEnd { what, end, len } => {
-                write!(f, "{what}: ends at {end}, past the {len} bp molecule")
+                write!(f, "{what}: {end} is past the {len} bp molecule")
             }
             Invalid::FeatureWithoutSegments { index, name } => {
                 write!(f, "feature {index} '{name}': has no segments")
@@ -464,6 +464,25 @@ impl Molecule {
                         end: s.end,
                     });
                 }
+                // BOTH endpoints, not just the end.
+                //
+                // Checking `end` alone leaves one window uncovered, and it is
+                // constructible: circular topology, `start > n`, and
+                // `end < start` (which the wrap rule above declares legal), so
+                // no `Inverted`; and `end <= n`, so no `PastEnd`. A `.dna`
+                // carrying `<Segment range="99999-100"/>` on a 5,386 bp plasmid
+                // landed in exactly that window — validate() returned clean,
+                // the GUI reported no coordinate problem, `subseq` refused the
+                // span, and `pl_draw::ranges` clamped the start and drew a
+                // fabricated 101 bp arc under the real feature's name. A
+                // fabrication is worse than a loss.
+                if n > 0 && s.start > n {
+                    out.push(Invalid::PastEnd {
+                        what: format!("feature {i} '{}' segment {j} start", f.name),
+                        end: s.start,
+                        len: n,
+                    });
+                }
                 if n > 0 && s.end > n {
                     out.push(Invalid::PastEnd {
                         what: format!("feature {i} '{}' segment {j}", f.name),
@@ -498,6 +517,13 @@ impl Molecule {
                         what: format!("primer {i} '{}' site {j}", p.name),
                         start: s.start,
                         end: s.end,
+                    });
+                }
+                if n > 0 && s.start > n {
+                    out.push(Invalid::PastEnd {
+                        what: format!("primer {i} '{}' site {j} start", p.name),
+                        end: s.start,
+                        len: n,
                     });
                 }
                 if n > 0 && s.end > n {
@@ -903,5 +929,55 @@ mod tests {
         assert_eq!(Strand::from_directionality(None), Strand::Unoriented);
         assert_eq!(Strand::from_directionality(Some(2)), Strand::Reverse);
         assert_eq!(Strand::Unoriented.to_directionality(), None);
+    }
+
+    #[test]
+    fn a_start_past_the_end_of_a_circle_is_reported() {
+        // The one window `validate` did not cover, and it is constructible from
+        // a real `.dna`: circular, `start > n`, and `end < start` — which the
+        // wrap rule calls legal — with `end <= n`, so neither `Inverted` nor
+        // the end-only `PastEnd` fired. validate() returned clean while
+        // `subseq` refused the span and the renderer drew a fabricated arc
+        // under the feature's name.
+        let mut m = Molecule {
+            seq: b"ACGTACGTACGT".to_vec(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let mut f = Feature::new("impossible", "CDS");
+        f.segments.push(Segment::new(99999, 10));
+        m.features.push(f);
+
+        let problems = m.validate();
+        assert!(
+            problems.iter().any(|p| matches!(
+                p,
+                Invalid::PastEnd {
+                    end: 99999,
+                    len: 12,
+                    ..
+                }
+            )),
+            "the start must be reported: {problems:?}"
+        );
+        // And the consumers that disagreed with it still disagree, which is
+        // why reporting it matters.
+        assert!(m.subseq(99999, 10).is_none());
+    }
+
+    #[test]
+    fn a_legal_wrap_on_a_circle_is_still_not_a_problem() {
+        // The guard against over-correcting: an ordinary origin-crossing
+        // feature must stay clean, or every circular plasmid starts reporting
+        // faults.
+        let mut m = Molecule {
+            seq: b"ACGTACGTACGT".to_vec(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let mut f = Feature::new("crosses the origin", "CDS");
+        f.segments.push(Segment::new(10, 3));
+        m.features.push(f);
+        assert_eq!(m.validate(), vec![], "a legal wrap is not a fault");
     }
 }
