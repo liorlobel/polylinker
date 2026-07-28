@@ -294,6 +294,53 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 /// input and false of a destination that has not been written yet — so the
 /// destination falls back to canonicalising its parent directory and comparing
 /// the file name.
+/// Pick a destination that does not overwrite an input or an earlier output.
+///
+/// `pl convert` and `pl export` have always de-collided their outputs and
+/// refused to write over an input. `pl trace --svg` and `pl gel --svg` grew the
+/// same multi-input handling without either guard, so two inputs sharing a file
+/// stem produced two "-> X.svg" success lines and one file: the first
+/// molecule's picture was overwritten and the CLI reported success for both.
+/// Reproduced with two distinct fixtures before this existed.
+///
+/// The suffix scheme matches `cmd_convert`, so the behaviour is one thing to
+/// learn rather than three.
+fn claim_output(
+    desired: PathBuf,
+    input: &Path,
+    claimed: &mut Vec<PathBuf>,
+    renamed: &mut usize,
+) -> Result<PathBuf, String> {
+    if same_file(input, &desired) {
+        return Err(format!(
+            "{}: writing here would overwrite the input file. Choose another --svg path.",
+            desired.display()
+        ));
+    }
+    if !claimed.contains(&desired) {
+        claimed.push(desired.clone());
+        return Ok(desired);
+    }
+    let stem = desired
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "out".into());
+    let ext = desired
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "svg".into());
+    let mut n = 2;
+    loop {
+        let candidate = desired.with_file_name(format!("{stem}-{n}.{ext}"));
+        if !claimed.contains(&candidate) && !same_file(input, &candidate) {
+            *renamed += 1;
+            claimed.push(candidate.clone());
+            return Ok(candidate);
+        }
+        n += 1;
+    }
+}
+
 fn same_file(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -2158,6 +2205,9 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
     }
 
     let gel = pl_gel::Gel::modelled(conditions);
+    // Two inputs sharing a file stem must not silently overwrite each other.
+    let mut claimed: Vec<PathBuf> = Vec::new();
+    let mut renamed = 0usize;
     for path in &a.files {
         let data = read(path)?;
         let (mol, _, _) =
@@ -2243,7 +2293,7 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
                 &pl_gel::render::Options::default(),
                 &title_of(path),
             );
-            let out = if a.files.len() > 1 {
+            let desired = if a.files.len() > 1 {
                 std::path::PathBuf::from(out).with_file_name(format!(
                     "{}.svg",
                     path.file_stem().unwrap_or_default().to_string_lossy()
@@ -2251,6 +2301,7 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
             } else {
                 std::path::PathBuf::from(out)
             };
+            let out = claim_output(desired, path, &mut claimed, &mut renamed)?;
             std::fs::write(&out, pl_draw::svg_of(&scene).as_bytes())
                 .map_err(|e| format!("{}: {e}", out.display()))?;
             println!("  -> {}", out.display());
@@ -2947,6 +2998,8 @@ Tm is over the annealed footprint only; a 5' tail never contributes to it"
 fn cmd_trace(args: &[String]) -> Result<(), String> {
     let a = parse_args(args, &["svg", "bases", "width"])?;
     a.require_files()?;
+    let mut claimed: Vec<PathBuf> = Vec::new();
+    let mut renamed = 0usize;
     for path in &a.files {
         let data = read(path)?;
         let t = match pl_abif::parse(&data) {
@@ -2997,7 +3050,7 @@ fn cmd_trace(args: &[String]) -> Result<(), String> {
             let svg = pl_draw::svg_of(&scene);
             // With several inputs, one `--svg` path would overwrite itself; a
             // silent last-writer-wins is the wrong answer to that.
-            let out = if a.files.len() > 1 {
+            let desired = if a.files.len() > 1 {
                 std::path::PathBuf::from(out).with_file_name(format!(
                     "{}.svg",
                     path.file_stem().unwrap_or_default().to_string_lossy()
@@ -3005,6 +3058,7 @@ fn cmd_trace(args: &[String]) -> Result<(), String> {
             } else {
                 std::path::PathBuf::from(out)
             };
+            let out = claim_output(desired, path, &mut claimed, &mut renamed)?;
             std::fs::write(&out, svg.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
             println!(
                 "{} -> {}  ({} bases, {} samples{})",
