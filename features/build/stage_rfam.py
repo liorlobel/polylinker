@@ -1158,9 +1158,18 @@ def validate_row(r: Row) -> None:
     This is a *mirror*, and mirrors drift — `crates/pl-features/src/lib.rs` is
     the authority, and if the two disagree the Rust side wins. It is worth
     having anyway because the two failures it is most likely to catch are ones
-    this stage can plausibly cause: a protein reference on a non-CDS class
-    (`lib.rs`: "class {} carries a protein reference; only cds may") and an
-    ambiguity code the nucleotide validator does not accept.
+    this stage can plausibly cause: a protein reference on a class that may not
+    carry one (`lib.rs`: "class {} carries a protein reference; only cds and
+    synthetic_part may") and an ambiguity code the nucleotide validator does not
+    accept.
+
+    That allow-list grew from one class to two on 2026-07-28, and the loader
+    also stopped requiring `reference_nt` on every row. This stage is unaffected
+    by both, and the local refusals below are deliberately kept in their
+    STRICTER form: every row it emits is `regulatory` or `misc`, neither of
+    which may carry a protein, and an Rfam row with no nucleotides is a bug in
+    this stage whatever the loader tolerates elsewhere. A mirror that relaxes
+    itself in step with the thing it mirrors stops being able to catch anything.
     """
     if r.cls not in LOADER_CLASSES:
         raise SystemExit(f"{r.id}: class {r.cls!r} is not a Class the loader parses")
@@ -1172,7 +1181,11 @@ def validate_row(r: Row) -> None:
     if bad:
         raise SystemExit(f"{r.id}: {bad} in reference_nt are not nucleotide codes")
     if r.reference_aa and r.cls != "cds":
-        raise SystemExit(f"{r.id}: class {r.cls} carries a protein reference; only cds may")
+        raise SystemExit(
+            f"{r.id}: class {r.cls} carries a protein reference. The loader now allows "
+            f"this on synthetic_part as well as cds; this stage emits neither, so a "
+            f"protein reference here is a bug in this stage."
+        )
     if not r.id or not r.name:
         raise SystemExit(f"{r.id}: id and name are required")
     if not r.boundary_evidence:

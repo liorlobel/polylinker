@@ -481,6 +481,21 @@ fn call(params: &Value) -> Result<Value, String> {
                     .collect();
                 if lines.is_empty() {
                     lines.push("nothing found".into());
+                    // The same caveat as the empty-database branch above, for the
+                    // same reason, and it has to be in both places: that branch
+                    // only fires when NOTHING is reviewed, so signing the table off
+                    // on 2026-07-28 silenced it and left a bare "nothing found"
+                    // crossing the boundary. An assistant repeats what it is
+                    // handed, and "nothing found" out of an 84-record database gets
+                    // relayed as "this plasmid has no known features" — a claim
+                    // about the molecule made out of a fact about the database.
+                    // The count is the bound on what the answer can mean.
+                    lines.push(format!(
+                        "This means none of the {} curated record(s) searched were \
+                         found — not that the molecule has no known features. The \
+                         database is deliberately small and is not comprehensive.",
+                        db.records.len()
+                    ));
                 }
                 if proposed {
                     lines.push(
@@ -698,8 +713,18 @@ mod tests {
             .unwrap()
             .as_str()
             .unwrap();
-        assert!(text.contains("reviewed by a named curator"), "{text}");
-        assert!(text.contains("Nothing was searched"), "{text}");
+        // Until 2026-07-28 this asserted the *other* caveat — "Nothing was
+        // searched: 0 of N reviewed" — because the shipped table was entirely
+        // unsigned. Signing it off silenced that branch and left this fixture
+        // returning a bare "nothing found", which is exactly the sentence the
+        // test exists to prevent an assistant from relaying. The caveat moved
+        // rather than disappeared, so the assertion moves with it.
+        assert!(text.contains("nothing found"), "{text}");
+        assert!(
+            text.contains("not that the molecule has no known features"),
+            "an empty result crossed the boundary without its bound: {text}"
+        );
+        assert!(text.contains("curated record(s) searched"), "{text}");
     }
 
     #[test]

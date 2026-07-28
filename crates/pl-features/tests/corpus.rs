@@ -33,7 +33,12 @@ fn load_db() -> Option<Db> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../features");
     let f = std::fs::read_to_string(root.join("features.tsv")).ok()?;
     let p = std::fs::read_to_string(root.join("provenance.tsv")).ok()?;
-    let (db, errors) = Db::parse(&f, &p);
+    // Read from disk, not `Db::builtin()`, so this suite measures the tables in
+    // the working tree rather than the ones compiled into the test binary. A
+    // missing sign-off table is the safe degenerate case — everything reads as
+    // `proposed` — so it is defaulted rather than made a hard requirement here.
+    let s = std::fs::read_to_string(root.join("SIGNOFF.tsv")).unwrap_or_default();
+    let (db, errors) = Db::parse(&f, &p, &s);
     assert!(
         errors.is_empty(),
         "the shipped database does not satisfy its own schema:\n  {}",
@@ -83,12 +88,22 @@ fn the_shipped_database_satisfies_its_own_schema() {
 
     // Every record must be able to say where its sequence came from, and under
     // what licence. This is the promise the database is named for.
+    //
+    // WHICH column holds "its sequence" now depends on the row: a peptide-only
+    // synthetic part has residues and no bases, so demanding `reference_nt`
+    // provenance for it would demand a source for a field that is deliberately
+    // empty. The promise is unchanged; only the column it is asked of moves.
     for r in &db.records {
+        let field = if r.is_peptide_only() {
+            "reference_aa"
+        } else {
+            "reference_nt"
+        };
         let prov = db.provenance_of(&r.id);
         assert!(
             prov.iter()
-                .any(|p| p.field == "reference_nt" && !p.licence.is_empty()),
-            "{} has no licensed provenance for its sequence",
+                .any(|p| p.field == field && !p.licence.is_empty()),
+            "{} has no licensed provenance for its {field}",
             r.id
         );
     }
@@ -102,16 +117,38 @@ fn the_shipped_database_satisfies_its_own_schema() {
 }
 
 #[test]
-fn every_coding_record_translates_to_the_protein_it_claims() {
+fn every_record_carrying_both_sequences_translates_from_one_to_the_other() {
     // The build script checks this; so does this test, independently, because
     // a database whose nucleotides and protein disagree would annotate the same
     // feature at two different places and look like a matcher bug.
+    //
+    // Renamed from `every_coding_record_translates_to_the_protein_it_claims`,
+    // because since 2026-07-28 that is no longer what it checks: a peptide-only
+    // synthetic part carries a protein and no nucleotides, so there is nothing
+    // to translate *from*. Skipping on the absent nucleotides rather than on
+    // the absent protein is the whole fix — `TABLE11.translate(&[])` returns
+    // empty without panicking, so the old skip let the run reach
+    // `assert_eq!("", "DYKDDDDK")` and fail by assertion on the first tag.
+    //
+    // The `checked > 0` floor below is what keeps that placement honest: a bug
+    // that emptied every `reference_nt` would otherwise turn this into a test
+    // that skips everything and passes.
     let Some(db) = load_db() else { return };
     let mut checked = 0;
+    let mut peptide_only = 0;
     for r in &db.records {
         let Some(aa) = r.reference_aa.as_ref() else {
             continue;
         };
+        if r.reference_nt.is_empty() {
+            assert!(
+                r.is_peptide_only() && r.class == pl_features::Class::SyntheticPart,
+                "{}: no nucleotides, and not a peptide-only synthetic part either",
+                r.id
+            );
+            peptide_only += 1;
+            continue;
+        }
         let mut got = translate::TABLE11.translate(&r.reference_nt);
         while got.last() == Some(&b'*') {
             got.pop();
@@ -132,7 +169,94 @@ fn every_coding_record_translates_to_the_protein_it_claims() {
         checked += 1;
     }
     assert!(checked > 0);
-    eprintln!("{checked} coding records translate exactly");
+    eprintln!(
+        "{checked} record(s) translate exactly; {peptide_only} peptide-only synthetic \
+         part(s) have no nucleotides to translate from"
+    );
+}
+
+/// A tag fused to a real GTG-started marker from this project's own table.
+///
+/// Not gated on `PL_CORPUS`: the substrate is the shipped database, so it runs
+/// everywhere, and it is the shipped rows that carry the property. Five of the
+/// 38 CDS rows begin `GTG` — `TetA`, `AprR`, `HygR`, `lacI` and lambda `int` —
+/// and while `Config::code` defaulted to table 1, `find_orfs` reported no ORF
+/// over any of them, so an N-terminal FLAG on any of the five was dropped with
+/// no output of any kind. The synthetic sweep in `annotate.rs` states the same
+/// property against whatever start set the configured code has; this one states
+/// it against real markers, because "five of our own rows" is the fact that
+/// makes it matter.
+#[test]
+fn a_tag_fused_to_a_real_gtg_started_marker_is_found() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: features/features.tsv not built");
+        return;
+    };
+    let Some(flag) = db.records.iter().find(|r| r.id == "PLF:3000") else {
+        eprintln!("skipping: PLF:3000 (FLAG tag) is not in the built table");
+        return;
+    };
+    let aa = flag.reference_aa.clone().expect("FLAG carries a peptide");
+
+    // Back-translate FLAG with the first codon in NCBI's TCAG order for each
+    // residue. Generated here, never recalled — and which synonymous encoding
+    // it is does not matter, because a peptide-only row is found by translation
+    // and by nothing else.
+    let code = Config::default().code;
+    let mut tag = Vec::new();
+    for &residue in &aa {
+        let c = (0..64usize)
+            .map(|i| [b"TCAG"[i / 16], b"TCAG"[(i / 4) % 4], b"TCAG"[i % 4]])
+            .find(|c| code.codon(c) == residue)
+            .unwrap_or_else(|| panic!("no codon encodes {}", residue as char));
+        tag.extend_from_slice(&c);
+    }
+
+    let ann = Annotator::new(&db, Config::default());
+    let mut gtg = 0usize;
+    for r in &db.records {
+        if r.class != pl_features::Class::Cds || r.reference_nt.len() < 300 {
+            continue;
+        }
+        if &r.reference_nt[..3] != b"GTG" {
+            continue;
+        }
+        gtg += 1;
+        // The tag spliced in frame immediately after the initiator: an
+        // N-terminal fusion, which is where His/FLAG/Strep tags usually go and
+        // so where this bug bit hardest.
+        let mut seq = r.reference_nt[..3].to_vec();
+        seq.extend_from_slice(&tag);
+        seq.extend_from_slice(&r.reference_nt[3..]);
+        let mol = pl_core::Molecule {
+            seq,
+            topology: pl_core::Topology::Linear,
+            ..Default::default()
+        };
+        let found: Vec<_> = ann
+            .annotate(&mol)
+            .into_iter()
+            .filter(|a| db.records[a.record].id == "PLF:3000")
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "{} ({}) starts GTG and an N-terminal FLAG on it was not reported",
+            r.id,
+            r.name
+        );
+        assert_eq!(found[0].start, 4, "{}: the tag follows the initiator", r.id);
+        assert!(
+            found[0].fusion_orf.is_some(),
+            "{}: reported with no ORF evidence",
+            r.id
+        );
+    }
+    assert!(
+        gtg >= 3,
+        "this test needs GTG-started CDS rows to have anything to say; found {gtg}"
+    );
+    eprintln!("{gtg} GTG-started marker(s) carry an N-terminal fusion correctly");
 }
 
 #[test]
@@ -188,13 +312,23 @@ fn markers_are_found_in_real_plasmids_at_coordinates_that_hold_them() {
             );
             assert!(h.end >= 1 && h.end <= len, "{}: end out of range", rec.id);
             let n = h.len(len);
+            // The reference's own length in *bases*, whichever alphabet it is
+            // stored in. A peptide-only synthetic part reports 0 nucleotides
+            // while covering three bases per residue, so measuring it against
+            // `reference_nt.len()` would cap a 38-residue SBP tag at 64 bases
+            // and fail on a correct call.
+            let db_bases = if rec.reference_nt.is_empty() {
+                3 * rec.units() as u64
+            } else {
+                rec.reference_nt.len() as u64
+            };
             assert!(
-                n > 0 && n <= rec.reference_nt.len() as u64 + 64,
+                n > 0 && n <= db_bases + 64,
                 "{} in {:?}: reported {} bases for a {} base feature",
                 rec.id,
                 path.file_name().unwrap(),
                 n,
-                rec.reference_nt.len()
+                db_bases
             );
 
             // Re-extract and re-check identity from scratch.

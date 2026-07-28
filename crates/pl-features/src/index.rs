@@ -30,6 +30,30 @@
 //! [`pl_core::iupac::find_all`]; wiring it in is a separate change with its own
 //! tests. Indels stay out of scope for these either way — a 10 bp element with
 //! an indel is not identifiable.
+//!
+//! # A peptide-only record is invisible to the DNA index by construction
+//!
+//! Since 2026-07-28 a `synthetic_part` row may carry a peptide and no
+//! nucleotides. `Index::build` gives such a record a length of 0 in the DNA
+//! index, seeds nothing from it, and therefore lists it in [`Index::short`] —
+//! **always, and for every one of them**. That is correct and is not a defect:
+//! there are no bases to seed. A reader who finds fourteen shipped rows sitting
+//! in the DNA index's short list and concludes something is broken is reading a
+//! true statement about the wrong index.
+//!
+//! `Annotator::unseedable` intersects the two short lists rather than uniting
+//! them, so those records are not reported as unreachable while translated
+//! matching is on. With `Config::protein` off they are, and that is also
+//! correct — with the protein index never consulted they really cannot be
+//! found by anything.
+//!
+//! The failure this arrangement does **not** catch, and which is why the
+//! builder carries a peptide length floor rather than trusting the index to
+//! complain: `short` reports records with *no* seedable word, not records with
+//! *too few*. A 6-residue peptide yields two 5-mer windows, never reaches
+//! `Config::min_seeds = 3`, and is therefore seeded, unchainable, absent from
+//! `short`, absent from `unseedable`, and never found. Silent. See
+//! `MIN_PEPTIDE_AA` in `features/build/stage_curated.py`.
 
 use std::collections::HashMap;
 

@@ -63,6 +63,11 @@ ANNOTATE OPTIONS:
     --include-proposed           search rows no human has signed off on
     --min-identity <0..1>        default 0.96
     --min-coverage <0..1>        default 0.30
+    --code <transl_table>        genetic code, default 11 (bacterial). Decides
+                                 which codons may open a reading frame, and so
+                                 whether a peptide tag counts as fused to one:
+                                 table 1 does not accept GTG, which five of the
+                                 shipped markers begin with
     --no-protein                 skip six-frame protein matching
     --fragments                  list partial hits too
     --genbank                    write an annotated GenBank record to stdout
@@ -2503,6 +2508,12 @@ ATTRIBUTION
   ENA and Rfam are services of EMBL-EBI. Rfam is CC0 1.0, with per-family
   primary-source credit carried in each record's notes.
 
+  The residue strings of the designed peptide parts are read out of deposited
+  polymer entities of the PDB archive, which the wwPDB Usage Policy places under
+  CC0 1.0 (https://www.wwpdb.org/about/usage-policies). Attribution to the
+  original depositors is encouraged rather than required; each record's
+  provenance row names the exact entity its residues were located in.
+
   This dataset is a dated snapshot and does not reflect the most current data
   available from NLM.
 
@@ -2769,7 +2780,7 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
 fn cmd_annotate(args: &[String]) -> Result<(), String> {
     let a = parse_args(
         args,
-        &["min-identity", "min-coverage"],
+        &["min-identity", "min-coverage", "code"],
         &[
             "db",
             "include-proposed",
@@ -2836,6 +2847,25 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
         config.min_coverage = x;
     }
     config.protein = !a.has("no-protein");
+    // The genetic code, exposed because it is no longer cosmetic. It decides
+    // which codons open a reading frame, and the fusion rule admits a peptide
+    // tag only inside one -- so a user annotating a eukaryotic construct can
+    // ask for table 1's three initiators instead of table 11's seven, and a
+    // user with a mitochondrial or ciliate construct can have the right stops.
+    if let Some(v) = a.get("code") {
+        let n: u8 = v
+            .parse()
+            .map_err(|_| format!("--code {v:?}: expected a GenBank transl_table number"))?;
+        config.code = pl_core::translate::table(n).ok_or_else(|| {
+            format!(
+                "--code {n}: not an NCBI translation table. Known: {}",
+                pl_core::translate::all_tables()
+                    .map(|c| c.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    }
 
     if db.records.is_empty() {
         println!(
@@ -2907,6 +2937,27 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
                         }
                     )),
                 ));
+                // The evidence a peptide part was admitted on, carried into the
+                // written file rather than left in the terminal. A tag called
+                // by the fusion rule with no ORF drawn under it is otherwise
+                // unexplainable to whoever opens the file next.
+                if let Some(o) = f.fusion_orf {
+                    feat.qualifiers.push((
+                        "note".into(),
+                        Some(format!(
+                            "peptide reference, admitted because it lies in frame inside \
+                             a {} aa ORF at {}..{} on the {} strand",
+                            o.aa_len,
+                            o.start,
+                            o.end,
+                            if o.strand == pl_core::Strand::Reverse {
+                                "minus"
+                            } else {
+                                "plus"
+                            }
+                        )),
+                    ));
+                }
                 out.features.push(feat);
             }
             print!(
@@ -2928,6 +2979,18 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
         );
         if shown.is_empty() {
             println!("  nothing found");
+            // Bounded, because the unbounded reading is the wrong one. Until the
+            // table was signed off on 2026-07-28 an empty result carried the
+            // "no rows are reviewed" notice and could not be mistaken for a
+            // statement about the molecule; now that it can, say what was
+            // actually searched. 84 records is not the set of features that
+            // exist, and a user who reads "nothing found" as "no features here"
+            // has been misled by us, not by their plasmid.
+            println!(
+                "  ({} curated record(s) searched; this database is not \
+                 comprehensive)",
+                db.records.len()
+            );
         }
         for f in &shown {
             let r = &db.records[f.record];
@@ -2951,6 +3014,25 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
                     ""
                 },
             );
+            // Why a peptide part was called at all. Without this line the
+            // fusion rule is correct and inexplicable: ORF display is a
+            // separate feature, so a user sees a FLAG tag appear with no
+            // visible protein under it and no way to check the reasoning.
+            // SOURCING.md §3's stated differentiator is "a hit plus how we
+            // found it", and this is the how.
+            if let Some(o) = f.fusion_orf {
+                println!(
+                    "                              in frame with a {} aa ORF at {}..{} {}",
+                    o.aa_len,
+                    o.start,
+                    o.end,
+                    if o.strand == pl_core::Strand::Reverse {
+                        "-"
+                    } else {
+                        "+"
+                    },
+                );
+            }
         }
         if proposed && !shown.is_empty() {
             println!(

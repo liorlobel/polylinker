@@ -79,7 +79,12 @@ TODAY = os.environ.get("PLF_BUILD_DATE") or time.strftime("%Y-%m-%d")
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from lib_columns import FEATURE_COLUMNS, PROVENANCE_COLUMNS  # noqa: E402
+from lib_columns import (  # noqa: E402
+    FEATURE_COLUMNS,
+    PROVENANCE_COLUMNS,
+    SIGNED_COLUMNS,
+    SIGNOFF_COLUMNS,
+)
 
 UA = "polylinker-features-build/0.1 (https://github.com/polylinker/polylinker)"
 
@@ -199,6 +204,13 @@ ALLOWED_FETCH_HOSTS = {
     "rest.uniprot.org",       # UniProt entries
     "www.ebi.ac.uk",          # ENA browser API
     "ftp.ebi.ac.uk",          # Rfam CURRENT
+    # RCSB's data API, for the deposited one-letter sequence of a named PDB
+    # polymer entity. Added 2026-07-28 with SOURCING.md section 1's new
+    # GO_WITH_CAVEAT row and legal/wwpdb-usage-policies.html behind it. It is
+    # the only fetchable witness a DESIGNED peptide can have -- a tag has no
+    # gene, so UniProt and ENA have nothing to offer -- and it is what turns the
+    # curated residue strings from "declared" into "checked".
+    "data.rcsb.org",
 }
 
 
@@ -356,6 +368,12 @@ CLEARED_SOURCES: dict[str, set[str]] = {
     "genbank": {"INSDC-free"},
     "uniprot": {"CC-BY-4.0"},
     "rfam": {"CC0-1.0"},
+    # Deposited PDB archive data, read through RCSB's API. `wwpdb` and not
+    # `rcsb` on purpose: the CC0 dedication is the wwPDB's, over the archive,
+    # and RCSB's own website layer is separately CC BY 4.0. Naming the source
+    # after the body that made the grant keeps the two from being conflated by
+    # whoever reads provenance.tsv next.
+    "wwpdb": {"CC0-1.0"},
     "insdc-ft": {"unresolved-see-SOURCING-Risk-4"},
 }
 
@@ -923,6 +941,37 @@ def esc(s: str) -> str:
     return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
 
 
+def unesc(s: str) -> str:
+    """Reverse `esc`, in one left-to-right pass.
+
+    Deliberately identical to `unescape` in crates/pl-features/src/lib.rs,
+    including the rule that an unknown escape is kept verbatim: losing a byte is
+    worse than keeping one we did not write. A chained-`replace` version does
+    not round-trip -- escaping `C:\\temp\\thing` gives `C:\\\\temp\\\\thing`, and
+    replacing `\\t` first sees the `\\t` formed by the second escape backslash and
+    the following `t`.
+
+    Needed because the content digest is taken over the UNESCAPED value on both
+    sides, so anything reading a row back off disk has to undo the writer's
+    escaping before it can recompute a signature.
+    """
+    out, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        i += 1
+        if i >= len(s):
+            out.append("\\")
+            break
+        n = s[i]
+        out.append({"t": "\t", "n": "\n", "r": "\r", "\\": "\\"}.get(n, "\\" + n))
+        i += 1
+    return "".join(out)
+
+
 # --------------------------------------------------------------------------
 # Stage 1 — AMRFinderPlus
 
@@ -1160,6 +1209,12 @@ VALID_RULES = {
 # means a bad row is named by the tool that produced it, at the moment it is
 # produced, instead of surfacing as an anonymous parse error in Rust.
 NT_ALPHABET = set("ACGTRYSWKMBDHVN")
+# The twenty standard residues plus X. Deliberately WITHOUT `*`: a stop codon in
+# a peptide reference is meaningless for a tag, and it is the one symbol that
+# would be indexed and could only ever match a query frame at a position the
+# frame renders as a terminator. `X` is admitted because index::seedable already
+# excludes it from every seed, so an unknown residue degrades honestly.
+AA_ALPHABET = set("ACDEFGHIKLMNPQRSTVWYX")
 
 
 def load_stage(stage: Stage):
@@ -1259,6 +1314,10 @@ def coerce_row(obj) -> Row:
         raise ValueError(f"stage emitted curator={curator!r}; only a human may sign a row")
 
     if isinstance(obj, Row):
+        # Normalised even on the pass-through path. Most stages hand back a real
+        # Row, so leaving this to the dict branch below would have normalised
+        # nothing that actually ships.
+        obj.aliases = canon_alias_list(obj.aliases)
         return obj
 
     name = str(_get(obj, "name", default="") or "")
@@ -1267,7 +1326,12 @@ def coerce_row(obj) -> Row:
         id=str(_get(obj, "id", default="") or ""),
         ordinal=int(_get(obj, "ordinal", default=0) or 0),
         name=name,
-        aliases=list(_get(obj, "aliases", default=[]) or []),
+        # Trimmed and emptied-dropped HERE, at the point of production, so the
+        # bytes written to features.tsv are already what `Db::parse` will store.
+        # Normalising only inside content_digest would keep the two digests in
+        # step and still write a cell whose round trip through the loader is
+        # lossy.
+        aliases=canon_alias_list(_get(obj, "aliases", default=[]) or []),
         cls=cls,
         genbank_key=str(_get(obj, "genbank_key", default="") or "misc_feature"),
         reference_nt=str(_get(obj, "reference_nt", default="") or "").upper(),
@@ -1279,10 +1343,13 @@ def coerce_row(obj) -> Row:
         patent_flag=str(_get(obj, "patent_flag", default="0") or "0").strip(),
         provenance=list(_get(obj, "provenance", default=[]) or []),
     )
-    if row.patent_flag.lower() in ("true", "yes"):
-        row.patent_flag = "1"
-    if row.patent_flag.lower() in ("false", "no", ""):
-        row.patent_flag = "0"
+    # Through parse_flag rather than two ad-hoc membership tests, so a stage's
+    # spelling is normalised by the same eleven-way table the loader uses.
+    # Anything parse_flag does not recognise is left verbatim, so validate_row
+    # can refuse it by name instead of silently reading it as 0.
+    flag = parse_flag(row.patent_flag)
+    if flag is not None:
+        row.patent_flag = "1" if flag else "0"
     return row
 
 
@@ -1302,16 +1369,43 @@ def validate_row(r: Row) -> str:
         return f"boundary_rule {r.boundary_rule!r} is not one of {sorted(VALID_RULES)}"
     if not r.boundary_evidence:
         return "boundary_evidence is empty: a boundary with no evidence is what this database replaces"
-    if not r.reference_nt:
-        # Not a nit. The reader requires nucleotides on every record, so a row
-        # that carries only a protein cannot be loaded at all — it is a schema
-        # conversation to have before the row is written, not a warning to skip.
-        return "reference_nt is empty; the loader requires nucleotides on every record"
+    # The pair-rule. Until 2026-07-28 this read "reference_nt is empty; the
+    # loader requires nucleotides on every record", with a comment calling the
+    # gap "a schema conversation to have before the row is written". The
+    # conversation happened, and the PI settled it: a synthetic part may be a
+    # peptide and nothing else. The invariant is now AT LEAST ONE reference,
+    # which is what keeps "reference_nt may be empty" from becoming "anything
+    # goes".
+    if not r.reference_nt and not r.reference_aa:
+        return ("row carries neither a nucleotide nor a protein reference; nothing in "
+                "either index could ever match it")
     bad = sorted(set(r.reference_nt) - NT_ALPHABET)
     if bad:
         return f"reference_nt contains non-nucleotide code(s) {bad}"
-    if r.reference_aa and r.cls != "cds":
-        return f"class {r.cls} carries a protein reference; only cds may"
+    # `reference_aa` had no alphabet check at all while it was decoration on a
+    # row that also carried nucleotides. On a peptide-only row it is the entire
+    # record. `*` is refused by name: a stop codon is meaningless in a tag and,
+    # unlike `X` -- which index::seedable already excludes, so it degrades
+    # honestly into "harder to find" -- it would be indexed.
+    bad = sorted(set(r.reference_aa) - AA_ALPHABET)
+    if bad:
+        return f"reference_aa contains non-amino-acid code(s) {bad}"
+    if r.reference_aa and r.cls not in ("cds", "synthetic_part"):
+        # Still exactly right for regulatory, origin, repeat and misc: a protein
+        # reference on a non-coding feature is a category error and would put a
+        # promoter into the translated index. A tag is nothing but protein,
+        # which is why the list has two members and not six.
+        return f"class {r.cls} carries a protein reference; only cds and synthetic_part may"
+    if r.cls == "cds" and not r.reference_nt:
+        # Without this the pair-rule admits a protein-only CDS, whose
+        # orf_atg_to_stop boundary would be a derived-boundary claim over no
+        # bases at all -- the strongest assertion in the schema, made about a
+        # sequence the row does not carry.
+        return ("class cds requires reference_nt: its boundary is a claim about a "
+                "reading frame, and there is no frame without bases")
+    if not r.reference_nt and r.boundary_rule in ("orf_atg_to_stop", "orf_mature_peptide"):
+        return (f"boundary_rule {r.boundary_rule} is a claim about a reading frame; this "
+                f"row carries no nucleotides to read")
     if r.patent_flag not in ("0", "1"):
         return f"patent_flag {r.patent_flag!r} is not 0 or 1"
     if not r.provenance:
@@ -1609,6 +1703,150 @@ def self_test() -> list:
          any(p[1] == "genbank_key" and p[4] == "unresolved-see-SOURCING-Risk-4"
              for p in bare.provenance))
 
+    # 7. The sign-off digest. Every clause is otherwise unfalsifiable in a green
+    #    build, and one of them -- the date_added exclusion -- is a check that
+    #    must NOT fire, which is the kind nobody writes unless told to.
+    def signed_row(**kw) -> Row:
+        base = dict(
+            # The aliases carry stray spaces and an empty element, and the
+            # patent flag is spelled TRUE, DELIBERATELY. The fixture used to be
+            # ["a", "b"] with "0", and it could not see either divergence the
+            # two implementations really had -- `Db::parse` trims aliases and
+            # this side joined them verbatim, and `parse_flag` accepts eleven
+            # spellings case-insensitively where this side matched five
+            # case-sensitively. A pin that only exercises canonical values is
+            # not a pin.
+            id="PLF:0000", ordinal=1, name="x", aliases=[" a ", " b ", ""], cls="cds",
+            genbank_key="CDS", reference_nt="ATGTAA", reference_aa="M",
+            boundary_rule="orf_atg_to_stop", boundary_evidence="X.1:1-6:+",
+            description="d", notes="n", patent_flag="TRUE",
+            provenance=[("PLF:0000", "reference_nt", "ena", "X.1", "INSDC-free",
+                         "https://www.ebi.ac.uk/", TODAY, "abc")],
+        )
+        base.update(kw)
+        return Row(**base)
+
+    ref = content_digest(signed_row())
+    want("the digest is 64 hex characters",
+         len(ref) == 64 and all(c in "0123456789abcdef" for c in ref))
+    # THE CROSS-LANGUAGE PIN. The same fixture row is hashed by
+    # `Db::content_digest` in crates/pl-features/src/lib.rs and asserted against
+    # this same literal by `the_two_implementations_of_the_content_digest_agree`.
+    # Nothing else compares the two, and if they drift, every signature in the
+    # repository verifies on one side and lapses on the other -- with each side
+    # individually green.
+    want("the digest matches the vector the Rust loader is pinned to",
+         ref == "16ab78984c715df5cfa3cab396e8a6e11a56abe34318d10028648297194a947d")
+    want("a changed base changes the digest",
+         content_digest(signed_row(reference_nt="ATGTAG")) != ref)
+    want("a changed description changes the digest",
+         content_digest(signed_row(description="different")) != ref)
+    want("a changed note changes the digest",
+         content_digest(signed_row(notes="different")) != ref)
+    want("a re-pointed accession changes the digest",
+         content_digest(signed_row(provenance=[
+             ("PLF:0000", "reference_nt", "ena", "X.2", "INSDC-free",
+              "https://www.ebi.ac.uk/", TODAY, "abc")])) != ref)
+    want("a re-fetch of the same accession does NOT change the digest",
+         content_digest(signed_row(provenance=[
+             ("PLF:0000", "reference_nt", "ena", "X.1", "INSDC-free",
+              "https://www.ebi.ac.uk/", "2099-01-01", "different-hash")])) == ref)
+    want("re-spelling patent_flag as TRUE does NOT change the digest",
+         content_digest(signed_row(patent_flag="true"))
+         == content_digest(signed_row(patent_flag="1")))
+    want("reordering aliases DOES change the digest",
+         content_digest(signed_row(aliases=["b", "a"])) != ref)
+
+    # The lapse, end to end, and the inverted control beside it.
+    row = signed_row()
+    signed = {"PLF:0000": {"review_status": "reviewed", "curator": "L. Lobel",
+                           "signed_date": "2026-07-28", "content_sha256": ref,
+                           "note": ""}}
+    decided, defects = apply_signoff([row], signed)
+    want("a matching digest grants the status the human wrote",
+         decided["PLF:0000"] == ("reviewed", "L. Lobel") and not defects)
+    decided, defects = apply_signoff([signed_row(reference_nt="ATGTAG")], signed)
+    want("a changed row is written 'proposed' with the lapse reported",
+         decided["PLF:0000"] == ("proposed", "")
+         and any("has changed since" in d for d in defects))
+    decided, defects = apply_signoff([], signed)
+    want("a signature pointing at no row is reported",
+         any("produced no such row" in d for d in defects))
+
+    # THE INVERTED CONTROL. `date_added` is stamped from the clock on every row
+    # on every run, so a digest defined over the whole row would lapse every
+    # signature in the repository on every build. A check that fires on
+    # everything is exactly as worthless as one that fires on nothing.
+    want("date_added is outside the digest, so a rebuild does not lapse anything",
+         "date_added" not in SIGNED_COLUMNS
+         and set(FEATURE_COLUMNS) - set(SIGNED_COLUMNS) == PROVENANCE_EXEMPT)
+
+    # And the malformed-file paths, which must yield nothing rather than a
+    # half-applied table.
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        bad = Path(td) / "SIGNOFF.tsv"
+        bad.write_text("record_id\tstatus\nPLF:0000\treviewed\n", encoding="utf8")
+        got, problems = read_signoff(bad)
+        want("a malformed sign-off header yields no signatures and says so",
+             got == {} and any("header does not match" in p for p in problems))
+        bad.write_text("", encoding="utf8")
+        want("a blank sign-off file is not an error", read_signoff(bad) == ({}, []))
+        want("an absent sign-off file is not an error",
+             read_signoff(Path(td) / "nope.tsv") == ({}, []))
+        bad.write_text(
+            "\t".join(SIGNOFF_COLUMNS) + "\n"
+            + f"PLF:0000\tproposed\tL. Lobel\t2026-07-28\t{'a' * 64}\t\n",
+            encoding="utf8")
+        got, problems = read_signoff(bad)
+        want("signing a row 'proposed' is refused rather than treated as a no-op",
+             got == {} and any("ABSENCE of a sign-off" in p for p in problems))
+        bad.write_text(
+            "\t".join(SIGNOFF_COLUMNS) + "\n"
+            + "PLF:0000\treviewed\tL. Lobel\t2026-07-28\tnot-a-digest\t\n",
+            encoding="utf8")
+        got, problems = read_signoff(bad)
+        want("a digest that is not 64 hex characters is refused",
+             got == {} and any("64 hex characters" in p for p in problems))
+        # A record signed twice grants NOTHING, from either line. This used to
+        # report the problem and then assign anyway, so a file that said two
+        # things still granted trust from whichever line came last -- which
+        # contradicts the invariant three docstrings state, and which the Rust
+        # loader's own error text openly admitted ("the second line replaces
+        # the first").
+        bad.write_text(
+            "\t".join(SIGNOFF_COLUMNS) + "\n"
+            + f"PLF:0000\treviewed\tA\t2026-07-28\t{'a' * 64}\t\n"
+            + f"PLF:0000\treviewed\tB\t2026-07-28\t{'b' * 64}\t\n",
+            encoding="utf8")
+        got, problems = read_signoff(bad)
+        want("a record signed twice grants nothing, from either line",
+             got == {} and any("signed twice" in p for p in problems))
+
+    # The two canonicalisations that had silently diverged from `Db::parse`.
+    # Neither is reachable through the build -- coerce_row normalises and
+    # validate_row refuses -- and both are reachable by hand, which is exactly
+    # the threat model apply_signoff names.
+    want("stray space round an alias does NOT change the digest",
+         content_digest(signed_row(aliases=[" a ", "b ", "", " "]))
+         == content_digest(signed_row(aliases=["a", "b"])))
+    want("every spelling of a SET patent_flag agrees",
+         len({content_digest(signed_row(patent_flag=s))
+              for s in ("1", "true", "TRUE", "Yes", "y", "T")}) == 1)
+    want("every spelling of a CLEARED patent_flag agrees",
+         len({content_digest(signed_row(patent_flag=s))
+              for s in ("0", "false", "FALSE", "No", "n", "F", "")}) == 1)
+    want("a set and a cleared patent_flag still differ",
+         content_digest(signed_row(patent_flag="TRUE"))
+         != content_digest(signed_row(patent_flag="no")))
+    try:
+        content_digest(signed_row(patent_flag="maybe"))
+        unreadable_refused = False
+    except ValueError:
+        unreadable_refused = True
+    want("an unreadable patent_flag has no digest rather than hashing as 0",
+         unreadable_refused)
+
     if fails:
         for f in fails:
             print(f)
@@ -1632,6 +1870,317 @@ def split_second_return(second):
         elif isinstance(item, (tuple, list)) and item:
             prov.setdefault(str(item[0]), []).append(item)
     return report, prov
+
+
+# --------------------------------------------------------------------------
+# Curator sign-off
+#
+# THE GOVERNING INVARIANT: a missing, stale, malformed or unreadable sign-off
+# can only ever REMOVE trust, never add it. Every failure path below resolves to
+# 'proposed', which is the behaviour this build already had, so the degenerate
+# case is safe by construction rather than by a judgement call.
+#
+# WHY THE DIGEST LIVES IN A COMMITTED FILE and is not inferred from the previous
+# features.tsv: audit_ids() compares against the file it is about to overwrite,
+# and its own docstring admits the trap -- build twice locally and the second
+# run audits the output against itself, green and proving nothing, while a fresh
+# clone has no previous file at all and gets a warning. SIGNOFF.tsv is
+# committed, so it is the ONLY baseline a fresh clone has. That is the single
+# strongest argument for content-hashing a sign-off rather than relying on the
+# id audit.
+#
+# WHAT THE BUILD MAY DO WITH IT: read it. Never write it. `features/SIGNOFF.tsv`
+# is not in this build's output set, and CI proves that by running the build and
+# requiring `git diff --exit-code` on the file afterwards.
+
+SIGNOFF = ROOT / "SIGNOFF.tsv"
+
+
+def parse_flag(s) -> bool | None:
+    """`patent_flag`, canonicalised exactly as `parse_flag` in lib.rs does it.
+
+    Eleven spellings, case-insensitively, and `None` for anything else so the
+    caller can refuse the row by name rather than guess at it.
+
+    This used to be a case-SENSITIVE membership test over five spellings with no
+    rejection path, and the divergence was real in both directions on a
+    hand-edited table: `TRUE` hashed here as 0 and in Rust as 1, so a
+    semantically identical edit turned CI red while the loader kept the
+    signature; `Y` on a `0` row hashed here as 0 and in Rust as 1, so CI stayed
+    green while the shipped binary dropped the approval and the patent claim
+    flipped. Unreachable through the build -- validate_row refuses anything but
+    0 or 1 -- and reachable by hand, which is the whole threat model
+    `Db::apply_signoff` names.
+    """
+    t = str(s).strip().lower()
+    if t in ("", "0", "false", "no", "n", "f"):
+        return False
+    if t in ("1", "true", "yes", "y", "t"):
+        return True
+    return None
+
+
+def canon_alias_list(aliases) -> list:
+    """Aliases, canonicalised exactly as `Db::parse` stores them.
+
+    `Db::parse` does `.split('|').map(str::trim).filter(non-empty)`, so a single
+    stray space in a stage's alias tuple produced `"FLAG |FLAG epitope"` here and
+    `"FLAG|FLAG epitope"` there. Every Python-side gate stayed green -- the build
+    exited 0, check_signoff.py certified, the row shipped `reviewed` -- while the
+    compiled loader recomputed a different digest and DOWNGRADED the approval.
+    That is the exact failure schema_pin.rs says it exists to prevent, and its
+    fixture used `a|b`, which cannot see it.
+    """
+    return [a for a in (str(x).strip() for x in aliases) if a]
+
+
+def canon_aliases(aliases) -> str:
+    """`canon_alias_list`, joined the way the cell is written."""
+    return "|".join(canon_alias_list(aliases))
+
+
+def content_digest(r: Row) -> str:
+    """The digest a curator's signature is taken over.
+
+    Length-framed rather than concatenated, with the column name inside the
+    hash. The framing means no cell can impersonate a delimiter, and -- the
+    reason it is there rather than plain joining -- it removes any need for this
+    file and `Db::content_digest` to agree about escaping. Both sides hash the
+    UNESCAPED canonical value, which this side holds natively and Rust holds
+    after parsing. Hashing the on-disk bytes would have been fragile:
+    escape(unescape(x)) != x for an unrecognised escape such as \\q.
+
+    The column name is inside the hash so that adding or reordering a
+    SIGNED_COLUMNS entry changes every digest rather than silently producing the
+    same bytes under a different schema.
+
+    Provenance enters as (field, source_db, source_accession, licence), sorted.
+    'reviewed' means "checked the sequence against the cited accession", so the
+    accession is part of what was signed. `url` is excluded because it is
+    derived from the accession, `retrieved` because it churns on every
+    --refresh, and the fetch `sha256` because upstream reissuing identical
+    content under a stable accession must not invalidate a human's reading --
+    a real gap, stated rather than hidden, and closed from the other side
+    because bytes that changed the SEQUENCE change reference_nt, which is in
+    the digest.
+    """
+    flag = parse_flag(r.patent_flag)
+    if flag is None:
+        # The loader REFUSES such a row rather than reading it as 0, so there is
+        # no digest for it to have, and inventing one would be the divergence
+        # this function exists to avoid. Reachable only from a hand-edited
+        # features.tsv, which is precisely the threat model.
+        raise ValueError(
+            f"{r.id}: patent_flag {r.patent_flag!r} is not a boolean, so this row has no "
+            f"content digest -- the loader refuses it outright rather than reading it as 0"
+        )
+    canon = {
+        "name": r.name,
+        # Order is meaningful; reordering aliases is a real edit. Trimmed, and
+        # empty elements dropped, to match what `Db::parse` stores -- see
+        # canon_aliases() for the one-space typo that made the two sides
+        # disagree.
+        "aliases": canon_aliases(r.aliases),
+        "class": r.cls,
+        "genbank_key": r.genbank_key,
+        "reference_nt": r.reference_nt.upper(),
+        "reference_aa": r.reference_aa.upper(),
+        "boundary_rule": r.boundary_rule,
+        "boundary_evidence": r.boundary_evidence,
+        # Unescaped, as the Rust loader holds it after parsing.
+        "description": r.description,
+        # The loader accepts eleven spellings of this flag; re-spelling 1 as
+        # TRUE is not a change to the claim and must not break a signature.
+        "patent_flag": "1" if flag else "0",
+        "notes": r.notes,
+    }
+    parts = ["polylinker-signoff-v1\n"]
+
+    def frame(name: str, value: str) -> None:
+        parts.append(f"{name}\x1f{len(value.encode('utf8'))}\x1f{value}\x1e")
+
+    for col in SIGNED_COLUMNS:
+        frame(col, canon[col])
+    for quad in sorted((str(p[1]), str(p[2]), str(p[3]), str(p[4])) for p in r.provenance):
+        frame("provenance", "\x1f".join(quad))
+    return hashlib.sha256("".join(parts).encode("utf8")).hexdigest()
+
+
+def render_row(r: Row) -> list:
+    """Every byte the digest covers, rendered for a human, then the digest.
+
+    The thing `--print-digests` alone could not give anyone. A signature is
+    supposed to be an attestation to CONTENT, and the digest is only a handle
+    on it -- but the content lives in a 15-column escaped TSV plus that
+    record's lines in a 900-row provenance table, and "read the row" had no
+    supported way to be carried out. Rendering the hash's own input means what
+    the curator reads and what the curator signs cannot come apart.
+
+    Deliberately printed in SIGNED_COLUMNS order, so a reader can see that the
+    four excluded columns -- id, review_status, curator, date_added -- really
+    are absent.
+    """
+    out = [f"\n{r.id}  {r.name}", "=" * 72]
+    canon = {
+        "name": r.name,
+        "aliases": canon_aliases(r.aliases),
+        "class": r.cls,
+        "genbank_key": r.genbank_key,
+        "reference_nt": r.reference_nt.upper(),
+        "reference_aa": r.reference_aa.upper(),
+        "boundary_rule": r.boundary_rule,
+        "boundary_evidence": r.boundary_evidence,
+        "description": r.description,
+        "patent_flag": "1" if parse_flag(r.patent_flag) else "0",
+        "notes": r.notes,
+    }
+    for col in SIGNED_COLUMNS:
+        v = canon[col]
+        if col in ("reference_nt", "reference_aa") and len(v) > 70:
+            # Wrapped at 60, the width every sequence viewer uses, so a curator
+            # can compare it against a fetched record by eye.
+            body = "\n".join(" " * 20 + v[i:i + 60] for i in range(0, len(v), 60))
+            out.append(f"  {col:<18}({len(v)} symbols)\n{body}")
+        else:
+            out.append(f"  {col:<18}{v if v else '(empty)'}")
+    out.append("  provenance        (field, source_db, accession, licence)")
+    quads = sorted((str(p[1]), str(p[2]), str(p[3]), str(p[4])) for p in r.provenance)
+    if not quads:
+        out.append("                    (none)")
+    for f, db, acc, lic in quads:
+        out.append(f"                    {f} <- {db} {acc} [{lic}]")
+    out.append("-" * 72)
+    out.append(f"  content_sha256    {content_digest(r)}")
+    out.append(
+        "  NOT covered:      id, review_status, curator, date_added "
+        "(date_added is the build clock)"
+    )
+    return out
+
+
+def read_signoff(path: Path) -> tuple[dict, list]:
+    """Read SIGNOFF.tsv into {record_id: row}, plus the reasons it is not clean.
+
+    A missing or blank file is not a problem to report: "nothing is signed" is a
+    legitimate state and, today, this repository's actual one. A file that is
+    present but malformed IS reported, and yields nothing FOR THE LINES IT
+    CANNOT READ -- a bad header discards the file, and any other unreadable line
+    discards that line. Either way the result is a downgrade, never a
+    half-applied grant.
+    """
+    if not path.exists():
+        return {}, []
+    text = path.read_text(encoding="utf8")
+    if not text.strip():
+        return {}, []
+    out, problems, header_seen = {}, [], False
+    duplicated: set = set()
+    for n, raw in enumerate(text.splitlines(), start=1):
+        if not raw.strip() or raw.startswith("#"):
+            continue
+        cells = raw.split("\t")
+        if not header_seen:
+            header_seen = True
+            if cells != SIGNOFF_COLUMNS:
+                problems.append(
+                    f"SIGNOFF.tsv:{n}: header does not match the schema "
+                    f"({len(SIGNOFF_COLUMNS)} columns expected)"
+                )
+                return {}, problems
+            continue
+        if len(cells) != len(SIGNOFF_COLUMNS):
+            problems.append(
+                f"SIGNOFF.tsv:{n}: {len(cells)} columns, expected {len(SIGNOFF_COLUMNS)}"
+            )
+            continue
+        rid, status, curator, signed_date, digest, note = (c.strip() for c in cells)
+        if status not in ("reviewed", "verified"):
+            problems.append(
+                f"SIGNOFF.tsv:{n}: review_status {status!r} is not 'reviewed' or "
+                f"'verified'; 'proposed' is the ABSENCE of a sign-off, so delete "
+                f"the line rather than signing it 'proposed'"
+            )
+            continue
+        if not rid or not curator:
+            problems.append(
+                f"SIGNOFF.tsv:{n}: record_id and curator are required -- a signature "
+                f"with no name is not one"
+            )
+            continue
+        if len(digest) != 64 or any(c not in "0123456789abcdefABCDEF" for c in digest):
+            problems.append(
+                f"SIGNOFF.tsv:{n}: content_sha256 {digest!r} is not 64 hex characters"
+            )
+            continue
+        if rid in out or rid in duplicated:
+            # DROPPED, not last-wins. The previous version appended the problem
+            # and then assigned anyway, so a duplicated signature still granted
+            # trust from whichever line happened to be last -- which contradicts
+            # this function's own docstring and the invariant it states. Both
+            # lines are human-authored, so this is not a forgery route; it is a
+            # case where the file does not say one thing, and "it says two
+            # things" must resolve to "no signature" like every other malformed
+            # state.
+            problems.append(
+                f"SIGNOFF.tsv:{n}: {rid} is signed twice, so neither line is applied; "
+                f"this file holds one current signature per record"
+            )
+            duplicated.add(rid)
+            out.pop(rid, None)
+            continue
+        out[rid] = {
+            "review_status": status,
+            "curator": curator,
+            "signed_date": signed_date,
+            "content_sha256": digest.lower(),
+            "note": note,
+        }
+    if not header_seen:
+        problems.append("SIGNOFF.tsv: no header row")
+    return out, problems
+
+
+def apply_signoff(rows: list, signed: dict) -> tuple[dict, list]:
+    """Decide each row's review_status and curator. Returns (decided, defects).
+
+    `decided` maps record id -> (review_status, curator). Four cases, and only
+    the first grants anything:
+
+      named, digest matches      -> the status and curator the human wrote
+      named, digest differs      -> 'proposed', and a defect naming BOTH digests
+                                    so the repair is a paste rather than a hunt
+      named, no such row         -> 'proposed' for nobody, and a defect (the
+                                    mirror of audit()'s orphan-provenance rule)
+      not named                  -> 'proposed', exactly as before any of this
+    """
+    decided, defects = {}, []
+    have = {r.id for r in rows}
+    for rid in sorted(set(signed) - have):
+        defects.append(
+            f"SIGNOFF.tsv signs {rid} ({signed[rid]['curator']}), but this build "
+            f"produced no such row -- a signature pointing at nothing is a silent "
+            f"lie about how much of the table a human has read"
+        )
+    for r in rows:
+        s = signed.get(r.id)
+        if s is None:
+            decided[r.id] = ("proposed", "")
+            continue
+        now = content_digest(r)
+        if now == s["content_sha256"]:
+            decided[r.id] = (s["review_status"], s["curator"])
+            continue
+        decided[r.id] = ("proposed", "")
+        defects.append(
+            f"{r.id} ({r.name}) has changed since {s['curator']} signed it on "
+            f"{s['signed_date']}; the approval has lapsed and the row is written "
+            f"'proposed'.\n"
+            f"      recorded  {s['content_sha256']}\n"
+            f"      recomputed {now}\n"
+            f"      Re-read the row, then replace its line in features/SIGNOFF.tsv "
+            f"with the recomputed digest above."
+        )
+    return decided, defects
 
 
 # --------------------------------------------------------------------------
@@ -1697,25 +2246,36 @@ def audit_ids(prev: dict | None, rows: list) -> tuple[list, list]:
 # --------------------------------------------------------------------------
 
 
-def write_outputs(out: Path, rows: list) -> int:
+def write_outputs(out: Path, rows: list, decided: dict) -> int:
+    """Write both tables. `decided` maps id -> (review_status, curator).
+
+    The status is NOT a constant here any more, and it is not something a stage
+    can influence either: `coerce_row` refuses any stage that emits one, and the
+    only path to anything other than 'proposed' is a line in features/SIGNOFF.tsv
+    whose content digest still matches. This function never writes that file.
+    """
+    signed = sum(1 for v in decided.values() if v[0] != "proposed")
     out.mkdir(parents=True, exist_ok=True)
     with (out / "features.tsv").open("w", encoding="utf8", newline="\n") as fh:
         fh.write(f"#!version {TODAY.replace('-', '.')}\n")
         fh.write(
-            "# Generated by features/build/build.py. Every row is 'proposed':\n"
-            "# machine-extracted, no human has signed off, NOT shippable.\n"
+            f"# Generated by features/build/build.py. {signed} of {len(rows)} row(s)\n"
+            "# carry a curator sign-off from features/SIGNOFF.tsv; the rest are\n"
+            "# 'proposed' -- machine-extracted, unread by any human, NOT shippable.\n"
+            "# A sign-off lapses automatically if the row's content changes.\n"
             "# IDs are allocated from per-stage reserved blocks and never move.\n"
             "# See features/SOURCING.md for how each source was cleared.\n"
         )
         fh.write("\t".join(FEATURE_COLUMNS) + "\n")
         for r in rows:
+            status, curator = decided.get(r.id, ("proposed", ""))
             fh.write(
                 "\t".join(
                     [
                         r.id, r.name, "|".join(r.aliases), r.cls, r.genbank_key,
                         r.reference_nt, r.reference_aa, r.boundary_rule,
                         r.boundary_evidence, esc(r.description),
-                        "proposed", "", TODAY, r.patent_flag, esc(r.notes),
+                        status, curator, TODAY, r.patent_flag, esc(r.notes),
                     ]
                 )
                 + "\n"
@@ -1751,6 +2311,23 @@ def main() -> int:
         action="store_true",
         help="write even if a published PLF id changed meaning (it should not; "
              "if you need this flag, say why in the commit message)",
+    )
+    ap.add_argument(
+        "--print-digests",
+        action="store_true",
+        help="print each row's content digest, the 64 hex characters a curator "
+             "pastes into features/SIGNOFF.tsv, and WRITE NOTHING. The tool "
+             "supplies the digest and the human supplies the judgement; neither "
+             "does the other's job.",
+    )
+    ap.add_argument(
+        "--show",
+        metavar="PLF:NNNN[,PLF:MMMM]",
+        help="render exactly what a signature would cover -- every signed column "
+             "unescaped, every provenance quad, then the digest -- and write "
+             "nothing. Step 1 of HOW TO SIGN is 'read the row', and without this "
+             "the only way to do it was to join a 15-column escaped TSV against a "
+             "900-row provenance table by hand.",
     )
     ap.add_argument(
         "--baseline",
@@ -1817,17 +2394,66 @@ def main() -> int:
         print("--allow-id-drift if the change is deliberate and documented.")
         return 2
 
+    # Read from the SOURCE tree, never from --out, and never written. See the
+    # comment above read_signoff().
+    signed, signoff_problems = read_signoff(SIGNOFF)
+    decided, signoff_defects = apply_signoff(rows, signed)
+    defects.extend(signoff_problems)
+    defects.extend(signoff_defects)
+    granted = sorted(r.id for r in rows if decided[r.id][0] != "proposed")
+    print(f"\nCurator sign-off  [{SIGNOFF}]")
+    if not signed:
+        print("  nothing is signed; every row is written 'proposed'")
+    else:
+        print(f"  {len(signed)} signature(s) on file, {len(granted)} still valid")
+        for rid in granted:
+            print(f"  ok    {rid} {decided[rid][0]} by {decided[rid][1]}")
+
     if defects:
         print(f"\n{len(defects)} defect(s):")
         for d in defects:
             print(f"  - {d}")
 
-    n_prov = write_outputs(out, rows)
+    # --- the read-only modes -------------------------------------------
+    #
+    # Both return BEFORE write_outputs, and that is not tidiness. The file that
+    # tells a curator to run `--print-digests` is the same file that argues the
+    # build must never write what a human signs -- and until this returned
+    # early, "print me the digests so I can sign" re-fetched every source and
+    # overwrote features/features.tsv and features/provenance.tsv underneath the
+    # curator, because --out defaults to the source tree. On a day when an
+    # upstream record has moved, the digests printed would describe rows that
+    # had just been rewritten.
+    if args.show:
+        wanted = {w.strip() for w in args.show.split(",") if w.strip()}
+        by_id = {r.id: r for r in rows}
+        missing = sorted(wanted - set(by_id))
+        for rid in missing:
+            print(f"\n{rid}: no such row in this build")
+        for rid in sorted(wanted & set(by_id)):
+            print("\n".join(render_row(by_id[rid])))
+        return 2 if missing else 0
+
+    if args.print_digests:
+        print("\nContent digests, for features/SIGNOFF.tsv column 5:")
+        for r in rows:
+            print(f"  {r.id}\t{content_digest(r)}\t{r.name}")
+        print("\nNothing was written. Use --show PLF:NNNN to read the row a digest")
+        print("covers before you sign it; a signature on 64 hex characters nobody")
+        print("read is not an attestation to anything.")
+        return 1 if defects else 0
+
+    n_prov = write_outputs(out, rows, decided)
 
     print(f"\nwrote {len(rows)} records to {out / 'features.tsv'}")
     print(f"      {n_prov} provenance rows")
-    print("\nAll rows are 'proposed'. Db::reviewed() will ship none of them until")
-    print("a curator signs each one off. That is the intended state.")
+    if granted:
+        print(f"\n{len(granted)} row(s) carry a curator sign-off; the other "
+              f"{len(rows) - len(granted)} are 'proposed'")
+        print("and Db::reviewed() will ship only the signed ones.")
+    else:
+        print("\nAll rows are 'proposed'. Db::reviewed() will ship none of them until")
+        print("a curator signs each one off in features/SIGNOFF.tsv.")
     if defects:
         print(f"\nexit 1: {len(defects)} defect(s) above. features.tsv holds only the")
         print("rows that passed, so it loads -- but this build is incomplete.")

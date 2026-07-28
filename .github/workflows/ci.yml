@@ -157,8 +157,52 @@ jobs:
       # program that knows nothing about how they were written, and that plants
       # each forbidden edit into the real table first and requires itself to
       # catch it. It was local-only; a rule nobody runs is a rule.
-      - name: Every feature row is proposed, with no curator
-        run: python features/build/check_proposed.py
+      #
+      # The rule did not change when the PI turned curator sign-off on
+      # (2026-07-28); the mechanism did. A row may sit above `proposed` only if
+      # features/SIGNOFF.tsv names it with a content digest that still matches.
+      # This step used to be called "Every feature row is proposed, with no
+      # curator", which is a statement about the data rather than about the rule
+      # -- and it would have had to be deleted the first time a curator signed
+      # anything, which is exactly when it is most needed.
+      - name: No feature row asserts more than a human signed
+        run: python features/build/check_signoff.py
+
+      # The control that makes the sign-off file mean anything: THE BUILD NEVER
+      # WRITES IT. Nothing about the hash prevents a machine writing a
+      # valid-looking signature, because the digest is computed from the content
+      # and authenticates nobody -- its job is stale-approval detection. What
+      # stops a machine signing a row is that the only program that could is not
+      # allowed to touch the file, and this proves it rather than asserting it.
+      # That is the distinction Db::audit's own comment draws about the NO_GO
+      # list: discipline is not a control.
+      #
+      # The build is run into a scratch directory, so the committed tables are
+      # not touched either. It may well exit non-zero here — `features/build/
+      # .cache/` is gitignored, so on a clean runner every stage re-fetches and
+      # some may fail — and that is fine, because `write_outputs` runs
+      # regardless and it is the WRITER being audited. The existence of
+      # `features.tsv` in the scratch directory is what proves the writer ran;
+      # without that check this step would pass vacuously whenever the build
+      # died early, which is a check that cannot fail.
+      - name: The build reads SIGNOFF.tsv and never writes it
+        run: |
+          PLF_BUILD_DATE=1970-01-01 python features/build/build.py --out /tmp/plf-out || true
+          test -e /tmp/plf-out/features.tsv \
+            || { echo "::error::the build never reached its writer, so this step checked nothing"; exit 1; }
+          test ! -e /tmp/plf-out/SIGNOFF.tsv \
+            || { echo "::error::the build emitted a SIGNOFF.tsv into its output directory"; exit 1; }
+          # `git diff` says NOTHING about a path git is not tracking, so while
+          # features/SIGNOFF.tsv is untracked the check below exits 0 whatever
+          # the build did to it. That is this step's third vacuity mode, and it
+          # is live exactly when the control matters most: the moment the file
+          # is added, renamed, or dropped from the index.
+          git ls-files --error-unmatch features/SIGNOFF.tsv >/dev/null 2>&1 \
+            || { echo "::error::features/SIGNOFF.tsv is not tracked by git, so the diff below would prove nothing"; exit 1; }
+          git diff --exit-code -- features/SIGNOFF.tsv \
+            || { echo "::error::the build modified features/SIGNOFF.tsv; a sign-off comes from a human, not from a program"; exit 1; }
+          rm -rf /tmp/plf-out
+          echo "the writer ran and the sign-off table is read-only to it"
 
       # features/SOURCING.md section 0.4. Fetches pLannotate's snapgene.csv at a
       # pinned immutable commit, asserts its sha256, measures containment

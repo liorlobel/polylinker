@@ -6,40 +6,58 @@ are stipulated by a paper)". There is no catalogue to harvest — UniProt return
 nothing for FLAG or His6 — so the allow-list below is written by hand, one paper
 per row, and that citation *is* the provenance.
 
-Why most of this table does not become a row yet
------------------------------------------------
+Two kinds of row, decided 2026-07-28
+------------------------------------
 
-The loader is explicit on two points, and together they make a protein-only
-Class C row inexpressible:
+Until 2026-07-28 the loader refused a protein-only Class C row twice over: every
+row had to carry `reference_nt`, and only class `cds` could carry
+`reference_aa`. A tag is a peptide -- FLAG is `DYKDDDDK` -- so the only way one
+could become a loadable row was with nucleotides, and there were exactly two
+ways to get those:
 
-    crates/pl-features/src/lib.rs:556   reference_nt is empty            -> reject
-    crates/pl-features/src/lib.rs:573   class {} carries a protein
-                                        reference; only cds may          -> reject
-
-A tag is a peptide. FLAG is `DYKDDDDK`, and SOURCING.md §3 says so itself:
-"Why translated matching is the *only* sane option for tags [...] At the
-nucleotide level it has dozens of synonymous encodings". But `synthetic_part`
-may not carry `reference_aa`, and every row must carry `reference_nt`. So the
-only way a tag becomes a loadable row today is with nucleotides.
-
-There are exactly two ways to obtain those nucleotides, and only one of them is
-allowed here:
-
-  * **Back-translate the peptide.** Forbidden outright. Choosing codons is
-    writing a sequence that no record contains — the precise failure this whole
-    build exists to prevent. It would also be useless: it would match only the
-    vectors that happened to make the same codon choices.
+  * **Back-translate the peptide.** Forbidden outright, then and now. Choosing
+    codons is writing a sequence that no record contains, which is the precise
+    failure this whole build exists to prevent. It would also be useless: it
+    would match only the vectors that happened to make the same codon choices.
 
   * **Take the codons out of the natural gene the peptide came from**, verified
-    by translation. Legitimate, and that is what `build()` does — but it only
-    exists for the tags that *have* a natural parent. FLAG, His6, Strep-tag,
-    SBP, AviTag, ALFA and the GS/EAAAK linkers were designed or selected; there
-    is no gene to read them out of. Those rows are declared here, are reported
-    every run with the reason, and emit nothing.
+    by translation. Legitimate, and that is what the nucleotide route below
+    does -- but it exists only for the tags that HAVE a natural parent. FLAG,
+    His6, Strep-tag, SBP, AviTag, ALFA and the GS/EAAAK linkers were designed or
+    selected; there is no gene to read them out of. Twenty parts sat declared,
+    cited, verified and unissued.
 
-So this stage yields eight rows out of twenty-eight, and the shortfall is a
-schema question for the curator, not a sourcing failure. It is stated in
-features/README.md rather than left in this docstring.
+The PI resolved it: *"Yes -- add these sequences, but make sure they are fused
+to an ORF, otherwise ignored."* `synthetic_part` may now carry `reference_aa`,
+with or without nucleotides, so this stage emits two shapes:
+
+  NUCLEOTIDE ROUTE   the part has a verified UniProt parent and clears MIN_NT.
+                     `reference_nt` is codons sliced out of that gene and
+                     re-translated; `reference_aa` stays empty. Eight rows,
+                     unchanged from before, byte for byte in their sequences.
+
+  PEPTIDE ROUTE      the part has no gene, and clears MIN_PEPTIDE_AA.
+                     `reference_aa` is the residue string, verified against a
+                     wwPDB polymer entity fetched at build time; `reference_nt`
+                     is empty. Fourteen rows, new.
+
+Never both. A row carrying nucleotides is matched by the tier-1 index and, if it
+had a peptide, by the ungated tier-2 scan as well -- and the annotator's
+exact-match and ORF-fusion rules apply only to peptide-ONLY rows. Giving the
+eight nucleotide rows a peptide as well would therefore make a nine-residue
+epitope matchable with no ORF requirement at all, which is a behaviour change
+nobody asked for. It is a separate decision with its own tests; see
+features/README.md, "Known gaps".
+
+Six of the twenty-eight still emit nothing, and the reason changed
+------------------------------------------------------------------
+
+It used to be "there is no gene to take codons from". That stopped being the
+reason on 2026-07-28. Six parts are now held by MIN_PEPTIDE_AA instead --
+His6 (6 aa), both TEV sites (7), thrombin (6), factor Xa (4) and enterokinase
+(5). Two of those, His6 and TEV, are the most-used items in the whole table, and
+holding them is the real cost of that floor. See MIN_PEPTIDE_AA for the
+arithmetic and for the one constant that would change it.
 
 Every declared part keeps its ordinal whether or not it emits
 -------------------------------------------------------------
@@ -56,13 +74,20 @@ The residue strings are checked, not trusted
 --------------------------------------------
 
 Each `aa` below was verified against fetched records by the curation pass that
-produced this allow-list (PDB polymer entities and UniProt canonicals; see
-`witness` on each part). This file does not take that on faith. For every part
-it tries to build, the peptide must be found — exactly once — inside a UniProt
-canonical sequence fetched at build time, and the codons sliced out of the ENA
-CDS must translate back to it. A single wrong residue in this table drops the
-row; it cannot ship. That is what makes a hand-written sequence table safe to
-have at all.
+produced this allow-list. This file does not take that on faith, and the gate is
+the same shape on both routes: **the peptide must be located, exactly once, in a
+sequence fetched at build time.**
+
+  NUCLEOTIDE ROUTE   located in a UniProt canonical, then the codons sliced out
+                     of the ENA CDS must re-translate to it.
+  PEPTIDE ROUTE      located in the deposited one-letter sequence of the wwPDB
+                     polymer entity named in `pdb_entity`.
+
+A single wrong residue in this table drops the row; it cannot ship. That is what
+makes a hand-written sequence table safe to have at all — and it is why the
+peptide route was not simply switched on when the schema allowed it. Without a
+fetchable witness the fourteen new rows would go from "declared but unissued" to
+"shipped, unverified", which is worse than the status quo it replaced.
 
 Usage
 -----
@@ -115,6 +140,62 @@ PLF_BLOCK_SIZE = 1000
 # back by this rule even though both have a clean natural parent.
 MIN_NT = 27
 
+# A peptide reference shorter than this is held. The loader enforces no length
+# floor of its own — a 3-residue reference_aa loads clean — so the floor lives
+# here, beside MIN_NT, in the same shape and for the same kind of reason.
+#
+# Derived from two independent numbers that happen to agree, which is why it is
+# 8 and not something rounder:
+#
+#   (a) FALSE-POSITIVE BUDGET. SOURCING.md §3 published its budget on exactly
+#       this length: 8 residues over a 20-letter alphabet against the ~10,000
+#       residue positions of a six-frame-translated 5 kb plasmid is ~4e-7 per
+#       plasmid. At 7 residues the same arithmetic gives 7.8e-6 and at 6 it
+#       gives 1.6e-4 — one spurious call per 6,000 plasmids, which is alarming
+#       for anyone annotating a library.
+#
+#   (b) THE SEEDING CLIFF. The tier-2 chainer cannot form a chain below 7
+#       residues at all: K_PROTEIN = 5 (crates/pl-features/src/index.rs) and
+#       Config::min_seeds = 3 (annotate.rs) together need k + min_seeds - 1 = 7
+#       residues to produce three windows. Worse, `Index::build` pushes a record
+#       to `short()` only when it indexed ZERO words, so a 6-residue peptide
+#       yields two windows, never chains, and is reported unreachable by
+#       nothing — silently unfindable, which is the failure index.rs's own
+#       header apologises for. A floor of 8 sits one residue above that cliff
+#       rather than on it, which matters because `min_seeds` is user-adjustable
+#       and a floor equal to the cliff would stop matching if anyone raised it.
+#
+# WHAT IT COSTS, and it is not small. Six parts are held by this floor and two
+# of them are the most-used items in the whole table:
+#
+#   PLF:3004 His6            HHHHHH    6 aa
+#   PLF:3015 TEV site        ENLYFQG   7 aa
+#   PLF:3016 TEV site (Ser)  ENLYFQS   7 aa
+#   PLF:3018 thrombin site   LVPRGS    6 aa
+#   PLF:3019 factor Xa       IEGR      4 aa
+#   PLF:3020 enterokinase    DDDDK     5 aa
+#
+# Lowering it to 7 would release both TEV sites and costs one order of magnitude
+# of false-positive budget, recovered only partly by the annotator's ORF gate
+# (worth ~4.7x, measured). That is a one-constant change and should be presented
+# to the curator as such rather than argued about.
+#
+# His6 deserves a refusal INDEPENDENT of length and would keep one at any floor:
+# a homopolymer's occurrence is not modelled by 20^-L at all, and this table's
+# own witness for it records 6,783 PDB entities carrying HHHHHHHH. Histidine
+# runs are common in deposited sequence, measured rather than assumed, so
+# "HHHHHH is here" is a much weaker claim than its length suggests.
+MIN_PEPTIDE_AA = 8
+
+# RCSB's data API. One endpoint, one field: the deposited one-letter sequence of
+# a named polymer entity. SOURCING.md §1 clears `wwpdb / CC0-1.0` narrowly — the
+# CC0 dedication is over the PDB ARCHIVE, while RCSB's own website layer is
+# separately CC BY 4.0 — so this build reads the deposited sequence and no
+# annotation. The entity's deposited description is printed in the build report
+# so a reviewer can see the entity is what the table says it is, and is
+# deliberately NOT written into any row.
+RCSB_ENTITY = "https://data.rcsb.org/rest/v1/core/polymer_entity/{}/{}"
+
 
 # --------------------------------------------------------------------------
 # The allow-list
@@ -148,14 +229,33 @@ class Part:
     table at all — see `dropped_from_the_allow_list()`."""
     parent_uniprot: str = ""
     """UniProt accession of the natural protein this peptide is a piece of, or
-    "" if it was designed and has no gene. Only parts with one can be built."""
-    hold: str = "designed or selected peptide; there is no gene to take codons from"
-    """Why this part emits no row, in one line, printed every run. Three
-    different situations hide behind an empty `parent_uniprot` and they are not
-    interchangeable: a peptide that never had a gene, a peptide whose gene exists
-    but whose accession nobody established from a fetched record, and an
-    engineered variant of a natural junction. Only the middle one is one lookup
-    away from buildable, and a generic message would bury that."""
+    "" if it was designed and has no gene. Only parts with one take the
+    nucleotide route."""
+    pdb_entity: str = ""
+    """`ENTRY_N` for the wwPDB polymer entity named in `witness`, machine
+    readable, e.g. `8RMO_1`.
+
+    This is the difference between a witness that was checked once by a human
+    and a witness the build checks every run. `witness` is prose; this is a
+    fetch. A part taking the peptide route without one is refused: it would ship
+    the `aa=` literal above straight into features.tsv, which turns a declared
+    row into an unverified one — worse than leaving it unissued."""
+    no_gene: str = "designed or selected peptide; there is no gene to take codons from"
+    """Why the NUCLEOTIDE route is unavailable, in one line, printed every run.
+
+    This field was called `hold` until 2026-07-28, when it stopped being the
+    reason a row was held: fourteen of the parts it described now ship a peptide
+    reference instead, and the six that are still held are held by
+    MIN_PEPTIDE_AA. Renaming it rather than leaving it is the point — the text
+    is still true and still worth printing, but a field called `hold` on a row
+    that is no longer held is a stale assertion sitting in the data model.
+
+    Three different situations hide behind an empty `parent_uniprot` and they
+    are not interchangeable: a peptide that never had a gene, a peptide whose
+    gene exists but whose accession nobody established from a fetched record,
+    and an engineered variant of a natural junction. Only the middle one is one
+    lookup away from a nucleotide reference, and a generic message would bury
+    that."""
     patent_flag: str = "0"
     caveat: str = ""
     """Something the curator must decide or must not assume. Appended to
@@ -170,6 +270,7 @@ PARTS: tuple[Part, ...] = (
         name="FLAG tag",
         aliases=("FLAG", "FLAG epitope", "DYKDDDDK tag"),
         aa="DYKDDDDK",
+        pdb_entity="8RMO_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -196,6 +297,7 @@ PARTS: tuple[Part, ...] = (
         name="3xFLAG tag",
         aliases=("3XFLAG", "triple FLAG", "3x FLAG epitope"),
         aa="DYKDHDGDYKDHDIDYKDDDDK",
+        pdb_entity="21VV_8",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -270,6 +372,7 @@ PARTS: tuple[Part, ...] = (
         aliases=("His tag", "His6", "6xHis", "His8", "His10", "10xHis",
                  "hexahistidine", "polyHis"),
         aa="HHHHHH",
+        pdb_entity="1KTR_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -322,6 +425,7 @@ PARTS: tuple[Part, ...] = (
         name="Strep-tag",
         aliases=("Strep-tag I", "AWRHPQFGG", "original Strep-tag"),
         aa="AWRHPQFGG",
+        pdb_entity="1RST_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -347,6 +451,7 @@ PARTS: tuple[Part, ...] = (
         name="Strep-tag II",
         aliases=("StrepII", "Strep II", "WSHPQFEK"),
         aa="WSHPQFEK",
+        pdb_entity="1KL3_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -369,6 +474,7 @@ PARTS: tuple[Part, ...] = (
         name="Twin-Strep-tag",
         aliases=("Twin Strep", "2xStrep-tag II", "One-STrEP-tag"),
         aa="WSHPQFEKGGGSGGGSGGSAWSHPQFEK",
+        pdb_entity="6SOS_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -394,37 +500,54 @@ PARTS: tuple[Part, ...] = (
         name="S-tag",
         aliases=("S-peptide", "RNase S peptide", "KETAAAKFERQHMDS"),
         aa="KETAAAKFERQHMDS",
+        pdb_entity="1A2W_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="literature_defined",
-        boundary_evidence="DOI:10.1016/s0021-9258(18)70031-8 (Richards & Vithayathil 1959, "
-                          "J Biol Chem 234:1459-1465) - the subtilisin-generated S-peptide, "
-                          "residues 1-15 of mature bovine RNase A",
-        citation="Richards FM, Vithayathil PJ (1959) The preparation of "
-                 "subtilisin-modified ribonuclease and the separation of the peptide and "
-                 "protein components. J Biol Chem 234:1459-1465.",
-        description="The first fifteen residues of bovine pancreatic ribonuclease A, "
-                    "released by a single subtilisin cut. Neither the peptide nor the "
-                    "remaining S-protein is active alone, but they reassociate with "
-                    "nanomolar affinity and restore activity - so a fusion carrying this "
-                    "peptide can be both captured and assayed. One of the oldest "
-                    "protein-fragment complementation systems in biochemistry.",
+        # THE 1959 PAPER DOES NOT STIPULATE THIS BOUNDARY, and citing it as
+        # though it did was this row's actual error. Subtilisin cuts RNase A
+        # once, between residues 20 and 21; its products are S-peptide
+        # (residues 1-20) and S-protein (21-124). Three independently fetched
+        # abstracts say so -- PMID:8453373, PMID:3076449, PMID:6260244 -- and
+        # RCSB polymer entity 1Z3M_2, 'Ribonuclease pancreatic, S-protein', is
+        # 104 residues, i.e. 21-124. The FIFTEEN-residue tag is S15, defined by
+        # Kim & Raines, whose abstract prints "the first 15 residues of
+        # S-peptide (S15)" and shows it still binds S-protein. So the citation
+        # is theirs: the paper that made the fragment is not the paper that
+        # chose this boundary within it.
+        boundary_evidence="PMID:8453373 (Kim & Raines 1993, Protein Sci 2:348-356) - S15, "
+                          "the first fifteen residues of the subtilisin-generated S-peptide "
+                          "of bovine RNase A",
+        citation="Kim JS, Raines RT (1993) Ribonuclease S-peptide as a carrier in fusion "
+                 "proteins. Protein Sci 2:348-356. Origin of the parent fragment: Richards "
+                 "FM, Vithayathil PJ (1959) The preparation of subtilisin-modified "
+                 "ribonuclease and the separation of the peptide and protein components. "
+                 "J Biol Chem 234:1459-1465.",
+        description="Subtilisin cuts bovine pancreatic ribonuclease A once, between residues "
+                    "20 and 21, giving S-peptide and S-protein; neither is active alone, but "
+                    "they reassociate and restore activity. This tag is S15, the first "
+                    "fifteen residues of that S-peptide, which Kim and Raines showed still "
+                    "binds S-protein - so a fusion carrying it can be both captured and "
+                    "assayed. Among the oldest fragment-complementation systems in use.",
         witness="PDB 1A2W entity 1, 'RIBONUCLEASE A', whose 124-residue chain begins "
-                "KETAAAKFERQHMDSSTSAASSSNYCNQMM - i.e. the boundary is read off residues "
-                "1-15 of a deposited chain rather than chosen.",
-        hold="parent is bovine pancreatic RNase A, but no accession for it was "
+                "KETAAAKFERQHMDSSTSAASSSNYCNQMM, so these fifteen residues are that chain's "
+                "first fifteen. That confirms the RESIDUES and cannot confirm the BOUNDARY: "
+                "taking the first fifteen of a 124-residue chain is a choice, and the choice "
+                "is Kim & Raines's.",
+        no_gene="parent is bovine pancreatic RNase A, but no accession for it was "
              "established from a fetched record; one lookup away",
-        caveat="NOT BUILT: the parent is bovine pancreatic RNase A, but no UniProt "
-               "accession for it was established from a fetched record in the session that "
-               "produced this table - only the PDB entity above. Sourcing its nucleotides "
-               "means first looking the parent up, not recalling it. One lookup away from "
-               "buildable.",
+        caveat="NO NUCLEOTIDE REFERENCE, and one lookup away from having one: the parent "
+               "is bovine pancreatic RNase A, but no UniProt accession for it was "
+               "established from a fetched record in the session that produced this table "
+               "- only the PDB entity above. Sourcing codons means first looking the parent "
+               "up, not recalling it.",
     ),
     Part(
         name="AviTag",
         aliases=("Avi tag", "BAP", "biotin acceptor peptide", "BirA substrate peptide",
                  "GLNDIFEAQKIEWHE"),
         aa="GLNDIFEAQKIEWHE",
+        pdb_entity="11ZV_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -435,16 +558,32 @@ PARTS: tuple[Part, ...] = (
                  "biotin holoenzyme synthetase-catalyzed biotinylation. "
                  "Protein Sci 8:921-929. Origin of the peptide: Schatz PJ (1993) "
                  "Bio/Technology 11:1138-1143.",
-        description="Fifteen-residue peptide selected from a library as a substrate for "
-                    "E. coli biotin ligase BirA, which attaches biotin to the single lysine "
-                    "at position ten. It gives site-specific, stoichiometric, "
-                    "enzymatically installed biotin on a recombinant protein - replacing "
-                    "chemical biotinylation, which hits every surface lysine at random.",
+        # NEITHER CITED PAPER STIPULATES FIFTEEN RESIDUES, and the old
+        # description's "fifteen-residue peptide selected from a library" ran
+        # two different lengths together as though they were one. Schatz 1993's
+        # own title says "a 13 residue consensus peptide specifies
+        # biotinylation"; Beckett 1999's abstract starts from "a 23-residue
+        # peptide previously identified by combinatorial methods" and reports
+        # "identification of a 14-residue peptide as the minimum required
+        # sequence". The fifteen-residue form is what the field and the vendor
+        # use, and this row's own witness already admits that the NAME rests on
+        # the papers rather than on a database label. Its LENGTH deserves the
+        # same honesty.
+        description="Acceptor peptide for E. coli biotin ligase BirA, which attaches biotin "
+                    "to the single lysine at position ten. That gives site-specific, "
+                    "stoichiometric, enzymatically installed biotin on a recombinant "
+                    "protein, where chemical biotinylation hits every surface lysine at "
+                    "random. Schatz defines a thirteen-residue consensus by library "
+                    "selection and Beckett a fourteen-residue minimum substrate; these "
+                    "fifteen residues are the form in common use, and no cited paper "
+                    "stipulates that extent.",
         witness="RCSB seqmotif returns 537 entities for the 15-mer; PDB 11ZV entities 1 "
                 "and 2 both carry it in the canonical GGS-flanked cassette. Schatz 1993's "
                 "abstract confirms the library-selection provenance of the motif. NOTE: no "
                 "PDB entity is *named* AviTag, so the name-to-sequence link rests on the "
-                "two papers, not on a database label.",
+                "two papers, not on a database label - and neither paper stipulates FIFTEEN "
+                "residues either: Schatz gives 13, Beckett 14. The extent is conventional, "
+                "not stipulated, and this row says so rather than implying otherwise.",
         patent_flag="1",
         caveat="PATENT/TRADEMARK FLAG (not a determination): AviTag is an Avidity LLC "
                "brand and site-specific BirA biotinylation has been patented. Not assessed "
@@ -454,6 +593,7 @@ PARTS: tuple[Part, ...] = (
         name="SBP-tag",
         aliases=("SBP", "streptavidin-binding peptide"),
         aa="MDEKTTGWRGGHVVEGLAGELEQLRARLEHHPQGQREP",
+        pdb_entity="4JO6_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -462,20 +602,32 @@ PARTS: tuple[Part, ...] = (
         citation="Keefe AD, Wilson DS, Seelig B, Szostak JW (2001) One-step purification "
                  "of recombinant proteins using a nanomolar-affinity streptavidin-binding "
                  "peptide, the SBP-Tag. Protein Expr Purif 23:440-446.",
-        description="Thirty-eight-residue peptide isolated by mRNA display that binds "
-                    "streptavidin about a hundred-fold more tightly than Strep-tag II, and "
+        # THE COMPARISON THAT USED TO BE HERE WAS SOURCED FROM NOTHING. It read
+        # "about a hundred-fold more tightly than Strep-tag II", and Keefe's
+        # abstract -- this row's only source -- gives one number and no
+        # comparison: "binds to streptavidin with an equilibrium dissociation
+        # constant of 2.5 nM", with Strep-tag II not mentioned at all. Neither
+        # PMID:8636976 (the Strep-tag II row's source) nor PMID:9415448 prints a
+        # constant that would let the ratio be computed. So the ratio was
+        # recalled, which is the one thing this table may never do. Say the
+        # number the cited paper prints, and nothing else.
+        description="Thirty-eight-residue peptide isolated by mRNA display, which binds "
+                    "streptavidin with an equilibrium dissociation constant of 2.5 nM and "
                     "elutes with free biotin under native conditions. Long enough to be a "
                     "real domain rather than a linear epitope, which is the cost of the "
                     "affinity.",
         witness="PDB 4JO6 entity 2, pdbx_description 'SBP-Tag', 38-residue sequence, the "
                 "entire entity. The length agrees with the paper's own abstract.",
-        caveat="NOT BUILT: selected by mRNA display, so there is no natural gene to read "
-               "codons out of. Patent status not assessed (Szostak lab).",
+        caveat="NO NUCLEOTIDE REFERENCE, and there can never be one: selected by mRNA "
+               "display, so there is no natural gene to read codons out of. That is the "
+               "clearest case for the peptide route existing at all. Patent status not "
+               "assessed (Szostak lab).",
     ),
     Part(
         name="Calmodulin-binding peptide",
         aliases=("CBP", "CBP tag", "MLCK M13 peptide"),
         aa="KRRWKKNFIAVSAANRFKKISSSGAL",
+        pdb_entity="2BBM_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="literature_defined",
@@ -485,26 +637,41 @@ PARTS: tuple[Part, ...] = (
                  "recombinant proteins. Characterization of a microtubule associated "
                  "protein (MAP 2) fragment which associates with the type II "
                  "cAMP-dependent protein kinase. FEBS Lett 302:274-278.",
-        description="The calmodulin-binding helix of skeletal-muscle myosin light-chain "
-                    "kinase. It binds calmodulin only in the presence of calcium, so the "
-                    "fusion is captured on a calmodulin resin and released by chelating "
-                    "with EGTA - an elution step mild enough to keep complexes intact, "
-                    "which is why this tag is the second half of the tandem affinity "
+        # PHRASED THE WAY IT IS FOR A MEASURED REASON, not for style. The first
+        # draft read "The calmodulin-binding helix of skeletal-muscle myosin
+        # light-chain kinase. It binds calmodulin only in the presence of
+        # calcium..." and taint_gate.py FAILED it: after stopword removal the
+        # sentence break vanished and it shared an eight-token contiguous run,
+        # "skeletal muscle myosin light chain kinase binds calmodulin", with
+        # pLannotate's snapgene.csv. Nothing was copied -- that is the
+        # vocabulary of the subject arriving in the obvious order -- but the
+        # rule is mechanical on purpose, and the project's answer to a tripped
+        # gate is to rewrite from the primary source rather than to argue with
+        # the measurement. The enzyme's own name is an irreducible four-token
+        # run and is left as such.
+        description="Twenty-six residues from the calcium-dependent regulatory helix of "
+                    "MLCK, the myosin light-chain kinase found in skeletal muscle. "
+                    "Calmodulin engages that helix only while calcium is bound, so a "
+                    "fusion carrying the peptide is captured on calmodulin resin and then "
+                    "eluted simply by chelating the calcium away with EGTA. An elution "
+                    "that mild leaves assembled complexes together, which is the property "
+                    "that made this peptide the second affinity handle of the tandem "
                     "purification tag.",
         witness="PDB 2BBM entity 2, 'MYOSIN LIGHT CHAIN KINASE', a 26-residue entity that "
                 "is an exact match to the tag. The 1992 abstract describes the three-unit "
                 "kfc cassette this peptide terminates.",
-        hold="parent is myosin light-chain kinase, but no accession for it was "
+        no_gene="parent is myosin light-chain kinase, but no accession for it was "
              "established from a fetched record; one lookup away",
-        caveat="NOT BUILT: same shape as S-tag. The parent is myosin light-chain kinase, "
-               "but the session that produced this table established only the PDB entity, "
-               "not a UniProt accession, and picking one from recall is exactly what this "
-               "build forbids.",
+        caveat="NO NUCLEOTIDE REFERENCE, same shape as S-tag. The parent is myosin "
+               "light-chain kinase, but the session that produced this table established "
+               "only the PDB entity, not a UniProt accession, and picking one from recall "
+               "is exactly what this build forbids.",
     ),
     Part(
         name="ALFA-tag",
         aliases=("ALFA", "SRLEEELRRRLTE"),
         aa="SRLEEELRRRLTE",
+        pdb_entity="6I2G_2",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -556,6 +723,7 @@ PARTS: tuple[Part, ...] = (
         name="TEV protease cleavage site",
         aliases=("TEV site", "ENLYFQG", "ENLYFQ/G", "TEV recognition sequence"),
         aa="ENLYFQG",
+        pdb_entity="10GW_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="literature_defined",
@@ -575,16 +743,23 @@ PARTS: tuple[Part, ...] = (
                 "Glu-Xaa-Xaa-Tyr-Xaa-Gln-Ser or Gly, with the scissile bond located "
                 "between the Gln-Ser or Gly dipeptide.' PDB 10GW entity 1 carries the "
                 "His6-TEV cassette.",
-        hold="parent is the TEV polyprotein, but no accession for it was established "
+        no_gene="parent is the TEV polyprotein, but no accession for it was established "
              "from a fetched record; one lookup away",
-        caveat="NOT BUILT: no UniProt accession for the TEV polyprotein was established "
-               "from a fetched record in the session that produced this table, so there is "
-               "no verified parent to slice codons out of.",
+        caveat="HELD, and the reason changed on 2026-07-28. It is no longer the missing "
+               "parent - the peptide route needs none - it is length: seven residues is "
+               "below MIN_PEPTIDE_AA = 8, and at seven the tier-2 chainer produces exactly "
+               "three seed windows with no margin at all. TEV is one of the two most-used "
+               "items in this table and holding it is a real cost; lowering the floor to 7 "
+               "releases it and both TEV variants for one order of magnitude of "
+               "false-positive budget. A curator decision, not a build fix. Separately, no "
+               "UniProt accession for the TEV polyprotein was ever established from a "
+               "fetched record, so it has no nucleotide route either.",
     ),
     Part(
         name="TEV protease cleavage site (Ser variant)",
         aliases=("ENLYFQS", "ENLYFQ/S", "TEV site S variant"),
         aa="ENLYFQS",
+        pdb_entity="10HA_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="literature_defined",
@@ -599,14 +774,15 @@ PARTS: tuple[Part, ...] = (
                     "exact-match rule that a seven-residue feature depends on.",
         witness="PDB 10HA entity 1 (pyrimidodiazepine synthase) carries ...ENLYFQS + "
                 "GSHHHHHH. RCSB seqmotif returns 3,891 entities.",
-        hold="same as the Gly variant: the TEV polyprotein accession was not "
+        no_gene="same as the Gly variant: the TEV polyprotein accession was not "
              "established from a fetched record",
-        caveat="NOT BUILT: same reason as the Gly variant.",
+        caveat="HELD: same reason as the Gly variant - seven residues, below MIN_PEPTIDE_AA = 8.",
     ),
     Part(
         name="HRV 3C protease cleavage site",
         aliases=("PreScission site", "3C site", "LEVLFQGP", "LEVLFQ/GP"),
         aa="LEVLFQGP",
+        pdb_entity="10HM_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -623,21 +799,23 @@ PARTS: tuple[Part, ...] = (
                     "so a tag can be removed on the column during a cold purification.",
         witness="RCSB seqmotif for LEVLFQGP returns 3,518 entities, e.g. PDB 10HM entity 1 "
                 "carrying MHHHHHHSSG + the octamer.",
-        hold="engineered P4 variant of the natural LETLFQ/GP junction, so no gene "
+        no_gene="engineered P4 variant of the natural LETLFQ/GP junction, so no gene "
              "encodes this octamer",
         caveat="DISCREPANCY THE CURATOR MUST SEE, found by checking rather than assuming. "
                "The vector sequence is LEVLFQ/GP, but the natural HRV14 2C/3A junction is "
                "LETLFQ/GP: UniProt P03303 carries LETLFQGP at 1424-1431 and annotates the "
                "3C cleavage there, and Cordingley's abstract names ETLFQ/GP. LEVLFQ/GP is "
                "a P4 Thr-to-Val engineered variant and no paper located here publishes it. "
-               "That is also why it is NOT BUILT: an engineered variant has no natural "
-               "gene to take codons from. Do not let this row imply Cordingley published "
-               "this octamer.",
+               "It is also why this row carries a PEPTIDE and no nucleotides: an "
+               "engineered variant has no natural gene to take codons from, which is "
+               "precisely the shape the peptide route exists for. Do not let this row "
+               "imply Cordingley published this octamer.",
     ),
     Part(
         name="Thrombin cleavage site",
         aliases=("thrombin site", "LVPRGS", "LVPR/GS"),
         aa="LVPRGS",
+        pdb_entity="10EE_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="literature_defined",
@@ -653,7 +831,7 @@ PARTS: tuple[Part, ...] = (
                     "recognised arginine, which is the requirement this hexamer satisfies.",
         witness="RCSB seqmotif returns 11,063 entities; PDB 10EE entity 1 carries the "
                 "pET-28a cassette MGSSHHHHHHSSG + LVPRGS + HM.",
-        hold="not a natural junction - checked absent from five human thrombin "
+        no_gene="not a natural junction - checked absent from five human thrombin "
              "substrates - so no gene encodes it",
         caveat="WEAKEST ATTRIBUTION IN THIS TABLE, stated plainly. No paper was found that "
                "first publishes the exact hexamer LVPR/GS: Chang 1985 establishes the "
@@ -662,7 +840,12 @@ PARTS: tuple[Part, ...] = (
                "human prothrombin (P00734), fibrinogen alpha (P02671), factor XIII A "
                "(P00488), PAR1 (P25116) and factor V (P12259), all checked. Sequence "
                "verified; attribution unresolved; and with no natural parent there are no "
-               "codons to take, so NOT BUILT.",
+               "codons to take. HELD on length rather than on sourcing: six residues is "
+               "below MIN_PEPTIDE_AA = 8, and at six the tier-2 chainer cannot form a "
+               "chain at all, so the row would be shipped and silently unfindable. Note "
+               "for whenever the floor is revisited: LVPRGS is the noisiest item this "
+               "table would admit, at roughly one spurious exact hit per 2,300 random "
+               "5 kb plasmids even with the ORF gate on.",
     ),
     Part(
         name="Factor Xa cleavage site",
@@ -687,7 +870,7 @@ PARTS: tuple[Part, ...] = (
                 "carries IEGR at 311-314 with an annotated factor Xa cleavage site at "
                 "314-315.",
         parent_uniprot="P00734",
-        caveat="NOT BUILT, and held back by MIN_NT rather than by sourcing: the parent is "
+        caveat="HELD by BOTH floors, and it would fail either alone: the parent is "
                "clean, but four residues is twelve base pairs. As protein it is ~60,000x "
                "over the false-positive budget SOURCING.md sets; as nucleotide it is "
                "shorter than any k-mer seed a tier-1 index would use. It must never be "
@@ -712,7 +895,8 @@ PARTS: tuple[Part, ...] = (
                 "18-23 as VDDDDK, immediately followed by the mature chain beginning IVGG "
                 "at 24 - the scissile bond read off the record rather than recalled.",
         parent_uniprot="P00760",
-        caveat="NOT BUILT, held back by MIN_NT: five residues is fifteen base pairs. "
+        caveat="HELD by BOTH floors: five residues is fifteen base pairs, below MIN_NT, "
+               "and five residues is below MIN_PEPTIDE_AA. "
                "SECOND PROBLEM the annotator must handle regardless of how this row is "
                "eventually sourced: DDDDK is the C-terminal half of the FLAG tag, so in "
                "any FLAG-tagged construct it will always co-hit FLAG and report a protease "
@@ -837,6 +1021,7 @@ PARTS: tuple[Part, ...] = (
         name="(GGGGS)3 flexible linker",
         aliases=("G4S linker", "(G4S)3", "15-residue scFv linker", "212 linker"),
         aa="GGGGSGGGGSGGGGS",
+        pdb_entity="1DZB_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -865,6 +1050,7 @@ PARTS: tuple[Part, ...] = (
         name="(GGGGS)4 flexible linker",
         aliases=("(G4S)4", "20-residue GS linker"),
         aa="GGGGSGGGGSGGGGSGGGGS",
+        pdb_entity="1H8N_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -886,6 +1072,7 @@ PARTS: tuple[Part, ...] = (
         name="A(EAAAK)3A rigid helical linker",
         aliases=("EAAAK linker", "alpha-helical linker", "rigid linker"),
         aa="AEAAAKEAAAKEAAAKA",
+        pdb_entity="8E4C_1",
         cls="synthetic_part",
         genbank_key="misc_feature",
         boundary_rule="designed_sequence",
@@ -957,6 +1144,34 @@ def locate_unique(canonical: str, pep: str) -> int:
     return canonical.index(pep)
 
 
+def rcsb_entity(entity: str, refresh: bool) -> tuple[str, str, dict]:
+    """The deposited one-letter sequence of a wwPDB polymer entity.
+
+    Returns (sequence, deposited description, cache metadata). `entity` is
+    `ENTRY_N`, e.g. `8RMO_1`.
+
+    Reads `entity_poly.pdbx_seq_one_letter_code_can` and the deposited
+    description, and nothing else. That narrowness is the licence position, not
+    tidiness: SOURCING.md §1 clears `wwpdb / CC0-1.0` over the PDB *archive*,
+    while RCSB's own website layer is separately CC BY 4.0. The description is
+    printed in the build report so a reviewer can see the entity is the one the
+    table names; it is deliberately not written into any row.
+
+    `_can` is the canonical one-letter form, in which a modified residue reads
+    as its parent amino acid. That is the right field here and the choice
+    matters: PDB 6I2G's ALFA-tag entity is deposited with N-terminal
+    pyrrolidone and C-terminal amide groups, so the non-canonical field spells
+    them out and the thirteen residues of the tag cannot be located in it.
+    """
+    entry, n = entity.split("_")
+    name = f"rcsb_{entry}_{n}.json"
+    raw = json.loads(fetch(RCSB_ENTITY.format(entry, n), name, refresh))
+    seq = (raw.get("entity_poly", {}).get("pdbx_seq_one_letter_code_can") or "")
+    seq = "".join(seq.split()).upper()
+    desc = raw.get("rcsb_polymer_entity", {}).get("pdbx_description", "") or ""
+    return seq, desc, cached_meta(name)
+
+
 def codon_slice(cds_nt: str, offset_aa: int, n_aa: int) -> str:
     """The codons encoding residues [offset_aa, offset_aa + n_aa).
 
@@ -1009,29 +1224,150 @@ def dropped_from_the_allow_list() -> list[str]:
 # Stage 5
 
 
+def build_peptide(p: Part, rid: str, ordinal: int, refresh: bool,
+                  report: list) -> "Row | None":
+    """The peptide route: a residue string verified against a wwPDB entity.
+
+    Taken by a part with no gene to slice codons out of. The gate is the same
+    shape as the nucleotide route's — locate the peptide, exactly once, in a
+    sequence fetched at build time — because without it the `aa=` literal in
+    PARTS would go straight into features.tsv and the row would be shipped,
+    unverified. That is worse than the unissued state it replaces.
+    """
+    tag = f"{rid} {p.name}"
+    if len(p.aa) < MIN_PEPTIDE_AA:
+        report.append(
+            f"  HOLD {rid} {p.name:40s} {len(p.aa)} aa, below the {MIN_PEPTIDE_AA} aa "
+            f"peptide floor. {p.no_gene}"
+        )
+        return None
+    if not p.pdb_entity:
+        report.append(
+            f"  DROP {tag}: no pdb_entity, so the residue string could only be taken on "
+            f"trust. A declared row is better than an unverified one."
+        )
+        return None
+
+    try:
+        deposited, desc, meta = rcsb_entity(p.pdb_entity, refresh)
+    except Exception as e:  # noqa: BLE001 — one bad part must not kill the stage
+        report.append(f"  DROP {tag}: wwPDB fetch failed for {p.pdb_entity}: {e}")
+        return None
+    if not deposited:
+        report.append(f"  DROP {tag}: {p.pdb_entity} carries no one-letter sequence")
+        return None
+    try:
+        offset = locate_unique(deposited, p.aa)
+    except ValueError as e:
+        report.append(f"  DROP {tag}: in wwPDB {p.pdb_entity}: {e}")
+        return None
+
+    for a in (p.name, *p.aliases):
+        if "|" in a or "\t" in a:
+            raise SystemExit(f"{tag}: name/alias {a!r} contains a cell delimiter")
+
+    notes = (
+        f"CLASS C, PEPTIDE REFERENCE. The boundary is stipulated by the citation in "
+        f"boundary_evidence, not derived from a record, and this row carries NO "
+        f"nucleotides on purpose: the peptide has dozens of synonymous encodings and "
+        f"any one of them would be an arbitrary choice that misses every re-coded copy "
+        f"(features/SOURCING.md section 3). "
+        f"reference_aa is {len(p.aa)} residues, located by exact search - found once - "
+        f"at residue {offset + 1} of the {len(deposited)}-residue deposited one-letter "
+        f"sequence of wwPDB polymer entity {p.pdb_entity}, fetched at build time. "
+        f"Verified for this table against: {p.witness} "
+        f"HOW THIS ROW IS MATCHED, which is not how the nucleotide rows are matched: "
+        f"only by six-frame translation, only at zero edit distance over the whole "
+        f"peptide regardless of the identity threshold, and only when the hit lies in "
+        f"frame inside an open reading frame of the query with at least 20 residues of "
+        f"that ORF outside the tag. A hit that fails the fusion rule is dropped, not "
+        f"reported as a fragment - the PI's decision of 2026-07-28, in his words: "
+        f"'add these sequences, but make sure they are fused to an ORF, otherwise "
+        f"ignored'. So this row will NOT fire on an empty tagging vector whose "
+        f"polylinker meets a stop within 20 codons, and will NOT fire on a 5'-truncated "
+        f"fragment with no initiator. Citation: {p.citation}"
+    )
+    if p.caveat:
+        notes += " " + p.caveat
+
+    for field, text in (("name", p.name), ("description", p.description),
+                        ("notes", notes)):
+        bad = [c for c in text if ord(c) > 126]
+        if bad:
+            raise SystemExit(
+                f"{tag} {field}: non-ASCII {sorted(set(bad))!r}. This table is "
+                f"hand-written, so a smart quote pasted from a PDF gets in silently "
+                f"and comes out of the TSV as mojibake."
+            )
+
+    report.append(
+        f"  OK   {rid} {p.name:34s} {len(p.aa):4d} aa  wwPDB {p.pdb_entity} residue "
+        f"{offset + 1}  ({desc[:38]!r})"
+    )
+    return Row(
+        id=rid,
+        ordinal=ordinal,
+        name=p.name,
+        aliases=list(p.aliases),
+        cls=p.cls,
+        genbank_key=p.genbank_key,
+        # Empty, and the whole point. See the notes above.
+        reference_nt="",
+        reference_aa=p.aa,
+        boundary_rule=p.boundary_rule,
+        boundary_evidence=p.boundary_evidence,
+        description=p.description,
+        notes=notes,
+        patent_flag=p.patent_flag,
+        provenance=[
+            # The bytes the residues were read out of. `wwpdb` and not `rcsb`:
+            # the CC0 dedication is the wwPDB's, over the archive, and RCSB's
+            # own website layer is separately CC BY 4.0.
+            (rid, "reference_aa", "wwpdb", p.pdb_entity, "CC0-1.0",
+             RCSB_ENTITY.format(*p.pdb_entity.split("_")),
+             meta.get("retrieved", TODAY), meta.get("sha256", "")),
+            # For Class C the citation IS the provenance of the boundary.
+            (rid, "boundary_evidence", "polylinker", p.boundary_evidence,
+             "own-work", "-", TODAY, ""),
+            (rid, "name", "polylinker", "-", "own-work", "-", TODAY, ""),
+            (rid, "aliases", "polylinker", "-", "own-work", "-", TODAY, ""),
+            (rid, "boundary_rule", "polylinker", "-", "own-work", "-", TODAY, ""),
+            (rid, "description", "polylinker", p.boundary_evidence,
+             "own-work", "-", TODAY, ""),
+            (rid, "notes", "polylinker", "-", "own-work", "-", TODAY, ""),
+        ],
+    )
+
+
 def build(refresh: bool) -> tuple[list, list]:
     """Return (rows, report), the shape every stage in this build returns."""
     rows, report = [], []
-    built = blocked = 0
+    built_nt = built_aa = blocked = 0
 
     for i, p in enumerate(PARTS):
         ordinal = i + 1
         rid = f"PLF:{PLF_BLOCK_BASE + i:04d}"
         tag = f"{rid} {p.name}"
 
-        if not p.parent_uniprot:
-            blocked += 1
-            report.append(f"  HOLD {rid} {p.name:40s} {p.hold}")
-            continue
-
-        nt_needed = 3 * len(p.aa)
-        if nt_needed < MIN_NT:
-            blocked += 1
-            report.append(
-                f"  HOLD {rid} {p.name:40s} {len(p.aa)} aa = {nt_needed} bp, below the "
-                f"{MIN_NT} bp floor; parent {p.parent_uniprot} is clean but the reference "
-                f"would be unindexable"
-            )
+        # WHICH ROUTE, and never both. A row carrying nucleotides is matched by
+        # the tier-1 index and, if it also carried a peptide, by the UNGATED
+        # tier-2 scan -- the annotator's exact-match and ORF-fusion rules apply
+        # only to peptide-only rows. Giving the eight nucleotide rows a peptide
+        # as well would make a nine-residue epitope matchable with no ORF
+        # requirement at all, which is a behaviour change nobody asked for.
+        if not p.parent_uniprot or 3 * len(p.aa) < MIN_NT:
+            if p.parent_uniprot:
+                report.append(
+                    f"       {rid} {p.name:40s} {len(p.aa)} aa = {3 * len(p.aa)} bp is "
+                    f"below the {MIN_NT} bp floor, so parent {p.parent_uniprot} cannot "
+                    f"supply a nucleotide reference; trying the peptide route"
+                )
+            row = build_peptide(p, rid, ordinal, refresh, report)
+            if row is None:
+                blocked += 1
+            else:
+                built_aa += 1
+                rows.append(row)
             continue
 
         try:
@@ -1156,11 +1492,16 @@ def build(refresh: bool) -> tuple[list, list]:
             f"residue 1. Verified for this table against: {p.witness} "
             f"READ THIS BEFORE USING THE ROW: reference_nt is ONE natural encoding of the "
             f"peptide. Vector versions of this element are routinely re-coded, so "
-            f"nucleotide matching will MISS most real occurrences. The peptide is what "
-            f"should be matched, and this row cannot carry it: the loader accepts "
-            f"reference_aa only on class 'cds' (crates/pl-features/src/lib.rs:573) and "
-            f"requires reference_nt on every row (lib.rs:556). Until that is decided, "
-            f"treat this row as a placeholder that is right rather than useful. "
+            f"nucleotide matching will MISS most real occurrences. That limitation is "
+            f"unchanged, but its cause is no longer the schema: since 2026-07-28 class "
+            f"'synthetic_part' may carry reference_aa, and fourteen sibling rows in this "
+            f"block do. This row deliberately does not. A row carrying BOTH would be "
+            f"matched by the tier-1 nucleotide index and by the tier-2 translated scan, "
+            f"and the annotator's exact-match and ORF-fusion rules apply only to "
+            f"peptide-ONLY rows - so adding a peptide here would make a short epitope "
+            f"matchable with no ORF requirement at all. Giving the parented parts a "
+            f"peptide reference as well is a real improvement and a separate decision "
+            f"with its own tests; see features/README.md, 'Known gaps'. "
             f"Citation: {p.citation}"
         )
         if p.caveat:
@@ -1184,8 +1525,10 @@ def build(refresh: bool) -> tuple[list, list]:
             cls=p.cls,
             genbank_key=p.genbank_key,
             reference_nt=nt,
-            # Empty, and not merely unset. See the note above and the module
-            # docstring: this is the schema limit, not an omission.
+            # Empty, and no longer because the schema forbids it -- it does not,
+            # since 2026-07-28. Empty because a row carrying both references is
+            # matched by the ungated tier-2 scan as well as by tier 1, and the
+            # fusion rule only guards peptide-ONLY rows. See the notes text.
             reference_aa="",
             boundary_rule=p.boundary_rule,
             boundary_evidence=p.boundary_evidence,
@@ -1220,7 +1563,7 @@ def build(refresh: bool) -> tuple[list, list]:
                 (rid, "notes", "polylinker", "-", "own-work", "-", TODAY, ""),
             ],
         ))
-        built += 1
+        built_nt += 1
         report.append(
             f"  OK   {rid} {p.name:34s} {len(nt):4d} bp  {pid} codons "
             f"{offset * 3 + 1}-{(offset + len(p.aa)) * 3}  (residues {offset + 1}-"
@@ -1228,9 +1571,23 @@ def build(refresh: bool) -> tuple[list, list]:
         )
 
     report.append(
-        f"  -- {built} built, {blocked} declared but not built. The held rows keep their "
-        f"ordinals, so their PLF ids stay reserved and unissued."
+        f"  -- {built_nt} nucleotide row(s) + {built_aa} peptide row(s) = "
+        f"{built_nt + built_aa} built, {blocked} declared and held. The held rows keep "
+        f"their ordinals, so their PLF ids stay reserved and unissued."
     )
+    held = [p.name for p in PARTS
+            if (not p.parent_uniprot or 3 * len(p.aa) < MIN_NT)
+            and len(p.aa) < MIN_PEPTIDE_AA]
+    if held:
+        report.append(
+            f"  -- CURATOR: the {len(held)} held row(s) are held by MIN_PEPTIDE_AA = "
+            f"{MIN_PEPTIDE_AA}, not by sourcing: {', '.join(held)}. His6 and the TEV "
+            f"sites are the two most-used items in this table. Lowering the floor to 7 "
+            f"releases both TEV sites and costs one order of magnitude of false-positive "
+            f"budget; His6 would still fail, because a histidine run's frequency is not "
+            f"modelled by 20^-L and 6,783 PDB entities carry HHHHHHHH. One constant, in "
+            f"this file."
+        )
     report.append(
         f"  -- {len(dropped_from_the_allow_list())} named candidate(s) are deliberately "
         f"not in PARTS at all; see dropped_from_the_allow_list()."
@@ -1296,6 +1653,39 @@ def self_test() -> list[str]:
         raise SystemExit(f"SELF-TEST FAILED: the MIN_NT floor now excludes {short}")
     out.append(f"  SELFTEST MIN_NT={MIN_NT} bp excludes exactly {short}")
 
+    # The MIN_PEPTIDE_AA floor must exclude exactly the six parts named in its
+    # own comment, and no others. Pinned by name rather than by count, because a
+    # count would stay green if the floor released one part and caught another.
+    on_peptide_route = [p for p in PARTS if not p.parent_uniprot or 3 * len(p.aa) < MIN_NT]
+    held = sorted(p.name for p in on_peptide_route if len(p.aa) < MIN_PEPTIDE_AA)
+    expected = sorted([
+        "Polyhistidine tag",
+        "TEV protease cleavage site",
+        "TEV protease cleavage site (Ser variant)",
+        "Thrombin cleavage site",
+        "Factor Xa cleavage site",
+        "Enterokinase cleavage site",
+    ])
+    if held != expected:
+        raise SystemExit(
+            f"SELF-TEST FAILED: MIN_PEPTIDE_AA={MIN_PEPTIDE_AA} now holds {held}, "
+            f"not {expected}. Changing that floor is a curator decision -- update the "
+            f"list here, the comment on MIN_PEPTIDE_AA and features/README.md together."
+        )
+    out.append(f"  SELFTEST MIN_PEPTIDE_AA={MIN_PEPTIDE_AA} holds exactly {held}")
+
+    # ...and the floor is not below the cliff the tier-2 chainer falls off.
+    # K_PROTEIN=5 with min_seeds=3 needs 7 residues to make three seed windows,
+    # and a record that seeds SOME words but too few is reported unreachable by
+    # nothing -- it is silently unfindable. The floor must sit above 7, not on it.
+    if MIN_PEPTIDE_AA <= 5 + 3 - 1:
+        raise SystemExit(
+            f"SELF-TEST FAILED: MIN_PEPTIDE_AA={MIN_PEPTIDE_AA} is at or below the "
+            f"seeding cliff at 7 residues, so a shipped row could be silently "
+            f"unfindable -- seeded, unchainable, and absent from Index::short()"
+        )
+    out.append("  SELFTEST the peptide floor sits above the tier-2 seeding cliff")
+
     # Every part must be internally coherent, checked here rather than trusted.
     for i, p in enumerate(PARTS):
         if p.cls != "synthetic_part":
@@ -1305,6 +1695,31 @@ def self_test() -> list[str]:
         if not p.citation or not p.boundary_evidence or not p.witness:
             raise SystemExit(f"SELF-TEST FAILED: {p.name} lacks a citation, boundary "
                              f"evidence or witness; Class C requires all three")
+        # A peptide row's residues are the whole record, so they may not be
+        # taken on trust. Anything the peptide route will try to build must name
+        # a fetchable wwPDB entity, or `build_peptide` drops it -- and a part
+        # that would be dropped for a reason this file can see at import time is
+        # a declaration error, not a build outcome.
+        if p in on_peptide_route and len(p.aa) >= MIN_PEPTIDE_AA and not p.pdb_entity:
+            raise SystemExit(
+                f"SELF-TEST FAILED: {p.name} takes the peptide route but names no "
+                f"pdb_entity, so its residue string could only ship unverified"
+            )
+        if p.pdb_entity and not re.fullmatch(r"[0-9A-Za-z]{4}_\d+", p.pdb_entity):
+            raise SystemExit(
+                f"SELF-TEST FAILED: {p.name} pdb_entity {p.pdb_entity!r} is not "
+                f"ENTRY_N; it would be fetched as a malformed URL"
+            )
+        # A peptide-only row may not claim a boundary derived from a reading
+        # frame it does not carry -- the loader refuses it (lib.rs), and a row
+        # refused by the loader is a build defect rather than a data question.
+        if p in on_peptide_route and p.boundary_rule in ("orf_atg_to_stop",
+                                                         "orf_mature_peptide"):
+            raise SystemExit(
+                f"SELF-TEST FAILED: {p.name} would be a peptide-only row claiming "
+                f"boundary_rule {p.boundary_rule!r}, which is a claim about bases it "
+                f"does not carry"
+            )
     names = [p.name for p in PARTS]
     if len(set(names)) != len(names):
         raise SystemExit("SELF-TEST FAILED: duplicate part name in PARTS")

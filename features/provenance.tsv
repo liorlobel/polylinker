@@ -729,6 +729,26 @@ PLF:2023	boundary_rule	polylinker	-	own-work	-	2026-07-28
 PLF:2023	description	polylinker	PMID:11752286	own-work	-	2026-07-28	
 PLF:2023	genbank_key	insdc-ft	rRNA	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
 PLF:2023	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3000	reference_aa	wwpdb	8RMO_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/8RMO/1	2026-07-28	d96d8628e2d654a18681278c9232830a89b668e6a1e19e47c3ab6bc750ef74f7
+PLF:3000	boundary_evidence	polylinker	DOI:10.1038/nbt1088-1204 (1988, Bio/Technology 6:1204-1210)	own-work	-	2026-07-28	
+PLF:3000	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3000	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3000	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3000	description	polylinker	DOI:10.1038/nbt1088-1204 (1988, Bio/Technology 6:1204-1210)	own-work	-	2026-07-28	
+PLF:3000	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3000	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3000	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3000	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3001	reference_aa	wwpdb	21VV_8	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/21VV/8	2026-07-28	58fbe4e6e4651a654f743d664f493d68570f205765708c3f75cca8f73a124773
+PLF:3001	boundary_evidence	polylinker	PMID:10769759 (2000, BioTechniques 28:789-793)	own-work	-	2026-07-28	
+PLF:3001	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3001	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3001	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3001	description	polylinker	PMID:10769759 (2000, BioTechniques 28:789-793)	own-work	-	2026-07-28	
+PLF:3001	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3001	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3001	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3001	patent_flag	polylinker	-	own-work	-	2026-07-28	
 PLF:3002	reference_nt	ena	ABH05852.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/ABH05852.1	2026-07-28	24b5e2e99ca8e41cff430a5dc3f1025762676e3454ef410f134fbfd6ec12254c
 PLF:3002	reference_nt	uniprot	P03438	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P03438.json	2026-07-28	da8a3dae35e216dd3fa7c7a371e76031823159cc6d7d40d1ac11b3556422ed65
 PLF:3002	boundary_evidence	polylinker	PMID:6204768 (1984, Cell 37:767-778) - the nine-residue immunodominant determinant of influenza A HA1	own-work	-	2026-07-28	
@@ -762,6 +782,86 @@ PLF:3005	notes	polylinker	-	own-work	-	2026-07-28
 PLF:3005	class	polylinker	-	own-work	-	2026-07-28	
 PLF:3005	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
 PLF:3005	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3006	reference_aa	wwpdb	1RST_2	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/1RST/2	2026-07-28	ae54cb7e4bbcd3a22ce177ac610507859c0ab5943d6675dad27491aaa503af67
+PLF:3006	boundary_evidence	polylinker	PMID:8636976 (1996, J Mol Biol 255:753-766)	own-work	-	2026-07-28	
+PLF:3006	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3006	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3006	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3006	description	polylinker	PMID:8636976 (1996, J Mol Biol 255:753-766)	own-work	-	2026-07-28	
+PLF:3006	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3006	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3006	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3006	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3007	reference_aa	wwpdb	1KL3_2	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/1KL3/2	2026-07-28	27abf427bf13a8b5c2a33a615826f7f47e93a0183fd7b83b58a097a0b38d7257
+PLF:3007	boundary_evidence	polylinker	PMID:8636976 (1996, J Mol Biol 255:753-766)	own-work	-	2026-07-28	
+PLF:3007	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3007	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3007	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3007	description	polylinker	PMID:8636976 (1996, J Mol Biol 255:753-766)	own-work	-	2026-07-28	
+PLF:3007	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3007	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3007	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3007	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3008	reference_aa	wwpdb	6SOS_2	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/6SOS/2	2026-07-28	0c81520434b663c7237c216f8d7eb6543394884f63d9e9828b863794968f9c4d
+PLF:3008	boundary_evidence	polylinker	PMID:24012791 (2013, Protein Expr Purif 92:54-61)	own-work	-	2026-07-28	
+PLF:3008	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3008	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3008	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3008	description	polylinker	PMID:24012791 (2013, Protein Expr Purif 92:54-61)	own-work	-	2026-07-28	
+PLF:3008	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3008	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3008	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3008	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3009	reference_aa	wwpdb	1A2W_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/1A2W/1	2026-07-28	2a01074d54bab8d3a29ec2da4308c298f6462257264b9ae7f4b057857ce199d0
+PLF:3009	boundary_evidence	polylinker	PMID:8453373 (Kim & Raines 1993, Protein Sci 2:348-356) - S15, the first fifteen residues of the subtilisin-generated S-peptide of bovine RNase A	own-work	-	2026-07-28	
+PLF:3009	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3009	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3009	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3009	description	polylinker	PMID:8453373 (Kim & Raines 1993, Protein Sci 2:348-356) - S15, the first fifteen residues of the subtilisin-generated S-peptide of bovine RNase A	own-work	-	2026-07-28	
+PLF:3009	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3009	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3009	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3009	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3010	reference_aa	wwpdb	11ZV_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/11ZV/1	2026-07-28	af63cf0e4d3097a4bcade24a79ae3349d01c654323a1cfa419b3a11ce5f43585
+PLF:3010	boundary_evidence	polylinker	PMID:10211839 (1999, Protein Sci 8:921-929); peptide selected in PMID:7764094 (Schatz 1993, Bio/Technology 11:1138-1143)	own-work	-	2026-07-28	
+PLF:3010	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3010	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3010	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3010	description	polylinker	PMID:10211839 (1999, Protein Sci 8:921-929); peptide selected in PMID:7764094 (Schatz 1993, Bio/Technology 11:1138-1143)	own-work	-	2026-07-28	
+PLF:3010	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3010	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3010	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3010	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3011	reference_aa	wwpdb	4JO6_2	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/4JO6/2	2026-07-28	7abddd0dddde6257e7a03e3e2f3d3eb6782cc4b8a06b183febf2e2d3c5c2c39b
+PLF:3011	boundary_evidence	polylinker	PMID:11722181 (2001, Protein Expr Purif 23:440-446)	own-work	-	2026-07-28	
+PLF:3011	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3011	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3011	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3011	description	polylinker	PMID:11722181 (2001, Protein Expr Purif 23:440-446)	own-work	-	2026-07-28	
+PLF:3011	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3011	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3011	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3011	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3012	reference_aa	wwpdb	2BBM_2	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/2BBM/2	2026-07-28	95446f1bdc2029b6874dc560896e8e35d0d2bcf6b54edd6b934e73d579432ce3
+PLF:3012	boundary_evidence	polylinker	PMID:1318232 (1992, FEBS Lett 302:274-278) - the third unit of the kfc cassette	own-work	-	2026-07-28	
+PLF:3012	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3012	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3012	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3012	description	polylinker	PMID:1318232 (1992, FEBS Lett 302:274-278) - the third unit of the kfc cassette	own-work	-	2026-07-28	
+PLF:3012	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3012	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3012	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3012	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3013	reference_aa	wwpdb	6I2G_2	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/6I2G/2	2026-07-28	43f80ccf22d65224ca7dfeffda11bb8d66f132f4ec748c8457395e0326a80abc
+PLF:3013	boundary_evidence	polylinker	PMID:31562305 (2019, Nat Commun 10:4403), Results paragraph 1, which prints the minimal tag	own-work	-	2026-07-28	
+PLF:3013	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3013	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3013	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3013	description	polylinker	PMID:31562305 (2019, Nat Commun 10:4403), Results paragraph 1, which prints the minimal tag	own-work	-	2026-07-28	
+PLF:3013	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3013	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3013	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3013	patent_flag	polylinker	-	own-work	-	2026-07-28	
 PLF:3014	reference_nt	ena	AAA60166.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAA60166.1	2026-07-28	f246b0c06ca48e8302e91ee04a09e0af1e420a276ee3ac047c581a8568bc163f
 PLF:3014	reference_nt	uniprot	P04070	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/P04070.json	2026-07-28	4a7c1ea9a3f41645665db4fd94baae5f2d40a6377082d13456526c80be367347
 PLF:3014	boundary_evidence	polylinker	PMID:1283093 (1992, Protein Expr Purif 3:453-460); antibody from PMID:2447082 (1988, J Biol Chem 263:826-832)	own-work	-	2026-07-28	
@@ -773,6 +873,16 @@ PLF:3014	notes	polylinker	-	own-work	-	2026-07-28
 PLF:3014	class	polylinker	-	own-work	-	2026-07-28	
 PLF:3014	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
 PLF:3014	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3017	reference_aa	wwpdb	10HM_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/10HM/1	2026-07-28	ebd309499b59f786c76b0347b46ad067707d74bd4f8c990853f4ab9f0b10e16c
+PLF:3017	boundary_evidence	polylinker	PMID:2160953 (1990, J Biol Chem 265:9062-9065) for the natural consensus; the vector octamer is a P4 variant of it and is published by no paper located in this work	own-work	-	2026-07-28	
+PLF:3017	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3017	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3017	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3017	description	polylinker	PMID:2160953 (1990, J Biol Chem 265:9062-9065) for the natural consensus; the vector octamer is a P4 variant of it and is published by no paper located in this work	own-work	-	2026-07-28	
+PLF:3017	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3017	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3017	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3017	patent_flag	polylinker	-	own-work	-	2026-07-28	
 PLF:3021	reference_nt	ena	AAK12416.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/AAK12416.1	2026-07-28	ecbec8a9b6ebf77ee67404975880c87a028228f0a8b85c2e8490d21d437ea8a6
 PLF:3021	reference_nt	uniprot	Q99HP0	CC-BY-4.0	https://rest.uniprot.org/uniprotkb/Q99HP0.json	2026-07-28	0294b2940ed722aeb35847cb4453cca21de026425fdd3459b4469de2791776eb
 PLF:3021	boundary_evidence	polylinker	PMID:21602908 (2011, PLoS ONE 6:e18556); the skip occurs between the terminal G and P, so the P is the first residue of the downstream protein	own-work	-	2026-07-28	
@@ -817,3 +927,33 @@ PLF:3024	notes	polylinker	-	own-work	-	2026-07-28
 PLF:3024	class	polylinker	-	own-work	-	2026-07-28	
 PLF:3024	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
 PLF:3024	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3025	reference_aa	wwpdb	1DZB_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/1DZB/1	2026-07-28	ff29b96e0071a0cda7d8738b6cba00b44627cf08bff98a91e3883bffe7a3691c
+PLF:3025	boundary_evidence	polylinker	PMID:3045807 (1988, PNAS 85:5879-5883), which stipulates a 15-residue linker joining VH to VL	own-work	-	2026-07-28	
+PLF:3025	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3025	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3025	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3025	description	polylinker	PMID:3045807 (1988, PNAS 85:5879-5883), which stipulates a 15-residue linker joining VH to VL	own-work	-	2026-07-28	
+PLF:3025	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3025	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3025	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3025	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3026	reference_aa	wwpdb	1H8N_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/1H8N/1	2026-07-28	5a0c0086a4ccc7fa1a94271b35e9aa6da7da264a567665a31058815ce3f2d980
+PLF:3026	boundary_evidence	polylinker	PMID:3045807 (1988, PNAS 85:5879-5883), which establishes the (Gly4Ser)n family rather than this count	own-work	-	2026-07-28	
+PLF:3026	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3026	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3026	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3026	description	polylinker	PMID:3045807 (1988, PNAS 85:5879-5883), which establishes the (Gly4Ser)n family rather than this count	own-work	-	2026-07-28	
+PLF:3026	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3026	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3026	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3026	patent_flag	polylinker	-	own-work	-	2026-07-28	
+PLF:3027	reference_aa	wwpdb	8E4C_1	CC0-1.0	https://data.rcsb.org/rest/v1/core/polymer_entity/8E4C/1	2026-07-28	4f4492f5576b0cbc18591f8859b5c6df489f20ce506796cf08c6e56911b85e8d
+PLF:3027	boundary_evidence	polylinker	PMID:11579220 (2001, Protein Eng 14:529-532), whose abstract stipulates the form A(EAAAK)nA with n = 2-5	own-work	-	2026-07-28	
+PLF:3027	name	polylinker	-	own-work	-	2026-07-28	
+PLF:3027	aliases	polylinker	-	own-work	-	2026-07-28	
+PLF:3027	boundary_rule	polylinker	-	own-work	-	2026-07-28	
+PLF:3027	description	polylinker	PMID:11579220 (2001, Protein Eng 14:529-532), whose abstract stipulates the form A(EAAAK)nA with n = 2-5	own-work	-	2026-07-28	
+PLF:3027	notes	polylinker	-	own-work	-	2026-07-28	
+PLF:3027	class	polylinker	-	own-work	-	2026-07-28	
+PLF:3027	genbank_key	insdc-ft	misc_feature	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-07-28	
+PLF:3027	patent_flag	polylinker	-	own-work	-	2026-07-28	

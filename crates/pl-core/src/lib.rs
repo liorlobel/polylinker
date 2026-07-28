@@ -17,6 +17,7 @@ pub mod oplog;
 pub mod orf;
 pub mod seguid;
 pub mod sha1;
+pub mod sha256;
 pub mod translate;
 
 pub use iupac::{complement, matches, reverse_complement, Composition};

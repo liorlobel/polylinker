@@ -46,6 +46,7 @@ Verdicts are the **challenger's** wherever prober and challenger disagreed. Disa
 | **pLannotate `snapgene.csv`** | GPL-3.0 covers **code only**. No licence of any kind, anywhere, for the data. Upstream SnapGene reserves all rights | **No** | **NO_GO** — *unchallenged*. Note: unchallenged in the **restrictive** direction, so the gap creates no risk of over-permission | 1,367 rows of ID → curated editorial prose. No sequence, no coordinates | 1,367 → **0**. Fetched at CI only, never committed |
 | **Sequence Ontology** | **Contested.** `LICENSE` says CC BY 4.0; the repo `README` §License says CC BY-**SA** 4.0. The LICENSE file was machine-generated from the OBO Foundry badge by an external contributor's bulk script — it is a restatement of the badge, not independent corroboration | Unresolved | **HOLD** — *challenger overturned **GO** → **HOLD***. Full verdict reversal. The prober also fabricated a supporting quote | Controlled vocabulary + INSDC↔SO crosswalk. **No sequences** | 2,615 terms / 260 SOFA → **0 in v0.1** |
 | **NCBI AMRFinderPlus Reference Gene Catalog** | Inherits NCBI posture + NLM FTP attribution. No LICENSE file found in the DB directory | Same posture as GenBank | **GO_WITH_CAVEAT** — surfaced late, only lightly probed | **Curated resistance-marker CDS in *nucleotide* and protein, current (2026-05-19), standard allele names** | **[UNVERIFIED]** total count → **~40** |
+| **wwPDB / RCSB PDB polymer entities** (`data.rcsb.org` REST) | **CC0 1.0** for archive data, stated in the HTML of `wwpdb.org/about/usage-policies` and archived under a sha256 at `legal/wwpdb-usage-policies.html`: *"Data files contained in the PDB archive are available under the CC0 1.0 Universal (CC0 1.0) Public Domain Dedication."* Depositor attribution is *encouraged*, not required | Yes, for the deposited data. **No** for RCSB's own website layer, which `rcsb.org/pages/policies` licenses separately under CC BY 4.0 | **GO_WITH_CAVEAT (new, 2026-07-28)** — cleared **narrowly**: the build may read the deposited one-letter sequence of a named polymer entity (`entity_poly.pdbx_seq_one_letter_code_can`) and nothing else. Reading no annotation layer is what keeps the CC0 claim and the CC BY layer apart, and it is enforced by the fetch being a single field | The only fetchable, citable witness for a **designed peptide**. An epitope tag or a linker has no gene, so UniProt and ENA have nothing to offer; deposited structures do — FLAG is the entirety of 8RMO entity 1, and the tag is what was crystallised | 18 named entities → **14** peptide references |
 | **PlasMapper 3.0 FeatureDB** | Apache-2.0 and GPL-3.0 in two subtrees, nothing at root — and `scrapeFeatures.py` proves the data is scraped from Addgene | No | **NO-GO (new)** | — | 266 → **0** |
 | **SEVA** | "Copyright 2019 … All Rights Reserved," no terms page | No | **NO-GO** absent a written grant | — | **0** |
 | **Addgene** | Informational, **noncommercial** use only; anti-scraping; Content clause broader than the scraping clause | No | **NO-GO** (confirmed verbatim) | — | **0** |
@@ -271,9 +272,14 @@ name               ours
 aliases[]          {alias, source, source_accession}
 type               INSDC feature key           # NOT an SO term in v0.1 — see Risk 4
 class              CDS | regulatory | origin | repeat | synthetic_part | misc
-reference_nt       sequence
-reference_aa       sequence                    # Class A only; this is what makes codon-optimised
-                                               # detection possible at all
+reference_nt       sequence                    # required on class A and on every class whose
+                                               # boundary is a claim about bases; MAY BE EMPTY on
+                                               # a synthetic_part that carries a peptide instead
+reference_aa       sequence                    # class A and class C. On A it is what makes
+                                               # codon-optimised detection possible at all; on C
+                                               # it is usually the whole record, because a tag IS
+                                               # a peptide (see below). The invariant is AT LEAST
+                                               # ONE reference, not "a nucleotide reference".
 boundary_rule      ORF_ATG_to_STOP | ORF_mature_peptide | literature_defined
                    | consensus_of_INSDC | designed_sequence
 boundary_evidence  accession.version + coords + strand, OR DOI + table/figure
@@ -282,6 +288,14 @@ provenance[]       PER FIELD: {source, licence, url, retrieved, sha256_of_archiv
 patent_flag        bool + note                 # see Risk 6
 description        WRITTEN BY US, always
 ```
+
+**Resolved 2026-07-28.** This section argued from the start that exact protein matching is the only sane option for tags, while the shipped schema said `reference_aa` was Class A only — the one place this document contradicted itself. The PI decided it: *"Yes — add these sequences, but make sure they are fused to an ORF, otherwise ignored."* Class C may now carry a peptide, with or without nucleotides, under three rules:
+
+1. **A peptide-only row is matched exactly and wholly**, at zero edit distance, regardless of `Config::min_identity`. The false-positive arithmetic above holds only under exact matching, and `min_identity` is user-adjustable — at 0.80 an eight-residue tag gets an edit budget of one and the annotator starts reporting FLAG tags that are not there.
+2. **A peptide hit must be fused to an ORF**, or it is ignored. The hit must lie in frame inside an open reading frame *of the query*, with at least 20 residues of that ORF outside the tag. The ORF is detected in the molecule, not taken from a tier-1 annotation: people tag their own protein, not AmpR, so a "must overlap an annotated CDS" rule would be invisible in exactly the case the rows exist for.
+3. **The residue string is verified at build time**, against a freshly fetched wwPDB polymer entity in which it must occur exactly once — the same discipline the nucleotide rows get from `locate_unique`.
+
+What rule 2 buys, measured rather than asserted: for an 8-residue tag under the shipped defaults it admits about 37% of the six-frame positions such a tag could start at on random 5 kb sequence — a factor of **2.7x** — and about **2.1x** on real vectors (pBR322 `J01749`, pUC19 `L09137`, pTrc99A `U13872`), which are denser in coding sequence than random DNA. An earlier version of this line said 4.7x, from an estimate rather than a run; `features/README.md` carries the full table and the floors either side of 20. **It is not the false-positive control** — exact matching is. It is the clause that makes the *claim* ("this is a tag on a protein") mean something. What it costs is stated in `features/README.md`: a tag on a partner shorter than 20 residues, a 5'-truncated fragment with no initiator, an empty tagging vector whose polylinker meets a stop within 20 codons, and a tag on a gene whose initiator the configured genetic code does not accept — all read as absent.
 
 Keying the DB on **verified protein identity** for Class A also dissolves the naming problem for free: `bla`, `Bla`, `ampR`, `AmpR`, `beta-lactamase`, `ampicillin resistance protein` and the other six measured spellings collapse into one record with an alias table hanging off it. And alleles that differ by a few residues (the TEM family) become explicit variants of a parent group instead of silent corruption.
 

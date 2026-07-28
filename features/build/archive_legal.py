@@ -90,6 +90,20 @@ ITEMS = [
         "that the prober never opened this page, and that reading it flips "
         "attribution_required from false to TRUE.",
     ),
+    (
+        "wwpdb-usage-policies.html",
+        "https://www.wwpdb.org/about/usage-policies",
+        "The wwPDB Usage Policy, which is the operative statement for PDB "
+        "archive data and the evidence behind clearing `wwpdb / CC0-1.0` in "
+        "SOURCING.md section 1. It is archived rather than cited because it is "
+        "the ONLY page in this set that states the licence for the source the "
+        "curated peptide references depend on, and unlike RCSB's own policies "
+        "page it puts the licence text in the HTML rather than behind script. "
+        "The distinction it draws matters and is why the fetch is narrow: the "
+        "CC0 dedication covers the deposited archive data, while RCSB's own "
+        "website content is separately CC BY 4.0, so this build reads only the "
+        "deposited one-letter sequence out of a polymer entity.",
+    ),
 ]
 
 ALLOWED_HOSTS = {
@@ -98,6 +112,7 @@ ALLOWED_HOSTS = {
     "ftp.ebi.ac.uk",
     "www.ncbi.nlm.nih.gov",
     "www.nlm.nih.gov",
+    "www.wwpdb.org",
 }
 
 

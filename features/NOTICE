@@ -25,7 +25,7 @@ That sentence is reproduced exactly as `SOURCING.md` section 2 Stage 0.1
 requires it. It is narrower than the truth, so the broader statement follows:
 this dataset is a dated snapshot (sources retrieved 2026-07-27 and 2026-07-28)
 and does not reflect the most current data available from NLM, the UniProt
-Consortium, EMBL-EBI or Rfam.
+Consortium, EMBL-EBI, Rfam or the Worldwide Protein Data Bank.
 
 The exact retrieval date and the sha256 of every fetched source file are
 recorded per field in `provenance.tsv`, so the age of any individual value can
@@ -101,6 +101,42 @@ Institute (EMBL-EBI):
     https://www.ebi.ac.uk/ena/browser/
 
 ENA records are INSDC records; see the INSDC section below.
+
+================================================================================
+Worldwide Protein Data Bank (wwPDB) / RCSB PDB
+================================================================================
+
+The residue strings of the designed peptide parts -- epitope tags, affinity
+tags, protease sites and linkers -- are verified against, and read out of,
+deposited polymer entities of the PDB archive, retrieved through RCSB's data
+API:
+    https://data.rcsb.org/rest/v1/core/polymer_entity/
+
+PDB archive data are dedicated to the public domain under the Creative Commons
+Zero (CC0 1.0) waiver, stated in the wwPDB Usage Policy:
+    https://www.wwpdb.org/about/usage-policies
+
+    "Data files contained in the PDB archive are available under the CC0 1.0
+     Universal (CC0 1.0) Public Domain Dedication."
+
+That page is archived, with its sha256 and retrieval date, at
+`legal/wwpdb-usage-policies.html`.
+
+CC0 imposes no attribution requirement, and wwPDB *encourages* rather than
+requires crediting the original depositors. The credit is given anyway, for the
+same reason the Rfam credit below is: a database that trades on provenance
+should say where its rows came from whether or not it is compelled to. Each
+peptide row's `provenance.tsv` entry names the exact polymer entity its residues
+were located in, and the row's `notes` names the residue offset at which it was
+found.
+
+ONE DISTINCTION MATTERS AND IS OBSERVED IN CODE. The CC0 dedication covers the
+PDB *archive*; RCSB's own website content and annotation layer are separately
+licensed under CC BY 4.0 (https://www.rcsb.org/pages/policies). This build reads
+`entity_poly.pdbx_seq_one_letter_code_can` -- the deposited one-letter sequence
+-- and nothing else. The deposited entity description is printed in the build
+report so a reviewer can confirm the entity is the one named, and is
+deliberately not written into any row.
 
 ================================================================================
 EMBL-EBI -- Rfam
@@ -203,7 +239,7 @@ matches the pinned one, so renaming it does not get it in. It is implemented in
 fails CLOSED -- a network error exits with the status `taint-gate-unavailable`
 rather than passing.
 
-Its result at the time of writing, over all 70 descriptions against all 1,367
+Its result at the time of writing, over all descriptions against all 1,367
 of theirs: no row shares a contiguous five-token run, and no row reaches 60%
 containment. Two rows exceed the 30% warning threshold, PLF:0002 and PLF:0003,
 whose longest shared runs are one and two tokens; they are the two
@@ -228,6 +264,10 @@ sources rather than reproducing them:
     otherwise cite the publication that stipulated them.
   * Rfam seed rows are alignment rows, not sequences: they are degapped, and
     RNA is transformed to DNA (U -> T) unconditionally.
+  * Designed peptide parts carry a residue string and no nucleotides: the
+    peptide is located, exactly once, in a deposited PDB polymer entity fetched
+    at build time. Back-translating a peptide is refused outright, because
+    choosing codons would be writing a sequence no record contains.
   * All names, aliases and descriptions are written by the Polylinker
     contributors, and are marked `own-work` per field in `provenance.tsv`.
 

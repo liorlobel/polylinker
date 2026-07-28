@@ -181,12 +181,37 @@ pub fn methods(t: Topic) -> String {
         "annotate" => {
             let (db, _) = pl_features::Db::builtin();
             let reviewed = db.reviewed().records.len();
+            // Counted live rather than written down, like `reviewed` above and
+            // for the same reason: a methods paragraph that hard-codes a number
+            // becomes a false statement the first time the library grows.
+            let peptides = db.records.iter().filter(|r| r.is_peptide_only()).count();
+            // Read off the default rather than written down, for the same
+            // reason: this table decides which ORFs exist, and therefore which
+            // tags are reported at all. Naming the wrong one in a methods
+            // paragraph would misdescribe the result, not just the settings.
+            let code = pl_features::annotate::Config::default().code.id;
+            let code_name = pl_features::annotate::Config::default().code.name();
             format!(
                 "Features were annotated with Polylinker {v} against its own curated \
                  library (release {}), by k-mer seeding followed by infix alignment, \
                  with protein-level matching in six frames so that recoded genes \
                  resolve. Default thresholds: {:.0}% identity, {:.0}% minimum coverage \
                  of the database feature.\n\n\
+                 {peptides} of the library's records are designed peptide parts -- \
+                 epitope tags, protease sites and linkers -- which carry a residue \
+                 string and no nucleotides, because such a peptide has many synonymous \
+                 encodings and no single one of them is the sequence. Those are matched \
+                 by translation only, at zero mismatches over the whole peptide, and are \
+                 reported only when the hit lies in frame inside an open reading frame \
+                 of the query with at least 20 residues of that frame outside the tag. A \
+                 tag that fails that test is not reported at all, so a tag on a construct \
+                 with no detectable reading frame -- an empty tagging vector, or a \
+                 fragment with no start codon -- will be absent rather than flagged. \
+                 Which codons may open a reading frame is the genetic code's business, \
+                 so it is also the code's business whether a given tag is reported: the \
+                 default here is NCBI translation table {code} ({code_name}), and a \
+                 construct whose gene initiates at a codon that table does not accept \
+                 carries no detectable frame and therefore no tag.\n\n\
                  Limits: the library contains {} record(s), of which **{reviewed} have \
                  been reviewed by a named curator**. Unreviewed records were assembled \
                  by machine from public sources and are not shipped by default; any \

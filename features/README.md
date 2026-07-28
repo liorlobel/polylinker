@@ -6,15 +6,17 @@ An openly licensed, provenance-tracked database of common plasmid features.
 this carries, and [`SOURCING.md`](SOURCING.md) for how each source was cleared
 and by what evidence.
 
-> **Status: v0.1 pre-release, 70 records. Every row is `proposed` —
+> **Status: v0.1 pre-release, 84 records. Every row is `proposed` —
 > machine-assembled, with no human sign-off. Nothing here is shippable yet.**
-> `Db::reviewed()` returns an empty database until a curator puts their name
-> against each row. That is the intended state, not an unfinished one; see
-> *Rule 6* below.
+> `Db::reviewed()` ships only the rows [`SIGNOFF.tsv`](SIGNOFF.tsv) names with a
+> content digest that still matches, and that file holds no signatures today. A
+> sign-off lapses automatically the moment the row it approves changes. That is
+> the intended state, not an unfinished one; see *Rule 6* below.
 >
 > **This is a dated snapshot** (sources retrieved 2026-07-27 and 2026-07-28) and
-> does not reflect the most current data available from NLM, UniProt, EMBL-EBI or
-> Rfam. Per-field retrieval dates and source hashes are in `provenance.tsv`.
+> does not reflect the most current data available from NLM, UniProt, EMBL-EBI,
+> Rfam or the wwPDB. Per-field retrieval dates and source hashes are in
+> `provenance.tsv`.
 
 ## Why this exists
 
@@ -67,20 +69,21 @@ right name.
 |---|---|
 | `features.tsv` | One line per feature. The biology. |
 | `provenance.tsv` | One line per `(record, field)`. Where each field came from. |
+| `SIGNOFF.tsv` | One line per **signed** record: who, when, what they checked, and a sha256 of the row's content at the time. A missing, stale or malformed sign-off can only remove trust, never add it. The build reads it and never writes it, and CI proves that. |
 | `SOURCING.md` | Which sources were cleared, with quoted licence evidence. |
 | `NOTICE` | Attributions required by the sources in use. |
 | `build/build.py` | The harness: id allocation, validation, the id-stability audit, both writers. §8.3 rule 5: *publish the build script, not just the output.* |
 | `build/lib_columns.py` | The schema, in one place. Pinned to `crates/pl-features/src/lib.rs` through the header of the file it writes — the Rust loader compares that header against its own `FEATURE_COLUMNS` and refuses the file if they differ. |
 | `build/stage_uniprot.py` | Stage 2. UniProt → ENA, one pinned cross-reference per entry, exact translation match. |
 | `build/stage_rfam.py` | Stage 3. Rfam seed alignments, with the miRBase and Wikipedia exclusions enforced at parse time. |
-| `build/stage_curated.py` | Stage 5. Hand-curated designed parts, one citation each. Most of its table is declared but held; see *Honest coverage*. |
-| `build/check_proposed.py` | Proves the shipped tables assert nothing — and proves the check itself can fail. |
+| `build/stage_curated.py` | Stage 5. Hand-curated designed parts, one citation each, and two routes: codons sliced out of a natural parent, or a peptide verified against a wwPDB polymer entity. Six of 28 are still held; see *Honest coverage*. |
+| `build/check_signoff.py` | Proves no row asserts more than a human signed — and proves the check itself can fail, in both directions. |
 
 Rebuild, then verify:
 
 ```bash
 PLF_BUILD_DATE=2026-07-28 python features/build/build.py
-python features/build/check_proposed.py
+python features/build/check_signoff.py
 python features/build/taint_gate.py
 python features/build/archive_legal.py --check
 cargo test -p pl-features
@@ -113,14 +116,16 @@ comes from **where it is declared**, never from where it landed in the output:
 | `PLF:0001`–`PLF:0999` | AMRFinderPlus resistance and selection markers | 24 |
 | `PLF:1000`–`PLF:1999` | UniProt → ENA natural proteins | 14 |
 | `PLF:2000`–`PLF:2999` | Rfam structured RNA | 24 |
-| `PLF:3000`–`PLF:3999` | Hand-curated designed parts | 8 of 28 declared |
+| `PLF:3000`–`PLF:3999` | Hand-curated designed parts | 22 of 28 declared |
 
-A candidate that fails verification, or that cannot yet be expressed in the
-schema, leaves its number unissued rather than pulling every later id down by
-one. `PLF:3000` is reserved for FLAG and is empty today; when the schema can
-carry it, FLAG gets that id and nothing already published moves. The build
-re-reads the previous `features.tsv` and refuses to write if any published id
-has come to mean a different sequence.
+A candidate that fails verification leaves its number unissued rather than
+pulling every later id down by one. That mechanism has now been exercised for
+real: `PLF:3000` was reserved for FLAG and sat empty for a release, and when the
+schema learned to carry a peptide, FLAG took **that** id and nothing already
+published moved. Six numbers are still reserved and empty — `PLF:3004`,
+`3015`, `3016`, `3018`, `3019`, `3020` — held by the peptide length floor rather
+than by sourcing. The build re-reads the previous `features.tsv` and refuses to
+write if any published id has come to mean a different sequence.
 
 TSV rather than JSON, and normalised across two files, on purpose. This is a
 *curated* database whose main interaction is pull requests, and one line per
@@ -141,13 +146,23 @@ what changed between releases.
    commit, compares, and deletes — no byte is ever committed, enforced by
    `.gitignore` on the name and by `tools/hooks/pre-commit` on the content hash.
    It is `features/build/taint_gate.py`, it runs in CI, and it fails **closed**
-   on a network error. Its measured result over all 70 descriptions: no shared
+   on a network error. Its measured result over all 84 descriptions: no shared
    five-token run anywhere, no row above 60% containment, and two rows above the
    30% warning line — PLF:0002 and PLF:0003, longest shared runs of one and two
    tokens, which is the shared vocabulary of two aminoglycoside
    phosphotransferases rather than shared phrasing. That is the written
    justification the threshold asks for. Disclosing the gate is an asset: it is
    the concrete evidence behind the project's premise.
+
+   **It fired for real on this release.** PLF:3012, the calmodulin-binding
+   peptide, is one of the fourteen rows decision 1 issued, so its description
+   faced the gate for the first time — and failed it, sharing the eight-token run
+   *"skeletal muscle myosin light chain kinase binds calmodulin"*. Nothing was
+   copied; that is the vocabulary of the subject arriving in the obvious order,
+   and a sentence break vanished when stopwords were removed. The rule is
+   mechanical on purpose, so the answer was to rewrite the row from the cited
+   paper rather than to argue with the measurement. `stage_curated.py` records
+   why that description is phrased the way it is, so nobody "tidies" it back.
 4. **Per-row provenance** means a single challenged row can be dropped without
    rebuilding, and a licence question can be answered feature by feature.
 5. **Publish the build script, not just the output.**
@@ -155,32 +170,51 @@ what changed between releases.
    draft text. Nothing ships without a named human curator and
    `review_status: reviewed`. This is enforced by the loader, not by discipline.
 
+   Since 2026-07-28 the mechanism is [`SIGNOFF.tsv`](SIGNOFF.tsv): one committed
+   line per signed record, carrying the curator, the date, what they checked, and
+   a sha256 of the row's semantic content at the time. The rule did not change;
+   what changed is that a signature now **lapses by itself** when the thing it
+   approved changes — a base, a description, a note, a cited accession, a
+   licence. Four controls keep it honest: the build only ever *reads* that file
+   and CI runs the build and requires `git diff --exit-code` on it; `coerce_row`
+   refuses any stage that emits a status or a curator; the compiled-in loader
+   recomputes the digest, so a hand-edited `features.tsv` is refused inside an
+   executable somebody already downloaded; and `check_signoff.py` plants each
+   forbidden edit into the real table and requires itself to catch it. The
+   digest **authenticates nobody** — the build computes it from the same content
+   — and `SIGNOFF.tsv`'s own preamble says so rather than implying more.
+
 ## Honest coverage
 
-**polylinker-features v0.1 contains 70 feature records: 24 antibiotic-resistance
+**polylinker-features v0.1 contains 84 feature records: 24 antibiotic-resistance
 and selection markers, 14 natural regulatory and enzyme proteins, 24 structured
-RNA elements, and 8 designed parts (epitope tags and 2A peptides). Every record
-carries an explicit boundary rule, at least one `boundary_evidence` pointer, and
-a per-field provenance chain with licence. It is released under CC BY 4.0, with
-attribution notices for the U.S. National Library of Medicine, the UniProt
-Consortium, EMBL-EBI (ENA and Rfam), Rfam's per-family primary sources, and
-INSDC submitters as required by those sources.**
+RNA elements, and 22 designed parts (epitope tags, protease sites, 2A peptides
+and linkers). Every record carries an explicit boundary rule, at least one
+`boundary_evidence` pointer, and a per-field provenance chain with licence. It is
+released under CC BY 4.0, with attribution notices for the U.S. National Library
+of Medicine, the UniProt Consortium, EMBL-EBI (ENA and Rfam), Rfam's per-family
+primary sources, the Worldwide Protein Data Bank, and INSDC submitters as
+required by those sources.**
 
 Composition, measured from the shipped file:
 
-| Block | Records | Class | Boundary rule |
-|---|---|---|---|
-| AMRFinderPlus markers | 24 | `cds` | `orf_atg_to_stop`, translation-verified |
-| UniProt → ENA proteins | 14 | `cds` | `orf_atg_to_stop`, translation-verified |
-| Rfam structured RNA | 24 | `regulatory` (19), `misc` (5) | `consensus_of_insdc` |
-| Curated designed parts | 8 | `synthetic_part` | `literature_defined` |
+| Block | Records | Class | Reference | Boundary rule |
+|---|---|---|---|---|
+| AMRFinderPlus markers | 24 | `cds` | nt + protein | `orf_atg_to_stop`, translation-verified |
+| UniProt → ENA proteins | 14 | `cds` | nt + protein | `orf_atg_to_stop`, translation-verified |
+| Rfam structured RNA | 24 | `regulatory` (19), `misc` (5) | nt | `consensus_of_insdc` |
+| Curated designed parts | 8 | `synthetic_part` | nt | codons from a natural parent |
+| Curated designed parts | 14 | `synthetic_part` | **peptide only** | `designed_sequence` (12), `literature_defined` (10) across all 22 |
 
-38 of 70 rows are coding and carry a protein reference verified by exact
-translation. 10 rows carry `patent_flag = 1`. **Five** licences are in play
-across 818 provenance rows: our own work (446), INSDC-free (156), CC0-1.0 (96),
-`unresolved-see-SOURCING-Risk-4` (70) and CC BY 4.0 (50); by source, polylinker
-446, Rfam 96, ENA 84, AMRFinderPlus 72, the INSDC feature-table specification 70
-and UniProt 50.
+38 of 84 rows are coding and carry a protein reference verified by exact
+translation from their own nucleotides. **14 rows carry a peptide and no
+nucleotides at all** — the shape decision 1 created — and each was verified by
+locating its residue string, exactly once, in a wwPDB polymer entity fetched at
+build time. 17 rows carry `patent_flag = 1`. **Five** licences are in play across
+958 provenance rows: our own work (558), INSDC-free (156), CC0-1.0 (110),
+`unresolved-see-SOURCING-Risk-4` (84) and CC BY 4.0 (50); by source, polylinker
+558, Rfam 96, ENA 84, the INSDC feature-table specification 84, AMRFinderPlus 72,
+UniProt 50 and the wwPDB 14.
 
 Two of those numbers are new and both were previously absent rather than wrong.
 `genbank_key` had **no** provenance at all on any row, and it is the one column
@@ -241,7 +275,7 @@ states its initiator codon in `notes`, measured rather than assumed.
 ### What this is not
 
 It is **not** a drop-in replacement for pLannotate or SnapGene Common Features:
-at 70 rows against their 1,367 it is about 5% of the row count, and it covers
+at 84 rows against their 1,367 it is about 6% of the row count, and it covers
 partly different ground. It is **not** complete or comprehensive, and it does not
 cover all common plasmid features. It carries **no** coverage claim for
 commercial catalogue vectors — pET-28a, pGEX-4T-1 and pMAL-c2 return `Count=0`
@@ -257,21 +291,44 @@ claimed here.
 
 All measured, not assumed, and all documented in `SOURCING.md`.
 
-- **Designed parts are mostly held back by the schema, not by sourcing.** 28
-  tags, linkers, protease sites and 2A peptides are declared in
-  `build/stage_curated.py` with a citation and a named verification witness
-  each; only 8 became rows. The other 20 are peptides with no natural gene —
-  FLAG, His6, Strep-tag, SBP, AviTag, ALFA, the GS and EAAAK linkers — and the
-  loader requires nucleotides on every row (`lib.rs:556`) while permitting a
-  protein reference only on class `cds` (`lib.rs:573`). Back-translating a
-  peptide would mean writing a sequence no record contains, so those rows are
-  not written. **This is the largest single decision waiting on the curator**;
-  see *Open schema question* below.
-- **The 8 designed parts that did build carry one natural encoding each**, taken
-  from the gene the peptide belongs to and verified by translation. Vector
-  versions of these elements are routinely re-coded, so nucleotide matching will
-  miss most real occurrences. Right, but not yet useful — the same schema
-  question governs.
+- **Six designed parts are still held, and now by LENGTH rather than by the
+  schema.** 28 tags, linkers, protease sites and 2A peptides are declared in
+  `build/stage_curated.py`; 22 are now rows. The six that are not are
+  `PLF:3004` His6 (6 aa), `PLF:3015`/`3016` the two TEV sites (7 aa),
+  `PLF:3018` thrombin (6 aa), `PLF:3019` factor Xa (4 aa) and `PLF:3020`
+  enterokinase (5 aa), all below `MIN_PEPTIDE_AA = 8`.
+
+  That floor is derived from two numbers that agree. `SOURCING.md` §3 published
+  its false-positive budget on exactly eight residues (~4e-7 per 5 kb plasmid;
+  at seven, 7.8e-6; at six, 1.6e-4). And the tier-2 chainer cannot form a chain
+  below seven residues at all — `K_PROTEIN = 5` with `min_seeds = 3` needs seven
+  to make three windows — while `Index::short()` reports only records that
+  seeded *nothing*, so a six-residue peptide would be seeded, unchainable, and
+  reported unreachable by nothing. Silently unfindable is worse than held.
+
+  **His6 and TEV are the two most-used items in the table and holding them is
+  the real cost.** Lowering the floor to 7 releases both TEV sites for one order
+  of magnitude of false-positive budget; it is one constant in
+  `stage_curated.py` and the build prints the trade-off on every run. His6 would
+  still fail at any floor: a histidine run's frequency is not modelled by
+  20⁻ᴸ at all, and this table's own witness for it records **6,783** PDB
+  entities carrying `HHHHHHHH`.
+- **The 8 designed parts with a natural parent carry one natural encoding
+  each**, taken from the gene the peptide belongs to and verified by
+  translation. Vector versions of these elements are routinely re-coded, so
+  nucleotide matching will miss most real occurrences. That limitation is
+  unchanged; what changed is its cause. They *could* now carry a peptide
+  reference as well, and deliberately do not — but the reason is now only that
+  nobody has done the curation, not that it would be unsafe. The two annotator
+  rules key on `Record::is_designed_peptide` (*a `synthetic_part` carrying
+  residues*), not on the absence of nucleotides, so a row carrying both gets the
+  exactness rule and the ORF-fusion rule on its translated route while its
+  nucleotide route stays exactly as it was. Keyed the other way — on
+  peptide-only — adding a peptide to one of these eight would silently have
+  opened an ungated six-frame path for a nine-residue epitope: a hole that opens
+  because of the *shape of a row* rather than because anyone decided anything,
+  which is what `Db::audit`'s own comment means by "discipline is not a
+  control".
 - **Mammalian selection markers.** `pac`/PuroR and `bsd`/BsdR are absent from
   AMRFinderPlus, confirmed by enumerating its drug-class field: zero PUROMYCIN
   and zero BLASTICIDIN entries. HygR and ZeoR *are* present but under catalogue
@@ -302,16 +359,133 @@ All measured, not assumed, and all documented in `SOURCING.md`.
   the same element. Class B is curatorial by nature, and that curation is the
   real work.
 
-### Open schema question for the curator
+### The schema question, ANSWERED — 2026-07-28
 
-`SOURCING.md` §3 argues that exact protein matching is *the only sane option for
-tags*, because a short designed peptide has dozens of synonymous encodings. The
-shipped schema takes the opposite position: `reference_aa` is permitted only on
-class `cds`, and `Class::SyntheticPart`'s own documentation says tags are not
-translated-matchable. Both cannot be right.
+This section used to pose a question. It records the answer instead.
 
-Nothing in this build resolves it, deliberately — it changes what the annotator
-finds, so it is a design decision and not an integration fix. Until it is
-decided, 20 of the most-used features in molecular biology sit declared,
-cited, verified and unissued in `build/stage_curated.py`, each holding the PLF id
-it will take when the answer arrives.
+**The question.** `SOURCING.md` §3 argued that exact protein matching is *the
+only sane option for tags*, because a short designed peptide has dozens of
+synonymous encodings. The shipped schema took the opposite position:
+`reference_aa` was permitted only on class `cds`, and every row had to carry
+`reference_nt`. Both could not be right, and 20 of the most-used features in
+molecular biology sat declared, cited, verified and unissued as a result.
+
+*(An earlier draft of this section said `Class::SyntheticPart`'s own
+documentation asserted that tags are not translated-matchable. It did not. The
+claim lived on `Class::Cds` — "this is the only class translated matching can
+find" — and on `Record::reference_aa`. The misattribution is corrected here
+rather than carried forward.)*
+
+**The answer, from the PI, verbatim:** *"Yes — add these sequences, but make
+sure they are fused to an ORF, otherwise ignored."*
+
+So `synthetic_part` may carry `reference_aa`, with or without nucleotides. Four
+loader clauses changed, no new column, no new `Class` variant, no new
+`boundary_rule`:
+
+| Rule | What it refuses |
+|---|---|
+| pair-rule | a row carrying **neither** a nucleotide nor a protein reference. The invariant is *at least one reference*, not *no reference required*. |
+| `cds` needs bases | a protein-only CDS, whose `orf_atg_to_stop` boundary would be the schema's strongest claim made about a sequence the row does not carry. |
+| allow-list of two | `reference_aa` on a `regulatory`, `origin`, `repeat` or `misc` row. A promoter has no protein; a tag is nothing but protein. |
+| no derived boundary without bases | a peptide-only row claiming `orf_atg_to_stop` or `orf_mature_peptide`. |
+
+**No new `Class` variant, deliberately.** FLAG's boundary is stipulated by Hopp
+et al. 1988; that is `synthetic_part` + `designed_sequence` whether or not the
+row happens to carry nucleotides. A `Class::Peptide` would answer a different
+question — *which index can find this* — which the two reference columns already
+answer exhaustively. It would also split the tag family on an accident of
+sourcing: HA tag has a natural parent and ships with codons, FLAG does not, and
+under a `Peptide` class those two would land in different classes for a reason
+that has nothing to do with either. And `class` is a published string that
+`Class::parse` rejects when unknown, so a new value means every already-released
+reader **refuses** every new row.
+
+**Two rules the annotator applies to a translated hit on a `synthetic_part`
+carrying residues, and to nothing else.** Every shipped row of that shape is
+peptide-only today, but the predicate is `Record::is_designed_peptide` rather
+than `is_peptide_only`, so the rules follow the peptide rather than the absence
+of bases. The nucleotide route is untouched by both.
+
+1. **Exact and whole**, at zero edit distance, regardless of
+   `Config::min_identity`. This used to fall out of the arithmetic — the edit
+   budget is `floor((1 − min_identity) × len)`, which is 0 for short cores at
+   the default 0.96 — but `min_identity` is user-adjustable, and it was never
+   the rule, only a consequence of it. Measured before the rule existed: a
+   36-of-37 match to the SBP tag was reported as an SBP tag *at the default
+   threshold*, with `identity 0.973` and `coverage 1.0`.
+2. **Fused to an ORF, or ignored.** The hit must lie in frame inside an open
+   reading frame of the *query*, with at least 20 residues of that ORF outside
+   the tag. The ORF is detected in the molecule by `pl_core::orf::find_orfs`,
+   not taken from a tier-1 annotation — people tag *their own* protein, not
+   AmpR, so a "must overlap an annotated CDS" rule would be blind in exactly the
+   case these rows exist for. It would also make a tag's visibility depend on
+   the curation state of an unrelated row, and would happily certify a fusion
+   straight through a nonsense mutation the user's clone really has.
+
+*Ignored* is meant literally: a hit that fails the predicate is dropped, with no
+annotation and no fragment.
+
+**What the fusion rule buys, measured rather than asserted.** The quantity is
+the share of the positions at which an 8-residue tag could start in the six
+translated frames that the predicate admits — which is exactly the share of
+chance exact matches that get through — under the shipped defaults:
+
+| substrate | partner floor 20 | 50 | 100 |
+|---|---|---|---|
+| random sequence, 20 × 5 kb | **2.7×** | 6.4× | 40× |
+| pBR322 `J01749`, 4361 bp | **2.1×** | 3.0× | 5.2× |
+| pUC19 `L09137`, 2686 bp | **2.3×** | 4.0× | 10.3× |
+| pTrc99A `U13872`, 4176 bp | **2.1×** | 3.5× | 8.3× |
+
+An earlier version of this section claimed 4.7× here and ~64× at 100, from an
+estimate rather than a run; the numbers above come from `find_orfs` itself over
+the three ENA records named. **Real vectors are what users annotate, and there
+the gate is worth about 2.1×** — they are far denser in coding sequence than
+random DNA, so more of them lies inside some ORF. The conclusion survives the
+correction and strengthens: if a 100-residue floor buys 5–10× on a real vector
+rather than 64×, paying for it with every bacterial small protein is a worse
+bargain than the old number suggested.
+
+**It is not the false-positive control** — exact matching is. It is the clause
+that makes the *claim* ("this is a tag on a protein") mean something.
+
+**What it costs, and these are silent:**
+
+- a tag whose fusion partner is shorter than 20 residues — a tagged peptide
+  antigen, a tagged peptide hormone, a 12-residue display construct;
+- a 5′-truncated fragment: a sequencing read or a Gibson piece covering the
+  middle of a tagged gene has no initiator, so no ORF, so no tag. The commonest
+  real miss;
+- **an empty tagging vector**, conditionally. A cassette not yet fused to an
+  insert has no partner by definition, so whether it is reported depends
+  entirely on where the first in-frame stop falls downstream: 20+ codons of
+  polylinker and stuffer and the tag appears, a prompt stop and it does not.
+  This is exactly what "fused to an ORF, otherwise ignored" instructs, and it
+  will still look like a bug to someone who opens an empty tagging vector and
+  sees nothing;
+- a tag on an exon of a genomic knock-in donor, where the partner's exons are
+  not one ORF;
+- readthrough constructs — amber suppression, selenocysteine recoding, −1
+  frameshift cassettes — where the ribosome makes a protein no ORF finder sees;
+- **a tag on a gene whose initiator the chosen genetic code does not accept.**
+  This one is new with the fusion rule and is worth stating on its own, because
+  it is the only silent miss that depends on a *setting*. `find_orfs` runs with
+  `require_start`, so which codons may initiate decides which ORFs exist at all.
+  The default is now **table 11** — seven initiators, including `GTG` — and it
+  was table 1 until 2026-07-28, under which an N-terminal tag on `TetA`,
+  `AprR`, `HygR`, `lacI` or lambda `int` (five of this database's own 38 CDS
+  rows, all beginning `GTG`) was dropped with no output of any kind. C-terminal
+  tags on the same genes were accidentally rescued by an internal downstream
+  `ATG`, so the miss bit hardest at the N-terminus, which is where His, FLAG and
+  Strep tags usually go. Under table 1 the miss is still real for `GTG`, `ATT`,
+  `ATC` and `ATA` starts; `pl annotate --code <transl_table>` is how to choose,
+  and a eukaryotic construct is a legitimate reason to want table 1's three.
+
+**What it admits that is not a fusion:** a tag inside a long antisense ORF
+(nothing about it is expressed, and no ORF rule can close this); a genuine
+`HHHHHH` inside a real histidine-rich protein; and chance exact hits at the
+residual rate.
+
+Every peptide row's `notes` states these rules, so a user reading one row is
+told how it is matched.

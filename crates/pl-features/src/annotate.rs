@@ -24,14 +24,116 @@
 //! cost is that every feature is found twice; [`dedupe`] resolves that by
 //! position modulo length rather than by identity, so the *origin-spanning* copy
 //! is the one that survives.
+//!
+//! # Peptide parts, and the fusion rule
+//!
+//! Since 2026-07-28 a `synthetic_part` row may be a peptide and nothing else —
+//! FLAG is `DYKDDDDK` and has dozens of synonymous encodings, so a nucleotide
+//! reference for it would be one arbitrary choice that misses every re-coded
+//! copy. Such a row is found only through the translated scan, and only under
+//! two extra rules this module applies and the loader does not:
+//!
+//! 1. **Exactly and wholly, at zero edit distance**, regardless of
+//!    [`Config::min_identity`]. `features/SOURCING.md` §3's false-positive
+//!    arithmetic — eight residues over twenty letters against ~10,000 residue
+//!    positions — holds only under exact matching. A scored aligner on an
+//!    8-mer reports FLAG tags that are not there.
+//! 2. **Fused to an ORF.** The hit must lie in frame inside an open reading
+//!    frame of the *query*, with at least [`PARTNER_MIN`] residues of that ORF
+//!    outside the tag. See [`fused_orf`] for the predicate and what it costs.
+//!
+//! The second is the PI's decision of 2026-07-28, in his words: "add these
+//! sequences, but make sure they are fused to an ORF, otherwise ignored."
+//! *Ignored* is meant literally — a hit that fails the predicate is dropped
+//! from the results with no annotation and no fragment.
 
-use pl_core::iupac;
+use pl_core::orf::{self, Orf, Params};
 use pl_core::translate::{self, Code, Frame};
-use pl_core::{Molecule, Strand};
+use pl_core::{iupac, Molecule, Strand};
 
 use crate::align;
 use crate::index::{Index, K_DNA, K_PROTEIN};
 use crate::{Db, Record};
+
+/// Shortest peptide the fusion predicate is required to be able to accept.
+///
+/// Derived from [`K_PROTEIN`] rather than picked: a peptide shorter than one
+/// seed word produces no window at all, lands in the protein index's `short`
+/// list, and is honestly reported unreachable — so nothing below this length
+/// can reach the predicate by any route, whatever a database says.
+///
+/// Deliberately **lower** than the builder's own `MIN_PEPTIDE_AA = 8`
+/// (`features/build/stage_curated.py`). The loader enforces no length floor at
+/// all, so a hand-authored table may carry a shorter peptide than the build
+/// would issue, and the annotator must not silently discard an ORF such a row
+/// could legitimately have used.
+const MIN_PART_AA: usize = K_PROTEIN;
+
+/// Residues of the ORF that must be something **other than** the tag.
+///
+/// This is the "fused to" clause: a fusion requires a partner, and the partner
+/// must exist. A flat count rather than a ratio, deliberately. The ratio
+/// version — tag at most half the ORF — demands the *most* corroboration from
+/// the tags that need it least: an exact 38-residue SBP match is astronomically
+/// unlikely by chance, and requiring it to sit in a 76 aa ORF buys nothing
+/// while costing real SBP-tagged small proteins. A flat floor puts the
+/// evidential burden on the short peptides, which is where it belongs: FLAG
+/// needs a 28 aa ORF, SBP a 58 aa one.
+///
+/// Why 20 and not 50 or 100, measured rather than asserted. The quantity is
+/// the share of the positions at which an 8-residue tag could start in the six
+/// translated frames that the predicate admits — which is exactly the share of
+/// chance exact matches the gate lets through — under the shipped defaults
+/// ([`Config::code`] = table 11):
+///
+/// ```text
+///                            partner 20   partner 50   partner 100
+///   random, 20 x 5 kb           2.7x         6.4x         40x
+///   pBR322   J01749 4361 bp     2.1x         3.0x        5.2x
+///   pUC19    L09137 2686 bp     2.3x         4.0x       10.3x
+///   pTrc99A  U13872 4176 bp     2.1x         3.5x        8.3x
+/// ```
+///
+/// An earlier version of this comment claimed 4.7x here and ~64x at 100, from
+/// an estimate rather than a run; the numbers above come from `find_orfs`
+/// itself over the three ENA records named. **Real vectors are the ones that
+/// matter, and there the gate is worth about 2.1x** — they are far denser in
+/// coding sequence than random DNA, so more of them is inside some ORF.
+///
+/// The conclusion survives the correction and in fact strengthens. If a
+/// 100-residue floor buys 5-10x on a real vector rather than 64x, then paying
+/// for it with every bacterial small protein — the PI's own field — is a worse
+/// bargain than the old number suggested, and a 50-residue floor drops a
+/// His-tagged 45 aa protein for about 1.6x. **The ORF rule is not the
+/// false-positive control** — exact matching is, and anyone who describes it
+/// otherwise is wrong. This rule is what makes the *claim* ("this is a tag on a
+/// protein") mean something.
+///
+/// Note which constant is doing the work: [`ORF_MIN_AA`] is *not*. Varying
+/// `Params::min_aa` between 25 and 28 moves none of the numbers above, because
+/// this clause already requires `aa_len >= tag_aa + 20` and discards whatever
+/// `min_aa` would have let through. `min_aa` exists to save work, not to
+/// filter.
+///
+/// What it costs, plainly: a genuine fusion whose partner is shorter than 20
+/// residues — a tagged peptide antigen, a tagged peptide hormone, a 12-residue
+/// display construct — is dropped, silently. A 30 aa small protein with a
+/// C-terminal His6 has a 24-residue partner and survives, which is why 20 was
+/// chosen over 50.
+const PARTNER_MIN: usize = 20;
+
+/// [`Params::min_aa`] for the fusion search: the smallest ORF the predicate can
+/// possibly accept, so the search discards nothing the predicate would take.
+const ORF_MIN_AA: usize = MIN_PART_AA + PARTNER_MIN;
+
+// Tied together rather than written as a literal, because the two numbers that
+// decide it live thirty lines apart and a literal would drift from them.
+const _: () = assert!(
+    ORF_MIN_AA == MIN_PART_AA + PARTNER_MIN && MIN_PART_AA >= K_PROTEIN,
+    "the ORF floor must be exactly the shortest acceptable tag plus its \
+     shortest acceptable partner, and no peptide below one seed word can reach \
+     the predicate at all"
+);
 
 /// Knobs, all with the plan's defaults.
 #[derive(Debug, Clone, Copy)]
@@ -68,8 +170,33 @@ pub struct Config {
     /// exception: a hit lying strictly inside a better-scoring one is kept.
     /// See [`resolve_overlaps`].
     pub overlap_trim: f64,
-    /// Match codon-optimised CDSs by six-frame translation.
+    /// Match by six-frame translation.
+    ///
+    /// This finds a marker whose nucleotides were rewritten for expression in
+    /// another organism — and, since 2026-07-28, it is the **only** route to a
+    /// peptide-only synthetic part. Turning it off does not merely make the
+    /// tags harder to find; it makes them matchable by nothing at all, because
+    /// they are in no other index. [`Annotator::unseedable`] reports them under
+    /// that setting, correctly and alarmingly.
     pub protein: bool,
+    /// The genetic code, used by the six-frame scan **and** by the fusion
+    /// rule's ORF search.
+    ///
+    /// One code for both halves, not two. If they differed, the stop that ends
+    /// an ORF would not be the stop the translated frame renders as `*`, and
+    /// the two halves of the fusion predicate would disagree about where the
+    /// protein ends — 13 of the 27 tables do not stop at `TGA`.
+    ///
+    /// # This field decides whether a tag is reported at all
+    ///
+    /// Until the fusion rule existed, `code` reached only
+    /// [`translate::six_frames`], and tables 1 and 11 have the *same* 64 amino
+    /// acids and the *same* three stops — so the start-codon half of the table
+    /// had literally no effect on `annotate()` and the default was inert. It is
+    /// not inert now: [`orf::find_orfs`] runs with `require_start`, so which
+    /// codons may initiate decides which ORFs exist, and an ORF that does not
+    /// exist admits no tag. See [`Config::default`] for why that made table 1
+    /// the wrong default.
     pub code: Code,
 }
 
@@ -83,7 +210,37 @@ impl Default for Config {
             min_match_len: 50,
             overlap_trim: 0.15,
             protein: true,
-            code: translate::TABLE1,
+            // Table 11, not table 1, and the fusion rule is why.
+            //
+            // The concrete failure: splice a FLAG tag in frame after the
+            // initiator of the shipped `lacI` row (PLF:1000) and annotate the
+            // result. Under table 1 the tag is NOT REPORTED; under table 11 it
+            // is found at 4..27, in frame with a 368 aa ORF. Same for `TetA`
+            // (PLF:0006, 407 aa) and lambda `int` (PLF:1007, 613 aa). All three
+            // begin `GTG`, which table 1 does not accept as an initiator, so
+            // `find_orfs` reports no ORF over the gene and the fusion predicate
+            // has nothing to admit the tag on. Five of the 38 CDS rows in this
+            // project's own table start GTG. `orf.rs`'s module doc names the
+            // trap by name: "tet(A) starts GTG, which this project has already
+            // been caught by once."
+            //
+            // Nothing else moves. `TABLE11` has the identical amino-acid string
+            // and the identical stop set to `TABLE1` — verified in
+            // `translate.rs`'s own `table_11_differs_from_table_1_only_in_starts`
+            // — so `six_frames` output is byte-for-byte unchanged and the "one
+            // code for both halves" invariant above still holds: what has to
+            // agree between the ORF finder and the frame is the *stop* set, and
+            // it does.
+            //
+            // The cost, stated: seven initiators instead of three admits more
+            // chance ORFs, and the gate is worth about 2.1x on a real vector
+            // under table 11 against 2.4x under table 1 (see `PARTNER_MIN`).
+            // That is the right trade — a silently missing tag on a real
+            // bacterial gene is a worse answer than a marginally weaker gate,
+            // and the gate was never the false-positive control. A user
+            // annotating a eukaryotic construct, where GTG initiation is not
+            // the norm, can ask for table 1 with `pl annotate --code 1`.
+            code: translate::TABLE11,
         }
     }
 }
@@ -130,6 +287,30 @@ pub struct Annotation {
     pub via_protein: bool,
     /// Runs across the origin of a circular molecule, so `start > end`.
     pub wraps_origin: bool,
+    /// For a peptide-only synthetic part: the ORF the fusion rule admitted it
+    /// on. `None` for every other record, which reaches no fusion rule.
+    ///
+    /// Carried as evidence because the rule is otherwise correct and
+    /// inexplicable. ORF display is a separate feature, so a user can see a
+    /// FLAG tag appear with no visible protein under it and no way to find out
+    /// why. `features/SOURCING.md` §3's stated differentiator is "a hit plus
+    /// how we found it"; this is the how, and a UI that says "in frame with a
+    /// 312 aa ORF at 1204..2139" turns a mysterious result into a checkable
+    /// one.
+    pub fusion_orf: Option<FusionOrf>,
+}
+
+/// The open reading frame a peptide part was admitted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FusionOrf {
+    /// 1-based inclusive, plus-strand, exactly as [`pl_core::orf::Orf`] reports
+    /// them — so `end < start` may mean it crosses the origin, and the
+    /// inclusive range is not its extent. [`FusionOrf::aa_len`] is the length.
+    pub start: u64,
+    pub end: u64,
+    pub strand: Strand,
+    /// Amino acids, excluding the stop.
+    pub aa_len: usize,
 }
 
 impl Annotation {
@@ -153,6 +334,7 @@ impl Annotation {
             is_fragment: false,
             via_protein: false,
             wraps_origin: wraps,
+            fusion_orf: None,
         }
     }
 
@@ -217,6 +399,15 @@ impl<'a> Annotator<'a> {
                 .filter(|i| {
                     // A record with no protein reference was never in the
                     // protein index, so that index cannot rescue it.
+                    //
+                    // The mirror case now exists and is common: a peptide-only
+                    // synthetic part is in `dna.short()` **always**, because it
+                    // has no bases to seed. That is not a defect and the
+                    // intersection is what keeps it from being reported as one.
+                    // With `config.protein` off, the branch below reports every
+                    // such row as unreachable — which is true, and will look
+                    // alarming to anyone who passes `--no-protein` and sees a
+                    // list of named tags they thought were searchable.
                     !self.db.records[*i as usize].has_protein() || protein.contains(i)
                 })
                 .collect()
@@ -245,10 +436,58 @@ impl<'a> Annotator<'a> {
             mol.seq.clone()
         };
 
+        // The ORFs the fusion rule adjudicates against, computed once and only
+        // when the database actually holds a row the rule applies to —
+        // otherwise this is a six-frame ORF search wasted on every call.
+        //
+        // Run on `mol.seq`, **not** on `doubled`. Running it on the 2L text
+        // would treat a circle as linear and throw away the stop
+        // synchronisation that makes ORF calls independent of where the file
+        // was cut; it would report every ORF twice; and it would invent
+        // incomplete ORFs running off the end of an artefact. So the two
+        // subsystems live in different coordinate systems — ORFs in molecule
+        // space, hits in doubled space — and `fused_orf` normalises once.
+        // `is_designed_peptide`, the same predicate `make` gates on. These two
+        // must be the same question: ask it here with `is_peptide_only` and a
+        // row carrying both references gets an EMPTY ORF list, so every hit on
+        // it fails the fusion rule for want of anything to be fused to — a hit
+        // silently dropped by an optimisation rather than by a decision.
+        let orfs: Vec<Orf> = if self.db.records.iter().any(|r| r.is_designed_peptide()) {
+            orf::find_orfs(
+                &mol.seq,
+                self.config.code,
+                mol.topology.is_circular(),
+                &Params {
+                    min_aa: ORF_MIN_AA,
+                    // A linear fragment carrying a tagged ORF that runs off the
+                    // end is a real fusion. On a circle this does nothing:
+                    // `find_orfs` deliberately reports no stopless circular ORF.
+                    include_incomplete: true,
+                    // orf.rs's own module doc: a stop-to-stop run "has no start,
+                    // so it is not a thing that could be translated". "Fused to
+                    // an ORF" means fused to something a ribosome makes. The
+                    // cost is a 5'-truncated fragment — a sequencing read or a
+                    // Gibson piece covering the middle of a tagged gene has no
+                    // initiator, so no ORF, so no tag. That is the commonest
+                    // real miss this rule has.
+                    require_start: true,
+                    // A nested ORF is always a suffix of a reported one, so it
+                    // can never change the predicate's answer: a tag inside the
+                    // suffix is also inside the parent. Pure cost — and
+                    // therefore, by the same argument, unfalsifiable: setting
+                    // it true leaves every test green, as it must. Named here
+                    // so nobody reads the suite's silence as coverage.
+                    nested: false,
+                },
+            )
+        } else {
+            Vec::new()
+        };
+
         let mut hits = Vec::new();
         self.scan_dna(&doubled, len, &mut hits);
         if self.config.protein {
-            self.scan_protein(&doubled, len, &mut hits);
+            self.scan_protein(&doubled, len, &orfs, mol.topology.is_circular(), &mut hits);
         }
 
         let hits = dedupe(hits, len as u64);
@@ -289,6 +528,12 @@ impl<'a> Annotator<'a> {
                         protein: false,
                     },
                     len,
+                    // A peptide-only record has no nucleotides, so it cannot
+                    // reach this scan at all: `db_units == 0` and `make`
+                    // rejects it. There is nothing here for the fusion rule to
+                    // adjudicate, which is why tier 1 needs no ORF list.
+                    &[],
+                    false,
                 ) {
                     out.push(a);
                 }
@@ -298,7 +543,18 @@ impl<'a> Annotator<'a> {
 
     /// §7.7 step 5 — six-frame translation, which is what finds a marker whose
     /// nucleotides were rewritten for expression in another organism.
-    fn scan_protein(&self, doubled: &[u8], len: usize, out: &mut Vec<Annotation>) {
+    ///
+    /// It is also the only route to a peptide-only synthetic part, which is
+    /// why `orfs` is threaded down here and nowhere else: those records are
+    /// adjudicated by the fusion rule inside [`Annotator::make`].
+    fn scan_protein(
+        &self,
+        doubled: &[u8],
+        len: usize,
+        orfs: &[Orf],
+        circular: bool,
+        out: &mut Vec<Annotation>,
+    ) {
         if self.protein.words() == 0 {
             return;
         }
@@ -334,6 +590,8 @@ impl<'a> Annotator<'a> {
                         protein: true,
                     },
                     len,
+                    orfs,
+                    circular,
                 ) {
                     a.via_protein = true;
                     out.push(a);
@@ -391,7 +649,11 @@ impl<'a> Annotator<'a> {
     }
 
     /// Turn a verified match into an annotation, or reject it as too thin.
-    fn make(&self, c: Candidate, len: usize) -> Option<Annotation> {
+    ///
+    /// `orfs` and `circular` are only consulted for a peptide-only synthetic
+    /// part; every other record ignores them entirely, so no existing
+    /// behaviour depends on them.
+    fn make(&self, c: Candidate, len: usize, orfs: &[Orf], circular: bool) -> Option<Annotation> {
         let Candidate {
             record,
             span,
@@ -411,6 +673,65 @@ impl<'a> Annotator<'a> {
         // while `start <= end`, with `len()` bigger than the molecule and
         // coverage 1.000. Clamp the span so those three agree.
         let span = (span.0, span.1.min(span.0 + len));
+
+        // The two rules that apply to a TRANSLATED hit on a designed peptide
+        // part, and to nothing else. Placed here, after the second-copy
+        // rejection and after the clamp, because that placement is
+        // load-bearing: `span.0 >= len` has already dropped the copy of an
+        // origin-spanning hit that lives wholly in the doubled text's second
+        // half, so each occurrence is adjudicated exactly once, with `span.0`
+        // in `[0, L)` — which is what `fused_orf`'s anchor arithmetic assumes.
+        //
+        // The scope is [`Record::is_designed_peptide`] — a `synthetic_part`
+        // carrying residues — and NOT `is_peptide_only`. The difference is a
+        // row carrying both a nucleotide reference and a peptide, which the
+        // relaxed schema permits and no shipped row has. Keyed on the absence
+        // of nucleotides, such a row would take an eight-residue peptide into
+        // the six-frame scan with no exactness rule and no ORF anywhere: a hole
+        // opened by the shape of a row rather than by anything anyone decided,
+        // and the loader is this project's answer to "discipline is not a
+        // control". Keyed on the peptide, the rules follow the thing they are
+        // about.
+        //
+        // `protein &&` rather than `!protein || … return None`, and that is the
+        // other half of the same fix. The extra rules are about the TRANSLATED
+        // route; a `synthetic_part` that carries real nucleotides — the eight
+        // parented tags, HA through F2A — must keep finding them by tier 1
+        // exactly as it did before any of this, ungated.
+        let mut fusion = None;
+        let rec = &self.db.records[record];
+        if protein && rec.is_designed_peptide() {
+            let aa = rec.reference_aa.as_deref().unwrap_or_default();
+            // EXACT AND WHOLE, regardless of `Config::min_identity`.
+            //
+            // Today this falls out of the arithmetic — `budget()` returns
+            // `floor((1 - 0.96) * len)`, which is 0 for anything under 25
+            // residues — but `min_identity` is documented as user-adjustable,
+            // and at 0.80 an 8-mer gets a budget of 1 and a 7-of-8 match passes
+            // the identity test. The annotator would then report FLAG tags that
+            // are not there, which is precisely what SOURCING.md §3's rule
+            // ("features under ~15 aa are matched exactly, never by scored
+            // alignment") exists to prevent. Asserted rather than inherited.
+            //
+            // Whole as well as exact, and at every length rather than only
+            // under 15 aa: these are *designed* parts whose boundary is the
+            // design, so a 12-residue partial of the 38-residue SBP tag is not
+            // a fragment of anything and must not be drawn as one. A useful
+            // side effect is that `is_fragment` below can never be true here,
+            // so the fragment machinery needs no special case.
+            if m.aligned != aa.len() || m.identity < 1.0 {
+                return None;
+            }
+            // FUSED TO AN ORF, or ignored. The PI's decision of 2026-07-28.
+            let hit = fused_orf(orfs, strand, span, len, m.aligned, circular)?;
+            fusion = Some(FusionOrf {
+                start: hit.start,
+                end: hit.end,
+                strand: hit.strand,
+                aa_len: hit.aa_len,
+            });
+        }
+
         let coverage = (m.aligned.min(db_units) as f64 / db_units as f64).min(1.0);
         // Too little of the feature to be a claim about the feature at all.
         if coverage < self.config.min_coverage {
@@ -437,8 +758,161 @@ impl<'a> Annotator<'a> {
         // §7.7 step 7.
         a.score = (span.1 - span.0) as f64 * a.identity * a.coverage;
         a.is_fragment = a.coverage < self.config.fragment_coverage;
+        a.fusion_orf = fusion;
         Some(a)
     }
+}
+
+/// The fusion predicate: is this peptide hit in frame inside an ORF, with a
+/// partner?
+///
+/// Returns the ORF it was admitted on, or `None`. **Any** ORF satisfying it is
+/// enough — `.any()`, never one emission per ORF, because a tag sitting inside
+/// a forward ORF and an overlapping reverse one must produce one annotation
+/// rather than two.
+///
+/// # Inputs
+///
+/// `span` is 0-based half-open in **doubled** coordinates, with `span.0 < len`
+/// guaranteed by the caller; `len` is the molecule's length; `tag_aa` is the
+/// residues actually matched, which the caller's exactness rule has already
+/// forced to be the whole peptide.
+///
+/// # Five things it deliberately does not do
+///
+/// 1. **It never compares frame numbers.** `Frame::offset` is an offset into
+///    the doubled text; `Orf::frame` is an offset into the *reverse complement*
+///    for a reverse ORF, and for a merged circular frame (`L % 3 != 0`) it is
+///    not a frame index at all but the offset from the origin. Comparing the
+///    two is a category error that would be right about a third of the time.
+///    `d % 3 == 0` asks the same question in one coordinate system and is
+///    immune to all of it — which is also why the doubled text's six frames not
+///    being the circle's six frames never has to be reasoned about.
+/// 2. **It never branches on `Orf::wrapped`.** It is not needed.
+/// 3. **It never uses `end - start` as an extent.** orf.rs is explicit that the
+///    inclusive range is not the extent when `laps != 0`, and that `end < start`
+///    is not a test for origin-crossing.
+/// 4. **It uses `3 * aa_len`, not `Orf::bases()`.** `bases()` includes the stop
+///    codon and `aa_len` excludes it. The two differ observably in tables 27,
+///    28 and 31, where a codon can be both a terminator and a residue — in
+///    table 31 `TAA` and `TAG` are stops *and* encode `E`, so a C-terminal
+///    AviTag or ALFA-tag whose final E sits on such a codon is rejected. That
+///    is a named miss and the right call: orf.rs's own `is_ambiguous_stop` doc
+///    says an ORF ending there is a guess.
+///
+///    **Honest status: no test in this crate distinguishes the two.** Swapping
+///    `3 * aa_len` for `bases()` changes no fixture's verdict, because every
+///    fixture uses table 1, where the two differ by exactly the stop codon and
+///    no peptide can occupy it. This clause is defensive, and saying it is
+///    covered would be a claim the suite does not support.
+/// 5. **`d >= 0` and `<=`, not `d > 0` and `<`.** Both boundaries are hit by
+///    ordinary real constructs; see the containment test's own comment.
+///
+/// # Internal stops need no separate clause
+///
+/// `find_orfs` with `require_start: true` returns a run from a start codon to
+/// the **first** in-frame stop, so by construction there is no in-frame stop
+/// strictly inside `[0, 3 * aa_len)`. `d >= 0` puts the tag downstream of the
+/// initiator and `d + 3 * tag_aa <= 3 * aa_len` puts it upstream of the
+/// terminator, so nothing terminating lies between them. This is a property a
+/// tier-1 CDS annotation would *not* have had: a database CDS mapped onto a
+/// user's construct carries the database's extent, so a clone that has acquired
+/// a nonsense mutation would still be certified as a fusion straight through a
+/// stop codon that is really there.
+fn fused_orf(
+    orfs: &[Orf],
+    strand: Strand,
+    span: (usize, usize),
+    len: usize,
+    tag_aa: usize,
+    circular: bool,
+) -> Option<&Orf> {
+    // `Strand` has four variants and neither subsystem produces the other two,
+    // but a `_ =>` arm falling through to Forward would silently adjudicate an
+    // unoriented hit on the plus strand. Refuse instead.
+    //
+    // HONEST STATUS: defensive and uncovered, like the `laps` loop and
+    // `3 * aa_len` below. `scan_protein` derives `strand` from `frame.reverse`
+    // alone, so only Forward and Reverse ever arrive, and turning this arm into
+    // an ordinary non-match leaves the whole suite green. It is kept because
+    // the cost is one line and the alternative — a wildcard — is the shape of
+    // bug that produces a confident answer about the wrong strand, not because
+    // a test says it fires.
+    let rev = match strand {
+        Strand::Forward => false,
+        Strand::Reverse => true,
+        Strand::Unoriented | Strand::Both => return None,
+    };
+    let (s, e) = span;
+    if len == 0 || e <= s {
+        return None;
+    }
+
+    orfs.iter().find(|o| {
+        if o.strand != strand {
+            return false;
+        }
+        // Both anchors are 0-based, plus-strand, and inside [0, L).
+        //
+        // A reverse ORF's 5' end is its HIGH plus-strand coordinate:
+        // `orf::make` maps reverse-complement index `from` — the start codon —
+        // to plus-strand `n - 1 - from`, which lands on `Orf::end`.
+        // Symmetrically `residues_to_bases` returns `(last.0, first.1)` for a
+        // reverse frame, so the tag's first residue occupies `[e - 3, e)` and
+        // its 5'-most base is `e - 1`. The `% len` is required because `e` may
+        // exceed `len` for an origin-spanning tag; `s` never does. Swapping
+        // these two anchors is the mirrored-coordinate bug that
+        // `residues_to_bases` already carries a comment about.
+        let (o5, t5) = if rev {
+            (o.end as usize - 1, (e - 1) % len)
+        } else {
+            (o.start as usize - 1, s)
+        };
+
+        // Distance from the ORF's initiator to the tag's first base, measured
+        // along the ORF's own reading direction.
+        let d0 = if circular {
+            if rev {
+                (o5 + len - t5) % len
+            } else {
+                (t5 + len - o5) % len
+            }
+        } else {
+            // Deliberately not `% len` on a linear molecule. It happens to be
+            // harmless — the wrapped value always overshoots containment — but
+            // relying on that coincidence is unreadable and one edit from wrong.
+            if rev {
+                if o5 < t5 {
+                    return false;
+                }
+                o5 - t5
+            } else {
+                if t5 < o5 {
+                    return false;
+                }
+                t5 - o5
+            }
+        };
+
+        let coding = 3 * o.aa_len;
+        // `laps` is enumerated because when 3 does not divide L the frame
+        // visits every position, one turn is L codons, and the ORF can walk up
+        // to 3L bases — so the same physical base is visited up to three times
+        // at different codon offsets, and `d0` alone cannot say which visit the
+        // tag is on. Since `laps != 0` only when `3 ∤ L`, at most one k in any
+        // three consecutive values can satisfy `d % 3 == 0`, so this is not
+        // ambiguous. Honest status: defensive, not demonstrated — `laps >= 1`
+        // requires `3 * aa_len + 3 > L`, and the partner floor forces
+        // `aa_len >= 25`, so `L <= 78`. A circular molecule under 78 bp is not
+        // a plasmid. Two lines, kept so the code cannot misbehave on a small
+        // circle, and not claimed to be covered by a test.
+        (0..=o.laps as usize).any(|k| {
+            let d = d0 + k * len;
+            d % 3 == 0                                     // in frame with the ORF
+                && d + 3 * tag_aa <= coding                // inside its coding part
+                && o.aa_len >= tag_aa + PARTNER_MIN // fused to something
+        })
+    })
 }
 
 /// Everything needed to decide whether a verified match becomes an annotation.
@@ -700,6 +1174,269 @@ mod tests {
             patent_flag: false,
             notes: String::new(),
         }
+    }
+
+    /// A peptide-only synthetic part: the shape decision 1 created.
+    ///
+    /// No nucleotides at all, which is the point — a tag has dozens of
+    /// synonymous encodings and any one of them would be an arbitrary choice.
+    fn peptide(id: &str, aa: &str) -> Record {
+        Record {
+            id: id.into(),
+            name: id.into(),
+            aliases: vec![],
+            class: Class::SyntheticPart,
+            genbank_key: "misc_feature".into(),
+            reference_nt: Vec::new(),
+            reference_aa: Some(aa.as_bytes().to_ascii_uppercase()),
+            boundary_rule: BoundaryRule::DesignedSequence,
+            boundary_evidence: "test".into(),
+            description: String::new(),
+            review_status: ReviewStatus::Proposed,
+            curator: String::new(),
+            date_added: "2026-07-28".into(),
+            patent_flag: false,
+            notes: String::new(),
+        }
+    }
+
+    /// The FLAG epitope, as `features/build/stage_curated.py` declares it and
+    /// as RCSB polymer entity 8RMO_1 ("FLAG-tag") carries it in full.
+    ///
+    /// Not recalled: this is the same eight residues the shipped table holds,
+    /// and the row it belongs to is PLF:3000.
+    const FLAG: &str = "DYKDDDDK";
+
+    /// The SBP-tag, from RCSB polymer entity 4JO6_2 ("SBP-Tag", the entire
+    /// entity) — PLF:3011 in the shipped table.
+    ///
+    /// Used here for one property no other shipped part has: it **begins with
+    /// M**, so it can be placed with its own first residue as the ORF's
+    /// initiator, which is the `d == 0` boundary of the containment test.
+    const SBP: &str = "MDEKTTGWRGGHVVEGLAGELEQLRARLEHHPQGQREP";
+
+    /// (GGGGS)4, the flexible linker shipped as PLF:3026.
+    ///
+    /// Here for one mechanical property rather than a biological one: 20
+    /// residues — long enough to clear `min_match_len / 3` — and encodable
+    /// under [`encode`]'s start-free constraint, which SBP is not. See
+    /// [`encode`]'s note on tryptophan.
+    const GS_LINKER: &str = "GGGGSGGGGSGGGGSGGGGS";
+
+    /// Filler for the sense codons of a fixture ORF.
+    ///
+    /// GC-only, and `GCC` rather than `GCT`. `GCT` repeated spells `CTG` in
+    /// frame 1, which is a table-1 start codon, so a fixture meant to hold one
+    /// ORF quietly grows a second and a negative fixture passes for the wrong
+    /// reason. pl-core's own `orf.rs` carries the same constant and asserts the
+    /// property; this is the second place that trap bites.
+    const FILLER: &str = "GCC";
+
+    /// Back-translate `peptide` into DNA that cannot fabricate an ORF around
+    /// itself.
+    ///
+    /// The constraint is the trap this whole fixture family is built on. An
+    /// encoding is usable only if no **forward** frame of
+    /// `GCCGCC + dna + GCCGCC` spells a start or a stop:
+    ///
+    /// - without the no-stop half, the out-of-frame fixture's displaced tag
+    ///   codons spell a terminator and truncate the very ORF the fixture
+    ///   needs — so it passes while testing nothing;
+    /// - without the no-start half, the outside-any-ORF fixture grows an ORF of
+    ///   its own, and the tag is then admitted *correctly*, for a reason the
+    ///   fixture did not intend.
+    ///
+    /// Forward frames only, deliberately. A start or stop on the reverse strand
+    /// can only produce a reverse ORF, and the predicate's first clause refuses
+    /// an ORF whose strand differs from the hit's — so a reverse artefact
+    /// cannot change any answer here. Constraining six frames instead of three
+    /// makes some peptides unencodable for no gain.
+    ///
+    /// A depth-first search with backtracking, not random draws. The constraint
+    /// is genuinely tight — codon boundaries interact across residues, so
+    /// `...GGA` followed by `TGG` for Trp spells `ATG` in the next frame along
+    /// and only `GGG` before it works — and a 37-residue peptide is never going
+    /// to satisfy it by chance. Randomised option order with a fixed seed keeps
+    /// the result deterministic without making it look hand-picked.
+    ///
+    /// # Which peptides this is impossible for, and why it got worse
+    ///
+    /// Because the three forward frames together cover every offset, the
+    /// constraint is really "no three-base window anywhere spells a start or a
+    /// stop". Under the shipped table 11 the forbidden set is ten words — the
+    /// three stops plus seven initiators — and that makes whole residues
+    /// unencodable rather than merely awkward:
+    ///
+    /// - **M**, whose only codon `ATG` is an initiator in every table;
+    /// - **I**, whose three codons `ATT`/`ATC`/`ATA` are *all* table-11 starts;
+    /// - **W** anywhere but the first position: its only codon is `TGG`, and
+    ///   every base that could precede it makes `ATG`, `CTG`, `GTG` or `TTG`.
+    ///
+    /// SBP-tag contains W, so no start-free encoding of it exists at all — a
+    /// fact discovered when [`Config::default`] moved to table 11 and three
+    /// fixtures stopped building. Those fixtures use [`encode_stopless`] and
+    /// say why.
+    fn encode(peptide: &str, code: Code, rng: &mut Rng) -> String {
+        encode_in(peptide, code, rng, FILLER, false, true)
+    }
+
+    /// [`encode`], forbidding stops but **not** starts.
+    ///
+    /// For the peptides the full constraint cannot express (see above). The
+    /// weaker guarantee is enough wherever a fixture's tag sits in a frame
+    /// whose *first* start is the fixture's own initiator: an extra start in
+    /// another frame produces an ORF the predicate cannot use, because
+    /// containment demands `d % 3 == 0` in the ORF's own frame, and an extra
+    /// start further into the same frame is nested and suppressed by
+    /// `Params::nested: false`. It is **not** enough for a fixture that needs
+    /// "no ORF covers this at all"; those must use a peptide [`encode`] can
+    /// handle, and each such call site says which property it is relying on.
+    fn encode_stopless(peptide: &str, code: Code, rng: &mut Rng) -> String {
+        encode_in(peptide, code, rng, FILLER, false, false)
+    }
+
+    /// `encode`, with the surrounding filler, the reverse-frame constraint and
+    /// the start constraint under the caller's control.
+    ///
+    /// `rev0` additionally forbids a stop in frame 0 of the encoding's *reverse
+    /// complement*, which one fixture needs: the reverse-ORF test plants the
+    /// tag so that its reverse complement sits inside a reverse-strand reading
+    /// frame, and a stop there would truncate the very ORF the fixture is built
+    /// around.
+    fn encode_in(
+        peptide: &str,
+        code: Code,
+        rng: &mut Rng,
+        filler: &str,
+        rev0: bool,
+        no_starts: bool,
+    ) -> String {
+        assert!(
+            !no_starts || !peptide.contains('M'),
+            "methionine's only codon is ATG, which is a start codon in every \
+             table, so no encoding of {peptide} can avoid fabricating an ORF"
+        );
+        let options: Vec<Vec<[u8; 3]>> = peptide
+            .bytes()
+            .map(|aa| {
+                let mut v = Vec::new();
+                for b1 in b"TCAG" {
+                    for b2 in b"TCAG" {
+                        for b3 in b"TCAG" {
+                            let c = [*b1, *b2, *b3];
+                            if code.codon(&c) == aa {
+                                v.push(c);
+                            }
+                        }
+                    }
+                }
+                assert!(!v.is_empty(), "no codon encodes {}", aa as char);
+                // Shuffled so the fixtures are not all first-codon-in-TCAG-order,
+                // which would make them agree with each other by construction.
+                for i in (1..v.len()).rev() {
+                    v.swap(i, (rng.next() % (i as u64 + 1)) as usize);
+                }
+                v
+            })
+            .collect();
+
+        // The context the tag will actually sit in, so the joins at both ends
+        // are constrained too.
+        let pad = filler.repeat(2);
+        let mut dna: Vec<u8> = pad.as_bytes().to_vec();
+        // Every codon that became complete when three bytes were appended at
+        // `p` starts at `p - 2`, `p - 1` or `p`.
+        let forbidden = |c: &[u8]| code.is_stop(c) || (no_starts && code.is_start(c));
+        let joins_clean = |dna: &[u8], p: usize| -> bool {
+            (p.saturating_sub(2)..=p).all(|i| i + 3 > dna.len() || !forbidden(&dna[i..i + 3]))
+        };
+        let rev_clean = |dna: &[u8]| -> bool {
+            !rev0
+                || iupac::reverse_complement(dna)
+                    .chunks_exact(3)
+                    .all(|c| !code.is_stop(c))
+        };
+        let mut choice = vec![0usize; options.len()];
+        let mut at = 0usize;
+        let mut steps = 0u64;
+        while at < options.len() {
+            steps += 1;
+            assert!(
+                steps < 5_000_000,
+                "the search for an encoding of {peptide} did not terminate"
+            );
+            if choice[at] >= options[at].len() {
+                choice[at] = 0;
+                assert!(at > 0, "no encoding of {peptide} satisfies the constraint");
+                at -= 1;
+                dna.truncate(dna.len() - 3);
+                choice[at] += 1;
+                continue;
+            }
+            let p = dna.len();
+            dna.extend_from_slice(&options[at][choice[at]]);
+            // `rev_clean` is re-checked over the whole prefix rather than
+            // incrementally: reverse-complementing reverses the codon
+            // boundaries, so appending three bases changes which reverse codons
+            // exist from the front, not only at the end.
+            if joins_clean(&dna, p) && rev_clean(&dna[pad.len()..]) {
+                at += 1;
+            } else {
+                dna.truncate(p);
+                choice[at] += 1;
+            }
+        }
+        dna.extend_from_slice(pad.as_bytes());
+
+        // The definitive check, over the whole padded string in all three
+        // forward frames. The incremental test above is an optimisation and
+        // this is the claim.
+        for f in 0..3 {
+            for c in dna[f..].chunks_exact(3) {
+                assert!(
+                    !forbidden(c),
+                    "the encoding of {peptide} spells {} in frame {f}",
+                    String::from_utf8_lossy(c)
+                );
+            }
+        }
+        let out = String::from_utf8(dna[pad.len()..dna.len() - pad.len()].to_vec()).unwrap();
+        assert_eq!(
+            code.translate(out.as_bytes()),
+            peptide.as_bytes(),
+            "the encoding does not spell the peptide it was asked for"
+        );
+        out
+    }
+
+    /// The code every fusion fixture below must be built under.
+    ///
+    /// Read off `Config::default()` rather than written as `TABLE1`, and that
+    /// is load-bearing rather than tidy. `encode` guarantees its output spells
+    /// no start codon *for the code it is given*; if that code is not the one
+    /// the annotator runs `find_orfs` with, a fixture meant to hold one ORF can
+    /// quietly grow another, and a negative case then passes for the wrong
+    /// reason. Tying the two together means changing the annotator's default —
+    /// which is exactly what the GTG regression below forced — cannot leave a
+    /// fixture silently mis-built.
+    fn fixture_code() -> Code {
+        Config::default().code
+    }
+
+    /// Does some translated frame of `seq` contain `peptide` verbatim?
+    ///
+    /// The guard every negative fixture below needs. Without it, "the tag was
+    /// not reported" is equally consistent with "the fusion rule rejected it"
+    /// and with "the tag is not in this molecule at all", and only the first is
+    /// what the test claims to show.
+    fn six_frame_contains(seq: &[u8], peptide: &str) -> bool {
+        translate::six_frames(seq, translate::TABLE1)
+            .iter()
+            .any(|f| {
+                f.protein
+                    .windows(peptide.len())
+                    .any(|w| w == peptide.as_bytes())
+            })
     }
 
     fn db_of(r: Vec<Record>) -> Db {
@@ -1246,6 +1983,801 @@ mod tests {
         let db = db_of(vec![rec("pf:a", "ACGTACGTACGTACGT", false)]);
         let ann = Annotator::new(&db, Config::default());
         assert!(ann.annotate(&mol("", false)).is_empty());
+    }
+
+    // ----------------------------------------------------------------
+    // The fusion rule. PI decision, 2026-07-28: "add these sequences, but make
+    // sure they are fused to an ORF, otherwise ignored."
+
+    #[test]
+    fn a_tag_is_found_in_frame_in_an_orf_and_nowhere_else() {
+        // THE test that carries the PI's requirement, so it is built to be
+        // impossible to explain away: ONE base molecule, ONE tag sequence, and
+        // the only thing that changes between the three cases is the byte
+        // offset the tag is inserted at.
+        //
+        //   A  at a codon boundary inside the ORF   -> found
+        //   B  one base later, so out of frame      -> not found
+        //   C  in the 5' flank, outside any ORF     -> not found
+        //
+        // Every case is guarded, because "no annotation" is otherwise equally
+        // consistent with "the gate worked" and "the matcher never saw it".
+        let mut rng = Rng(0x0f1a_0000_0000_0001);
+        let code = fixture_code();
+        let tag = encode(FLAG, code, &mut rng);
+        assert_eq!(tag.len(), 24);
+
+        let flank = FILLER.repeat(30); // 90 bases, no start and no stop
+        let orf = format!("ATG{}TAA", FILLER.repeat(80));
+        let base = format!("{flank}{orf}{flank}");
+        let at = |pos: usize| mol(&format!("{}{tag}{}", &base[..pos], &base[pos..]), false);
+
+        // 90 flank + 3 initiator + 40 filler codons: the boundary of codon 42.
+        let in_frame = flank.len() + 3 + 120;
+        let cases = [
+            ("in frame inside the ORF", at(in_frame), true),
+            ("one base out of frame", at(in_frame + 1), false),
+            ("outside any ORF", at(45), false),
+        ];
+
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let ann = Annotator::new(&db, Config::default());
+        for (label, m, want) in &cases {
+            // Guard 1: the tag really is in this molecule, translated, in some
+            // frame. If this ever fails the negative cases prove nothing.
+            assert!(
+                six_frame_contains(&m.seq, FLAG),
+                "{label}: the fixture does not contain the peptide at all"
+            );
+            let found = ann.annotate(m);
+            assert_eq!(
+                !found.is_empty(),
+                *want,
+                "{label}: expected found={want}, got {found:?}"
+            );
+            if *want {
+                let f = &found[0];
+                assert!(f.via_protein);
+                assert_eq!(f.strand, Strand::Forward);
+                assert_eq!(f.len(m.seq.len() as u64), 24, "eight residues of bases");
+                // The evidence the UI needs in order to explain the call.
+                let ev = f.fusion_orf.expect("the ORF it was admitted on");
+                assert_eq!(ev.strand, Strand::Forward);
+                assert_eq!(ev.aa_len, 89, "1 initiator + 80 filler + 8 tag");
+                assert_eq!(ev.start, flank.len() as u64 + 1);
+            }
+        }
+
+        // Guard 2, for case B specifically: the ORF is still there and still
+        // covers the tag. Without this the fixture could be passing because the
+        // displaced tag codons truncated the ORF — the exact trap the `encode`
+        // constraint exists to avoid, so it is asserted rather than assumed.
+        let out = &cases[1].1;
+        let orfs = orf::find_orfs(
+            &out.seq,
+            code,
+            false,
+            &Params {
+                min_aa: ORF_MIN_AA,
+                include_incomplete: true,
+                require_start: true,
+                nested: false,
+            },
+        );
+        let covering = orfs.iter().find(|o| {
+            o.strand == Strand::Forward
+                && (o.start as usize) <= in_frame + 1
+                && in_frame + 1 + 24 <= o.end as usize
+        });
+        let covering = covering.expect("the ORF must still span the tag; it was truncated");
+        assert_eq!(covering.aa_len, 89, "and it must still be full length");
+
+        // Guard 3, for case C: no ORF covers the tag there, which is what
+        // "outside any ORF" is supposed to mean.
+        let outside = &cases[2].1;
+        let orfs = orf::find_orfs(
+            &outside.seq,
+            code,
+            false,
+            &Params {
+                min_aa: ORF_MIN_AA,
+                include_incomplete: true,
+                require_start: true,
+                nested: false,
+            },
+        );
+        assert!(
+            !orfs
+                .iter()
+                .any(|o| (o.start as usize) <= 46 && 46 + 24 <= o.end as usize),
+            "case C grew an ORF of its own, so it tests the wrong thing: {orfs:?}"
+        );
+    }
+
+    #[test]
+    fn a_tag_separated_from_its_orf_by_an_in_frame_stop_is_not_found() {
+        // A tag downstream of an in-frame terminator, inside what *looks* like
+        // one long coding region. `find_orfs` with `require_start` returns the
+        // run to the FIRST in-frame stop, so the containment test alone
+        // excludes this and no separate clause is needed — which is a property
+        // a tier-1 CDS rule would not have had. A database CDS mapped onto a
+        // clone that has acquired a nonsense mutation still carries the
+        // database's extent, so a containment-in-the-annotation test would
+        // certify a fusion straight through a stop codon that is really there.
+        let mut rng = Rng(0x0f1a_0000_0000_0002);
+        let code = fixture_code();
+        let tag = encode(FLAG, code, &mut rng);
+        let f30 = FILLER.repeat(30);
+
+        // The ONE codon that differs between the two molecules.
+        let build = |middle: &str| {
+            mol(
+                &format!(
+                    "{}ATG{f30}{middle}{f30}{tag}{f30}TAA{}",
+                    FILLER.repeat(10),
+                    FILLER.repeat(10)
+                ),
+                false,
+            )
+        };
+        let broken = build("TAA");
+        let whole = build(FILLER);
+        assert_eq!(broken.seq.len(), whole.seq.len(), "one codon, not one base");
+
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        assert!(six_frame_contains(&broken.seq, FLAG));
+        assert!(
+            ann.annotate(&broken).is_empty(),
+            "a tag past an in-frame stop was called a fusion"
+        );
+        // The ORF list shows *why*: the run ends at the first stop, before the
+        // tag.
+        let orfs = orf::find_orfs(
+            &broken.seq,
+            code,
+            false,
+            &Params {
+                min_aa: ORF_MIN_AA,
+                include_incomplete: true,
+                require_start: true,
+                nested: false,
+            },
+        );
+        assert!(
+            orfs.iter()
+                .any(|o| o.strand == Strand::Forward && o.aa_len == 31 && o.complete),
+            "expected a 31 aa ORF ending at the planted stop: {orfs:?}"
+        );
+
+        // The control: remove the stop, change nothing else, and the same tag
+        // at the same place is found.
+        let found = ann.annotate(&whole);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].fusion_orf.unwrap().aa_len, 100);
+    }
+
+    #[test]
+    fn an_n_terminal_and_a_c_terminal_tag_are_both_found_on_both_strands() {
+        // The boundary arithmetic, and both boundaries are the NORMAL case
+        // rather than an edge:
+        //
+        //   C-terminal  ->  d + 3*tag_aa == 3*aa_len exactly. An implementer
+        //                   who writes `<` here ships a tool that finds no
+        //                   C-terminal tag at all, which is about half of all
+        //                   tagging.
+        //   N-terminal  ->  d == 3, the initiator then the tag.
+        //
+        // Run on both strands, because the reverse anchor is the ORF's HIGH
+        // plus-strand coordinate and swapping the two anchors is the
+        // mirrored-coordinate bug `residues_to_bases` already carries a comment
+        // about.
+        let mut rng = Rng(0x0f1a_0000_0000_0003);
+        let code = fixture_code();
+        let tag = encode(FLAG, code, &mut rng);
+        let f40 = FILLER.repeat(40);
+
+        let n_terminal = format!("ATG{tag}{f40}TAA");
+        let c_terminal = format!("ATG{f40}{tag}TAA");
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        for (label, construct) in [("N-terminal", &n_terminal), ("C-terminal", &c_terminal)] {
+            for reverse in [false, true] {
+                let body = if reverse {
+                    String::from_utf8(iupac::reverse_complement(construct.as_bytes())).unwrap()
+                } else {
+                    construct.clone()
+                };
+                let m = mol(
+                    &format!("{}{body}{}", FILLER.repeat(30), FILLER.repeat(30)),
+                    false,
+                );
+                let found = ann.annotate(&m);
+                assert_eq!(found.len(), 1, "{label}, reverse={reverse}: {found:?}");
+                assert_eq!(
+                    found[0].strand,
+                    if reverse {
+                        Strand::Reverse
+                    } else {
+                        Strand::Forward
+                    },
+                    "{label}, reverse={reverse}"
+                );
+                let ev = found[0].fusion_orf.unwrap();
+                assert_eq!(ev.aa_len, 49, "{label}, reverse={reverse}");
+                // ...and the bases named really do translate to the tag, read
+                // the way the strand says to.
+                let region = &m.seq[(found[0].start - 1) as usize..found[0].end as usize];
+                let read = if reverse {
+                    iupac::reverse_complement(region)
+                } else {
+                    region.to_vec()
+                };
+                assert_eq!(code.translate(&read), FLAG.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn a_tag_whose_own_first_residue_is_the_initiator_is_found() {
+        // The N-terminal off-by-one that actually bites: `d == 0`, reached by a
+        // shipped part rather than by a hypothetical. SBP-tag begins with M, so
+        // a construct can place its own first residue as the initiator, and
+        // `d > 0` would reject it.
+        let mut rng = Rng(0x0f1a_0000_0000_0004);
+        let code = fixture_code();
+        // The initiator must be a literal ATG for the tag's first residue to be
+        // both the M of the peptide and the ORF's start codon, so the tag's
+        // remaining residues are encoded and prepended with ATG.
+        //
+        // `encode_stopless`, because SBP contains W and no start-free encoding
+        // of it exists under table 11. Safe here, and the assertion on
+        // `aa_len` below is what proves it: the tag's frame is fixed, so only
+        // an ORF in that frame can admit it, the first start in that frame is
+        // this fixture's own ATG, and anything further in is nested and
+        // suppressed. If a stray start ever did displace the winning ORF, the
+        // 78 would move.
+        let rest = encode_stopless(&SBP[1..], code, &mut rng);
+        let construct = format!("ATG{rest}{}TAA", FILLER.repeat(40));
+        let m = mol(
+            &format!("{}{construct}{}", FILLER.repeat(30), FILLER.repeat(30)),
+            false,
+        );
+        assert!(six_frame_contains(&m.seq, SBP));
+
+        let db = db_of(vec![peptide("pf:sbp", SBP)]);
+        let found = Annotator::new(&db, Config::default()).annotate(&m);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].fusion_orf.unwrap().aa_len, 38 + 40);
+        assert_eq!(found[0].start, 91, "the tag starts at the initiator");
+    }
+
+    #[test]
+    fn a_fusion_across_the_origin_of_a_circle_is_found() {
+        // The case a linear reading cannot see, and the one where the anchor
+        // arithmetic has to reduce a hit whose span runs past the molecule's
+        // length back into `[0, L)`. Both the ORF and the tag straddle base 1.
+        let mut rng = Rng(0x0f1a_0000_0000_0005);
+        let code = fixture_code();
+        let tag = encode(FLAG, code, &mut rng);
+        let f40 = FILLER.repeat(40);
+        let construct = format!("ATG{f40}{tag}{f40}TAA");
+        assert_eq!(construct.len(), 270);
+
+        // Cut through the middle of the tag itself, so the tag crosses the
+        // origin as well as the ORF.
+        let cut = 3 + 120 + 12;
+        let seq = format!(
+            "{}{}{}",
+            &construct[cut..],
+            FILLER.repeat(30),
+            &construct[..cut]
+        );
+        assert_eq!(seq.len() % 3, 0, "distinct frames keeps the fixture simple");
+        let m = mol(&seq, true);
+
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let found = Annotator::new(&db, Config::default()).annotate(&m);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let f = &found[0];
+        assert!(f.wraps_origin, "{f:?}");
+        assert_eq!(f.len(m.seq.len() as u64), 24);
+        assert_eq!(f.fusion_orf.unwrap().aa_len, 89);
+
+        // The linear reading of the same bases must NOT find it, which is what
+        // makes this a test of the circular path rather than of luck.
+        let flat = mol(&seq, false);
+        assert!(
+            Annotator::new(&db, Config::default())
+                .annotate(&flat)
+                .is_empty(),
+            "a linear molecule has no way round"
+        );
+    }
+
+    #[test]
+    fn a_tag_with_no_partner_is_not_a_fusion() {
+        // "Fused to" needs something to be fused to. The floor is on the ORF's
+        // residues OUTSIDE the tag, so it asks the most of the shortest
+        // peptides, which is where the evidential burden belongs.
+        let mut rng = Rng(0x0f1a_0000_0000_0006);
+        let code = fixture_code();
+        let tag = encode(FLAG, code, &mut rng);
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        // partner = 1 initiator + n filler residues. The rule is
+        // `aa_len - tag_aa >= 20`, so n = 19 fails and n = 20 passes.
+        for (n, want) in [(18usize, false), (19, false), (20, true), (21, true)] {
+            let construct = format!("ATG{}{tag}TAA", FILLER.repeat(n - 1));
+            let m = mol(
+                &format!("{}{construct}{}", FILLER.repeat(30), FILLER.repeat(30)),
+                false,
+            );
+            assert!(six_frame_contains(&m.seq, FLAG), "n={n}");
+            assert_eq!(
+                !ann.annotate(&m).is_empty(),
+                want,
+                "a {n}-residue partner: expected found={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_peptide_part_is_matched_exactly_however_the_identity_threshold_is_set() {
+        // SOURCING.md §3: features under ~15 aa are matched exactly, never by
+        // scored alignment, and its false-positive arithmetic holds only under
+        // that rule. Today exactness falls out of `budget()` returning 0 for
+        // short cores at the default 0.96 — but `min_identity` is documented as
+        // user-adjustable, and at 0.80 an 8-mer gets a budget of 1. So the rule
+        // is asserted rather than inherited.
+        let mut rng = Rng(0x0f1a_0000_0000_0007);
+        let code = fixture_code();
+        let tag = encode(FLAG, code, &mut rng);
+        let f40 = FILLER.repeat(40);
+
+        // One residue of the tag changed, by changing one codon. The construct
+        // is otherwise the fixture that IS found.
+        let mut damaged: Vec<u8> = tag.bytes().collect();
+        damaged[0..3].copy_from_slice(b"GCC"); // D -> A at position 1
+        let damaged = String::from_utf8(damaged).unwrap();
+
+        // ...and the same on a LONG peptide, which is the case that really
+        // bites. On an 8-mer the rule is currently satisfied by an accident:
+        // `min_match_len / 3` is clamped to the record's own length, so a
+        // 7-of-8 match falls one residue short of the floor and is dropped
+        // before the identity threshold is consulted. A 37-residue tag with one
+        // residue changed in the MIDDLE still seeds on both sides, still chains
+        // over the whole record, and at the DEFAULT 0.96 scores 0.973 — so
+        // before this rule existed the annotator reported a 36-of-37 match as
+        // an SBP-tag, with `identity: 0.972…` and `coverage: 1.0`, and no
+        // threshold a user could set would have stopped it.
+        // `encode_stopless`: SBP contains W, which has no start-free encoding
+        // under table 11. Enough here — every case below either asserts the
+        // control is found (one ORF, in the tag's own frame, starting at this
+        // fixture's ATG) or asserts a damaged tag is found NOWHERE, and no
+        // extra ORF can make an inexact peptide match.
+        let long_tag = encode_stopless(&SBP[1..], code, &mut rng);
+        let mid = (SBP.len() - 1) / 2;
+        let mut long_damaged: Vec<u8> = long_tag.bytes().collect();
+        long_damaged[mid * 3..mid * 3 + 3].copy_from_slice(b"GCC");
+        let long_damaged = String::from_utf8(long_damaged).unwrap();
+
+        for (label, part, whole, broken) in [
+            ("FLAG, 8 aa", FLAG, &tag, &damaged),
+            ("SBP-tag, 37 aa", &SBP[1..], &long_tag, &long_damaged),
+        ] {
+            let db = db_of(vec![peptide("pf:part", part)]);
+            for min_identity in [0.96, 0.80, 0.50] {
+                let cfg = Config {
+                    min_identity,
+                    ..Config::default()
+                };
+                let ann = Annotator::new(&db, cfg);
+                let good = mol(
+                    &format!(
+                        "{}ATG{f40}{whole}TAA{}",
+                        FILLER.repeat(30),
+                        FILLER.repeat(30)
+                    ),
+                    false,
+                );
+                assert_eq!(
+                    ann.annotate(&good).len(),
+                    1,
+                    "{label}: the control must still be found at min_identity {min_identity}"
+                );
+                let bad = mol(
+                    &format!(
+                        "{}ATG{f40}{broken}TAA{}",
+                        FILLER.repeat(30),
+                        FILLER.repeat(30)
+                    ),
+                    false,
+                );
+                let got = ann.annotate(&bad);
+                assert!(
+                    got.is_empty(),
+                    "{label}: a one-residue mismatch was reported as the tag at \
+                     min_identity {min_identity}: {got:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_tag_inside_an_orf_on_the_other_strand_is_not_a_fusion() {
+        // The strand clause, which nothing else here can break. `Strand` has
+        // four variants and a `_ =>` arm falling through to Forward would
+        // silently adjudicate an unoriented hit on the plus strand -- but the
+        // failure this fixture demonstrates is coarser and more likely: drop
+        // the `orf.strand != strand` test and a FORWARD tag is admitted on the
+        // strength of a REVERSE ORF whose arithmetic happens to line up.
+        //
+        // Built inside out. The construct is written as the ORF, with the tag's
+        // reverse complement inside it, and then the whole thing is reverse
+        // complemented into the molecule -- so the plus strand carries the tag
+        // readable forward while the only long ORF is on the minus strand.
+        let mut rng = Rng(0x0f1a_0000_0000_0009);
+        let code = fixture_code();
+        // GGC filler, because the tag's plus-strand neighbours here are the
+        // reverse complement of the ORF's filler; and rev0, because a stop in
+        // the reverse complement of the tag would truncate the reverse ORF.
+        let tag = encode_in(FLAG, code, &mut rng, "GGC", true, true);
+        let rc_tag = String::from_utf8(iupac::reverse_complement(tag.as_bytes())).unwrap();
+        let f40 = "GGC".repeat(40);
+        let gene = format!("ATG{f40}{rc_tag}{f40}TAA");
+        let region = String::from_utf8(iupac::reverse_complement(gene.as_bytes())).unwrap();
+        assert!(
+            region.contains(&tag),
+            "the plus strand must carry the tag verbatim"
+        );
+        let m = mol(
+            &format!("{}{region}{}", "GGC".repeat(30), "GGC".repeat(30)),
+            false,
+        );
+
+        // Guard: the tag really is there, on the plus strand, and the reverse
+        // ORF really is there and really does span it. Without both, the
+        // negative result below is about the wrong thing.
+        assert!(six_frame_contains(&m.seq, FLAG));
+        let orfs = orf::find_orfs(
+            &m.seq,
+            code,
+            false,
+            &Params {
+                min_aa: ORF_MIN_AA,
+                include_incomplete: true,
+                require_start: true,
+                nested: false,
+            },
+        );
+        let tag_at = 90 + 3 + 120;
+        let rev = orfs
+            .iter()
+            .find(|o| o.strand == Strand::Reverse && o.aa_len == 89)
+            .unwrap_or_else(|| panic!("the reverse ORF was truncated: {orfs:?}"));
+        assert!(
+            (rev.start as usize) <= tag_at + 1 && tag_at + 24 <= rev.end as usize,
+            "the reverse ORF must span the tag: {rev:?}"
+        );
+        assert!(
+            !orfs.iter().any(|o| o.strand == Strand::Forward
+                && (o.start as usize) <= tag_at + 1
+                && tag_at + 24 <= o.end as usize),
+            "a forward ORF spans the tag, so this fixture tests nothing: {orfs:?}"
+        );
+
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let found = Annotator::new(&db, Config::default()).annotate(&m);
+        assert!(
+            found.is_empty(),
+            "a forward tag was admitted on the strength of a reverse ORF: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_tag_is_found_on_an_orf_that_initiates_at_any_of_its_codes_start_codons() {
+        // The GTG regression. `Config::code` reaches `find_orfs` with
+        // `require_start`, so which codons may initiate decides whether an ORF
+        // exists at all — and while the default was table 1, a tag fused to any
+        // GTG-, ATT-, ATC- or ATA-started gene was silently dropped. That is
+        // not exotic: five of this project's own 38 CDS rows start GTG (TetA,
+        // AprR, HygR, lacI, lambda int), and an N-terminal tag on one of them
+        // is the commonest thing anyone does with a tag.
+        //
+        // Sweeps the code's OWN start set rather than a hard-coded list, so it
+        // states the property — "every initiator this code accepts can carry a
+        // fusion" — instead of a table's contents.
+        let mut rng = Rng(0x0f1a_0000_0000_000a);
+        let code = fixture_code();
+        let tag = encode(FLAG, code, &mut rng);
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        let starts: Vec<[u8; 3]> = {
+            let mut v = Vec::new();
+            for b1 in b"TCAG" {
+                for b2 in b"TCAG" {
+                    for b3 in b"TCAG" {
+                        let c = [*b1, *b2, *b3];
+                        if code.is_start(&c) {
+                            v.push(c);
+                        }
+                    }
+                }
+            }
+            v
+        };
+        assert!(
+            starts.len() >= 4,
+            "a code with three initiators cannot demonstrate this; \
+             Config::code is {} ({:?} start codons)",
+            code.id,
+            starts.len()
+        );
+
+        for start in &starts {
+            let init = std::str::from_utf8(start).unwrap();
+            let seq = format!(
+                "{}{init}{}{tag}{}TAA{}",
+                FILLER.repeat(30),
+                FILLER.repeat(40),
+                FILLER.repeat(10),
+                FILLER.repeat(30)
+            );
+            let m = mol(&seq, false);
+            assert!(
+                six_frame_contains(&m.seq, FLAG),
+                "{init}: the fixture does not contain the peptide at all"
+            );
+            let found = ann.annotate(&m);
+            assert_eq!(
+                found.len(),
+                1,
+                "an ORF initiating at {init} carried no fusion, but {init} is a \
+                 start codon of the code the annotator is using: {found:?}"
+            );
+            let ev = found[0].fusion_orf.expect("the ORF it was admitted on");
+            assert_eq!(ev.start, 91, "{init}: admitted on the planted ORF");
+            assert_eq!(ev.aa_len, 59, "{init}: 1 initiator + 40 + 8 tag + 10");
+        }
+    }
+
+    #[test]
+    fn an_exact_partial_of_a_peptide_part_is_reported_as_nothing_at_all() {
+        // WHOLE as well as exact, which is a separate clause from the identity
+        // one and needs its own fixture: deleting `m.aligned != aa.len()` and
+        // keeping `m.identity < 1.0` leaves the whole suite green while the
+        // annotator starts reporting a 16-of-37-residue prefix of SBP-tag as an
+        // SBP-tag, at identity 1.0, coverage 0.43, drawn as a fragment.
+        //
+        // It must not. These are DESIGNED parts whose boundary is the design,
+        // so a prefix of one is not a fragment of anything — there is no
+        // truncated SBP-tag, only a different peptide. The fragment machinery
+        // needs no special case precisely because this can never fire.
+        let mut rng = Rng(0x0f1a_0000_0000_000b);
+        let code = fixture_code();
+        let db = db_of(vec![peptide("pf:sbp", SBP)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        // The control first, so a bug that found nothing anywhere could not
+        // pass the negatives below.
+        let whole = encode_stopless(&SBP[1..], code, &mut rng);
+        let good = mol(
+            &format!(
+                "{}ATG{whole}{}TAA{}",
+                FILLER.repeat(30),
+                FILLER.repeat(40),
+                FILLER.repeat(30)
+            ),
+            false,
+        );
+        assert_eq!(ann.annotate(&good).len(), 1, "the whole tag must be found");
+
+        // Prefixes long enough to clear BOTH floors that could reject them for
+        // an unrelated reason: `min_coverage` 0.30 (16/38 = 0.42) and
+        // `min_match_len / 3` = 16 residues. Anything shorter would be dropped
+        // by arithmetic rather than by the wholeness rule, and would prove
+        // nothing.
+        // 36 is the longest that is still a prefix: `ATG` + 36 encoded residues
+        // is 37 of the 38, one residue short of the whole thing.
+        for take in [16usize, 20, 24, 30, 36] {
+            let part = &SBP[1..=take]; // residues 2..=take+1, so `take` of them
+            let dna = encode_stopless(part, code, &mut rng);
+            let m = mol(
+                &format!(
+                    "{}ATG{dna}{}TAA{}",
+                    FILLER.repeat(30),
+                    FILLER.repeat(40),
+                    FILLER.repeat(30)
+                ),
+                false,
+            );
+            // Guard: the prefix really is present, translated, in a frame.
+            assert!(
+                six_frame_contains(&m.seq, &SBP[..=take]),
+                "{take}: the fixture does not contain the prefix at all"
+            );
+            let got = ann.annotate(&m);
+            assert!(
+                got.is_empty(),
+                "a {}-of-{} residue prefix of SBP-tag was reported as an \
+                 SBP-tag: {got:?}",
+                take + 1,
+                SBP.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_synthetic_part_carrying_both_references_is_gated_on_the_peptide_route_only() {
+        // The shape the relaxed schema permits and no shipped row has: a
+        // `synthetic_part` with nucleotides AND a peptide. Keyed on
+        // `is_peptide_only`, the two extra rules missed it entirely, so an
+        // eight-residue epitope went into the six-frame scan with no exactness
+        // rule and no ORF requirement — a hole opened by the shape of a row
+        // rather than by anyone's decision. Keyed on `is_designed_peptide` it
+        // is closed, and the nucleotide route is left exactly as it was.
+        let mut rng = Rng(0x0f1a_0000_0000_000d);
+        let code = fixture_code();
+        let tag = encode(FLAG, code, &mut rng);
+
+        // A row of both shapes at once. The nucleotide reference is unrelated
+        // to the tag's codons AND to the filler, so neither route can be
+        // mistaken for the other in the results below.
+        let mut both = peptide("pf:both", FLAG);
+        let dna_ref = rng.dna(60);
+        both.reference_nt = dna_ref.as_bytes().to_vec();
+        let db = db_of(vec![both]);
+        let ann = Annotator::new(&db, Config::default());
+
+        // 1. The PEPTIDE route is gated. No ORF anywhere near the tag, so
+        //    nothing may be reported for it.
+        let no_orf = mol(
+            &format!("{}TAA{tag}TAA{}", FILLER.repeat(20), FILLER.repeat(20)),
+            false,
+        );
+        assert!(
+            six_frame_contains(&no_orf.seq, FLAG),
+            "the fixture does not contain the peptide at all"
+        );
+        let got = ann.annotate(&no_orf);
+        assert!(
+            got.is_empty(),
+            "a synthetic part carrying both references took its peptide through \
+             the six-frame scan ungated: {got:?}"
+        );
+
+        // 2. ...and it is gated by the ORF rule rather than by being ignored:
+        //    the same tag inside a qualifying ORF IS reported, with evidence.
+        let with_orf = mol(
+            &format!(
+                "{}ATG{}{tag}{}TAA{}",
+                FILLER.repeat(20),
+                FILLER.repeat(40),
+                FILLER.repeat(10),
+                FILLER.repeat(20)
+            ),
+            false,
+        );
+        let got = ann.annotate(&with_orf);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].via_protein);
+        assert!(got[0].fusion_orf.is_some());
+
+        // 3. The NUCLEOTIDE route is untouched. Tier 1 on the same row finds
+        //    its own reference with no ORF in sight — which is what the eight
+        //    parented tags depend on, and what 44 suites of existing behaviour
+        //    would have lost to a gate placed on the record rather than on the
+        //    route.
+        let nt_only = mol(
+            &format!("{}{dna_ref}{}", FILLER.repeat(15), FILLER.repeat(15)),
+            false,
+        );
+        let got = ann.annotate(&nt_only);
+        assert_eq!(
+            got.len(),
+            1,
+            "the nucleotide route on a synthetic part must not be ORF-gated: {got:?}"
+        );
+        assert!(!got[0].via_protein, "found by DNA, not by translation");
+        assert!(got[0].fusion_orf.is_none(), "a DNA hit claims no fusion");
+    }
+
+    #[test]
+    fn a_tagged_orf_running_off_the_end_of_a_linear_fragment_is_still_a_fusion() {
+        // `include_incomplete: true`, which nothing else here can break. A
+        // sequencing read or a Gibson piece that carries an initiator and a tag
+        // but is cut before the stop is a real fusion, and the commonest shape
+        // of real input that is not a whole plasmid.
+        let mut rng = Rng(0x0f1a_0000_0000_000c);
+        let code = fixture_code();
+        let tag = encode(FLAG, code, &mut rng);
+        // No stop anywhere: ATG, 40 filler codons, the tag, 5 more, end of file.
+        let seq = format!("ATG{}{tag}{}", FILLER.repeat(40), FILLER.repeat(5));
+        let m = mol(&seq, false);
+
+        // Guard: the fixture really does depend on the flag. With incomplete
+        // ORFs excluded there is no ORF here at all, so if this ever stopped
+        // being true the test below would pass without exercising anything.
+        let strict = orf::find_orfs(
+            &m.seq,
+            code,
+            false,
+            &Params {
+                min_aa: ORF_MIN_AA,
+                include_incomplete: false,
+                require_start: true,
+                nested: false,
+            },
+        );
+        assert!(
+            strict.is_empty(),
+            "the fragment reached a stop, so it is not the case this tests: {strict:?}"
+        );
+
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let found = Annotator::new(&db, Config::default()).annotate(&m);
+        assert_eq!(
+            found.len(),
+            1,
+            "a tag on an ORF that runs off the 3' end of a linear fragment is a \
+             fusion and must be reported: {found:?}"
+        );
+        let ev = found[0].fusion_orf.expect("the ORF it was admitted on");
+        assert_eq!(ev.aa_len, 54, "1 initiator + 40 + 8 tag + 5, and no stop");
+    }
+
+    #[test]
+    fn a_record_carrying_nucleotides_is_not_gated_by_the_fusion_rule() {
+        // The scope check. The rule applies to peptide-only synthetic parts and
+        // to nothing else, so a codon-optimised CDS found by translation with
+        // no ORF anywhere near it must still be reported — that is §7.7 step 5,
+        // and 44 suites of existing behaviour depend on it.
+        //
+        // One molecule, one peptide, two records: the difference is the shape
+        // of the row, and nothing else.
+        let mut rng = Rng(0x0f1a_0000_0000_0008);
+        let code = fixture_code();
+        // Long enough to clear `min_match_len / 3`, and in a frame with no
+        // initiator and no stop, so no ORF can contain it.
+        //
+        // (GGGGS)4 rather than SBP, and this is the fixture that forced the
+        // distinction: "no ORF can contain it" is exactly the property
+        // `encode_stopless` does NOT provide, so this call must be the strict
+        // `encode` — and SBP is unencodable under it, because W's only codon
+        // `TGG` makes a table-11 start with every base that could precede it.
+        let protein = GS_LINKER.to_string();
+        let cds = encode(&protein, code, &mut rng);
+        let m = mol(
+            &format!("{}{cds}{}", FILLER.repeat(40), FILLER.repeat(40)),
+            false,
+        );
+        assert!(six_frame_contains(&m.seq, &protein));
+
+        let as_cds = db_of(vec![rec("pf:cds", &protein, true)]);
+        let found = Annotator::new(&as_cds, Config::default()).annotate(&m);
+        assert_eq!(
+            found.len(),
+            1,
+            "a translated CDS hit must not be gated: {found:?}"
+        );
+        assert!(found[0].via_protein);
+        assert!(
+            found[0].fusion_orf.is_none(),
+            "a CDS hit must not claim fusion evidence"
+        );
+
+        let as_tag = db_of(vec![peptide("pf:tag", &protein)]);
+        assert!(
+            Annotator::new(&as_tag, Config::default())
+                .annotate(&m)
+                .is_empty(),
+            "the same peptide as a peptide-only part must be gated"
+        );
     }
 
     #[test]
