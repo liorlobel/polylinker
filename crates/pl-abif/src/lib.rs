@@ -215,8 +215,16 @@ pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>), Error> {
         let bytes: Vec<u8> = if size <= 4 {
             where_.to_be_bytes()[..size].to_vec()
         } else {
-            let start = where_.max(0) as usize;
-            match data.get(start..start + size) {
+            // A negative offset is not a small one. Clamping it to 0 made a
+            // tag whose pointer sits before the start of the file read the
+            // first `size` bytes instead — so a damaged .ab1 came back Ok with
+            // its "sequence" set to the literal bytes "ABIF...". A pointer
+            // outside the file is dropped whichever end it falls off.
+            if where_ < 0 {
+                continue;
+            }
+            let start = where_ as usize;
+            match start.checked_add(size).and_then(|end| data.get(start..end)) {
                 Some(s) => s.to_vec(),
                 None => continue, // a tag pointing outside the file is dropped
             }
@@ -472,5 +480,32 @@ mod tests {
             None,
             "a positional diff between different lengths is meaningless"
         );
+    }
+
+    #[test]
+    fn a_tag_pointing_before_the_start_of_the_file_is_dropped() {
+        // `where_.max(0)` clamped a negative dataoffset to 0, so a tag whose
+        // pointer sits before the file read the first `size` bytes instead —
+        // and `parse` returned Ok with a "sequence" of the literal header
+        // bytes. A pointer outside the file is dropped whichever end it falls
+        // off, and a negative one is not a small one.
+        let mut f = build(&[(b"PBAS", 2, 2, b"ACGTACGTAC")]);
+        // The directory starts at byte 128; PBAS2 is its only entry, and the
+        // data offset is the fifth 4-byte field of the 28-byte record.
+        assert_eq!(
+            &f[128..132],
+            b"PBAS",
+            "the entry is where the builder put it"
+        );
+        let at = 128 + 20;
+        f[at..at + 4].copy_from_slice(&(-1i32).to_be_bytes());
+        match parse(&f) {
+            Err(Error::NoBaseCalls) => {}
+            Ok(t) => panic!(
+                "a negative offset must not yield a sequence, got {:?}",
+                String::from_utf8_lossy(&t.sequence)
+            ),
+            Err(e) => panic!("unexpected error {e:?}"),
+        }
     }
 }

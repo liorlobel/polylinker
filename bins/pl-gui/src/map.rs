@@ -297,9 +297,23 @@ fn draw_circular(
                     if hi < lo {
                         std::mem::swap(&mut lo, &mut hi);
                     }
+                    // Normalise by arithmetic, not by accumulation.
+                    //
+                    // `while a < lo - PI { a += TAU }` terminates only while
+                    // TAU is large enough to change `a`. `angle_of` scales a
+                    // raw file coordinate by 1/span with no clamp, so `lo` is
+                    // unbounded; past about 2^27 the f32 step size exceeds TAU,
+                    // the addition stops moving the value, and the loop spins
+                    // forever with the window frozen. One `.dna` with an
+                    // out-of-range coordinate hung the app.
                     let mut a = a;
-                    while a < lo - std::f32::consts::PI {
-                        a += std::f32::consts::TAU;
+                    if lo.is_finite() && a.is_finite() {
+                        let turns = ((lo - std::f32::consts::PI - a) / std::f32::consts::TAU)
+                            .ceil()
+                            .max(0.0);
+                        if turns.is_finite() && turns < 1.0e6 {
+                            a += turns * std::f32::consts::TAU;
+                        }
                     }
                     if a >= lo && a <= hi {
                         out.hovered = Some(b.index);

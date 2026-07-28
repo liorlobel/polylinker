@@ -158,12 +158,21 @@ impl View<'_> {
             let lo = self.peaks[b0] as usize;
             let hi = self.peaks[b1] as usize;
             // Half a base of air on each side, so the end peaks are not clipped.
-            let air = if b1 > b0 {
+            //
+            // `hi > lo` is checked as well as `b1 > b0`: PLOC2 is *supposed* to
+            // ascend, and a corrupt or hostile file is under no obligation to
+            // make it. A descending pair underflowed this subtraction — a panic
+            // in debug, and in release a wrapped `air` near usize::MAX that
+            // then poisoned the window.
+            let air = if b1 > b0 && hi > lo {
                 (hi - lo) / (b1 - b0).max(1) / 2
             } else {
                 8
             };
-            (lo.saturating_sub(air), (hi + air).min(chan_len - 1))
+            (
+                lo.saturating_sub(air),
+                hi.saturating_add(air).min(chan_len - 1),
+            )
         };
         if s1 <= s0 {
             rep.notes
