@@ -71,6 +71,10 @@ pub const TOPICS: &[Topic] = &[
         name: "primers",
         title: "Primer binding sites",
     },
+    Topic {
+        name: "design",
+        title: "Primer design",
+    },
 ];
 
 pub fn topic(name: &str) -> Option<Topic> {
@@ -260,6 +264,56 @@ pub fn methods(t: Topic) -> String {
                 p.seed_len
             )
         }
+        "design" => {
+            let c = pl_design::Constraints::default();
+            format!(
+                "PCR primer pairs were designed with Polylinker {v}. Candidate oligos \
+                 were enumerated over the selected region, filtered independently on \
+                 melting temperature, composition and secondary structure, and then \
+                 paired. Constraints: {}. Melting temperatures were computed for the \
+                 annealed footprint only, with a nearest-neighbour model ({}); a 5' \
+                 tail carrying a restriction site does not pair with the template on \
+                 the first cycle and is excluded, and the tailed oligo's own melting \
+                 temperature is reported separately as the one that applies from the \
+                 third cycle onward. {}. Each candidate was additionally required to \
+                 anneal at exactly one site on the supplied molecule, located with a \
+                 3'-anchored seed of {} exact bases extended toward the 5' end. \
+                 Surviving pairs were ranked by a weighted sum of normalised \
+                 deviations ({}), an approach following Rozen & Skaletsky (Methods Mol \
+                 Biol 132:365, 2000) and Untergasser et al. (Nucleic Acids Res \
+                 40:e115, 2012); the weights are this software's own and no \
+                 equivalence to any other designer is claimed.
+
+                 Limits: **specificity was checked against the supplied molecule and \
+                 nothing else.** A primer unique in a plasmid is routinely not unique \
+                 in a host genome, and no genome-wide search was performed. Secondary \
+                 structure was screened as perfect ungapped helices only: internal \
+                 loops, bulges, dangling ends, terminal mismatches, coaxial stacking \
+                 and G-quadruplexes are not modelled, and hairpin loop initiation is \
+                 not applied, so the reported free energies are a screen and not a \
+                 fold. No correction is made for Mg2+ or dNTPs, so melting \
+                 temperatures are on a {:.0} mM monovalent scale and an ordinary PCR \
+                 buffer sits about 5 C higher. **For RT-PCR the design cannot exclude \
+                 genomic DNA**: this software is scoped to bacterial templates, \
+                 bacterial genes have no introns, and there is therefore no exon-exon \
+                 junction for a primer to span -- a no-RT control is the only thing \
+                 that distinguishes cDNA from contaminating genomic DNA. No in-frame \
+                 mode is offered and tail length is never adjusted to preserve a \
+                 reading frame. Where a restriction site was added as a 5' tail, the \
+                 finished amplicon was scanned on both strands for further occurrences \
+                 of that site and any pair carrying one was rejected; cleavage \
+                 efficiency close to a fragment terminus was NOT modelled, and the \
+                 amplicon was treated as unmethylated, which it is -- it is synthesised \
+                 in vitro from dNTPs. Methylation of the destination vector was \
+                 considered only where a vector was supplied.",
+                c.describe(),
+                c.tm_method.table_name,
+                c.describe_dg(),
+                c.off_seed,
+                c.weights.describe(),
+                c.tm_method.na_molar * 1e3,
+            )
+        }
         _ => String::new(),
     }
 }
@@ -302,6 +356,15 @@ pub fn help(t: Topic) -> &'static str {
         "primers" => {
             "Where a primer anneals, with the footprint and the tail kept \
                       apart."
+        }
+        "design" => {
+            // Backslash continuations, like every sibling arm. Written as one
+            // long literal this carried two 22-space runs from the source
+            // indentation; `pl methods` rewraps and hid them, but a consumer
+            // that does not wrap would print the gaps.
+            "Pick a PCR primer pair for a region, checked for a second binding \
+                     site on the molecule you have open. A restriction site goes on \
+                     as a 5' tail and stays out of the Tm."
         }
         _ => "",
     }

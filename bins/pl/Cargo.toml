@@ -18,6 +18,7 @@ path = "src/main.rs"
 pl-abif.workspace = true
 pl-clone.workspace = true
 pl-core.workspace = true
+pl-design.workspace = true
 pl-doc.workspace = true
 pl-draw.workspace = true
 pl-enzymes.workspace = true

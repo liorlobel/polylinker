@@ -8,6 +8,7 @@
 // in debug builds so panics and eprintln stay visible while developing.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod design;
 mod doc;
 mod library;
 mod map;
@@ -121,6 +122,12 @@ struct App {
     /// pointer across the empty window drove dozens of those a second, which is
     /// what made the welcome screen stutter.
     dna_owner: Option<Option<String>>,
+
+    /// The Design primers panel, if it is open.
+    ///
+    /// It holds a snapshot of the selection it was opened on, not a live
+    /// reference to it -- see `design.rs`.
+    design: Option<design::Panel>,
 }
 
 /// Which document the recovery file holds, and exactly where in its history.
@@ -386,6 +393,7 @@ impl App {
             autosaved: None,
             last_autosave: None,
             dna_owner: None,
+            design: None,
         }
     }
 
@@ -837,6 +845,7 @@ impl eframe::App for App {
         self.side_panel(ui);
         self.central(ui);
         self.paste_dialog(&ctx);
+        self.design_panel(&ctx);
     }
 }
 
@@ -2037,6 +2046,14 @@ impl App {
             });
             (self.edit.readout(mol), alt)
         };
+        let (n_c, mol_circular) = {
+            let mol = self
+                .document
+                .as_ref()
+                .expect("checked by caller")
+                .molecule();
+            (mol.len(), mol.topology.is_circular())
+        };
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(mol_line)
@@ -2072,6 +2089,23 @@ impl App {
                         s.through_origin = !s.through_origin;
                     }
                 }
+            }
+
+            // Design lives beside the readout because that is where the
+            // selection is already described: the panel's target line repeats
+            // these numbers rather than deriving its own.
+            let has_sel = self
+                .edit
+                .sel
+                .is_some_and(|s| !s.canonical(n_c, mol_circular).is_empty(n_c));
+            let b = ui.add_enabled(
+                has_sel && self.design.is_none(),
+                egui::Button::new(RichText::new("Design primers…").size(11.0)),
+            );
+            if !has_sel {
+                b.on_hover_text("Select the region to amplify first.");
+            } else if b.clicked() {
+                self.open_design();
             }
         });
         if let Some(msg) = self.edit.notice.clone() {
@@ -2243,6 +2277,14 @@ impl App {
         // the caret, Backspace deletes, and a second Ctrl+V silently replaces
         // the question.
         if self.edit.pending_paste.is_some() {
+            return;
+        }
+        // Same reason, same rule. `egui::Window` is not modal and `Button`
+        // never takes keyboard focus, so without this arrow keys move the caret
+        // and Backspace deletes underneath a panel describing the document --
+        // and the panel's snapshot would then name bases that are no longer
+        // there.
+        if self.design.is_some() {
             return;
         }
         let events = ui.input(|i| i.events.clone());
@@ -2602,6 +2644,76 @@ impl App {
     /// useless to them while a confirm costs one keypress. The real safety net
     /// is still undo — one paste is one operation, and the log forks rather
     /// than truncates, so the pasted branch stays reachable even afterwards.
+    /// Open the design panel on the current selection.
+    ///
+    /// The commit comes first, and it is not tidiness. Between keystrokes the
+    /// log is one run behind the screen (see `seqedit`'s module doc), so
+    /// designing against the committed molecule while three more typed bases
+    /// are visible would return primers for a sequence that is not on screen.
+    fn open_design(&mut self) {
+        self.settle();
+        let Some(d) = self.document.as_ref() else {
+            return;
+        };
+        let Some(sel) = self.edit.sel else { return };
+        let mol = d.molecule();
+        let title = d
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| mol.name.clone());
+        match design::Panel::open(title, mol.len(), mol.topology.is_circular(), sel) {
+            Ok(p) => self.design = Some(p),
+            Err(e) => self.notice = Some(e),
+        }
+    }
+
+    fn design_panel(&mut self, ctx: &egui::Context) {
+        let Some(mut panel) = self.design.take() else {
+            return;
+        };
+        let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
+        let (seq, dark) = {
+            let Some(d) = self.document.as_ref() else {
+                return;
+            };
+            (d.molecule().seq.clone(), dark)
+        };
+        let keep = design::show(ctx, &mut panel, &seq, dark);
+
+        // Applied after the frame, because `App::edit` needs `&mut self` and
+        // the panel is holding a borrow of it during the closure.
+        if let Some(i) = panel.add_request.take() {
+            if let Some(Ok(r)) = &panel.result {
+                if let Some(p) = r.pairs.get(i) {
+                    let stem = design::stem_of(&panel.title);
+                    let fs = design::features(p, &stem, i + 1);
+                    let names: Vec<String> = fs.iter().map(|f| f.name.clone()).collect();
+                    for f in fs {
+                        self.edit(pl_core::OpKind::SetFeature {
+                            index: None,
+                            feature: Box::new(f),
+                        });
+                    }
+                    panel.added.push(i);
+                    // Two operations, so one Ctrl+Z leaves half a pair in the
+                    // document. There is no OpKind that adds two features and
+                    // inventing one is out of scope, so this gets a sentence
+                    // rather than a shrug: a silent half-state is what ADR-2
+                    // exists to prevent.
+                    self.status = format!(
+                        "added 2 primer_bind features, {} and {} - Ctrl+Z twice to undo both",
+                        names[0], names[1]
+                    );
+                }
+            }
+        }
+        if keep {
+            self.design = Some(panel);
+        }
+    }
+
     fn paste_dialog(&mut self, ctx: &egui::Context) {
         // The selection the question was asked about, not wherever the caret
         // has since got to. It was stored and then thrown away: with the

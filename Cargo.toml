@@ -10,6 +10,7 @@ members = [
     "crates/pl-index",
     "crates/pl-scan",
     "crates/pl-primer",
+    "crates/pl-design",
     "crates/pl-sanger",
     "crates/pl-gel",
     "crates/pl-doc",
@@ -39,6 +40,7 @@ pl-features = { path = "crates/pl-features", version = "0.1.0" }
 pl-index = { path = "crates/pl-index", version = "0.1.0" }
 pl-scan = { path = "crates/pl-scan", version = "0.1.0" }
 pl-primer = { path = "crates/pl-primer", version = "0.1.0" }
+pl-design = { path = "crates/pl-design", version = "0.1.0" }
 pl-sanger = { path = "crates/pl-sanger", version = "0.1.0" }
 pl-gel = { path = "crates/pl-gel", version = "0.1.0" }
 pl-doc = { path = "crates/pl-doc", version = "0.1.0" }

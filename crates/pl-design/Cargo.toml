@@ -1,0 +1,15 @@
+[package]
+name = "pl-design"
+description = "Choosing a PCR primer pair for a region, against the molecule the user has open."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pl-core.workspace = true
+pl-thermo.workspace = true
+pl-primer.workspace = true
+pl-enzymes.workspace = true
+pl-clone.workspace = true

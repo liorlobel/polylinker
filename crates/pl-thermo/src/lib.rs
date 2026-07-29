@@ -132,6 +132,44 @@ impl NnTable {
             .find(|(k, _, _)| *k == rc)
             .map(|&(_, h, s)| (h, s))
     }
+
+    /// As [`NnTable::step`], without allocating.
+    ///
+    /// `step` builds a `Vec`, a `String` and a reverse complement for every
+    /// lookup. That is nothing for one Tm and is not nothing for a primer
+    /// search: `pl-design` makes millions of ΔG lookups per run, and this was
+    /// measured at 100 seconds of a 104-second design over a 1 kb region.
+    ///
+    /// A second lookup is exactly the kind of duplication that drifts, so
+    /// `step_and_step_fast_agree_on_every_input` asserts equivalence over all
+    /// 16 dinucleotides, both cases, and the ambiguous and short inputs.
+    /// Private, so nothing outside this module can pick the wrong one.
+    fn step_fast(&self, a: u8, b: u8) -> Option<(f64, f64)> {
+        fn comp(b: u8) -> Option<u8> {
+            match b {
+                b'A' => Some(b'T'),
+                b'C' => Some(b'G'),
+                b'G' => Some(b'C'),
+                b'T' => Some(b'A'),
+                _ => None,
+            }
+        }
+        let (a, b) = (a.to_ascii_uppercase(), b.to_ascii_uppercase());
+        let (ra, rb) = (comp(b)?, comp(a)?);
+        for &(k, h, s) in &self.stacks {
+            let k = k.as_bytes();
+            if k[0] == a && k[1] == b {
+                return Some((h, s));
+            }
+        }
+        for &(k, h, s) in &self.stacks {
+            let k = k.as_bytes();
+            if k[0] == ra && k[1] == rb {
+                return Some((h, s));
+            }
+        }
+        None
+    }
 }
 
 /// How salt is accounted for.
@@ -376,6 +414,91 @@ pub fn tm(seq: &[u8], m: &Method) -> Result<Tm, TmError> {
         self_complementary: selfcomp,
         gc_percent: 100.0 * gc / up.len() as f64,
     })
+}
+
+/// 37 °C in kelvin — the reference temperature for every ΔG in this crate.
+///
+/// 37 rather than a PCR temperature because that is the condition the
+/// published parameters are tabulated at, and quoting ΔG at a temperature the
+/// table was not measured at would be inventing a number.
+pub const T37_KELVIN: f64 = 310.15;
+
+/// Sum ΔH and ΔS over a sequence's nearest-neighbour steps.
+///
+/// The stacks only: no initiation, no terminal AT/GC penalty, no symmetry
+/// term. `tm` adds those; the two ΔG functions below differ in exactly this.
+fn stack_sums(seq: &[u8], t: &NnTable) -> Result<(f64, f64), TmError> {
+    if seq.len() < 2 {
+        return Err(TmError::TooShort);
+    }
+    // Allocation-free, deliberately: this is the inner loop of a primer search,
+    // and an uppercase copy per call plus three more inside `step` is what made
+    // one design run take a hundred seconds. `step_fast` is pinned equivalent
+    // to `step`.
+    if let Some((i, &b)) = seq
+        .iter()
+        .enumerate()
+        .find(|(_, b)| !matches!(b.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T'))
+    {
+        return Err(TmError::NotUnambiguous(i, b.to_ascii_uppercase()));
+    }
+    let (mut dh, mut ds) = (0.0, 0.0);
+    for w in seq.windows(2) {
+        let (h, s) = t.step_fast(w[0], w[1]).expect("checked unambiguous above");
+        dh += h;
+        ds += s;
+    }
+    Ok((dh, ds))
+}
+
+/// ΔG°37 of the stacks alone, kcal/mol, at the table's own 1 M Na⁺.
+///
+/// `ΔG = ΔH − T·ΔS/1000`, with the stored ΔH and ΔS. **No new table is
+/// needed**: the ΔG°37 column SantaLucia publishes is this arithmetic on the
+/// two columns already here, and computing it rather than storing a third set
+/// of numbers means a transcription error cannot make the two disagree.
+///
+/// This is the *stack-sum* convention, and it is the one every ΔG reported by
+/// `pl-design` uses — including the Rychlik 3'-end-stability criterion, which
+/// is defined over a terminal pentamer treated as bare stacks. It is not the
+/// free energy of forming a duplex: [`dg37`] is, and on the 2004 table the two
+/// differ by up to 2.03 kcal/mol, which is larger than several of the
+/// thresholds measured against it. Naming them apart is why they are two
+/// functions rather than one with a flag.
+///
+/// **No salt correction.** SantaLucia's correction is defined on duplex
+/// entropy at the melting transition; applying it to a ΔG°37 stack sum would
+/// be inventing a model. The number is a 1 M Na⁺ number and must be reported
+/// as one.
+pub fn dg37_stacks(seq: &[u8], t: &NnTable) -> Result<f64, TmError> {
+    let (dh, ds) = stack_sums(seq, t)?;
+    Ok(dh - T37_KELVIN * ds / 1000.0)
+}
+
+/// ΔG°37 of the whole duplex, kcal/mol: stacks plus initiation, the two
+/// terminal penalties, and the symmetry term for a palindrome.
+///
+/// The physically complete number for `seq` annealed to its perfect
+/// complement. Also at 1 M Na⁺, for the reason [`dg37_stacks`] gives.
+pub fn dg37(seq: &[u8], t: &NnTable) -> Result<f64, TmError> {
+    let (mut dh, mut ds) = stack_sums(seq, t)?;
+    let up: Vec<u8> = seq.iter().map(|b| b.to_ascii_uppercase()).collect();
+    dh += t.init.0;
+    ds += t.init.1;
+    for end in [up[0], up[up.len() - 1]] {
+        let (h, s) = if matches!(end, b'A' | b'T') {
+            t.init_at
+        } else {
+            t.init_gc
+        };
+        dh += h;
+        ds += s;
+    }
+    if is_self_complementary(&up) {
+        dh += t.sym.0;
+        ds += t.sym.1;
+    }
+    Ok(dh - T37_KELVIN * ds / 1000.0)
 }
 
 /// A polymerase, and how its vendor says to pick an annealing temperature.
@@ -665,6 +788,152 @@ mod tests {
             a.tm,
             c.tm
         );
+    }
+
+    /// PROVEN TO FAIL: with the reverse-complement fallback dropped from
+    /// `step_fast`, `AC` resolves in one lookup and not the other.
+    #[test]
+    fn step_and_step_fast_agree_on_every_input() {
+        // Two lookups is exactly the kind of duplication that drifts, and the
+        // drift would be invisible: a wrong stack shifts every downstream
+        // number by a degree and nothing looks broken. So the fast one is
+        // checked against the slow one exhaustively rather than trusted.
+        for t in [SANTALUCIA_1998, SANTALUCIA_2004] {
+            for a in b"ACGTacgt" {
+                for b in b"ACGTacgt" {
+                    assert_eq!(
+                        t.step(&[*a, *b]),
+                        t.step_fast(*a, *b),
+                        "{}{}",
+                        *a as char,
+                        *b as char
+                    );
+                }
+            }
+            // And the refusals agree too.
+            for (a, b) in [(b'A', b'N'), (b'N', b'A'), (b'-', b'-'), (b'A', b'U')] {
+                assert_eq!(t.step(&[a, b]), t.step_fast(a, b));
+                assert_eq!(t.step_fast(a, b), None);
+            }
+        }
+    }
+
+    /// PROVEN TO FAIL: with the GC stack's stored entropy mistyped by 1.0
+    /// cal/(K.mol) - one keystroke - this reports `GC: -1.92 vs -2.24`. Nothing
+    /// else in the crate would have noticed; every Tm would simply be wrong.
+    #[test]
+    fn the_stored_enthalpies_and_entropies_reproduce_the_published_dg37_column() {
+        // A free, high-value check on the transcription. SantaLucia & Hicks
+        // (2004) print a ΔG°37 column beside ΔH and ΔS; it is not stored here,
+        // it is derived, so if either stored column were mistyped this
+        // reproduction would fail. A wrong stacking parameter is otherwise
+        // invisible — it shifts every downstream number and nothing looks
+        // broken, which is the failure this crate's module doc opens with.
+        //
+        // Published values, transcribed from the review's Table 1 (rounded to
+        // 2 dp there, so the tolerance is 0.02).
+        let published: &[(&str, f64)] = &[
+            ("AA", -1.00),
+            ("AT", -0.88),
+            ("TA", -0.58),
+            ("CA", -1.45),
+            ("GT", -1.44),
+            ("CT", -1.28),
+            ("GA", -1.30),
+            ("CG", -2.17),
+            ("GC", -2.24),
+            ("GG", -1.84),
+        ];
+        for (step, want) in published {
+            let got = dg37_stacks(step.as_bytes(), &SANTALUCIA_2004).unwrap();
+            approx(got, *want, 0.02, step);
+        }
+        // And ΔG°37 really is a different quantity from ΔH: the two orderings
+        // are not the same, so this is not a check that trivially passes.
+        let (h_at, _) = SANTALUCIA_2004.step(b"AT").unwrap();
+        let (h_ta, _) = SANTALUCIA_2004.step(b"TA").unwrap();
+        assert_eq!(h_at, h_ta, "AT and TA share an enthalpy");
+        assert!(
+            dg37_stacks(b"AT", &SANTALUCIA_2004).unwrap()
+                < dg37_stacks(b"TA", &SANTALUCIA_2004).unwrap() - 0.2,
+            "and are told apart only by entropy"
+        );
+    }
+
+    #[test]
+    fn the_two_dg_conventions_differ_by_exactly_the_initiation_terms() {
+        // They are two functions rather than one with a flag because the
+        // difference is large enough to move a threshold: 2.03 kcal/mol on the
+        // 2004 table for a GC-ended oligo, against a 3'-end-stability limit of
+        // -7.5.
+        let seq = b"CGCGC";
+        let stacks = dg37_stacks(seq, &SANTALUCIA_2004).unwrap();
+        let duplex = dg37(seq, &SANTALUCIA_2004).unwrap();
+        let init = SANTALUCIA_2004.init.0 - T37_KELVIN * SANTALUCIA_2004.init.1 / 1000.0;
+        let end_gc = SANTALUCIA_2004.init_gc.0 - T37_KELVIN * SANTALUCIA_2004.init_gc.1 / 1000.0;
+        approx(duplex - stacks, init + 2.0 * end_gc, 1e-9, "initiation");
+        assert!(
+            duplex - stacks > 1.9,
+            "the gap must be big enough to matter: {}",
+            duplex - stacks
+        );
+    }
+
+    /// PROVEN TO FAIL: with `T37_KELVIN` moved, the achievable range moves with
+    /// it and the most stable pentamer is no longer CGCGC. The assertion is
+    /// about this crate's own scale, so it goes red whenever that scale moves -
+    /// which is the point.
+    #[test]
+    fn no_pentamer_on_this_scale_reaches_minus_nine_kcal_per_mole() {
+        // The literature 3'-end-stability threshold is -9 kcal/mol, and it
+        // originates on **Breslauer's** 1986 parameters, which are
+        // systematically more negative than SantaLucia's. Imported unchanged
+        // onto this crate's tables it is arithmetically incapable of firing:
+        // reaching -9 over four stacks needs a mean of -2.25 and the single
+        // most stable stack here, GC, is -2.23.
+        //
+        // A production threshold that cannot fire is worse than no threshold,
+        // because the report then carries a line saying the check was applied
+        // and passed. This test exists so that anyone "correcting" pl-design's
+        // -7.5 back to the literature value breaks the build here, where the
+        // reason is written down.
+        let bases = b"ACGT";
+        let mut best = 0.0f64;
+        let mut best_seq = Vec::new();
+        let mut count = 0usize;
+        for a in bases {
+            for b in bases {
+                for c in bases {
+                    for d in bases {
+                        for e in bases {
+                            let p = [*a, *b, *c, *d, *e];
+                            let g = dg37_stacks(&p, &SANTALUCIA_2004).unwrap();
+                            count += 1;
+                            if g < best {
+                                best = g;
+                                best_seq = p.to_vec();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 1024);
+        assert_eq!(best_seq, b"CGCGC".to_vec(), "the most stable pentamer");
+        assert!(
+            best > -9.0,
+            "the most stable pentamer reaches only {best}, so -9 kcal/mol cannot fire"
+        );
+        approx(best, -8.79, 0.01, "CGCGC");
+    }
+
+    #[test]
+    fn a_dg_over_an_ambiguity_code_is_refused_like_a_tm() {
+        assert!(matches!(
+            dg37_stacks(b"ACNGT", &SANTALUCIA_2004),
+            Err(TmError::NotUnambiguous(2, b'N'))
+        ));
+        assert_eq!(dg37(b"A", &SANTALUCIA_2004).unwrap_err(), TmError::TooShort);
     }
 
     #[test]

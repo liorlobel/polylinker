@@ -25,6 +25,7 @@ USAGE:
     pl tm      <OLIGO>...                melting temperature
     pl goldengate <OVERHANG>...          check a Type IIS overhang set
     pl primers <file> --primer SEQ       where primers anneal
+    pl design  <file> --region A..B      pick a PCR primer pair for a region
     pl trace   <file.ab1>... [--svg F]   read or draw a Sanger chromatogram
     pl orfs    <file> [--table N]        open reading frames, six frames
     pl sanger  <read>... --ref <file>    did the clone work?
@@ -112,6 +113,74 @@ FIND OPTIONS:
 
 LIBRARY OPTIONS:
     --problems                   every record that could not be fully read
+
+DESIGN OPTIONS:
+    --region <A..B>              the target, 1-based inclusive. Required.
+                                 On a circle A > B means the region crosses the
+                                 origin, which is ordinary on a plasmid.
+    --seq <BASES>                template, instead of a file
+    --circular                   with --seq
+    --mode <contain|within>      contain: the product contains all of A..B and a
+                                 primer may begin outside it (cloning an ORF).
+                                 within: both primers lie inside A..B (a qPCR
+                                 amplicon inside a gene). Default contain.
+    --flank <N>                  how far outside A..B a primer's OUTER end may
+                                 sit, contain only. Default 200. --flank 0 pins
+                                 the two outer ends exactly to A and B, which is
+                                 what seamless cloning wants -- and is also the
+                                 setting most likely to return nothing, because
+                                 it leaves only one 5' end and 10 lengths per
+                                 side. Measured on 35 plasmids: 12 designed, 23
+                                 refused. Raise it a few bases before relaxing
+                                 anything physical.
+    --rt                         RT-PCR preset. Prints the bacteria caveat: this
+                                 CANNOT exclude genomic DNA, because bacterial
+                                 genes have no introns to span.
+    --len <MIN..MAX>             primer length, default 18..27
+    --len-opt <N>                default 20
+    --tm <MIN..MAX>              footprint Tm, default 52..58 -- ON THIS MODEL'S
+                                 50 mM Na+ SCALE, where an ordinary PCR buffer
+                                 sits about 5 C higher. Pass --na 150 to design
+                                 on the bench scale instead.
+    --tm-opt <C>                 default 55
+    --tm-diff <C>                max |Tm_f - Tm_r|, default 5
+    --gc <MIN..MAX>              default 40..60, REPORTED and not a gate
+    --gc-hard                    make it a gate. Measured, on a 22% GC template
+                                 it cuts the forward survivors from 17 to 1 --
+                                 one candidate from an empty result, on a
+                                 criterion the Tm window already covers. That
+                                 is why it is off.
+    --gc-clamp <MIN..MAX>        G or C among the LAST 5 bases, default 1..3
+    --max-poly <N>               longest run of one base, default 4 (G: 3)
+    --product <MIN..MAX>         amplicon length, default 100..3000. The
+                                 AMPLICON's, so any 5' tails count toward it --
+                                 that is the molecule that runs on the gel.
+    --product-opt <N>            penalise distance from this, on a log scale
+    --max <N>                    pairs to report, default 5
+    --add-5 <ENZYME>             add this enzyme's site as a 5' tail, forward
+    --add-3 <ENZYME>             ... reverse
+    --spacer <BASES>             bases 5' of the added site. None by default; a
+                                 warning says why you may want some.
+    --vector <file>              count the added enzymes' sites in a vector too,
+                                 with Dam/Dcm methylation applied: a blocked
+                                 site is not a usable single cutter
+    --vector-circular            read the vector as a plasmid. FASTA carries no
+                                 topology, and a site straddling the origin of a
+                                 vector read as linear is reported as absent
+    --dam- / --dcm-              the vector prep is dam- / dcm-. Both are
+                                 assumed PRESENT, which is an ordinary lab strain
+    --cpg                        the vector is CpG methylated (a mammalian cell
+                                 line, or M.SssI). Off by default
+    --off-seed <N>               3'-anchored seed for the off-target scan, 8-32,
+                                 default 12. Raising it makes the scan faster
+                                 and BLINDER: 12 is pl-clone's own MIN_ANNEAL,
+                                 so above it this tool would offer pairs its own
+                                 simulator refuses as not specific
+    --no-specificity             skip the off-target scan, and say so
+    --table <1998|2004>          } spelled exactly as `pl tm` spells them
+    --na <mM>                    }
+    --oligo <nM>                 }
+    --salt <santalucia|schildkraut|none>
 
 PRIMERS OPTIONS:
     --primer <SEQ>               a primer, repeatable
@@ -204,6 +273,7 @@ fn main() -> ExitCode {
         "tm" => cmd_tm(rest),
         "goldengate" => cmd_goldengate(rest),
         "primers" => cmd_primers(rest),
+        "design" => cmd_design(rest),
         "orfs" => cmd_orfs(rest),
         "sanger" => cmd_sanger(rest),
         "annotate" => cmd_annotate(rest),
@@ -3607,6 +3677,392 @@ Tm is over the annealed footprint only; a 5' tail never contributes to it"
         );
     }
     Ok(())
+}
+
+/// Pick a primer pair for a region.
+///
+/// Every numeric option is validated with a **positive** test —
+/// `v.is_finite() && (lo..=hi).contains(&v)` — never `!(v <= 0.0)`. NaN fails
+/// every comparison and slipped past exactly that guard in `pl-thermo`, where
+/// `--na nan` parsed, failed `NaN > 0.0`, and printed the 1 M number under a
+/// method line reading "0 mM Na+".
+fn cmd_design(args: &[String]) -> Result<(), String> {
+    let a = parse_args(
+        args,
+        &[
+            "region",
+            "seq",
+            "mode",
+            "flank",
+            "len",
+            "len-opt",
+            "tm",
+            "tm-opt",
+            "tm-diff",
+            "gc",
+            "gc-clamp",
+            "max-poly",
+            "product",
+            "product-opt",
+            "max",
+            "add-5",
+            "add-3",
+            "spacer",
+            "vector",
+            "off-seed",
+            "table",
+            "na",
+            "oligo",
+            "salt",
+        ],
+        &[
+            "circular",
+            "rt",
+            "gc-hard",
+            "no-specificity",
+            "json",
+            "vector-circular",
+            "dam-",
+            "dcm-",
+            "cpg",
+        ],
+    )?;
+
+    // The Tm knobs, spelled exactly as `pl tm` spells them. Two spellings of
+    // one model is how a user ends up unable to reproduce their own number.
+    let mut c = pl_design::Constraints {
+        tm_method: match a.get("table").unwrap_or("1998") {
+            "1998" => pl_thermo::Method::default(),
+            "2004" => pl_thermo::Method::santalucia_2004(),
+            other => return Err(format!("--table {other:?}: expected 1998 or 2004")),
+        },
+        ..Default::default()
+    };
+    if let Some(v) = a.get("na") {
+        c.tm_method.na_molar = number(v, "--na", 0.000_001, 5_000.0)? * 1e-3;
+    }
+    if let Some(v) = a.get("oligo") {
+        c.tm_method.oligo_molar = number(v, "--oligo", 0.000_001, 1e9)? * 1e-9;
+    }
+    c.tm_method.salt = match a.get("salt").unwrap_or("santalucia") {
+        "santalucia" => pl_thermo::SaltCorrection::SantaLucia1998,
+        "schildkraut" => pl_thermo::SaltCorrection::SchildkrautLifson,
+        "none" => pl_thermo::SaltCorrection::None,
+        other => {
+            return Err(format!(
+                "--salt {other:?}: expected santalucia, schildkraut or none"
+            ))
+        }
+    };
+
+    // `--rt` is applied BEFORE the explicit options, so an explicit --product
+    // or --tm still wins. A preset that overrode what the user typed would be
+    // the worst of both.
+    if a.has("rt") {
+        c = c.rt_pcr();
+    }
+
+    if let Some(v) = a.get("mode") {
+        c.mode = pl_design::Mode::parse(v)
+            .ok_or_else(|| format!("--mode {v:?}: expected contain or within"))?;
+    }
+    if let Some(v) = a.get("flank") {
+        c.flank = number(v, "--flank", 0.0, 100_000.0)? as u64;
+    }
+    if let Some(v) = a.get("len") {
+        let (lo, hi) = range(v, "--len", 8.0, 60.0)?;
+        c.len_min = lo as usize;
+        c.len_max = hi as usize;
+        c.len_opt = c.len_opt.clamp(c.len_min, c.len_max);
+    }
+    if let Some(v) = a.get("len-opt") {
+        c.len_opt = number(v, "--len-opt", c.len_min as f64, c.len_max as f64)? as usize;
+    }
+    if let Some(v) = a.get("tm") {
+        let (lo, hi) = range(v, "--tm", -50.0, 150.0)?;
+        c.tm_min = lo;
+        c.tm_max = hi;
+        c.tm_opt = (c.tm_min + c.tm_max) / 2.0;
+    }
+    if let Some(v) = a.get("tm-opt") {
+        c.tm_opt = number(v, "--tm-opt", c.tm_min, c.tm_max)?;
+    }
+    if let Some(v) = a.get("tm-diff") {
+        c.tm_diff_max = number(v, "--tm-diff", 0.0, 100.0)?;
+    }
+    if let Some(v) = a.get("gc") {
+        let (lo, hi) = range(v, "--gc", 0.0, 100.0)?;
+        c.gc_min = lo;
+        c.gc_max = hi;
+    }
+    c.gc_hard = a.has("gc-hard");
+    if let Some(v) = a.get("gc-clamp") {
+        let (lo, hi) = range(v, "--gc-clamp", 0.0, 5.0)?;
+        c.gc_clamp_min = lo as usize;
+        c.gc_clamp_max = hi as usize;
+    }
+    if let Some(v) = a.get("max-poly") {
+        c.max_poly = number(v, "--max-poly", 1.0, 30.0)? as usize;
+        c.max_poly_g = c.max_poly_g.min(c.max_poly);
+    }
+    if let Some(v) = a.get("product") {
+        let (lo, hi) = range(v, "--product", 20.0, 100_000.0)?;
+        c.product_min = lo as u64;
+        c.product_max = hi as u64;
+        c.product_target = c
+            .product_target
+            .filter(|t| (c.product_min..=c.product_max).contains(t));
+    }
+    if let Some(v) = a.get("product-opt") {
+        c.product_target = Some(number(v, "--product-opt", 20.0, 100_000.0)? as u64);
+    }
+    if let Some(v) = a.get("max") {
+        c.max_pairs = number(v, "--max", 1.0, 200.0)? as usize;
+    }
+    if let Some(v) = a.get("off-seed") {
+        c.off_seed = number(v, "--off-seed", 8.0, 32.0)? as usize;
+    }
+    c.specificity = !a.has("no-specificity");
+
+    let spacer = a.get("spacer").unwrap_or("").as_bytes().to_vec();
+    if let Some(b) = spacer
+        .iter()
+        .find(|b| !matches!(b.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T'))
+    {
+        return Err(format!(
+            "--spacer contains {:?}, which is not a DNA base. A tail is real DNA that has to \
+             be ordered.",
+            *b as char
+        ));
+    }
+    for (flag, slot) in [("add-5", 0usize), ("add-3", 1usize)] {
+        let Some(name) = a.get(flag) else { continue };
+        let e = pl_enzymes::by_name(name).ok_or_else(|| {
+            format!(
+                "--{flag} {name:?}: not in the shipped table. {} enzymes are available; \
+                 pl digest --enzyme lists them.",
+                pl_enzymes::ENZYMES.len()
+            )
+        })?;
+        let spec = pl_design::params::Tailspec {
+            enzyme: e,
+            spacer: spacer.clone(),
+        };
+        if slot == 0 {
+            c.tail_five = Some(spec);
+        } else {
+            c.tail_three = Some(spec);
+        }
+    }
+
+    let region_text = a
+        .get("region")
+        .ok_or("give --region A..B, the target to amplify")?;
+    let (rs, re) = region_text
+        .split_once("..")
+        .ok_or_else(|| format!("--region {region_text:?}: expected A..B"))?;
+    let region = pl_design::Region::new(
+        rs.trim()
+            .parse::<u64>()
+            .map_err(|e| format!("--region: {e}"))?,
+        re.trim()
+            .parse::<u64>()
+            .map_err(|e| format!("--region: {e}"))?,
+    );
+
+    // The template, and the two no-bases files refused in their own terms by
+    // pl-design rather than by a sentence restated here.
+    let (mol, label) = match a.get("seq") {
+        Some(s) => (
+            pl_core::Molecule {
+                name: "<--seq>".into(),
+                seq: s.as_bytes().to_vec(),
+                topology: if a.has("circular") {
+                    pl_core::Topology::Circular
+                } else {
+                    pl_core::Topology::Linear
+                },
+                ..Default::default()
+            },
+            "<--seq>".to_string(),
+        ),
+        None => {
+            let path = a.files.first().ok_or("give a template file, or --seq")?;
+            let data = read(path)?;
+            let (mol, _, report) =
+                load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+            note_first_record_only(&path.display().to_string(), &report, "used as the template");
+            (mol, path.display().to_string())
+        }
+    };
+
+    // Said BEFORE the scan, not after it. The off-target check is what this
+    // tool does that a designer deferring specificity to BLAST cannot, and on
+    // a bacterial chromosome it is also the whole runtime: measured, 3 s at
+    // 500 kb, 17 s at 1 Mb, 65 s at 2 Mb of random sequence and about five and
+    // a half minutes on a real 9.1 Mb chromosome. The GUI refuses templates
+    // over 200 kb and sends the user here, so here is where the cost has to be
+    // stated. It is not lowered by shortening the seed -- see
+    // `Constraints::OFF_SEED` for why raising it would buy the time by making
+    // the answer worse -- so the honest move is to name the knobs.
+    if c.specificity && mol.seq.len() as u64 > pl_design::Constraints::SCAN_NOTICE_BP {
+        eprintln!(
+            "pl: {} bp template: the off-target scan is the slow part here and grows faster \
+             than the template -- measured on random sequence, 3 s at 500 kb, 17 s at 1 Mb, \
+             65 s at 2 Mb, about 5 minutes at 9 Mb. --no-specificity skips it and the report \
+             says so; a smaller --flank or a narrower --region enumerates fewer candidates.",
+            mol.seq.len()
+        );
+    }
+
+    let mut r = pl_design::design_molecule(&mol, region, &c).map_err(|e| e.to_string())?;
+
+    // A vector, if one was given, is a separate molecule and gets a separate
+    // line. "Absent from the product, present 3x in the vector" is a different
+    // problem from an internal site and collapsing the two makes it unfixable.
+    //
+    // Methylation is asked about the VECTOR only, and is now actually asked.
+    // A PCR product is synthesised from dNTPs in vitro and is unmethylated, so
+    // running the Dam/Dcm rules over it would spuriously reject ClaI, XbaI and
+    // the rest for a molecule they cut perfectly -- `tail.rs` says why. A
+    // vector, though, came out of a miniprep, and an ordinary lab strain is
+    // dam+ dcm+. Until a reviewer checked, this block called `cut_positions`
+    // and nothing else while two comments claimed methylation was applied
+    // here: a ClaI site sitting inside GATCGATC was reported as "1 time --
+    // which is what you want: that is where the insert goes", and the user
+    // linearises a dam+ prep, gets no cut, and loses a week.
+    if let Some(v) = a.get("vector") {
+        let data = read(Path::new(v))?;
+        let (mut vec_mol, _, _) = load_with_report(&data).map_err(|e| format!("{v}: {e}"))?;
+        // The same two no-bases gates the template gets, in the same words --
+        // an annotation track scored as "cuts 0 times -- so it cannot open
+        // this vector" is a verdict derived from zero bases, and a user
+        // comparing backbones eliminates one on it.
+        if vec_mol.is_annotation_track() {
+            return Err(format!(
+                "--vector {v}: {}",
+                pl_design::DesignError::AnnotationTrack {
+                    features: vec_mol.features.len(),
+                }
+            ));
+        }
+        if vec_mol.sequence_absent() {
+            return Err(format!(
+                "--vector {v}: {}",
+                pl_design::DesignError::SequenceAbsent {
+                    declared: vec_mol.declared_len.unwrap_or(0),
+                }
+            ));
+        }
+        // FASTA carries no topology, so a site straddling a plasmid's origin
+        // read as linear is reported as absent -- measured: a 2,400 bp vector
+        // whose only EcoRI site spans base 1 came back "cuts 0 times".
+        // `--vector-circular` says so explicitly, and the line below states
+        // which topology was assumed, the way `pl digest`'s header does.
+        if a.has("vector-circular") {
+            vec_mol.topology = pl_core::Topology::Circular;
+        }
+        let meth = pl_core::Methylation {
+            dam: !a.has("dam-"),
+            dcm: !a.has("dcm-"),
+            ecoki: false,
+            // Not a flag any container carries, and not the ordinary case for
+            // a plasmid grown in E. coli, so it is opt-in.
+            cpg: a.has("cpg"),
+        };
+        for spec in [&c.tail_five, &c.tail_three].into_iter().flatten() {
+            // `cut_sites` rather than `cut_positions`, because methylation is a
+            // question about the recognition site and recovering the site
+            // start back from the cut is the arithmetic that was already wrong
+            // once in the GUI, on origin-straddling sites.
+            let sites = pl_enzymes::cut_sites(&vec_mol.seq, vec_mol.topology, spec.enzyme);
+            let mut affected: Vec<(u64, pl_enzymes::methylation::SiteEffect)> = Vec::new();
+            for s in &sites {
+                if let Some(e) = pl_enzymes::methylation::site_effect(
+                    spec.enzyme,
+                    &vec_mol.seq,
+                    (s.site_start - 1) as usize,
+                    vec_mol.topology,
+                    &meth,
+                ) {
+                    affected.push((s.site_start, e));
+                }
+            }
+            affected.sort_by_key(|(p, _)| *p);
+            affected.dedup_by_key(|(p, _)| *p);
+            let cuts = sites.len();
+            let dead = affected
+                .iter()
+                .filter(|(_, e)| e.effect == pl_enzymes::methylation::Effect::Blocked)
+                .count();
+            // The verdict is about the sites that will actually be cut. A
+            // blocked site is not "where the insert goes"; it is a site that
+            // does nothing.
+            let live = cuts.saturating_sub(dead);
+            let mut line = format!(
+                "{} reads {} site{} in {} ({} bp, {}) and cuts {} of them -- {}",
+                spec.enzyme.name,
+                cuts,
+                if cuts == 1 { "" } else { "s" },
+                v,
+                vec_mol.seq.len(),
+                if vec_mol.topology.is_circular() {
+                    "circular".to_string()
+                } else {
+                    "read as LINEAR; pass --vector-circular if it is a plasmid".to_string()
+                },
+                live,
+                match live {
+                    0 => "so it cannot open this vector".to_string(),
+                    1 => "which is what you want: that is where the insert goes".to_string(),
+                    n => format!("so the digest fragments the vector into {n} pieces"),
+                }
+            );
+            for (pos, e) in &affected {
+                line.push_str(&format!(
+                    ". The site at {pos} is {} by {} methylation in the dam{} dcm{} prep \
+                     assumed here -- grow the vector in a dam-/dcm- strain, or pass \
+                     --dam-/--dcm- if this prep already is",
+                    e.effect.as_str(),
+                    e.methylase.name(),
+                    if meth.dam { "+" } else { "-" },
+                    if meth.dcm { "+" } else { "-" },
+                ));
+            }
+            r.warnings.push(line);
+        }
+    }
+
+    if a.has("json") {
+        print!("{}", r.json(&label));
+    } else {
+        print!("{}", r.text(&label));
+    }
+    Ok(())
+}
+
+/// A finite number inside a range, refused positively.
+fn number(v: &str, flag: &str, lo: f64, hi: f64) -> Result<f64, String> {
+    let x: f64 = v.trim().parse().map_err(|e| format!("{flag} {v:?}: {e}"))?;
+    // A positive test, not `!(x < lo)`: NaN fails every comparison and would
+    // slip through the negation.
+    if x.is_finite() && (lo..=hi).contains(&x) {
+        Ok(x)
+    } else {
+        Err(format!("{flag} {v:?}: expected a number from {lo} to {hi}"))
+    }
+}
+
+fn range(v: &str, flag: &str, lo: f64, hi: f64) -> Result<(f64, f64), String> {
+    let (a, b) = v
+        .split_once("..")
+        .ok_or_else(|| format!("{flag} {v:?}: expected MIN..MAX"))?;
+    let a = number(a, flag, lo, hi)?;
+    let b = number(b, flag, lo, hi)?;
+    if a > b {
+        return Err(format!("{flag} {v:?}: {a} is greater than {b}"));
+    }
+    Ok((a, b))
 }
 
 /// Read a Sanger chromatogram.

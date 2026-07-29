@@ -557,3 +557,280 @@ fn an_ordinary_dna_converts_without_a_notice() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// pl design --vector
+// ---------------------------------------------------------------------------
+
+/// A FASTA record, since `--vector` most often gets one and FASTA is the format
+/// that carries no topology.
+fn fasta(name: &str, seq: &str) -> String {
+    format!(">{name}\n{seq}\n")
+}
+
+/// `n` deterministic pseudo-random bases carrying none of `absent`.
+///
+/// An LCG, matching `pl-design`'s own test fixtures, and **not** a repeated
+/// motif: the first draft of these tests used `"ACCTTGCAAG".repeat(200)`, on
+/// which every candidate primer occurs two hundred times, the off-target gate
+/// refuses the whole design, and all three tests below failed with empty stdout
+/// having proved nothing about vectors at all.
+fn plain(n: usize, absent: &[&str]) -> String {
+    let mut s: u64 = 20_260_729;
+    let mut out = String::with_capacity(n);
+    for _ in 0..n {
+        s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        out.push(b"ACGT"[((s >> 24) & 3) as usize] as char);
+    }
+    // Break any occurrence of a site these tests place deliberately, so a
+    // fixture cannot turn a control into a refusal.
+    let flip = |c: u8| match c {
+        b'A' => "C",
+        b'C' => "A",
+        b'G' => "T",
+        _ => "G",
+    };
+    loop {
+        let Some((i, m)) = absent
+            .iter()
+            .filter_map(|m| out.find(m).map(|i| (i, *m)))
+            .min()
+        else {
+            return out;
+        };
+        let at = i + m.len() / 2;
+        let with = flip(out.as_bytes()[at]);
+        out.replace_range(at..at + 1, with);
+    }
+}
+
+/// A methylation-blocked site in the vector is not a usable single cutter.
+///
+/// PROVEN TO FAIL against the shipped `--vector` block, which called
+/// `pl_enzymes::cut_positions` and nothing else: both assertions fire, because
+/// the Dam-blocked vector and the Dam-free control printed byte-identical
+/// lines. Two source comments — `bins/pl/src/main.rs` and `pl_design::tail` —
+/// said methylation *was* applied here. The bench consequence is a week: the
+/// user linearises a dam+ prep, gets no cut, and the tool had told them that
+/// site was where the insert goes.
+#[test]
+fn a_dam_blocked_site_in_the_vector_is_not_reported_as_the_one_to_use() {
+    let dir = scratch("design-vector-meth");
+    // ATCGAT out of the fixture so the only ClaI site anywhere is the one each
+    // vector is built around; TCGA as well, so the flanks cannot spell one.
+    let body = plain(2_000, &["ATCGAT", "TCGA"]);
+    write(&dir, "template.fa", &fasta("t", &body));
+
+    // ClaI's ATCGAT inside GATCGATC: Dam methylates the GATC that overlaps it
+    // at each end, and the site is blocked.
+    let blocked = format!("{}GATCGATC{}", &body[..1_000], &body[1_008..]);
+    write(&dir, "blocked.fa", &fasta("v", &blocked));
+    // The control: the same recognition site with no GATC overlapping it. AA
+    // after the site and CC before it, so neither GATCGAT nor ATCGATC occurs.
+    let free = format!("{}CCATCGATAA{}", &body[..1_000], &body[1_010..]);
+    write(&dir, "free.fa", &fasta("v", &free));
+
+    let args = |v: &'static str| {
+        vec![
+            "design",
+            "template.fa",
+            "--region",
+            "400..1000",
+            "--add-5",
+            "ClaI",
+            "--vector",
+            v,
+        ]
+    };
+    let dam = stdout(&run(&dir, &args("blocked.fa")));
+    let none = stdout(&run(&dir, &args("free.fa")));
+
+    assert!(
+        dam.contains("blocked by Dam methylation"),
+        "the blocked vector must say so:\n{dam}"
+    );
+    assert!(
+        dam.contains("cuts 0 of them"),
+        "a blocked site is not a cut:\n{dam}"
+    );
+    assert!(
+        none.contains("cuts 1 of them -- which is what you want"),
+        "the Dam-free control must still be usable:\n{none}"
+    );
+    assert!(
+        !none.contains("methylation"),
+        "and must not be warned about:\n{none}"
+    );
+
+    // --dam- is the escape hatch for a prep that already is dam-.
+    let mut a = args("blocked.fa");
+    a.push("--dam-");
+    let off = stdout(&run(&dir, &a));
+    assert!(
+        off.contains("cuts 1 of them -- which is what you want"),
+        "{off}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The vector's topology is stated, and a plasmid can be declared circular.
+///
+/// PROVEN TO FAIL: without `--vector-circular` and the topology on the line,
+/// the first assertion fires — a 2,400 bp vector whose only EcoRI site
+/// straddles base 1 was reported as "cuts 0 times -- so it cannot open this
+/// vector", with nothing anywhere saying it had been read as linear.
+#[test]
+fn a_vector_site_across_the_origin_is_found_when_the_vector_is_a_plasmid() {
+    let dir = scratch("design-vector-origin");
+    let body = plain(2_000, &["GAATTC", "AATT"]);
+    write(&dir, "template.fa", &fasta("t", &body));
+    // GAA at the end, TTC at the start: one EcoRI site, only on a circle.
+    let v = format!("TTC{}GAA", &body[3..1_997]);
+    write(&dir, "v.fa", &fasta("v", &v));
+
+    let base = vec![
+        "design",
+        "template.fa",
+        "--region",
+        "400..1000",
+        "--add-5",
+        "EcoRI",
+        "--vector",
+        "v.fa",
+    ];
+    let lin = stdout(&run(&dir, &base));
+    assert!(
+        lin.contains("read as LINEAR; pass --vector-circular"),
+        "the assumption has to be disclosed:\n{lin}"
+    );
+    assert!(lin.contains("reads 0 sites"), "{lin}");
+
+    let mut c = base.clone();
+    c.push("--vector-circular");
+    let circ = stdout(&run(&dir, &c));
+    assert!(circ.contains("(2000 bp, circular)"), "{circ}");
+    assert!(
+        circ.contains("reads 1 site") && circ.contains("cuts 1 of them"),
+        "{circ}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file with no bases is refused as a vector in the same words as a template.
+///
+/// PROVEN TO FAIL: with the two gates applied only to the template, as shipped,
+/// this reports `EcoRI cuts anno.gb 0 times -- so it cannot open this vector` —
+/// a verdict derived from zero bases, on which a user comparing candidate
+/// backbones would eliminate one.
+#[test]
+fn an_annotation_only_vector_is_refused_rather_than_scored() {
+    let dir = scratch("design-vector-anno");
+    write(
+        &dir,
+        "template.fa",
+        &fasta("t", &plain(2_000, &["GAATTC", "AATT"])),
+    );
+    write(
+        &dir,
+        "anno.gb",
+        "LOCUS       anno                    4000 bp    DNA     circular SYN 26-JUL-2026\n\
+         FEATURES             Location/Qualifiers\n\
+         \x20    misc_feature    1..100\n\
+         \x20                    /label=\"a\"\n//\n",
+    );
+
+    let out = run(
+        &dir,
+        &[
+            "design",
+            "template.fa",
+            "--region",
+            "400..1000",
+            "--add-5",
+            "EcoRI",
+            "--vector",
+            "anno.gb",
+        ],
+    );
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let e = stderr(&out);
+    assert!(e.contains("--vector anno.gb"), "{e}");
+    assert!(
+        e.contains("declares 4000 bases and carries none of them"),
+        "the same words the template gets: {e}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The off-target scan's cost is stated **before** it is paid.
+///
+/// The scan is what this verb does that a designer deferring specificity to
+/// BLAST cannot, and on a bacterial chromosome it is also the entire runtime:
+/// measured, 3 s at 500 kb, 17 s at 1 Mb, 65 s at 2 Mb of random sequence and
+/// about five and a half minutes on a real 9.1 Mb chromosome, with no bound and
+/// no progress. Raising `--off-seed` would buy the time by making the scan
+/// blind to exactly the second sites `pl_clone::pcr` objects to, so it is not
+/// bought; what a user gets instead is the number and the knobs, up front. The
+/// GUI refuses templates over 200 kb and sends people here, so here is where it
+/// has to be said.
+///
+/// PROVEN TO FAIL: without the notice — the shipped behaviour — the first
+/// assertion fires against empty stderr.
+#[test]
+fn a_template_big_enough_for_the_scan_to_dominate_says_so_first() {
+    let dir = scratch("design-scan-notice");
+    // Just over the 500 kb threshold. `--flank 0` keeps the enumeration to ten
+    // oligos a side, so this pays for the notice rather than for the scan.
+    let big = plain(520_000, &[]);
+    write(&dir, "big.fa", &fasta("big", &big));
+    let small = plain(20_000, &[]);
+    write(&dir, "small.fa", &fasta("small", &small));
+
+    let out = run(
+        &dir,
+        &["design", "big.fa", "--region", "9000..9800", "--flank", "0"],
+    );
+    let e = stderr(&out);
+    assert!(
+        e.contains("the off-target scan is the slow part here"),
+        "the cost has to be stated before it is paid: {e:?}"
+    );
+    assert!(e.contains("--no-specificity"), "{e}");
+
+    // Not said on a template where it is not true, or it is a notice nobody
+    // reads; and not said when the scan is not going to run.
+    let quiet = run(
+        &dir,
+        &[
+            "design",
+            "small.fa",
+            "--region",
+            "9000..9800",
+            "--flank",
+            "0",
+        ],
+    );
+    assert!(
+        !stderr(&quiet).contains("off-target scan is the slow part"),
+        "{}",
+        stderr(&quiet)
+    );
+    let skipped = run(
+        &dir,
+        &[
+            "design",
+            "big.fa",
+            "--region",
+            "9000..9800",
+            "--flank",
+            "0",
+            "--no-specificity",
+        ],
+    );
+    assert!(
+        !stderr(&skipped).contains("off-target scan is the slow part"),
+        "{}",
+        stderr(&skipped)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
