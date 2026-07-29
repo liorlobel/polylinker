@@ -42,8 +42,11 @@
 //!
 //! - The dimer thresholds are set tighter than a full model would need, and
 //!   `Constraints::DG_DIMER_THREE_PRIME`'s doc says that is why.
-//! - Every ΔG is reported as an **inequality** in the honest direction, and
-//!   [`Structure::render`] writes it that way rather than as an equality.
+//! - Every ΔG is reported with the qualifier that says which way it can be
+//!   wrong, and [`Structure::render`] writes it that way rather than as an
+//!   equality. Not as `>=`, which is the direction that is honest for the
+//!   hairpin and dishonest for the dimer — and the dimer is the only thing
+//!   `render` is ever called on.
 //! - [`SCREEN_NOTE`] says the same thing in a sentence, and the report prints
 //!   it beside the numbers rather than leaving it to `pl methods design`.
 //!
@@ -62,8 +65,9 @@ pub const SCREEN_NOTE: &str = "\
 hairpin and dimer free energies are a perfect-helix SCREEN, not a fold: only ungapped runs \
 of Watson-Crick pairs are found, so a stem broken by one mismatch is scored as its longer \
 half and a real structure can be several kcal/mol more stable than the number shown. That \
-is why each is printed as >=. Internal loops, bulges, dangling ends, terminal mismatches, \
-coaxial stacking and G-quadruplexes are not modelled.";
+is why each is printed as \"or more stable\" rather than as a value: for a dimer the number \
+is an upper bound on the stack sum, not the stack sum. Internal loops, bulges, dangling \
+ends, terminal mismatches, coaxial stacking and G-quadruplexes are not modelled.";
 
 /// The most stable helix found, and where.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,24 +81,37 @@ pub struct Structure {
 impl Structure {
     pub const NONE: Structure = Structure { dg: 0.0, pairs: 0 };
 
-    /// The number with the inequality that makes it honest.
+    /// The number with the qualifier that makes it honest.
     ///
-    /// `>=`, never a bare number. The module doc has promised this since the
-    /// file was written and the body printed an equality anyway, which is the
-    /// one overclaim this module exists to prevent: a reviewer measured
+    /// Never a bare number. The module doc has promised that since the file was
+    /// written and the body printed an equality anyway, which is the one
+    /// overclaim this module exists to prevent: a reviewer measured
     /// `ATTATTATTATTATTGCGAGCG` against `ATTATTATTATTATTCGCACGC`, whose 3' ends
     /// form 3 bp + a 1×1 internal loop + 3 bp. This screen sees one of the two
     /// helices and reports −4.40 kcal/mol, which **passes** the −6.0 gate; the
-    /// two helices stack to −8.79. Printed as `-4.4` that is read as the
-    /// answer. Printed as `>= -4.4` it is read as what it is.
+    /// two helices stack to −8.79. Printed as `-4.4` that is read as the answer.
+    ///
+    /// # Why not `>=`, which is what it used to print
+    ///
+    /// Because that is the inequality the wrong way round for the only thing
+    /// this ever renders. The single production call site is the 3' cross-dimer,
+    /// and for a dimer the omissions all *remove* stabilisation: the best
+    /// structure's stack sum is at most the best single helix's, by
+    /// construction, so `-8.79 >= -4.4` is false and `>=` excluded exactly the
+    /// value the qualifier was introduced to warn about. Nor is the fix `<=`:
+    /// `Constraints::describe_dg` prints the acceptance conditions two lines
+    /// above as "3'-end dimer >= -6.0", so "cross-dimer dG37 <= -1.5" underneath
+    /// reads as a gate the pair has just failed. Overloading a comparison
+    /// operator is what went wrong; the words say it once and cannot be read
+    /// backwards.
     pub fn render(&self) -> String {
         if self.pairs == 0 {
-            // No number, so no inequality to hang on one: the screen found no
+            // No number, so no qualifier to hang on one: the screen found no
             // helix of two or more pairs. A real structure may still exist —
             // that is what SCREEN_NOTE says, once, where the report shows it.
             "none found".to_string()
         } else {
-            format!(">= {:.1} ({} bp helix)", self.dg, self.pairs)
+            format!("{:.1} or more stable ({} bp helix)", self.dg, self.pairs)
         }
     }
 }
@@ -295,36 +312,65 @@ mod tests {
         assert_eq!(three.pairs, seq.len(), "{three:?}");
     }
 
-    /// PROVEN TO FAIL: against the shipped `render` — which formatted
-    /// `"{:.1} ({} bp helix)"` — the first assertion fires with
-    /// `left: "-8.8 (6 bp helix)"`. The module doc promised the inequality from
-    /// the day the file was written; the body printed an equality, and a
-    /// reviewer had to measure a gate-crossing case to find it.
+    /// PROVEN TO FAIL, twice over.
+    ///
+    /// Against the original `render`, which formatted `"{:.1} ({} bp helix)"`,
+    /// the first assertion fires with `left: "-8.8 (6 bp helix)"` — a screen
+    /// result reading as a measurement.
+    ///
+    /// Against the `">= {:.1} ({} bp helix)"` that replaced it, the
+    /// `!contains(">=")` assertion fires. That direction is the one that had to
+    /// be measured to be believed: `>=` is honest for a hairpin, whose omitted
+    /// loop-initiation term is positive, and dishonest for a dimer, whose
+    /// omissions all remove stabilisation — and the dimer is the only thing
+    /// `render` is ever called on in production. The constructed pair below is
+    /// the counterexample: the screen reports −4.40, the two helices stack to
+    /// −8.79, and `-8.79 >= -4.40` is false, so the printed relation excluded
+    /// exactly the value it was introduced to warn about.
     #[test]
-    fn a_screened_helix_is_rendered_as_an_inequality_and_never_as_a_number() {
+    fn a_screened_helix_is_rendered_as_a_bound_and_never_as_a_number() {
         let h = hairpin(b"GGGGCCAAAAGGCCCC", &t());
         let s = h.render();
         assert!(
-            s.starts_with(">= -"),
+            s.contains("or more stable"),
             "a screen result must not read as a measurement: {s}"
         );
+        assert!(
+            !s.contains(">="),
+            "`>=` is the wrong way round for the only thing render() is called on: {s}"
+        );
 
-        // The measured case the inequality exists for. These two 3' ends form
+        // The measured case the qualifier exists for. These two 3' ends form
         // 3 bp + a 1x1 internal loop + 3 bp; the screen sees one helix, reports
         // about -4.4, and PASSES the -6.0 gate, while the two helices stack to
-        // about -8.8. The number is not wrong, the equals sign was.
+        // about -8.8.
         let (_, three) = dimer(b"ATTATTATTATTATTGCGAGCG", b"ATTATTATTATTATTCGCACGC", &t());
         assert!(
             three.dg > -6.0,
             "the premise: this pair passes the shipped gate ({three:?})"
         );
-        assert!(three.render().starts_with(">= -"), "{}", three.render());
+        let two_helices = 2.0 * pl_thermo::dg37_stacks(b"GCG", &t()).unwrap();
+        assert!(
+            two_helices < three.dg,
+            "the premise: the real structure is more stable than the screen's \
+             ({two_helices} vs {})",
+            three.dg
+        );
+        let r = three.render();
+        assert!(r.contains("or more stable"), "{r}");
+        // The rendered claim has to be TRUE of that structure. `>= -4.4` is not.
+        assert!(!r.contains(">="), "{r}");
 
         // And the empty case says it found nothing rather than claiming zero.
         assert_eq!(Structure::NONE.render(), "none found");
 
-        // The sentence that has to reach the reader alongside it.
+        // The sentence that has to reach the reader alongside it, and it must
+        // not still be justifying the operator that was removed.
         assert!(SCREEN_NOTE.contains("longer half"), "{SCREEN_NOTE}");
+        assert!(
+            !SCREEN_NOTE.contains("printed as >="),
+            "the note endorsed the very direction that was wrong: {SCREEN_NOTE}"
+        );
     }
 
     #[test]

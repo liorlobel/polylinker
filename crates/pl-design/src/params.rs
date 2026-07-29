@@ -189,11 +189,21 @@ pub struct Constraints {
     pub product_target: Option<u64>,
     /// How many pairs to report.
     pub max_pairs: usize,
-    /// Minimum 3'-end separation between two *reported* forward primers, and
-    /// likewise for reverse.
+    /// Diversity bound on the 3' ends of the **pair**, not of either side.
+    ///
+    /// A pair is dropped only when its forward 3' end AND its reverse 3' end are
+    /// both within `min_separation` of an already-accepted pair's, so two
+    /// reported pairs may share one side outright — a genuinely different
+    /// reverse primer on the same forward is still offered, which is the point.
     ///
     /// Adjacent candidates differing by one base score almost identically, so a
     /// naive top-5 is five views of the same primer — the illusion of choice.
+    /// This field bounds that for the pair; it does **not** guarantee that two
+    /// reported forward primers differ, and it used to say it did. On an
+    /// ordinary default run (`--region 250..350` on 600 bp) pairs 1 and 2 came
+    /// back with a byte-identical forward and pairs 1 and 3 with a
+    /// byte-identical reverse, so both halves of that claim failed in one
+    /// invocation.
     pub min_separation: u64,
     /// How many survivors per side are carried into pairing.
     ///
@@ -234,6 +244,22 @@ pub struct Tailspec {
     pub spacer: Vec<u8>,
 }
 
+/// The one relation between this crate's advice floor and another crate's
+/// constant, checked where it is stated rather than in a test.
+///
+/// [`Constraints::LEN_ADVICE_MIN`]'s doc justifies 15 by `pl_clone::MIN_ANNEAL`
+/// being 12. If that ever rises past 15, the widening advice starts
+/// recommending oligos `pl_clone::pcr` will not anneal — the exact thing the
+/// constant exists to prevent — and the doc above becomes a false claim. A
+/// runtime `assert!` in a test could only report that after the fact, and
+/// clippy is right that it is not an assertion at all; this one fails the
+/// build.
+const _: () = assert!(
+    Constraints::LEN_ADVICE_MIN > pl_clone::MIN_ANNEAL,
+    "the shortest primer this crate recommends has to clear the simulator's \
+     annealing floor, or `pl design` advises its way to oligos `pl_clone::pcr` refuses"
+);
+
 impl Constraints {
     /// 18 nt. Derivable rather than conventional, which is why it is the one
     /// length bound with an argument: a primer is uninformative unless its
@@ -263,6 +289,27 @@ impl Constraints {
     /// two is wrong. 60 because coupling at ~99%/step leaves 55% of a 60-mer
     /// full-length, and below half is not an oligo anyone should be sent.
     pub const LEN_HARD_MAX: usize = 60;
+    /// The shortest primer any interface here will accept, 8 nt.
+    ///
+    /// The mirror of [`Constraints::LEN_HARD_MAX`], and named for the same
+    /// reason: [`crate::report::Tally::advice`] used to say `--len` was "already
+    /// at 15..60, the widest this tool accepts", which is false — both
+    /// interfaces validate `--len` against 8..60, so 8..60 is wider and is
+    /// accepted, and following this function's own advice from the defaults
+    /// parks a user at exactly `len_min = 15`, the state where the claim fires.
+    pub const LEN_HARD_MIN: usize = 8;
+    /// 15 nt: the shortest primer this crate will **recommend**, as distinct
+    /// from the shortest it will accept.
+    ///
+    /// The widening advice floors its suggestion here rather than at
+    /// [`Constraints::LEN_HARD_MIN`], and that is deliberate rather than
+    /// arbitrary: `pl_clone::MIN_ANNEAL` is 12, so a primer shorter than that
+    /// does not anneal in this project's own simulator, and a designer that
+    /// advised its way down to 8 would be recommending oligos the rest of the
+    /// toolchain then refuses to run. 15 leaves three bases of margin over that
+    /// floor. Advice that the tool rejects is worse than no advice, and advice
+    /// that the tool *accepts* and then cannot simulate is worse still.
+    pub const LEN_ADVICE_MIN: usize = 15;
     /// 20 nt. **Conventional, and labelled so rather than defended.** It is the
     /// midpoint of 18-27 to within a base and the number every protocol book
     /// orders by; nothing here derives it, and it only ever moves a soft length
@@ -513,10 +560,27 @@ impl Constraints {
     pub const GC_NORM: f64 = 20.0;
 
     /// 200 survivors per side carried into pairing, giving at most 40,000
-    /// pairs. In `Mode::Contain` with the default 200 bp flank the two sides
-    /// enumerate 2,010 candidates each and rarely leave more than a few hundred
-    /// standing, so the bound almost never bites there; it exists for
-    /// `Mode::Within` over a long gene, where it does.
+    /// pairs.
+    ///
+    /// **It bites on ordinary input, and the report says so whenever it does.**
+    /// In `Mode::Contain` at the default flank the two sides enumerate 2,010
+    /// candidates each and typically leave 300-700 standing per side, so the cut
+    /// fires on any template of ordinary composition: measured across template
+    /// GC from 25% to 75%, it bit at every step from 30% to 70% and failed to
+    /// bite only at the two extremes, where the Tm window has already emptied
+    /// the search. This doc used to say it "almost never bites there", while
+    /// `tests/scoring.rs`'s own module doc recorded the opposite from a measured
+    /// 3 kb / 400 bp run — two files in one crate disagreeing about one
+    /// constant.
+    ///
+    /// The cut is harmless in `Mode::Contain` because every candidate lies
+    /// inside a `2 * flank + region` band, so the survivors are mutually within
+    /// the product window whichever 200 are kept. In `Mode::Within` they are
+    /// not: `pair::cap` orders by the per-oligo penalty with the coordinate only
+    /// as a tie-break, so over a long region the retained candidates spread out
+    /// and the expected pair count is `max_per_side^2 * window / region_bp` —
+    /// 1.6 over 2 Mb under `--rt`. That is why `pair::run` conditions the
+    /// reverse cut on the forwards that survived theirs; see `retain_pairable`.
     pub const MAX_PER_SIDE: usize = 200;
 
     /// 12, deliberately shorter than `pl_primer::Params::default().seed_len`
@@ -636,7 +700,7 @@ impl Constraints {
         format!(
             "len {}-{} opt {}, Tm {:.1}-{:.1}C opt {:.1}, dTm <= {:.1}C, GC {:.0}-{:.0}% ({}), \
              poly-N <= {} (G <= {}), dinucleotide repeats <= {} units, \
-             G/C in last 5: {}-{}, product {}-{} bp{}",
+             G/C in last 5: {}-{}, product {}-{} bp{}{}",
             self.len_min,
             self.len_max,
             self.len_opt,
@@ -669,6 +733,17 @@ impl Constraints {
                     self.product_min.saturating_sub(t).max(1),
                     self.product_max.saturating_sub(t)
                 ),
+            },
+            // The requested size, printed next to the window it is measured
+            // against. It reached no surface at all before -- not the text
+            // report, not the JSON, not an error -- so when the size term was
+            // dropped for sitting at or above `product_max` the only trace was
+            // `product 1.0` in the weights line, which asserts the opposite.
+            match self.product_target {
+                None => String::new(),
+                Some(t) if (self.product_min..=self.product_max).contains(&t) =>
+                    format!(", target {t} bp"),
+                Some(t) => format!(", target {t} bp OUTSIDE that window"),
             }
         )
     }

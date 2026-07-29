@@ -1716,8 +1716,16 @@ def self_test() -> list:
             # spellings case-insensitively where this side matched five
             # case-sensitively. A pin that only exercises canonical values is
             # not a pin.
+            #
+            # `genbank_key` is `misc_feature` because the Rust fixture's cell is
+            # EMPTY and that is what `Db::parse` stores for one. That default,
+            # the trimming of every signed cell, and the lower-casing of `class`
+            # and `boundary_rule` are three more canonicalisations the loader
+            # performs; the Rust fixture now pads every signed cell and leaves
+            # `genbank_key` blank, so all three are exercised here rather than
+            # assumed.
             id="PLF:0000", ordinal=1, name="x", aliases=[" a ", " b ", ""], cls="cds",
-            genbank_key="CDS", reference_nt="ATGTAA", reference_aa="M",
+            genbank_key="misc_feature", reference_nt="ATGTAA", reference_aa="M",
             boundary_rule="orf_atg_to_stop", boundary_evidence="X.1:1-6:+",
             description="d", notes="n", patent_flag="TRUE",
             provenance=[("PLF:0000", "reference_nt", "ena", "X.1", "INSDC-free",
@@ -1736,7 +1744,7 @@ def self_test() -> list:
     # repository verifies on one side and lapses on the other -- with each side
     # individually green.
     want("the digest matches the vector the Rust loader is pinned to",
-         ref == "16ab78984c715df5cfa3cab396e8a6e11a56abe34318d10028648297194a947d")
+         ref == "25b8783590b89116e394a31b946a86432f8139a510d6e0d4db934d2630c9c6e3")
     want("a changed base changes the digest",
          content_digest(signed_row(reference_nt="ATGTAG")) != ref)
     want("a changed description changes the digest",

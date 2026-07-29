@@ -74,6 +74,11 @@ pub struct Params {
     /// tail into the footprint. That was six of eighty cases in the pydna
     /// differential, and it is why the flag exists rather than the rule being
     /// argued about.
+    ///
+    /// A footprint found this way carries a mismatch, and [`Binding::tm`] is
+    /// then `None`: the nearest-neighbour model behind it describes a perfect
+    /// duplex, and a perfect-duplex number for an imperfect footprint is wrong
+    /// in the direction that kills the reaction.
     pub extend_mismatches: bool,
     /// Thermodynamics for the footprint Tm.
     pub tm_method: Method,
@@ -106,8 +111,26 @@ pub struct Binding {
     pub mismatches: Vec<usize>,
     /// Melting temperature of the footprint alone, in Celsius.
     ///
-    /// `None` when the footprint is too short or holds an ambiguity code, which
-    /// is reported rather than guessed at.
+    /// `None` when the footprint is too short, holds an ambiguity code, or
+    /// **carries a mismatch** — each of which is reported rather than guessed
+    /// at.
+    ///
+    /// The mismatch case is the one that bites, and it was wrong here until
+    /// 2026-07-29. [`pl_thermo`] models a *perfect* duplex and has no
+    /// internal-mismatch parameters at all, so computing a Tm over a footprint
+    /// that the `mismatches` field beside it says is imperfect answers a
+    /// different question, and answers it **hot**. On the 31 bp template
+    /// `TGCACGAATGAGAACAGAACCACAAATGGTG` the mutagenic primer
+    /// `GCATGAGAACAGAACCACAA` reported 50.5 C where a mismatch-aware
+    /// nearest-neighbour model gives 40.2 C — and, the tell, 2.8 C *above* the
+    /// 47.7 C of its perfectly-paired parent `GAATGAGAACAGAACCACAA`.
+    /// Introducing a mismatch cannot raise a melting temperature. Ten degrees
+    /// hot is exactly the failure this module's header names: the PCR is run
+    /// too hot and nothing amplifies.
+    ///
+    /// Making this number right rather than absent means mismatch
+    /// nearest-neighbour tables, which `pl-thermo` does not have; until it
+    /// does, the honest answer is no answer.
     pub tm: Option<f64>,
 }
 
@@ -238,7 +261,26 @@ pub fn find_bindings(primer: &[u8], template: &[u8], circular: bool, p: &Params)
             let (footprint_len, mismatches, start0) = if seed_from_left {
                 // Extend rightwards along the plus strand, which is 5'-ward on
                 // the primer.
-                let avail = (ext.len() - i).min(oriented.len());
+                //
+                // Never more than one turn of the circle -- the same clamp the
+                // 5'-extension branch below carries, which this branch was
+                // missing until 2026-07-29. `ext` is the *doubled* template, so
+                // `ext.len() - i` is more than one turn at every seed hit, and a
+                // primer longer than the plasmid paired with template bases it
+                // had already consumed. On the 20 bp circle
+                // ACGGTTACCAGTTGCATCGA the 26 nt primer
+                // AACCGTTCGATGCAACTGGTAACCGT came back as a 26 nt footprint
+                // with no tail at 61.1 C, where the same 26 bases read on the
+                // other strand -- which has clamped since 2026-07-28 -- give a
+                // 20 nt footprint, a 6 nt tail and 54.7 C. It broke the
+                // coordinates too: the reported span 1..6 is six bases against
+                // a twenty-six base footprint. Marking a molecule circular must
+                // not lengthen a footprint past the molecule nor delete a real
+                // tail; the linear answer is the right one here.
+                //
+                // On a line `ext.len() == n`, so `.min(n)` is already implied by
+                // `ext.len() - i` and needs no `circular` test of its own.
+                let avail = (ext.len() - i).min(oriented.len()).min(n);
                 let region: Vec<u8> = ext[i..i + avail].to_vec();
                 let rp: Vec<u8> = oriented[..avail].iter().rev().copied().collect();
                 let rt: Vec<u8> = region.iter().rev().copied().collect();
@@ -319,7 +361,16 @@ pub fn find_bindings(primer: &[u8], template: &[u8], circular: bool, p: &Params)
                 start: (start0 % n) as u64 + 1,
                 end: (end0 % n) as u64 + 1,
                 strand,
-                tm: tm(&footprint, &p.tm_method).ok().map(|t| t.tm),
+                // A footprint holding a mismatch is not a perfect duplex, and
+                // `pl_thermo` knows no other kind, so its number would be a
+                // different question's answer -- roughly ten degrees hot, the
+                // direction that kills the reaction. Refuse rather than guess;
+                // see `Binding::tm`.
+                tm: if mismatches.is_empty() {
+                    tm(&footprint, &p.tm_method).ok().map(|t| t.tm)
+                } else {
+                    None
+                },
                 footprint,
                 tail,
                 mismatches,
@@ -619,6 +670,108 @@ mod tests {
             "everything 5' of the mismatch is tail"
         );
         assert!(strict[0].footprint.len() < lenient[0].footprint.len());
+    }
+
+    /// PROVEN TO FAIL at dfd6ac9: `tm` was computed over the footprint
+    /// unconditionally, so this reported `Some(45.73)` and the final assertion
+    /// -- that the mismatched primer's perfect-duplex number is *hotter* than
+    /// the perfectly-paired parent's -- documents why that number was not
+    /// merely imprecise.
+    #[test]
+    fn a_mismatched_footprint_gets_no_tm_rather_than_a_perfect_duplex_one() {
+        // The site-directed mutagenesis case, which is what `extend_mismatches`
+        // is on by default for. The footprint pairs everywhere but one base;
+        // `pl_thermo` has no internal-mismatch parameters, so its answer for
+        // these bases is the answer for a duplex that does not exist.
+        let template = b"TGCACGAATGAGAACAGAACCACAAATGGTG";
+        let parent = b"GAATGAGAACAGAACCA".to_vec();
+        let mut primer = parent.clone();
+        primer[1] = flip(primer[1]); // one base in from the 5' end
+
+        let m = find_bindings(&primer, template, false, &p());
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!(m[0].mismatches.len(), 1, "{:?}", m[0]);
+        assert_eq!(
+            m[0].footprint, primer,
+            "the mismatch is inside the footprint, not split off as tail"
+        );
+        assert!(
+            m[0].tm.is_none(),
+            "a mismatched footprint is not a perfect duplex, so it has no \
+             perfect-duplex Tm; got {:?} C",
+            m[0].tm
+        );
+
+        // A perfect footprint still gets one -- the refusal is about the
+        // mismatch, not about giving up on Tm.
+        let ok = find_bindings(&parent, template, false, &p());
+        assert_eq!(ok.len(), 1, "{ok:?}");
+        let parent_tm = ok[0].tm.expect("a perfect footprint keeps its Tm");
+
+        // And the number that used to be reported was wrong in the direction
+        // the module header calls fatal: introducing a mismatch made it go UP.
+        let as_if_perfect = tm(&m[0].footprint, &Method::default()).unwrap().tm;
+        assert!(
+            as_if_perfect > parent_tm + 2.0,
+            "the fixture must make the error unmistakable: the mismatched \
+             primer's perfect-duplex Tm is {as_if_perfect} C against the \
+             parent's {parent_tm} C"
+        );
+    }
+
+    /// PROVEN TO FAIL at dfd6ac9: the reverse branch's `avail` was
+    /// `(ext.len() - i).min(oriented.len())` with no one-turn clamp, so this
+    /// reported a 26 nt footprint with an empty tail on a 20 bp molecule, span
+    /// `1..6`, at 61.1 C.
+    #[test]
+    fn a_primer_longer_than_the_circle_does_not_pair_the_same_bases_twice() {
+        //                1234567890123456789012345678901234567890
+        let template = b"ACGGTTACCAGTTGCATCGA"; // 20 bp
+        let n = template.len();
+        // Reverse-strand: the reverse complement of the whole circle plus six
+        // bases of a second turn. Only one turn can physically pair; the extra
+        // six bases are a 5' tail like any other.
+        let primer = b"AACCGTTCGATGCAACTGGTAACCGT"; // 26 nt
+
+        let circ = find_bindings(primer, template, true, &Default::default());
+        assert!(!circ.is_empty(), "the site is real, only over-long");
+        for b in &circ {
+            assert!(
+                b.footprint.len() <= n,
+                "a {} nt footprint on a {n} bp molecule pairs {} bases twice: {}",
+                b.footprint.len(),
+                b.footprint.len() - n,
+                b.footprint_str()
+            );
+            // The span the coordinates describe must be the number of bases
+            // that pair. This is the cheaper half of the same defect: the
+            // 26 nt footprint was reported at 1..6, six bases.
+            let span = (b.end as i64 - b.start as i64).rem_euclid(n as i64) as usize + 1;
+            assert_eq!(
+                span,
+                b.footprint.len(),
+                "span {}..{} is {span} bases against a {} nt footprint",
+                b.start,
+                b.end,
+                b.footprint.len()
+            );
+        }
+
+        let rev = circ
+            .iter()
+            .find(|b| b.strand == Strand::Reverse)
+            .unwrap_or_else(|| panic!("{circ:?}"));
+        assert_eq!(rev.footprint_str(), "TCGATGCAACTGGTAACCGT");
+        assert_eq!(rev.tail_str(), "AACCGT", "the second turn is tail");
+
+        // The control that makes it undeniable: closing the molecule cannot
+        // lengthen a footprint past the molecule, and cannot delete a tail the
+        // linear answer reports. Every field must agree.
+        let lin = find_bindings(primer, template, false, &Default::default());
+        assert_eq!(
+            circ, lin,
+            "circular and linear must agree when the site does not wrap"
+        );
     }
 
     #[test]

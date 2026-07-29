@@ -7,8 +7,26 @@ use std::sync::Arc;
 
 use pl_core::oplog::{OpError, OpKind, OpLog};
 use pl_core::{Molecule, Topology};
+use pl_enzymes::methylation::SiteEffect;
 use pl_enzymes::Digest;
 use pl_fileio::{snapgene, Format};
+
+/// Everything one worker produces about a molecule.
+///
+/// The verdicts live here rather than being derived at paint time. The Enzymes
+/// tab draws one row per cutting enzyme and each row shows a methylation
+/// verdict; computing that verdict needs the enzyme's first [`pl_enzymes::CutSite`],
+/// and asking `cut_sites` for it in the row builder put a full-molecule scan
+/// back on the UI thread — 58 of them per frame, measured at 1.58 s per frame
+/// on the 4.6 Mb NC_000913.3, which is the whole of the work this worker exists
+/// to take away. The worker already had those sites in hand and threw them
+/// away.
+pub struct Digested {
+    pub results: Vec<Digest>,
+    /// Parallel to `results`: the methylation verdict at that enzyme's first
+    /// site, or `None` if it does not cut or nothing methylates its site.
+    verdicts: Vec<Option<SiteEffect>>,
+}
 
 /// Digestion is O(sequence x enzymes). Measured at 1,712 ms for all 58 enzymes
 /// on the 4.6 Mb NC_000913.3 in the benchmark corpus — this docstring said
@@ -16,7 +34,7 @@ use pl_fileio::{snapgene, Format};
 /// says so meanwhile.
 pub enum DigestState {
     Running {
-        rx: Receiver<Vec<Digest>>,
+        rx: Receiver<Digested>,
         /// Set when a later edit supersedes this scan.
         ///
         /// Dropping the `Receiver` alone does not stop the worker: its `send`
@@ -30,7 +48,7 @@ pub enum DigestState {
         /// burning a core to produce an answer nobody will read.
         cancel: Arc<AtomicBool>,
     },
-    Done(Vec<Digest>),
+    Done(Digested),
     /// No bases to digest, with the reason.
     Unavailable(String),
 }
@@ -38,8 +56,18 @@ pub enum DigestState {
 impl DigestState {
     pub fn results(&self) -> &[Digest] {
         match self {
-            DigestState::Done(v) => v,
+            DigestState::Done(v) => &v.results,
             _ => &[],
+        }
+    }
+    /// The methylation verdict for `results()[i]`.
+    ///
+    /// A field read, deliberately. See [`Digested`] for what it cost when this
+    /// was a scan.
+    pub fn verdict(&self, i: usize) -> Option<SiteEffect> {
+        match self {
+            DigestState::Done(v) => v.verdicts.get(i).copied().flatten(),
+            _ => None,
         }
     }
     pub fn is_running(&self) -> bool {
@@ -218,6 +246,10 @@ fn start_digest(mol: &Molecule) -> DigestState {
     // millisecond, far less than the scan it feeds.
     let seq = mol.seq.clone();
     let topology = mol.topology;
+    // Nothing in the UI edits the methylation flags — they come off the file —
+    // so the worker's copy cannot go stale without the document changing, and a
+    // document change restarts the digest.
+    let meth = mol.methylation;
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&cancel);
@@ -227,18 +259,44 @@ fn start_digest(mol: &Molecule) -> DigestState {
             // Checked once per enzyme: 58 relaxed loads against a scan that
             // takes seconds, so the check itself is free, and a superseded
             // worker stops within one enzyme instead of finishing the genome.
-            let mut out = Vec::with_capacity(pl_enzymes::ENZYMES.len());
+            let mut results = Vec::with_capacity(pl_enzymes::ENZYMES.len());
+            let mut verdicts = Vec::with_capacity(pl_enzymes::ENZYMES.len());
             for e in pl_enzymes::ENZYMES.iter() {
                 if flag.load(Ordering::Relaxed) {
                     return;
                 }
-                out.push(Digest {
+                // `cut_sites` rather than `cut_positions`, because
+                // `cut_positions` *is* `cut_sites` with the sites mapped away
+                // and the Enzymes tab needs the first one back. Calling both
+                // would double this worker's cost; deriving the positions here
+                // costs a sort. The two lines below are `cut_positions`' whole
+                // body and `cut_positions_and_verdicts_agree_with_the_crate`
+                // pins them to it, because the dedup is not cosmetic: on a
+                // circle two sites at different starts can nick the same bond.
+                let sites = pl_enzymes::cut_sites(&seq, topology, e);
+                let mut positions: Vec<u64> = sites.iter().map(|c| c.position).collect();
+                positions.sort_unstable();
+                positions.dedup();
+                // The verdict is a property of the *site*, so it is asked at
+                // the first site the scan found rather than reconstructed from
+                // a cut position — the two disagree wherever a site wraps the
+                // origin.
+                verdicts.push(sites.first().and_then(|s| {
+                    pl_enzymes::methylation::site_effect(
+                        e,
+                        &seq,
+                        (s.site_start - 1) as usize,
+                        topology,
+                        &meth,
+                    )
+                }));
+                results.push(Digest {
                     enzyme: e,
-                    positions: pl_enzymes::cut_positions(&seq, topology, e),
+                    positions,
                 });
             }
             // Send failing means the document was replaced; that is fine.
-            let _ = tx.send(out);
+            let _ = tx.send(Digested { results, verdicts });
         })
         .expect("spawn digest worker");
     DigestState::Running { rx, cancel }
@@ -464,6 +522,125 @@ mod tests {
         assert!(
             ecori_sites(&mut d).is_empty(),
             "the site was deleted, so the digest must no longer report it"
+        );
+    }
+
+    /// The worker derives `positions` itself instead of calling
+    /// `cut_positions`, so that it can keep the first `CutSite` from the one
+    /// scan it already pays for. This pins the derivation to the crate: the
+    /// sort and the dedup are not cosmetic — on a circle two sites at different
+    /// starts can nick the same bond — and the verdict has to be asked at the
+    /// *site*, which is not recoverable from the cut position when the site
+    /// wraps the origin.
+    #[test]
+    fn the_workers_positions_and_verdicts_match_the_crate() {
+        // ApaI's GGGCCC starts at 0-based 15 on this 20 bp circle and runs off
+        // the end, and Dcm blocks it there.
+        let mut mol = Molecule {
+            seq: b"CAAAAAAAAAAACCAGGGCC".to_vec(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.methylation.dcm = true;
+        let mut d = Document::of_molecule(mol.clone());
+        while d.digest.is_running() {
+            d.digest.poll();
+            std::thread::yield_now();
+        }
+
+        for (i, dg) in d.digest.results().iter().enumerate() {
+            assert_eq!(
+                dg.positions,
+                pl_enzymes::cut_positions(&mol.seq, mol.topology, dg.enzyme),
+                "{} positions",
+                dg.enzyme.name
+            );
+            let want = pl_enzymes::cut_sites(&mol.seq, mol.topology, dg.enzyme)
+                .into_iter()
+                .next()
+                .and_then(|s| {
+                    pl_enzymes::methylation::site_effect(
+                        dg.enzyme,
+                        &mol.seq,
+                        (s.site_start - 1) as usize,
+                        mol.topology,
+                        &mol.methylation,
+                    )
+                });
+            assert_eq!(d.digest.verdict(i), want, "{} verdict", dg.enzyme.name);
+        }
+
+        let i = d
+            .digest
+            .results()
+            .iter()
+            .position(|x| x.enzyme.name == "ApaI")
+            .expect("ApaI ships");
+        let v = d.digest.verdict(i).expect("Dcm blocks this wrapped site");
+        assert_eq!(v.effect, pl_enzymes::methylation::Effect::Blocked);
+        assert_eq!(v.methylase, pl_enzymes::methylation::Methylase::Dcm);
+    }
+
+    /// The Enzymes tab draws one row per cutting enzyme and every row shows a
+    /// methylation verdict. Recovering that verdict used to mean a full
+    /// `cut_sites` scan of the whole molecule *per row, per frame* — 58 of them,
+    /// measured at 1.58 s on the 4.6 Mb NC_000913.3, which is `doc.rs`'s entire
+    /// digest put back on the UI thread. This asserts the ratio rather than an
+    /// absolute time, so it means the same thing on a slow machine.
+    #[test]
+    fn a_frame_of_the_enzymes_tab_does_not_rescan_the_molecule_per_row() {
+        // 120 kb: a fosmid, well past the ~45 kb where 58 scans stop fitting in
+        // a frame and well short of the genomes where it becomes seconds.
+        let n = 120_000usize;
+        let mut seq = Vec::with_capacity(n);
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..n {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            seq.push(b"ACGT"[(s >> 33) as usize & 3]);
+        }
+        let mol = Molecule {
+            seq: seq.clone(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let mut d = Document::of_molecule(mol);
+        while d.digest.is_running() {
+            d.digest.poll();
+            std::thread::yield_now();
+        }
+        let rows = d.digest.results().len();
+        assert_eq!(rows, pl_enzymes::ENZYMES.len(), "one row per enzyme");
+
+        // Twenty frames of the tab, every row asking for its verdict.
+        let t = std::time::Instant::now();
+        let mut seen = 0usize;
+        for _ in 0..20 {
+            for i in 0..rows {
+                if d.digest.verdict(i).is_some() {
+                    seen += 1;
+                }
+            }
+        }
+        let twenty_frames = t.elapsed();
+        std::hint::black_box(seen);
+
+        // One frame the way it was done before: a full-molecule scan per row.
+        let t = std::time::Instant::now();
+        for dg in d.digest.results() {
+            std::hint::black_box(
+                pl_enzymes::cut_sites(&seq, Topology::Circular, dg.enzyme)
+                    .into_iter()
+                    .next(),
+            );
+        }
+        let one_old_frame = t.elapsed();
+
+        assert!(
+            twenty_frames * 10 < one_old_frame,
+            "twenty frames of verdict reads took {twenty_frames:?}; one frame of the \
+             old per-row rescan took {one_old_frame:?} — the verdict is being recomputed"
         );
     }
 

@@ -40,6 +40,11 @@ pub fn parse_all(text: &str) -> Vec<Molecule> {
 ///
 /// Returns `false` for text with no LOCUS line at all: nothing declared it.
 pub fn declares_topology(text: &str) -> bool {
+    // See `lib::strip_bom`. `load_all` strips it, but this and
+    // `parse_all_reporting` are public and are called directly, and a U+FEFF
+    // makes the very first `starts_with("LOCUS")` false — which is exactly the
+    // record whose topology is being asked about.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut seen = false;
     for locus in text.lines().filter(|l| l.starts_with("LOCUS")) {
         seen = true;
@@ -61,6 +66,12 @@ pub fn declares_topology(text: &str) -> bool {
 /// The warnings are the point: an exotic location that simply vanished left a
 /// feature quietly claiming a span it does not have. See [`parse_location`].
 pub fn parse_all_reporting(text: &str) -> (Vec<Molecule>, Vec<String>) {
+    // See `lib::strip_bom`: a leading U+FEFF makes every `starts_with("LOCUS")`
+    // below false, which costs the name, the declared length, the strandedness
+    // and the topology — and, for a file with no trailing `//`, the whole
+    // record, because the guard at the bottom of this function uses the same
+    // token test.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut out = Vec::new();
     let mut warnings = Vec::new();
     let mut current: Vec<&str> = Vec::new();
@@ -76,6 +87,26 @@ pub fn parse_all_reporting(text: &str) -> (Vec<Molecule>, Vec<String>) {
                 current.clear();
             }
             continue;
+        }
+        // A second LOCUS ends the chunk too, and that is not belt-and-braces:
+        // `//` is the only thing that used to end one, so a file whose internal
+        // terminator is missing — hand-edited, or written by a tool that omits
+        // it — became a single chunk and `parse_record`'s ORIGIN loop, which has
+        // no stop condition, ate the next record's own header as bases. Two
+        // 12 bp records came back as one molecule of
+        // `acgtacgtacgtLOCUSlacZbpDNAcircularSYN-JAN-ORIGINttttggggcccc`: 60
+        // fabricated bases from 24 real ones, `records == 1` so `truncated()`
+        // was false, the second record gone, and `pl convert --to fasta` wrote
+        // the invented string out at exit 0.
+        //
+        // `LOCUS` is the one keyword that can begin a record, it is required to
+        // sit at column 1, and every line inside a record that could be confused
+        // with it — a FEATURES row, an ORIGIN row, a wrapped DEFINITION — is
+        // indented. So this cannot split a well-formed record, and it is what
+        // makes the ORIGIN loop's chunk exactly one record.
+        if line.starts_with("LOCUS") && current.iter().any(|l| l.starts_with("LOCUS")) {
+            take(&current, &mut out, &mut warnings);
+            current.clear();
         }
         current.push(line);
     }
@@ -193,10 +224,14 @@ fn parse_record(lines: &[&str]) -> (Molecule, Vec<String>) {
     // --- ORIGIN ---
     if let Some(oi) = lines.iter().position(|l| l.starts_with("ORIGIN")) {
         let mut seq = Vec::new();
+        // No stop condition, deliberately: `lines` is exactly one record,
+        // because `parse_all_reporting` ends a chunk at `//` **or** at the next
+        // `LOCUS`, so at most one LOCUS line can be in here and it is above this
+        // point. There used to be a `line.starts_with("//")` break, which could
+        // never fire — the chunker uses the identical predicate and `continue`s
+        // without pushing the terminator — and an unreachable guard is what made
+        // this loop look bounded when it was not.
         for line in &lines[oi + 1..] {
-            if line.starts_with("//") {
-                break;
-            }
             // Case preserved: lowercase marks soft-masked / low-coverage bases.
             seq.extend(
                 line.bytes()
@@ -441,9 +476,22 @@ fn parse_location(loc: &str) -> (Vec<Segment>, Strand, Vec<String>) {
         strand = Strand::Reverse;
         s = inner.strip_suffix(')').unwrap_or(inner);
     }
+    // `order` is read as a join, because `Feature` has no operator to hold, and
+    // `join_parts` then writes `join(...)` back out. That is a reinterpretation,
+    // not a parse: INSDC's `order` asserts the elements occur in this order and
+    // deliberately does *not* assert that they are joined, which is why a
+    // submitter reaches for it — X92946 carries
+    // `gene complement(order(14253..14810,14820..14824))` beside a
+    // `/note="-1 translational frameshift"`, precisely because the two pieces
+    // are not spliced. Saving that file turned the file's own claim into
+    // `complement(join(...))` with nothing said, while the mixed-strand branch
+    // below reports the identical class of change. Tracked here and reported at
+    // the bottom, once, and only if a segment actually survives.
+    let mut order_read_as_join = false;
     for p in ["join(", "order("] {
         if let Some(inner) = s.strip_prefix(p) {
             s = inner.strip_suffix(')').unwrap_or(inner);
+            order_read_as_join = p == "order(";
             break;
         }
     }
@@ -503,6 +551,20 @@ fn parse_location(loc: &str) -> (Vec<Segment>, Strand, Vec<String>) {
                 unparsable.push(raw.to_string());
             }
         }
+    }
+
+    // Gated on a surviving segment, and structurally so rather than by
+    // inspection: if every part was rejected on its own merits — the GenPept
+    // `order(bond(30,115),bond(64,80))`, which yields nothing and four reports —
+    // then nothing was re-expressed as a join and a line here would be false.
+    // Reporting at the `strip_prefix` above instead would have fired on it and
+    // broken `an_unrepresentable_location_is_reported_not_invented`.
+    if order_read_as_join && !segs.is_empty() {
+        unparsable.push(format!(
+            "{}: order() read as join(), which asserts the parts are joined; a save writes \
+             join() and the file no longer says what it said",
+            loc.trim()
+        ));
     }
 
     // A complement() nested inside join() flips the whole feature for our model.
@@ -580,7 +642,7 @@ pub fn locus_name(title: &str) -> String {
 ///
 /// # And what cannot be split has to be said out loud
 ///
-/// Two shapes have no legal GenBank form and used to be written literally
+/// Three shapes have no legal GenBank form and used to be written literally
 /// anyway, which is the same one-in-zero-out loss wearing a different hat:
 ///
 /// - `start > span` with `end < start`. A `.dna` may carry
@@ -591,6 +653,16 @@ pub fn locus_name(title: &str) -> String {
 ///   circle `validate()` reports nothing either side of the trip.
 /// - `start == 0`. GenBank numbers bases from 1, so `0..50` is rejected on
 ///   re-read in exactly the same way.
+/// - `end == 0` with `end < start`. This one reached the file, because it took
+///   the origin-crossing branch and came out as the second part of a join:
+///   `<Segment range="5-0"/>` on a 16 bp molecule wrote
+///   ` misc_feature join(5..16,1..0)` at exit 0 with nothing on stderr. `1..0`
+///   names no base — GenBank locations are 1-based inclusive, so the low
+///   bound cannot exceed the high one — and Biopython does not reject it but
+///   "fixes" it, yielding a feature over the whole molecule. A wrong
+///   annotation that looks deliberate is worse than a dropped one, which is
+///   why this returns `None` and is reported rather than being clamped to
+///   something plausible.
 ///
 /// Returning `None` puts the caller in a position to report it.
 fn location_parts(start: u64, end: u64, span: u64) -> Option<Vec<String>> {
@@ -598,7 +670,10 @@ fn location_parts(start: u64, end: u64, span: u64) -> Option<Vec<String>> {
         return None;
     }
     if end < start {
-        if span >= start {
+        // `end == 0` names no base, so there is no second part to write and no
+        // wrap to describe. It has to be refused here rather than in the caller
+        // because this is the only branch that can emit `1..{end}`.
+        if span >= start && end >= 1 {
             // Crosses the origin: two ranges, in reading order.
             return Some(vec![format!("{start}..{span}"), format!("1..{end}")]);
         }
@@ -788,9 +863,23 @@ pub fn write_reporting(
         out.push_str(&format!("            Source document UUID: {uuid}\n"));
     }
     out.push_str("FEATURES             Location/Qualifiers\n");
-    out.push_str(&format!("     source          1..{n}\n"));
-    qualifier_lines("organism", "synthetic DNA construct", &mut out);
-    qualifier_lines("mol_type", "other DNA", &mut out);
+    // `source` is the one location in this writer that does not go through
+    // `location_parts`, and it was hard-coded as `1..{n}`. On a molecule with no
+    // bases — a standalone annotation track with no ORIGIN block and no `bp`
+    // field, or a FASTA record with a header and nothing under it — that is
+    // `source 1..0`, which is not a legal INSDC base range at all;
+    // `location_parts(1, 0, 0)` returns `None` for exactly that shape, so the
+    // writer's own policy function refuses what this line printed, and it
+    // printed it with exit 0 and an empty report. Our own reader cannot see it,
+    // because `flush` discards `source` before `parse_location` runs.
+    //
+    // A record with no bases has no source to describe, so the feature and its
+    // two qualifiers are omitted rather than written with an invented range.
+    if n >= 1 {
+        out.push_str(&format!("     source          1..{n}\n"));
+        qualifier_lines("organism", "synthetic DNA construct", &mut out);
+        qualifier_lines("mol_type", "other DNA", &mut out);
+    }
 
     for f in &mol.features {
         let kind = if f.kind.is_empty() {
@@ -1503,6 +1592,87 @@ mod tests {
     }
 
     #[test]
+    fn a_wrap_that_ends_at_base_zero_is_reported_rather_than_written_as_one_dot_zero() {
+        // `<Segment range="5-0"/>` reaches this writer intact: `snapgene.rs`
+        // takes a range at face value on purpose, and `pl convert` never calls
+        // `Molecule::validate()`. `end < start` sent it down the origin-crossing
+        // branch, which wrote the second part as `1..{end}` — `1..0`, a range
+        // whose low bound exceeds its high one and which therefore names no
+        // base. It went out at exit 0 with an empty report, and Biopython does
+        // not reject it: it "fixes" it into a feature spanning the whole
+        // molecule, so a coordinate naming nothing became an annotation over
+        // everything.
+        assert_eq!(location_parts(5, 0, 16), None);
+        // The neighbours that must keep working, or the guard has eaten the
+        // feature it was meant to protect.
+        assert_eq!(
+            location_parts(5, 2, 16),
+            Some(vec!["5..16".to_string(), "1..2".to_string()]),
+            "an ordinary wrap still splits at the origin"
+        );
+        assert_eq!(location_parts(5, 16, 16), Some(vec!["5..16".to_string()]));
+
+        // End to end: it is refused AND named, not silently dropped.
+        let m = Molecule {
+            seq: b"ACGTACGTACGTACGT".to_vec(),
+            topology: Topology::Circular,
+            features: vec![Feature {
+                name: "wrap".into(),
+                kind: "misc_feature".into(),
+                strand: Strand::Forward,
+                segments: vec![Segment::new(5, 0)],
+                qualifiers: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let (text, report) = write_reporting(&m, "w.gb", (1, 0, 2026));
+        assert!(!text.contains("1..0"), "wrote an illegal range:\n{text}");
+        assert!(
+            report.iter().any(|r| r.contains("5..0")),
+            "the loss has to be named, or it is just a quieter loss: {report:?}"
+        );
+    }
+
+    #[test]
+    fn order_read_as_join_is_reported_because_the_file_stops_saying_what_it_said() {
+        // INSDC `order` asserts the parts occur in this order and explicitly
+        // does NOT assert they are joined; `join` asserts they are. `Feature`
+        // carries no operator, so `order` is read as a join and `join_parts`
+        // writes `join(...)` back — the same class of change the mixed-strand
+        // branch two lines below already reports, and it was silent. X92946
+        // carries `gene complement(order(14253..14810,14820..14824))` next to a
+        // `/note="-1 translational frameshift"`, i.e. the submitter used `order`
+        // precisely because the pieces are not spliced.
+        let (segs, strand, bad) = parse_location("order(1..10,20..30)");
+        assert_eq!(segs, vec![Segment::new(1, 10), Segment::new(20, 30)]);
+        assert_eq!(strand, Strand::Forward);
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        assert!(bad[0].contains("order()"), "{bad:?}");
+
+        // The real one, complement-wrapped.
+        let (_, strand, bad) = parse_location("complement(order(14253..14810,14820..14824))");
+        assert_eq!(strand, Strand::Reverse);
+        assert_eq!(bad.len(), 1, "{bad:?}");
+
+        // A single-element `order` is written back as a bare range, which is the
+        // same reinterpretation with the join spelling removed, so it counts.
+        let (segs, _, bad) = parse_location("order(1..10)");
+        assert_eq!(segs, vec![Segment::new(1, 10)]);
+        assert_eq!(bad.len(), 1, "{bad:?}");
+
+        // But an `order` whose every part was rejected on its own merits was not
+        // re-expressed as anything, so it must NOT gain a line: the GenPept
+        // form still reports exactly its four unrepresentable parts.
+        let (segs, _, bad) = parse_location("order(bond(30,115),bond(64,80))");
+        assert!(segs.is_empty());
+        assert_eq!(bad.len(), 4, "{bad:?}");
+
+        // And `join` itself is not a reinterpretation and stays quiet.
+        let (_, _, bad) = parse_location("join(1..10,20..30)");
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+
+    #[test]
     fn ordinary_locations_still_parse_and_report_nothing() {
         for loc in [
             "1..10",
@@ -1909,6 +2079,100 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].seq, b"acgt".to_vec());
         assert_eq!(all[1].topology, Topology::Circular);
+    }
+
+    #[test]
+    fn a_missing_record_terminator_does_not_turn_the_next_header_into_bases() {
+        // `//` was the only thing that ended a chunk, and `parse_record`'s
+        // ORIGIN loop had no stop condition — its `line.starts_with("//")` guard
+        // could never fire, because the chunker uses the same predicate and
+        // never pushes a terminator through. So a file whose internal `//` is
+        // missing came back as ONE molecule holding the next record's header as
+        // sequence, with `records == 1` so nothing was reported as truncated.
+        let nosep = "\
+LOCUS       recA                      12 bp    DNA     linear   SYN 01-JAN-2026
+ORIGIN
+        1 acgtacgtacgt
+LOCUS       lacZ                      12 bp    DNA     circular SYN 01-JAN-2026
+ORIGIN
+        1 ttttggggcccc
+//
+";
+        let all = parse_all(nosep);
+        assert_eq!(all.len(), 2, "the second record was swallowed: {all:?}");
+        assert_eq!(
+            all[0].seq,
+            b"acgtacgtacgt".to_vec(),
+            "fabricated bases: {:?}",
+            String::from_utf8_lossy(&all[0].seq)
+        );
+        assert_eq!(all[0].name, "recA");
+        assert_eq!(all[1].seq, b"ttttggggcccc".to_vec());
+        assert_eq!(all[1].name, "lacZ");
+        assert_eq!(all[1].topology, Topology::Circular);
+
+        // The ordinary case is untouched: one LOCUS per chunk, `//` ends it,
+        // and nothing splits a record whose indented lines merely mention the
+        // word — a wrapped DEFINITION, a FEATURES row, an ORIGIN row.
+        let ok = "\
+LOCUS       a                          4 bp    DNA     linear   SYN 01-JAN-2026
+DEFINITION  the word
+            LOCUS appears indented here
+FEATURES             Location/Qualifiers
+     misc_feature    1..4
+ORIGIN
+        1 acgt
+//
+";
+        let all = parse_all(ok);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].seq, b"acgt".to_vec());
+        assert_eq!(all[0].features.len(), 1);
+    }
+
+    #[test]
+    fn a_record_with_no_bases_writes_no_source_feature() {
+        // `source 1..{n}` was hard-coded and is the one location in the writer
+        // that does not go through `location_parts`. On a molecule with no bases
+        // that is `source 1..0`, which is not a legal INSDC range —
+        // `location_parts(1, 0, 0)` returns `None` for that exact shape — and it
+        // went out at exit 0 with an empty report. Our own reader cannot catch
+        // it either: `flush` drops `source` before `parse_location` ever runs.
+        let track = Molecule {
+            features: vec![Feature {
+                name: "CDS".into(),
+                kind: "CDS".into(),
+                strand: Strand::Forward,
+                segments: vec![Segment::new(242, 1015)],
+                qualifiers: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(track.span(), 0);
+        let (text, report) = write_reporting(&track, "track.gb", (1, 0, 2026));
+        assert!(
+            !text.contains("1..0"),
+            "wrote an illegal base range:\n{text}"
+        );
+        assert!(
+            !text.contains("     source "),
+            "a record with no bases has no source to describe:\n{text}"
+        );
+        assert!(report.is_empty(), "got {report:?}");
+
+        // Every molecule that has any extent still gets its source line, and it
+        // still covers the whole molecule — including an annotation track whose
+        // length is declared rather than carried.
+        let declared = Molecule {
+            declared_len: Some(3000),
+            ..Default::default()
+        };
+        assert!(write(&declared, "x.gb", (1, 0, 2026)).contains("     source          1..3000\n"));
+        let bases = Molecule {
+            seq: b"acgt".to_vec(),
+            ..Default::default()
+        };
+        assert!(write(&bases, "x.gb", (1, 0, 2026)).contains("     source          1..4\n"));
     }
 
     #[test]

@@ -190,9 +190,23 @@ Plain UTF-8 XML.
 - `directionality`: `1` forward, `2` reverse, `3` both, absent = unoriented.
 - `color` is a per-segment `#rrggbb`, so a multi-segment feature can be
   parti-coloured.
-- `<Q name=…><V …/></Q>` carries GenBank-style qualifiers, with the value
-  typed by attribute (`text`, `int`, `predef`). This maps cleanly onto GenBank
-  qualifiers in both directions.
+- Qualifiers have **two spellings, and a reader must accept both**:
+  - short, seen on export 11 / import 10 and above —
+    `<Q name=…><V text=… | int=… | predef=…/></Q>`;
+  - long, seen on export 10 / import 5 — `<Qualifier name=…><QualifierValue
+    textVal=… | intVal=… | predefVal=…/></Qualifier>`.
+
+  Either maps cleanly onto GenBank qualifiers in both directions. This section
+  documented only the short form until 2026-07-29, and that omission is the
+  upstream cause of a real defect rather than a documentation nicety: the Rust
+  reader *and* the Python cross-check oracle both matched `<Q>`/`<V>` alone, so
+  on a file of the older vintage the two agreed perfectly about a feature set
+  from which **both** had silently dropped every qualifier — `/locus_tag`,
+  `/codon_start`, `/transl_table`, `/direction`, and whole protein
+  `/translation` strings. Measured on `pKoV with His decR.dna`: 10 qualifiers
+  lost, three of them full translations. A qualifier element carrying no value
+  element is a *valueless* qualifier — GenBank's bare `/pseudo` — and not an
+  absent one.
 
 ## 6. Block 5 — primers
 

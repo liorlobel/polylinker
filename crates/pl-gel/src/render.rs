@@ -56,23 +56,39 @@ const PAD: f64 = 18.0;
 /// How far outside the lane a band's size label is set.
 const LABEL_OFFSET: f64 = 4.0;
 const BAND_LABEL_SIZE: f64 = 9.0;
+const LANE_LABEL_SIZE: f64 = 11.0;
 const NOTE_SIZE: f64 = 8.5;
 
 /// Width of a string in points, from Helvetica's advance widths.
 ///
-/// pl-gel takes no dependencies, so there is no font metric table to consult —
-/// but a band label is only ever digits and `/`, and Helvetica's digits are all
-/// 0.556 em (they are tabular by design, so a size label cannot surprise us)
-/// with `/` at 0.278 em. Anything else in a caption is charged 0.6 em, which
-/// over-estimates for the lower case that dominates English prose; the estimate
-/// erring wide is the direction that keeps text inside the page.
+/// pl-gel takes no dependencies, so there is no font metric table to consult.
+/// Each number below is the larger of that glyph's Helvetica and Helvetica-Bold
+/// advance, rounded up, so the estimate errs wide whichever weight the text is
+/// set in — and erring wide is the direction that keeps text inside the page.
+///
+/// This used to charge a flat 0.6 em for everything that is not a digit or `/`.
+/// That is wide enough for the lower case that dominates a caption but *narrow*
+/// for capitals — Helvetica-Bold `E` is 0.667 em and `W` is 0.944 — which did
+/// not matter while the only measured text was band labels (digits and `/`,
+/// tabular by design, so a size label cannot surprise us) and unplaced-fragment
+/// captions (English prose). It started to matter when the bold, capital-heavy
+/// lane labels were folded into [`layout`]: an under-estimate of
+/// `EcoRI+BamHI+HindIII+XhoI` is not a picture a few points too wide, it is a
+/// caption the viewBox cuts in half.
+///
+/// A character outside the table is charged 0.611 em, which bounds Latin script
+/// and nothing else; a lane label in another script can still overrun.
 fn text_width(s: &str, size: f64) -> f64 {
     size * s
         .chars()
         .map(|c| match c {
             '0'..='9' => 0.556,
-            '/' | ' ' | ',' | '.' | 'i' | 'l' | 'j' | 't' | 'f' => 0.278,
-            _ => 0.6,
+            '/' | ' ' | ',' | '.' | 'i' | 'l' | 'j' | 'I' => 0.278,
+            't' | 'f' => 0.333,
+            'M' | 'W' => 0.944,
+            'm' | 'w' => 0.889,
+            'A'..='Z' => 0.778,
+            _ => 0.611,
         })
         .sum::<f64>()
 }
@@ -136,11 +152,42 @@ fn layout(lanes: &[Lane], o: &Options) -> Layout {
         0.0
     };
 
-    let left = (LABEL_OFFSET + ladder + 2.0).max(PAD).max(PAD + note_over);
-    let right = (LABEL_OFFSET + sample + 2.0).max(PAD).max(PAD + note_over);
-    // A ladder in the middle of a gel puts its labels in the gap to its left,
-    // so the gap has to hold whichever kind of label is wider.
-    let gap = o.lane_gap.max(LABEL_OFFSET * 2.0 + sample.max(ladder));
+    // The lane label is centred over its lane exactly as the notes are, so
+    // again only the overhang needs reserving — and it needs reserving at both
+    // edges, because nothing here knows which lane is outermost. Reserving
+    // nothing for it is what let `pl gel f.gb --cut EcoRI --cut BamHI --cut
+    // HindIII --cut XhoI` emit `viewBox="0 0 240.99 424"` around a 142.7 pt
+    // caption centred at x=175.04; an SVG clips at its viewport, so the reader
+    // saw `EcoRI+BamHI+HindIII+Xho`. The dangerous ones are the digests that
+    // clip to another real enzyme — `AarI+BamHI+BsiWI+SacII` came out
+    // `AarI+BamHI+BsiWI+SacI`, naming a digest nobody ran.
+    let label_over = lanes
+        .iter()
+        .map(|l| (text_width(&l.label, LANE_LABEL_SIZE) - o.lane_width) / 2.0)
+        .fold(0.0f64, f64::max)
+        .max(0.0);
+    let centred_over = note_over.max(label_over);
+
+    let left = (LABEL_OFFSET + ladder + 2.0)
+        .max(PAD)
+        .max(PAD + centred_over);
+    let right = (LABEL_OFFSET + sample + 2.0)
+        .max(PAD)
+        .max(PAD + centred_over);
+    // A sample lane sets its band labels in the gap to its *right* and a ladder
+    // sets its own in the gap to its *left*, so a gap between a sample and the
+    // ladder after it carries both columns at once and has to hold both widths.
+    // Reserving room for whichever kind is wider left them overlapping by
+    // exactly `min(sample, ladder)`: a `2000/2100` sample beside a 1 kb ladder
+    // put both that label and the ladder's `2000` ending at x = 151.55, their
+    // baselines 2 pt apart at 9 pt type, printing one on top of the other.
+    let ladder_after_sample = lanes.windows(2).any(|w| !w[0].is_ladder && w[1].is_ladder);
+    let in_gap = if ladder_after_sample {
+        sample + ladder
+    } else {
+        sample.max(ladder)
+    };
+    let gap = o.lane_gap.max(LABEL_OFFSET * 2.0 + in_gap);
     let width = left
         + right
         + lanes.len() as f64 * o.lane_width
@@ -207,7 +254,7 @@ pub fn to_scene(lanes: &[Lane], o: &Options, title: &str) -> Scene {
         items.push(Item::Text {
             x: x + o.lane_width / 2.0,
             y: TOP - 18.0,
-            size: 11.0,
+            size: LANE_LABEL_SIZE,
             anchor: Anchor::Middle,
             color: text.into(),
             bold: true,
@@ -432,6 +479,14 @@ mod tests {
                 .run(&[20, 800, 40_000]),
                 is_ladder: false,
             }],
+            // A multi-enzyme digest, whose *lane* label is the widest text on
+            // the picture. Every other fixture here labels its lanes with one
+            // to six characters, which is why this guard stayed green while the
+            // caption named the digest ran off the right edge.
+            vec![
+                lane(&[500, 1_000, 3_000, 10_000], "ladder", true),
+                lane(&[3_180, 1_120], "EcoRI+BamHI+HindIII+XhoI", false),
+            ],
         ];
         for lanes in cases {
             let sc = to_scene(&lanes, &Options::default(), "t");
@@ -454,6 +509,140 @@ mod tests {
                     sc.width
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_lane_label_wider_than_its_lane_stays_on_the_picture() {
+        // `pl gel f.gb --cut EcoRI --cut BamHI --cut HindIII --cut XhoI` joins
+        // the enzyme names with `+` into one lane caption. `layout` reserved
+        // margins for the band labels and the unplaced-fragment captions and
+        // nothing at all for this one, so the shipped binary emitted
+        // `viewBox="0 0 240.99 424"` around a caption centred at x=175.04 that
+        // needs 142.7 pt of Helvetica-Bold — 5.4 pt past the right edge, and an
+        // SVG clips at its viewport, so the reader saw
+        // `EcoRI+BamHI+HindIII+Xho`. The dangerous ones are the quadruple
+        // digests that clip to another *real* enzyme: `AarI+BamHI+BsiWI+SacII`
+        // came out `AarI+BamHI+BsiWI+SacI`, which is a different digest.
+        let wide = "EcoRI+BamHI+HindIII+XhoI";
+        let cases = vec![
+            // The right edge, in the arrangement `pl gel` emits: ladder first,
+            // the multi-enzyme lane outermost.
+            vec![
+                lane(&[500, 1_000, 3_000, 10_000], "ladder", true),
+                lane(&[3_180, 1_120], wide, false),
+            ],
+            // And the left edge. `pl gel` cannot reach this — it always puts
+            // the ladder in lane 0 — but `Lane` and `to_scene` are public API
+            // and neither documents an ordering.
+            vec![
+                lane(&[3_180, 1_120], wide, false),
+                lane(&[500, 1_000, 3_000, 10_000], "ladder", true),
+            ],
+        ];
+        for lanes in cases {
+            let sc = to_scene(&lanes, &Options::default(), "t");
+            let (x, size, anchor) = sc
+                .items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Text {
+                        x,
+                        size,
+                        anchor,
+                        text,
+                        ..
+                    } if text == wide => Some((*x, *size, *anchor)),
+                    _ => None,
+                })
+                .expect("the lane label is drawn");
+            let (l, r) = extent(x, size, anchor, wide);
+            assert!(l >= -1e-9, "{wide:?} starts at {l}, off the left edge");
+            assert!(
+                r <= sc.width + 1e-9,
+                "{wide:?} ends at {r}, past the {} pt edge",
+                sc.width
+            );
+        }
+    }
+
+    #[test]
+    fn a_sample_lane_beside_a_ladder_does_not_stack_two_band_labels() {
+        // The gap between two lanes carries a sample lane's labels rightwards
+        // and a ladder's leftwards, so a sample immediately left of a ladder
+        // needs room for both columns; `layout` reserved the wider of the two.
+        // Result on this fixture: `2000/2100` ran [109.02, 151.55] at y 207.85
+        // and the ladder's `2000` ran [131.54, 151.55] at y 209.93 — both
+        // ending at the same x, 2 pt apart at 9 pt type, so the two numbers
+        // were printed one on top of the other and neither was legible.
+        //
+        // `a_band_label_does_not_sit_over_the_next_lane` cannot catch this: it
+        // asks only whether a label crosses the next lane's left edge, and both
+        // offenders stop 4 pt short of it.
+        let lanes = vec![
+            lane(&[2_000, 2_100], "a", false),
+            lane(
+                &[
+                    500, 1_000, 1_500, 2_000, 3_000, 4_000, 5_000, 6_000, 8_000, 10_000,
+                ],
+                "L",
+                true,
+            ),
+        ];
+        let sc = to_scene(&lanes, &Options::default(), "t");
+        // With exactly one lane of each kind the anchor identifies the lane:
+        // sample band labels are set with `Anchor::Start`, ladder ones with
+        // `Anchor::End`.
+        let column = |want: Anchor| -> Vec<(f64, f64, f64, String)> {
+            sc.items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Text {
+                        x,
+                        y,
+                        size,
+                        anchor,
+                        text,
+                        ..
+                    } if *size == BAND_LABEL_SIZE && *anchor == want => {
+                        let (l, r) = extent(*x, *size, *anchor, text);
+                        Some((l, r, *y, text.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let sample = column(Anchor::Start);
+        let ladder = column(Anchor::End);
+        assert!(!sample.is_empty() && !ladder.is_empty(), "both kinds drawn");
+        // The two columns must not share horizontal space at all. Report the
+        // vertically closest offending pair, because that is the one whose two
+        // numbers are actually printed over each other.
+        let mut clash: Option<(f64, String)> = None;
+        for (sl, sr, sy, st) in &sample {
+            for (ll, lr, ly, lt) in &ladder {
+                let shared = sr.min(*lr) - sl.max(*ll);
+                if shared <= 1e-9 {
+                    continue;
+                }
+                let dy = (sy - ly).abs();
+                let closest = match &clash {
+                    Some((best, _)) => dy < *best,
+                    None => true,
+                };
+                if closest {
+                    clash = Some((
+                        dy,
+                        format!(
+                            "{st:?} [{sl}, {sr}] and {lt:?} [{ll}, {lr}] share {shared} pt of \
+                             the same gap, {dy} pt apart vertically"
+                        ),
+                    ));
+                }
+            }
+        }
+        if let Some((_, why)) = clash {
+            panic!("{why}");
         }
     }
 

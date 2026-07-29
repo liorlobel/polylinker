@@ -834,3 +834,1034 @@ fn a_template_big_enough_for_the_scan_to_dominate_says_so_first() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// pl find-motif: the file's own topology
+// ---------------------------------------------------------------------------
+
+/// A 42 bp circle whose only EcoRI site spans bases 40,41,42,1,2,3.
+///
+/// `GAATTC` does not occur anywhere in it read as a line — checked by the
+/// `--topology linear` leg below, which is also the override's own control.
+const ORIGIN_SITE: &str = "TTCCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGGAA";
+
+/// A file that says it is a circle is searched as one.
+///
+/// PROVEN TO FAIL: `circular` came solely from `--topology`, whose default was
+/// `linear` for a file as well as for `--seq`, so `mol.topology` was read into
+/// nothing and this printed `ori.gb, 42 bp, linear` then `no hits` at exit 0 —
+/// while `pl info`, `pl digest`, `pl primers` and `pl find` on the same bytes
+/// all read it as a circle and all found the site. The `--json` leg is the one
+/// that matters most: it emitted `"circular": false` and `"hits": []`, a
+/// machine-readable false negative with no header text to notice.
+#[test]
+fn a_file_that_declares_a_circle_is_searched_as_a_circle() {
+    let dir = scratch("find-motif-topology");
+    write(&dir, "ori.gb", &genbank("ori", ORIGIN_SITE, true));
+
+    let out = run(&dir, &["find-motif", "GAATTC", "ori.gb"]);
+    let text = stdout(&out);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        text.contains("42 bp, circular"),
+        "the header has to state the topology it actually used: {text}"
+    );
+    assert!(
+        text.contains("wraps the origin") && text.contains("1 hit(s)"),
+        "the site spans 40..3 and is only findable on a circle: {text}"
+    );
+
+    let json = stdout(&run(&dir, &["find-motif", "GAATTC", "ori.gb", "--json"]));
+    assert!(json.contains("\"circular\": true"), "{json}");
+    assert!(json.contains("\"wrapped\": true"), "{json}");
+
+    // `--topology` still overrides, and is the control that the sequence really
+    // does hold no linear occurrence.
+    let lin = stdout(&run(
+        &dir,
+        &["find-motif", "GAATTC", "ori.gb", "--topology", "linear"],
+    ));
+    assert!(
+        lin.contains("42 bp, linear") && lin.contains("no hits"),
+        "{lin}"
+    );
+
+    // `--seq` carries no topology, so linear stays the default there.
+    let bare = stdout(&run(&dir, &["find-motif", "GAATTC", "--seq", "TTCAAAAGAA"]));
+    assert!(
+        bare.contains("10 bp, linear") && bare.contains("no hits"),
+        "{bare}"
+    );
+    let circ = stdout(&run(
+        &dir,
+        &[
+            "find-motif",
+            "GAATTC",
+            "--seq",
+            "TTCAAAAGAA",
+            "--topology",
+            "circular",
+        ],
+    ));
+    assert!(circ.contains("1 hit(s)"), "{circ}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// pl annotate --genbank: the same four loss notices pl convert gives
+// ---------------------------------------------------------------------------
+
+/// A GenBank record holding two locations this reader cannot represent.
+fn remote_locations() -> String {
+    "LOCUS       remote                    42 bp    DNA     linear   SYN 26-JUL-2026\n\
+     FEATURES             Location/Qualifiers\n\
+     \x20    misc_feature    join(1..10,J00194.1:200..300)\n\
+     \x20                    /label=\"split\"\n\
+     \x20    misc_feature    gap(unk100)\n\
+     \x20                    /label=\"ghost\"\n\
+     ORIGIN\n\
+     \x20       1 ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTAA\n\
+     //\n"
+        .to_string()
+}
+
+/// The verb that writes a record says what the record could not carry.
+///
+/// PROVEN TO FAIL: `cmd_annotate` read only `truncated()` off the load report
+/// and called `genbank::write` rather than `write_reporting`, so
+/// `pl annotate remote.gb --genbank` emitted a complete-looking record in which
+/// "ghost" was gone entirely and "split" had become `misc_feature 1..10` — 10 bp
+/// where the source claimed 111 — with **empty stderr** and exit 0.
+/// `pl convert remote.gb --to genbank --stdout` writes a byte-identical record
+/// to the same stream and reported the loss; only this verb was silent.
+#[test]
+fn annotating_to_genbank_says_what_the_output_could_not_carry() {
+    let dir = scratch("annotate-genbank-loss");
+    write(&dir, "remote.gb", &remote_locations());
+
+    let out = run(&dir, &["annotate", "remote.gb", "--genbank"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let e = stderr(&out);
+    assert!(
+        e.contains("location(s) the reader could not represent"),
+        "the loss happens here and has to be said here: {e:?}"
+    );
+    assert!(e.contains("gap(unk100)"), "{e}");
+    assert!(e.contains("the output does not carry"), "{e}");
+    // The record itself is still written — this is a notice, not a refusal.
+    assert!(stdout(&out).contains("LOCUS"), "{}", stdout(&out));
+
+    // The reader's other channel, on the format that has one: a nested citation
+    // in a `.dna`'s notes block.
+    write_bytes(&dir, "cited.dna", &dna(CITED));
+    let cited = run(&dir, &["annotate", "cited.dna", "--genbank"]);
+    assert!(
+        stderr(&cited).contains("Notes/References/Reference"),
+        "{}",
+        stderr(&cited)
+    );
+
+    // The control: a notice that fires on every file is a notice nobody reads.
+    write(
+        &dir,
+        "plain.gb",
+        &genbank("plain", "AAAACCCCGGGGTTTT", true),
+    );
+    let quiet = run(&dir, &["annotate", "plain.gb", "--genbank"]);
+    assert!(
+        !stderr(&quiet).contains("could not carry")
+            && !stderr(&quiet).contains("does not carry")
+            && !stderr(&quiet).contains("cannot hold"),
+        "nothing was lost here: {}",
+        stderr(&quiet)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// pl design --vector: a multi-record file, and a vector nothing reads
+// ---------------------------------------------------------------------------
+
+/// Which record is the backbone is not a question record 1 can answer.
+///
+/// PROVEN TO FAIL: the vector's `LoadReport` was bound to `_` — the last such
+/// binding in the binary — so a two-record file whose *second* record carries
+/// the three EcoRI sites was judged on the first and the verdict printed as a
+/// statement about the file: "EcoRI reads 0 sites in multi.fa (2000 bp, read as
+/// LINEAR) and cuts 0 of them -- so it cannot open this vector", exit 0, empty
+/// stderr, and the same sentence inside `--json`'s `warnings`, where a stderr
+/// note could not have been seen at all. The user eliminates a good backbone.
+#[test]
+fn a_multi_record_vector_is_refused_rather_than_judged_on_record_one() {
+    let dir = scratch("design-vector-multi");
+    let body = plain(2_000, &["GAATTC", "AATT"]);
+    write(&dir, "template.fa", &fasta("t", &body));
+    // Record 2 carries three EcoRI sites; record 1 carries none.
+    let cutter = format!(
+        "{}GAATTC{}GAATTC{}GAATTC{}",
+        &body[..300],
+        &body[306..900],
+        &body[906..1500],
+        &body[1506..]
+    );
+    write(&dir, "only2.fa", &fasta("r2", &cutter));
+    write(
+        &dir,
+        "multi.fa",
+        &format!("{}{}", fasta("r1", &body), fasta("r2", &cutter)),
+    );
+
+    let args = |v: &'static str| {
+        vec![
+            "design",
+            "template.fa",
+            "--region",
+            "400..1000",
+            "--add-5",
+            "EcoRI",
+            "--vector",
+            v,
+            "--no-specificity",
+        ]
+    };
+    let out = run(&dir, &args("multi.fa"));
+    assert!(
+        !out.status.success(),
+        "a verdict about a backbone must not come from half the file:\n{}",
+        stdout(&out)
+    );
+    let e = stderr(&out);
+    assert!(e.contains("--vector multi.fa"), "{e}");
+    assert!(e.contains("2 records"), "{e}");
+    assert!(
+        !stdout(&out).contains("cannot open this vector"),
+        "and the wrong verdict must not be printed anyway:\n{}",
+        stdout(&out)
+    );
+
+    // The control: the record it would have judged, alone, is still scored.
+    let one = stdout(&run(&dir, &args("only2.fa")));
+    assert!(
+        one.contains("reads 3 sites in only2.fa"),
+        "the single-record case must keep working:\n{one}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A vector nothing will read is refused, not accepted and ignored.
+///
+/// PROVEN TO FAIL: everything `--vector` produces comes out of a loop over
+/// `[tail_five, tail_three]`, so with neither `--add-5` nor `--add-3` the file
+/// was opened, parsed and put through both no-bases gates and then never
+/// mentioned — `pl design template.fa --region 400..1000 --vector v.fa` printed
+/// a full report in which the string "vector" did not occur once, exit 0, and
+/// `--json`'s `warnings` said nothing either. Because the gates run first, an
+/// unusable vector errored loudly while a usable one was completely silent, so
+/// the silence read as a clean bill of health.
+#[test]
+fn a_vector_with_no_added_enzyme_is_refused_rather_than_ignored() {
+    let dir = scratch("design-vector-inert");
+    let body = plain(2_000, &["GAATTC", "AATT"]);
+    write(&dir, "template.fa", &fasta("t", &body));
+    write(&dir, "v.fa", &fasta("v", &body));
+
+    let base = ["design", "template.fa", "--region", "400..1000"];
+    let bad = run(
+        &dir,
+        &[&base[..], &["--vector", "v.fa", "--no-specificity"][..]].concat(),
+    );
+    assert!(!bad.status.success(), "{}", stdout(&bad));
+    assert!(
+        stderr(&bad).contains("--add-5") && stderr(&bad).contains("--vector"),
+        "{}",
+        stderr(&bad)
+    );
+
+    // `--spacer` is inert the same way, and independently of `--vector`.
+    let sp = run(
+        &dir,
+        &[&base[..], &["--spacer", "AAAA", "--no-specificity"][..]].concat(),
+    );
+    assert!(!sp.status.success(), "{}", stdout(&sp));
+    assert!(stderr(&sp).contains("--spacer"), "{}", stderr(&sp));
+
+    // ...and the flags that only describe a vector need one to describe.
+    let meth = run(
+        &dir,
+        &[&base[..], &["--dam-", "--no-specificity"][..]].concat(),
+    );
+    assert!(!meth.status.success(), "{}", stdout(&meth));
+    assert!(stderr(&meth).contains("--dam-"), "{}", stderr(&meth));
+
+    // The control: with a tail, the vector is read and reported as before.
+    let ok = stdout(&run(
+        &dir,
+        &[
+            &base[..],
+            &["--add-5", "EcoRI", "--vector", "v.fa", "--no-specificity"][..],
+        ]
+        .concat(),
+    ));
+    assert!(ok.contains("reads 0 sites in v.fa"), "{ok}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Values, not just names: options that silently accepted anything
+// ---------------------------------------------------------------------------
+
+/// `--column` picks a width, so a value it does not understand is an error.
+///
+/// PROVEN TO FAIL: this was `a.get("column").map(|c| c == "double")`, a bare
+/// `==` against one lowercase literal, so `--column Double` — with `--journal`
+/// next door accepting `Nature` case-insensitively — silently selected the
+/// single-column width. Measured: the EPS came out with `%%BoundingBox: 0 0 253
+/// 253` (89 mm) instead of `0 0 519 519` (183 mm), and the journal type floor
+/// then ran against the wrong width and printed "smallest type is 3.0 pt, below
+/// nature's 5 pt minimum / ... or use --column double" — advising the user to do
+/// exactly what they had typed.
+#[test]
+fn a_column_that_is_not_single_or_double_is_refused() {
+    let dir = scratch("export-column");
+    write(&dir, "map.gb", &genbank("map", "AAAACCCCGGGGTTTT", true));
+
+    let width = |col: &str| -> String {
+        stderr(&run(
+            &dir,
+            &[
+                "export",
+                "map.gb",
+                "--journal",
+                "nature",
+                "--column",
+                col,
+                "--outdir",
+                "out",
+            ],
+        ))
+    };
+    assert!(
+        width("double").contains("183.0 x 183.0 mm"),
+        "{}",
+        width("double")
+    );
+    assert!(
+        width("Double").contains("183.0 x 183.0 mm"),
+        "--journal matches case-insensitively; --column has to as well: {}",
+        width("Double")
+    );
+    assert!(
+        width("single").contains("89.0 x 89.0 mm"),
+        "{}",
+        width("single")
+    );
+
+    for bad in ["doubel", "sngl", ""] {
+        let out = run(
+            &dir,
+            &[
+                "export",
+                "map.gb",
+                "--journal",
+                "nature",
+                "--column",
+                bad,
+                "--outdir",
+                "out",
+            ],
+        );
+        assert!(
+            !out.status.success(),
+            "--column {bad:?} silently became single-column: {}",
+            stderr(&out)
+        );
+        assert!(
+            stderr(&out).contains("expected single or double"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    // A `--column` nothing reads is no better than a mistyped one.
+    let no_journal = run(
+        &dir,
+        &["export", "map.gb", "--column", "double", "--outdir", "out"],
+    );
+    assert!(!no_journal.status.success(), "{}", stderr(&no_journal));
+    assert!(
+        stderr(&no_journal).contains("--journal"),
+        "{}",
+        stderr(&no_journal)
+    );
+    let with_mm = run(
+        &dir,
+        &[
+            "export", "map.gb", "--mm", "100", "--column", "double", "--outdir", "out",
+        ],
+    );
+    assert!(!with_mm.status.success(), "{}", stderr(&with_mm));
+    assert!(stderr(&with_mm).contains("--mm"), "{}", stderr(&with_mm));
+
+    // The controls: neither option is broken on its own.
+    let mm = run(
+        &dir,
+        &["export", "map.gb", "--mm", "100", "--outdir", "out"],
+    );
+    assert!(mm.status.success(), "{}", stderr(&mm));
+    assert!(stderr(&mm).contains("100.0 x 100.0 mm"), "{}", stderr(&mm));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `--max-depth` that is not a number is refused, not ignored.
+///
+/// PROVEN TO FAIL: `.and_then(|v| v.parse().ok())` left `max_depth` at the
+/// default 32, and since the only evidence a bound applied is the "scan
+/// incomplete: ... deeper than --max-depth N" line, the run was
+/// character-for-character identical to one with no `--max-depth` at all —
+/// which is exactly what `parse_args`' own doc says must never happen.
+#[test]
+fn a_max_depth_that_is_not_a_number_is_refused() {
+    let dir = scratch("index-max-depth");
+    let root = dir.join("root");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    write(&root, "a.gb", &genbank("a", "AAAACCCCGGGGTTTT", true));
+    write(
+        &root.join("sub"),
+        "b.gb",
+        &genbank("b", "GGGGTTTTAAAACCCC", true),
+    );
+    let idx = dir.join("idx");
+    let idx = idx.to_str().unwrap();
+
+    let bad = run(
+        &dir,
+        &[
+            "index",
+            "root",
+            "--index-at",
+            idx,
+            "--max-depth",
+            "not-a-number",
+        ],
+    );
+    assert!(
+        !bad.status.success(),
+        "a bad depth walked the whole tree and said nothing: {}",
+        stdout(&bad)
+    );
+    assert!(stderr(&bad).contains("--max-depth"), "{}", stderr(&bad));
+    // `pl find` reaches the same parser.
+    let find_bad = run(
+        &dir,
+        &[
+            "find",
+            "root",
+            "--index-at",
+            idx,
+            "--motif",
+            "ACGT",
+            "--max-depth",
+            "xyz",
+        ],
+    );
+    assert!(!find_bad.status.success(), "{}", stdout(&find_bad));
+
+    // The controls: a real depth still bounds the walk, and still says so.
+    let zero = run(
+        &dir,
+        &["index", "root", "--index-at", idx, "--max-depth", "0"],
+    );
+    assert!(zero.status.success(), "{}", stderr(&zero));
+    assert!(
+        stderr(&zero).contains("deeper than --max-depth 0"),
+        "{}",
+        stderr(&zero)
+    );
+    assert!(stdout(&zero).contains("1 files"), "{}", stdout(&zero));
+    let deep = run(
+        &dir,
+        &["index", "root", "--index-at", idx, "--max-depth", "8"],
+    );
+    assert!(stdout(&deep).contains("2 files"), "{}", stdout(&deep));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The unknown-enzyme message must not deny shipping enzymes that ship.
+///
+/// PROVEN TO FAIL: it read "not in the shipped table of 58 Type IIP enzymes. /
+/// there is no BsaI, BsmBI, BbsI or SapI yet — use --motif GGTCTC to ask about
+/// the site itself." Every clause was false at the time it was printed: all four
+/// enzymes are in the table, 8 of the 58 entries are Type IIS, and `--enzyme
+/// BsaI` hands `Motif::new` the same "GGTCTC" the suggested workaround does.
+/// A user who mistypes any name is told the tool cannot do Golden Gate.
+#[test]
+fn the_unknown_enzyme_message_does_not_deny_the_type_iis_enzymes() {
+    let dir = scratch("find-enzyme-message");
+    let root = dir.join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    write(
+        &root,
+        "t.fa",
+        ">t\nAAAAAAAAAAGGTCTCCGATCGGGGGGGGGGGAATTCTTTTTT\n",
+    );
+    let idx = dir.join("idx");
+    let idx = idx.to_str().unwrap();
+
+    let out = run(
+        &dir,
+        &["find", "root", "--index-at", idx, "--enzyme", "FooI"],
+    );
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let e = stderr(&out);
+    assert!(
+        !e.contains("there is no BsaI"),
+        "the tool must not deny shipping an enzyme it ships: {e}"
+    );
+    assert!(
+        !e.contains("Type IIP enzymes"),
+        "8 of the 58 entries are Type IIS: {e}"
+    );
+    assert!(e.contains("Type IIS"), "{e}");
+
+    // ...because the enzyme it denied resolves and searches.
+    let bsai = run(
+        &dir,
+        &[
+            "find",
+            "root",
+            "--index-at",
+            idx,
+            "--enzyme",
+            "BsaI",
+            "--json",
+        ],
+    );
+    assert!(bsai.status.success(), "{}", stderr(&bsai));
+    assert!(
+        stdout(&bsai).contains("\"matched\": 1"),
+        "{}",
+        stdout(&bsai)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A query `pl find` cannot honour is refused, not dropped.
+///
+/// PROVEN TO FAIL: USAGE advertised `pl find <dir> [query] [filters]` and
+/// `cmd_find` read only `files[0]`, so `pl find root GAATTC` and
+/// `pl find root ZZZZZZ` — the second not even valid IUPAC — both listed every
+/// record in the library and printed "1 record matched" at exit 0. A search
+/// written the way `pl find-motif <IUPAC> <file>` is written returned the whole
+/// library as its answer.
+#[test]
+fn a_positional_query_is_refused_rather_than_silently_dropped() {
+    let dir = scratch("find-positional");
+    let root = dir.join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root, "t.fa", ">t\nAAAAGAATTCAAAA\n");
+    let idx = dir.join("idx");
+    let idx = idx.to_str().unwrap();
+
+    for query in ["GAATTC", "ZZZZZZ"] {
+        let out = run(&dir, &["find", "root", "--index-at", idx, query]);
+        assert!(
+            !out.status.success(),
+            "pl find root {query} answered with the whole library:\n{}",
+            stdout(&out)
+        );
+        assert!(
+            !stdout(&out).contains("1 record matched"),
+            "and the unfiltered answer must not be printed anyway:\n{}",
+            stdout(&out)
+        );
+        assert!(stderr(&out).contains("--motif"), "{}", stderr(&out));
+    }
+
+    // The controls: the folder alone still lists, and the named filter still
+    // filters -- one of these motifs is present and the other is not.
+    let all = run(&dir, &["find", "root", "--index-at", idx]);
+    assert!(all.status.success(), "{}", stderr(&all));
+    assert!(
+        stdout(&all).contains("1 record matched"),
+        "{}",
+        stdout(&all)
+    );
+    let hit = run(
+        &dir,
+        &["find", "root", "--index-at", idx, "--motif", "GAATTC"],
+    );
+    assert!(hit.status.success(), "{}", stderr(&hit));
+    assert!(
+        stdout(&hit).contains("1 record matched"),
+        "{}",
+        stdout(&hit)
+    );
+    let miss = run(
+        &dir,
+        &["find", "root", "--index-at", idx, "--motif", "GGATCC"],
+    );
+    assert!(
+        stdout(&miss).contains("0 records matched"),
+        "{}",
+        stdout(&miss)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Verdicts computed from nothing
+// ---------------------------------------------------------------------------
+
+/// A digest that recovered no overhang is not a clean bill of health.
+///
+/// PROVEN TO FAIL: `check(&[])` returns early on the empty slice, so a file with
+/// no site for the enzyme printed "-> 1 fragment(s)", a blank line where the
+/// overhang list goes, then "no structural fault found" at exit 0, and `--json`
+/// gave `{"overhangs": [], "faults": [], "usable": true}`. The fragment count
+/// does not disambiguate: a circle with one genuine BsaI junction prints the
+/// same "-> 1 fragment(s)", and the `--json` path never emits it at all.
+#[test]
+fn a_digest_that_leaves_no_overhang_is_not_reported_as_usable() {
+    let dir = scratch("goldengate-empty");
+    // No GGTCTC and no GAGACC anywhere.
+    write(
+        &dir,
+        "none.gb",
+        &genbank("none", &"ACCTTGCAAG".repeat(30), true),
+    );
+    // One BsaI site, on a circle: one fragment, one real junction.
+    write(
+        &dir,
+        "one.gb",
+        &genbank(
+            "one",
+            &format!(
+                "{}GGTCTCAATG{}",
+                "ACCTTGCAAG".repeat(10),
+                "ACCTTGCAAG".repeat(10)
+            ),
+            true,
+        ),
+    );
+
+    let out = run(&dir, &["goldengate", "none.gb", "--enzyme", "BsaI"]);
+    assert!(
+        !out.status.success(),
+        "an empty set passes every check by default, so it cannot be a pass:\n{}",
+        stdout(&out)
+    );
+    assert!(
+        !stdout(&out).contains("no structural fault found"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(stderr(&out).contains("no overhang"), "{}", stderr(&out));
+
+    // The `--json` consumer has no stderr to read, so exit code and the absence
+    // of `"usable": true` are the whole signal.
+    let json = run(
+        &dir,
+        &["goldengate", "none.gb", "--enzyme", "BsaI", "--json"],
+    );
+    assert!(!json.status.success(), "{}", stdout(&json));
+    assert!(
+        !stdout(&json).contains("\"usable\": true"),
+        "{}",
+        stdout(&json)
+    );
+
+    // The second route to the same empty set, and the one audit #42 opened
+    // with: a linear part whose BsaI site sits so close to the end that the
+    // overhang cannot form. #42's fix made `left_overhang` return an
+    // empty-bases `Overhang` that `check` turns into `Fault::Incompatible`;
+    // #43 then stopped `cut` producing that fragment at all, so the digest
+    // yields no overhang and reaches `check` as an empty slice instead. The
+    // library-level guard is unreachable from a file, which is why this one has
+    // to be here.
+    write(&dir, "short.fa", ">short\nAAAAAAAAAAAAGGTCTCAC\n");
+    let short = run(
+        &dir,
+        &["goldengate", "short.fa", "--enzyme", "BsaI", "--json"],
+    );
+    assert!(
+        !short.status.success(),
+        "audit #42's own fixture still passed:\n{}",
+        stdout(&short)
+    );
+    assert!(
+        !stdout(&short).contains("\"usable\": true"),
+        "{}",
+        stdout(&short)
+    );
+
+    // The control, and the reason the fragment count cannot carry this on its
+    // own: one genuine junction on a circle also prints "-> 1 fragment(s)".
+    let ok = run(&dir, &["goldengate", "one.gb", "--enzyme", "BsaI"]);
+    assert!(ok.status.success(), "{}", stderr(&ok));
+    assert!(stdout(&ok).contains("-> 1 fragment(s)"), "{}", stdout(&ok));
+    assert!(stdout(&ok).contains("ATGA"), "{}", stdout(&ok));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// No verb answers a question about a molecule that carries no bases.
+///
+/// PROVEN TO FAIL: on this record — 4000 bp declared, ORIGIN empty, which
+/// `pl info` correctly describes as "4000 bp DECLARED, but this file carries no
+/// bases" and which `pl digest` has always refused — `pl gel --cut EcoRI` said
+/// "none of these enzymes cuts this molecule", `pl orfs` "no ORF of 30 aa or
+/// more", `pl primers` "no binding site", `pl annotate` "nothing found",
+/// `pl find-motif` "no hits" and `pl goldengate --enzyme BsaI` "no structural
+/// fault found": six negative verdicts derived from zero bases, all at exit 0,
+/// each also printing `0 bp` for a record that declares 4000. `pl find` over the
+/// same file already excludes it from its coverage count and says why.
+#[test]
+fn no_verb_answers_about_a_file_that_declares_bases_and_carries_none() {
+    let dir = scratch("no-bases-verdicts");
+    write(
+        &dir,
+        "anno.gb",
+        "LOCUS       anno                    4000 bp    DNA     circular SYN 26-JUL-2026\n\
+         FEATURES             Location/Qualifiers\n\
+         \x20    misc_feature    1..100\n\
+         \x20                    /label=\"a\"\n//\n",
+    );
+
+    for args in [
+        &["gel", "anno.gb", "--cut", "EcoRI"][..],
+        &["orfs", "anno.gb"][..],
+        &["primers", "anno.gb", "--primer", "GAATTCAAAACCCC"][..],
+        &["annotate", "anno.gb"][..],
+        &["find-motif", "GAATTC", "anno.gb"][..],
+        &["goldengate", "anno.gb", "--enzyme", "BsaI"][..],
+    ] {
+        let out = run(&dir, args);
+        assert!(
+            !out.status.success(),
+            "pl {} answered from zero bases:\n{}",
+            args.join(" "),
+            stdout(&out)
+        );
+        assert!(
+            stderr(&out).contains("carries none of them"),
+            "pl {}: {}",
+            args.join(" "),
+            stderr(&out)
+        );
+        assert!(
+            !stdout(&out).contains("0 bp"),
+            "pl {} printed 0 bp for a record declaring 4000:\n{}",
+            args.join(" "),
+            stdout(&out)
+        );
+    }
+
+    // The control: every one of them still answers about a molecule with bases.
+    write(
+        &dir,
+        "real.gb",
+        &genbank("real", "GAATTCAAAACCCCGGGGTTTTGAATTC", true),
+    );
+    for args in [
+        &["gel", "real.gb", "--cut", "EcoRI"][..],
+        &["orfs", "real.gb"][..],
+        &["primers", "real.gb", "--primer", "GAATTCAAAACCCC"][..],
+        &["annotate", "real.gb"][..],
+        &["find-motif", "GAATTC", "real.gb"][..],
+    ] {
+        let out = run(&dir, args);
+        assert!(
+            out.status.success(),
+            "pl {} must still answer: {}",
+            args.join(" "),
+            stderr(&out)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- 2026-07-29 workspace phase: the cross-area fixes ----------------------
+//
+// Each of these closes a `cross_area_requirements` entry that no per-area agent
+// could reach, because the defect and its fix sat in different lanes. Every one
+// was reproduced against the binary built from the per-area tree before being
+// fixed, and the reproduction is quoted beside it.
+
+#[test]
+fn the_annealing_advice_applies_the_length_rule_it_prints() {
+    // `pl_thermo::anneal` is length-blind, and `cmd_tm` folded its Tm list down
+    // to a bare f64 one line before calling it -- so the +3 was applied at
+    // every length while the note on that same printed line said "for primers
+    // over 20 nt". Measured before the fix, on the 18 nt SP6 primer:
+    // "Phusion  42C".
+    let dir = scratch("tm-carveout");
+
+    let out = run(&dir, &["tm", "ATTTAGGTGACACTATAG"]);
+    let s = stdout(&out);
+    assert!(
+        s.contains("38.9C"),
+        "the premise -- an 18 nt oligo at Tm 38.9C:\n{s}"
+    );
+    let phusion = s
+        .lines()
+        .find(|l| l.trim_start().starts_with("Phusion"))
+        .unwrap_or_else(|| panic!("no Phusion line:\n{s}"))
+        .to_string();
+    assert!(
+        phusion.contains("39C"),
+        "an 18 nt primer is not 'over 20 nt', so its Ta is the Tm itself and \
+         not Tm + 3 -- the rule this very line prints: {phusion}"
+    );
+    assert!(
+        !phusion.contains("42C"),
+        "42C is Tm + 3 applied to a primer the printed rule excludes: {phusion}"
+    );
+
+    // The control, and it is what stops the fix degenerating into "never add
+    // three": a primer that IS over 20 nt still gets the offset.
+    let out = run(&dir, &["tm", "ACGTACGTACGTAAGGCCTTACGT"]);
+    let s = stdout(&out);
+    assert!(s.contains("57.8C"), "the control's premise:\n{s}");
+    let phusion = s
+        .lines()
+        .find(|l| l.trim_start().starts_with("Phusion"))
+        .unwrap_or_else(|| panic!("no Phusion line:\n{s}"))
+        .to_string();
+    assert!(
+        phusion.contains("61C"),
+        "24 nt is over 20, so Tm + 3 applies: {phusion}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_enzyme_the_table_does_not_hold_is_named_even_beside_one_it_does() {
+    // The guard was per CALL and not per NAME: `retain` followed by
+    // `if results.is_empty()` fires only when EVERY name is unknown. Measured
+    // before the fix, `--enzyme HaeIII --enzyme EcoRI` printed the EcoRI row,
+    // exited 0 and dropped HaeIII without a word -- an answer about one enzyme
+    // under the heading of two. HaeIII and DpnI are both absent from the 58-row
+    // table and both ordinary things to ask for, so this is reachable by typing
+    // a real enzyme name rather than by mistyping one.
+    let dir = scratch("digest-per-name");
+    write(&dir, "d.fa", ">d\nGAATTCGGATCCGGCCAAGCTTGATC\n");
+
+    let out = run(
+        &dir,
+        &["digest", "d.fa", "--enzyme", "HaeIII", "--enzyme", "EcoRI"],
+    );
+    assert!(!out.status.success(), "must refuse:\n{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("HaeIII"),
+        "the missing name has to be the one named: {}",
+        stderr(&out)
+    );
+    assert!(
+        !stdout(&out).contains("EcoRI"),
+        "and the half-answer must not be printed anyway:\n{}",
+        stdout(&out)
+    );
+
+    // Every miss at once, so three wrong names do not cost three runs.
+    let out = run(
+        &dir,
+        &["digest", "d.fa", "--enzyme", "DpnI", "--enzyme", "HaeIII"],
+    );
+    let e = stderr(&out);
+    assert!(e.contains("DpnI") && e.contains("HaeIII"), "{e}");
+
+    // Controls: a known name still digests, and a known NON-CUTTER still
+    // reports no cuts rather than being confused with an unknown name.
+    let out = run(&dir, &["digest", "d.fa", "--enzyme", "EcoRI"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("EcoRI"), "{}", stdout(&out));
+    let out = run(&dir, &["digest", "d.fa", "--enzyme", "NotI"]);
+    assert!(
+        out.status.success(),
+        "a real enzyme that does not cut is not an error: {}",
+        stderr(&out)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_orf_that_laps_the_molecule_reports_its_real_length() {
+    // `start..end` is an inclusive span round the circle, and it stops being
+    // the ORF's extent the moment `laps > 0`. Measured before the fix on this
+    // 19 bp circle: "5..18  10 aa", a range of 14 bases for an ORF of 33, with
+    // `start < end` so not even the wrap was visible -- while `--translate`
+    // printed all ten residues, because `bases_of` already used `o.bases()`.
+    // One line disagreeing with itself.
+    let dir = scratch("orf-laps");
+
+    let out = run(
+        &dir,
+        &[
+            "orfs",
+            "--seq",
+            "CGTAATGCCTTTCCCTAAC",
+            "--circular",
+            "--table",
+            "1",
+            "--min-aa",
+            "1",
+            "--json",
+        ],
+    );
+    let s = stdout(&out);
+    assert!(
+        s.contains("\"laps\": 1"),
+        "the lap count must cross the boundary:\n{s}"
+    );
+    assert!(
+        s.contains("\"bp\": 33"),
+        "10 aa plus a stop is 33 bases:\n{s}"
+    );
+    assert!(
+        s.contains("\"start\": 5") && s.contains("\"end\": 18"),
+        "the coordinates themselves are unchanged:\n{s}"
+    );
+
+    let out = run(
+        &dir,
+        &[
+            "orfs",
+            "--seq",
+            "CGTAATGCCTTTCCCTAAC",
+            "--circular",
+            "--table",
+            "1",
+            "--min-aa",
+            "1",
+        ],
+    );
+    let s = stdout(&out);
+    assert!(
+        s.contains("33 bp in all"),
+        "the text form says it too:\n{s}"
+    );
+
+    // The control: an ORF that does not lap says nothing about laps, or the
+    // note appears on every ORF and therefore means nothing.
+    let out = run(
+        &dir,
+        &[
+            "orfs",
+            "--seq",
+            "ATGCCCTTTTAA",
+            "--table",
+            "1",
+            "--min-aa",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(stdout(&out).contains("\"laps\": 0"), "{}", stdout(&out));
+    let out = run(
+        &dir,
+        &[
+            "orfs",
+            "--seq",
+            "ATGCCCTTTTAA",
+            "--table",
+            "1",
+            "--min-aa",
+            "1",
+        ],
+    );
+    assert!(
+        !stdout(&out).contains("laps the molecule"),
+        "{}",
+        stdout(&out)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_that_disagrees_with_itself_says_so_rather_than_being_answered_about() {
+    // `Molecule::validate()` was reached from exactly one place in the whole
+    // workspace -- pl-gui's document loader -- so every check it performs was
+    // invisible from the terminal. The reachable case is dull: a GenBank record
+    // whose `//` is missing and which has something after the sequence. The
+    // ORIGIN loop reads on to end of file, so this record loads as 30 bases
+    // against a LOCUS line that says 12, and `pl info` printed both numbers
+    // without ever remarking that they disagree.
+    let dir = scratch("self-contradiction");
+    write(
+        &dir,
+        "foot.gb",
+        "LOCUS       foot                      12 bp    DNA     linear   SYN 01-JAN-2026\n\
+         ORIGIN\n        1 acgtacgtacgt\n--\nSent from my iPhone\n",
+    );
+
+    let out = run(&dir, &["info", "foot.gb"]);
+    assert!(
+        stderr(&out).contains("declares 12 bases but carries 30"),
+        "the contradiction has to be named: {}",
+        stderr(&out)
+    );
+    // A notice, not a refusal: the bases may well be the ones the user wants.
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // The control, and it is the one that matters -- a notice that fires on
+    // every file is a notice nobody reads.
+    write(&dir, "ok.gb", &genbank("ok", "ACGTACGTACGTACGT", false));
+    let out = run(&dir, &["info", "ok.gb"]);
+    assert!(
+        !stderr(&out).contains("declares"),
+        "an ordinary file must say nothing: {}",
+        stderr(&out)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_origin_crossing_feature_reports_the_wrap_and_not_the_whole_molecule() {
+    // `Feature::start`/`end` are a min and a max over the segments, and
+    // `genbank::write` emits an origin-crossing feature as `join(37..40,1..7)`
+    // -- so the min start is always exactly 1 and the max end always exactly
+    // the molecule length. Measured before the fix, an 11 bp promoter came out
+    // of a shipped machine-readable format as `"start": 1, "end": 40`, spanning
+    // the whole molecule, with only `"segments": 2` beside it and the true
+    // coordinates unrecoverable from the document.
+    let dir = scratch("extent-json");
+    write(
+        &dir,
+        "wrap.gb",
+        "LOCUS       wrap                      40 bp    DNA     circular SYN 01-JAN-2026\n\
+         FEATURES             Location/Qualifiers\n\
+         \x20    promoter        join(37..40,1..7)\n\
+         \x20                    /label=\"wrapped\"\n\
+         ORIGIN\n        1 acgtacgtac gtacgtacgt acgtacgtac gtacgtacgt\n//\n",
+    );
+
+    let out = run(&dir, &["info", "wrap.gb", "--json"]);
+    let s = stdout(&out);
+    assert!(
+        s.contains("\"start\": 37") && s.contains("\"end\": 7"),
+        "an origin-crossing feature is reported as the wrap it is, the way \
+         Molecule::subseq reads a pair:\n{s}"
+    );
+    assert!(
+        !s.contains("\"start\": 1, \"end\": 40"),
+        "and not as the whole molecule:\n{s}"
+    );
+
+    // The control: an ordinary spliced join really does run from its lowest
+    // coordinate to its highest, and must not be turned into a wrap.
+    write(
+        &dir,
+        "spliced.gb",
+        "LOCUS       spliced                   40 bp    DNA     circular SYN 01-JAN-2026\n\
+         FEATURES             Location/Qualifiers\n\
+         \x20    CDS             join(5..10,20..30)\n\
+         \x20                    /label=\"exons\"\n\
+         ORIGIN\n        1 acgtacgtac gtacgtacgt acgtacgtac gtacgtacgt\n//\n",
+    );
+    let out = run(&dir, &["info", "spliced.gb", "--json"]);
+    let s = stdout(&out);
+    assert!(
+        s.contains("\"start\": 5") && s.contains("\"end\": 30"),
+        "a spliced join keeps its min/max:\n{s}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

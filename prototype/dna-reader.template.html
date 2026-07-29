@@ -431,6 +431,19 @@ function adapt(summary, sequence) {
     span: summary.span,
     annotationSpan: summary.annotationSpan,
     circular: summary.circular,
+    // How many records the file held, and whether `circular` above is a claim
+    // the file made or this reader's default. Both cross the ABI and neither
+    // was read: a 3-record FASTA opened silently as record 1, and a FASTA —
+    // which cannot declare a topology at all — drew as a definite line, so a
+    // Plasmidsaurus assembly of a plasmid looked linear on the map with
+    // nothing to say otherwise.
+    recordsInFile: summary.recordsInFile,
+    topologyDeclared: summary.topologyDeclared,
+    // True when the parse produced nothing from input that looked like a
+    // sequence file. Without it, a blank map reads as an empty plasmid.
+    suspect: summary.suspect,
+    unrepresentableLocations: summary.unrepresentableLocations,
+    unrepresentableNotes: summary.unrepresentableNotes,
     sequenceAbsent: summary.sequenceAbsent,
     annotationTrack: summary.annotationTrack,
     // null when the source does not record it. GenBank almost never does and
@@ -838,7 +851,13 @@ function renderSummary(doc, state) {
   host.innerHTML = `
     <div class="fname" title="${esc(state.title)}">${esc(state.title)}</div>
     ${doc.sequenceAbsent ? `<span class="pill" style="background:var(--warn);color:#fff">annotations only — no bases in this file</span>` : ""}
-    <span class="pill">${doc.circular ? "circular" : "linear"}</span>
+    ${doc.suspect ? `<span class="pill" style="background:var(--warn);color:#fff">this file parsed to nothing — the view below is empty because the read found no sequence, not because the molecule is empty</span>` : ""}
+    ${doc.recordsInFile > 1 ? `<span class="pill" style="background:var(--warn);color:#fff">record 1 of ${doc.recordsInFile} — the rest of this file is not shown</span>` : ""}
+    ${doc.topologyDeclared === false
+      ? `<span class="pill plain" title="this format records no topology, so &quot;linear&quot; here is this reader's default and not a claim the file made">${doc.circular ? "circular" : "linear"} (not declared)</span>`
+      : `<span class="pill">${doc.circular ? "circular" : "linear"}</span>`}
+    ${(doc.unrepresentableLocations || []).length ? `<span class="pill plain" title="${esc((doc.unrepresentableLocations || []).join('; '))}">${doc.unrepresentableLocations.length} location(s) this reader cannot represent</span>` : ""}
+    ${(doc.unrepresentableNotes || []).length ? `<span class="pill plain" title="${esc((doc.unrepresentableNotes || []).join('; '))}">${doc.unrepresentableNotes.length} note(s) this reader cannot represent</span>` : ""}
     ${doc.doubleStranded === null || doc.doubleStranded === undefined ? ""
       : `<span class="pill plain">${doc.doubleStranded ? "double-stranded" : "single-stranded"}</span>`}
     ${meth.length ? `<span class="pill plain">${meth.join(" · ")} methylated</span>` : ""}
@@ -1137,17 +1156,29 @@ function requireDoc() {
   return CURRENT;
 }
 
+// These two check their return code, the way dlBtn below always has.
+//
+// They used to discard it and download unconditionally, which stopped being
+// harmless the moment the core learned to refuse: pl_to_genbank returns
+// non-zero for a file holding more than one record, because writing it here
+// would keep only the first and throw the rest away. With the code discarded
+// the refusal MESSAGE is what got saved, so the browser handed back a file
+// called plasmid.gb whose contents were
+// {"error": "this file holds 3 records ..."}. A refusal that still downloads
+// something is worse than no refusal at all.
 document.getElementById("expGb").addEventListener("click", () => {
   if (!requireDoc()) return;
   const d = new Date();
-  withString(state.title, (p, n) =>
+  const rc = withString(state.title, (p, n) =>
     W.pl_to_genbank(p, n, d.getDate(), d.getMonth(), d.getFullYear()));
+  if (rc !== 0) { fail(coreText()); return; }
   download(coreText(), locusName(state.title) + ".gb", "text/plain");
 });
 
 document.getElementById("expFa").addEventListener("click", () => {
   if (!requireDoc()) return;
-  withString(state.title, (p, n) => W.pl_to_fasta(p, n, 70));
+  const rc = withString(state.title, (p, n) => W.pl_to_fasta(p, n, 70));
+  if (rc !== 0) { fail(coreText()); return; }
   download(coreText(), locusName(state.title) + ".fa", "text/plain");
 });
 

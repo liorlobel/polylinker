@@ -93,7 +93,29 @@ fn same(a: u8, b: u8) -> bool {
 /// `cutoff` is Ukkonen's: rows whose value already exceeds `max_dist` cannot
 /// contribute, because the DP is non-decreasing along diagonals. Set it false to
 /// get the plain, obviously-correct computation.
-fn best_end(pattern: &[u8], text: &[u8], max_dist: u32, cutoff: bool) -> Option<(usize, u32)> {
+///
+/// `anchor`, when given, breaks ties between equally-good end positions toward
+/// the one nearest it; see [`infix_near`] for why that is not cosmetic. With
+/// `None` the tie-break is the leftmost end, which is what scanning left to
+/// right and only accepting a *strictly* smaller distance already gives, so
+/// passing `None` is exactly the behaviour this function had before the
+/// parameter existed.
+fn best_end(
+    pattern: &[u8],
+    text: &[u8],
+    max_dist: u32,
+    cutoff: bool,
+    anchor: Option<i64>,
+) -> Option<(usize, u32)> {
+    // Order candidates by distance first, then by how far the end sits from the
+    // anchor, then leftmost. Without an anchor the middle term is constant and
+    // the third can never fire (`j` only increases), so the key reduces to
+    // "strictly smaller distance wins".
+    let key = |end: usize, dist: u32| -> (u32, u64, usize) {
+        let off = anchor.map_or(0, |a| (end as i64 - a).unsigned_abs());
+        (dist, off, end)
+    };
+
     let m = pattern.len();
     if m == 0 {
         return Some((0, 0));
@@ -143,7 +165,7 @@ fn best_end(pattern: &[u8], text: &[u8], max_dist: u32, cutoff: bool) -> Option<
             }
         }
 
-        if cur[m] <= max_dist && best.is_none_or(|(_, d)| cur[m] < d) {
+        if cur[m] <= max_dist && best.is_none_or(|(be, bd)| key(j, cur[m]) < key(be, bd)) {
             best = Some((j, cur[m]));
         }
         std::mem::swap(&mut prev, &mut cur);
@@ -158,24 +180,65 @@ fn best_end(pattern: &[u8], text: &[u8], max_dist: u32, cutoff: bool) -> Option<
 /// deterministic — an annotator that reshuffles feature positions between runs
 /// on the same file is not usable.
 pub fn infix(pattern: &[u8], text: &[u8], max_dist: u32) -> Option<Hit> {
-    infix_with(pattern, text, max_dist, true)
+    infix_with(pattern, text, max_dist, true, None)
+}
+
+/// [`infix`], but among *equally good* matches prefer the one ending nearest
+/// `anchor` (an offset into `text`, and allowed to fall outside it).
+///
+/// # The failure this exists for
+///
+/// A caller that already knows roughly where the feature should be — seeding
+/// does, that is what a chain's diagonal is — hands the aligner a window
+/// widened by `slack` on both sides so an indel still fits. When a feature
+/// occurs in DIRECT TANDEM with a period no larger than `slack`, that window
+/// contains whole neighbouring copies, every copy matches at distance 0, and
+/// the leftmost tie-break in [`infix`] hands every chain the *same*, leftmost
+/// copy. `Annotator::dedupe` then merges the identical results and an array of
+/// n copies is annotated n − 1 times, with the last copy silently gone.
+/// Measured with the shipped 27 bp HA row before this existed: 2xHA reported
+/// one box, 3xHA two, 4xHA three; on a 600 bp circle the count even depended on
+/// which base the file numbered 1 (2 boxes for 573 rotations, 3 for the other
+/// 27). The peptide route was worse, because its slack is 12 residues and the
+/// vacated copy came back labelled as a different, shorter feature.
+///
+/// Rejecting a hit whose diagonal drifted would have been the wrong fix and was
+/// tried on paper first: the drift there is one period, which is *smaller* than
+/// `slack` in exactly the cases that fail, so any tolerance loose enough to
+/// admit a real indel is loose enough to admit the wrong copy. Distance still
+/// decides first here, so a genuine indelled match — which scores strictly
+/// better than any neighbouring copy — is unaffected; only ties move.
+pub fn infix_near(pattern: &[u8], text: &[u8], max_dist: u32, anchor: i64) -> Option<Hit> {
+    infix_with(pattern, text, max_dist, true, Some(anchor))
 }
 
 /// The same alignment without Ukkonen's cutoff: slower, and the oracle the
 /// cutoff version is tested against.
 pub fn infix_reference(pattern: &[u8], text: &[u8], max_dist: u32) -> Option<Hit> {
-    infix_with(pattern, text, max_dist, false)
+    infix_with(pattern, text, max_dist, false, None)
 }
 
-fn infix_with(pattern: &[u8], text: &[u8], max_dist: u32, cutoff: bool) -> Option<Hit> {
-    let (end, dist) = best_end(pattern, text, max_dist, cutoff)?;
+fn infix_with(
+    pattern: &[u8],
+    text: &[u8],
+    max_dist: u32,
+    cutoff: bool,
+    anchor: Option<i64>,
+) -> Option<Hit> {
+    let (end, dist) = best_end(pattern, text, max_dist, cutoff, anchor)?;
 
     // The forward pass gives the end but not the start. Running the same
     // computation on both sequences reversed finds where the alignment began:
     // its end position in reversed coordinates *is* the match length.
+    //
+    // Deliberately unanchored: the anchor is an *end* position in forward text
+    // coordinates and means nothing in the reversed frame, where `best_end`'s
+    // answer is a length. The end is already chosen at this point, so the only
+    // question left is how far back the alignment reaches, and the shortest
+    // minimal-distance answer is the right one there as it always was.
     let rp: Vec<u8> = pattern.iter().rev().copied().collect();
     let rt: Vec<u8> = text[..end].iter().rev().copied().collect();
-    let (len, back) = best_end(&rp, &rt, max_dist, cutoff)?;
+    let (len, back) = best_end(&rp, &rt, max_dist, cutoff, None)?;
 
     // Both passes solve the same problem, so they must agree. If they ever do
     // not, the alignment is not trustworthy and silently returning the shorter
@@ -300,6 +363,71 @@ mod tests {
                 infix(&p, &t, k),
                 infix_reference(&p, &t, k),
                 "cutoff changed the result for p={:?} t={:?} k={k}",
+                String::from_utf8_lossy(&p),
+                String::from_utf8_lossy(&t),
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4000);
+    }
+
+    #[test]
+    fn an_anchor_chooses_between_copies_that_match_equally_well() {
+        // The tandem-array failure, reduced to one call. Three exact copies of
+        // the same 4-mer: each is a distance-0 match, so `infix`'s leftmost
+        // tie-break returns the first of them however much the caller already
+        // knew about which one it was asking about. `Annotator::verify` is
+        // exactly such a caller — seeding hands it a window widened by `slack`,
+        // which for a period below the slack holds whole neighbouring copies —
+        // and taking the leftmost there dropped one copy of every tandem array.
+        let t = b"AAAAGGGGAAAAGGGGAAAAGGGGAAAA";
+        for &end in &[8usize, 16, 24] {
+            let h = infix_near(b"GGGG", t, 0, end as i64).unwrap();
+            assert_eq!((h.start, h.end, h.dist), (end - 4, end, 0));
+        }
+        // Unanchored is unchanged, which is what lets `infix` keep its own
+        // callers: always the leftmost, deterministically.
+        assert_eq!(infix(b"GGGG", t, 0).unwrap().end, 8);
+        // An anchor outside the text orders the candidates rather than being
+        // clamped — a chain whose diagonal sits left of the text start yields
+        // exactly that, and pulling it to 0 would quietly re-create the bug.
+        assert_eq!(infix_near(b"GGGG", t, 0, 10_000).unwrap().end, 24);
+        assert_eq!(infix_near(b"GGGG", t, 0, -10_000).unwrap().end, 8);
+    }
+
+    #[test]
+    fn a_nearer_copy_never_beats_a_better_one() {
+        // Distance decides first, and it must. A genuine indelled match scores
+        // strictly better than any neighbouring copy, so an anchor allowed to
+        // override distance would not rescue the missing tandem copy — it would
+        // move features onto the wrong one. Exact copy far from the anchor,
+        // damaged copy sitting on it.
+        let t = b"GGGGAAAAAAAAAAAAGGAG";
+        let h = infix_near(b"GGGG", t, 1, 20).unwrap();
+        assert_eq!((h.start, h.end, h.dist), (0, 4, 0));
+    }
+
+    #[test]
+    fn ukkonens_cutoff_never_changes_an_anchored_answer_either() {
+        // The property above exercises only the unanchored key, where the
+        // cutoff has to preserve the *best* distance and nothing more. An
+        // anchored tie-break has to see every end position within budget, not
+        // merely the best one, so the cutoff has strictly more to get wrong
+        // here and the older test cannot say it does not.
+        let mut rng = Rng(0x5eed_0000_dead_beef);
+        let mut checked = 0;
+        for _ in 0..4000 {
+            let m = 1 + rng.below(30);
+            let n = 1 + rng.below(80);
+            let p = rng.seq(m);
+            let t = rng.seq(n);
+            let k = rng.below(8) as u32;
+            // Deliberately allowed to fall outside the text on both sides.
+            let anchor = rng.below(2 * n + 8) as i64 - 4;
+            assert_eq!(
+                infix_with(&p, &t, k, true, Some(anchor)),
+                infix_with(&p, &t, k, false, Some(anchor)),
+                "cutoff changed the anchored result for p={:?} t={:?} k={k} anchor={anchor}",
                 String::from_utf8_lossy(&p),
                 String::from_utf8_lossy(&t),
             );

@@ -127,6 +127,28 @@ pub fn unescape(s: &str) -> String {
 /// One function for element bodies and attribute values, though only attributes
 /// need TAB and LF escaped. Two escapers would mean a call site could pick the
 /// wrong one, and a character reference in a body is the same text.
+///
+/// # The other control characters are dropped, because they have no spelling
+///
+/// TAB, LF and CR are the only three control characters XML 1.0 permits. The
+/// rest — U+0000..U+0008, U+000B, U+000C, U+000E..U+001F — are outside the
+/// `Char` production, and there is no escape for them: `&#12;` is itself
+/// rejected ("reference to invalid character number"), so escaping cannot fix
+/// what raw bytes break. They used to go straight through this function's
+/// catch-all arm, which made blocks 5, 6 and 10 of the `.dna` we write
+/// not-well-formed XML. A GenBank record whose `/label` holds a form feed —
+/// ordinary in text pasted out of a PDF — converted at exit 0 with an empty
+/// report into a `.dna` that this project's own reference implementation refuses
+/// (`ParseError: not well-formed (invalid token)` from `_parse_features`), and
+/// SnapGene with it. `unescape` will also manufacture one from a hostile file:
+/// `&#0;` expands to NUL, which then reaches this function.
+///
+/// Dropped rather than reported, matching `pl_draw::esc`, which faced the same
+/// choice for SVG and made it this way: the two other writers in the workspace
+/// that meet this input agree, `features_xml` has no report channel to push to,
+/// and losing a form feed from a label is a far smaller loss than dropping the
+/// whole feature the label is on. U+007F is *not* in the set — XML 1.0 allows
+/// it — and removing it would be a false positive.
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -139,6 +161,7 @@ pub fn escape(s: &str) -> String {
             '\t' => out.push_str("&#9;"),
             '\n' => out.push_str("&#10;"),
             '\r' => out.push_str("&#13;"),
+            c if (c as u32) < 0x20 => {}
             _ => out.push(c),
         }
     }
@@ -393,6 +416,30 @@ mod tests {
             );
             assert_eq!(unescape(&escape(s)), s);
         }
+    }
+
+    /// The control characters XML 1.0 has no spelling for do not leave at all.
+    ///
+    /// TAB/LF/CR are permitted and leave as references, which the test above
+    /// covers. Everything else below U+0020 is outside the `Char` production and
+    /// cannot be escaped — `&#12;` is refused as a reference to an invalid
+    /// character number — so a raw one makes the whole block unparseable. They
+    /// reached here from an ordinary GenBank `/label` holding a form feed, and
+    /// from `unescape("&#0;")`, and went out raw into blocks 5, 6 and 10 of a
+    /// `.dna` that `reference/python/snapdna.py` then refused to read.
+    #[test]
+    fn control_characters_xml_cannot_hold_are_dropped_not_emitted_raw() {
+        assert_eq!(escape("lac\u{c}Z"), "lacZ");
+        assert_eq!(escape("a\u{0}b"), "ab");
+        for c in (0u32..0x20).filter(|c| ![9, 10, 13].contains(c)) {
+            let s = format!("x{}y", char::from_u32(c).unwrap());
+            let got = escape(&s);
+            assert_eq!(got, "xy", "U+{c:04X} survived escape as {got:?}");
+        }
+        // U+007F is legal XML 1.0 and must not be caught by the same net, and
+        // the three that ARE legal still leave as references rather than raw.
+        assert_eq!(escape("a\u{7f}b"), "a\u{7f}b");
+        assert_eq!(escape("a\tb\nc\rd"), "a&#9;b&#10;c&#13;d");
     }
 
     #[test]

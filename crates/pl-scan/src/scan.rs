@@ -212,7 +212,9 @@ pub fn scan(root: &Path, now_ns: u128, opts: &ScanOptions) -> (Library, ScanRepo
 
     let packed_bases = bases.len() as u64;
     let lib = Library {
-        root: root.to_string_lossy().replace('\\', "/"),
+        // Windows-only fold, for the reason spelled out on `rel`: off Windows a
+        // backslash is part of a directory's name, not a separator.
+        root: crate::slash_separated(&root.to_string_lossy()),
         built_ns: now_ns,
         complete: report.incomplete.is_none(),
         rows,

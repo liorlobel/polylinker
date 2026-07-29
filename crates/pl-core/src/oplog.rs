@@ -132,7 +132,10 @@ impl OpKind {
     /// the operation — while still advancing to the new document. The log then
     /// said one thing and the document another, and undo/redo silently restored
     /// the older text. A qualifier edit disappearing without an error is
-    /// exactly the class of loss ADR-2 exists to prevent.
+    /// exactly the class of loss ADR-2 exists to prevent. `SetMethylation` had
+    /// the same hole for `Methylation::cpg`, a field added to the struct after
+    /// this encoding was written: two states differing only in CpG hashed alike,
+    /// so toggling CpG after an undo was refused outright.
     ///
     /// And the framing was ambiguous: variable-length fields were separated by
     /// NUL bytes, but a Rust `String` may contain NUL, so `(name "a\0b", kind
@@ -221,6 +224,13 @@ impl OpKind {
                 v.push(m.dam as u8);
                 v.push(m.dcm as u8);
                 v.push(m.ecoki as u8);
+                // `cpg` was added to `Methylation` after this encoding was
+                // written and never reached it, while `apply` assigns the whole
+                // struct. Two states differing only in `cpg` therefore derived
+                // one `OpId`: toggle CpG, undo, toggle it the other way, and the
+                // second edit was refused with `IdCollision` — the error two
+                // comments in this file call unreachable.
+                v.push(m.cpg as u8);
             }
         }
         v
@@ -366,7 +376,16 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
             remap_annotations(mol, *at, 0, k);
         }
         OpKind::DeleteRange { start, len } => {
-            if *start < 1 || *len == 0 || start + len - 1 > n {
+            // `start + len - 1 > n` overflowed on exactly the inputs it exists
+            // to reject. `DeleteRange { start: u64::MAX, len: 1 }` panicked
+            // "attempt to add with overflow" here in every checked build, which
+            // is every `cargo test` and every dev GUI; with checks off the sum
+            // wrapped and the guard answered *wrongly* for a whole family —
+            // `{ start: 2, len: u64::MAX }` computed 0, passed, and panicked in
+            // `Vec::drain(1..0)` inside libcore, naming no polylinker code at
+            // all. `len > n` first makes `n - len` safe, and `start >= 1` is
+            // already established by the short circuit.
+            if *start < 1 || *len == 0 || *len > n || *start > n - *len + 1 {
                 return Err(OpError::OutOfRange {
                     what: "deletion",
                     at: *start,
@@ -379,7 +398,13 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
             remap_annotations(mol, *start, *len, 0);
         }
         OpKind::ReplaceRange { start, len, seq } => {
-            if *start < 1 || start + len - 1 > n {
+            // Same overflow as `DeleteRange` above, spelled without the sum.
+            // `len == 0` stays deliberately *legal* here where `DeleteRange`
+            // refuses it — a zero-length replacement is an insertion, and
+            // `seqedit.rs` relies on the asymmetry — so this cannot simply
+            // borrow the guard above. `start - 1 > n - len` is `start + len - 1
+            // > n` with both subtractions already proven non-negative.
+            if *start < 1 || *len > n || *start - 1 > n - *len {
                 return Err(OpError::OutOfRange {
                     what: "replacement",
                     at: *start,
@@ -558,9 +583,22 @@ pub fn apply(mol: &mut Molecule, kind: &OpKind) -> Result<(), OpError> {
 /// instead would leave a one-base `AmpR` sitting in the file: valid, plausible
 /// at a glance, and false. Deleting the bases a feature describes deletes the
 /// feature.
+///
+/// It applies only to a feature this function *emptied*. A feature that arrived
+/// from the file already carrying no segments is left alone — see the retain at
+/// the foot of this function.
 fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64) {
     let old_end = start + old_len; // one past the edited region
     let delta = new_len as i64 - old_len as i64;
+
+    // The bases were already spliced before this ran, so `mol.len()` is the
+    // length *after* the edit. Taking an origin-crossing segment apart into its
+    // two linear pieces needs the length it was crossing.
+    let old_n = if delta >= 0 {
+        mol.len().saturating_sub(delta as u64)
+    } else {
+        mol.len().saturating_add(delta.unsigned_abs())
+    };
 
     // Returns None when the coordinate fell inside a region that no longer
     // exists and there is nothing to anchor it to.
@@ -635,11 +673,10 @@ fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64)
     // molecule that is legal — `Molecule::validate` says so explicitly.
     let circular = mol.topology.is_circular();
 
-    let remap = |s_start: &mut u64, s_end: &mut u64| -> bool {
-        // Did this segment cross the origin *before* the edit? Then its
-        // remapped ends are still expected to read backwards.
-        let wrapped = circular && *s_end < *s_start;
-
+    // Remap one span that reads *forwards*, returning `None` when nothing of it
+    // survives. `allow_inverted` exists only for the leftover shapes the wrap
+    // decomposition below refuses to take apart.
+    let remap_span = |s_start: u64, s_end: u64, allow_inverted: bool| -> Option<(u64, u64)> {
         // A segment straddling the edit keeps whichever ends survive.
         //
         // A segment whose far end survives keeps its near end pinned to where
@@ -650,45 +687,125 @@ fn remap_annotations(mol: &mut Molecule, start: u64, old_len: u64, new_len: u64)
         // itself. Replacing 5 bases at 10 with 20 used to move a feature that
         // began at 12 back to 10, swallowing twenty bases it has no
         // relationship to.
-        let a = map_start(*s_start).or_else(|| (*s_end >= old_end).then_some(start + new_len));
-        let b = map_end(*s_end).or_else(|| (*s_start < start).then_some(start - 1));
+        //
+        // `s_end <= old_n` is what stops that rescue running on a coordinate
+        // that named no base. The fallback reads "the far end lies past the
+        // edit, so the span survives it" — a conclusion only a real base can
+        // support. `gene 5..20` on a 12 bp molecule is `PastEnd`, and deleting
+        // every base used to rescue the dead start against that fictitious end
+        // and hand back `gene 1..8` on a molecule with NO bases. Worse than the
+        // fabrication, it laundered the report: `validate()` went 1 problem ->
+        // 0, `refuse_new_problems` read that as an improvement and committed,
+        // and `genbank::write` then emitted `gene 1..8` under a `0 bp` LOCUS.
+        // The guard is on this fallback alone, deliberately: an out-of-range
+        // end whose *start* survives is still shifted, absurd value and all, so
+        // `validate()` goes on reporting it instead of being quietly truncated.
+        let a = map_start(s_start)
+            .or_else(|| (s_end >= old_end && s_end <= old_n).then_some(start + new_len));
+        let b = map_end(s_end).or_else(|| (s_start < start).then_some(start - 1));
         match (a, b) {
             // A segment the remap did not move is handed back exactly as it
             // arrived, whatever coordinate it carries. This is the docstring's
             // first case — "entirely before the edit: unchanged" — spelled out,
-            // and it has to come first because the `a >= 1` conjunct below
-            // contradicted it. Trace the four branches that produce `a` and
-            // none of them can compute 0: `InsertAt`, `DeleteRange` and
-            // `ReplaceRange` all validate `start >= 1` before they get here, so
-            // `a == 0` only ever meant a start of 0 that the SnapGene reader
-            // carried through from `<Segment range="0-4"/>` — a state
-            // `Molecule::rotate` goes out of its way to preserve. The conjunct
-            // therefore did nothing but delete such a feature outright on the
-            // first unrelated length-changing edit: measured, an
-            // `InsertAt { at: 10 }` six bases away removed it and `apply`
-            // returned `Ok`, because the vanished `ZeroStart` made the gate see
-            // an improvement rather than a loss.
-            (Some(a), Some(b)) if a == *s_start && b == *s_end => true,
-            // `b >= a` is right for an ordinary segment and wrong for a wrapped
-            // one, whose end is *supposed* to sit below its start. Without the
-            // exception, ANY edit anywhere on a circular molecule silently
-            // deleted every origin-crossing feature — including edits nowhere
-            // near them. A 15..2 feature on a 16 bp circle vanished when three
-            // bases were inserted at position 5, and `apply` still returned Ok.
-            (Some(a), Some(b)) if a >= 1 && (b >= a || wrapped) => {
+            // and it has to come first because the arm below judges the result
+            // rather than the movement: `0..0`, and an inverted span on a
+            // *linear* molecule, both fail it. Neither is a coordinate this
+            // function produced, and an edit that did not touch a segment has no
+            // business deleting the `ZeroStart` or `Inverted` that `validate()`
+            // is reporting for it.
+            (Some(a), Some(b)) if a == s_start && b == s_end => Some((a, b)),
+            // `a >= 1` used to stand where `a >= 1 || b >= 1` stands now, and it
+            // deleted the wrong thing. Trace the branches that produce `a` and
+            // none can compute 0 on its own: `InsertAt`, `DeleteRange` and
+            // `ReplaceRange` all validate `start >= 1` first, so `a == 0` only
+            // ever meant a start of 0 the SnapGene reader carried through from
+            // `<Segment range="0-4"/>` — a state `Molecule::rotate` goes out of
+            // its way to preserve. Testing `a` alone therefore threw away a
+            // feature whose bases had merely been *trimmed*: `0-4` under
+            // `DeleteRange { start: 3, len: 2 }` keeps bases 1 and 2 and should
+            // become `0..2`, and instead the whole feature vanished with `apply`
+            // returning `Ok`, because the vanished `ZeroStart` made the gate see
+            // an improvement rather than a loss. `b` is the honest survivor
+            // test: `b == 0` here can only come from the `start - 1` fallback
+            // with `start == 1`, i.e. nothing of the span is left.
+            (Some(a), Some(b)) if (a >= 1 || b >= 1) && (b >= a || allow_inverted) => Some((a, b)),
+            _ => None,
+        }
+    };
+
+    let remap = |s_start: &mut u64, s_end: &mut u64| -> bool {
+        // Did this segment cross the origin *before* the edit? Then its
+        // remapped ends are still expected to read backwards.
+        let wrapped = circular && *s_end < *s_start;
+
+        // An origin-crossing segment is two linear runs, `[s_start, old_n]` and
+        // `[1, s_end]`, and the fallbacks above encode "the remnant lies on the
+        // far side of the cut" — true only in numeric order. For a wrap the two
+        // ends sit on opposite sides of the origin, which makes both fallback
+        // guards unsatisfiable: `a`'s needs `s_end >= old_end` but is only
+        // reached when `s_start < old_end`, and `b`'s needs `s_start < start`
+        // but is only reached when `s_end >= start`. So ANY length-changing edit
+        // whose replaced region contained either endpoint deleted the whole
+        // segment however many of its bases survived: a 401 bp `AmpR` written
+        // `3900..300` lost all 401 to a 21 bp deletion at 3890, while the same
+        // biological span written as the two-segment join `3900..4000, 1..300`
+        // truncated correctly. Remapping the two runs separately and rejoining
+        // makes the two encodings agree, and drops the segment only when both
+        // runs are gone.
+        if wrapped && *s_end >= 1 && *s_start <= old_n {
+            let head = remap_span(*s_start, old_n, false);
+            let tail = remap_span(1, *s_end, false);
+            return match (head, tail) {
+                // Still crosses the origin: take the far end of each run.
+                (Some((hs, _)), Some((_, te))) => {
+                    *s_start = hs;
+                    *s_end = te;
+                    true
+                }
+                // Only one run left, so it is an ordinary forward span now.
+                (Some(a), None) | (None, Some(a)) => {
+                    *s_start = a.0;
+                    *s_end = a.1;
+                    true
+                }
+                (None, None) => false,
+            };
+        }
+
+        // What is left is a forward span, or a "wrap" whose own coordinates say
+        // it names nothing — `s_end == 0`, or a start past the end of the
+        // molecule. Those keep the pre-existing treatment, which preserves the
+        // absurd coordinate so `validate()` goes on reporting it.
+        match remap_span(*s_start, *s_end, wrapped) {
+            Some((a, b)) => {
                 *s_start = a;
                 *s_end = b;
                 true
             }
-            _ => false,
+            None => false,
         }
     };
+
+    // Which features had no segments *on arrival*. See the retain below.
+    let arrived_empty: Vec<bool> = mol.features.iter().map(|f| f.segments.is_empty()).collect();
 
     for f in &mut mol.features {
         f.segments.retain_mut(|s| remap(&mut s.start, &mut s.end));
     }
-    // A feature with nothing left to point at is not a feature.
-    mol.features.retain(|f| !f.segments.is_empty());
+    // A feature this edit emptied is not a feature. One that arrived empty is
+    // the importer's problem, not the user's, and deleting it here erased the
+    // `FeatureWithoutSegments` that `validate()` was reporting — which
+    // `refuse_new_problems` then read as an improvement, so an insertion
+    // nowhere near it removed a named `CDS` and its qualifiers with `apply`
+    // returning `Ok`. `snapgene::parse_features` builds every feature with
+    // `segments: Vec::new()` and pushes it whether or not a `<Segment>` follows,
+    // so `<Feature name="AmpR" type="CDS"/>` reaches this point routinely.
+    let mut i = 0;
+    mol.features.retain(|f| {
+        let keep = arrived_empty[i] || !f.segments.is_empty();
+        i += 1;
+        keep
+    });
 
     for p in &mut mol.primers {
         p.sites.retain_mut(|s| remap(&mut s.start, &mut s.end));
@@ -867,7 +984,6 @@ impl OpLog {
         Ok(&self.current)
     }
 
-    /// Step the cursor forward, along the most recently created branch.
     /// Is there anything to undo?
     ///
     /// Cheap enough to call every frame, which is what a toolbar needs in
@@ -890,6 +1006,7 @@ impl OpLog {
             .is_some_and(|c| !c.is_empty())
     }
 
+    /// Step the cursor forward, along the most recently created branch.
     pub fn redo(&mut self) -> Result<&Molecule, OpError> {
         let next = self
             .children
@@ -2133,6 +2250,405 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_start_segment_is_truncated_when_only_some_of_its_bases_go() {
+        // Between the two tests above. `0-4` describes bases 1..4; delete bases
+        // 3 and 4 and bases 1 and 2 survive, so the segment should become
+        // `0..2`. The `a >= 1` conjunct tested the wrong endpoint and threw the
+        // whole feature away instead, with `apply` returning `Ok` and the sole
+        // `ZeroStart` disappearing with it, so the gate saw an improvement.
+        let mut m = mol("AAAACCCCGGGGTTTT", false);
+        let mut zero = Feature::new("zero start", "misc_feature");
+        zero.segments.push(Segment::new(0, 4));
+        m.features.push(zero);
+        assert_eq!(m.validate().len(), 1, "{:?}", m.validate());
+
+        let mut log = OpLog::new(m);
+        log.apply(OpKind::DeleteRange { start: 3, len: 2 }, "t")
+            .expect("two of the four bases survive");
+
+        let after = log.current();
+        assert_eq!(
+            after.features.len(),
+            1,
+            "two bases survived, so the feature must: {:?}",
+            after.features
+        );
+        assert_eq!(
+            (
+                after.features[0].segments[0].start,
+                after.features[0].segments[0].end
+            ),
+            (0, 2)
+        );
+        assert!(
+            after
+                .validate()
+                .iter()
+                .any(|p| matches!(p, crate::Invalid::ZeroStart { .. })),
+            "the importer's problem is reported, not repaired by deletion: {:?}",
+            after.validate()
+        );
+
+        // The same, with the deletion strictly *inside* the segment, which is
+        // not an overlap at all: `0-8` less bases 2 and 3 is `0..6`.
+        let mut m = mol("AAAACCCCGGGGTTTT", false);
+        let mut zero = Feature::new("zero start", "misc_feature");
+        zero.segments.push(Segment::new(0, 8));
+        m.features.push(zero);
+        let mut log = OpLog::new(m);
+        log.apply(OpKind::DeleteRange { start: 2, len: 2 }, "t")
+            .expect("six of the eight bases survive");
+        assert_eq!(
+            (
+                log.current().features[0].segments[0].start,
+                log.current().features[0].segments[0].end
+            ),
+            (0, 6)
+        );
+    }
+
+    #[test]
+    fn an_edit_overlapping_a_wrapped_feature_truncates_it_instead_of_deleting_it() {
+        // The two `or_else` fallbacks encode "the remnant lies on the far side
+        // of the cut", which is only true in numeric order. A wrapped segment
+        // has its two ends on opposite sides of the origin, so both guards are
+        // unsatisfiable and any length-changing edit touching either endpoint
+        // deleted the segment outright — however many of its bases survived.
+        //
+        // `AmpR` at 15..2 covers bases 15, 16, 1, 2. Delete bases 1 and 2 and
+        // two of its four bases survive, so it must become 13..14.
+        let mut m = mol("AAAACCCCGGGGTTTT", true);
+        let mut ampr = Feature::new("AmpR", "CDS");
+        ampr.segments.push(Segment::new(15, 2));
+        let mut ori = Feature::new("ori", "rep_origin");
+        ori.segments.push(Segment::new(5, 8));
+        m.features.push(ampr);
+        m.features.push(ori);
+        assert!(
+            m.is_valid(),
+            "a wrap is legal on a circle: {:?}",
+            m.validate()
+        );
+
+        let mut log = OpLog::new(m);
+        log.apply(OpKind::DeleteRange { start: 1, len: 2 }, "t")
+            .expect("delete the two bases at the front");
+
+        let after = log.current();
+        assert_eq!(
+            after.features.len(),
+            2,
+            "half of AmpR survived the cut: {:?}",
+            after.features
+        );
+        assert_eq!(after.features[0].name, "AmpR");
+        assert_eq!(
+            (
+                after.features[0].segments[0].start,
+                after.features[0].segments[0].end
+            ),
+            (13, 14),
+            "the head of the wrap moved with its bases; the tail is gone"
+        );
+        assert_eq!(
+            (
+                after.features[1].segments[0].start,
+                after.features[1].segments[0].end
+            ),
+            (3, 6),
+            "the control follows its bases"
+        );
+    }
+
+    #[test]
+    fn the_two_spellings_of_one_origin_crossing_span_survive_an_edit_alike() {
+        // The decisive A/B. The same biological span written two ways — one
+        // wrapped segment, and the two-segment join `genbank::write` emits for
+        // it — must come out of the same edit describing the same bases. The
+        // join truncated correctly while the wrap was deleted whole, so the
+        // answer depended on which file format the molecule had been through.
+        //
+        // 40 bp circle, span covers 37..40 + 1..8 (12 bases). Delete bases 6-8,
+        // three of which the span names. The nine survivors are 37..40 and
+        // 1..5, which the deletion renumbers to 34..37 and 1..5.
+        let build = |segs: &[(u64, u64)]| {
+            let mut m = mol("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", true);
+            let mut f = Feature::new("wrapper", "misc_feature");
+            for &(a, b) in segs {
+                f.segments.push(Segment::new(a, b));
+            }
+            m.features.push(f);
+            m
+        };
+
+        let mut wrap = OpLog::new(build(&[(37, 8)]));
+        wrap.apply(OpKind::DeleteRange { start: 6, len: 3 }, "t")
+            .expect("nine of the twelve bases survive");
+        let w = &wrap.current().features[0].segments;
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!((w[0].start, w[0].end), (34, 5));
+
+        let mut join = OpLog::new(build(&[(37, 40), (1, 8)]));
+        join.apply(OpKind::DeleteRange { start: 6, len: 3 }, "t")
+            .expect("nine of the twelve bases survive");
+        let j = &join.current().features[0].segments;
+        assert_eq!(j.len(), 2, "{j:?}");
+        assert_eq!((j[0].start, j[0].end), (34, 37));
+        assert_eq!((j[1].start, j[1].end), (1, 5));
+    }
+
+    #[test]
+    fn a_feature_that_arrived_with_no_segments_survives_an_unrelated_edit() {
+        // `snapgene::parse_features` builds every feature with
+        // `segments: Vec::new()` and pushes it on `</Feature>` whether or not a
+        // `<Segment>` ever arrived, so `<Feature name="AmpR" type="CDS"/>` — or
+        // any feature whose `range` failed to parse — reaches the operation log
+        // carrying its name, its type and its qualifiers and nothing else.
+        //
+        // The unconditional retain deleted it on the first length-changing edit
+        // anywhere in the molecule. That erased the `FeatureWithoutSegments`
+        // report along with it, so `refuse_new_problems` counted 1 -> 0 and read
+        // the loss as an improvement: `apply` returned `Ok` and the feature and
+        // its qualifiers were gone from the document and from the next save.
+        let mut m = mol("AAAACCCCGGGGTTTT", false);
+        let mut orphan = Feature::new("AmpR", "CDS");
+        orphan.set_qualifier("gene", "bla");
+        orphan.set_qualifier("note", "confers ampicillin resistance");
+        let mut ordinary = Feature::new("prom", "promoter");
+        ordinary.segments.push(Segment::new(1, 4));
+        m.features.push(orphan);
+        m.features.push(ordinary);
+        assert!(matches!(
+            m.validate().as_slice(),
+            [crate::Invalid::FeatureWithoutSegments { .. }]
+        ));
+
+        let mut log = OpLog::new(m);
+        log.apply(
+            OpKind::InsertAt {
+                at: 9,
+                seq: "T".into(),
+            },
+            "t",
+        )
+        .expect("an insert at 9 touches neither feature");
+
+        let after = log.current();
+        assert_eq!(
+            after.features.len(),
+            2,
+            "a feature this edit did not empty must not be deleted: {:?}",
+            after.features
+        );
+        assert_eq!(after.features[0].name, "AmpR");
+        assert_eq!(after.features[0].qualifier("gene"), Some("bla"));
+        assert!(
+            after
+                .validate()
+                .iter()
+                .any(|p| matches!(p, crate::Invalid::FeatureWithoutSegments { .. })),
+            "the importer's mess stays visible: {:?}",
+            after.validate()
+        );
+
+        // ...and the deliberate rule is untouched: a feature THIS edit emptied
+        // still goes.
+        let mut log = OpLog::new(with_feature("AAAACCCCGGGGTTTT", 13, 16));
+        log.apply(OpKind::DeleteRange { start: 13, len: 4 }, "t")
+            .expect("delete");
+        assert!(log.current().features.is_empty());
+    }
+
+    #[test]
+    fn a_coordinate_that_was_already_past_the_end_is_no_anchor_for_a_dead_start() {
+        // `gene 5..20` on a 12 bp molecule names eight bases that do not exist,
+        // and `validate()` reports it as `PastEnd`. Deleting every base then
+        // produced `gene 1..8` on a molecule with NO bases: the `a` fallback
+        // rescued a start that had died inside the deleted region, on the
+        // strength of `s_end >= old_end` — a test that reads as "the far end is
+        // past the edit and therefore survived", which is true only of a
+        // coordinate that named a base to begin with. 20 named none.
+        //
+        // Two harms, and the second is what let it travel. It fabricated a span
+        // on a molecule with nothing to put it on, and it LAUNDERED the
+        // `PastEnd`: `validate()` went 1 problem -> 0, which
+        // `refuse_new_problems` reads as an improvement, so the edit committed.
+        // `genbank::write` then emits `gene 1..8` under a `0 bp` LOCUS, which
+        // reopens as a real annotation track, and `is_annotation_track()`
+        // answered true for a document the user had merely emptied — which is
+        // what left `pl-gui`'s sequence editor refusing to edit it.
+        let mut m = mol("ACGTACGTACGT", false);
+        let mut gene = Feature::new("gene", "CDS");
+        gene.segments.push(Segment::new(5, 20));
+        m.features.push(gene);
+        assert!(
+            matches!(m.validate().as_slice(), [crate::Invalid::PastEnd { .. }]),
+            "the premise: 5..20 on a 12 bp molecule is past the end"
+        );
+
+        let mut log = OpLog::new(m);
+        log.apply(OpKind::DeleteRange { start: 1, len: 12 }, "t")
+            .expect("deleting every base is a legal edit");
+        let after = log.current();
+        assert_eq!(after.len(), 0, "every base was deleted");
+        assert!(
+            after.features.is_empty(),
+            "the only bases this feature really had went with the rest, so the \
+             feature goes too — it must not come back as a span of a molecule \
+             that has no bases: {:?}",
+            after.features.first().map(|f| f.segments.clone())
+        );
+        assert!(
+            !after.is_annotation_track(),
+            "a molecule the user emptied is not an annotation track"
+        );
+
+        // The control, and the reason the fix is a guard on that one fallback
+        // rather than a blanket "out of range is not an anchor": an edit that
+        // does NOT kill the start must still carry the absurd end through, so
+        // `validate()` goes on reporting it. Dropping or truncating it here
+        // would launder the same `PastEnd` in the other direction.
+        let mut m = mol("ACGTACGTACGT", false);
+        let mut gene = Feature::new("gene", "CDS");
+        gene.segments.push(Segment::new(5, 20));
+        m.features.push(gene);
+        let mut log = OpLog::new(m);
+        log.apply(
+            OpKind::InsertAt {
+                at: 9,
+                seq: "TT".into(),
+            },
+            "t",
+        )
+        .expect("an insert at 9 leaves base 5 where it is");
+        let after = log.current();
+        let s = &after.features[0].segments[0];
+        assert_eq!((s.start, s.end), (5, 22), "{s:?}");
+        assert!(
+            matches!(
+                after.validate().as_slice(),
+                [crate::Invalid::PastEnd { .. }]
+            ),
+            "the coordinate that named no base stays absurd: {:?}",
+            after.validate()
+        );
+    }
+
+    #[test]
+    fn two_methylation_states_that_differ_only_in_cpg_are_two_operations() {
+        // `OpKind::content` hashed dam, dcm and ecoki while `apply` assigns the
+        // whole struct, so the two states below derived one `OpId`. From the
+        // same parent — which is what an undo leaves behind — the second one hit
+        // the collision guard and was refused, and CpG is the field that matters
+        // most: 26 of 34 blocking pairs are CpG.
+        let off = crate::Methylation {
+            dam: true,
+            dcm: false,
+            ecoki: false,
+            cpg: false,
+        };
+        let on = crate::Methylation { cpg: true, ..off };
+        assert_ne!(
+            derive_id(None, &OpKind::SetMethylation(off)),
+            derive_id(None, &OpKind::SetMethylation(on)),
+            "the encoding has to be injective over every field `apply` acts on"
+        );
+
+        let mut log = OpLog::new(mol("AAAACCCCGGGG", false));
+        log.apply(OpKind::SetMethylation(off), "t").unwrap();
+        log.undo().unwrap();
+        log.apply(OpKind::SetMethylation(on), "t")
+            .expect("toggling CpG after an undo is an ordinary edit");
+        assert!(log.current().methylation.cpg);
+        assert_eq!(log.all_ops().len(), 2);
+    }
+
+    #[test]
+    fn a_range_that_names_no_base_is_refused_rather_than_overflowing() {
+        // `start + len - 1 > n` overflowed on exactly the inputs it exists to
+        // reject. In a checked build — every `cargo test`, every dev GUI — it
+        // panicked at the guard itself; with checks off the sum wrapped, the
+        // guard passed, and the panic moved into `Vec::drain`/`Vec::splice`
+        // inside libcore where it names no polylinker code at all.
+        let base = mol("ACGT", false);
+        for (kind, what) in [
+            (
+                OpKind::DeleteRange {
+                    start: u64::MAX,
+                    len: 1,
+                },
+                "deletion",
+            ),
+            (
+                OpKind::DeleteRange {
+                    start: 2,
+                    len: u64::MAX,
+                },
+                "deletion",
+            ),
+            (
+                OpKind::ReplaceRange {
+                    start: 1,
+                    len: u64::MAX,
+                    seq: "A".into(),
+                },
+                "replacement",
+            ),
+            (
+                OpKind::ReplaceRange {
+                    start: 5,
+                    len: u64::MAX,
+                    seq: "A".into(),
+                },
+                "replacement",
+            ),
+        ] {
+            let mut m = base.clone();
+            let e = apply(&mut m, &kind).unwrap_err();
+            assert!(
+                matches!(e, OpError::OutOfRange { what: w, .. } if w == what),
+                "{kind:?} -> {e:?}"
+            );
+            assert_eq!(m.seq, base.seq, "a refused op leaves the bases alone");
+        }
+
+        // The asymmetry the guards deliberately keep: `DeleteRange` refuses a
+        // zero length, `ReplaceRange` accepts it as an insertion, and appending
+        // at `n + 1` is still legal.
+        let mut m = base.clone();
+        assert!(matches!(
+            apply(&mut m, &OpKind::DeleteRange { start: 1, len: 0 }).unwrap_err(),
+            OpError::OutOfRange { .. }
+        ));
+        let mut m = base.clone();
+        apply(
+            &mut m,
+            &OpKind::ReplaceRange {
+                start: 1,
+                len: 0,
+                seq: "TT".into(),
+            },
+        )
+        .expect("a zero-length replacement is an insertion");
+        assert_eq!(m.seq, b"TTACGT".to_vec());
+        let mut m = base.clone();
+        apply(
+            &mut m,
+            &OpKind::ReplaceRange {
+                start: 5,
+                len: 0,
+                seq: "TT".into(),
+            },
+        )
+        .expect("appending one past the end is in range");
+        assert_eq!(m.seq, b"ACGTTT".to_vec());
+        let mut m = base.clone();
+        apply(&mut m, &OpKind::DeleteRange { start: 4, len: 1 })
+            .expect("the last base is in range");
+        assert_eq!(m.seq, b"ACG".to_vec());
+    }
+
+    #[test]
     fn a_hostile_coordinate_neither_overflows_nor_vanishes_when_the_length_changes() {
         // `(p as i64 + delta) as u64` on a value straight off disk.
         // `snapgene.rs` parses `<Segment range="a-b"/>` with an unbounded
@@ -2182,5 +2698,36 @@ mod tests {
                 after.validate()
             );
         }
+    }
+
+    #[test]
+    fn redos_own_documentation_sits_on_redo_and_not_on_can_undo() {
+        // A doc comment is a claim the code has to keep. This sentence sat at
+        // the head of `can_undo`'s `///` block, so rustdoc printed "Step the
+        // cursor forward, along the most recently created branch." as the
+        // summary for a read-only `&self` predicate that moves no cursor and
+        // answers the opposite question, while `redo` — the only way forward
+        // through the log — was listed with no description at all. Verified in
+        // the generated `struct.OpLog.html`, and asserted here rather than
+        // eyeballed because nothing else in the build reads doc comments. The
+        // sibling assertion for `rotate` lives in `lib.rs`.
+        let src = include_str!("oplog.rs");
+        let sentence = "/// Step the cursor forward, along the most recently created branch.";
+        let can_undo = src
+            .find("pub fn can_undo(&self)")
+            .expect("the undo predicate is still here");
+        let redo = src
+            .find("pub fn redo(&mut self)")
+            .expect("redo is still here");
+        let doc = src.find(sentence).expect("redo still describes itself");
+        assert!(
+            doc > can_undo && doc < redo,
+            "redo's summary must attach to redo, not to the predicate above it"
+        );
+        // ...and the predicate keeps its own.
+        let can_undo_doc = src
+            .find("/// Is there anything to undo?")
+            .expect("the undo predicate still describes itself");
+        assert!(can_undo_doc < can_undo);
     }
 }

@@ -97,6 +97,38 @@ console.log(`\n=== behaviour on hand-made input ===`);
   T("sequence round-trips byte-for-byte", new TextDecoder().decode(out()) === "ACGTacgtNN");
 }
 {
+  // A multi-record file, over the real ABI. `pl_open` used to call
+  // `pl_fileio::load`, which drops the LoadReport in its own body, so a
+  // 3-record FASTA opened as record 1 with no record count anywhere in the
+  // JSON — and `pl_to_genbank` then wrote that one record out as the file at
+  // rc 0, an operation `pl convert` refuses outright. Checked here and not
+  // only in the Rust unit tests because this is the surface the page uses.
+  const multi = new TextEncoder().encode(
+    ">plasmidA first\nGAATTCAAAAAAAAAAAAAAAA\n" +
+    ">plasmidB second\nGGATCCTTTTTTTTTTTTTTTT\n" +
+    ">plasmidC third\nAAAAAAAAAAAAAAAAAAAAAA\n");
+  T("opens a multi-record FASTA", open(multi) === 0);
+  const j = outJson();
+  T("shows the first record", j.name === "plasmidA", j.name);
+  T("says how many records the file held", j.recordsInFile === 3, `recordsInFile=${j.recordsInFile}`);
+  T("says FASTA never declared a topology", j.topologyDeclared === false, String(j.topologyDeclared));
+
+  const rcGb = withStr("multi.fa", (p, n) => w.pl_to_genbank(p, n, 26, 6, 2026));
+  T("GenBank export refuses rather than writing record 1", rcGb === 1, `rc=${rcGb}`);
+  // The page throws these return codes away and downloads the buffer, so the
+  // refusal has to be *in the buffer* or it is a silent no-op there.
+  T("and the refusal is in the output buffer", outText().includes("3 records"), outText().slice(0, 90));
+  const rcFa = withStr("multi.fa", (p, n) => w.pl_to_fasta(p, n, 70));
+  T("FASTA export refuses too", rcFa === 1 && !outText().includes("GAATTC"), outText().slice(0, 90));
+}
+{
+  // ...and the refusal fires on truncation and nothing else.
+  open(new TextEncoder().encode(">solo only one\nACGTACGTACGT\n"));
+  T("a single-record file reports one record", outJson().recordsInFile === 1);
+  const rc = withStr("solo.fa", (p, n) => w.pl_to_fasta(p, n, 70));
+  T("and still exports", rc === 0 && outText().includes("ACGTACGTACGT"), outText().slice(0, 60));
+}
+{
   T("rejects rubbish with rc=1", open(new TextEncoder().encode("nonsense")) === 1);
   T("error is JSON", !!outJson().error, outText().slice(0, 60));
 }

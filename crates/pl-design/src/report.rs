@@ -45,7 +45,19 @@ pub enum Reason {
     PairOverlap,
     DeltaTm,
     CrossDimer,
-    ProductLength,
+    /// The two footprints are more than one turn of a circular molecule apart,
+    /// so the amplicon would be longer than the molecule.
+    ///
+    /// **Not "the product is outside `--product`".** The pairing loop bounds
+    /// `r.hi` to `[f.lo + span_min - 1, f.lo + span_max - 1]`, so every pair
+    /// that reaches `span_bases` already satisfies the window; the window is
+    /// enforced by the loop bounds and never by a counter. This was called
+    /// `ProductLength` and labelled "product outside {min}-{max} bp", which was
+    /// false for every input that could reach it — a 2,686 bp circle reporting
+    /// five good 2,600 bp products printed "4955 product outside 100-3000 bp"
+    /// underneath them — and its remedy, "Widen --product", is the one change
+    /// that produces strictly more of them.
+    SpanExceedsMolecule,
     InternalSite,
 }
 
@@ -73,7 +85,7 @@ impl Reason {
         Reason::PairOverlap,
         Reason::DeltaTm,
         Reason::CrossDimer,
-        Reason::ProductLength,
+        Reason::SpanExceedsMolecule,
         Reason::InternalSite,
     ];
 
@@ -89,7 +101,7 @@ impl Reason {
             Reason::PairOverlap
                 | Reason::DeltaTm
                 | Reason::CrossDimer
-                | Reason::ProductLength
+                | Reason::SpanExceedsMolecule
                 | Reason::InternalSite
         )
     }
@@ -107,7 +119,7 @@ impl Reason {
             Reason::SelfDimer => "self_dimer",
             Reason::OffTarget => "off_target",
             Reason::DeltaTm => "delta_tm",
-            Reason::ProductLength => "product_length",
+            Reason::SpanExceedsMolecule => "span_exceeds_molecule",
             Reason::PairOverlap => "primers_overlap",
             Reason::CrossDimer => "cross_dimer",
             Reason::InternalSite => "added_site_already_in_product",
@@ -140,8 +152,8 @@ impl Reason {
             ),
             Reason::OffTarget => "another binding site on this template".into(),
             Reason::DeltaTm => format!("dTm above {:.1}C", c.tm_diff_max),
-            Reason::ProductLength => {
-                format!("product outside {}-{} bp", c.product_min, c.product_max)
+            Reason::SpanExceedsMolecule => {
+                "the amplicon would be longer than the molecule itself".into()
             }
             Reason::PairOverlap => "the two footprints overlap".into(),
             Reason::CrossDimer => format!(
@@ -225,15 +237,36 @@ impl Tally {
     /// time to a fully off-target result, until the fourth suggestion was an
     /// argument the CLI itself refuses.
     ///
-    /// A 1%-of-all-rejections floor keeps a gate that happened to kill the last
-    /// one or two candidates from outranking a gate that killed thousands.
+    /// A 1% floor keeps a gate that happened to kill the last one or two
+    /// candidates from outranking a gate that killed thousands. It is taken
+    /// **within the gate's own funnel**, not over `total()`.
+    ///
+    /// `total()` spans both funnels, and the two are routinely three orders of
+    /// magnitude apart: a run enumerating 59,570 candidates, rejecting 41,148 of
+    /// them and then killing all 250 pairs it built on an internal restriction
+    /// site had `total() = 41,398`, a floor of 413, and 250 < 413 — so the gate
+    /// that was 100% fatal was silenced, `binding()` returned Tm, and the report
+    /// answered "Widen the LENGTH range first" directly beneath a table row
+    /// reading "250 the added restriction site already occurs in the product
+    /// <- all 250 that reached it". The correct branch's own words are "No
+    /// threshold moves this", and it is the only place `NoPair`'s `clashes` are
+    /// ever rendered, so the enzyme name and the template coordinates were
+    /// dropped too. A share of the candidate funnel is not a meaningful floor
+    /// for a pair-stage gate.
     pub fn terminal(&self, enumerated: usize, built: usize) -> Option<Reason> {
-        let floor = (self.total() / 100).max(1);
+        let funnel = |pair: bool| -> u32 {
+            Reason::ALL
+                .iter()
+                .filter(|x| x.pair_stage() == pair)
+                .map(|x| self.get(*x))
+                .sum()
+        };
         // `rfind`, so it is the LAST such gate: a later gate acted on a
         // population everything earlier had already filtered, which makes it
         // the more specific diagnosis of the two.
         Reason::ALL.iter().copied().rfind(|r| {
             let n = self.get(*r);
+            let floor = (funnel(r.pair_stage()) / 100).max(1);
             n >= floor && n > 0 && n == self.reached(*r, enumerated, built)
         })
     }
@@ -280,18 +313,31 @@ impl Tally {
         out
     }
 
+    /// The gate a remedy has to be about: the last 100%-fatal one, else the
+    /// largest.
+    ///
+    /// Exposed so a caller that wants to answer a particular diagnosis in its
+    /// own words does not have to re-derive the choice and drift from it.
+    pub fn diagnosis(&self, enumerated: usize, built: usize) -> Option<Reason> {
+        self.terminal(enumerated, built).or_else(|| self.binding())
+    }
+
     /// What to widen, and the order to widen it in.
     ///
     /// `clashes` is empty for a candidate-stage refusal and carries the
     /// unintended restriction sites for a pair-stage one, because
     /// [`Reason::InternalSite`] is the one refusal whose remedy depends on
     /// *which* site and *where* rather than on a threshold.
+    ///
+    /// `geom` is the enumeration geometry, and it is here because a remedy that
+    /// names a flag has to know whether that flag can move: see [`Geom`].
     pub fn advice(
         &self,
         c: &Constraints,
         enumerated: usize,
         built: usize,
         clashes: &[crate::tail::SiteClash],
+        geom: Geom,
     ) -> String {
         let mut out = String::new();
         // Said first when it applies, because it explains the size of the
@@ -307,13 +353,13 @@ impl Tally {
                 c.len_max + 1 - c.len_min
             ));
         }
-        let reason = self.terminal(enumerated, built).or_else(|| self.binding());
+        let reason = self.diagnosis(enumerated, built);
         let lead = match reason {
             Some(Reason::Tm) => {
                 // Capped at what the CLI will accept, so the remedy is never an
                 // argument the tool then refuses; and once there is nothing
                 // left to widen, stop suggesting it and say so.
-                let lo = c.len_min.saturating_sub(3).max(15);
+                let lo = c.len_min.saturating_sub(3).max(Constraints::LEN_ADVICE_MIN);
                 let hi = (c.len_max + 13).min(Constraints::LEN_HARD_MAX);
                 if hi > c.len_max || lo < c.len_min {
                     format!(
@@ -326,15 +372,31 @@ impl Tally {
                         c.tm_max + 3.0
                     )
                 } else {
+                    // NOT "the widest this tool accepts". `--len` is validated
+                    // against 8..60 by both interfaces, so 8..60 is wider and
+                    // is accepted -- the sentence was false for every len_min
+                    // from 9 to 15, and 15 is exactly where following this
+                    // function's own advice from the defaults parks a user.
+                    // What is true is that this crate will not RECOMMEND
+                    // anything shorter, and the reason is downstream: primers
+                    // under `pl_clone::MIN_ANNEAL` do not anneal in the
+                    // simulator, so `pl design` would be emitting oligos the
+                    // rest of the toolchain refuses.
                     format!(
-                        "Tm is the binding constraint and --len is already at {}..{}, the \
-                         widest this tool accepts, so there is nothing left to widen on the \
-                         synthesis side. --tm {:.0}..{:.0} is the remaining move and it is a \
-                         physical one: on an AT-rich template the honest answer may be that \
-                         the anneal has to be run cooler, not that the primer has to be \
+                        "Tm is the binding constraint and --len is already at {}..{}. \
+                         {} nt is the shortest primer this tool will recommend -- --len \
+                         accepts down to {}, but pl_clone::pcr will not anneal a primer \
+                         under {} nt, so a shorter one is an oligo the rest of this \
+                         toolchain refuses to simulate. There is nothing left to widen on \
+                         the synthesis side. --tm {:.0}..{:.0} is the remaining move and it \
+                         is a physical one: on an AT-rich template the honest answer may be \
+                         that the anneal has to be run cooler, not that the primer has to be \
                          longer.",
                         c.len_min,
                         c.len_max,
+                        Constraints::LEN_ADVICE_MIN,
+                        Constraints::LEN_HARD_MIN,
+                        pl_clone::MIN_ANNEAL,
                         c.tm_min - 3.0,
                         c.tm_max + 3.0
                     )
@@ -346,11 +408,7 @@ impl Tally {
                  duplicated polylinker, an rrn operon -- move the region, or accept the \
                  risk with --no-specificity, which says so in the report."
                 .into(),
-            Some(Reason::OffTheEnd) => format!(
-                "There is not enough template outside the region. Raise --flank past {}, \
-                 or use --mode within.",
-                c.flank
-            ),
+            Some(Reason::OffTheEnd) => off_the_end(c, geom),
             Some(Reason::Gc) if c.gc_hard => format!(
                 "The %GC band is a gate here because --gc-hard was passed, and it is what \
                  emptied the search. Drop --gc-hard, or widen --gc past {:.0}..{:.0}: on an \
@@ -358,21 +416,28 @@ impl Tally {
                  design, and it encodes no failure the Tm window does not already gate.",
                 c.gc_min, c.gc_max
             ),
-            Some(Reason::ProductLength) => {
-                format!("Widen --product past {}..{}.", c.product_min, c.product_max)
-            }
+            Some(Reason::SpanExceedsMolecule) => "Every pair's two footprints are more than one \
+                 turn of this circular molecule apart, so the amplicon would be longer than \
+                 the molecule. Widening --product admits MORE of these, not fewer, and is the \
+                 one move that provably cannot help -- the window is not what refused them. \
+                 Narrow --region; and note that for a region covering the whole circle the \
+                 only product that exists is exactly one turn, which no flag widens."
+                .into(),
             Some(Reason::DeltaTm) => format!(
                 "The two primers' Tms are what will not agree. Widen --tm-diff past \
                  {:.1}C, or widen --tm so more lengths are available to balance against.",
                 c.tm_diff_max
             ),
+            // `2 * len_min`, not one more: the separation gate is `f.hi >=
+            // r.lo`, so two footprints may abut and the shortest span they can
+            // occupy is exactly the sum of their lengths.
             Some(Reason::PairOverlap) => format!(
                 "Every pair's two footprints overlap: there is no room between them for a \
-                 product. The shortest product two {} nt primers can make is {} bases. Use \
+                 product. The shortest span two {} nt primers can occupy is {} bases. Use \
                  --mode contain so the primers may sit outside the region, amplify a longer \
                  region, or lower --len.",
                 c.len_min,
-                2 * c.len_min + 1
+                2 * c.len_min
             ),
             Some(Reason::CrossDimer) => format!(
                 "The forward and reverse 3' ends anneal to each other at or below {:.1} \
@@ -403,6 +468,80 @@ impl Tally {
         out.push_str(&lead);
         out
     }
+}
+
+/// The enumeration geometry, so a remedy can tell a flag that moves from one
+/// that cannot.
+///
+/// [`Reason::OffTheEnd`]'s remedy used to be the unconditional "Raise --flank
+/// past {n}, or use --mode within". `flank` widens the forward window downward
+/// and the reverse window upward, so on a linear molecule it adds candidates
+/// only on a side the end has not already clipped. When the empty side IS the
+/// clipped one — the ordinary `--region 1..N` — the advice restated itself with
+/// a bigger number for ever: measured, 200 -> 400 -> 800 -> 1600 -> 2500, with
+/// forward survivors 0 at every step, while `--mode within` on the same input
+/// designed five pairs on the first try. And for a short region at a linear end
+/// BOTH offered remedies refuse, because the sentence never checked that the
+/// region can hold a pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Geom {
+    /// Bases of template before the region's first base. `None` on a circle,
+    /// where no span can run off an end.
+    pub before: Option<u64>,
+    /// Bases of template after the region's last base. `None` on a circle.
+    pub after: Option<u64>,
+    /// The region's length. Zero means "not supplied", and the mode clause is
+    /// then omitted rather than guessed at.
+    pub region_bp: u64,
+    /// Did any forward candidate survive the per-oligo gate?
+    pub forward: bool,
+    /// Did any reverse candidate survive it?
+    pub reverse: bool,
+}
+
+/// The [`Reason::OffTheEnd`] remedy, which has to know which side is stuck.
+fn off_the_end(c: &Constraints, g: Geom) -> String {
+    let stuck_fwd = !g.forward && g.before.is_some_and(|b| b < c.flank);
+    let stuck_rev = !g.reverse && g.after.is_some_and(|a| a < c.flank);
+    let mut s = match (stuck_fwd, stuck_rev, g.before, g.after) {
+        (true, _, Some(b), _) => format!(
+            "The region starts at base {}, so there are {b} bases of template before it and \
+             the forward primer's 5' start cannot go below base 1. Raising --flank past {} \
+             widens a window this molecule's end has already clipped: it adds no forward \
+             candidate at all, and the same refusal comes back with a larger count. ",
+            b + 1,
+            c.flank
+        ),
+        (_, true, _, Some(a)) => format!(
+            "There are {a} bases of template after the region, so the reverse primer's 3' \
+             end cannot go past the last base. Raising --flank past {} widens a window this \
+             molecule's end has already clipped: it adds no reverse candidate at all. ",
+            c.flank
+        ),
+        _ => format!(
+            "Spans ran off the end of this linear molecule. Raise --flank past {} only if \
+             the side with no survivors is the one the end has NOT clipped; on the clipped \
+             side it widens a window the molecule has already cut short. ",
+            c.flank
+        ),
+    };
+    if c.mode == Mode::Contain && g.region_bp > 0 {
+        if g.region_bp >= 2 * c.len_min as u64 {
+            s.push_str(
+                "--mode within puts both primers inside the region instead -- but that \
+                 changes what is amplified: the product loses both ends of the selection.",
+            );
+        } else {
+            s.push_str(&format!(
+                "--mode within is not a way out either: the region is {} bases and two {} nt \
+                 footprints need {}. Move the region, or lower --len.",
+                g.region_bp,
+                c.len_min,
+                2 * c.len_min
+            ));
+        }
+    }
+    s
 }
 
 /// A ranked primer pair.
@@ -440,8 +579,18 @@ pub struct Pair {
     /// `DesignError::AmbiguousTarget`).
     pub product_ambiguous: u64,
     pub delta_tm: f64,
+    /// The two **footprints'** cross-dimer, which is what the gate and the
+    /// ranking used.
     pub cross_dimer_any: crate::fold::Structure,
     pub cross_dimer_three: crate::fold::Structure,
+    /// The two **whole oligos'** 3'-end cross-dimer, tails included, or `None`
+    /// when neither primer has a tail.
+    ///
+    /// Reported, not gated — see [`crate::Primer::hairpin_full`]. The only
+    /// tail-versus-tail check in the gate is keyed on
+    /// `a.enzyme.site == b.enzyme.site`, so it is blind to every heterogeneous
+    /// pair of tails, and this is the number that is not.
+    pub cross_dimer_three_full: Option<crate::fold::Structure>,
     /// Did `pl_clone::pcr` agree, and on what length?
     pub pcr_check: Result<u64, String>,
     pub warnings: Vec<String>,
@@ -596,6 +745,26 @@ impl Report {
                     "off-target scan not run".to_string()
                 }
             ));
+            // The whole-oligo structure, on its own line and only when there is
+            // a tail to make it differ. The gated numbers above are the
+            // footprints', and a report that printed only those had a tailed
+            // oligo's hairpin reading `none found` while the molecule being
+            // ordered folds at -9.7 kcal/mol.
+            if let Some(cross) = p.cross_dimer_three_full {
+                o.push_str(&format!(
+                    "     whole oligo, tail included, NOT gated: F hairpin {}, R hairpin {}, \
+                     3' cross-dimer {}\n",
+                    p.forward
+                        .hairpin_full
+                        .map(|s| s.render())
+                        .unwrap_or_else(|| "n/a".into()),
+                    p.reverse
+                        .hairpin_full
+                        .map(|s| s.render())
+                        .unwrap_or_else(|| "n/a".into()),
+                    cross.render()
+                ));
+            }
             match &p.pcr_check {
                 Ok(bp) if *bp == p.product_bp => {
                     o.push_str(&format!("     pl-clone agrees: {bp} bp\n"))
@@ -621,7 +790,24 @@ impl Report {
                 p.forward.tm.min(p.reverse.tm)
             ));
             for pol in pl_thermo::POLYMERASES {
-                let (lo, _) = pl_thermo::anneal(p.forward.tm, Some(p.reverse.tm), pol);
+                // Sized, not bare. The Phusion/Phire note printed at the end of
+                // this very line reads "Ta = Tm + 3 for primers over 20 nt",
+                // and the length-blind `anneal` applied that +3 at every
+                // length — so the advice contradicted its own stated condition
+                // on one printed line. It bites here in particular because
+                // `Constraints::LEN_OPT` is 20, so the scorer aims at exactly
+                // the length at which the carve-out turns on.
+                //
+                // The FOOTPRINT length, not the ordered oligo's: this block
+                // scopes itself to the early cycles ("run about 5 cycles at the
+                // annealing temperature above"), when only the footprint is
+                // templated, so counting a 5' tail would push a primer past the
+                // 20 nt threshold on the strength of bases not yet in the duplex.
+                let (lo, _) = pl_thermo::anneal_sized(
+                    (p.forward.tm, p.forward.footprint.len()),
+                    Some((p.reverse.tm, p.reverse.footprint.len())),
+                    pol,
+                );
                 o.push_str(&format!("  {:>9} {:5.0}C   {}\n", pol.name, lo, pol.note));
             }
             o.push_str("this is advice, not a measurement; the Tm above is the measurement\n");
@@ -727,9 +913,16 @@ impl Report {
             o.push_str(&format!("\"forward\": {}, ", p.forward.json()));
             o.push_str(&format!("\"reverse\": {}, ", p.reverse.json()));
             o.push_str(&format!(
-                "\"delta_tm\": {:.3}, \"cross_dimer_3p_dg37\": {:.3}, \
-                 \"cross_dimer_any_dg37\": {:.3}, ",
-                p.delta_tm, p.cross_dimer_three.dg, p.cross_dimer_any.dg
+                "\"delta_tm\": {:.3}, \"structure_basis\": \"footprint\", \
+                 \"cross_dimer_3p_dg37\": {:.3}, \"cross_dimer_any_dg37\": {:.3}, \
+                 \"cross_dimer_3p_dg37_whole_oligo\": {}, ",
+                p.delta_tm,
+                p.cross_dimer_three.dg,
+                p.cross_dimer_any.dg,
+                match p.cross_dimer_three_full {
+                    Some(s) => format!("{:.3}", s.dg),
+                    None => "null".into(),
+                }
             ));
             o.push_str("\"warnings\": [");
             for (j, w) in p.warnings.iter().enumerate() {
@@ -867,7 +1060,7 @@ mod tests {
             "287 candidates got past everything"
         );
         assert!(t
-            .advice(&c, 300, 0, &[])
+            .advice(&c, 300, 0, &[], Geom::default())
             .contains("Widen the LENGTH range first"));
     }
 
@@ -896,7 +1089,7 @@ mod tests {
         assert_eq!(t.binding(), Some(Reason::Tm), "on raw count Tm still wins");
         assert_eq!(t.reached(Reason::OffTarget, 4020, 0), 269);
         assert_eq!(t.terminal(4020, 0), Some(Reason::OffTarget));
-        let a = t.advice(&c, 4020, 0, &[]);
+        let a = t.advice(&c, 4020, 0, &[], Geom::default());
         assert!(a.contains("look for a repeat"), "{a}");
         assert!(!a.contains("Widen the LENGTH range"), "{a}");
         // And the funnel is visible in the table itself.
@@ -918,15 +1111,165 @@ mod tests {
         for _ in 0..100 {
             t.bump(Reason::Tm);
         }
-        let a = t.advice(&c, 1000, 0, &[]);
+        let a = t.advice(&c, 1000, 0, &[], Geom::default());
         assert!(a.contains("--len 15..60"), "{a}");
         assert!(!a.contains("66"), "{a}");
 
         // And once there is nothing left to widen it stops saying so.
         c.len_max = Constraints::LEN_HARD_MAX;
-        let a = t.advice(&c, 1000, 0, &[]);
+        let a = t.advice(&c, 1000, 0, &[], Geom::default());
         assert!(a.contains("nothing left to widen"), "{a}");
         assert!(!a.contains("Widen the LENGTH range first"), "{a}");
+
+        // PROVEN TO FAIL: that branch used to say `--len` was "already at
+        // 15..60, the widest this tool accepts". Both interfaces validate
+        // `--len` against 8..60, so 8..60 is wider and is accepted -- the claim
+        // is false for every len_min from 9 to 15, and following this very
+        // function's advice from the defaults parks a user at exactly 15. The
+        // reason to stop is downstream, not a limit that does not exist, so the
+        // sentence has to name the real one.
+        assert!(
+            !a.contains("the widest this tool accepts"),
+            "--len {}..{} is accepted and is wider: {a}",
+            Constraints::LEN_HARD_MIN,
+            Constraints::LEN_HARD_MAX
+        );
+        assert!(
+            a.contains("shortest primer this tool will recommend"),
+            "{a}"
+        );
+        assert!(
+            a.contains(&format!("accepts down to {}", Constraints::LEN_HARD_MIN)),
+            "{a}"
+        );
+        assert!(
+            a.contains(&format!("under {} nt", pl_clone::MIN_ANNEAL)),
+            "the reason has to be the one that is true: {a}"
+        );
+        // The relation this sentence rests on -- LEN_ADVICE_MIN clearing
+        // `pl_clone::MIN_ANNEAL` -- is a compile-time assertion beside the
+        // constant itself (`params.rs`, `const _: () = assert!(...)`). Both are
+        // consts, so a runtime check here could only report a violation after a
+        // build that already shipped it.
+    }
+
+    /// A pair-stage gate that killed everything it saw is not silenced because
+    /// the candidate funnel was a hundred times larger.
+    ///
+    /// PROVEN TO FAIL: with the floor taken over `self.total()` -- both funnels
+    /// summed, which is what shipped -- `terminal` returns `None` here. The
+    /// measured run: 59,570 candidates enumerated, 41,148 rejected on their own,
+    /// 250 pairs built and all 250 killed by an EcoRI site already inside the
+    /// product. `total()` is 41,398, the floor 413, and 250 < 413, so the 100%
+    /// fatal gate loses to a share of a funnel it is not in. `binding()` then
+    /// answers Tm and the report prints "Widen the LENGTH range first" beneath
+    /// a row reading "<- all 250 that reached it".
+    #[test]
+    fn a_pair_stage_floor_is_a_share_of_the_pair_funnel_and_not_of_both() {
+        let c = Constraints::default();
+        let mut t = Tally::new(&c);
+        for _ in 0..41_148 {
+            t.bump(Reason::Tm);
+        }
+        for _ in 0..250 {
+            t.bump(Reason::InternalSite);
+        }
+        // The premise: the old rule cannot see it.
+        assert!(
+            250 < (t.total() / 100).max(1),
+            "a floor over total() has to silence it or this proves nothing: {}",
+            t.total()
+        );
+        assert_eq!(t.reached(Reason::InternalSite, 59_570, 250), 250);
+        assert_eq!(
+            t.terminal(59_570, 250),
+            Some(Reason::InternalSite),
+            "the gate saw the whole pair funnel and killed it"
+        );
+
+        // And the diagnosis reaches the user, with the coordinates that only
+        // this branch ever renders.
+        let clashes = [crate::tail::SiteClash {
+            enzyme: "EcoRI",
+            strand: "+",
+            at: crate::tail::ClashAt::Template(601),
+        }];
+        let a = t.advice(&c, 59_570, 250, &clashes, Geom::default());
+        assert!(a.contains("No threshold moves this"), "{a}");
+        assert!(a.contains("EcoRI also reads at 601"), "{a}");
+        assert!(!a.contains("Widen the LENGTH range first"), "{a}");
+
+        // The control: the floor still does its job WITHIN the pair funnel. A
+        // gate that killed the last pair of a large pair funnel is still
+        // beneath 1% of it.
+        let mut u = Tally::new(&c);
+        for _ in 0..41_148 {
+            u.bump(Reason::Tm);
+        }
+        for _ in 0..40_000 {
+            u.bump(Reason::CrossDimer);
+        }
+        u.bump(Reason::InternalSite);
+        assert_eq!(
+            u.terminal(59_570, 40_001),
+            None,
+            "one pair out of 40,001 is not a diagnosis"
+        );
+    }
+
+    /// The off-the-end remedy must not name a flag the molecule's end has
+    /// already made irrelevant.
+    ///
+    /// PROVEN TO FAIL: the arm was the unconditional "There is not enough
+    /// template outside the region. Raise --flank past {flank}, or use --mode
+    /// within." Measured, following it: 200 -> 400 -> 800 -> 1600 -> 2500, with
+    /// forward survivors 0 at every step, because `--flank` widens the forward
+    /// window downward and every base it adds is off the end. `--mode within`
+    /// designed five pairs on the same input on the first try -- and for a
+    /// region too short to hold a pair it refuses on arrival, which the sentence
+    /// never checked.
+    #[test]
+    fn the_off_the_end_remedy_is_told_which_side_the_end_has_clipped() {
+        let c = Constraints::default();
+        let mut t = Tally::new(&c);
+        for _ in 0..2_000 {
+            t.bump(Reason::OffTheEnd);
+        }
+        // A region at base 1 with no forward survivor: the empty side is the
+        // clipped one, so raising --flank cannot add a candidate to it.
+        let clipped = Geom {
+            before: Some(0),
+            after: Some(2_600),
+            region_bp: 400,
+            forward: false,
+            reverse: true,
+        };
+        let a = t.advice(&c, 4_020, 0, &[], clipped);
+        assert!(a.contains("adds no forward candidate at all"), "{a}");
+        assert!(a.contains("--mode within puts both primers inside"), "{a}");
+
+        // The same geometry with a region too short to hold a pair: the second
+        // remedy has to be withdrawn rather than offered and then refused.
+        let short = Geom {
+            region_bp: 30,
+            ..clipped
+        };
+        let b = t.advice(&c, 4_020, 0, &[], short);
+        assert!(b.contains("--mode within is not a way out either"), "{b}");
+        assert!(b.contains("two 18 nt footprints need 36"), "{b}");
+
+        // The control: when the EMPTY side is the one the end has NOT clipped,
+        // raising --flank really can help, and the advice must not forbid it.
+        let unclipped = Geom {
+            before: Some(2_600),
+            after: Some(2_600),
+            region_bp: 400,
+            forward: false,
+            reverse: true,
+        };
+        let d = t.advice(&c, 4_020, 0, &[], unclipped);
+        assert!(!d.contains("adds no forward candidate at all"), "{d}");
+        assert!(d.contains("Raise --flank past 200"), "{d}");
     }
 
     /// PROVEN TO FAIL: with the `--flank 0` clause removed, the assertion on
@@ -942,13 +1285,15 @@ mod tests {
         for _ in 0..20 {
             t.bump(Reason::Tm);
         }
-        let a = t.advice(&c, 20, 0, &[]);
+        let a = t.advice(&c, 20, 0, &[], Geom::default());
         assert!(a.starts_with("--flank 0 pins BOTH outer ends"), "{a}");
         assert!(a.contains("10 oligos per side"), "{a}");
 
         // Not said when it does not apply.
         let d = Constraints::default();
-        assert!(!t.advice(&d, 20, 0, &[]).contains("--flank 0 pins"));
+        assert!(!t
+            .advice(&d, 20, 0, &[], Geom::default())
+            .contains("--flank 0 pins"));
     }
 
     /// PROVEN TO FAIL: with `NoPair`'s fixed "widen --tm-diff or --product"
@@ -975,7 +1320,7 @@ mod tests {
             strand: "+",
             at: crate::tail::ClashAt::Template(4359),
         }];
-        let a = t.advice(&c, 4020, 39481, &clashes);
+        let a = t.advice(&c, 4020, 39481, &clashes, Geom::default());
         assert!(a.contains("EcoRI also reads at 4359"), "{a}");
         assert!(!a.contains("--tm-diff"), "the remedy that cannot work: {a}");
 

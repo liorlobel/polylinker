@@ -91,7 +91,22 @@ pub mod scan;
 /// The same bump covers the note *values* the reader stopped fusing across a
 /// nested child: a `<Comments>` field indexed as `Grown at 37 C overnight`, a
 /// string in no file, is now indexed as what the file actually says.
-pub const ENGINE: u32 = 2;
+///
+/// 3: the SnapGene feature reader learned the long qualifier spelling. Files of
+/// the export-10/import-5 vintage spell a qualifier
+/// `<Qualifier name=..><QualifierValue textVal=..>` rather than `<Q><V>`, and
+/// `parse_features` matched only the short form — so on those files every
+/// qualifier was dropped: `/locus_tag`, `/codon_start`, `/transl_table`,
+/// `/direction`, and whole protein `/translation` strings.
+/// `pl_scan::searchable_text` indexes qualifier keys and values, so this is
+/// both halves again — the parser changed *and* a derived column changed with
+/// it. Without the bump a library built before the fix keeps rows in which
+/// those qualifiers were never indexed, reports them as `unchanged (reused)` on
+/// the next scan, and `pl find --text` goes on answering that a translation
+/// nobody can find is not there. The same bump covers the notes reader, which
+/// stopped losing every note after one unbalanced tag; those keys and values
+/// are indexed too.
+pub const ENGINE: u32 = 3;
 
 /// The on-disk layout version. Bumped when the bytes change shape.
 pub const FORMAT: u32 = 1;

@@ -76,8 +76,9 @@ pub struct WalkReport {
     ///
     /// Set by every path that did not look at something it was asked to look
     /// at: a directory that could not be listed — the root or any other — a
-    /// depth bound that cut a sub-tree off, and an entry the directory iterator
-    /// failed on.
+    /// depth bound that cut a sub-tree off, an entry the directory iterator
+    /// failed on, an entry we could not stat, and a link we were asked to
+    /// follow whose target would not resolve.
     pub incomplete: Option<String>,
     pub placeholders: usize,
     /// Symbolic links and Windows junctions that were not followed because
@@ -92,8 +93,17 @@ pub struct WalkReport {
 
 /// Enumerate candidate sequence files under `root`.
 ///
-/// Breadth-first with an explicit stack, so a deep tree cannot overflow it, and
-/// depth-bounded so a symlink cycle terminates even with `follow_links`.
+/// Depth-first with an explicit stack — `Vec::pop` is LIFO — so a deep tree
+/// cannot overflow the call stack, and depth-bounded so a symlink cycle
+/// terminates even with `follow_links`.
+///
+/// This line said "breadth-first" while the loop did the opposite, which is the
+/// wrong thing to hand the next person reasoning about the peak size of `stack`
+/// or about the order `errors` and `incomplete` are filled in. Depth-first is
+/// also the order to keep, so do not correct it the other way: `pop_front` on a
+/// `VecDeque` would genuinely be breadth-first and would hold a whole level of
+/// the tree at once — 65,536 pending directories at branching 4 and depth 8,
+/// against 25 for this loop.
 ///
 /// Metadata comes from the directory entry, never a second `stat`: on Windows
 /// `FindNextFileW` has already returned size and mtime, and the measured cost
@@ -148,11 +158,29 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> (Vec<Found>, WalkReport) {
                 }
             };
             let path = entry.path();
-            let Ok(link_meta) = entry.metadata() else {
-                report
-                    .errors
-                    .push((path.display().to_string(), "metadata unavailable".into()));
-                continue;
+            let link_meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    // An entry we were handed and could not stat is a thing we
+                    // were asked to look at and did not, so it must read as a
+                    // partial walk and never as a deletion — the same rule the
+                    // `read_dir` arm above follows. This is infallible on
+                    // Windows, where the directory iterator has already
+                    // returned the attributes, but live on Unix: a directory
+                    // that is readable but not searchable (mode 0600) lists
+                    // every child and fails `lstat` on all of them, and with
+                    // `incomplete` left unset every row under it was dropped
+                    // and the index stamped `complete: 1` — no `--follow-links`
+                    // needed. The error is now carried through instead of the
+                    // literal "metadata unavailable", because EACCES and ENOENT
+                    // call for different actions and the operator was being
+                    // handed neither.
+                    report
+                        .errors
+                        .push((path.display().to_string(), e.to_string()));
+                    report.incomplete = Some(format!("{}: {e}", path.display()));
+                    continue;
+                }
             };
 
             // `DirEntry::metadata` does not traverse links on **any** platform,
@@ -182,10 +210,30 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> (Vec<Found>, WalkReport) {
                 match std::fs::metadata(&path) {
                     Ok(m) => m,
                     Err(e) => {
-                        // A dangling link, or one whose target we may not stat.
+                        // A link we were asked to follow and could not resolve
+                        // is a sub-tree we did not look at, so the walk is
+                        // partial. Recording it only in `errors` meant a
+                        // junction to a volume that went away — a dropped drive
+                        // mapping, an unplugged disk, a share that blinked —
+                        // read as a mass deletion: measured, `2 removed` and
+                        // `complete: 1` written for two plasmids still sitting
+                        // on disk, byte-identical, so `pl library` had nothing
+                        // to warn about and `pl find` answered "not in my
+                        // library" for both.
+                        //
+                        // Deliberately not carved out by `ErrorKind::NotFound`:
+                        // that volume case is ERROR_PATH_NOT_FOUND, which Rust
+                        // maps to `NotFound` exactly like a genuinely dangling
+                        // link (as it does ERROR_BAD_NETPATH), so the kind
+                        // cannot tell "the files are gone" from "the road to
+                        // them is". The cost is the one the `read_dir` arm
+                        // above already weighs and accepts: a permanently
+                        // unresolvable link keeps deletions from being
+                        // recorded, which beats a library that empties itself.
                         report
                             .errors
                             .push((path.display().to_string(), e.to_string()));
+                        report.incomplete = Some(format!("{}: {e}", path.display()));
                         continue;
                     }
                 }
@@ -314,6 +362,58 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(walk(&root, &WalkOptions::default()).0, first);
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sub_directories_are_visited_last_in_first_out_as_the_doc_now_says() {
+        // The doc on `walk` said "breadth-first" for as long as the file has
+        // existed while `Vec::pop` did the opposite. Nothing could catch that,
+        // because `out` is sorted before it is returned and no other test looks
+        // at anything order-sensitive — so the word is pinned here instead.
+        //
+        // It also guards the direction of the fix: correcting the *loop* to
+        // match the old word — `VecDeque::pop_front` — would hold a whole level
+        // of the tree pending at once, 65,536 directories at branching 4 and
+        // depth 8 against 25 for this loop.
+        let root = tmp("lifo");
+        for i in 0..3 {
+            write(&root, &format!("s{i}/child/f.gb"), "x");
+        }
+        // Whatever order this filesystem hands the three sub-directories back
+        // in — no filesystem promises one — is the order they are pushed in.
+        let mut pushed: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(pushed.len(), 3);
+
+        // `--max-depth 1` cuts every `child` off, and each cut appends one
+        // `errors` entry as it is popped. That is the only externally visible
+        // trace of the traversal order.
+        let opts = WalkOptions {
+            max_depth: 1,
+            ..Default::default()
+        };
+        let (_, report) = walk(&root, &opts);
+        let visited: Vec<String> = report
+            .errors
+            .iter()
+            .map(|(p, _)| {
+                Path::new(p)
+                    .parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        pushed.reverse();
+        assert_eq!(
+            visited, pushed,
+            "the last directory pushed must be the first one visited"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -463,6 +563,83 @@ mod tests {
         assert_eq!(
             report.links_skipped, 1,
             "a skipped link must be countable, not invisible"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_link_we_were_asked_to_follow_and_could_not_resolve_is_incomplete() {
+        // The link is the road to the files, not the files. When the road goes
+        // away — a `subst` drive unmapped, a disk unplugged, a share that
+        // blinked — the plasmids behind it are untouched, and a walk that
+        // reports "I found one file" rather than "I could not look" hands the
+        // caller a mass deletion: measured before the fix, `2 removed` and
+        // `#!complete 1` written for two `.gb` files still on disk byte for
+        // byte, after which `pl library` had nothing to warn about and
+        // `pl find GAATTC` answered "not in my library" for both.
+        let root = tmp("danglinglink");
+        write(&root, "plain.gb", "x");
+        let target = tmp("danglinglink-target");
+        write(&target, "a.gb", "x");
+        link_dir(&target, &crate::abs(&root, "linked"));
+        // The link stays; only what it points at goes away.
+        std::fs::remove_dir_all(&target).unwrap();
+
+        let opts = WalkOptions {
+            follow_links: true,
+            ..Default::default()
+        };
+        let (found, report) = walk(&root, &opts);
+        let rels: Vec<&str> = found.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels, vec!["plain.gb"], "the linked sub-tree is missing");
+        assert!(
+            report.incomplete.is_some(),
+            "a link we were told to follow and could not resolve is a place we \
+             did not look, not a place we looked and found nothing: {:?}",
+            report.errors
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same hole on the other arm, which needs no `--follow-links` at all.
+    ///
+    /// Unix-only by necessity rather than by choice: on Windows
+    /// `DirEntry::metadata` returns what `FindNextFileW` already handed back
+    /// and cannot fail, so there is no way to reach this arm there.
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_that_cannot_be_stat_ed_is_incomplete_and_keeps_the_real_error() {
+        use std::os::unix::fs::PermissionsExt;
+        // Readable but not searchable. `read_dir` lists every child and `lstat`
+        // on each of them fails with EACCES, so an entire directory's worth of
+        // rows used to be dropped with `incomplete` left unset.
+        let root = tmp("nostat");
+        write(&root, "keep.gb", "x");
+        write(&root, "locked/a.gb", "x");
+        let locked = crate::abs(&root, "locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Root ignores the missing `x` bit, and a test that silently stops
+        // testing under a root CI is a check that cannot fail.
+        let blocked = std::fs::metadata(crate::abs(&root, "locked/a.gb")).is_err();
+        let (found, report) = walk(&root, &WalkOptions::default());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(
+            blocked,
+            "this test cannot exercise the stat failure as root — run it unprivileged"
+        );
+        let rels: Vec<&str> = found.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels, vec!["keep.gb"], "the locked file was not reached");
+        assert!(
+            report.incomplete.is_some(),
+            "every row under an unreadable directory would be dropped: {:?}",
+            report.errors
+        );
+        let reason = &report.errors[0].1;
+        assert!(
+            reason.contains("os error 13"),
+            "the operator needs the EACCES, not the word \"metadata\": {reason:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

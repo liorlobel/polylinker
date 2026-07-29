@@ -827,11 +827,31 @@ impl<'a> Annotator<'a> {
     /// suppresses every seed overlapping it and would otherwise leave the
     /// feature reported a dozen bases short at each end — a wrong coordinate
     /// dressed as a right one.
+    ///
+    /// # Why the alignment is anchored on the chain's own diagonal
+    ///
+    /// `Index::chain` widens each window to `(diagonal - slack, diagonal +
+    /// rec_len + slack)` so an indel still fits inside it. For a feature in
+    /// direct tandem with a period no larger than `slack` that window holds
+    /// whole neighbouring copies, all of them matching at distance 0 — and
+    /// [`align::infix`] breaks such ties toward the leftmost end, so every
+    /// chain returned the *same* leftmost copy however correctly
+    /// `collinear_runs` had separated them. [`dedupe`] then merged the
+    /// duplicates and n tandem copies became n − 1 annotations, the last one
+    /// gone without a diagnostic. So the chain's diagonal is carried down here
+    /// and used as [`align::infix_near`]'s tie-break; it is the only thing that
+    /// knows which copy this chain was built on.
     fn verify(&self, record: &[u8], text: &[u8], chain: &crate::index::Chain) -> Option<Match> {
         let (rlo, rhi) = chain.record_span;
         let (wlo, whi) = chain.window;
         let core = &record[rlo..rhi];
-        let hit = align::infix(core, &text[wlo..whi], self.budget(core.len()))?;
+        // Where record offset `rhi` falls if the chain's diagonal is right,
+        // expressed as an offset into the window actually being aligned.
+        // Signed and unclamped on purpose: a chain whose diagonal sits left of
+        // the text start yields a negative anchor, which orders candidates
+        // perfectly well and must not be silently pulled to 0.
+        let anchor = chain.diagonal + rhi as i64 - wlo as i64;
+        let hit = align::infix_near(core, &text[wlo..whi], self.budget(core.len()), anchor)?;
 
         let mut aligned = core.len();
         let mut dist = hit.dist as usize;
@@ -1044,8 +1064,10 @@ fn fused_orf(
     // but a `_ =>` arm falling through to Forward would silently adjudicate an
     // unoriented hit on the plus strand. Refuse instead.
     //
-    // HONEST STATUS: defensive and uncovered, like the `laps` loop and
-    // `3 * aa_len` below. `scan_protein` derives `strand` from `frame.reverse`
+    // HONEST STATUS: defensive and uncovered. (The `laps` loop below used to be
+    // named here as the same kind of thing; it is not — see its own note — and
+    // `a_fusion_admitted_only_on_an_orfs_second_lap` covers it.)
+    // `scan_protein` derives `strand` from `frame.reverse`
     // alone, so only Forward and Reverse ever arrive, and turning this arm into
     // an ordinary non-match leaves the whole suite green. It is kept because
     // the cost is one line and the alternative — a wildcard — is the shape of
@@ -1114,11 +1136,22 @@ fn fused_orf(
         // at different codon offsets, and `d0` alone cannot say which visit the
         // tag is on. Since `laps != 0` only when `3 ∤ L`, at most one k in any
         // three consecutive values can satisfy `d % 3 == 0`, so this is not
-        // ambiguous. Honest status: defensive, not demonstrated — `laps >= 1`
-        // requires `3 * aa_len + 3 > L`, and the partner floor forces
-        // `aa_len >= 25`, so `L <= 78`. A circular molecule under 78 bp is not
-        // a plasmid. Two lines, kept so the code cannot misbehave on a small
-        // circle, and not claimed to be covered by a test.
+        // ambiguous.
+        //
+        // NOT a small-circle guard, whatever the size of the molecule suggests.
+        // This used to claim it was, deriving `L <= 78` from `3 * aa_len + 3 >
+        // L` together with the partner floor `aa_len >= 25` — an inequality run
+        // backwards, since a *lower* bound on `aa_len` bounds `L` from above by
+        // nothing at all. The real condition is `bases() > L`: a frame that runs
+        // stopless for more than one lap, which `find_orfs` can only produce
+        // when `3 ∤ L` and which is governed by stop-codon spacing rather than
+        // by `L`. `a_fusion_admitted_only_on_an_orfs_second_lap` below is a 223
+        // bp circle whose sole Forward ORF has `aa_len = 148` and `laps = 2`,
+        // and whose tag is admitted at k = 1 and at no other k — delete this
+        // loop and that annotation disappears. The same construct still needs
+        // k = 1 at 9103 bp. What DOES keep it off real DNA is the stop density:
+        // a stopless run of more than L/3 consecutive codons against roughly
+        // 3/64 per position does not happen in a plasmid.
         (0..=o.laps as usize).any(|k| {
             let d = d0 + k * len;
             d % 3 == 0                                     // in frame with the ORF
@@ -2257,6 +2290,137 @@ mod tests {
         }
     }
 
+    /// The 60 bp fixtures above are structurally unable to see this, which is
+    /// why it needs its own: 60 is longer than the DNA scan's `slack = 40`, so
+    /// each chain's widened window holds one whole copy and the tie-break inside
+    /// `align::infix` never gets a second one to choose from. Below the slack it
+    /// does, and it chose wrong.
+    ///
+    /// Measured before `verify` was anchored on the chain's diagonal, on the
+    /// shipped 27 bp HA row and on this fixture alike: x2 reported ONE box, x3
+    /// two, x4 three, x5 four — always the last copy missing, because every
+    /// chain aligned to the leftmost copy in its window and [`dedupe`] then
+    /// merged the identical results. It stopped at 42 bp (V5), i.e. exactly
+    /// where the period passes the slack.
+    #[test]
+    fn tandem_copies_closer_together_than_the_alignment_slack_are_all_reported() {
+        let mut rng = Rng(0x7a4d_0000_0000_0013);
+        let feature = rng.dna(27); // period 27 < slack 40, unlike the 60 above
+        let left = rng.dna(300);
+        let right = rng.dna(300);
+        let db = db_of(vec![rec("pf:a", &feature, false)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        for n in 1..=5usize {
+            let m = mol(&format!("{left}{}{right}", feature.repeat(n)), false);
+            let found = ann.annotate(&m);
+            assert_eq!(found.len(), n, "{n} tandem copies reported as {found:?}");
+            for (i, f) in found.iter().enumerate() {
+                let start = 301 + 27 * i;
+                assert_eq!(
+                    (f.start as usize, f.end as usize),
+                    (start, start + 26),
+                    "copy {} of {n} is at the wrong coordinates",
+                    i + 1
+                );
+            }
+        }
+
+        // ...and the spacer sweep, because the threshold is the *period* — the
+        // feature plus whatever sits between copies — against the slack, not
+        // the feature length. Three copies at every spacing from butt-joined up
+        // to one slack apart.
+        for spacer in [0usize, 3, 6, 9, 12, 15, 30] {
+            let gap = rng.dna(spacer);
+            let m = mol(
+                &format!("{left}{feature}{gap}{feature}{gap}{feature}{right}"),
+                false,
+            );
+            assert_eq!(
+                ann.annotate(&m).len(),
+                3,
+                "three copies {spacer} bp apart must be three annotations"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_tandem_repeat_is_counted_the_same_from_every_origin_of_a_circle() {
+        // The same invariant as `a_tandem_repeat_is_counted_the_same_from_every_
+        // origin_of_a_circle`, at a period BELOW the slack, where that test
+        // cannot reach. Before `verify` was anchored on the chain's diagonal
+        // this molecule reported 2 boxes for 573 of its 600 rotations and 3 for
+        // the other 27 — the feature count depending on which base the file
+        // numbers 1, which is the whole failure the older test is named for.
+        let mut rng = Rng(0x7a4d_0000_0000_0014);
+        let feature = rng.dna(27);
+        let filler = rng.dna(519);
+        let db = db_of(vec![rec("pf:a", &feature, false)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        let base = format!("{}{filler}", feature.repeat(3));
+        assert_eq!(base.len(), 600);
+        let mut counts: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
+        for r in 0..base.len() {
+            let rotated = format!("{}{}", &base[r..], &base[..r]);
+            *counts
+                .entry(ann.annotate(&mol(&rotated, true)).len())
+                .or_insert(0) += 1;
+        }
+        assert_eq!(
+            counts,
+            [(3usize, 600usize)].into_iter().collect(),
+            "feature count changed with the origin: {counts:?}"
+        );
+    }
+
+    #[test]
+    fn a_tandem_array_of_a_peptide_tag_is_reported_once_per_copy() {
+        // The translated route has the same defect and a worse constant: its
+        // slack is 12 RESIDUES against an 8-residue tag, so every window holds
+        // two or three whole copies. Measured before the fix, with the shipped
+        // table rather than this one-row fixture: n copies gave n - 1 "FLAG tag"
+        // boxes, and for 3 copies the vacated span came back labelled
+        // "Enterokinase cleavage site" over FLAG's own DDDDK — a protease site
+        // drawn where the user put a tag.
+        //
+        // The whole array is encoded in one call so the joins between copies are
+        // start- and stop-free too; encoding one copy and repeating it
+        // constrains the join against the filler pad, not against the next copy.
+        let mut rng = Rng(0x0f1a_0000_0000_0010);
+        let code = fixture_code();
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let ann = Annotator::new(&db, Config::default());
+
+        for n in 1..=4usize {
+            let array = encode(&FLAG.repeat(n), code, &mut rng);
+            // 1 initiator + 26 filler residues leaves a partner of at least
+            // PARTNER_MIN outside the tag, so the fusion gate admits every copy.
+            let construct = format!("ATG{}{array}TAA", FILLER.repeat(26));
+            let m = mol(
+                &format!("{}{construct}{}", FILLER.repeat(30), FILLER.repeat(30)),
+                false,
+            );
+            assert!(six_frame_contains(&m.seq, FLAG), "n={n}");
+            let found = ann.annotate(&m);
+            assert_eq!(
+                found.len(),
+                n,
+                "{n} tandem FLAG copies reported as {found:?}"
+            );
+            for (i, f) in found.iter().enumerate() {
+                assert!(f.via_protein);
+                assert_eq!(
+                    (f.end - f.start + 1) as usize,
+                    24,
+                    "copy {} of {n} is not 8 residues wide",
+                    i + 1
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_circular_molecule_does_not_report_each_feature_twice() {
         // The doubling in step 2 must not leak into the output.
@@ -2616,6 +2780,82 @@ mod tests {
                 .is_empty(),
             "a linear molecule has no way round"
         );
+    }
+
+    #[test]
+    fn a_fusion_admitted_only_on_an_orfs_second_lap() {
+        // Coverage for `fused_orf`'s `laps` loop, which its own note used to
+        // call "defensive, not demonstrated" and to bound to circles under
+        // 78 bp. Both halves of that were wrong, and the second was wrong by two
+        // orders of magnitude: `laps != 0` needs a frame that runs stopless for
+        // more than one lap, which `find_orfs` produces only when `3 ∤ L`, and
+        // which is a statement about stop spacing rather than about `L`.
+        //
+        // The fixture above cannot reach it — it asserts `seq.len() % 3 == 0`,
+        // which forces `laps == 0` — so this is a separate molecule: 223 bases,
+        // `223 % 3 == 1`, with the tag inside an ATG..TAA cassette and a long
+        // tract of stops behind it. The merged frame opens on an `ATA` (a
+        // table-11 initiator) inside that tract and runs 148 codons, i.e. 444
+        // coding bases on a 223 bp molecule.
+        let code = fixture_code();
+        // Written out rather than encoded: this fixture needs an exact length
+        // and an exact frame, and `encode`'s search would give neither.
+        // GAC TAC AAG GAC GAC GAC GAC AAG = DYKDDDDK.
+        let tag = "GACTACAAGGACGACGACGACAAG";
+        let seq = format!(
+            "ATG{}{tag}{}TAA{}A",
+            FILLER.repeat(12),
+            FILLER.repeat(12),
+            "TAA".repeat(40)
+        );
+        assert_eq!(seq.len(), 223);
+        assert_eq!(seq.len() % 3, 1, "a merged frame is the whole point");
+        let m = mol(&seq, true);
+        assert!(six_frame_contains(&m.seq, FLAG));
+
+        let db = db_of(vec![peptide("pf:flag", FLAG)]);
+        let found = Annotator::new(&db, Config::default()).annotate(&m);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let f = &found[0];
+        assert!(f.via_protein);
+        let fo = f.fusion_orf.expect("admitted by the fusion gate");
+        assert_eq!((fo.start, fo.end, fo.aa_len), (102, 102, 148));
+
+        // ...and it really is the second lap that admits it, which is what
+        // makes deleting the loop a behaviour change rather than a tidy-up.
+        // `d0` is `fused_orf`'s own forward anchor arithmetic: the distance
+        // from the ORF's initiator to the tag's first base.
+        let len = m.seq.len();
+        let o5 = fo.start as usize - 1;
+        let t5 = f.start as usize - 1;
+        let d0 = (t5 + len - o5) % len;
+        assert_ne!(
+            d0 % 3,
+            0,
+            "k = 0 already admits this tag, so the loop is not what carries it"
+        );
+        assert_eq!((d0 + len) % 3, 0, "k = 1 is the lap that admits it");
+
+        // And the ORF genuinely laps: `Orf::laps` is what bounds the loop, and
+        // a fixture with `laps == 0` would exercise only k = 0 however the
+        // arithmetic above came out.
+        let orfs = orf::find_orfs(
+            &m.seq,
+            code,
+            true,
+            &Params {
+                min_aa: ORF_MIN_AA,
+                include_incomplete: true,
+                require_start: true,
+                nested: false,
+            },
+        );
+        let admitting = orfs
+            .iter()
+            .find(|o| o.strand == Strand::Forward && o.aa_len == 148)
+            .expect("the 148 aa merged-frame ORF");
+        assert_eq!(admitting.laps, 2);
+        assert!(admitting.bases() > len, "an ORF longer than its molecule");
     }
 
     #[test]

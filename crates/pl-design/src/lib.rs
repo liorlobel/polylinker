@@ -73,10 +73,13 @@
 //!   internal loops, bulges, dangling ends, terminal mismatches, coaxial
 //!   stacking or quadruplexes. `docs/PLAN.md` §7.4 schedules a Zuker DP
 //!   (seqfold, Lattice Automation, MIT) that would replace it; **that has not
-//!   been ported and is not cited as though it had**. Every ΔG it produces is
-//!   printed as `>=` and [`fold::SCREEN_NOTE`] is carried in
+//!   been ported and is not cited as though it had**. Every ΔG it renders is
+//!   printed with the words "or more stable" rather than as a value — an
+//!   operator was overloaded here and pointed the wrong way for the one thing
+//!   `render` is ever called on — and [`fold::SCREEN_NOTE`] is carried in
 //!   [`Report::warnings`] on every run, so this limit reaches a `pl design`
-//!   user without their having to run `pl methods design` to find it.
+//!   user without their having to run `pl methods design` to find it. The raw
+//!   values are also in the JSON, unqualified and labelled by basis.
 //! - **No Mg²⁺ or dNTP correction.** `pl-thermo` has monovalent corrections
 //!   only, so every Tm here is on a 50 mM Na⁺ scale by default and an ordinary
 //!   PCR buffer is about 150 mM monovalent-equivalent. Measured: the same
@@ -191,8 +194,14 @@ pub enum DesignError {
         shortest_product: usize,
         len_min: usize,
     },
-    /// [`Mode::Contain`] on a linear molecule with no template beyond the end
-    /// of the region to put a primer on.
+    /// [`Mode::Contain`] on a linear molecule with no room for a footprint at
+    /// one end of the region.
+    ///
+    /// Not "no template *outside* the region": a Contain footprint needs none,
+    /// because `flank` bounds the primer's outer end and `lo = s` / `hi = e`
+    /// are always enumerated. `which` names the end that has no room, and
+    /// `available` is how many bases of template a footprint there would have
+    /// to sit in.
     NoFlank {
         which: &'static str,
         available: u64,
@@ -246,6 +255,18 @@ pub enum DesignError {
         enzyme: &'static str,
         site: &'static str,
     },
+    /// The off-target seed is longer than the shortest primer the search may
+    /// build, so some candidates could not be scanned at all.
+    ///
+    /// Nothing enforced this relation: `--off-seed` is validated against 8..32
+    /// and `--len` against 8..60, independently, and `Constraints` had no
+    /// validator. A seed longer than the footprint then broke both specificity
+    /// paths — the index path by a `usize` underflow, the fall-back path by
+    /// silently certifying every short candidate as unique. Refused here rather
+    /// than papered over downstream, because "cannot be scanned" has no safe
+    /// reading as an answer: passing the candidate claims a uniqueness nothing
+    /// checked, and failing it blames the molecule for a setting.
+    SeedLongerThanPrimer { off_seed: usize, len_min: usize },
 }
 
 impl std::fmt::Display for DesignError {
@@ -298,10 +319,13 @@ impl std::fmt::Display for DesignError {
                 bp,
             } => write!(
                 f,
-                "designing primers around this region needs template {which} of it on a \
-                 {bp} bp linear sequence; there is not enough. {available} nt available, \
-                 {needed} nt minimum. Use --mode within to put both primers inside the \
-                 region -- but note that changes what is amplified."
+                "there is no room for a primer {which} on this {bp} bp linear sequence: a \
+                 footprint there has {available} nt of template to sit in and the shortest \
+                 --len is {needed}. --mode contain needs no template OUTSIDE the region -- \
+                 the two footprints may sit exactly on its ends -- so this is the molecule \
+                 running out, not the flank. Raise --flank so the primer may back off \
+                 further, lower --len, move the region, or use --mode within (which changes \
+                 what is amplified)."
             ),
             DesignError::AmbiguousTarget { position, base } => write!(
                 f,
@@ -332,12 +356,26 @@ impl std::fmt::Display for DesignError {
                 clashes: _,
                 constraints,
             } => {
-                writeln!(
-                    f,
-                    "{survivors} oligo{} passed on their own and all {built} pair{} rejected:",
-                    if *survivors == 1 { "" } else { "s" },
-                    if *built == 1 { " was" } else { "s were" }
-                )?;
+                // `built == 0` is not a rejection, and saying "all 0 pairs were
+                // rejected" described one that never happened. It means the
+                // product window left no combination for the pairing loop to
+                // consider at all, which is a different refusal with a
+                // different remedy.
+                if *built == 0 {
+                    writeln!(
+                        f,
+                        "{survivors} oligo{} passed on their own and no two of them could be \
+                         paired:",
+                        if *survivors == 1 { "" } else { "s" }
+                    )?;
+                } else {
+                    writeln!(
+                        f,
+                        "{survivors} oligo{} passed on their own and all {built} pair{} rejected:",
+                        if *survivors == 1 { "" } else { "s" },
+                        if *built == 1 { " was" } else { "s were" }
+                    )?;
+                }
                 write!(f, "{}", tally.render("  ", *enumerated, *built))?;
                 // The remedy tracks the tally rather than being a fixed
                 // sentence. It used to end "widen --tm-diff or --product"
@@ -362,6 +400,15 @@ impl std::fmt::Display for DesignError {
                 "{enzyme}'s site is {site}, which is not fully specified. A tail is real DNA \
                  that has to be ordered, so an N in the site has no single oligo to write \
                  down. Choose an enzyme whose site is unambiguous."
+            ),
+            DesignError::SeedLongerThanPrimer { off_seed, len_min } => write!(
+                f,
+                "--off-seed {off_seed} is longer than the shortest primer --len allows \
+                 ({len_min}). A 3'-anchored seed longer than the primer cannot anchor, so \
+                 every candidate of {len_min} nt would go unscanned -- and an unscanned \
+                 candidate is not a specific one. Lower --off-seed to at most {len_min}, or \
+                 raise the shortest --len to at least {off_seed}. --no-specificity skips the \
+                 scan outright, and the report says so."
             ),
         }
     }
@@ -412,6 +459,17 @@ pub fn design(
     if n < c.len_min as u64 {
         return Err(DesignError::TemplateTooShort {
             bp: n,
+            len_min: c.len_min,
+        });
+    }
+    // The one relation between two flags that nothing else checks. Both are
+    // range-validated on their own -- `--off-seed` against 8..32, `--len`
+    // against 8..60 -- and neither interface compares them, so `--off-seed 20`
+    // at the default `--len 18..27` reached `specificity::scan` with an 18 nt
+    // footprint and a 20 nt seed and crashed the process.
+    if c.specificity && c.off_seed > c.len_min {
+        return Err(DesignError::SeedLongerThanPrimer {
+            off_seed: c.off_seed,
             len_min: c.len_min,
         });
     }

@@ -130,23 +130,52 @@ def row_from_tsv(cells: list[str], prov: list[list[str]]) -> Row:
     digest hash the unescaped canonical value — see `Db::content_digest`. The
     alternative, hashing the on-disk bytes, is fragile:
     `esc(unesc(x)) != x` for an unrecognised escape such as `\\q`.
+
+    EVERY SIGNED CELL GOES THROUGH `Db::parse`'S OWN CANONICALISATION, and that
+    is the point of this function rather than a tidy-up. The Rust loader trims
+    every cell it reads, lower-cases `class` and `boundary_rule` through
+    `Class::parse`/`BoundaryRule::parse`, and turns an empty `genbank_key` into
+    `misc_feature`. This side used to hash the cells raw. So one trailing space
+    on a description — the sort of thing an editor leaves behind — hashed one
+    way here and another there: this script reported zero violations and
+    certified the row, and the shipped binary then recomputed a different digest
+    and DOWNGRADED the approval, reporting "the row has changed since it was
+    signed" and clearing the curator's name. An error that blames a curator's
+    data for a disagreement between two hashers, on a row nobody edited.
+
+    For the tables as this build writes them the canonicalisation is a no-op,
+    because `coerce_row` already emits what `Db::parse` will store; it matters
+    for a hand-edited `features.tsv`, which is exactly the threat model this
+    file exists for.
+
+    `aliases` and `patent_flag` are canonicalised by `content_digest` itself and
+    are not repeated here. The two reference columns are only stripped, not
+    upper-cased: `content_digest` upper-cases both sides already, so case is not
+    a divergence for them and forcing it here would just be a second, quieter
+    reading of the same contract.
     """
     rid = cells[ID]
+
+    def signed(col: str) -> str:
+        """One signed cell, trimmed exactly as `Db::parse`'s `get` trims it."""
+        return cells[FEATURE_COLUMNS.index(col)].strip()
+
+    genbank_key = signed("genbank_key") or "misc_feature"
     return Row(
         id=rid,
-        name=cells[FEATURE_COLUMNS.index("name")],
+        name=signed("name"),
         # Through the same canonicaliser the build and `Db::parse` use, so a
         # hand-edited cell with a stray space round an alias hashes here exactly
         # as it will in the shipped binary.
         aliases=canon_alias_list(cells[FEATURE_COLUMNS.index("aliases")].split("|")),
-        cls=cells[FEATURE_COLUMNS.index("class")],
-        genbank_key=cells[FEATURE_COLUMNS.index("genbank_key")],
-        reference_nt=cells[NT],
-        reference_aa=cells[AA],
-        boundary_rule=cells[FEATURE_COLUMNS.index("boundary_rule")],
-        boundary_evidence=cells[FEATURE_COLUMNS.index("boundary_evidence")],
-        description=unesc(cells[DESCRIPTION]),
-        notes=unesc(cells[FEATURE_COLUMNS.index("notes")]),
+        cls=signed("class").lower(),
+        genbank_key=genbank_key,
+        reference_nt=cells[NT].strip(),
+        reference_aa=cells[AA].strip(),
+        boundary_rule=signed("boundary_rule").lower(),
+        boundary_evidence=signed("boundary_evidence"),
+        description=unesc(cells[DESCRIPTION].strip()),
+        notes=unesc(cells[FEATURE_COLUMNS.index("notes")].strip()),
         patent_flag=cells[FEATURE_COLUMNS.index("patent_flag")],
         provenance=[p for p in prov if p[0] == rid],
     )
@@ -601,6 +630,45 @@ def main() -> int:
         return 2
     if not args.quiet:
         print("  control  an alias padded with spaces: correctly NOT a violation")
+
+    # Every OTHER signed cell that `Db::parse` canonicalises, for the same
+    # reason and with the same failure if this side does not follow.
+    #
+    # `Db::parse` trims every cell it reads, lower-cases `class` and
+    # `boundary_rule`, and turns an empty `genbank_key` into `misc_feature`.
+    # This side hashed the cells raw, so one trailing space on a description --
+    # the sort of thing an editor leaves behind -- made this script report the
+    # curator's signature LAPSED over content that had not changed, and told
+    # them to re-read the row and re-sign it. Measured on the real tables before
+    # this control existed: padding PLF:0001's description gave
+    # "1 violation(s) ... The approval has lapsed", while the loader trims the
+    # space away and the signed content is identical.
+    #
+    # Each of these is a cell whose canonical value is unchanged, so each MUST
+    # verify. Whether the stray whitespace is worth fixing is a separate
+    # question, and `Db::parse` answers it separately by naming the cell as a
+    # load error -- which is a bookkeeping problem, not a lapsed approval.
+    for label, col, value in [
+        ("a description padded with spaces", DESCRIPTION,
+         " " + next(r for r in base_rows if r[ID] == first)[DESCRIPTION] + " "),
+        ("class in upper case", FEATURE_COLUMNS.index("class"),
+         next(r for r in base_rows if r[ID] == first)[
+             FEATURE_COLUMNS.index("class")].upper()),
+        ("boundary_rule in upper case", FEATURE_COLUMNS.index("boundary_rule"),
+         next(r for r in base_rows if r[ID] == first)[
+             FEATURE_COLUMNS.index("boundary_rule")].upper()),
+    ]:
+        padded = plant(good, col, value)
+        still = violations(padded, provenance_text, good_sign)
+        if still:
+            print(f"CHECK IS WORTHLESS IN THE OTHER DIRECTION: {label} invalidated the")
+            print("signature here, while Db::parse canonicalises it away and keeps the")
+            print("signature. The two implementations of the digest have diverged.")
+            for p in still:
+                print(f"    {p}")
+            return 2
+        if not args.quiet:
+            print(f"  control  {label}: correctly NOT a violation")
 
     # --- THE INVERTED CONTROL --------------------------------------------
     # The one most likely to be skipped, and the most valuable. `date_added` is

@@ -715,15 +715,15 @@ fn a_region_too_short_for_two_primers_is_refused_with_the_arithmetic() {
         } => {
             assert_eq!(bp, 19);
             assert_eq!(len_min, 18);
-            // Computed as 2 * len_min + 1, never written in: lowering --len
-            // must change it.
-            assert_eq!(shortest_product, 37);
+            // Computed as 2 * len_min, never written in: lowering --len must
+            // change it.
+            assert_eq!(shortest_product, 36);
         }
         other => panic!("{other}"),
     }
     let msg = err.to_string();
     assert!(msg.contains("19 bases"), "{msg}");
-    assert!(msg.contains("37 bases"), "{msg}");
+    assert!(msg.contains("36 bases"), "{msg}");
     assert!(msg.contains("--mode contain"), "{msg}");
 
     // The number tracks the constraint rather than being a literal.
@@ -731,8 +731,70 @@ fn a_region_too_short_for_two_primers_is_refused_with_the_arithmetic() {
     match design(&template, false, Region::new(400, 418), &shorter) {
         Err(DesignError::RegionTooShort {
             shortest_product, ..
-        }) => assert_eq!(shortest_product, 31),
+        }) => assert_eq!(shortest_product, 30),
         other => panic!("a 19 bp region still cannot hold two 15-mers: {other:?}"),
+    }
+}
+
+/// The guard is off by nothing, and the boundary is where that is decidable.
+///
+/// PROVEN TO FAIL at HEAD, where `shortest_product = 2 * len_min + 1`: the first
+/// half refuses a region of exactly `2 * len_min` bases with
+/// `RegionTooShort { bp: 40, shortest_product: 41 }` — while the second half of
+/// this same test designs a pair that occupies exactly 40 of those bases and
+/// `pl_clone::pcr` agrees on 40. The only separation gate is `f.hi >= r.lo`, so
+/// two footprints may abut; `2 * len_min + 1` is a claim the next call disproves.
+///
+/// The `2 * len_min - 1` case is the control: without it a guard deleted
+/// outright would pass the first half.
+#[test]
+fn a_region_of_exactly_two_footprints_is_designed_rather_than_refused() {
+    let template = seq(400, 12);
+    // One length only, so `2 * len_min` is the exact span of the only pair that
+    // can exist; the thermodynamic windows are opened because the criterion
+    // under test is the arithmetic, not the chemistry.
+    let c = Constraints {
+        mode: Mode::Within,
+        len_min: 20,
+        len_max: 20,
+        product_min: 40,
+        product_max: 3_000,
+        tm_min: 20.0,
+        tm_max: 90.0,
+        tm_diff_max: 40.0,
+        gc_clamp_min: 0,
+        gc_clamp_max: 5,
+        max_poly: 20,
+        max_poly_g: 20,
+        max_dinuc_repeat: 20,
+        dg_three_prime: -100.0,
+        dg_hairpin: -100.0,
+        dg_dimer_three_prime: -100.0,
+        ..Default::default()
+    };
+
+    let r = design(&template, false, Region::new(101, 140), &c)
+        .expect("40 bases hold two abutting 20-mers");
+    let p = &r.pairs[0];
+    assert_eq!(p.product_bp, 40, "two 20 nt footprints, abutting");
+    assert_eq!(p.forward.start, 101);
+    assert_eq!(p.forward.end, 120);
+    assert_eq!(p.reverse.start, 121);
+    assert_eq!(p.reverse.end, 140);
+    // The independent check: this is a real amplicon, not an arithmetic one.
+    assert_eq!(p.pcr_check, Ok(40));
+
+    // One base fewer really is refused, so the guard still guards.
+    match design(&template, false, Region::new(101, 139), &c) {
+        Err(DesignError::RegionTooShort {
+            bp,
+            shortest_product,
+            ..
+        }) => {
+            assert_eq!(bp, 39);
+            assert_eq!(shortest_product, 40);
+        }
+        other => panic!("39 bases cannot hold two 20-mers: {other:?}"),
     }
 }
 

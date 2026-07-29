@@ -14,14 +14,27 @@
 //!
 //! # What this checks, and what it does not
 //!
-//! Three structural faults, all computable from the overhangs alone:
+//! Every junction puts *two* overhangs in the tube: the designed one on one
+//! fragment end, and its reverse complement on the end it is meant to meet. So
+//! a check that only ever compares the listed overhangs with each other sees
+//! half the pool. Each fault below is therefore tested in both orientations —
+//! against the other overhang, and against the other overhang's partner.
+//!
+//! The structural faults, all computable from the overhangs alone:
 //!
 //! - a **repeated** overhang — two junctions that can swap, so the assembly has
 //!   more than one answer;
+//! - a **cross-pairing** overhang — one that equals another's partner, which is
+//!   the same collision seen from the other strand;
 //! - a **palindromic** overhang — one that ligates to itself, giving head-to-head
 //!   dimers;
 //! - a **single-mismatch neighbour** — two overhangs differing at one position,
-//!   which T4 ligase mis-joins at a measurable rate.
+//!   which T4 ligase mis-joins at a measurable rate;
+//! - a **cross-orientation single-mismatch neighbour** — one overhang a single
+//!   substitution from another's partner, which mis-joins the same way but
+//!   head-to-head;
+//! - an **incompatible** set — mixed overhang lengths, mixed 5'/3' geometry, or
+//!   an end whose overhang never formed.
 //!
 //! **The published ligation-fidelity matrices are not shipped**, and that is
 //! stated rather than implied. Potapov *et al.* (PLOS ONE 2020,
@@ -81,6 +94,11 @@ pub enum Fault {
     /// An overhang that pairs with another's partner — the same collision as
     /// `Repeated`, seen from the other strand.
     CrossPairing { a: String, b: String },
+    /// An overhang one substitution from another's partner. The same
+    /// mis-ligation as `NearNeighbour`, seen from the other strand: the two
+    /// fragment ends join head-to-head, so the minor product carries one part
+    /// inverted.
+    CrossNeighbour { a: String, b: String, at: usize },
     /// Overhangs of different lengths, or a mix of 5' and 3'.
     Incompatible { detail: String },
 }
@@ -109,6 +127,13 @@ impl std::fmt::Display for Fault {
                 "{a} pairs with the partner of {b}; those two junctions are \
                  interchangeable"
             ),
+            Fault::CrossNeighbour { a, b, at } => write!(
+                f,
+                "{a} and the partner of {b} differ only at position {}; T4 \
+                 ligase mis-joins pairs like this at a measurable rate, and the \
+                 minor product joins those two ends head-to-head",
+                at + 1
+            ),
             Fault::Incompatible { detail } => write!(f, "{detail}"),
         }
     }
@@ -120,8 +145,15 @@ impl Fault {
     /// A repeat or a palindrome produces a *different construct*. A near
     /// neighbour produces mostly the right one with a wrong minor product. They
     /// are not the same problem and must not be reported as the same severity.
+    ///
+    /// `CrossNeighbour` is a `NearNeighbour` read on the other strand and gets
+    /// the same severity for the same reason: one substitution short of a real
+    /// pairing costs yield, it does not decide the construct.
     pub fn is_fatal(&self) -> bool {
-        !matches!(self, Fault::NearNeighbour { .. })
+        !matches!(
+            self,
+            Fault::NearNeighbour { .. } | Fault::CrossNeighbour { .. }
+        )
     }
 }
 
@@ -144,10 +176,34 @@ impl Report {
 
     /// What this check cannot tell you. Print it with the result, always.
     pub fn caveat(&self) -> &'static str {
-        "structural checks only: repeats, palindromes and single-mismatch \
-         neighbours. Measured ligation-fidelity rates (Potapov et al. 2020) are \
-         not shipped, so no fidelity percentage is claimed."
+        "structural checks only: repeats, palindromes, cross-pairing and \
+         single-mismatch neighbours, each in both orientations. Measured \
+         ligation-fidelity rates (Potapov et al. 2020) are not shipped, so no \
+         fidelity percentage is claimed."
     }
+}
+
+/// The one position at which two overhangs differ, if there is exactly one.
+///
+/// `None` for equal overhangs, for two or more differences, and for unequal
+/// lengths — a length mismatch is [`Fault::Incompatible`] and not a fidelity
+/// question. Case is folded because [`Overhang::partner`] goes through
+/// `pl_core::iupac::reverse_complement`, which preserves case: a soft-masked
+/// `aatg` would otherwise count four differences against `CATT`.
+fn one_substitution_apart(a: &[u8], b: &[u8]) -> Option<usize> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut found = None;
+    for (k, (x, y)) in a.iter().zip(b).enumerate() {
+        if !x.eq_ignore_ascii_case(y) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(k);
+        }
+    }
+    found
 }
 
 /// Check a set of overhangs for the faults that can be found without data.
@@ -247,27 +303,44 @@ pub fn check(overhangs: &[Overhang]) -> Report {
             // One overhang pairing with another's partner is the same
             // collision as a repeat, seen from the other strand -- and it is
             // the one a designer reading a list of overhangs will not spot.
-            if overhangs[i].bases == overhangs[j].partner().bases {
+            let partner = overhangs[j].partner();
+            if overhangs[i].bases == partner.bases {
                 faults.push(Fault::CrossPairing {
                     a: names[i].clone(),
                     b: names[j].clone(),
                 });
                 continue;
             }
-            if overhangs[i].bases.len() == overhangs[j].bases.len() {
-                let diffs: Vec<usize> = overhangs[i]
-                    .bases
-                    .iter()
-                    .zip(&overhangs[j].bases)
-                    .enumerate()
-                    .filter(|(_, (a, b))| !a.eq_ignore_ascii_case(b))
-                    .map(|(k, _)| k)
-                    .collect();
-                if diffs.len() == 1 {
-                    faults.push(Fault::NearNeighbour {
+            if let Some(at) = one_substitution_apart(&overhangs[i].bases, &overhangs[j].bases) {
+                faults.push(Fault::NearNeighbour {
+                    a: names[i].clone(),
+                    b: names[j].clone(),
+                    at,
+                });
+            }
+            // The mirror of the exact test above, one substitution out. Both
+            // orientations are in the tube -- junction j contributes `a_j` on
+            // one fragment end and `rc(a_j)` on the end it is meant to meet --
+            // so `a_i` mis-ligates either to `rc(a_j)`, caught by the diff
+            // above, or to `a_j` itself, which is this one and joins the two
+            // ends head-to-head. Comparing only `a_i` with `a_j` tested exact
+            // matches in both orientations and one-mismatch matches in only
+            // one: `check` on `AATG CATA GGAG TACT` reported an empty fault
+            // list, while the same physical hazard spelled out by hand --
+            // `AATG CATA GGAG TACT CATT`, where CATT is nothing but rc(AATG) --
+            // reported "CATA and CATT differ only at position 4".
+            //
+            // One direction per pair is enough: `d(a_i, rc(a_j))` equals
+            // `d(a_j, rc(a_i))`, because reverse-complementing both sides of a
+            // comparison preserves the number of mismatches.
+            if !overhangs[j].is_palindromic() {
+                // A palindromic `a_j` is its own partner, so this would restate
+                // the `NearNeighbour` just pushed, in the same words.
+                if let Some(at) = one_substitution_apart(&overhangs[i].bases, &partner.bases) {
+                    faults.push(Fault::CrossNeighbour {
                         a: names[i].clone(),
                         b: names[j].clone(),
-                        at: diffs[0],
+                        at,
                     });
                 }
             }
@@ -309,11 +382,32 @@ pub fn check(overhangs: &[Overhang]) -> Report {
 /// nothing else. An end whose carrying strand is shorter than `|ovhg|` — the
 /// enzyme's second-strand nick fell outside the fragment, so the designed
 /// overhang never forms — returns the single-stranded bases that are really
-/// there, which is shorter than every other overhang in the set and so reaches
-/// the reader as a fatal [`Fault::Incompatible`]. It used to return `None` and
-/// vanish: the sole caller is a bare `if let Some(o) = … { push }`, so the
-/// junction was deleted from the set and the CLI printed "no structural fault
-/// found" with `"usable": true` over what was left.
+/// there, which is shorter than every other overhang in the set and so would
+/// reach the reader as a fatal [`Fault::Incompatible`]. It used to return
+/// `None` and vanish: the sole caller is a bare `if let Some(o) = … { push }`,
+/// so the junction was deleted from the set and the CLI printed "no structural
+/// fault found" with `"usable": true` over what was left.
+///
+/// # That last branch is unreachable from a digest, and saying so is the point
+///
+/// It was written for audit 2026-07-28 #42, whose exhibit is the linear
+/// `AAAAAAAAAAAAGGTCTCAC`: BsaI's second nick falls past the end, and the
+/// fragment used to arrive here with a carrying strand shorter than `|ovhg|`.
+/// #43 then stopped `cut` producing that fragment at all — measured on that
+/// exact fixture, `cut_positions` returns `[]`, so the molecule comes back as
+/// one blunt piece and `n == 0` returns above. The 2026-07-29 spacer guard in
+/// [`crate::cut`] removes the one remaining shape, a piece whose two boundaries
+/// are nicks closer together than `|ovhg|`.
+///
+/// So no input this program can read reaches the `k.min(w.len())` clamp, and
+/// the in-module test that covers it constructs a `Dseq::from_parts("", "", -4,
+/// false)` by hand — a value `cut` no longer emits. The branch is kept, because
+/// `Dseq` is public and a caller may build one, and because a silent truncation
+/// here would be worse than a fatal fault. But it is defensive code rather than
+/// a live path, and a reader asking "when does this fire" deserves to be told
+/// that from a real file it does not. **The refusal a user actually meets is
+/// `bins/pl`'s**, which rejects an empty overhang set outright rather than
+/// letting `check(&[])` return no faults and `"usable": true`.
 pub fn left_overhang(f: &Dseq) -> Option<Overhang> {
     let n = f.ovhg;
     if n == 0 {
@@ -423,6 +517,103 @@ mod tests {
             r.faults
                 .iter()
                 .any(|f| matches!(f, Fault::CrossPairing { .. })),
+            "{:?}",
+            r.faults
+        );
+    }
+
+    #[test]
+    fn a_near_neighbour_of_anothers_partner_is_caught_too() {
+        // Every junction puts *two* overhangs in the tube: `a_j` on one
+        // fragment end and `rc(a_j)` on the end it is meant to meet. AATG's
+        // obligate partner is CATT, and CATT is one substitution from CATA, so
+        // AATG anneals to CATA over three of its four bases -- the same
+        // mis-ligation `NearNeighbour` reports, read on the other strand.
+        //
+        // `check` used to diff `a_i` only against `a_j`, never against
+        // `a_j.partner()`, so exact collisions were tested in both
+        // orientations (Repeated, CrossPairing, Palindromic) and one-mismatch
+        // collisions in only one. This set came back with an empty fault list
+        // and `pl goldengate AATG CATA GGAG TACT --json` printed
+        // `"faults": [ ]` with "no structural fault found" -- while the very
+        // same hazard spelled out by hand, `... TACT CATT` with CATT being
+        // nothing but rc(AATG), was duly reported.
+        let r = check(&[oh("AATG"), oh("CATA"), oh("GGAG"), oh("TACT")]);
+        // Stated first without naming the new variant, because this is the
+        // assertion that fails against the unfixed crate: the set is not
+        // fault-free, whatever the fault ends up being called.
+        assert!(
+            !r.faults.is_empty(),
+            "AATG anneals to CATA over 3 of 4 bases; that is a fault"
+        );
+        let cn: Vec<&Fault> = r
+            .faults
+            .iter()
+            .filter(|f| matches!(f, Fault::CrossNeighbour { .. }))
+            .collect();
+        assert_eq!(cn.len(), 1, "{:?}", r.faults);
+        let text = cn[0].to_string();
+        assert!(text.contains("AATG"), "{text}");
+        assert!(text.contains("CATA"), "{text}");
+        assert!(text.contains("position 1"), "{text}");
+        assert!(text.contains("head-to-head"), "{text}");
+        // A wrong minor product, not a wrong construct -- the same severity as
+        // the same-strand near neighbour, for the same reason.
+        assert!(!cn[0].is_fatal());
+        assert!(r.is_usable(), "{:?}", r.faults);
+        // The direct diff still says nothing about this pair: AATG and CATA
+        // differ at two positions. Reporting it once, not once per orientation.
+        assert!(
+            !r.faults
+                .iter()
+                .any(|f| matches!(f, Fault::NearNeighbour { .. })),
+            "{:?}",
+            r.faults
+        );
+    }
+
+    #[test]
+    fn the_canonical_moclo_set_stays_clean_under_the_cross_orientation_check() {
+        // The control for the test above, and the reason the new rule is safe
+        // to ship: Weber et al. 2011's level-0 overhangs are the set this
+        // check exists to vet, and no pair of them is within one substitution
+        // of another's partner. A rule that flagged the standard set would be
+        // a rule nobody could use.
+        let r = check(&[
+            oh("GGAG"),
+            oh("TACT"),
+            oh("AATG"),
+            oh("AGGT"),
+            oh("GCTT"),
+            oh("CGCT"),
+        ]);
+        assert!(r.faults.is_empty(), "{:?}", r.faults);
+        assert!(r.is_usable());
+    }
+
+    #[test]
+    fn a_palindromic_overhang_does_not_report_its_neighbour_twice() {
+        // AATT is its own partner, so diffing AATG against AATT and against
+        // rc(AATT) is literally the same comparison. Pushing both would print
+        // the same sentence twice with different wording, and burying a real
+        // diagnosis in its own echo is what the dedup above the loop exists to
+        // prevent.
+        let r = check(&[oh("AATG"), oh("AATT")]);
+        assert_eq!(
+            r.faults
+                .iter()
+                .filter(|f| matches!(f, Fault::NearNeighbour { .. }))
+                .count(),
+            1,
+            "{:?}",
+            r.faults
+        );
+        assert_eq!(
+            r.faults
+                .iter()
+                .filter(|f| matches!(f, Fault::CrossNeighbour { .. }))
+                .count(),
+            0,
             "{:?}",
             r.faults
         );

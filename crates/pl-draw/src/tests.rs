@@ -269,6 +269,39 @@ fn a_feature_wholly_inside_the_molecule_is_not_called_partly_drawn() {
     assert!(report.malformed.is_empty());
 }
 
+/// Every text item's horizontal extent, measured the way it will be typeset.
+///
+/// `pdf::text_width_in` in the item's own weight, which is what `pdf::to_pdf`
+/// and `eps::to_eps` position with and therefore what the `/MediaBox` and the
+/// `%%BoundingBox` crop against. Measuring with `label_width` here instead --
+/// the same estimate `fit_label` used to decide with -- is why the test below
+/// could not see a label 5.93 pt off the page: the check and the decision
+/// shared an assumption, so the check could only ever agree with it.
+fn text_extents(sc: &Scene) -> Vec<(String, f64, f64)> {
+    sc.items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Text {
+                x,
+                size,
+                anchor,
+                text,
+                bold,
+                ..
+            } => {
+                let w = pdf::text_width_in(text, *size, *bold);
+                let (l, r) = match anchor {
+                    Anchor::Start => (*x, x + w),
+                    Anchor::Middle => (x - w / 2.0, x + w / 2.0),
+                    Anchor::End => (x - w, *x),
+                };
+                Some((text.clone(), l, r))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn no_label_is_drawn_past_the_edge_of_the_canvas() {
     // The radius reserves room for the widest label, but that reservation is
@@ -282,27 +315,12 @@ fn no_label_is_drawn_past_the_edge_of_the_canvas() {
     m.features.push(feat(long, "CDS", 100, 500));
     m.features.push(feat("ori", "rep_origin", 600, 700));
     let (sc, report) = scene(&m, Options::default());
-    for item in &sc.items {
-        if let Item::Text {
-            x,
-            size,
-            anchor,
-            text,
-            ..
-        } = item
-        {
-            let w = label_width(text, *size);
-            let (l, r) = match anchor {
-                Anchor::Start => (*x, x + w),
-                Anchor::Middle => (x - w / 2.0, x + w / 2.0),
-                Anchor::End => (x - w, *x),
-            };
-            assert!(
-                l >= 0.0 && r <= sc.width,
-                "{text:?} runs from {l} to {r} on a canvas 0..{}",
-                sc.width
-            );
-        }
+    for (text, l, r) in text_extents(&sc) {
+        assert!(
+            l >= 0.0 && r <= sc.width,
+            "{text:?} runs from {l} to {r} on a canvas 0..{}",
+            sc.width
+        );
     }
     assert_eq!(report.labels_truncated, vec![long.to_string()]);
     // Shortened, not dropped: the reader can still tell which feature it is.
@@ -310,6 +328,84 @@ fn no_label_is_drawn_past_the_edge_of_the_canvas() {
         i,
         Item::Text { text, .. } if text.starts_with("TetR-P2A") && text.ends_with("...")
     )));
+}
+
+#[test]
+fn a_capital_heavy_name_inside_the_reservation_is_still_measured_in_helvetica() {
+    // The uncapped case, which the cap-binding test above cannot reach. On a
+    // square canvas below the 30% cap the reservation closes with exactly 8
+    // units to spare -- but in `label_width`'s 0.55 em/character units, and the
+    // figure is cropped in Helvetica's. `pCMV-WPRE` is 9 characters: 59.4
+    // estimate units against 67.4 of room, so `fit_label` kept it whole and
+    // reported nothing, and then the PDF wrote `652.6 555.59 Td (pCMV-WPRE) Tj`
+    // with `/MediaBox [0 0 720 720]` against a real width of 73.33 pt -- ending
+    // at 725.93, most of the final E cropped off the printed figure. The EPS is
+    // the same numbers under `%%BoundingBox: 0 0 720 720`.
+    //
+    // EGFP, WPRE, CMV, BGH: capital-heavy is the dominant plasmid naming style,
+    // and it is exactly where the 0.55 estimate is furthest out.
+    let name = "pCMV-WPRE";
+    for (start, end, want_right_column) in [(100u64, 900u64, true), (2100, 2900, false)] {
+        let mut m = plasmid(4000, true);
+        m.features.push(feat(name, "CDS", start, end));
+        m.features.push(feat("ori", "rep_origin", 2000, 2400));
+        let (sc, report) = scene(&m, Options::default());
+
+        // The label really is in the column this case is about, or the mirror
+        // half of the defect would go untested.
+        let (x, anchor) = sc
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Text {
+                    x, anchor, text, ..
+                } if text.starts_with("pCMV") => Some((*x, *anchor)),
+                _ => None,
+            })
+            .expect("the label");
+        let right = anchor == Anchor::Start;
+        assert_eq!(right, want_right_column, "label at x={x}");
+
+        for (text, l, r) in text_extents(&sc) {
+            assert!(
+                l >= 0.0 && r <= sc.width,
+                "{text:?} runs from {l} to {r} on a canvas 0..{} ({start}..{end})",
+                sc.width
+            );
+        }
+        // Shortened rather than cropped, and named -- a label the reader can
+        // see has been cut is worth more than one that silently lost a letter.
+        assert_eq!(report.labels_truncated, vec![name.to_string()]);
+    }
+}
+
+#[test]
+fn a_name_that_really_fits_is_not_shortened_by_the_stricter_measure() {
+    // The control for the change of unit: measuring in Helvetica must shorten
+    // only what would otherwise have been cropped. `room` is the distance from
+    // the label's own origin to the canvas edge, so the two conditions are the
+    // same inequality -- a name whose real glyphs fit goes out whole.
+    let mut m = plasmid(5386, true);
+    m.features.push(feat("bla", "CDS", 100, 960));
+    m.features.push(feat("lacZalpha", "gene", 1200, 1800));
+    m.features.push(feat("ori", "rep_origin", 3000, 3200));
+    let (sc, report) = scene(&m, Options::default());
+    assert!(
+        report.labels_truncated.is_empty(),
+        "{:?}",
+        report.labels_truncated
+    );
+    for name in ["bla", "lacZalpha", "ori"] {
+        assert!(
+            sc.items
+                .iter()
+                .any(|i| matches!(i, Item::Text { text, .. } if text == name)),
+            "{name} was shortened or dropped"
+        );
+    }
+    for (text, l, r) in text_extents(&sc) {
+        assert!(l >= 0.0 && r <= sc.width, "{text:?}: {l}..{r}");
+    }
 }
 
 #[test]
@@ -360,6 +456,28 @@ fn degenerate_molecules_do_not_panic() {
     let mut huge = plasmid(10, true);
     huge.features.push(feat("z", "CDS", u64::MAX, u64::MAX));
 
+    // A hostile *length*, not just a hostile coordinate. This list is what the
+    // name of this test promises to cover and the longest molecule in it was
+    // 3000 bp, so the ruler's `base += step` and `angle`'s i64 modulo -- both of
+    // which only overflow near the top of the range -- were never reached.
+    let mut declared_max = Molecule {
+        declared_len: Some(u64::MAX),
+        topology: Topology::Circular,
+        ..Default::default()
+    };
+    declared_max.features.push(feat("w", "CDS", 1, u64::MAX));
+    let mut past_i64 = Molecule {
+        declared_len: Some(5_000_000_000_000_000_000),
+        topology: Topology::Linear,
+        ..Default::default()
+    };
+    past_i64.features.push(feat(
+        "v",
+        "CDS",
+        4_999_999_999_999_999_000,
+        5_000_000_000_000_000_000,
+    ));
+
     let cases = [
         Molecule::default(),
         plasmid(0, true),
@@ -368,11 +486,89 @@ fn degenerate_molecules_do_not_panic() {
         zero_coords,
         huge,
         track,
+        declared_max,
+        past_i64,
     ];
     for (i, m) in cases.iter().enumerate() {
         let (svg, _) = circular_svg(m, Options::default());
         well_formed(&svg).unwrap_or_else(|e| panic!("case {i}: {e}"));
     }
+}
+
+#[test]
+fn a_declared_length_at_the_top_of_the_u64_range_neither_panics_nor_runs_away() {
+    // `LOCUS HOSTILE 18446744073709551615 bp DNA circular SYN` with `ORIGIN`
+    // immediately followed by `//`. The GenBank reader parses that length with a
+    // bare `parse::<u64>()` and `Molecule::validate` compares a declared length
+    // against the sequence only when there *is* one -- annotation-only records
+    // are a supported class -- so nothing between the file and here bounds it,
+    // and `pl info` prints it back cheerfully.
+    //
+    // Two sites overflowed. The ruler's `base += step` walked 2e18 at a time and
+    // passed u64::MAX on the tenth tick: debug panicked, and the shipped release
+    // build wrapped to 1553255926290448384, which is still `<= len`, so the loop
+    // never ended and pushed two `Item`s a turn until the process was killed
+    // with no file and no error. `angle` did its modulo through i64, which
+    // panicked above about 4.6e18.
+    let mut m = Molecule {
+        declared_len: Some(u64::MAX),
+        topology: Topology::Circular,
+        ..Default::default()
+    };
+    // Ends on the last base, so the closing angle of its arc is asked for at
+    // `len` -- where `angle(b + 1, len)` overflowed before `angle` was entered.
+    m.features.push(feat("everything", "CDS", 1, u64::MAX));
+
+    let (svg, report) = circular_svg(&m, Options::default());
+    well_formed(&svg).expect("malformed svg");
+    assert!(report.malformed.is_empty(), "{:?}", report.malformed);
+    assert_eq!(report.labels_placed, 1);
+    // The ruler stopped at the last tick that fits instead of wrapping round.
+    assert!(
+        svg.contains("18,000,000,000,000,000,000"),
+        "the last in-range tick is missing"
+    );
+    assert!(
+        !svg.contains("1,553,255,926,290,448,384"),
+        "the ruler wrapped past u64::MAX and started again"
+    );
+    assert!(svg.contains("18,446,744,073,709,551,615 bp"));
+}
+
+#[test]
+fn the_angle_of_a_base_is_right_at_lengths_no_i64_can_hold() {
+    // `((base as i64 - 1) % l + l) % l` overflowed the `+ l` once `len` passed
+    // about 4.6e18 with a base large enough to reach it -- and the ruler walks
+    // bases all the way up to `len`, so it did. Above i64::MAX the same
+    // expression stopped panicking and started lying instead: `l` went negative
+    // and it returned 0 for every base, i.e. every feature at twelve o'clock,
+    // with nothing in any `Report`.
+    let huge = 5_000_000_000_000_000_000u64;
+    assert!(angle(huge, huge).is_finite());
+    assert!(
+        angle(huge, huge) > TAU * 0.99,
+        "the last base is nearly a full turn round, got {}",
+        angle(huge, huge)
+    );
+    let half = angle(u64::MAX / 2, u64::MAX);
+    assert!((half - TAU / 2.0).abs() < 1e-6, "half a turn is {half}");
+    assert!(
+        angle(1, u64::MAX) == 0.0 && angle(2, u64::MAX) > 0.0,
+        "every base collapsed onto the origin"
+    );
+    // Base 0 still lands one step *before* the origin, at every length.
+    assert!((angle(0, 1000) - TAU * 999.0 / 1000.0).abs() < 1e-12);
+    assert!((angle(0, u64::MAX) - TAU).abs() < 1e-9);
+    // And `angle_past` is `angle(base + 1)` wherever that addition is safe.
+    for (b, len) in [(0u64, 1000u64), (1, 1000), (999, 1000), (500, 4000), (7, 7)] {
+        assert!(
+            (angle_past(b, len) - angle(b + 1, len)).abs() < 1e-12,
+            "{b}/{len}"
+        );
+    }
+    // ... and it is defined where that addition is not.
+    assert_eq!(angle_past(u64::MAX, u64::MAX), 0.0);
+    assert_eq!(angle_past(5, 0), 0.0);
 }
 
 #[test]

@@ -8,7 +8,13 @@
 //! having no bases. The footer is what turns it into an audited one, and the
 //! arithmetic — searched plus every excluded bucket equals the total — is a
 //! property test rather than a hope, because a footer that lies is worse than
-//! no footer.
+//! no footer. It balances for every query that names a sequence criterion,
+//! which is the only kind that scans. A `--name`-only query scans nothing, so
+//! its footer would read "0 of 3,047 records searched" beside seventeen
+//! matches; that is why the callers suppress it rather than print it. See
+//! [`Coverage`], which states the precondition, and
+//! `a_query_with_no_sequence_criterion_searches_nothing_and_excludes_nothing`,
+//! which pins the shape.
 //!
 //! # Substring, not tokens
 //!
@@ -40,8 +46,20 @@ pub const MAX_RETAINED_HITS: u64 = 1_000_000;
 
 /// What a query looked at, and what it could not.
 ///
-/// Reported alongside every result. `searched + Σ(excluded) == total` is
-/// asserted; see `coverage_arithmetic_always_balances`.
+/// Reported alongside every result. `searched + Σ(excluded) == total` holds
+/// **whenever the query carried a sequence criterion**, and is asserted for
+/// that case in `coverage_arithmetic_always_balances`, which draws
+/// `motif: Some(..)` on every one of its 600 cases and so speaks only for it.
+///
+/// With no motif the equality is `0 == total`, deliberately: nothing is
+/// scanned, so there is no scan for a record to be excluded *from*, and
+/// `searched`, `excluded` and `filtered_out` all stay zero while `total` counts
+/// the library — see [`run`] and
+/// `a_query_with_no_sequence_criterion_searches_nothing_and_excludes_nothing`.
+/// Stating the equality unconditionally, as this doc once did, invites a new
+/// consumer to render `searched / total` as a coverage bar, which would read
+/// 0% for every `--name` and `--text` query. Gate on the motif, as both shipped
+/// callers do.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Coverage {
     pub total: usize,
@@ -75,6 +93,14 @@ impl Coverage {
     }
 
     /// Human-readable, in the shape the CLI and the GUI both print.
+    ///
+    /// **Only meaningful when the query carried a sequence criterion.** With
+    /// none, `searched` is 0 by design and the first line renders "0 of 3,047
+    /// records searched" beside a full page of name matches — precisely the
+    /// lying footer this module opens by condemning. The gating lives in the
+    /// callers rather than here because an empty string would be
+    /// indistinguishable from a library of zero records; a third caller has to
+    /// gate too.
     pub fn describe(&self) -> String {
         let mut s = format!("{} of {} records searched", self.searched, self.total);
         if self.filtered_out > 0 {
@@ -334,6 +360,17 @@ pub fn run<'a>(rows: &'a [Row], packed: &[u8], q: &Query) -> Results<'a> {
     // Stable, so two runs print the same footer.
     buckets.sort_by_key(|(s, _)| s.as_str());
     cov.excluded = buckets;
+    // The documented arithmetic, checked where it is produced rather than only
+    // in a property test that draws one half of the domain. Guarded on the
+    // motif because with no sequence criterion nothing is scanned and the
+    // footer is all zeroes by design, not by accident.
+    debug_assert!(
+        q.motif.is_none() || cov.searched + cov.excluded_total() == cov.total,
+        "coverage does not balance: {} searched + {} excluded != {} total",
+        cov.searched,
+        cov.excluded_total(),
+        cov.total
+    );
     Results {
         matches,
         coverage: cov,

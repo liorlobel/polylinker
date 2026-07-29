@@ -505,9 +505,24 @@ pub fn dg37(seq: &[u8], t: &NnTable) -> Result<f64, TmError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Polymerase {
     pub name: &'static str,
-    /// Degrees added to the *lower* primer Tm.
+    /// Degrees added to the *lower* primer Tm — but only when that primer is
+    /// longer than [`Polymerase::offset_over_nt`].
     pub offset_low: i32,
     pub offset_high: i32,
+    /// The offset applies only to primers **longer than** this many bases; at
+    /// or under it the vendor's Ta is the governing Tm itself. `0` means the
+    /// rule has no length carve-out and the offset always applies.
+    ///
+    /// It exists because [`Polymerase::note`] was stating a condition nothing
+    /// could check. NEB's Phusion protocol: primers *greater than* 20 nt anneal
+    /// 3 °C above the lower Tm, and at *less than* 20 nt "an annealing
+    /// temperature equivalent to the Tm of the lower primer should be used".
+    /// Exactly 20 falls between NEB's two sentences, so the boundary is this
+    /// project's choice, not theirs: 20 here means the +3 starts at 21, which
+    /// is what the printed note has always said ("over 20 nt").
+    ///
+    /// Only [`anneal_sized`] can honour this. [`anneal`] never sees a length.
+    pub offset_over_nt: usize,
     pub note: &'static str,
 }
 
@@ -522,24 +537,29 @@ pub const POLYMERASES: &[Polymerase] = &[
         name: "Phusion",
         offset_low: 3,
         offset_high: 3,
+        offset_over_nt: 20,
         note: "Ta = Tm + 3 for primers over 20 nt; use the lower Tm",
     },
     Polymerase {
         name: "Q5",
         offset_low: 0,
         offset_high: 0,
+        offset_over_nt: 0,
         note: "NEB advise their own calculator; Ta near the lower Tm",
     },
     Polymerase {
         name: "Phire",
         offset_low: 3,
         offset_high: 3,
+        offset_over_nt: 20,
         note: "as Phusion",
     },
     Polymerase {
         name: "Taq",
         offset_low: -5,
         offset_high: -5,
+        // No length clause in the classic rule, so none is invented here.
+        offset_over_nt: 0,
         note: "Ta = Tm - 5, the classic rule",
     },
 ];
@@ -548,12 +568,55 @@ pub const POLYMERASES: &[Polymerase] = &[
 ///
 /// Always from the **lower** of the two Tms: the weaker primer is the one that
 /// fails to anneal.
+///
+/// **This is the length-blind form, and half the table's rules turn on length.**
+/// Phusion and Phire carry `offset_over_nt: 20`, which nothing reachable from
+/// here can test, so this function applies the +3 to every primer regardless of
+/// length. That is how the SP6 primer `ATTTAGGTGACACTATAG` (18 nt, Tm 38.9 °C)
+/// came to be advised at `Phusion 42C` on the same printed line as "Ta = Tm + 3
+/// for primers over 20 nt", where NEB's rule for an 18-mer gives Ta = Tm =
+/// 39 °C. Prefer [`anneal_sized`] anywhere the oligos themselves are in hand —
+/// which is every caller in this workspace, `bins/pl` (`cmd_tm`) and
+/// `pl-design`'s report. This form is kept for callers that genuinely hold no
+/// length, and for the boundary it documents.
 pub fn anneal(tm_a: f64, tm_b: Option<f64>, p: &Polymerase) -> (f64, f64) {
     let low = match tm_b {
         Some(b) => tm_a.min(b),
         None => tm_a,
     };
     (low + p.offset_low as f64, low + p.offset_high as f64)
+}
+
+/// As [`anneal`], but told how long the primers are, so a vendor rule with a
+/// length carve-out can be applied instead of merely quoted.
+///
+/// Each argument is `(Tm in °C, length in bases)`. The **lower-Tm** primer
+/// governs, for the reason [`anneal`] gives, and it is *that* primer's length
+/// that decides whether the offset applies — NEB's wording is "the Tm of the
+/// lower Tm primer", not the pair's mean or the longer oligo's.
+///
+/// The length wanted is the annealed footprint, not the ordered oligo: a 5'
+/// tail is not templated in the early cycles and does not anneal, so counting
+/// it would raise the length past the carve-out on the strength of bases that
+/// are not in the duplex at that point.
+///
+/// Tms that tie are decided by the shorter primer, which is the cooler of the
+/// two possible answers; a Ta guessed 3 °C hot costs the reaction, a Ta 3 °C
+/// cool costs some specificity.
+pub fn anneal_sized(a: (f64, usize), b: Option<(f64, usize)>, p: &Polymerase) -> (f64, f64) {
+    let governing = match b {
+        Some(b) if b.0 < a.0 || (b.0 == a.0 && b.1 < a.1) => b,
+        _ => a,
+    };
+    let (tm, nt) = governing;
+    // At or under the threshold the vendor's Ta *is* the Tm, so this is not
+    // "skip the offset", it is a different branch of the same published rule.
+    // `offset_over_nt: 0` means the rule has no length clause at all, and must
+    // not be read as a threshold a zero-length primer could fall under.
+    if p.offset_over_nt > 0 && nt <= p.offset_over_nt {
+        return (tm, tm);
+    }
+    (tm + p.offset_low as f64, tm + p.offset_high as f64)
 }
 
 #[cfg(test)]
@@ -695,6 +758,67 @@ mod tests {
         assert_eq!(anneal(60.0, Some(65.0), phusion), (63.0, 63.0));
         // One primer is allowed.
         assert_eq!(anneal(60.0, None, taq), (55.0, 55.0));
+    }
+
+    /// A note that states a condition, beside a number computed without it.
+    ///
+    /// `pl tm ATTTAGGTGACACTATAG` (SP6, 18 nt, Tm 38.9 C) printed
+    /// `Phusion  42C   Ta = Tm + 3 for primers over 20 nt` — 18 is not over 20,
+    /// so the rule on that line asks for 39 C. `anneal` cannot tell: it is
+    /// handed temperatures only. `anneal_sized` is handed the lengths, so the
+    /// carve-out is applied rather than merely quoted.
+    #[test]
+    fn a_length_carve_out_is_applied_when_the_length_is_known() {
+        let phusion = POLYMERASES.iter().find(|p| p.name == "Phusion").unwrap();
+        let taq = POLYMERASES.iter().find(|p| p.name == "Taq").unwrap();
+
+        // The scenario, both ways round. 18 nt: NEB's Ta is the Tm itself.
+        assert_eq!(anneal(38.9, None, phusion), (41.9, 41.9));
+        assert_eq!(anneal_sized((38.9, 18), None, phusion), (38.9, 38.9));
+        // Over 20 nt the +3 is the rule and must survive the fix.
+        assert_eq!(anneal_sized((60.0, 21), None, phusion), (63.0, 63.0));
+        // The boundary this project chose, since NEB's two sentences cover
+        // "greater than 20" and "less than 20" and leave 20 itself unsaid.
+        assert_eq!(anneal_sized((60.0, 20), None, phusion), (60.0, 60.0));
+        assert_eq!(phusion.offset_over_nt, 20);
+
+        // A pair: the lower-Tm primer governs, and it is *that* one's length
+        // that decides. A 25 nt partner does not buy the 19 nt primer a +3.
+        assert_eq!(
+            anneal_sized((54.6, 19), Some((58.0, 25)), phusion),
+            (54.6, 54.6)
+        );
+        // ... and a short partner with the *higher* Tm does not cost the
+        // governing 22-mer its +3 either.
+        assert_eq!(
+            anneal_sized((60.0, 22), Some((65.0, 16)), phusion),
+            (63.0, 63.0)
+        );
+        // Tied Tms: the shorter primer governs, the cooler of the two answers.
+        assert_eq!(
+            anneal_sized((60.0, 20), Some((60.0, 24)), phusion),
+            (60.0, 60.0)
+        );
+
+        // A rule with no length clause keeps none: Taq is Tm - 5 at any length.
+        assert_eq!(taq.offset_over_nt, 0);
+        for nt in [8usize, 18, 20, 21, 40] {
+            assert_eq!(anneal_sized((60.0, nt), None, taq), (55.0, 55.0), "{nt} nt");
+        }
+
+        // Any note that names a primer length has to be backed by a threshold
+        // something can check, or it is a claim about a number the code did not
+        // compute -- which is exactly what this test was written for.
+        for p in POLYMERASES {
+            if p.note.contains(" nt") {
+                assert!(
+                    p.offset_over_nt > 0,
+                    "{}'s note states a length condition: {}",
+                    p.name,
+                    p.note
+                );
+            }
+        }
     }
 
     #[test]
@@ -945,17 +1069,61 @@ mod tests {
     }
 }
 
+/// The body of a JSON string literal — the quotes are the caller's.
+///
+/// Hand-written because this crate carries no dependencies; `bins/pl` already
+/// has the identical routine as `json_str`, so the escaping rule is settled and
+/// this is only a matter of applying it here too.
+///
+/// It was not applied, and both halves of [`tm_report_line`] leaked. The echoed
+/// oligo is whatever the user typed: `pl tm --json 'AC"GT'` closed the string
+/// early, `AC\GT` emitted `\G` (not a JSON escape), and a pasted TSV line —
+/// `pl tm --json` reads oligos one per line from stdin and `str::trim` only
+/// strips the ends, so `ACGTACGT<TAB>primerF` survives whole — put a raw TAB
+/// inside a string. The error message leaked separately: `Display for TmError`
+/// renders the offending byte with `{:?}` on a `char`, and Rust's `Debug for
+/// char` sets `escape_double_quote: false`, so a `"` comes out bare and a
+/// control byte comes out as `\u{7}`, which is not a JSON escape either. Every
+/// one of those lines is refused by `json.loads` while `pl` exits 0, so a
+/// consumer using this repo's own idiom — `[json.loads(l) for l in
+/// out.stdout.splitlines()]`, as `reference/python/tests/xcheck_tm.py` does —
+/// loses a whole batch over one stray character in one line.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// A JSON line per oligo, for the differential test against Biopython.
 ///
 /// Lives in the crate rather than in the CLI so the oracle drives exactly the
 /// code the product uses, with no formatting layer in between to disagree.
 pub fn tm_report_line(seq: &str, m: &Method) -> String {
+    // Escaped in both arms, not only the failing one. The `Ok` arm's `seq` is
+    // pure ASCII ACGT today, but only because `tm` refuses every other byte
+    // (see `TmError::NotUnambiguous`) — an invariant enforced in a different
+    // function, over a value this one echoes back unmodified. Emitting raw text
+    // here on the strength of a check over there is how the `Err` arm broke.
+    let esc = json_escape(seq);
     match tm(seq.as_bytes(), m) {
         Ok(t) => format!(
-            "{{\"seq\": \"{seq}\", \"tm\": {:.6}, \"dh\": {:.6}, \"ds\": {:.6}, \"selfcomp\": {}}}",
+            "{{\"seq\": \"{esc}\", \"tm\": {:.6}, \"dh\": {:.6}, \"ds\": {:.6}, \"selfcomp\": {}}}",
             t.tm, t.dh, t.ds, t.self_complementary
         ),
-        Err(e) => format!("{{\"seq\": \"{seq}\", \"error\": \"{e}\"}}"),
+        Err(e) => format!(
+            "{{\"seq\": \"{esc}\", \"error\": \"{}\"}}",
+            json_escape(&e.to_string())
+        ),
     }
 }
 
@@ -1013,6 +1181,105 @@ mod convention_tests {
             "the two conventions differ by only {:.2} C",
             (want_whole - want_quarter).abs()
         );
+    }
+
+    /// The JSON rules a report line has to satisfy, checked without a parser
+    /// because this crate has no dependencies: no raw control character inside
+    /// a string, no escape JSON does not define, and no bare token outside a
+    /// string — which is what an unescaped `"` in the oligo produces once it
+    /// has closed the string early.
+    fn json_fault(line: &str) -> Option<String> {
+        let mut it = line.chars();
+        let mut in_string = false;
+        while let Some(c) = it.next() {
+            if !in_string {
+                match c {
+                    '"' => in_string = true,
+                    '{' | '}' | ':' | ',' | ' ' | '-' | '+' | '.' => {}
+                    // Numbers, and the letters of `true`/`false`/`null`.
+                    c if c.is_ascii_digit() => {}
+                    't' | 'r' | 'u' | 'e' | 'f' | 'a' | 'l' | 's' | 'n' => {}
+                    c => return Some(format!("{c:?} outside a string")),
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = false,
+                '\\' => match it.next() {
+                    Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't') => {}
+                    Some('u') => {
+                        for _ in 0..4 {
+                            match it.next() {
+                                Some(h) if h.is_ascii_hexdigit() => {}
+                                other => return Some(format!("truncated \\u escape at {other:?}")),
+                            }
+                        }
+                    }
+                    other => return Some(format!("undefined escape \\{other:?}")),
+                },
+                c if (c as u32) < 0x20 => {
+                    return Some(format!("raw control U+{:04X} inside a string", c as u32));
+                }
+                _ => {}
+            }
+        }
+        in_string.then(|| "unterminated string".to_string())
+    }
+
+    /// An oligo cannot be allowed to end the JSON string it is quoted inside.
+    ///
+    /// `pl tm --json` echoes back whatever the user typed, one object per line,
+    /// and `reference/python/tests/xcheck_tm.py` parses those lines with
+    /// `json.loads`. Unescaped, `pl tm --json 'AC"GT'` printed
+    /// `{"seq": "AC"GT", ...}` and exited 0, so the damage read as a consumer
+    /// bug. The TAB case is the one that arrives by accident: oligos are also
+    /// read one per line from stdin and `str::trim` strips only the ends, so a
+    /// pasted TSV line `ACGTACGT<TAB>primerF` reached the output whole. The
+    /// message leaks separately from the oligo, because `Debug for char` does
+    /// not escape `"` and renders a control byte as `\u{7}`, which is a Rust
+    /// escape and not a JSON one.
+    #[test]
+    fn a_report_line_stays_parsable_whatever_the_oligo_contains() {
+        let m = Method::default();
+        let cases: [(&str, &str); 5] = [
+            (
+                "AC\"GT",
+                r#"{"seq": "AC\"GT", "error": "base 3 is '\"', which has no stacking parameters; a Tm over the rest would be a different oligo's"}"#,
+            ),
+            (
+                "AC\\GT",
+                r#"{"seq": "AC\\GT", "error": "base 3 is '\\\\', which has no stacking parameters; a Tm over the rest would be a different oligo's"}"#,
+            ),
+            (
+                "ACGTACGT\tprimerF",
+                r#"{"seq": "ACGTACGT\tprimerF", "error": "base 9 is '\\t', which has no stacking parameters; a Tm over the rest would be a different oligo's"}"#,
+            ),
+            (
+                "AC\u{7}GT",
+                r#"{"seq": "AC\u0007GT", "error": "base 3 is '\\u{7}', which has no stacking parameters; a Tm over the rest would be a different oligo's"}"#,
+            ),
+            // Shortest input that reaches a different error, so the seq escape
+            // is checked against a message that cannot be doing the work.
+            (
+                "\"",
+                r#"{"seq": "\"", "error": "a melting temperature needs at least two bases"}"#,
+            ),
+        ];
+        for (input, want) in cases {
+            let line = tm_report_line(input, &m);
+            assert_eq!(line, want, "input {input:?}");
+            assert_eq!(json_fault(&line), None, "input {input:?}: {line}");
+        }
+
+        // The Ok arm goes through the same escape, and must still be JSON.
+        let ok = tm_report_line("acgtacgtacgtacgtacgt", &m);
+        assert!(ok.contains("\"tm\": "), "{ok}");
+        assert_eq!(json_fault(&ok), None, "{ok}");
+
+        // The check has to be able to fail, so: the shapes this used to emit.
+        assert!(json_fault(r#"{"seq": "AC"GT", "error": "x"}"#).is_some());
+        assert!(json_fault("{\"seq\": \"ACG\tT\"}").is_some());
+        assert!(json_fault(r#"{"seq": "AC\GT"}"#).is_some());
     }
 
     /// Ordinary primers land in the band ordinary primers land in.

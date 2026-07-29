@@ -131,15 +131,26 @@ pub struct Report {
     /// Labels shortened with a trailing `...` because the canvas was too narrow
     /// for the whole name, by full name.
     ///
-    /// The ring's radius reserves room for the widest label, but that
-    /// reservation is capped at 30% of the canvas so that one 60-character name
-    /// cannot collapse the map to nothing. Past the cap the name no longer fits
-    /// in what was reserved, and the choice is a clipped label or a shortened
-    /// one. A clipped label is cropped by the `viewBox`, the `/MediaBox` and the
+    /// The ring's radius reserves room for the widest label with a
+    /// 0.55 em/character estimate, and two things can make the real glyphs
+    /// outgrow it: the reservation is capped at 30% of the canvas so that one
+    /// 60-character name cannot collapse the map to nothing, and Helvetica's
+    /// own advances run up to ~26% above the estimate for capital-heavy names.
+    /// Either way the choice is a clipped label or a shortened one. A clipped
+    /// label is cropped by the `viewBox`, the `/MediaBox` and the
     /// `%%BoundingBox` alike — silently, in the typesetter's hands — so it is
     /// shortened here and said so. The feature's own `<title>` still carries
     /// the whole name, so nothing is lost from the SVG itself — only from what
     /// a reader of the printed figure can see, which is why it is reported.
+    ///
+    /// `pl export` prints this beside `labels_hidden`, and so does
+    /// `partly_drawn`. Neither had a print site anywhere in `bins/` until
+    /// 2026-07-29, so "shortened here and said so" was true of the `Report` and
+    /// not of anything a user could see — a name could be cut short in a figure
+    /// on its way to a journal in silence, and `pCMV-WP...` is a different
+    /// plasmid's name from `pCMV-WPRE`. `bins/pl-gui` still surfaces only
+    /// `labels_hidden`: there the whole name is one hover away, which is not
+    /// true of a printed page.
     pub labels_truncated: Vec<String>,
 }
 
@@ -229,15 +240,39 @@ pub fn polar(cx: f64, cy: f64, r: f64, a: f64) -> (f64, f64) {
 ///
 /// The positive modulo, rather than a saturating subtraction, is what makes
 /// base 0 land just *before* the origin instead of on it — the same reading
-/// `baseToAngle` takes, and the reason `angle(b + 1, len)` closes an arc that
-/// ends at the last base.
+/// `baseToAngle` takes, and the reason [`angle_past`] closes an arc that ends
+/// at the last base.
+///
+/// **Done in `u64`.** The same function was written `((base as i64 - 1) % l +
+/// l) % l`, and `len` is not bounded: `pl-fileio`'s GenBank reader parses the
+/// LOCUS length with a bare `parse::<u64>()`, `Molecule::validate` only checks
+/// it against the sequence when there *is* a sequence, and nothing between
+/// there and [`scene`] clamps it. Above about 4.6e18 the `+ l` overflowed —
+/// debug panicked on this line — and above `i64::MAX` `l` went negative and the
+/// expression quietly returned 0 for every base, putting every feature on a
+/// hostile record at twelve o'clock.
 pub fn angle(base: u64, len: u64) -> f64 {
     if len == 0 {
         return 0.0;
     }
-    let (l, shifted) = (len as i64, base as i64 - 1);
-    let frac = ((shifted % l) + l) % l;
+    // Base 0 is one step *before* the origin, i.e. the last base.
+    let frac = if base == 0 { len - 1 } else { (base - 1) % len };
     (frac as f64 / len as f64) * TAU
+}
+
+/// The angle one base *past* `base` — where an arc ending at `base` closes.
+///
+/// Identical to `angle(base + 1, len)` for every base a caller can hold, and
+/// written this way because that `+ 1` is not safe: `ranges` clamps a segment's
+/// end to `len`, and `len` can be `u64::MAX` off a LOCUS line, so the addition
+/// overflowed before `angle` was even entered — a debug panic, and in release a
+/// wrap to `angle(0, len)`, which is a whole turn away from where the arc
+/// should close.
+fn angle_past(base: u64, len: u64) -> f64 {
+    if len == 0 {
+        return 0.0;
+    }
+    ((base % len) as f64 / len as f64) * TAU
 }
 
 /// The angular ranges a segment occupies, splitting an origin-spanning one.
@@ -311,29 +346,58 @@ fn mid_base(parts: &[(u64, u64)], span: u64) -> u64 {
     parts.first().map_or(1, |p| p.0)
 }
 
-/// How wide a label is going to be, in scene units.
+/// How wide a label is *assumed* to be when the ring reserves room for it.
 ///
-/// The estimate, not Helvetica's real advances: it is what the ring radius
-/// reserves room with and what the TypeScript renderer measures with, and the
-/// invariant that a label ends inside the canvas has to be stated in one unit
-/// or the other. Both call sites use this so they cannot drift apart.
+/// The estimate, not Helvetica's real advances, and it is used for the radius
+/// reservation only: `packages/circular-map/src/render.ts` sizes its margin
+/// with the same 0.55 em/character, so keeping this here is what keeps the two
+/// renderers' geometry identical.
+///
+/// **It is not what a label measures when it is drawn.** The PDF and EPS back
+/// ends position and clip against `pdf::text_width_in`, which is up to ~26%
+/// wider for capital-heavy Latin — `pCMV-WPRE` at 12 pt is 59.4 units here and
+/// 73.33 pt there. Deciding whether a name fits with this number is how a
+/// 9-character plasmid name ran 5.93 pt past the `/MediaBox`, so [`fit_label`]
+/// asks `drawn_width` instead. This doc used to say "both call sites use this
+/// so they cannot drift apart"; the emitters were a third call site that never
+/// did.
 fn label_width(name: &str, font_size: f64) -> f64 {
     name.chars().count() as f64 * font_size * 0.55
+}
+
+/// How wide a label really is once drawn, in scene units.
+///
+/// Helvetica's own advances, in the regular weight every feature label is drawn
+/// in — the same measurement `pdf::to_pdf` and `eps::to_eps` use to place an
+/// `Anchor::End` label and that the `/MediaBox`, the `%%BoundingBox` and the
+/// `viewBox` therefore crop against.
+fn drawn_width(name: &str, font_size: f64) -> f64 {
+    crate::pdf::text_width_in(name, font_size, false)
 }
 
 /// A label shortened to what the canvas can actually hold, or `None` if not
 /// even one character and an ellipsis fit.
 ///
-/// `Some(name.to_string())` when the whole name fits, which is the case for
-/// every map where the radius reservation was not capped — the caller compares
+/// `Some(name.to_string())` when the whole name fits — the caller compares
 /// against the original to decide whether anything was lost.
 ///
-/// The ellipsis is three ASCII full stops, not U+2026: the PDF writer would
-/// carry the real character as WinAnsi 0x85, but the EPS writer asks the viewer
-/// for `Helvetica` with its own StandardEncoding, where 0x85 is not an ellipsis
-/// at all. Three dots are the same three dots in all three formats.
+/// **Measured with [`drawn_width`], not [`label_width`].** A label runs from
+/// `cx ± (ro + 26)`, and `room` is the distance from there to the canvas edge,
+/// so "the drawn glyphs are wider than `room`" and "the label is cropped by the
+/// `/MediaBox`" are the same statement — but only if the two are measured the
+/// same way. Deciding with the 0.55 em/character estimate while the emitters
+/// drew with Helvetica's advances left a band where the name was declared to
+/// fit and did not: `pCMV-WPRE` on a 4 kb plasmid at the defaults came out at
+/// 59.4 estimate units against 67.4 of room, kept whole, and then typeset 73.33
+/// pt wide from x=652.6 on a 720 pt page — most of the final E cropped off the
+/// figure, with `Report::labels_truncated` empty. Measured this way the two
+/// conditions coincide exactly, so nothing is shortened that would not
+/// otherwise have been cropped.
+///
+/// The ellipsis is three ASCII full stops, not U+2026, because three dots are
+/// three dots in every encoding and the real character is not.
 fn fit_label(name: &str, room: f64, font_size: f64) -> Option<String> {
-    if label_width(name, font_size) <= room {
+    if drawn_width(name, font_size) <= room {
         return Some(name.to_string());
     }
     const ELLIPSIS: &str = "...";
@@ -341,7 +405,7 @@ fn fit_label(name: &str, room: f64, font_size: f64) -> Option<String> {
     for c in name.chars() {
         let mut trial = kept.clone();
         trial.push(c);
-        if label_width(&(trial.clone() + ELLIPSIS), font_size) > room {
+        if drawn_width(&(trial.clone() + ELLIPSIS), font_size) > room {
             break;
         }
         kept = trial;
@@ -377,11 +441,18 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     let ro = (opts.width.min(opts.height) / 2.0 - margin).max(40.0);
     // What is left for a label once the ring has taken its radius, on either
     // side: a label runs outward from `cx ± (ro + 26)`, so both columns have the
-    // same room. Uncapped the reservation closes with 8 units to spare whatever
-    // the name, but the `.min(30%)` cap above drops the `widest` term from `ro`
-    // while the label still grows with it, and the `.max(40)` floor does the
-    // same on a small canvas. Past either, the name no longer fits in what was
-    // reserved and gets shortened below rather than cropped by the viewBox.
+    // same room, and a label wider than this is cropped by the viewBox, the
+    // /MediaBox and the %%BoundingBox alike.
+    //
+    // Uncapped the reservation closes with 8 units to spare **in the estimate's
+    // units** — and that is not the unit the figure is cropped in. `label_width`
+    // assumes 0.55 em a character; Helvetica charges up to ~0.7 for capitals, so
+    // for a capital-heavy name the 8 units of slack are spent and more. This
+    // comment used to end at "8 units to spare whatever the name", which was the
+    // reason nobody looked: `pCMV-WPRE` had 8 units of estimated slack and ran
+    // 5.93 pt off the page. `fit_label` therefore decides in `drawn_width`, so
+    // the cap and the floor below are no longer the only ways to overflow the
+    // reservation — they are just the ways that overflow it by a lot.
     let room = cx - (ro + 26.0);
     let ri = ro - opts.ring_width;
     let mid_r = (ro + ri) / 2.0;
@@ -443,7 +514,17 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                 bold: false,
                 text: commas(base),
             });
-            base += step;
+            // `base + step` is not safe at the top of the u64 range, and `len`
+            // comes straight off a GenBank LOCUS line. For a declared length of
+            // 18446744073709551615 the step is 2e18, the ninth tick is 1.8e19,
+            // and the tenth overflows: debug panicked here, and the shipped
+            // release build wrapped to 1553255926290448384 — still `<= len`, so
+            // the loop never ended and pushed two `Item`s a turn at about
+            // 1.4 GB/s until the process was killed with no output and no error.
+            match base.checked_add(step) {
+                Some(next) => base = next,
+                None => break,
+            }
         }
     }
 
@@ -511,7 +592,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                     Arrow::None
                 };
                 items.push(Item::Path {
-                    segs: arc_segs(cx, cy, ri, ro, angle(a, len), angle(b + 1, len), arrow),
+                    segs: arc_segs(cx, cy, ri, ro, angle(a, len), angle_past(b, len), arrow),
                     fill: Some(colour.clone()),
                     stroke: Some(ink::FEATURE_STROKE.into()),
                     stroke_width: 0.6,

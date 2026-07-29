@@ -348,7 +348,22 @@ fn parse_features(x: &str) -> Vec<Feature> {
                         }
                     }
                 }
-                "Q" => {
+                // Both spellings. SnapGene writes qualifiers two ways and only
+                // the short one was matched, so every qualifier in a file of the
+                // older export/import lineage fell through `_ => {}` and was
+                // lost with nothing anywhere reporting it. Measured across the
+                // real `.dna` files on this machine: all four at export 10 /
+                // import 5 — a pair `docs/DNA-FORMAT.md` §1 lists as observed,
+                // and the pair *this crate's own writer emits* — use
+                // `<Qualifier name=".."><QualifierValue intVal="1"/></Qualifier>`
+                // (43 qualifiers: codon_start, transl_table, translation,
+                // locus_tag, label, direction), while all ten at 11/10 and above
+                // use `<Q>`/`<V>`. `pl convert --to genbank` on such a file wrote
+                // CDS features with no /codon_start, no /transl_table and none of
+                // the protein translations, exit 0 and an empty stderr;
+                // `pl convert --to dna` rewrote block 10 with the qualifier
+                // elements — 45% of the block — simply gone.
+                "Q" | "Qualifier" => {
                     q_name = Event::attr(&attrs, "name").map(str::to_string);
                     q_had_value = false;
                     // A `<Q/>` that closes immediately can never carry a `<V>`,
@@ -360,12 +375,20 @@ fn parse_features(x: &str) -> Vec<Feature> {
                         q_name = None;
                     }
                 }
-                "V" => {
+                "V" | "QualifierValue" => {
                     if let (Some(f), Some(k)) = (cur.as_mut(), q_name.as_ref()) {
-                        // A qualifier value arrives as whichever typed attribute fits.
+                        // A qualifier value arrives as whichever typed attribute
+                        // fits. The long spelling names them `textVal`/`intVal`/
+                        // `predefVal`, so both sets are tried: a file mixing the
+                        // long element name with a short attribute name is not a
+                        // shape anything is known to write, and accepting either
+                        // costs nothing.
                         let v = Event::attr(&attrs, "text")
+                            .or_else(|| Event::attr(&attrs, "textVal"))
                             .or_else(|| Event::attr(&attrs, "int"))
+                            .or_else(|| Event::attr(&attrs, "intVal"))
                             .or_else(|| Event::attr(&attrs, "predef"))
+                            .or_else(|| Event::attr(&attrs, "predefVal"))
                             .unwrap_or_default();
                         f.qualifiers.push((k.clone(), Some(v.to_string())));
                         q_had_value = true;
@@ -378,7 +401,7 @@ fn parse_features(x: &str) -> Vec<Feature> {
                     if let Some(f) = cur.take() {
                         out.push(f);
                     }
-                } else if name == "Q" {
+                } else if name == "Q" || name == "Qualifier" {
                     // `<Q name="pseudo"></Q>` — no `<V>` ever came. That is a
                     // **valueless** qualifier, GenBank's `/pseudo`, and it is a
                     // different thing from `/replace=""`, an empty value.
@@ -543,6 +566,13 @@ fn parse_primers(x: &str) -> Vec<Primer> {
 ///   observed file has one; the branch exists so that a future one is named
 ///   rather than dropped, which is the whole complaint that produced this
 ///   function's rewrite, one level up.
+/// - **An unbalanced close tag**, reported as `Notes/Comments/</sup>`, and a
+///   **second top-level element** after the root has closed, reported by its
+///   bare name. Both are malformed markup rather than a shape the model cannot
+///   hold, and they are named for the same reason: the elements are closed by
+///   name here, so a stray tag is skipped instead of popping the stack, and
+///   what it skipped has to be visible. Before that, one stray tag shifted every
+///   later depth and re-rooted the parse — see the `Event::Close` arm.
 ///
 /// `snapgene::write` is unaffected either way: it re-emits the original block
 /// verbatim, so only the `from_molecule` path ever depended on this.
@@ -561,6 +591,12 @@ fn parse_notes(x: &str) -> (Vec<Note>, Vec<String>) {
     // note, but there is no shape for "value, hole, value" and no separator that
     // would not be invented, so it is reported instead of glued on.
     let mut cur_lost_tail = false;
+    // Has the root element closed? Only relevant to a malformed payload, and
+    // then it matters a lot: without it, a second top-level element is adopted
+    // as a second `<Notes>` root and its children become notes.
+    let mut root_closed = false;
+    // ...so that subtree is discarded and named instead of being read.
+    let mut discarding = false;
 
     for ev in xml::scan(x) {
         match ev {
@@ -569,6 +605,26 @@ fn parse_notes(x: &str) -> (Vec<Note>, Vec<String>) {
                 attrs,
                 self_closing,
             } => {
+                if discarding {
+                    if !self_closing {
+                        stack.push(name);
+                    }
+                    continue;
+                }
+                // A second element at top level. Block 6 has one root; treating
+                // this as another one turns its children into notes, which is
+                // how a single stray tag used to promote unrelated elements into
+                // the note list.
+                if stack.is_empty() && root_closed {
+                    if !nested.contains(&name) {
+                        nested.push(name.clone());
+                    }
+                    if !self_closing {
+                        discarding = true;
+                        stack.push(name);
+                    }
+                    continue;
+                }
                 match stack.len() {
                     // `<Notes>` itself. It carries no attributes in any observed
                     // file, and `Molecule` has nowhere to put one, so any that
@@ -618,20 +674,65 @@ fn parse_notes(x: &str) -> (Vec<Note>, Vec<String>) {
                     stack.push(name);
                 }
             }
-            Event::Close { .. } => {
-                if stack.len() == 2 {
-                    if cur_lost_tail {
+            // Closed by NAME, never by depth alone.
+            //
+            // This used to be `Event::Close { .. }` with an unconditional
+            // `stack.pop()`, which is the one parser in this file that did not
+            // look at the tag name — `parse_features` and `parse_primers` both
+            // match on it and are immune to this. One unbalanced tag anywhere in
+            // block 6 shifted every depth after it, and because an element then
+            // seen at depth 0 is treated as the `<Notes>` root, the damage was
+            // not a slip but a re-rooting: a real payload carrying a single
+            // stray `</sup>` inside `<Comments>` lost `Type`, `Description` and
+            // `Created` entirely and reported exactly one thing — `Created@UTC`,
+            // an attribute on a root the file never had. `Description` also
+            // drives `mol.description`, so the GenBank DEFINITION line went with
+            // it, at exit 0 with an empty stderr.
+            //
+            // `xml::scan` matches nothing itself (xml.rs:148 promises that one
+            // odd tag must not cost the user the whole file), so the matching
+            // has to happen here.
+            Event::Close { name } => {
+                let Some(pos) = stack.iter().rposition(|open| *open == name) else {
+                    // A close with nothing open under that name. Ignored rather
+                    // than absorbed — absorbing it is what shifted the depths —
+                    // and named, because the text either side of it is fused
+                    // into one value and the reader deserves to know why.
+                    if !discarding {
                         let mut path = stack.join("/");
-                        path.push_str("/text()");
+                        if !path.is_empty() {
+                            path.push('/');
+                        }
+                        path.push_str("</");
+                        path.push_str(&name);
+                        path.push('>');
                         if !nested.contains(&path) {
                             nested.push(path);
                         }
                     }
-                    if let Some(n) = cur.take() {
-                        out.push(n);
+                    continue;
+                };
+                // Unwind to the matching open, closing the note if it is among
+                // the levels being left.
+                while stack.len() > pos {
+                    if !discarding && stack.len() == 2 {
+                        if cur_lost_tail {
+                            let mut path = stack.join("/");
+                            path.push_str("/text()");
+                            if !nested.contains(&path) {
+                                nested.push(path);
+                            }
+                        }
+                        if let Some(n) = cur.take() {
+                            out.push(n);
+                        }
                     }
+                    stack.pop();
                 }
-                stack.pop();
+                if stack.is_empty() {
+                    root_closed = true;
+                    discarding = false;
+                }
             }
             Event::Text(t) => {
                 // The note's own text, up to its first child element. Text
@@ -640,7 +741,7 @@ fn parse_notes(x: &str) -> (Vec<Note>, Vec<String>) {
                 // value — see the doc comment. `xml::scan` suppresses
                 // whitespace-only runs, so the newlines around a real
                 // `<Reference/>` never reach here and never report a loss.
-                if stack.len() == 2 {
+                if !discarding && stack.len() == 2 {
                     if let Some(n) = cur.as_mut() {
                         if cur_has_child {
                             cur_lost_tail = true;
@@ -729,7 +830,35 @@ pub fn write(doc: &Document, drop_derived: bool) -> Vec<u8> {
 /// adds one on the way in and [`primers_xml`] takes it back off on the way out,
 /// in the same file, deliberately.
 ///
-/// # Known gap
+/// # Known gaps
+///
+/// **A `<Segment name="...">` is not written, because it was never read.**
+/// `parse_features` builds a [`pl_core::Segment`] from `range`, `color`,
+/// `translated` and `type` only, and the model has no field for the name, so it
+/// is dropped on read with nothing anywhere reporting it — unlike the note
+/// subtree below, which at least gets a path. Seven segments across six of the
+/// 51 real `.dna` files on this machine carry one, and it is not decoration:
+/// `<Feature name="lac promoter"><Segment name="-35" .../><Segment .../><Segment
+/// name="-10" .../></Feature>` comes back out as three indistinguishable
+/// anonymous boxes, and SacB's `<Segment name="signal peptide">` loses the label
+/// that says which third of the CDS is the signal peptide. Carrying it needs a
+/// `name: Option<String>` on `pl_core::Segment` — the struct already holds
+/// `color`, `translated` and `kind`, so this is a representable field and not a
+/// report-only gap — plus a block-10 check in `tests/corpus.rs` against the
+/// original payload, because `a_synthesised_dna_preserves_everything_the_model_
+/// holds` compares `x.segments != y.segments` with both sides out of the same
+/// lossy reader and cannot see a loss that cancels.
+///
+/// *Not* in this list, though they are also absent from the output:
+/// `<BindingSite annealedBases>` and the tail/body `<Component>` split. Across
+/// 128 real binding sites, `annealedBases` is `sequence[len - span..]` in 126,
+/// and the non-annealing 5' tail — the NotI overhang a cloning primer is
+/// designed around — is written out verbatim inside `sequence=`. They are a
+/// cache of a hybridization scan this program did not run, the same class as
+/// `<HybridizationParams>` and the `simplified` duplicate that [`primers_xml`]
+/// already documents. The one primer construct with no shape here at all is a
+/// gapped binding site — two `hybridizedRange` components, 2 of those 128 —
+/// which a flat `BindingSite` cannot express.
 ///
 /// **A subtree nested under a note is not written, because it was never read.**
 /// `<References><Reference title=".." pubMedID=".."/></References>` — a
@@ -988,6 +1117,45 @@ fn is_xml_name(s: &str) -> bool {
     start(first) && chars.all(rest)
 }
 
+/// Is every namespace prefix in this name bound where the name is about to be
+/// written?
+///
+/// [`is_xml_name`] is XML 1.0's `Name` production, and that production permits
+/// `:` — but block 6 is written into a context where *Namespaces in XML* also
+/// applies, and there an undeclared prefix is a hard error. The two rules
+/// disagreed and only the first was checked, which is the false accept
+/// `is_xml_name`'s own doc comment says is the expensive direction.
+///
+/// Concretely: a block 6 of
+/// `<Notes xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>Lior</dc:creator></Notes>`
+/// reads as a note keyed `dc:creator`, and [`parse_notes`] reports and discards
+/// the root's `xmlns:dc` because [`Molecule`] has nowhere to hold it. The writer
+/// then emitted `<Notes><dc:creator>Lior</dc:creator></Notes>`, which
+/// `reference/python/snapdna.py` refuses — `ParseError: unbound prefix` — while
+/// it read the input fine. Converting `pl`'s own output a second time printed
+/// nothing at all, because by then the declaration is not in the source either.
+///
+/// Deliberately *not* "reject any `:`": a declaration carried on the note
+/// element rather than on the root — `<dc:creator xmlns:dc="...">Lior</dc:creator>`
+/// — survives as a note attribute and round-trips correctly today, and refusing
+/// it would drop a note the container can hold. `xml` is bound by the
+/// specification itself and needs no declaration.
+fn prefix_is_bound(name: &str, declared: &[&str]) -> bool {
+    let Some((prefix, local)) = name.split_once(':') else {
+        return true;
+    };
+    // `a:b:c` is a legal `Name` and not a legal `QName`.
+    if prefix.is_empty() || local.is_empty() || local.contains(':') {
+        return false;
+    }
+    prefix == "xml" || declared.contains(&prefix)
+}
+
+/// Is this attribute name a namespace declaration, and so its own binding?
+fn is_ns_declaration(k: &str) -> bool {
+    k == "xmlns" || k.strip_prefix("xmlns:").is_some_and(|p| !p.is_empty())
+}
+
 /// The notes block, block 6.
 ///
 /// Attributes are written, which is the whole point of [`pl_core::Note`]: a
@@ -1022,6 +1190,25 @@ fn notes_xml(mol: &Molecule, unwritable: &mut Vec<String>) -> String {
             ));
             continue;
         }
+        // Which prefixes this note declares for itself. Collected before the tag
+        // is opened, because the key is written first and has to be checked
+        // against them; see `prefix_is_bound` for why a root-level declaration
+        // cannot help here.
+        let declared: Vec<&str> = n
+            .attrs
+            .iter()
+            .filter_map(|(k, _)| k.strip_prefix("xmlns:"))
+            .filter(|p| !p.is_empty())
+            .collect();
+        if !prefix_is_bound(&n.key, &declared) {
+            unwritable.push(format!(
+                "note {:?}: its namespace prefix is not declared on this note, so writing it \
+                 would produce a block no parser can read; the note and its value {:?} are not \
+                 written",
+                n.key, n.value
+            ));
+            continue;
+        }
         if n.key == "Description" {
             seen_description = true;
         }
@@ -1032,6 +1219,16 @@ fn notes_xml(mol: &Molecule, unwritable: &mut Vec<String>) -> String {
                 unwritable.push(format!(
                     "note {:?}: attribute name {k:?} is not a legal XML name, so the value {v:?} \
                      is not written",
+                    n.key
+                ));
+                continue;
+            }
+            // An `xmlns:*` attribute IS the binding, so it is exempt from the
+            // check it establishes.
+            if !is_ns_declaration(k) && !prefix_is_bound(k, &declared) {
+                unwritable.push(format!(
+                    "note {:?}: attribute {k:?} uses a namespace prefix that is not declared on \
+                     this note, so the value {v:?} is not written",
                     n.key
                 ));
                 continue;
@@ -1243,6 +1440,59 @@ mod tests {
     }
 
     #[test]
+    fn the_long_qualifier_spelling_is_read_too() {
+        // Both spellings are genuine SnapGene. Every real `.dna` on this machine
+        // at export 10 / import 5 — the pair `from_molecule_reporting` itself
+        // writes — spells qualifiers `<Qualifier>`/`<QualifierValue …Val>`, and
+        // only `<Q>`/`<V>` was matched, so those files lost /codon_start,
+        // /transl_table, the whole protein /translation, /locus_tag and
+        // /direction with an empty report and exit 0 on both the GenBank and the
+        // `.dna` export path.
+        let long = r#"<Features>
+          <Feature name="SacB" type="CDS" directionality="2">
+            <Segment range="1976-3310" type="standard"/>
+            <Qualifier name="codon_start"><QualifierValue intVal="1"/></Qualifier>
+            <Qualifier name="transl_table"><QualifierValue intVal="11"/></Qualifier>
+            <Qualifier name="translation"><QualifierValue textVal="MNIKGKAL"/></Qualifier>
+            <Qualifier name="direction"><QualifierValue predefVal="LEFT"/></Qualifier>
+            <Qualifier name="pseudo"></Qualifier>
+          </Feature>
+        </Features>"#;
+        let f = parse_features(long);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].qualifier("codon_start"), Some("1"));
+        assert_eq!(f[0].qualifier("transl_table"), Some("11"));
+        assert_eq!(
+            f[0].qualifier("translation"),
+            Some("MNIKGKAL"),
+            "the protein sequence is the whole point of the CDS annotation"
+        );
+        assert_eq!(f[0].qualifier("direction"), Some("LEFT"));
+        // A valueless qualifier is still a qualifier — the `/pseudo` case — and
+        // it needs the long spelling on the close tag as well as the open one.
+        assert_eq!(
+            f[0].qualifiers.iter().find(|(k, _)| k == "pseudo"),
+            Some(&("pseudo".to_string(), None))
+        );
+
+        // The short spelling is untouched, and so is a self-closing valueless
+        // qualifier written the long way.
+        let short = parse_features(
+            r#"<Features><Feature name="x" type="CDS"><Segment range="1-9"/>
+                 <Q name="gene"><V text="bla"/></Q><Qualifier name="ribosomal_slippage"/>
+               </Feature></Features>"#,
+        );
+        assert_eq!(short[0].qualifier("gene"), Some("bla"));
+        assert_eq!(
+            short[0]
+                .qualifiers
+                .iter()
+                .find(|(k, _)| k == "ribosomal_slippage"),
+            Some(&("ribosomal_slippage".to_string(), None))
+        );
+    }
+
+    #[test]
     fn feature_labels_containing_entities_survive() {
         let f = parse_features(
             r#"<Features><Feature name="P&amp;S &lt;δ&gt;" type="CDS"><Segment range="1-9"/></Feature></Features>"#,
@@ -1428,6 +1678,72 @@ mod tests {
     }
 
     #[test]
+    fn one_unbalanced_tag_does_not_cost_every_note_after_it() {
+        // `parse_notes` was the only parser in this file that identified an
+        // element by DEPTH rather than by name, and its `Event::Close { .. }`
+        // popped unconditionally. So an extra close emptied the stack, the next
+        // element was then seen at depth 0 and adopted as a second `<Notes>`
+        // ROOT, and every note after the stray tag was lost — with the report
+        // naming none of them.
+        let (n, nested) = parse_notes("<Notes><A>x</B>y</A><C>z</C></Notes>");
+        assert_eq!(
+            n,
+            vec![Note::new("A", "xy"), Note::new("C", "z")],
+            "note C and its value were dropped"
+        );
+        assert_eq!(nested, vec!["Notes/A/</B>".to_string()]);
+
+        // The shape a real file reaches: one stray `</sup>` in a Comments field,
+        // everything else exactly as docs/DNA-FORMAT.md §7 records it. Type,
+        // Description and Created used to vanish and the only thing reported was
+        // `Created@UTC` — an attribute on a root the file never had.
+        let (n, nested) = parse_notes(
+            "<Notes><UUID>bf25</UUID><Comments>grown at 37</sup>C overnight</Comments>\
+             <Type>Synthetic</Type><Description>mNeonGreen vector.</Description>\
+             <Created UTC=\"22:0:0\">2022.12.13</Created></Notes>",
+        );
+        let keys: Vec<&str> = n.iter().map(|x| x.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["UUID", "Comments", "Type", "Description", "Created"],
+            "got {n:?}"
+        );
+        assert_eq!(n[3].value, "mNeonGreen vector.");
+        assert_eq!(n[4].attr("UTC"), Some("22:0:0"));
+        assert_eq!(nested, vec!["Notes/Comments/</sup>".to_string()]);
+
+        // An unclosed child: the siblings after it are notes, not children of
+        // the note the unclosed tag was in, and their values survive.
+        let (n, nested) =
+            parse_notes("<Notes><A>see <br> more</A><B>keepme</B><Type>Synthetic</Type></Notes>");
+        assert_eq!(
+            n,
+            vec![
+                Note::new("A", "see"),
+                Note::new("B", "keepme"),
+                Note::new("Type", "Synthetic"),
+            ]
+        );
+        assert_eq!(
+            nested,
+            vec!["Notes/A/br".to_string()],
+            "B and Type are siblings of A, not children of it"
+        );
+
+        // A stray close before the first note used to leave the whole block
+        // empty, so `from_molecule` emitted no block 6 at all.
+        let (n, nested) = parse_notes("<Notes></X><A>x</A><B>y</B></Notes>");
+        assert_eq!(n, vec![Note::new("A", "x"), Note::new("B", "y")]);
+        assert_eq!(nested, vec!["Notes/</X>".to_string()]);
+
+        // And a second root after the first one closes is not a second `<Notes>`
+        // whose children are notes.
+        let (n, nested) = parse_notes("<Notes><A>x</A></Notes><Other><B>y</B></Other>");
+        assert_eq!(n, vec![Note::new("A", "x")]);
+        assert_eq!(nested, vec!["Other".to_string()]);
+    }
+
+    #[test]
     fn an_attribute_on_the_notes_root_is_named_rather_than_dropped() {
         // The same shape of loss the finding is about, one level up: the `0 =>`
         // arm bound `attrs` and said nothing, so `pl convert --to dna` wrote a
@@ -1521,6 +1837,78 @@ mod tests {
             "{}",
             notes_payload(&bytes)
         );
+    }
+
+    #[test]
+    fn an_unbound_namespace_prefix_is_refused_rather_than_written() {
+        // `is_xml_name` is XML 1.0's `Name` production and `Name` permits ':'.
+        // Block 6 is also subject to Namespaces in XML, where an undeclared
+        // prefix is fatal — and `parse_notes` reports and DISCARDS the root's
+        // `xmlns:*`, because `Molecule` has nowhere to hold it. So the reader
+        // knew it was dropping the declaration and the writer wrote the prefix
+        // anyway, producing a block 6 that `reference/python/snapdna.py` refuses
+        // with `ParseError: unbound prefix` while it read the input fine.
+        let raw = build(&[
+            (block::HEADER, header_block()),
+            (block::SEQUENCE, vec![flag::CIRCULAR, b'A', b'C', b'G', b'T']),
+            (
+                block::NOTES,
+                br#"<Notes xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>Lior</dc:creator><Created dc:when="2022">2022.12.13</Created><Type>Synthetic</Type></Notes>"#
+                    .to_vec(),
+            ),
+        ]);
+        let doc = parse(&raw).unwrap();
+        assert_eq!(
+            doc.unrepresentable_notes,
+            vec!["Notes@xmlns:dc".to_string()],
+            "the reader already says the declaration is being dropped"
+        );
+
+        let (bytes, unwritable) = from_molecule_reporting(&doc.molecule);
+        let payload = notes_payload(&bytes);
+        assert!(
+            !payload.contains("dc:"),
+            "wrote a prefix with nothing binding it: {payload}"
+        );
+        assert!(
+            payload.contains("<Type>Synthetic</Type>"),
+            "the unprefixed notes are unaffected: {payload}"
+        );
+        assert_eq!(unwritable.len(), 2, "got {unwritable:?}");
+        assert!(unwritable.iter().any(|u| u.contains("dc:creator")));
+        assert!(unwritable.iter().any(|u| u.contains("dc:when")));
+
+        // NOT "reject any colon". A prefix declared on the note itself is bound
+        // where it is used, round-trips correctly today, and must keep doing so.
+        let ok = build(&[
+            (block::HEADER, header_block()),
+            (block::SEQUENCE, vec![flag::CIRCULAR, b'A', b'C', b'G', b'T']),
+            (
+                block::NOTES,
+                br#"<Notes><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">Lior</dc:creator></Notes>"#
+                    .to_vec(),
+            ),
+        ]);
+        let doc = parse(&ok).unwrap();
+        let (bytes, unwritable) = from_molecule_reporting(&doc.molecule);
+        let payload = notes_payload(&bytes);
+        assert!(unwritable.is_empty(), "got {unwritable:?}");
+        assert!(
+            payload.contains(
+                r#"<dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">Lior</dc:creator>"#
+            ),
+            "{payload}"
+        );
+
+        // `xml:` needs no declaration: the specification binds it.
+        let mut m = Molecule {
+            seq: b"ACGT".to_vec(),
+            ..Default::default()
+        };
+        m.notes.push(Note::new("xml:lang", "en"));
+        let (bytes, unwritable) = from_molecule_reporting(&m);
+        assert!(unwritable.is_empty(), "got {unwritable:?}");
+        assert!(notes_payload(&bytes).contains("<xml:lang>en</xml:lang>"));
     }
 
     #[test]

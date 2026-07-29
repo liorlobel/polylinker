@@ -113,7 +113,11 @@ def bio_find(pattern, seq, circular):
 
 
 def ours(exe, pattern, seq, circular):
-    """The Rust answer, through the CLI's motif search over a temp FASTA."""
+    """The Rust answer, through the CLI's motif search over `--seq`.
+
+    Bare bases carry no topology, so this leg always states one explicitly.
+    `ours_from_file` is the other leg, and it deliberately does not.
+    """
     out = subprocess.run(
         [exe, "find-motif", pattern, "--seq", seq,
          "--topology", "circular" if circular else "linear", "--json"],
@@ -123,6 +127,52 @@ def ours(exe, pattern, seq, circular):
         raise RuntimeError(f"pl find-motif {pattern}: {out.stderr.strip()}")
     import json
     doc = json.loads(out.stdout)
+    return {(h["start"], h["strand"]) for h in doc["hits"]}
+
+
+def ours_from_file(exe, pattern, seq, circular, tmpdir):
+    """The Rust answer over a real record, with NO --topology on the command.
+
+    This is the leg that did not exist, and its absence is why a real defect
+    shipped: `cmd_find_motif` discarded the file's declared topology and
+    searched every file as linear, so an origin-crossing hit came back absent
+    at exit 0. The `--seq` leg above cannot catch that, because it always
+    passes `--topology` and so never exercises the branch that reads the file.
+    The docstring on `ours` used to say it ran "over a temp FASTA", which is
+    what made this gap look already covered.
+
+    GenBank rather than FASTA on purpose: FASTA declares no topology at all, so
+    it could not tell "read what the file declared" apart from "default to
+    linear".
+    """
+    body = "\n".join(
+        f"{i + 1:>9} {seq[i:i + 60].lower()}" for i in range(0, len(seq), 60)
+    )
+    record = (
+        f"LOCUS       xchk {len(seq)} bp    DNA     "
+        f"{'circular' if circular else 'linear'} SYN 01-JAN-2026\n"
+        f"ORIGIN\n{body}\n//\n"
+    )
+    path = os.path.join(tmpdir, "xchk.gb")
+    with open(path, "w", encoding="utf8", newline="\n") as fh:
+        fh.write(record)
+
+    out = subprocess.run(
+        [exe, "find-motif", pattern, path, "--json"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"pl find-motif {pattern} <file>: {out.stderr.strip()}")
+    import json
+    doc = json.loads(out.stdout)
+    # The record has to come back with the topology it declared, or this
+    # comparison is measuring something else and would pass vacuously for every
+    # linear case -- which is exactly how the defect survived.
+    if bool(doc.get("circular")) is not circular:
+        raise RuntimeError(
+            f"the file declared {'circular' if circular else 'linear'} and pl "
+            f"read it as {'circular' if doc.get('circular') else 'linear'}"
+        )
     return {(h["start"], h["strand"]) for h in doc["hits"]}
 
 
@@ -151,20 +201,36 @@ def main(argv):
         return 1
 
     compared = 0
+    from_file = 0
     disagreements = []
-    for seq in SEQS:
-        for pattern in PATTERNS:
-            for circular in (True, False):
-                want = bio_find(pattern, seq, circular)
-                got = ours(exe, pattern, seq, circular)
-                compared += 1
-                if got != want:
-                    disagreements.append((pattern, seq, circular, sorted(got), sorted(want)))
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for seq in SEQS:
+            for pattern in PATTERNS:
+                for circular in (True, False):
+                    want = bio_find(pattern, seq, circular)
+                    got = ours(exe, pattern, seq, circular)
+                    compared += 1
+                    if got != want:
+                        disagreements.append(
+                            (pattern, seq, circular, sorted(got), sorted(want)))
+
+                    # The same question again, this time off a real file with
+                    # no --topology on the command line, so the answer has to
+                    # come from what the record declares. Nothing else in the
+                    # repository exercises that path.
+                    got = ours_from_file(exe, pattern, seq, circular, tmpdir)
+                    from_file += 1
+                    if got != want:
+                        disagreements.append(
+                            (pattern, f"{seq} (from file)", circular,
+                             sorted(got), sorted(want)))
 
     print(f"{'='*74}")
     print(f"patterns              : {len(PATTERNS)}")
     print(f"sequences             : {len(SEQS)}")
-    print(f"comparisons           : {compared}")
+    print(f"comparisons (--seq)   : {compared}")
+    print(f"comparisons (file)    : {from_file}")
     print(f"disagreements         : {len(disagreements)}")
     print("\ndegenerate codes, both strands and origin wrapping, against a regex")
     print("built from Biopython's own IUPAC table -- a different mechanism from")
@@ -175,7 +241,7 @@ def main(argv):
         print(f"    ours      = {got}")
         print(f"    biopython = {want}")
 
-    if compared == 0:
+    if compared == 0 or from_file == 0:
         print("\nFAIL: compared nothing")
         return 1
     if disagreements:

@@ -658,7 +658,10 @@ fn rows<'a>(
 /// Read `features/SIGNOFF.tsv` into `record_id -> Signoff`.
 ///
 /// A blank file is not an error and must not be: "nothing is signed" is a
-/// legitimate and, today, the actual state of this repository. A file that is
+/// legitimate state, and the one every failure path below resolves to. It is
+/// **not** this repository's state — `features/SIGNOFF.tsv` carries a signature
+/// for every row `features.tsv` ships — and this sentence used to claim it was,
+/// which invited a reader to treat the whole mechanism as inert. A file that is
 /// present but malformed *is* reported, and yields nothing for the lines it
 /// cannot read — a bad header discards the file, any other unreadable line
 /// discards that line, and a record signed twice loses **both** lines. Every
@@ -748,14 +751,22 @@ impl Db {
     /// `features/SIGNOFF.tsv` names it, with a curator that matches and a
     /// [`Db::content_digest`] that still matches; everything else is
     /// [`ReviewStatus::Proposed`], and [`Db::reviewed`] ships only the
-    /// remainder. That file is empty of signatures as this is written, so
-    /// `reviewed()` returns an empty database — the intended state, not a
-    /// defect: the rows were assembled by machine from public sources. Writing
-    /// `AmpR` onto somebody's plasmid map is an assertion, and the rule here is
-    /// that the tool may propose and never assert.
+    /// remainder.
     ///
-    /// A caller that wants the proposed rows has to ask for them by name, and
-    /// owes the user that same sentence.
+    /// **How many rows that is, is a property of `features/SIGNOFF.tsv` and not
+    /// of this function.** Ask [`Db::review_counts`]; do not believe a count
+    /// written into a doc comment. This one used to carry one — "that file is
+    /// empty of signatures as this is written, so `reviewed()` returns an empty
+    /// database" — and it was false the moment it was written, having landed in
+    /// the same commit that added the first 84 signatures. The cost of leaving
+    /// it was not cosmetic: a reader auditing this crate's central trust claim
+    /// would have concluded the tool asserts nothing, while by default it
+    /// asserts every signed name onto a user's map.
+    ///
+    /// Writing `AmpR` onto somebody's plasmid map is an assertion, and the rule
+    /// here is that the tool may propose and never assert. A caller that wants
+    /// the proposed rows too has to ask for them by name, and owes the user
+    /// that sentence.
     pub fn builtin() -> (Db, Vec<LoadError>) {
         Db::parse(BUILTIN_FEATURES, BUILTIN_PROVENANCE, BUILTIN_SIGNOFF)
     }
@@ -925,6 +936,82 @@ impl Db {
                 continue;
             };
 
+            let genbank_key = {
+                let g = get(4);
+                if g.is_empty() {
+                    "misc_feature".to_string()
+                } else {
+                    g
+                }
+            };
+
+            // THE TWO IMPLEMENTATIONS OF `content_digest` MUST HASH THE SAME
+            // BYTES, and `get` is where they can quietly stop doing so. `get`
+            // trims every cell; `Class::parse` and `BoundaryRule::parse`
+            // lower-case theirs; an empty `genbank_key` becomes `misc_feature`;
+            // the two reference columns are upper-cased. `build.py`'s
+            // `content_digest` hashes the cell as it sits on disk, upper-casing
+            // the references and canonicalising `aliases` and `patent_flag` and
+            // nothing else. So `description = "A description "` — one trailing
+            // space — hashes one way there and another here, `check_signoff.py`
+            // certifies the row, and the shipped binary then reports "the row
+            // has changed since it was signed" and clears the curator's name:
+            // an error that blames a curator's data for a disagreement between
+            // two hashers, on a row nobody edited. Measured on the real tables:
+            // one trailing space on PLF:0001's description gives
+            // `check_signoff.py` zero violations and `Db::parse` a lapse.
+            //
+            // Named at load, because once `get` has run the digest cannot tell
+            // the two apart and every downstream message is about the wrong
+            // thing. `build.py`'s `coerce_row` already states this as the
+            // design — "the bytes written to features.tsv are already what
+            // `Db::parse` will store" — and implemented it for `aliases` alone.
+            //
+            // REPORTED, NOT DROPPED, unlike every other refusal in this loop: a
+            // stray space is a bookkeeping problem and the row is still a real
+            // feature, so discarding it would lose data over one. Same direction
+            // of failure `apply_signoff` picks when it downgrades a row instead
+            // of deleting it. `Db::builtin`'s own test asserts no errors, so the
+            // shipped tables cannot reach this state regardless.
+            //
+            // `aliases` and `patent_flag` are absent on purpose: build.py
+            // canonicalises both itself, which is why the pin fixture in
+            // tests/schema_pin.rs can write ` a | b |` and `TRUE`.
+            //
+            // WHICH IS ALSO WHY THE TWO REFERENCE COLUMNS ARE COMPARED AGAINST
+            // THE TRIMMED CELL AND NOT THE STORED, UPPER-CASED ONE. build.py's
+            // `content_digest` writes `r.reference_nt.upper()` and
+            // `r.reference_aa.upper()`, so case is canonicalised on BOTH sides
+            // and a lower-case cell is not a divergence at all. Demanding the
+            // stored spelling here reported one anyway — a curator with a
+            // soft-masked sequence would have been sent looking for a signature
+            // mismatch that does not exist, on the one column where lower case
+            // is ordinary (`align::same` matches case-insensitively for exactly
+            // that reason). Whitespace is the only thing that actually parts the
+            // two hashers for these two, so whitespace is all this asks about.
+            for (i, canonical) in [
+                (1usize, get(1)),
+                (3, class.as_str().to_string()),
+                (4, genbank_key.clone()),
+                (5, get(5)),
+                (6, get(6)),
+                (7, rule.as_str().to_string()),
+                (8, get(8)),
+                (9, get(9)),
+                (14, get(14)),
+            ] {
+                if c[i] != canonical {
+                    bad(format!(
+                        "{} reads {:?} on disk but is stored as {:?}; \
+                         features/build/build.py hashes the cell and this loader hashes \
+                         what it stored, so the two content digests differ and a \
+                         signature taken over one lapses against the other. Write the \
+                         stored spelling into the cell.",
+                        FEATURE_COLUMNS[i], c[i], canonical
+                    ));
+                }
+            }
+
             db.records.push(Record {
                 id: get(0),
                 name: get(1),
@@ -934,14 +1021,7 @@ impl Db {
                     .filter(|s| !s.is_empty())
                     .collect(),
                 class,
-                genbank_key: {
-                    let g = get(4);
-                    if g.is_empty() {
-                        "misc_feature".into()
-                    } else {
-                        g
-                    }
-                },
+                genbank_key,
                 reference_nt: nt,
                 reference_aa: aa,
                 boundary_rule: rule,
@@ -1489,11 +1569,17 @@ mod tests {
         "record_id\tfield\tsource_db\tsource_accession\tlicence\turl\tretrieved\tsha256";
     const SH: &str = "record_id\treview_status\tcurator\tsigned_date\tcontent_sha256\tnote";
 
-    /// [`Db::parse`] with no sign-off table, which is this repository's state.
+    /// [`Db::parse`] with no sign-off table.
     ///
     /// A helper rather than a default argument on `parse` itself: a caller that
     /// forgets the third file must say "nothing is signed" out loud, because
     /// that is a claim about trust and not a formality.
+    ///
+    /// It is not the shipped tables' state, which this used to say it was:
+    /// `features/SIGNOFF.tsv` signs every row, and
+    /// `the_shipped_database_parses_and_ships_only_what_is_signed` is what
+    /// checks that. The fixtures that need a signature build one with
+    /// [`signoff`] below.
     fn parse(features: &str, provenance: &str) -> (Db, Vec<LoadError>) {
         Db::parse(features, provenance, "")
     }
@@ -2043,6 +2129,18 @@ mod tests {
         );
 
         let ship = db.reviewed();
+        // NOT a pinned count, for the reason the comment above gives. But not
+        // nothing either: the rustdoc on `Db::builtin` used to state that
+        // SIGNOFF.tsv is empty of signatures and that `reviewed()` therefore
+        // returns an empty database, and prose alone could not stop that from
+        // going stale a second time. Asserting non-emptiness puts the claim
+        // where a change to the data has to face it.
+        assert!(
+            !ship.records.is_empty(),
+            "the shipped tables carry signatures; if that is deliberately no \
+             longer true, `Db::builtin`'s doc and `pl annotate --db`'s empty-set \
+             message both describe the new state and must be re-read"
+        );
         for r in &ship.records {
             assert!(
                 !r.curator.is_empty(),
@@ -2144,6 +2242,101 @@ mod tests {
             ReviewStatus::Reviewed,
             "re-stamping the build clock lapsed a signature: {errs:?}"
         );
+    }
+
+    #[test]
+    fn a_cell_this_loader_canonicalises_is_named_before_it_can_lapse_a_signature() {
+        // The cross-language half of the digest, and the failure it has is the
+        // one that looks like data corruption. `Db::parse` canonicalises before
+        // it hashes — trim everywhere, lower-case for `class` and
+        // `boundary_rule`, `misc_feature` for an empty `genbank_key` — while
+        // `features/build/build.py` hashes the cell as written. So a curator who
+        // leaves one trailing space gets a digest out of `build.py --show`,
+        // `check_signoff.py` reports zero violations, and the shipped binary
+        // says "the row has changed since it was signed" and clears their name.
+        //
+        // Every case below is a cell whose bytes differ and whose digest THIS
+        // SIDE cannot tell apart — asserted, because that identity is exactly
+        // what makes the row undiagnosable later, and a fixture that lost it
+        // would be testing nothing. `aliases` and `patent_flag` are absent
+        // because build.py canonicalises those two itself; the pin fixture in
+        // tests/schema_pin.rs covers them.
+        let mut base: Vec<String> = feat("PLF:0001", "ATGACGT", "MT", "cds", "proposed", "")
+            .split('\t')
+            .map(String::from)
+            .collect();
+        // Written as the value the loader stores, so that emptying it below is
+        // a pure on-disk change and the digest stays put.
+        base[4] = "misc_feature".into();
+        let p = format!("{PH}\n{}\n", prov("PLF:0001"));
+        let table = |cells: &[String]| format!("{FH}\n{}\n", cells.join("\t"));
+
+        let (control, errs) = parse(&table(&base), &p);
+        assert!(errs.is_empty(), "the control must load clean: {errs:?}");
+        let want = control.content_digest(&control.records[0]);
+
+        for (i, col, cell) in [
+            (1usize, "name", "Test "),
+            (3, "class", "CDS"),
+            (4, "genbank_key", ""),
+            (5, "reference_nt", "ATGACGT "),
+            (6, "reference_aa", " MT"),
+            (7, "boundary_rule", "ORF_ATG_TO_STOP"),
+            (8, "boundary_evidence", "J01749.1:3293-4153:- "),
+            (9, "description", "A description "),
+            (14, "notes", " "),
+        ] {
+            let mut cells = base.clone();
+            cells[i] = cell.into();
+            assert_ne!(cells, base, "{col}: the perturbation did not apply");
+
+            let (db, errs) = parse(&table(&cells), &p);
+            assert_eq!(
+                db.records.len(),
+                1,
+                "{col}: the row is still a real feature and must not be dropped"
+            );
+            assert_eq!(
+                db.content_digest(&db.records[0]),
+                want,
+                "{col}: this fixture no longer exercises a divergence — the digest \
+                 moved, so the two implementations would still agree"
+            );
+            assert!(
+                errs.iter().any(|e| e.problem.starts_with(col)),
+                "{col}: a cell build.py and this loader hash differently was accepted \
+                 without a word: {errs:?}"
+            );
+        }
+
+        // The control, and the reason the two reference columns are compared on
+        // whitespace alone rather than on the stored spelling:
+        // `build.py::content_digest` upper-cases `reference_nt` and
+        // `reference_aa` itself, so a lower-case cell is NOT a divergence.
+        // Reporting one would send a curator looking for a signature mismatch
+        // that does not exist — and lower case is a cell a real table can
+        // carry, since soft-masked sequence is ordinary sequence everywhere
+        // else in this workspace (`align::same` matches case-insensitively for
+        // exactly that reason).
+        for (i, col, cell) in [
+            (5usize, "reference_nt", "atgacgt"),
+            (6, "reference_aa", "mt"),
+        ] {
+            let mut cells = base.clone();
+            cells[i] = cell.into();
+            let (db, errs) = parse(&table(&cells), &p);
+            assert_eq!(db.records.len(), 1, "{col}");
+            assert_eq!(
+                db.content_digest(&db.records[0]),
+                want,
+                "{col}: case does not move this side's digest"
+            );
+            assert!(
+                errs.is_empty(),
+                "{col}: both implementations upper-case this column, so a lower-case \
+                 cell is not a divergence and must not be reported as one: {errs:?}"
+            );
+        }
     }
 
     #[test]

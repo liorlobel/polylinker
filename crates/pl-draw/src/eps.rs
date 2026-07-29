@@ -31,6 +31,17 @@
 //! widths. Colours go through [`crate::pdf::rgb`] for the same reason — the
 //! copy that lived here understood fewer hex forms than the original.
 //!
+//! **The bytes have to mean the same thing.** [`crate::pdf::encode`] produces
+//! WinAnsi, and the PDF says so — `/Encoding /WinAnsiEncoding` on both fonts.
+//! A PostScript base font has no such declaration and carries
+//! `StandardEncoding` instead (PLRM 3rd ed., Appendix E), where 0351 is
+//! `Oslash`, 0305 is `macron` and 0226 has no glyph at all. Selecting
+//! `/Helvetica` directly therefore drew `café – Ångström` as `cafØ` ·  ·
+//! `¯ngstr` ·  · `m` while the PDF and the SVG of the same [`Scene`] were
+//! correct, with an empty [`Report`]. The prolog re-encodes both weights to
+//! WinAnsi once and the labels select those, so one byte is one glyph in all
+//! three formats.
+//!
 //! # What EPS cannot carry
 //!
 //! Tooltips. The scene's `title` fields become PostScript comments so the
@@ -39,6 +50,129 @@
 
 use crate::pdf::{encode, rgb, text_width_in, Report, BASELINE_DROP_EM};
 use crate::scene::{arc_to_beziers, Anchor, Item, Scene, Seg};
+
+/// The 256 glyph names of `WinAnsiEncoding`, in code order.
+///
+/// The same table the PDF writer names by reference when it declares
+/// `/Encoding /WinAnsiEncoding` (PDF 1.7 Annex D.2). PostScript has no such
+/// name, so a base font keeps `StandardEncoding` unless a re-encoded copy is
+/// built — which is what [`PROLOG_ENCODE`] does with this vector.
+///
+/// Spelled out rather than derived from `StandardEncoding` with a handful of
+/// `put`s, because the two differ in 90 places and a partial patch is exactly
+/// the kind of near-miss that renders one accented letter as a different
+/// accented letter.
+///
+/// Laid out eight to a line in code order, and `rustfmt` is kept off it for the
+/// same reason as `pl_core::sha256`'s round constants: the table is transcribed
+/// from a specification and the only realistic way to check it is to read it
+/// against the printed one. Reflowed to one name a line it is 256 lines and
+/// nobody ever will.
+#[rustfmt::skip]
+const WIN_ANSI: [&str; 256] = [
+    // 0x00
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    // 0x10
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef", ".notdef",
+    // 0x20
+    "space", "exclam", "quotedbl", "numbersign", "dollar", "percent", "ampersand", "quotesingle",
+    "parenleft", "parenright", "asterisk", "plus", "comma", "hyphen", "period", "slash",
+    // 0x30
+    "zero", "one", "two", "three", "four", "five", "six", "seven",
+    "eight", "nine", "colon", "semicolon", "less", "equal", "greater", "question",
+    // 0x40
+    "at", "A", "B", "C", "D", "E", "F", "G",
+    "H", "I", "J", "K", "L", "M", "N", "O",
+    // 0x50
+    "P", "Q", "R", "S", "T", "U", "V", "W",
+    "X", "Y", "Z", "bracketleft", "backslash", "bracketright", "asciicircum", "underscore",
+    // 0x60
+    "grave", "a", "b", "c", "d", "e", "f", "g",
+    "h", "i", "j", "k", "l", "m", "n", "o",
+    // 0x70
+    "p", "q", "r", "s", "t", "u", "v", "w",
+    "x", "y", "z", "braceleft", "bar", "braceright", "asciitilde", ".notdef",
+    // 0x80 -- the block `encode` maps the typographic characters into, and the
+    // one that is wrong under StandardEncoding *and* under ISOLatin1Encoding.
+    "Euro", ".notdef", "quotesinglbase", "florin", "quotedblbase", "ellipsis", "dagger", "daggerdbl",
+    "circumflex", "perthousand", "Scaron", "guilsinglleft", "OE", ".notdef", "Zcaron", ".notdef",
+    // 0x90
+    ".notdef", "quoteleft", "quoteright", "quotedblleft", "quotedblright", "bullet", "endash", "emdash",
+    "tilde", "trademark", "scaron", "guilsinglright", "oe", ".notdef", "zcaron", "Ydieresis",
+    // 0xA0
+    "space", "exclamdown", "cent", "sterling", "currency", "yen", "brokenbar", "section",
+    "dieresis", "copyright", "ordfeminine", "guillemotleft", "logicalnot", "hyphen", "registered", "macron",
+    // 0xB0
+    "degree", "plusminus", "twosuperior", "threesuperior", "acute", "mu", "paragraph", "periodcentered",
+    "cedilla", "onesuperior", "ordmasculine", "guillemotright", "onequarter", "onehalf", "threequarters", "questiondown",
+    // 0xC0
+    "Agrave", "Aacute", "Acircumflex", "Atilde", "Adieresis", "Aring", "AE", "Ccedilla",
+    "Egrave", "Eacute", "Ecircumflex", "Edieresis", "Igrave", "Iacute", "Icircumflex", "Idieresis",
+    // 0xD0
+    "Eth", "Ntilde", "Ograve", "Oacute", "Ocircumflex", "Otilde", "Odieresis", "multiply",
+    "Oslash", "Ugrave", "Uacute", "Ucircumflex", "Udieresis", "Yacute", "Thorn", "germandbls",
+    // 0xE0
+    "agrave", "aacute", "acircumflex", "atilde", "adieresis", "aring", "ae", "ccedilla",
+    "egrave", "eacute", "ecircumflex", "edieresis", "igrave", "iacute", "icircumflex", "idieresis",
+    // 0xF0
+    "eth", "ntilde", "ograve", "oacute", "ocircumflex", "otilde", "odieresis", "divide",
+    "oslash", "ugrave", "uacute", "ucircumflex", "udieresis", "yacute", "thorn", "ydieresis",
+];
+
+/// The procedure that copies a base font and swaps its `/Encoding`.
+///
+/// The textbook re-encoding idiom: copy every entry of the font dictionary
+/// except `/FID`, which belongs to the original and must not be carried over,
+/// then `definefont` the copy under a new name. `/Helvetica` itself is left
+/// alone — redefining a standard font name would follow this figure into
+/// whatever document it is pasted into.
+///
+/// **One line, deliberately.** `reference/python/tests/xcheck_eps.py` checks
+/// every operator against a closed set and skips only lines that begin with
+/// `/`, which is how the label lines already pass. Every line this prolog emits
+/// therefore begins with a `/name`, and a reformat that breaks one across two
+/// lines turns the EPS gate red rather than silently going unchecked.
+const PROLOG_ENCODE: &str = "/PLreencode { findfont dup length dict begin \
+     { 1 index /FID ne { def } { pop pop } ifelse } forall \
+     /Encoding PLWinAnsi def currentdict end definefont pop } bind def\n";
+
+/// The name of the re-encoded face for a weight, as selected by `findfont`.
+fn font_name(bold: bool) -> &'static str {
+    if bold {
+        "PL-Helvetica-Bold"
+    } else {
+        "PL-Helvetica"
+    }
+}
+
+/// The `%%BeginProlog`..`%%EndProlog` block that defines both re-encoded faces.
+fn prolog() -> String {
+    let mut s = String::with_capacity(4096);
+    s.push_str("%%BeginProlog\n");
+    s.push_str("/PLWinAnsi [\n");
+    let rows = WIN_ANSI.len().div_ceil(8);
+    for (i, row) in WIN_ANSI.chunks(8).enumerate() {
+        let mut line = row
+            .iter()
+            .map(|g| format!("/{g}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if i + 1 == rows {
+            // The closing bracket rides the last name so that no line of this
+            // block starts with `]` — see [`PROLOG_ENCODE`].
+            line.push_str(" ] def");
+        }
+        s.push_str(&line);
+        s.push('\n');
+    }
+    s.push_str(PROLOG_ENCODE);
+    s.push_str("/PL-Helvetica /Helvetica PLreencode\n");
+    s.push_str("/PL-Helvetica-Bold /Helvetica-Bold PLreencode\n");
+    s.push_str("%%EndProlog\n");
+    s
+}
 
 /// Render a scene as EPS at a physical size.
 ///
@@ -62,6 +196,10 @@ pub fn to_eps(scene: &Scene, scale: f64) -> (String, Report) {
     s.push_str(&format!("%%Title: {}\n", ps_comment(&scene.title)));
     s.push_str("%%LanguageLevel: 2\n");
     s.push_str("%%EndComments\n");
+    // Emitted unconditionally, not only when a non-ASCII byte turns up: a
+    // second code path taken by one map in fifty is a path nothing exercises,
+    // and the gate would then never see this block at all.
+    s.push_str(&prolog());
     // A white background: an EPS with no paint is transparent, and a plasmid
     // map dropped on a coloured slide would otherwise show through.
     s.push_str(&format!(
@@ -198,7 +336,12 @@ pub fn to_eps(scene: &Scene, scale: f64) -> (String, Report) {
                 // PDF's number, and it put every EPS label 0.0985 em — 1.18 pt
                 // at size 12 — below the same label in the PDF and the SVG.
                 let y0 = ty(*y) - pts * BASELINE_DROP_EM;
-                let font = if *bold { "Helvetica-Bold" } else { "Helvetica" };
+                // The WinAnsi-re-encoded copy from the prolog, never the base
+                // font: the bytes below are WinAnsi and a base font is
+                // StandardEncoding, so `/Helvetica findfont` drew 0351 as
+                // `Oslash` where the PDF drew `eacute` — same file, same
+                // scene, different letter, and nothing in the `Report`.
+                let font = font_name(*bold);
                 let (r, g, b) = rgb(color);
                 s.push_str(&format!(
                     "/{} findfont {} scalefont setfont {} {} {} setrgbcolor {} {} moveto {} show\n",
@@ -272,8 +415,15 @@ fn n(v: f64) -> String {
 /// A PostScript string literal.
 ///
 /// `(`, `)` and `\` must be escaped or the string runs on and takes the rest of
-/// the program with it. Bytes outside printable ASCII go out as octal, which is
-/// what keeps a Latin-1 feature name intact in a 7-bit-safe file.
+/// the program with it. Bytes outside printable ASCII go out as octal, which
+/// keeps the file 7-bit safe.
+///
+/// Octal escaping preserves the *bytes*; it says nothing about the glyphs. What
+/// makes a Latin-1 feature name come out as itself is the WinAnsi re-encoding
+/// in the prolog — until that was there, `\326` reached a `StandardEncoding`
+/// Helvetica, where it is `.notdef`, and an `Ö` rendered as a hole. This
+/// docstring used to claim the escaping alone kept the name intact, which is
+/// precisely why the loss went unnoticed.
 fn ps_string(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() + 2);
     s.push('(');
@@ -489,7 +639,13 @@ mod tests {
             "{}",
             x_of(&end)
         );
-        assert!(mid.contains("/Helvetica-Bold findfont"), "{mid}");
+        // The bold weight really is selected -- the re-encoded copy of it, so
+        // the string is measured and drawn in the same font.
+        assert!(mid.contains("/PL-Helvetica-Bold findfont"), "{mid}");
+        assert!(
+            mid.contains("/PL-Helvetica-Bold /Helvetica-Bold PLreencode"),
+            "{mid}"
+        );
     }
 
     #[test]
@@ -595,6 +751,140 @@ mod tests {
         assert!(rep.unencodable.is_empty(), "Latin-1 is representable");
         assert!(eps.contains("\\326"), "O-diaeresis as octal: {eps}");
         assert!(eps.is_ascii(), "and the file stays 7-bit safe");
+        // "Survives" is about the glyph, not the byte. 0326 is `.notdef` in
+        // StandardEncoding, so for as long as this test asserted only that the
+        // octal escape was present it was certifying a name that renders with
+        // two holes in it. The byte has to reach a WinAnsi font.
+        assert!(
+            eps.contains("/PL-Helvetica findfont"),
+            "the label must select the re-encoded face: {eps}"
+        );
+    }
+
+    /// The glyph name the prolog's vector gives a byte.
+    fn encoded_as(eps: &str, byte: u8) -> String {
+        let open = eps.find("/PLWinAnsi [").expect("the encoding vector");
+        let close = eps[open..].find("] def").expect("the vector closes") + open;
+        let names: Vec<&str> = eps[open + "/PLWinAnsi [".len()..close]
+            .split_whitespace()
+            .collect();
+        assert_eq!(names.len(), 256, "a PostScript Encoding is 256 long");
+        names[byte as usize].trim_start_matches('/').to_string()
+    }
+
+    #[test]
+    fn a_label_is_shown_in_a_font_that_reads_its_bytes_as_winansi() {
+        // `encode` produces WinAnsi and the PDF declares `/WinAnsiEncoding`, so
+        // the PDF was right. A PostScript *base* font carries StandardEncoding
+        // (PLRM 3rd ed., Appendix E) and cannot be told otherwise, so
+        // `/Helvetica findfont` read the very same bytes as different letters:
+        // 0351 is `Oslash` there, 0305 is `macron`, 0226 is nothing at all.
+        // "café – Ångström" came out of this emitter as `cafØ` · blank ·
+        // `¯ngstr` · blank · `m` while the PDF and the SVG of the same Scene
+        // were correct -- and `Report::unencodable` was empty, so nothing said
+        // so. `fit_label` in lib.rs already knew about the trap and worked
+        // around the one character it authored itself; everything arriving from
+        // a file was unhandled.
+        let name = "caf\u{e9} \u{2013} \u{c5}ngstr\u{f6}m";
+        let s = scene(vec![Item::Text {
+            x: 10.0,
+            y: 50.0,
+            size: 12.0,
+            anchor: Anchor::Start,
+            color: "#000000".into(),
+            bold: false,
+            text: name.into(),
+        }]);
+        let (eps, rep) = to_eps(&s, 1.0);
+        assert!(rep.unencodable.is_empty(), "all of this is WinAnsi");
+
+        // The label selects a re-encoded face, never the base font, whose
+        // encoding cannot be changed.
+        let label = eps
+            .lines()
+            .find(|l| l.contains(" show"))
+            .expect("the label");
+        assert!(
+            label.starts_with("/PL-Helvetica findfont"),
+            "the label selects a base font: {label}"
+        );
+        assert!(
+            eps.contains("/PL-Helvetica /Helvetica PLreencode"),
+            "no re-encoded regular face is defined: {eps}"
+        );
+
+        // ... and the face really is WinAnsi, at exactly the codes `encode`
+        // emits for this string. These four are the whole defect: the two
+        // Latin-1 letters rendered as *different letters* under
+        // StandardEncoding, and the en dash as nothing.
+        for (ch, want) in [
+            ('\u{e9}', "eacute"),
+            ('\u{c5}', "Aring"),
+            ('\u{f6}', "odieresis"),
+            ('\u{2013}', "endash"),
+        ] {
+            let byte = crate::pdf::encode(&ch.to_string()).0[0];
+            assert_eq!(encoded_as(&eps, byte), want, "byte {byte:#04x} for {ch:?}");
+        }
+        // The C1 block is the guaranteed-broken part: it is wrong under
+        // StandardEncoding *and* under ISOLatin1Encoding, which some RIPs
+        // default to, and it is where `encode` puts the punctuation that "turns
+        // up constantly in feature names copied out of papers".
+        for (ch, want) in [
+            ('\u{2014}', "emdash"),
+            ('\u{2018}', "quoteleft"),
+            ('\u{2019}', "quoteright"),
+            ('\u{201c}', "quotedblleft"),
+            ('\u{2022}', "bullet"),
+            ('\u{2026}', "ellipsis"),
+            ('\u{20ac}', "Euro"),
+        ] {
+            let byte = crate::pdf::encode(&ch.to_string()).0[0];
+            assert!((0x80..=0x9F).contains(&byte), "{ch:?} is not in C1");
+            assert_eq!(encoded_as(&eps, byte), want, "byte {byte:#04x} for {ch:?}");
+        }
+        // And printable ASCII is left where it was, or every ordinary label
+        // would have moved instead.
+        assert_eq!(encoded_as(&eps, b'A'), "A");
+        assert_eq!(encoded_as(&eps, b' '), "space");
+        assert_eq!(encoded_as(&eps, b'~'), "asciitilde");
+    }
+
+    #[test]
+    fn the_prolog_stays_inside_what_the_eps_gate_can_read() {
+        // `reference/python/tests/xcheck_eps.py` checks every token against a
+        // closed operator set and skips only lines beginning with `/` -- which
+        // is how the label lines have always passed. The prolog is written to
+        // the same rule, so a reformat that breaks `PLreencode` across two
+        // lines, or that puts the array's `]` at the start of one, turns that
+        // gate red. Stated here because the gate lives outside this crate and
+        // cannot say why it went red.
+        let (eps, _) = to_eps(&scene(vec![]), 1.0);
+        let prolog = &eps[eps.find("%%BeginProlog").expect("a prolog")
+            ..eps.find("%%EndProlog").expect("and its end")];
+        for line in prolog.lines() {
+            assert!(
+                line.starts_with('/') || line.starts_with('%'),
+                "a prolog line the gate would tokenise: {line:?}"
+            );
+        }
+        // Balanced, and it leaves the dict stack as it found it. Counted over
+        // whole tokens: `/endash` is a glyph name in the vector, and a
+        // substring count would score it as an `end`.
+        let tok = |w: &str| prolog.split_whitespace().filter(|t| *t == w).count();
+        assert_eq!(tok("begin"), 1);
+        assert_eq!(tok("end"), 1);
+        assert_eq!(tok("definefont"), 1);
+        assert!(!prolog.contains("gsave") && !prolog.contains("grestore"));
+        // Nothing here may look like path geometry to the oracle's tokeniser.
+        for op in [" moveto", " lineto", " curveto", " show"] {
+            assert!(!prolog.contains(op), "{op} in the prolog");
+        }
+        // The standard font names are left alone: redefining `/Helvetica` would
+        // follow this figure into whatever document it is pasted into.
+        assert!(!prolog.contains("/Helvetica /Helvetica"));
+        assert!(prolog.contains("/PL-Helvetica /Helvetica PLreencode"));
+        assert!(prolog.contains("/PL-Helvetica-Bold /Helvetica-Bold PLreencode"));
     }
 
     #[test]

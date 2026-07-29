@@ -35,7 +35,7 @@ pub mod json;
 use std::cell::RefCell;
 
 use pl_core::{Molecule, Strand};
-use pl_fileio::{genbank, snapgene, Format};
+use pl_fileio::{genbank, snapgene, Format, LoadReport};
 
 use json::Json;
 
@@ -43,6 +43,15 @@ use json::Json;
 struct State {
     molecule: Option<Molecule>,
     format: Option<Format>,
+    /// What the file held beyond the one record we keep.
+    ///
+    /// Kept because every other front door in this project has it and this one
+    /// did not: `pl info` prints "records N in this file; showing the first",
+    /// the desktop GUI appends "showing record 1 of N", `pl-mcp` prefixes its
+    /// answers with the same note, and `pl convert` refuses outright. Here the
+    /// report was dropped inside `pl_fileio::load`, so a 3-record FASTA opened
+    /// as record 1 with nothing anywhere in the ABI saying so.
+    report: LoadReport,
     /// Only present for `.dna`, and only so the container can be described.
     container: Option<snapgene::Document>,
     out: Vec<u8>,
@@ -129,13 +138,20 @@ pub unsafe extern "C" fn pl_open(ptr: *const u8, len: usize) -> i32 {
         None
     };
 
-    match pl_fileio::load(data) {
-        Ok((mol, fmt)) => {
-            let summary = summary_json(&mol, fmt);
+    // `load_with_report`, not `load`: `load` drops the `LoadReport` in its own
+    // body, so nothing downstream could learn that the file held more than the
+    // record we keep, whether the topology was declared or merely defaulted, or
+    // that the parse produced something that does not look like a molecule. A
+    // 3-record FASTA opened as record 1, `pl_to_genbank` then wrote that one
+    // record out as though it were the file, and both calls returned 0.
+    match pl_fileio::load_with_report(data) {
+        Ok((mol, fmt, report)) => {
+            let summary = summary_json(&mol, fmt, &report);
             STATE.with(|st| {
                 let mut st = st.borrow_mut();
                 st.molecule = Some(mol);
                 st.format = Some(fmt);
+                st.report = report;
                 st.container = container;
             });
             set_out(summary);
@@ -146,6 +162,7 @@ pub unsafe extern "C" fn pl_open(ptr: *const u8, len: usize) -> i32 {
                 let mut st = st.borrow_mut();
                 st.molecule = None;
                 st.format = None;
+                st.report = LoadReport::default();
                 st.container = None;
             });
             set_out(error_json(&e.to_string()));
@@ -163,18 +180,50 @@ fn strand_str(s: Strand) -> &'static str {
     }
 }
 
-fn summary_json(mol: &Molecule, fmt: Format) -> String {
+/// A JSON array of strings, always emitted even when empty.
+///
+/// Same contract as `sites` and `attrs` below: a key that appears only
+/// sometimes is the harder one to consume.
+fn str_array(j: &mut Json, key: &str, items: &[String]) {
+    j.key(key).arr();
+    for s in items {
+        j.str(s);
+    }
+    j.end_arr();
+}
+
+fn summary_json(mol: &Molecule, fmt: Format, report: &LoadReport) -> String {
     let mut j = Json::new();
     j.obj()
         .kv_str("format", fmt.name())
+        // Records in the *file*, not records returned: only the first is open.
+        // Staying silent is how 1,879 features went missing from a 124-record
+        // `.gbk` without anyone noticing, and the browser was the last front
+        // door with no way to say it. Spelled like the CLI's `records_in_file`
+        // rather than plain `records` because `features`, `primers` and `notes`
+        // in this same object are arrays, and a scalar named `records` reads
+        // like a fourth one.
+        .kv_num("recordsInFile", report.records as u64)
         .kv_str("name", &mol.name)
         .kv_str("description", &mol.description)
         .kv_num("bp", mol.len())
         .kv_num("span", mol.span())
         .kv_num("annotationSpan", mol.annotation_span())
         .kv_bool("circular", mol.topology.is_circular())
+        // Did the file *say* so? `circular: false` conflates "this file says
+        // linear" with "this file has no topology field", and FASTA never has
+        // one. A Plasmidsaurus plasmid assembly arrives as FASTA at an
+        // arbitrary rotation, so reporting it as linear with no hedge loses
+        // exactly the origin-straddling sites it was sequenced to check.
+        .kv_bool("topologyDeclared", report.topology_declared)
         .kv_bool("sequenceAbsent", mol.sequence_absent())
         .kv_bool("annotationTrack", mol.is_annotation_track())
+        // `genbank::parse` and `fasta::parse` cannot fail, so a file of noise
+        // that happens to contain the word LOCUS opens "successfully" as an
+        // empty molecule and the page draws a blank map with no error. An
+        // observation, not a diagnosis -- a corrupt file and an exotic one look
+        // the same from here.
+        .kv_bool("suspect", report.suspect)
         .kv_opt_float("gc", mol.gc_percent())
         .kv_num(
             "lowercase",
@@ -197,13 +246,26 @@ fn summary_json(mol: &Molecule, fmt: Format) -> String {
         .end_obj();
 
     j.key("features").arr();
+    // `Feature::start`/`end` are a min and a max over the segments, which is the
+    // extent only for an ordinary spliced join. An origin-crossing feature
+    // reaches the browser in the join form `genbank::write` emits —
+    // `join(2677..2686,1..7)` — whose minimum start is always exactly 1 and
+    // whose maximum end is always exactly the molecule length, so a 17 bp
+    // promoter arrived as `"start": 1, "end": 2686` and the page had nothing to
+    // tell it otherwise. `extent` reports the pair the way `Molecule::subseq`
+    // reads one: `end < start` means the span crosses the origin.
+    let feat_span = mol.span();
+    let feat_circular = mol.topology.is_circular();
     for f in &mol.features {
+        let (fs, fe) = f
+            .extent(feat_span, feat_circular)
+            .unwrap_or((f.start(), f.end()));
         j.obj()
             .kv_str("name", &f.name)
             .kv_str("kind", &f.kind)
             .kv_str("strand", strand_str(f.strand))
-            .kv_num("start", f.start())
-            .kv_num("end", f.end())
+            .kv_num("start", fs)
+            .kv_num("end", fe)
             .kv_opt_str("color", f.color());
         j.key("segments").arr();
         for s in &f.segments {
@@ -267,6 +329,26 @@ fn summary_json(mol: &Molecule, fmt: Format) -> String {
         j.end_obj();
     }
     j.end_arr();
+
+    // The last two channels of the load report. `unrepresentableLocations` is
+    // what `pl info` prints as "location(s) this reader cannot represent" -- a
+    // `bond(...)` operator or a remote reference such as `J00194.1:200..300`,
+    // which would otherwise leave a feature quietly claiming a span it does not
+    // have. `unrepresentableNotes` is its `.dna` sibling, e.g. a
+    // `<References><Reference/></References>` subtree the note model has no
+    // shape for. Deliberately two keys and not one: folding a notes path into
+    // the locations list would have a caller say something false about
+    // coordinates, which is the mistake this whole channel exists to avoid.
+    str_array(
+        &mut j,
+        "unrepresentableLocations",
+        &report.unrepresentable_locations,
+    );
+    str_array(
+        &mut j,
+        "unrepresentableNotes",
+        &report.unrepresentable_notes,
+    );
 
     j.end_obj();
     j.finish()
@@ -397,6 +479,30 @@ pub extern "C" fn pl_digest_json() -> i32 {
 // writing
 // ---------------------------------------------------------------------------
 
+/// Why an export refuses a file that held more records than we kept.
+///
+/// `pl convert` errors out on exactly this condition, and a viewer's "Save as
+/// GenBank" is the same operation with a different destination. Before this,
+/// a 3-record FASTA exported to GenBank produced a complete, plausible,
+/// one-record file with records 2 and 3 gone, return code 0, and nothing
+/// anywhere saying so.
+///
+/// The refusal is written into the **output buffer** and not only signalled by
+/// the return code, because the shipped page discards the return value of these
+/// two exports and downloads the buffer regardless
+/// (`prototype/dna-reader.template.html`, the `expGb`/`expFa` handlers). A
+/// code-only signal would have been a silent no-op there — the same defect in
+/// a new place. A download whose contents are the refusal is ugly; a download
+/// that looks like the user's plasmid and is not is worse.
+fn truncation_refusal(report: &LoadReport) -> Option<String> {
+    report.truncated().then(|| {
+        format!(
+            "this file holds {} records and writing it here would keep only the first. Split the file first.",
+            report.records
+        )
+    })
+}
+
 /// # Safety
 /// `title_ptr`/`title_len` must describe valid UTF-8 for the duration of the call.
 #[no_mangle]
@@ -415,6 +521,11 @@ pub unsafe extern "C" fn pl_to_genbank(
             set_out(error_json("no file open"));
             return 1;
         };
+        if let Some(msg) = truncation_refusal(&st_ref.report) {
+            drop(st_ref);
+            set_out(error_json(&msg));
+            return 1;
+        }
         let text = genbank::write(mol, &title, (day, month as usize, year));
         drop(st_ref);
         set_out(text);
@@ -434,6 +545,14 @@ pub unsafe extern "C" fn pl_to_fasta(title_ptr: *const u8, title_len: usize, wid
             set_out(error_json("no file open"));
             return 1;
         };
+        // Refused for the same reason as GenBank above: a multi-FASTA in gives
+        // a single-record FASTA out, which is the one case where the output
+        // format makes the loss look like the whole file.
+        if let Some(msg) = truncation_refusal(&st_ref.report) {
+            drop(st_ref);
+            set_out(error_json(&msg));
+            return 1;
+        }
         let text = pl_fileio::fasta::write(mol, &title, width);
         drop(st_ref);
         set_out(text);
@@ -511,8 +630,13 @@ unsafe fn read_str(ptr: *const u8, len: usize) -> String {
 pub extern "C" fn pl_rotate(origin: u64) -> i32 {
     STATE.with(|st| {
         let mut st_mut = st.borrow_mut();
-        // Read the format before taking a mutable borrow of the molecule.
+        // Read the format and the load report before taking a mutable borrow of
+        // the molecule. The report is cloned rather than re-derived: rotating
+        // does not change what the file held, and a summary that dropped the
+        // record count on rotation would put the warning back to sleep for any
+        // caller that re-reads it after a rotate.
         let fmt = st_mut.format.unwrap_or(Format::GenBank);
+        let report = st_mut.report.clone();
         let Some(mol) = st_mut.molecule.as_mut() else {
             drop(st_mut);
             set_out(error_json("no file open"));
@@ -523,7 +647,7 @@ pub extern "C" fn pl_rotate(origin: u64) -> i32 {
             set_out(error_json("cannot rotate: linear, or origin out of range"));
             return 1;
         }
-        let out = summary_json(mol, fmt);
+        let out = summary_json(mol, fmt, &report);
         drop(st_mut);
         set_out(out);
         0
@@ -741,6 +865,167 @@ mod tests {
         assert_eq!(pl_to_dna(0), 1);
         let j = STATE.with(|st| String::from_utf8(st.borrow().out.clone()).unwrap());
         assert!(j.contains("does not synthesise"), "{j}");
+    }
+
+    // ---- what the file held beyond record 1 -------------------------------
+    //
+    // Every one of these went through `pl_fileio::load`, which drops the
+    // `LoadReport` inside its own body. Nothing in this crate could see any of
+    // it, and nothing in this test module asked.
+
+    const THREE_FASTA: &[u8] = b">plasmidA first\nGAATTCAAAAAAAAAAAAAAAA\n\
+>plasmidB second\nGGATCCTTTTTTTTTTTTTTTT\n\
+>plasmidC third\nAAAAAAAAAAAAAAAAAAAAAA\n";
+
+    #[test]
+    fn a_multi_record_file_says_how_many_records_it_held() {
+        // A 3-record FASTA opened as `plasmidA` and the summary described it as
+        // though it were the file: no record count anywhere in the ABI, while
+        // `pl info` prints "records 3 in this file; showing the first" and the
+        // desktop GUI appends "showing record 1 of 3".
+        let (rc, json) = open(THREE_FASTA);
+        assert_eq!(rc, 0, "{json}");
+        assert!(json.contains(r#""name":"plasmidA""#), "{json}");
+        assert!(
+            json.contains(r#""recordsInFile":3"#),
+            "the browser must be told what it is not showing: {json}"
+        );
+    }
+
+    #[test]
+    fn exports_refuse_to_hand_over_record_one_as_the_whole_file() {
+        // Both of these returned 0 and produced a complete, plausible
+        // single-record file. `pl convert multi.fa --to genbank` refuses the
+        // identical operation; the browser did it silently, and the page throws
+        // the return code away and downloads the buffer either way — so the
+        // refusal has to be *in the buffer*.
+        let (rc, _) = open(THREE_FASTA);
+        assert_eq!(rc, 0);
+
+        let title = "multi.fa";
+        let rc = unsafe { pl_to_genbank(title.as_ptr(), title.len(), 26, 7, 2026) };
+        let out = STATE.with(|st| String::from_utf8(st.borrow().out.clone()).unwrap());
+        assert_eq!(rc, 1, "GenBank export must refuse: {out}");
+        assert!(out.starts_with(r#"{"error":"#), "{out}");
+        assert!(out.contains("3 records"), "{out}");
+        assert!(!out.contains("LOCUS"), "no record may be written: {out}");
+
+        let rc = unsafe { pl_to_fasta(title.as_ptr(), title.len(), 70) };
+        let out = STATE.with(|st| String::from_utf8(st.borrow().out.clone()).unwrap());
+        assert_eq!(rc, 1, "FASTA export must refuse: {out}");
+        assert!(out.contains("3 records"), "{out}");
+        assert!(!out.contains("GAATTC"), "no bases may be written: {out}");
+    }
+
+    #[test]
+    fn a_single_record_file_still_exports() {
+        // The refusal above must fire on truncation and nothing else: one
+        // record in, one record out, unchanged. Without this the fix could be
+        // "refuse everything" and the test above would still pass.
+        let (rc, json) = open(b">only one\nGAATTCACGTACGT\n");
+        assert_eq!(rc, 0, "{json}");
+        assert!(json.contains(r#""recordsInFile":1"#), "{json}");
+        let title = "only.fa";
+        let rc = unsafe { pl_to_fasta(title.as_ptr(), title.len(), 70) };
+        let out = STATE.with(|st| String::from_utf8(st.borrow().out.clone()).unwrap());
+        assert_eq!(rc, 0, "{out}");
+        assert!(out.contains("GAATTCACGTACGT"), "{out}");
+    }
+
+    #[test]
+    fn fasta_never_declares_topology_and_the_summary_says_which() {
+        // `"circular":false` had two meanings and the browser could not tell
+        // them apart. A Plasmidsaurus plasmid assembly arrives as FASTA at an
+        // arbitrary rotation; reading that as a linear molecule loses the
+        // origin-straddling sites it was sequenced to check.
+        let (_, fasta) = open(b">p ACGT\nACGTACGTACGT\n");
+        assert!(fasta.contains(r#""circular":false"#), "{fasta}");
+        assert!(
+            fasta.contains(r#""topologyDeclared":false"#),
+            "FASTA has no topology field at all: {fasta}"
+        );
+
+        let (_, dna) = open(&dna_fixture());
+        assert!(dna.contains(r#""circular":true"#), "{dna}");
+        assert!(
+            dna.contains(r#""topologyDeclared":true"#),
+            "a .dna always carries the flag: {dna}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_parsed_to_nothing_is_flagged_suspect() {
+        // `genbank::parse` cannot fail, so noise containing the word LOCUS
+        // opened with rc 0 and the page drew an empty map with no error at all.
+        let (rc, json) = open(b"LOCUS\nnot a record, just noise\n");
+        assert_eq!(rc, 0, "this really does parse 'successfully': {json}");
+        assert!(
+            json.contains(r#""suspect":true"#),
+            "an empty parse must be visible: {json}"
+        );
+        // ...and an ordinary file must not be smeared with the same flag.
+        let (_, ok) = open(&dna_fixture());
+        assert!(ok.contains(r#""suspect":false"#), "{ok}");
+    }
+
+    #[test]
+    fn unrepresentable_locations_and_notes_reach_the_browser() {
+        // Both channels existed in `LoadReport` and neither had a way out of
+        // this crate. `bond(5,10)` leaves a CDS with no segments at all, and the
+        // browser drew that feature-free molecule with nothing to explain it;
+        // `pl info` prints "location(s) this reader cannot represent".
+        // Built by concatenation, not with `\`-continued source lines: that
+        // escape eats the *leading whitespace* of the next line, and a GenBank
+        // feature table is column-significant, so the continued form silently
+        // produced a file with no features at all.
+        let gb = concat!(
+            "LOCUS       x                        12 bp    DNA     linear SYN 26-JUL-2026\n",
+            "FEATURES             Location/Qualifiers\n",
+            "     CDS             bond(5,10)\n",
+            "                     /label=\"odd\"\n",
+            "ORIGIN\n        1 acgtacgtacgt\n//\n"
+        );
+        let (rc, json) = open(gb.as_bytes());
+        assert_eq!(rc, 0, "{json}");
+        assert!(
+            json.contains(r#""unrepresentableLocations":["#) && json.contains("bond"),
+            "{json}"
+        );
+        assert!(json.contains(r#""unrepresentableNotes":[]"#), "{json}");
+
+        // The `.dna` sibling: a citation subtree the flat note model has no
+        // shape for. Kept as its own key -- reporting it as a *location* would
+        // have the caller say something false about coordinates.
+        let (rc, json) = open(&dna_with_notes(
+            r#"<Notes><References><Reference pubMedID="1"/></References></Notes>"#,
+        ));
+        assert_eq!(rc, 0, "{json}");
+        assert!(
+            json.contains(r#""unrepresentableNotes":["Notes/References/Reference"]"#),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn rotating_does_not_forget_what_the_file_held() {
+        // `pl_rotate` re-emits the summary. Rebuilding it without the report
+        // would put the warning back to sleep for any caller that re-reads the
+        // summary after a rotate -- which the page does on every drag of the
+        // origin.
+        let gb = "LOCUS       one           10 bp    DNA     circular SYN 26-JUL-2026\n\
+ORIGIN\n        1 ACGTACGTAC\n//\n\
+LOCUS       two            8 bp    DNA     linear SYN 26-JUL-2026\n\
+ORIGIN\n        1 TTTTGGGG\n//\n";
+        let (rc, json) = open(gb.as_bytes());
+        assert_eq!(rc, 0, "{json}");
+        assert!(json.contains(r#""recordsInFile":2"#), "{json}");
+
+        assert_eq!(pl_rotate(3), 0);
+        let after = STATE.with(|st| String::from_utf8(st.borrow().out.clone()).unwrap());
+        assert!(
+            after.contains(r#""recordsInFile":2"#),
+            "the count survives a rotation: {after}"
+        );
     }
 
     #[test]

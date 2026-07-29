@@ -24,10 +24,16 @@
 //! # Two copies of the app
 //!
 //! Recovery files are named per process, so a second window cannot overwrite
-//! the first one's. On startup every stale file is *listed*, with its title and
-//! age, rather than one being picked. Guessing which is the interesting one is
-//! how the wrong draft gets restored, and the user knows and the program does
-//! not.
+//! the first one's — two live processes always hold distinct PIDs. A *dead*
+//! process is another matter: the OS reissues its PID, and the name alone then
+//! cannot tell "my own file" from "a crashed session that happened to hold my
+//! number". So the name is only half the rule and [`claim`] is the other half:
+//! a slot that already exists is somebody's unclean exit, whatever it is called,
+//! and this run takes the next free one.
+//!
+//! On startup every stale file is *listed*, with its title and age, rather than
+//! one being picked. Guessing which is the interesting one is how the wrong
+//! draft gets restored, and the user knows and the program does not.
 
 use std::path::{Path, PathBuf};
 
@@ -220,6 +226,59 @@ pub fn recovery_path(dir: &Path, slot: usize) -> PathBuf {
     dir.join(format!("{}-{slot}.recover", std::process::id()))
 }
 
+/// A recovery file, with whatever could be read out of it.
+///
+/// Named because [`stale`] and [`claim`] both hand these back and the pair is
+/// otherwise deep enough to trip `clippy::type_complexity`.
+pub type Found = (PathBuf, Result<Snapshot, String>);
+
+/// How many slots [`claim`] will look at before giving up.
+///
+/// [`claim`] probes names instead of listing the directory, so nothing else
+/// bounds the search: a directory that somehow held every slot name would turn
+/// startup into an open-ended run of `stat` calls. Sixty-four is far past the
+/// realistic case, which is one — a single crashed session that held this PID.
+const MAX_SLOTS: usize = 64;
+
+/// This run's recovery file, plus anything already sitting at a name this
+/// process would use.
+///
+/// `std::process::id()` identifies a *run* only while that run is alive. A file
+/// left behind by a dead process that held the same PID is indistinguishable by
+/// name from our own in-progress one, and then both halves of the PID
+/// convention turn against the user at once: [`stale`] skips it because the name
+/// starts with our prefix, so the Recover banner never lists it, and
+/// [`recovery_path`] resolves to that same file, so [`clear`] deletes it on the
+/// next clean quit — which needs no document to have been opened at all — and
+/// the first autosave renames over it. A crashed session's draft was hidden and
+/// then destroyed, with no banner, no warning and no copy.
+///
+/// So *existence* decides, not the name. Anything already at one of our slots
+/// belongs to a session that did not close cleanly: it is returned to be listed
+/// beside the rest, and this run takes the first free slot instead. Two
+/// concurrent windows still cannot collide, because they hold distinct PIDs and
+/// so never look at the same names.
+///
+/// `None` for the path means every slot is taken and there is nowhere left to
+/// write; the caller must say autosave is off rather than overwrite one of the
+/// files it has just promised to list.
+pub fn claim(dir: &Path) -> (Option<PathBuf>, Vec<Found>) {
+    let mut found = Vec::new();
+    for slot in 0..MAX_SLOTS {
+        let p = recovery_path(dir, slot);
+        // `try_exists` rather than `exists`: a name we cannot stat is one we
+        // must not assume is free, because writing there would overwrite it.
+        if matches!(p.try_exists(), Ok(false)) {
+            return (Some(p), found);
+        }
+        match std::fs::read_to_string(&p) {
+            Ok(t) => found.push((p, decode(&t))),
+            Err(e) => found.push((p, Err(e.to_string()))),
+        }
+    }
+    (None, found)
+}
+
 /// Write a snapshot atomically.
 ///
 /// Temp file, flush, `sync_all`, rename. Durability before visibility: a rename
@@ -259,7 +318,7 @@ pub fn clear(path: &Path) {
 /// Returned with what could be read from each, newest first. A file whose
 /// header will not parse is still returned, with whatever [`salvage`] found,
 /// because the sequence is the part that matters.
-pub fn stale(dir: &Path) -> Vec<(PathBuf, Result<Snapshot, String>)> {
+pub fn stale(dir: &Path) -> Vec<Found> {
     let mut out = Vec::new();
     let me = format!("{}-", std::process::id());
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -500,6 +559,66 @@ mod tests {
         assert_eq!(found[0].1.as_ref().unwrap().title, "from another process");
         assert_eq!(found[1].1.as_ref().unwrap().title, "older");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_draft_left_at_our_own_pid_is_listed_and_not_written_over() {
+        // PID reuse. A crashed session left `{pid}-0.recover`; the OS hands the
+        // same number to this run. `stale` skips the file because the name
+        // begins with our prefix, so the banner never lists it, and
+        // `recovery_path(dir, 0)` resolves to it, so `clear` on the next clean
+        // quit deletes it and the first autosave renames over it. Total, silent
+        // loss of exactly the artefact this module exists to protect.
+        let dir = std::env::temp_dir().join(format!("pl-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let crashed = recovery_path(&dir, 0);
+        let mut draft = snap();
+        draft.title = "40 unsaved edits".into();
+        draft.ops = 40;
+        write(&crashed, &draft).unwrap();
+
+        let (path, mine) = claim(&dir);
+        let path = path.expect("slot 1 is free");
+        assert_ne!(
+            path, crashed,
+            "this run must not write where the crashed one already did"
+        );
+        assert_eq!(mine.len(), 1, "and the draft is handed back to be listed");
+        assert_eq!(mine[0].0, crashed);
+        assert_eq!(mine[0].1.as_ref().unwrap().title, "40 unsaved edits");
+
+        // The whole point: quitting cleanly, having opened nothing, no longer
+        // deletes it.
+        clear(&path);
+        assert!(crashed.exists(), "the crashed draft survives a clean quit");
+        assert_eq!(
+            decode(&std::fs::read_to_string(&crashed).unwrap())
+                .unwrap()
+                .ops,
+            40
+        );
+
+        // A second collision takes the next slot again, and both are listed.
+        write(&path, &draft).unwrap();
+        let (third, mine) = claim(&dir);
+        assert_eq!(third.unwrap(), recovery_path(&dir, 2));
+        assert_eq!(mine.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_recovery_directory_still_gives_this_run_slot_zero() {
+        // The ordinary case must not drift: no collision means no change.
+        let dir = std::env::temp_dir().join(format!("pl-claim0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (path, mine) = claim(&dir);
+        assert_eq!(path.unwrap(), recovery_path(&dir, 0));
+        assert!(mine.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -14,13 +14,20 @@
 //!    that answers with one confident product has told the user their
 //!    experiment worked when it did not". A designer more permissive than its
 //!    own simulator would emit pairs the tool then refuses to simulate.
-//! 2. The direction of strictness is checked rather than assumed. `pcr`'s
-//!    `anneal` takes the longest exact 3' suffix of at least `MIN_ANNEAL` (12)
-//!    that occurs anywhere, so a primer drawn from the template locks to its
-//!    full length and finds one site; `find_bindings` reports a site wherever
-//!    the seed matches exactly, extension included. `find_bindings` therefore
-//!    finds a superset of what `pcr` would object to, which is the safe
-//!    direction. Worth stating because the two constants differ.
+//! 2. The direction of strictness is checked rather than assumed, and the
+//!    mechanism is no longer the one this note used to give. `pcr` used to
+//!    count sites through `anneal`, which takes the longest exact 3' suffix
+//!    that occurs anywhere, so a primer drawn from the template locked to its
+//!    full length and reported one site — and the safety argument rested on
+//!    that length difference ("worth stating because the two constants
+//!    differ"). It no longer does: `pcr` now runs its own scan over the
+//!    primer's 3'-terminal `MIN_ANNEAL` bases on both strands, and
+//!    `MIN_ANNEAL` is 12, exactly [`Constraints::OFF_SEED`]. The conclusion
+//!    survives the change of reason — `find_bindings` reports a site wherever
+//!    the seed matches exactly, extension included, over the whole molecule,
+//!    so it still finds a superset of what `pcr` would object to, which is the
+//!    safe direction. It now follows from the whole-molecule scan rather than
+//!    from a gap between two constants that has closed.
 //! 3. After the prefilter below it is nearly free.
 //!
 //! # The prefilter, and why it cannot miss a binding
@@ -135,10 +142,14 @@ pub struct Scan {
     /// were computed at all**?
     ///
     /// A designed footprint is a template substring at known coordinates, so it
-    /// always is; a `false` here means the caller's `intended` and the bases it
-    /// passed do not describe the same place, which is a bug and not a
-    /// property of the molecule. `accept_specificity` `debug_assert`s it for
-    /// exactly that reason.
+    /// always is. A `false` here has exactly two causes and they are not alike:
+    /// either the caller's `intended` and the bases it passed do not describe
+    /// the same place — a bug, not a property of the molecule — or
+    /// [`Scan::unscannable`] is set and no bindings were computed for anything
+    /// to be found among. `accept_specificity` `debug_assert`s
+    /// `anchored || unscannable` for that reason; asserting `anchored` alone
+    /// aborted a debug build on a configuration [`crate::design`] now refuses
+    /// with a sentence instead, which is a worse way to report it.
     ///
     /// On the index fast path nothing is scanned and this is reported `true`
     /// without being looked for. That is honest rather than assumed: the fast
@@ -151,11 +162,32 @@ pub struct Scan {
     pub anchored: bool,
     /// False when a precondition forced the slow path, so the report can say so.
     pub used_index: bool,
+    /// The footprint is shorter than the seed, so no scan of it means anything.
+    ///
+    /// Both paths break in this state and they break differently. The index path
+    /// computed `&primer[primer.len() - seed_len..]`, which underflows: in debug
+    /// "attempt to subtract with overflow", in release a wrapped index and
+    /// "range start index 18446744073709551615 out of range for slice of length
+    /// 19" — reachable from one documented flag on an ordinary clean FASTA
+    /// (`pl design t.fa --region 1000..1600 --off-seed 20`), and from the GUI's
+    /// own widget ranges on the UI thread, where it takes unsaved work with it.
+    /// The slow path is worse, because it is silent: `find_bindings` returns an
+    /// empty `Vec` for a primer shorter than the seed, so `elsewhere` is empty,
+    /// `is_unique()` was true, and a primer with two exact sites on the template
+    /// was reported as unique under a header reading "every candidate scanned in
+    /// full". `anchored` does go false there, but its only consumer is a
+    /// `debug_assert!` that release compiles out.
+    ///
+    /// [`Scan::is_unique`] is false in this state. "Cannot be scanned" must
+    /// never read as "no second site" — that is the one claim this module exists
+    /// to prevent. The configuration itself is refused up front by
+    /// [`crate::design`]; this is the belt-and-braces for a direct API caller.
+    pub unscannable: bool,
 }
 
 impl Scan {
     pub fn is_unique(&self) -> bool {
-        self.elsewhere.is_empty()
+        !self.unscannable && self.elsewhere.is_empty()
     }
 }
 
@@ -192,6 +224,21 @@ pub fn scan(
     p: &Params,
 ) -> Scan {
     let used_index = index.is_some();
+    // Checked before either path, because both are broken here and only one of
+    // them is loud about it. See `Scan::unscannable`.
+    // `p.seed_len` and the index's are both built from `Constraints::off_seed`,
+    // but the max is taken rather than assumed: the slice below indexes by the
+    // index's and `find_bindings` bails on `p`'s, so a caller that let them
+    // drift would break a different path from the one it checked.
+    let seed_len = p.seed_len.max(index.map_or(0, |i| i.seed_len));
+    if primer.len() < seed_len {
+        return Scan {
+            elsewhere: Vec::new(),
+            anchored: false,
+            used_index,
+            unscannable: true,
+        };
+    }
     if let Some(ix) = index {
         // Both orientations in one bound: the forward-strand search matches the
         // primer's own 3' seed, and the reverse-strand search matches its
@@ -203,6 +250,7 @@ pub fn scan(
                 elsewhere: Vec::new(),
                 anchored: true,
                 used_index,
+                unscannable: false,
             };
         }
     }
@@ -221,6 +269,7 @@ pub fn scan(
         elsewhere,
         anchored,
         used_index,
+        unscannable: false,
     }
 }
 
@@ -270,6 +319,76 @@ mod tests {
         // a design ends up describing a different product from the one drawn.
         let wrong = scan(primer, t, false, (12, 33, Strand::Forward), None, &p);
         assert!(!wrong.anchored, "{:?}", wrong.elsewhere);
+    }
+
+    /// A footprint shorter than the seed cannot be scanned, and "cannot be
+    /// scanned" must never read as "no second site".
+    ///
+    /// PROVEN TO FAIL, at runtime, on both paths and in different ways.
+    ///
+    /// On the index path the code was `&primer[primer.len() - ix.seed_len..]`
+    /// with no guard, so the first call here aborts the test: debug "attempt to
+    /// subtract with overflow", release "range start index
+    /// 18446744073709551615 out of range for slice of length 10".
+    ///
+    /// The fall-back path is the worse half, because it is silent. It is taken
+    /// whenever `SeedIndex::build` refuses — any ambiguity code in the template
+    /// — and `find_bindings` returns an empty `Vec` for a primer shorter than
+    /// its seed (`pl-primer`'s own early return). So `elsewhere` was empty,
+    /// `is_unique()` was **true**, and the assertion below fires: a footprint
+    /// with two exact sites on this template, certified unique, under a report
+    /// header reading "every candidate scanned in full". `anchored` did go
+    /// false, but its only consumer is a `debug_assert!` that release compiles
+    /// out.
+    #[test]
+    fn a_footprint_shorter_than_the_seed_is_never_reported_as_unique() {
+        // 48 bases with an exact **14 bp** direct repeat at 0 and 24. The unit
+        // has to be at least `seed_len` long, or the control below -- a
+        // footprint of `seed_len` or more that really does bind twice -- would
+        // run off the end of the repeat and bind once, which is what it asserts
+        // is not happening.
+        let unit = b"ACGTTGCAGGTATC";
+        let mut t = Vec::new();
+        t.extend_from_slice(unit);
+        t.extend_from_slice(b"TTTTTTTTTT");
+        t.extend_from_slice(unit);
+        t.extend_from_slice(b"CCCCCCCCCC");
+        assert_eq!(&t[0..14], &t[24..38], "the premise: a real repeat");
+        let primer = t[0..10].to_vec();
+        let p = params(12, pl_thermo::Method::default());
+        assert!(
+            primer.len() < p.seed_len,
+            "the premise: shorter than the seed"
+        );
+
+        // The fast path, which used to panic.
+        let ix = SeedIndex::build(&t, 12, false).expect("a clean template indexes");
+        let fast = scan(&primer, &t, false, (1, 10, Strand::Forward), Some(&ix), &p);
+        assert!(
+            !fast.is_unique(),
+            "an unscannable candidate must not pass the specificity gate: {fast:?}"
+        );
+
+        // The fall-back path, which used to say "unique" and mean "not looked
+        // at". An N anywhere is enough to reach it -- put it in the poly-C run,
+        // clear of the repeat, so the control still has two sites to find.
+        t[44] = b'N';
+        assert!(SeedIndex::build(&t, 12, false).is_none(), "the premise");
+        let slow = scan(&primer, &t, false, (1, 10, Strand::Forward), None, &p);
+        assert!(
+            !slow.is_unique(),
+            "a primer with two exact sites, certified unique because nothing looked: {slow:?}"
+        );
+
+        // The control, and it is what stops this asserting that `is_unique` was
+        // simply nailed to false: a footprint at least as long as the seed
+        // still answers the real question, both ways round.
+        let long_repeat = t[0..14].to_vec();
+        let dup = scan(&long_repeat, &t, false, (1, 14, Strand::Forward), None, &p);
+        assert!(!dup.is_unique(), "it really does bind twice: {dup:?}");
+        let unique = t[10..24].to_vec();
+        let one = scan(&unique, &t, false, (11, 24, Strand::Forward), None, &p);
+        assert!(one.is_unique(), "and this one really does not: {one:?}");
     }
 
     #[test]

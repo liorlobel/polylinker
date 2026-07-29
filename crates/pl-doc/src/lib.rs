@@ -88,20 +88,44 @@ pub fn topic(name: &str) -> Option<Topic> {
 ///
 /// Written in the past tense and the passive, which is what a methods section
 /// wants, so it can be pasted and edited rather than rewritten.
+///
+/// # It is handed a topic and nothing else, so every number here is a default
+///
+/// There is no argument for what a particular run used, and `pl methods` parses
+/// no flags, so this function can only interpolate `*::default()`. Saying so is
+/// not pedantry: `pl tm --na 1000 --oligo 500 GTAAAACGACGGCCAGT` reports 67.4 C,
+/// the same oligo at the defaults reports 49.2 C, and `pl methods tm` used to
+/// print "Parameters: ... 50 nM oligo, 50 mM Na+" in the past tense beside
+/// either of them. Every parameter below is therefore labelled as a default,
+/// the way the gel and annotate paragraphs always did.
+///
+/// Hedging a number is not enough for a claim about *what was computed*, since
+/// a reader cannot tell that such a sentence needs editing. Three of those were
+/// false outright — the paragraph asserted an off-target scan that
+/// `pl design --no-specificity` never runs, a start-codon requirement that
+/// `pl orfs --any-start` removes, and an exact seed that `pl primers
+/// --seed-mismatch` relaxes — so they are stated conditionally now, naming both
+/// settings rather than assuming one. A caller that knows what a run used
+/// should print it from the run, not from here.
 pub fn methods(t: Topic) -> String {
     let v = env!("CARGO_PKG_VERSION");
     match t.name {
         "tm" => {
             let m = pl_thermo::Method::default();
             format!(
-                "Melting temperatures were calculated with a nearest-neighbour model \
-                 ({}), using Polylinker {v}. Parameters: {}. Tm is reported for the \
-                 annealing footprint only; any 5' tail on a primer is excluded, since \
-                 it does not pair with the template on the first cycle.\n\n\
+                "Melting temperatures were calculated with a nearest-neighbour model, \
+                 using Polylinker {v}. Default parameters, unless overridden: {}. Tm is \
+                 reported for the annealing footprint only; any 5' tail on a primer is \
+                 excluded, since it does not pair with the template on the first \
+                 cycle.\n\n\
                  Limits: the model assumes two-state hybridisation of a perfectly \
                  matched duplex in a well-mixed solution, and no correction is applied \
-                 for Mg2+, dNTPs, DMSO or betaine, all of which shift Tm in a real PCR.",
-                m.table_name,
+                 for Mg2+, dNTPs, DMSO or betaine, all of which shift Tm in a real PCR. \
+                 The nearest-neighbour table, the salt correction, the oligo \
+                 concentration and the [Na+] are all selectable and none of them is \
+                 known here, so the line above describes the defaults and not \
+                 necessarily the run: changing the salt or the oligo moves Tm by \
+                 degrees, and changing the table changes the citation.",
                 m.describe()
             )
         }
@@ -145,12 +169,16 @@ pub fn methods(t: Topic) -> String {
                 .count();
             format!(
                 "Open reading frames were identified in all six frames with Polylinker \
-                 {v}, using the NCBI genetic code specified for each molecule. An ORF \
-                 was defined as a run beginning at an initiation codon permitted by that \
-                 code and ending at the first in-frame termination codon; runs without \
-                 an initiation codon were not reported. On circular molecules the search \
-                 was synchronised to a termination codon before scanning, so results do \
-                 not depend on where the sequence was linearised.\n\n\
+                 {v}, using the NCBI genetic code specified for each molecule. By \
+                 default an ORF was defined as a run beginning at an initiation codon \
+                 permitted by that code and ending at the first in-frame termination \
+                 codon, and runs without an initiation codon were not reported; the \
+                 stop-to-stop option removes that requirement and reports runs that \
+                 begin at no initiation codon at all, so a run made with it has to say \
+                 so, because the two settings do not report the same ORFs. On circular \
+                 molecules the search was synchronised to a termination codon before \
+                 scanning, so results do not depend on where the sequence was \
+                 linearised.\n\n\
                  Limits: all {n} NCBI codes are available and the code must be chosen \
                  correctly — {readthrough} of them do not treat TGA as a termination \
                  codon, so the wrong table silently reads through a stop or ends a \
@@ -164,12 +192,13 @@ pub fn methods(t: Topic) -> String {
             format!(
                 "Sanger reads were compared to their reference with Polylinker {v}. Both \
                  orientations were aligned and the higher-scoring one retained. \
-                 Alignment was semi-global with affine gaps (match {}, mismatch {}, gap \
-                 open {}, gap extend {}), the read being aligned in full while unmatched \
-                 reference at either end was not penalised. Differences at Phred {} or \
-                 above were treated as substantive; those below were reported separately \
-                 and not counted. The reliable extent of each read was determined by \
-                 Mott trimming.\n\n\
+                 Alignment was semi-global with affine gaps, at the default scores \
+                 (match {}, mismatch {}, gap open {}, gap extend {}), the read being \
+                 aligned in full while unmatched reference at either end was not \
+                 penalised. Differences at or above the quality threshold -- Phred {} \
+                 unless it was overridden -- were treated as substantive; those below \
+                 were reported separately and not counted. The reliable extent of each \
+                 read was determined by Mott trimming.\n\n\
                  Limits: this compares one read to one reference and does not call \
                  variants. Agreement of independent reads, and the interpretation of a \
                  difference seen in only one, are judgements the software does not make. \
@@ -255,9 +284,11 @@ pub fn methods(t: Topic) -> String {
             let p = pl_primer::Params::default();
             format!(
                 "Primer binding sites were located with Polylinker {v} using a \
-                 3'-anchored seed of {} exact bases, extended toward the 5' end. The \
-                 annealing footprint and any 5' tail are reported separately, and the \
-                 melting temperature is computed from the footprint alone.\n\n\
+                 3'-anchored seed of {} bases -- exact by default, or allowing one \
+                 mismatch, never at the 3' end, where that option was given -- extended \
+                 toward the 5' end. The annealing footprint and any 5' tail are \
+                 reported separately, and the melting temperature is computed from the \
+                 footprint alone.\n\n\
                  Limits: this reports where a primer can anneal, not whether a product \
                  forms. Amplification efficiency, secondary structure, primer-dimer \
                  formation and 3'-end mismatch tolerance are not modelled.",
@@ -266,34 +297,52 @@ pub fn methods(t: Topic) -> String {
         }
         "design" => {
             let c = pl_design::Constraints::default();
+            // Backslash continuations and an explicit `\n\n`, like every sibling
+            // arm. The paragraph break here was once a bare newline in the
+            // source, which put 17 spaces of source indentation in front of
+            // "Limits:" -- invisible through `pl methods`, which rewraps, but
+            // the MCP tool and the PyO3 binding hand the string over raw, and a
+            // blank line followed by four spaces is a CommonMark indented code
+            // block: the two **...** hedges below rendered as literal asterisks
+            // in monospace. Note the `\n\n\` and not a bare `\`: a backslash
+            // before an empty line eats the paragraph break entirely, and
+            // `pl methods` paginates by splitting on "\n\n".
             format!(
                 "PCR primer pairs were designed with Polylinker {v}. Candidate oligos \
                  were enumerated over the selected region, filtered independently on \
                  melting temperature, composition and secondary structure, and then \
-                 paired. Constraints: {}. Melting temperatures were computed for the \
-                 annealed footprint only, with a nearest-neighbour model ({}); a 5' \
-                 tail carrying a restriction site does not pair with the template on \
-                 the first cycle and is excluded, and the tailed oligo's own melting \
-                 temperature is reported separately as the one that applies from the \
-                 third cycle onward. {}. Each candidate was additionally required to \
-                 anneal at exactly one site on the supplied molecule, located with a \
-                 3'-anchored seed of {} exact bases extended toward the 5' end. \
-                 Surviving pairs were ranked by a weighted sum of normalised \
-                 deviations ({}), an approach following Rozen & Skaletsky (Methods Mol \
-                 Biol 132:365, 2000) and Untergasser et al. (Nucleic Acids Res \
-                 40:e115, 2012); the weights are this software's own and no \
-                 equivalence to any other designer is claimed.
-
-                 Limits: **specificity was checked against the supplied molecule and \
-                 nothing else.** A primer unique in a plasmid is routinely not unique \
-                 in a host genome, and no genome-wide search was performed. Secondary \
+                 paired. Default constraints, unless overridden: {}. Melting \
+                 temperatures were computed for the annealed footprint only, with a \
+                 nearest-neighbour model ({} by default); a 5' tail carrying a \
+                 restriction site does not pair with the template on the first cycle \
+                 and is excluded, and the tailed oligo's own melting temperature is \
+                 reported separately as the one that applies from the third cycle \
+                 onward. The secondary-structure screen was applied to that same \
+                 annealed footprint; the whole ordered oligo's hairpin and dimer free \
+                 energies are reported beside the screened ones and were not gated \
+                 on. {}. Unless the off-target scan was turned off, each candidate \
+                 was additionally required to anneal at exactly one site on the \
+                 supplied molecule, located with a 3'-anchored seed of {} exact bases \
+                 extended toward the 5' end. Surviving pairs were ranked by a weighted \
+                 sum of normalised deviations ({}), an approach following Rozen & \
+                 Skaletsky (Methods Mol Biol 132:365, 2000) and Untergasser et al. \
+                 (Nucleic Acids Res 40:e115, 2012); the weights are this software's own \
+                 and no equivalence to any other designer is claimed.\n\n\
+                 Limits: **where the off-target scan ran, specificity was checked \
+                 against the supplied molecule and nothing else, and where it was \
+                 turned off nothing was checked at all.** The run's own report states \
+                 which of the two happened and this paragraph cannot, so it has to be \
+                 read off the report. A primer unique in a plasmid is routinely not \
+                 unique in a host genome, and no genome-wide search was performed \
+                 either way. Secondary \
                  structure was screened as perfect ungapped helices only: internal \
                  loops, bulges, dangling ends, terminal mismatches, coaxial stacking \
                  and G-quadruplexes are not modelled, and hairpin loop initiation is \
                  not applied, so the reported free energies are a screen and not a \
                  fold. No correction is made for Mg2+ or dNTPs, so melting \
-                 temperatures are on a {:.0} mM monovalent scale and an ordinary PCR \
-                 buffer sits about 5 C higher. **For RT-PCR the design cannot exclude \
+                 temperatures are on a monovalent scale -- {:.0} mM Na+ unless a \
+                 different concentration was given -- and an ordinary PCR buffer sits \
+                 about 5 C higher. **For RT-PCR the design cannot exclude \
                  genomic DNA**: this software is scoped to bacterial templates, \
                  bacterial genes have no introns, and there is therefore no exon-exon \
                  junction for a primer to span -- a no-RT control is the only thing \
@@ -426,6 +475,110 @@ mod tests {
             d.contains(&pl_enzymes::ENZYMES.len().to_string()),
             "the enzyme count is interpolated: {d}"
         );
+    }
+
+    #[test]
+    fn no_paragraph_states_a_setting_as_though_it_knew_what_the_run_used() {
+        // `methods` gets a Topic and nothing else, and `pl methods` parses no
+        // flags, so every value here is a default. The paragraph is meant to be
+        // pasted into a paper beside a number, and it used to assert the
+        // defaults in the past tense: `pl tm --na 1000 --oligo 500` reports
+        // 67.4 C where the defaults give 49.2 C, and `pl methods tm` printed
+        // "Parameters: ... 50 nM oligo, 50 mM Na+" beside it. Worse, three
+        // sentences described *what was computed* and were flatly false under a
+        // documented flag. Each assertion below names one of them.
+        let m = methods(topic("tm").unwrap());
+        let d = pl_thermo::Method::default();
+        assert!(
+            m.contains(&format!(
+                "Default parameters, unless overridden: {}",
+                d.describe()
+            )),
+            "the tm parameters are labelled as defaults, not asserted of the run: {m}"
+        );
+        assert!(
+            !m.contains(&format!("Parameters: {}", d.describe())),
+            "the unhedged past-tense parameter list is gone: {m}"
+        );
+
+        // `pl orfs --any-start` reports stop-to-stop runs; the sentence said
+        // they were not reported at all.
+        let m = methods(topic("orfs").unwrap());
+        assert!(
+            !m.contains("codon; runs without an initiation codon were not reported."),
+            "the start-codon requirement is not asserted unconditionally: {m}"
+        );
+        assert!(
+            m.contains("stop-to-stop"),
+            "and the option that removes it is named: {m}"
+        );
+
+        // `pl primers --seed-mismatch` allows one mismatch in the seed.
+        let m = methods(topic("primers").unwrap());
+        let p = pl_primer::Params::default();
+        assert!(
+            !m.contains(&format!("seed of {} exact bases,", p.seed_len)),
+            "the seed is not asserted to be exact: {m}"
+        );
+        assert!(
+            m.contains("mismatch, never at the 3' end"),
+            "and the option that relaxes it is named: {m}"
+        );
+
+        // `pl sanger --min-quality` moves the threshold.
+        let m = methods(topic("sanger").unwrap());
+        let q = pl_sanger::Params::default().min_quality;
+        assert!(
+            m.contains(&format!("Phred {q} unless it was overridden")),
+            "the quality threshold is labelled as a default: {m}"
+        );
+
+        // The one that would put a false claim in a paper rather than a wrong
+        // number: `pl design --no-specificity` runs no off-target scan, and the
+        // flag's own help says "skip the off-target scan, and say so".
+        let m = methods(topic("design").unwrap());
+        assert!(
+            !m.contains(
+                "**specificity was checked against the supplied molecule and nothing else.**"
+            ),
+            "the off-target scan is not asserted to have run: {m}"
+        );
+        assert!(
+            m.contains("Unless the off-target scan was turned off, each candidate"),
+            "the specificity requirement is conditional: {m}"
+        );
+        assert!(
+            m.contains("turned off nothing was checked at all"),
+            "and the limits state what a skipped scan leaves behind: {m}"
+        );
+        let na = pl_design::Constraints::default().tm_method.na_molar * 1e3;
+        assert!(
+            m.contains(&format!(
+                "{na:.0} mM Na+ unless a different concentration was given"
+            )),
+            "the salt scale is labelled as a default, since --na moves it: {m}"
+        );
+    }
+
+    #[test]
+    fn no_paragraph_carries_source_indentation_into_the_text() {
+        // The design arm broke its literal at the paragraph before "Limits:"
+        // without a `\` continuation, so 17 spaces of source indentation ended
+        // up in the returned String. `pl methods` rewraps and hid it, but the
+        // MCP tool and the PyO3 binding return the string raw, and a blank line
+        // followed by four spaces is a CommonMark indented code block -- which
+        // is where the two **...** hedges in that arm lost their emphasis and
+        // became literal asterisks. Three spaces is the cheapest signal: every
+        // other topic already has none.
+        for t in TOPICS {
+            let m = methods(*t);
+            assert!(
+                !m.contains("   "),
+                "{} carries source indentation: {m}",
+                t.name
+            );
+            assert!(!help(*t).contains("   "), "{} help: {}", t.name, help(*t));
+        }
     }
 
     #[test]

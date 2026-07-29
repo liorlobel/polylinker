@@ -161,13 +161,66 @@ impl Feature {
         }
     }
 
-    /// Lowest coordinate across all segments.
+    /// The **minimum of the segment starts**, which is not the same thing as
+    /// where the feature begins.
+    ///
+    /// Use [`extent`](Self::extent) for anything a user or a machine will
+    /// read. Two shapes make this number a lie, and both arrive from ordinary
+    /// files:
+    ///
+    /// - a single origin-crossing segment `2677..7` begins at 2677, and this
+    ///   returns 2677 — the *highest* coordinate it names, not the lowest;
+    /// - the same span written as a GenBank join, `join(2677..2686,1..7)`,
+    ///   which is what `genbank::write` emits and `genbank::parse` reads back,
+    ///   always has a part starting at base 1, so this returns exactly 1 and
+    ///   [`end`](Self::end) returns the molecule length. A 17 bp promoter then
+    ///   reports as spanning a whole 2,686 bp plasmid, and
+    ///   `Rotate { origin: f.start() }` becomes a guaranteed no-op.
     pub fn start(&self) -> u64 {
         self.segments.iter().map(|s| s.start).min().unwrap_or(0)
     }
-    /// Highest coordinate across all segments.
+    /// The **maximum of the segment ends**. See [`start`](Self::start) for why
+    /// that is not where the feature ends, and use [`extent`](Self::extent)
+    /// instead.
     pub fn end(&self) -> u64 {
         self.segments.iter().map(|s| s.end).max().unwrap_or(0)
+    }
+
+    /// Where this feature begins and ends, read the way [`Molecule::subseq`]
+    /// reads a pair: `end < start` means the span crosses the origin.
+    ///
+    /// `None` only when the feature has no segments at all.
+    ///
+    /// This exists because [`start`](Self::start)/[`end`](Self::end) are a
+    /// min/max over the segments and collapse to `(1, span)` for any
+    /// origin-crossing feature in its GenBank join form — a shape every
+    /// save-and-reopen through `genbank::write` produces, so the answer was
+    /// format-dependent. Both call sites are still correct for an ordinary
+    /// multi-exon join (`join(100..200,300..400)` really does run 100..400),
+    /// which is why they are not simply replaced.
+    ///
+    /// For a feature with introns *and* an origin crossing the result is an
+    /// outer bound: the pair covers the intervening bases the segments do not.
+    /// Draw from `segments`; use this to say where a feature is.
+    pub fn extent(&self, span: u64, circular: bool) -> Option<(u64, u64)> {
+        let first = self.segments.first()?;
+        let last = self.segments.last()?;
+        if self.segments.len() == 1 {
+            return Some((first.start, first.end));
+        }
+        // GenBank has exactly one spelling for a span that crosses the origin:
+        // a join whose penultimate part ends at the last base and whose final
+        // part begins at base 1. `location_parts` emits that and nothing else,
+        // so recognising it here is recognising our own output. The
+        // `last.end < first.start` test is what keeps an ordinary join that
+        // merely happens to start at base 1 out of this branch.
+        if circular && span > 0 && last.start == 1 && last.end < first.start {
+            let prev = &self.segments[self.segments.len() - 2];
+            if prev.end == span {
+                return Some((first.start, last.end));
+            }
+        }
+        Some((self.start(), self.end()))
     }
     /// First colour any segment carries.
     pub fn color(&self) -> Option<&str> {
@@ -330,7 +383,17 @@ pub enum Invalid {
     /// reported there. Reporting it was a contradiction that made `rotate`
     /// refuse roughly a third of real rotations.
     Inverted { what: String, start: u64, end: u64 },
-    /// Coordinates are 1-based, so there is no position 0.
+    /// An endpoint of 0. Coordinates are 1-based, so there is no position 0.
+    ///
+    /// Reported for **either** endpoint. Checking only `start` left `end == 0`
+    /// clean, and that window is reachable off disk: on a circle `end < start`
+    /// is a legal wrap and `0 <= n` is not past the end, so a `.dna` carrying
+    /// `<Segment range="5-0"/>` on a 16 bp plasmid validated clean while
+    /// `Molecule::subseq(5, 0)` refused the very same span, and
+    /// `genbank::write` emitted `misc_feature join(5..16,1..0)` — not a legal
+    /// GenBank location, and Biopython "fixes" it into a feature covering the
+    /// whole molecule. `what` therefore names the endpoint, which is why the
+    /// `Display` text below cannot say "starts".
     ZeroStart { what: String },
     /// The coordinate is past the end of the molecule.
     PastEnd { what: String, end: u64, len: u64 },
@@ -380,7 +443,9 @@ impl std::fmt::Display for Invalid {
                 write!(f, "{what}: {start}..{end} ends before it starts")
             }
             Invalid::ZeroStart { what } => {
-                write!(f, "{what}: starts at 0, but coordinates are 1-based")
+                // Endpoint-agnostic, because `what` may name either end: the
+                // old "starts at 0" read "segment 0 end: starts at 0".
+                write!(f, "{what}: names position 0, but coordinates are 1-based")
             }
             Invalid::PastEnd { what, end, len } => {
                 write!(f, "{what}: {end} is past the {len} bp molecule")
@@ -568,6 +633,20 @@ impl Molecule {
                         what: format!("feature {i} '{}' segment {j}", f.name),
                     });
                 }
+                // BOTH endpoints, for the same reason as the `PastEnd` pair
+                // below. `end == 0` slipped through every other check on a
+                // circle: `start != 0`, `end < start` is a legal wrap there,
+                // and `0 <= n` is not past the end. `<Segment range="5-0"/>`
+                // parses verbatim out of a `.dna`, and `validate()` called it
+                // clean while `subseq(5, 0)` refused the span, `pl_draw::ranges`
+                // fabricated a 1 bp arc at base 1 under the feature's name, and
+                // `genbank::write` emitted `join(5..16,1..0)` with nothing on
+                // `unwritable` and exit 0.
+                if s.end == 0 {
+                    out.push(Invalid::ZeroStart {
+                        what: format!("feature {i} '{}' segment {j} end", f.name),
+                    });
+                }
                 if s.end < s.start && !wraps_are_legal {
                     out.push(Invalid::Inverted {
                         what: format!("feature {i} '{}' segment {j}", f.name),
@@ -621,6 +700,16 @@ impl Molecule {
                 if s.start == 0 {
                     out.push(Invalid::ZeroStart {
                         what: format!("primer {i} '{}' site {j}", p.name),
+                    });
+                }
+                // The mirror of the segment check above. `snapgene.rs` cannot
+                // hand a binding site a 0 (it adds 1 to the file's 0-based
+                // `location`), so this is as latent as the `start == 0` check
+                // beside it — but `from_molecule_reporting` already refuses to
+                // write a `9..0` site, so the model must be able to say why.
+                if s.end == 0 {
+                    out.push(Invalid::ZeroStart {
+                        what: format!("primer {i} '{}' site {j} end", p.name),
                     });
                 }
                 if s.end < s.start && !wraps_are_legal {
@@ -1128,6 +1217,104 @@ mod tests {
             empty.validate().as_slice(),
             [Invalid::FeatureWithoutSegments { .. }]
         ));
+    }
+
+    #[test]
+    fn an_endpoint_of_zero_is_reported_at_either_end() {
+        // The mirror of the `start > n` gap above, and it hid in the same way.
+        // On a circle `end == 0` passes every other check: `start != 0`, and
+        // `end < start` is a legal wrap there, and `0` is not past the end. A
+        // `.dna` carrying `<Segment range="5-0"/>` parses verbatim, so
+        // `validate()` called the molecule clean while `subseq(5, 0)` refused
+        // the same span and `genbank::write` emitted `join(5..16,1..0)` — not a
+        // legal GenBank location — with nothing reported and exit 0.
+        let mut m = circular(b"AAAACCCCGGGGTTTT");
+        let mut f = Feature::new("endzero", "misc_feature");
+        f.segments.push(Segment::new(5, 0));
+        m.features.push(f);
+        assert!(
+            m.subseq(5, 0).is_none(),
+            "the model already refuses to slice this span"
+        );
+        assert!(
+            matches!(m.validate().as_slice(), [Invalid::ZeroStart { .. }]),
+            "a span the model will not slice is not a clean span: {:?}",
+            m.validate()
+        );
+
+        // Both endpoints at once is two problems, not one.
+        let mut both = circular(b"AAAACCCCGGGGTTTT");
+        let mut f = Feature::new("bothzero", "misc_feature");
+        f.segments.push(Segment::new(0, 0));
+        both.features.push(f);
+        assert_eq!(both.validate().len(), 2, "{:?}", both.validate());
+
+        // And the same for a primer binding site. `snapgene.rs` cannot produce
+        // one, but `snapgene::from_molecule_reporting` already refuses to write
+        // a `9..0` site, so the model has to be able to say why.
+        let mut p = circular(b"AAAACCCCGGGGTTTT");
+        p.primers.push(Primer {
+            name: "P".into(),
+            sites: vec![BindingSite {
+                start: 9,
+                end: 0,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+            ..Default::default()
+        });
+        assert!(
+            matches!(p.validate().as_slice(), [Invalid::ZeroStart { .. }]),
+            "{:?}",
+            p.validate()
+        );
+
+        // The message has to work for either end, which "starts at 0" did not.
+        let text = Invalid::ZeroStart {
+            what: "feature 0 'endzero' segment 0 end".into(),
+        }
+        .to_string();
+        assert!(!text.contains("starts at"), "{text}");
+        assert!(text.contains("position 0"), "{text}");
+    }
+
+    #[test]
+    fn extent_reads_an_origin_crossing_join_as_the_wrap_it_is() {
+        // `Feature::start`/`end` are a min and a max over the segments, and an
+        // origin-crossing feature in its GenBank join form always has a part
+        // beginning at base 1 — so they collapse to `(1, n)` and report a 17 bp
+        // promoter as spanning the whole 2,686 bp plasmid. That shape is not
+        // exotic: `genbank::write` emits it for every wrapped feature and
+        // `genbank::parse` reads it straight back, so a save and a reopen was
+        // enough to produce it.
+        let n = 2686u64;
+        let mut joined = Feature::new("wrapper", "promoter");
+        joined.segments.push(Segment::new(2677, n));
+        joined.segments.push(Segment::new(1, 7));
+        assert_eq!((joined.start(), joined.end()), (1, 2686));
+        assert_eq!(joined.extent(n, true), Some((2677, 7)));
+
+        // The single-segment spelling of the same span agrees with it.
+        let mut wrapped = Feature::new("wrapper", "promoter");
+        wrapped.segments.push(Segment::new(2677, 7));
+        assert_eq!(wrapped.extent(n, true), Some((2677, 7)));
+
+        // An ordinary multi-exon join is NOT this shape and must keep the
+        // conventional span, which is also what Biopython reports for it.
+        let mut spliced = Feature::new("spliced", "CDS");
+        spliced.segments.push(Segment::new(100, 200));
+        spliced.segments.push(Segment::new(300, 400));
+        assert_eq!(spliced.extent(n, true), Some((100, 400)));
+
+        // Nor is a join that merely begins at base 1.
+        let mut from_one = Feature::new("from one", "CDS");
+        from_one.segments.push(Segment::new(1, 200));
+        from_one.segments.push(Segment::new(300, 400));
+        assert_eq!(from_one.extent(n, true), Some((1, 400)));
+
+        // On a linear molecule there is no origin to cross.
+        assert_eq!(joined.extent(n, false), Some((1, 2686)));
+        assert_eq!(Feature::new("nowhere", "CDS").extent(n, true), None);
     }
 
     #[test]

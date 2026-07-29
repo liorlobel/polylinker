@@ -40,8 +40,39 @@ impl Format {
     }
 }
 
+/// A UTF-8 byte-order mark, if the file opens with one.
+///
+/// U+FEFF is not whitespace to `str::trim`, not a digit, and not an ASCII
+/// letter, so every `starts_with("LOCUS")` and `strip_prefix('>')` in this crate
+/// treats it as ordinary content — and nothing else in the crate removed it.
+/// PowerShell 5.1's `Out-File -Encoding utf8` and older Notepad "Save As UTF-8"
+/// both emit one, so this arrives on real files that a user edited by hand.
+///
+/// What it cost, measured on a BOM'd copy of pUC19 (L09137.2, `circular`):
+/// `genbank::parse_record` missed the LOCUS line entirely, so the name, the
+/// declared length, the strandedness and the topology were all silently lost and
+/// the plasmid loaded as **linear** — `pl digest --enzyme EcoRI` then printed two
+/// fragments of 2290 and 396 bp where the same bytes without the BOM give one of
+/// 2686, exit 0 and nothing on stderr. Worse, the same `starts_with("LOCUS")`
+/// guards the trailing record in `parse_all_reporting`, so a BOM'd file with no
+/// closing `//` produced **zero** records: "length 0 bp", exit 0. And a BOM'd
+/// FASTA was not recognised at all, because `detect` sniffs `>` after
+/// `trim_start`, which leaves U+FEFF in place.
+///
+/// Stripped once here, at the format boundary, rather than teaching each token
+/// rule about it: the rules are right, the bytes reaching them were not. Only
+/// one mark is removed — a second U+FEFF is a zero-width no-break space in the
+/// document, not a mark, and inventing a rule for it would be guessing.
+fn strip_bom(data: &[u8]) -> &[u8] {
+    data.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(data)
+}
+
 /// Identify a file from its leading bytes.
 pub fn detect(data: &[u8]) -> Option<Format> {
+    // Before the magic checks as well as the text sniff: no binary format here
+    // begins `EF BB BF`, so nothing is masked, and `detect` and the parsers then
+    // agree about where the file starts.
+    let data = strip_bom(data);
     if data.len() >= 13 && data[0] == snapgene::block::HEADER && &data[5..13] == snapgene::MAGIC {
         return Some(Format::SnapGene);
     }
@@ -193,7 +224,10 @@ pub fn load_all(data: &[u8]) -> Result<(Vec<Molecule>, Format, LoadReport), Load
             Ok((vec![doc.molecule], Format::SnapGene, report))
         }
         Some(Format::GenBank) => {
-            let text = String::from_utf8_lossy(data);
+            // `strip_bom`: a leading U+FEFF survives `from_utf8_lossy` and makes
+            // the first line's `starts_with("LOCUS")` false, which loses the
+            // name, the declared length, the strandedness and the topology.
+            let text = String::from_utf8_lossy(strip_bom(data));
             let (all, unrepresentable_locations) = genbank::parse_all_reporting(&text);
             let records = all.len();
             let report = LoadReport {
@@ -207,7 +241,9 @@ pub fn load_all(data: &[u8]) -> Result<(Vec<Molecule>, Format, LoadReport), Load
             Ok((all, Format::GenBank, report))
         }
         Some(Format::Fasta) => {
-            let text = String::from_utf8_lossy(data);
+            // `strip_bom`: U+FEFF is not ASCII whitespace, so the reader would
+            // otherwise keep its three bytes as bases of the first record.
+            let text = String::from_utf8_lossy(strip_bom(data));
             let all = fasta::parse_all(&text);
             let records = all.len();
             let report = LoadReport {
@@ -437,6 +473,53 @@ GGGG
         // A single-record file is not truncated.
         let one = format!("{}\n", record("one", "acgt"));
         assert!(!load_with_report(one.as_bytes()).unwrap().2.truncated());
+    }
+
+    #[test]
+    fn a_utf8_bom_does_not_hide_the_first_line() {
+        // PowerShell 5.1's `Out-File -Encoding utf8` and older Notepad both
+        // write one. U+FEFF is not whitespace, not a digit and not a letter, so
+        // it made `starts_with("LOCUS")` false and the whole LOCUS block was
+        // skipped: a circular plasmid loaded linear and `pl digest` printed two
+        // fragments where there is one, at exit 0 with an empty stderr.
+        const BOM: &str = "\u{feff}";
+        let gb =
+            "LOCUS       pUC19                   2686 bp ds-DNA     circular SYN 26-JUL-2026\n\
+                  ORIGIN\n        1 acgtacgtac\n//\n";
+        let (m, fmt, r) = load_with_report(format!("{BOM}{gb}").as_bytes()).unwrap();
+        assert_eq!(fmt, Format::GenBank);
+        assert_eq!(m.name, "pUC19");
+        assert!(
+            m.topology.is_circular(),
+            "a circular plasmid read as linear"
+        );
+        assert_eq!(m.declared_len, Some(2686));
+        assert_eq!(m.double_stranded, Some(true));
+        assert!(r.topology_declared);
+        // Same bytes, same answer.
+        let (plain, _, _) = load_with_report(gb.as_bytes()).unwrap();
+        assert_eq!(plain.topology.is_circular(), m.topology.is_circular());
+
+        // The trailing-record guard uses the same token test, so a file with no
+        // closing `//` — which the parser otherwise accepts — lost its record
+        // entirely rather than just its header.
+        let noterm = format!(
+            "{BOM}LOCUS       x                         10 bp    DNA     circular SYN 26-JUL-2026\n\
+             ORIGIN\n        1 acgtacgtac\n"
+        );
+        let (m, _, _) = load_with_report(noterm.as_bytes()).unwrap();
+        assert_eq!(m.seq.len(), 10, "the whole sequence was dropped");
+        assert!(m.topology.is_circular());
+
+        // And a BOM'd FASTA was not recognised at all: `detect` sniffs `>` after
+        // `trim_start`, which does not remove U+FEFF.
+        let fa = format!("{BOM}>pUC19 cloning vector\nACGTACGTAC\n");
+        assert_eq!(detect(fa.as_bytes()), Some(Format::Fasta));
+        let (m, _, r) = load_with_report(fa.as_bytes()).unwrap();
+        assert_eq!(m.name, "pUC19");
+        assert_eq!(m.description, "cloning vector");
+        assert_eq!(m.seq, b"ACGTACGTAC".to_vec(), "the mark was read as bases");
+        assert_eq!(r.records, 1);
     }
 
     #[test]

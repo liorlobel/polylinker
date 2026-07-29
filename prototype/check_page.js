@@ -94,7 +94,23 @@ async function main() {
     process.exit(1);
   }
   T("wasm core initialises", true, `ABI ${F("W.pl_abi_version()")}`);
-  T("core publishes its enzyme set", F("ENZYMES.length") === 50, `${F("ENZYMES.length")} enzymes`);
+  // Not `=== 50`. That literal was the table's size on the day this was
+  // written, and the check has gone red ever since pl-enzymes grew to 58 -- a
+  // gate failing for a reason nobody has to act on, which is how a gate stops
+  // being read at all. What is really being checked is that the page takes its
+  // enzymes FROM THE CORE instead of carrying a list of its own, so ask that:
+  // the set is non-empty and contains enzymes only the core's table defines.
+  // That still fails if the export is dropped, and it does not go stale when a
+  // row is added.
+  // `ENZYMES` holds [name, site] pairs, not objects -- see the page's own
+  // declaration. Reading `e.name` here yielded a list of `undefined` whose
+  // length was still right, which is the kind of green a count-only assertion
+  // cannot distinguish from the real thing.
+  const enzymeNames = F("ENZYMES.map(e => e[0])");
+  T("core publishes its enzyme set",
+    Array.isArray(enzymeNames) && enzymeNames.length > 0
+      && ["EcoRI", "BamHI", "BsaI"].every(n => enzymeNames.includes(n)),
+    `${Array.isArray(enzymeNames) ? enzymeNames.length : "no"} enzymes`);
   T("page holds no parser of its own",
     !/function parseDna|function parseGenBank|function parseFasta/.test(src));
 

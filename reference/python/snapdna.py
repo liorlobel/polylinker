@@ -251,13 +251,39 @@ def _parse_features(payload: bytes) -> list[Feature]:
                 ))
             except ValueError:
                 continue
+        # Both spellings of a qualifier, because SnapGene has two.
+        #
+        # Files of the export-10/import-5 vintage spell it
+        # `<Qualifier name=..><QualifierValue textVal=..>`; 11/10 and above
+        # write `<Q name=..><V text=..>`. This oracle matched only the short
+        # form -- and so did the Rust reader it exists to cross-check, so the
+        # two agreed perfectly about files from which BOTH had silently dropped
+        # every qualifier: /locus_tag, /codon_start, /transl_table, /direction,
+        # and whole protein /translation strings. An oracle sharing the
+        # implementation's blind spot certifies the loss instead of catching it,
+        # which is what happened on `pKoV with His decR.dna` until 2026-07-29.
+        #
+        # A valueless qualifier -- GenBank's bare /pseudo -- is now recorded as
+        # an empty string rather than skipped: "absent" and "present with no
+        # value" are different claims and `continue` collapsed them.
         quals = {}
-        for q in fel.findall("Q"):
+        for q in list(fel.findall("Q")) + list(fel.findall("Qualifier")):
             qname = q.get("name", "")
             v = q.find("V")
             if v is None:
+                v = q.find("QualifierValue")
+            if v is None:
+                quals[qname] = ""
                 continue
-            quals[qname] = v.get("text") or v.get("int") or v.get("predef") or ""
+            quals[qname] = (
+                v.get("text")
+                or v.get("textVal")
+                or v.get("int")
+                or v.get("intVal")
+                or v.get("predef")
+                or v.get("predefVal")
+                or ""
+            )
         d = fel.get("directionality")
         feats.append(Feature(
             name=fel.get("name", ""),

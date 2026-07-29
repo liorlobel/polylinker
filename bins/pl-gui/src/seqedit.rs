@@ -581,6 +581,37 @@ pub fn sanitise_paste(text: &str) -> PasteReport {
             .collect::<Vec<_>>()
             .join("")
     } else if let Some(oi) = genbank_origin_line(&text) {
+        // More than one record, refused for the same reason the FASTA branch
+        // above refuses it, and reachable the same way: "Send to -> File" at
+        // NCBI and every multi-record export produce these.
+        //
+        // Without this, `genbank_origin_line` found the FIRST `ORIGIN` and the
+        // `take_while` below stopped at the FIRST `//`, so record 2 was dropped
+        // whole — its bases counted by nothing, `rejected` empty, `refused`
+        // None, so `needs_consent` was false and the paste went in with no
+        // dialog. Worse than silence: the notice was byte-identical to a
+        // single-record paste and asserted "this is a whole GenBank record",
+        // singular, which is a claim the code could not support. `is_a_lot`
+        // could not rescue it either, because it is measured on the already
+        // truncated `report.bases`.
+        //
+        // Both counts, not just `ORIGIN`: a record whose own `//` is missing
+        // lets the `take_while` run on into the next record's header and turn
+        // its letters into bases, and the terminator count catches that shape
+        // even when only one `ORIGIN` line is present.
+        let origins = text.lines().filter(|l| l.trim() == "ORIGIN").count();
+        let terminators = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with("//"))
+            .count();
+        let records = origins.max(terminators);
+        if records > 1 {
+            report.refused = Some(format!(
+                "That is {records} GenBank records. Concatenating them would fabricate a \
+                 chimera nobody asked for. Paste one at a time."
+            ));
+            return report;
+        }
         // A GenBank ORIGIN block, read by exactly the reader's own rule
         // (`genbank.rs`: drop ASCII whitespace and ASCII digits). Reusing the
         // rule rather than restating it is the point — a second copy drifts.
@@ -1132,11 +1163,26 @@ impl SeqEdit {
         self.caret = caret.min(n);
     }
 
-    /// Move by `delta` gaps, wrapping on a circle.
+    /// Move by `delta` gaps, wrapping on a circle for a single-gap step only.
     ///
-    /// A circle has no end and an arrow key that stops dead contradicts the
-    /// topology the file declares. `Home`/`End` deliberately do not wrap: those
-    /// are statements about the *numbering*, which is what the text shows.
+    /// A circle has no end and Left/Right stopping dead at base 1 would
+    /// contradict the topology the file declares, so those two wrap. Everything
+    /// else clamps: `Home`/`End`, and — because both wrap arms below are gated
+    /// on `delta == ±1` while `main.rs` passes `±per_row` for Up/Down and
+    /// `±per_page` for PageUp/PageDown, and `fit_per_row` never returns 1 —
+    /// those four as well. That is deliberate and it is what every text editor
+    /// does: a *row* motion is a statement about the layout, and `Home`/`End`
+    /// about the numbering, and neither is a claim that the molecule has ends.
+    /// The docstring here used to promise that no arrow key ever stops, which
+    /// four of the six keys reaching this function have never honoured.
+    ///
+    /// Crossing the origin with Shift held is initiated by Shift+Left or
+    /// Shift+Right — the `over_the_origin` arm is gated on `delta == ±1` too,
+    /// and must stay that way: it *toggles* `through_origin`, which is what lets
+    /// a selection be walked back, and firing it on a multi-gap step that landed
+    /// on an already-wrapping selection would name the complement arc. Once the
+    /// bit is set, Shift+Up and Shift+Down extend across the origin a whole row
+    /// at a time like any other key.
     pub fn step(&mut self, doc: &mut Document, delta: i64, extend: bool) {
         // Settle FIRST, before the length is read. A caret move closes the run
         // in any case — `place` says so — but this function measured the
@@ -1398,19 +1444,39 @@ impl SeqEdit {
     /// Backspace at caret 0.
     ///
     /// A no-op on a circle too, deliberately. The document is stored and shown
-    /// as a linear array with a distinguished base 1, and deleting the last
-    /// base because the user pressed Backspace on row 1 is an edit whose entire
-    /// visible effect is off-screen. The message names the alternative so this
-    /// does not read as the topology being ignored.
+    /// as a linear array with a distinguished base 1, and deleting the last base
+    /// because the user pressed Backspace on row 1 is an edit at the *other end*
+    /// of the document from the caret — usually off the bottom of the view, and
+    /// on a molecule that fits in one screenful, several cells to the right of a
+    /// caret that has not moved. Either way it is not where the user is looking.
+    /// The message names the alternative so this does not read as the topology
+    /// being ignored.
     fn at_the_start(&mut self, doc: &Document, n: u64) {
         if doc.molecule().topology.is_circular() && n > 0 {
+            // Base `n` is on the LAST row, which is the bottom-most row of the
+            // grid: `main.rs` lays row `r` out at increasing `y`, so nothing can
+            // ever push base `n` above the viewport. This said "off the top of
+            // this view" — the direction the companion `at_the_end` correctly
+            // gives for base 1 — and paired it with `n / per_row`, which is one
+            // row too many whenever `per_row` divides `n` and reads "0 rows
+            // away, off the top" for any circle short enough to fit on one row,
+            // where base `n` is plainly visible beside the caret.
+            let rows = (n - 1) / self.per_row();
+            let where_it_is = if rows == 0 {
+                ", on this same row".to_string()
+            } else {
+                format!(
+                    ", {} row{} below, at the foot of the sequence",
+                    fmt_int(rows),
+                    if rows == 1 { "" } else { "s" }
+                )
+            };
             self.say(format!(
-                "The caret is at base 1. On a circle the base before it is base {} — \
-                 {} rows away, off the top of this view. Select it, or use Edit ▸ Set origin, \
-                 if that is what you meant. This is a display decision, not a claim that a \
-                 circle has ends.",
+                "The caret is at base 1. On a circle the base before it is base {}{}. \
+                 Select it, or use Edit ▸ Set origin, if that is what you meant. This is a \
+                 display decision, not a claim that a circle has ends.",
                 fmt_int(n),
-                fmt_int(n / self.per_row())
+                where_it_is
             ));
         } else {
             self.say("The caret is at the start; there is nothing before base 1.");
@@ -1499,11 +1565,23 @@ impl SeqEdit {
 
     /// The arc a paste or an insertion would replace: the selection if there is
     /// one, otherwise the caret as an empty span.
+    ///
+    /// A selection covering **no bases** is not a selection. `type_text` has
+    /// always fallen back to the caret in that case; this did not, and one
+    /// empty shape is not where the caret is: shift-selecting backwards across
+    /// the origin from gap 0 and then shrinking it back to nothing leaves
+    /// `{anchor: 0, head: n, through_origin: true}`, whose `canonical` collapses
+    /// to gap 0 while the caret is at gap n. Ctrl+V then inserted before base 1
+    /// where typing the same characters inserted after base n — shifting every
+    /// coordinate in the file by the length of the paste, moving the origin, and
+    /// saying nothing, while the readout above the grid had just promised
+    /// "numbering unchanged".
     pub fn target(&self, doc: &Document) -> Selection {
         let mol = doc.molecule();
         let n = mol.len();
         self.sel
             .map(|s| s.canonical(n, mol.topology.is_circular()))
+            .filter(|s| !s.is_empty(n))
             .unwrap_or(Selection::point(self.caret.min(n)))
     }
 

@@ -170,8 +170,16 @@ fn tool_list() -> Vec<Value> {
         ),
         tool(
             "checksum",
-            "SEGUID v2 checksum — the same for the same molecule however it was \
-             rotated or which strand was written first.",
+            // Split by topology rather than promising both invariances for
+            // both, because only one of them is true of a linear molecule:
+            // rotating a linear duplex makes a different molecule. The old
+            // wording claimed rotation invariance for everything and the
+            // linear branch did not even deliver strand invariance.
+            "SEGUID v2 checksum. Circular: cdseguid, the same however the \
+             molecule was rotated and whichever strand was written first. \
+             Linear: ldseguid, the same whichever strand was written first. \
+             The single-strand lsseguid is given too, labelled as covering \
+             one strand and not the molecule.",
             vec![("path", "string", "Path to the file")],
             &["path"],
         ),
@@ -245,91 +253,238 @@ fn elided(n: usize, which: &str) -> String {
     }
 }
 
+/// An argument the caller actually supplied, or `None`.
+///
+/// [`Value::as_i64`], [`Value::as_str`] and [`Value::as_bool`] each return
+/// `None` for two different situations — the key was absent, and the key was
+/// present holding the wrong JSON type — and `unwrap_or(default)` collapses
+/// them. A client that sent `{"min_aa": "1000"}`, a number written as a string
+/// and a routine tool-call artifact, therefore got the *default* threshold of
+/// 30, and the reply named no threshold at all, so nothing in it could be
+/// checked against what was asked for. Absent still means the default; present
+/// and unreadable is a tool error the model can see and correct itself from.
+///
+/// An explicit `null` counts as absent, because that is what a client sends
+/// for an optional field it has no value for; it carries no requested value
+/// that could be lost.
+fn supplied<'a>(a: &'a Value, key: &str) -> Option<&'a Value> {
+    match a.get(key) {
+        None | Some(Value::Null) => None,
+        v => v,
+    }
+}
+
+/// A string argument. Absent means `""`; the wrong type is refused.
+fn text_arg(a: &Value, key: &str) -> Result<String, String> {
+    match supplied(a, key) {
+        None => Ok(String::new()),
+        Some(v) => v
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("{key} must be a string, not {}", json::write(v))),
+    }
+}
+
+/// A boolean argument, or `None` when it was not supplied.
+fn flag_arg(a: &Value, key: &str) -> Result<Option<bool>, String> {
+    match supplied(a, key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| format!("{key} must be true or false, not {}", json::write(v))),
+    }
+}
+
+/// A whole-number argument, or `None` when it was not supplied.
+///
+/// Refuses a fraction for the reason [`json`] gives — a caller who meant a
+/// length and wrote `3.7` has made a mistake, and rounding it away hides that
+/// — and refuses a magnitude past 2^53 for a second reason: beyond there a
+/// `f64` no longer holds consecutive integers, so `{"min_aa": 1e19}` came back
+/// as "no ORF of 9223372036854775807 aa or more", naming a threshold the
+/// caller never sent.
+fn whole_arg(a: &Value, key: &str) -> Result<Option<i64>, String> {
+    // Past this a `f64` cannot name a particular integer.
+    const EXACT: f64 = 9_007_199_254_740_992.0;
+    let Some(v) = supplied(a, key) else {
+        return Ok(None);
+    };
+    let whole = || format!("{key} must be a whole number, not {}", json::write(v));
+    let n = v.as_f64().ok_or_else(whole)?;
+    if !n.is_finite() || n.abs() >= EXACT {
+        return Err(format!(
+            "{key} is out of range: {} is past the largest whole number this can name",
+            json::write(v)
+        ));
+    }
+    v.as_i64().map(Some).ok_or_else(whole)
+}
+
+/// Load record 1 of a file, together with what else the file held.
+fn load(path: &str) -> Result<(pl_core::Molecule, pl_fileio::LoadReport), String> {
+    let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    pl_fileio::load_with_report(&data)
+        .map(|(m, _, r)| (m, r))
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+/// The opening line for a reply about a file that held more than one record.
+///
+/// [`load`] returns record 1 and every tool below then answers about it as
+/// though it were the file. The [`pl_fileio::LoadReport`] was bound to `_`, so
+/// a 3-record GenBank whose second record has three EcoRI sites came back as
+/// "EcoRI: 1 cut(s)" with no record count and no warning — a statement true of
+/// one record, handed over the process boundary as a fact about the file. The
+/// CLI prints this on every matching verb (`note_first_record_only`), and the
+/// checksum tool is the sharp case: an identity claim whose scope has to
+/// travel with it. Empty when nothing was left behind, so a complete answer
+/// reads as one.
+fn first_record_only(report: &pl_fileio::LoadReport) -> Vec<String> {
+    if report.truncated() {
+        vec![format!(
+            "note: this file holds {} records; everything below describes only the first",
+            report.records
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
 fn call(params: &Value) -> Result<Value, String> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or("tools/call needs a name")?;
     let a = params.get("arguments").cloned().unwrap_or(Value::Null);
-    let arg = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    // A bad argument is a *tool* error and not a protocol error — see
+    // [`tool_error`] — so every `?` inside [`run`] lands here and is turned
+    // into one, rather than telling the client the server itself is broken.
+    Ok(run(name, &a).unwrap_or_else(tool_error))
+}
 
-    let load = |path: &str| -> Result<pl_core::Molecule, String> {
-        let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        pl_fileio::load_with_report(&data)
-            .map(|(m, _, _)| m)
-            .map_err(|e| format!("{path}: {e}"))
-    };
-
+fn run(name: &str, a: &Value) -> Result<Value, String> {
     Ok(match name {
-        "read_molecule" => match load(&arg("path")) {
-            Err(e) => tool_error(e),
-            Ok(m) => {
-                let c = pl_core::Composition::of(&m.seq);
-                text_result(format!(
-                    "{} bp {}, GC {}, {} feature(s), {} primer(s)",
-                    m.seq.len(),
-                    m.topology.as_str(),
-                    // `None` when the molecule holds no unambiguous bases —
-                    // "0.0%" would be a claim about a sequence there is nothing
-                    // to say about.
-                    c.gc_percent()
-                        .map(|g| format!("{g:.1}%"))
-                        .unwrap_or_else(|| "unknown".into()),
-                    m.features.len(),
-                    m.primers.len()
-                ))
+        "read_molecule" => {
+            let (m, report) = load(&text_arg(a, "path")?)?;
+            let c = pl_core::Composition::of(&m.seq);
+            let mut lines = first_record_only(&report);
+            // `m.seq.len()` counts the bases actually present, and printing it
+            // as the molecule's length described a GenBank record declaring
+            // `5386 bp` with an empty `ORIGIN` as "0 bp" — exactly the class of
+            // claim the GC field two lines below refuses to make. `pl info`
+            // hedges this case, so this has to as well.
+            let extent = if m.sequence_absent() {
+                format!(
+                    "{} bp DECLARED, but this file carries no bases, {}",
+                    m.span(),
+                    m.topology.as_str()
+                )
+            } else if m.is_annotation_track() {
+                // No bases, no declared length, and — in the UGENE export that
+                // this matches — no topology word on the LOCUS line either, so
+                // "0 bp linear" asserted a topology the file never gave. The
+                // span here is inferred from the features and says so.
+                format!(
+                    "an annotation track: coordinates and no bases, spanning {} bp by its features",
+                    m.annotation_span()
+                )
+            } else {
+                format!("{} bp {}", m.len(), m.topology.as_str())
+            };
+            lines.push(format!(
+                "{extent}, GC {}, {} feature(s), {} primer(s)",
+                // `None` when the molecule holds no unambiguous bases —
+                // "0.0%" would be a claim about a sequence there is nothing
+                // to say about.
+                c.gc_percent()
+                    .map(|g| format!("{g:.1}%"))
+                    .unwrap_or_else(|| "unknown".into()),
+                m.features.len(),
+                m.primers.len()
+            ));
+            text_result(lines.join("\n"))
+        }
+        "digest" => {
+            let path = text_arg(a, "path")?;
+            let (m, report) = load(&path)?;
+            // A digest of nothing is not "no cuts". `pl digest` exits with this
+            // sentence and `pl_digest_json` returns it; this tool answered "no
+            // cuts" for a record that declared 5386 bp and shipped none, which
+            // reads as a fact about the plasmid rather than about the file.
+            if m.seq.is_empty() {
+                return Err(format!("{path}: no bases to digest"));
             }
-        },
-        "digest" => match load(&arg("path")) {
-            Err(e) => tool_error(e),
-            Ok(m) => {
-                let wanted = arg("enzymes");
-                let names: Vec<&str> = wanted
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|x| !x.is_empty())
-                    .collect();
-                let mut lines = Vec::new();
-                for d in pl_enzymes::digest_all(&m) {
-                    if !names.is_empty()
-                        && !names.iter().any(|n| n.eq_ignore_ascii_case(d.enzyme.name))
-                    {
-                        continue;
-                    }
-                    if d.positions.is_empty() {
-                        continue;
-                    }
-                    let f = d.fragments(m.len(), m.topology);
-                    // Both lists are capped, and a cap that does not say so is
-                    // the whole failure. `fragments` comes back largest first,
-                    // so the eight shown are the eight biggest bands and the
-                    // rest are invisible: an assistant asked what the gel will
-                    // look like reported eight bands for a digest that gives
-                    // thirteen. The CLI appends ", ..." past six positions and
-                    // heads its column "largest fragments"; nothing crossing
-                    // this process boundary may be less honest than the
-                    // terminal.
-                    lines.push(format!(
-                        "{}: {} cut(s) at {:?}{}, {} fragment(s) {:?}{}",
-                        d.enzyme.name,
-                        d.positions.len(),
-                        &d.positions[..d.positions.len().min(SHOWN)],
-                        elided(d.positions.len(), "first"),
-                        f.len(),
-                        &f[..f.len().min(SHOWN)],
-                        elided(f.len(), "largest"),
-                    ));
-                }
-                if lines.is_empty() {
-                    lines.push("no cuts".into());
-                }
-                text_result(lines.join("\n"))
+            let wanted = text_arg(a, "enzymes")?;
+            let names: Vec<&str> = wanted
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .collect();
+            // Every requested name is resolved before anything is digested.
+            // Filtering `digest_all`'s output by name meant a name the table
+            // does not hold simply matched nothing, and the empty result came
+            // back as "no cuts" — a claim about the molecule manufactured out
+            // of a gap in the database, byte-identical to a true negative.
+            // DpnI is the case that bites: GATC occurs in essentially every
+            // plasmid, it is the standard post-PCR template-removal step, and
+            // it is not among the 58. All the misses are named at once, so a
+            // caller who mistyped three does not have to iterate three times.
+            let unknown: Vec<&str> = names
+                .iter()
+                .copied()
+                .filter(|n| pl_enzymes::by_name(n).is_none())
+                .collect();
+            if !unknown.is_empty() {
+                return Err(format!(
+                    "no enzyme named {} in the built-in set of {}",
+                    unknown.join(", "),
+                    pl_enzymes::ENZYMES.len()
+                ));
             }
-        },
+            let mut cuts = Vec::new();
+            for d in pl_enzymes::digest_all(&m) {
+                if !names.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(d.enzyme.name))
+                {
+                    continue;
+                }
+                if d.positions.is_empty() {
+                    continue;
+                }
+                let f = d.fragments(m.len(), m.topology);
+                // Both lists are capped, and a cap that does not say so is
+                // the whole failure. `fragments` comes back largest first,
+                // so the eight shown are the eight biggest bands and the
+                // rest are invisible: an assistant asked what the gel will
+                // look like reported eight bands for a digest that gives
+                // thirteen. The CLI appends ", ..." past six positions and
+                // heads its column "largest fragments"; nothing crossing
+                // this process boundary may be less honest than the
+                // terminal.
+                cuts.push(format!(
+                    "{}: {} cut(s) at {:?}{}, {} fragment(s) {:?}{}",
+                    d.enzyme.name,
+                    d.positions.len(),
+                    &d.positions[..d.positions.len().min(SHOWN)],
+                    elided(d.positions.len(), "first"),
+                    f.len(),
+                    &f[..f.len().min(SHOWN)],
+                    elided(f.len(), "largest"),
+                ));
+            }
+            // Only reachable now for names that resolved and genuinely did not
+            // cut, which is the only thing this sentence can honestly mean.
+            if cuts.is_empty() {
+                cuts.push("no cuts".into());
+            }
+            let mut lines = first_record_only(&report);
+            lines.extend(cuts);
+            text_result(lines.join("\n"))
+        }
         "melting_temperature" => {
             let m = pl_thermo::Method::default();
             let mut lines = vec![format!("Method: {}", m.describe())];
-            for o in arg("oligos")
+            for o in text_arg(a, "oligos")?
                 .split(',')
                 .map(str::trim)
                 .filter(|x| !x.is_empty())
@@ -341,184 +496,239 @@ fn call(params: &Value) -> Result<Value, String> {
             }
             text_result(lines.join("\n"))
         }
-        "open_reading_frames" => match load(&arg("path")) {
-            Err(e) => tool_error(e),
-            Ok(m) => {
-                // Checked *before* it is narrowed, and reported as the caller
-                // wrote it.
-                //
-                // `as u8` on the way in truncated to the low byte, so a request
-                // for table 267 silently became table 11 and -243 became 13 —
-                // both real NCBI codes, so the guard below never fired and the
-                // ORFs came back computed under a genetic code nobody asked
-                // for. Table 300 did reach the error, and named 44.
-                let id = a.get("table").and_then(Value::as_i64).unwrap_or(11);
-                let Some(code) = u8::try_from(id).ok().and_then(pl_core::translate::table) else {
-                    return Ok(tool_error(format!("no NCBI code {id}")));
-                };
-                // Likewise: `-1 as usize` is 18,446,744,073,709,551,615, which
-                // no ORF can reach, and the reply was then byte-identical to a
-                // molecule that genuinely has no ORF at the threshold asked
-                // for.
-                let want = a.get("min_aa").and_then(Value::as_i64).unwrap_or(30);
-                let Ok(min_aa) = usize::try_from(want) else {
-                    return Ok(tool_error(format!(
-                        "min_aa must be zero or more, not {want}"
-                    )));
-                };
-                let p = pl_core::orf::Params {
-                    min_aa,
-                    ..Default::default()
-                };
-                let orfs = pl_core::orf::find_orfs(&m.seq, code, m.topology.is_circular(), &p);
-                let mut lines = vec![format!("table {id} — {}", code.name())];
-                // The empty case is a result, not the absence of one. Without
-                // this line the whole reply was the table header, which an
-                // assistant reads as "this plasmid has no open reading frames"
-                // — a claim about the molecule rather than about the threshold.
-                // The CLI prints it; a hedge that does not survive the process
-                // boundary is lost exactly where it matters most.
-                if orfs.is_empty() {
-                    lines.push(format!("no ORF of {min_aa} aa or more"));
-                }
-                for o in orfs.iter().take(40) {
-                    lines.push(format!(
-                        "{}..{} {} {} aa, starts {}{}",
-                        o.start,
-                        o.end,
-                        if o.strand == pl_core::Strand::Reverse {
-                            "-"
-                        } else {
-                            "+"
-                        },
-                        o.aa_len,
-                        String::from_utf8_lossy(&o.start_codon),
-                        if o.wrapped { " (crosses origin)" } else { "" }
-                    ));
-                }
-                if orfs.len() > 40 {
-                    lines.push(format!("... and {} more", orfs.len() - 40));
-                }
-                if !code.is_stop(b"TGA") {
-                    lines.push(format!(
-                        "note: table {id} reads TGA as an amino acid, not a stop"
-                    ));
-                }
-                text_result(lines.join("\n"))
+        "open_reading_frames" => {
+            let (m, report) = load(&text_arg(a, "path")?)?;
+            // Checked *before* it is narrowed, and reported as the caller
+            // wrote it.
+            //
+            // `as u8` on the way in truncated to the low byte, so a request
+            // for table 267 silently became table 11 and -243 became 13 —
+            // both real NCBI codes, so the guard below never fired and the
+            // ORFs came back computed under a genetic code nobody asked
+            // for. Table 300 did reach the error, and named 44.
+            //
+            // `whole_arg` rather than `as_i64().unwrap_or(11)` because that
+            // also read `{"table": "2"}` as "no table was given".
+            let id = whole_arg(a, "table")?.unwrap_or(11);
+            let Some(code) = u8::try_from(id).ok().and_then(pl_core::translate::table) else {
+                return Err(format!("no NCBI code {id}"));
+            };
+            // Likewise: `-1 as usize` is 18,446,744,073,709,551,615, which
+            // no ORF can reach, and the reply was then byte-identical to a
+            // molecule that genuinely has no ORF at the threshold asked
+            // for.
+            let want = whole_arg(a, "min_aa")?.unwrap_or(30);
+            let Ok(min_aa) = usize::try_from(want) else {
+                return Err(format!("min_aa must be zero or more, not {want}"));
+            };
+            let p = pl_core::orf::Params {
+                min_aa,
+                ..Default::default()
+            };
+            let orfs = pl_core::orf::find_orfs(&m.seq, code, m.topology.is_circular(), &p);
+            let mut lines = first_record_only(&report);
+            // The threshold rides on the header rather than only on the empty
+            // branch below. It used to appear in one line that fires only when
+            // nothing was found, so a reply that *did* list ORFs named no
+            // threshold anywhere and a caller could not tell the one they asked
+            // for from a default that had been substituted for it.
+            lines.push(format!("table {id} — {}, min {min_aa} aa", code.name()));
+            // The empty case is a result, not the absence of one. Without
+            // this line the whole reply was the table header, which an
+            // assistant reads as "this plasmid has no open reading frames"
+            // — a claim about the molecule rather than about the threshold.
+            // The CLI prints it; a hedge that does not survive the process
+            // boundary is lost exactly where it matters most.
+            if orfs.is_empty() {
+                lines.push(format!("no ORF of {min_aa} aa or more"));
             }
-        },
-        "checksum" => match load(&arg("path")) {
-            Err(e) => tool_error(e),
-            Ok(m) => {
-                let w = String::from_utf8_lossy(&m.seq).to_string();
-                let r = if m.topology.is_circular() {
-                    let c =
-                        String::from_utf8_lossy(&pl_core::reverse_complement(&m.seq)).to_string();
-                    pl_core::cdseguid(&w, &c).map(|x| format!("cdseguid: {x}"))
-                } else {
-                    pl_core::lsseguid(&w).map(|x| format!("lsseguid: {x}"))
-                };
-                match r {
-                    Ok(x) => text_result(x),
-                    // A checksum over a sequence with a character the algorithm
-                    // does not define is not a checksum, and returning one
-                    // anyway is how two different molecules come to look equal.
-                    Err(e) => tool_error(format!("no checksum for this sequence: {e:?}")),
-                }
-            }
-        },
-        "annotate" => match load(&arg("path")) {
-            Err(e) => tool_error(e),
-            Ok(m) => {
-                let (all, _) = pl_features::Db::builtin();
-                let proposed = a
-                    .get("include_proposed")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let db = if proposed {
-                    all.clone()
-                } else {
-                    all.reviewed()
-                };
-                if db.records.is_empty() {
-                    // The caveat has to survive the process boundary. An
-                    // assistant repeats what it is handed, so "nothing found"
-                    // without the reason would be read as "this plasmid has no
-                    // known features".
-                    return Ok(text_result(format!(
-                        "Nothing was searched: {} of {} database records have been \
-                         reviewed by a named curator. The rest were assembled by \
-                         machine from public sources and are not used by default. \
-                         Set include_proposed to search them, and treat anything \
-                         found as a suggestion to check against its cited accession.",
-                        all.reviewed().records.len(),
-                        all.records.len()
-                    )));
-                }
-                let ann = pl_features::annotate::Annotator::new(
-                    &db,
-                    pl_features::annotate::Config::default(),
-                );
-                let found = ann.annotate(&m);
-                let mut lines: Vec<String> = found
-                    .iter()
-                    .map(|f| {
+            for o in orfs.iter().take(40) {
+                // `start..end` is the ORF's extent only while `laps` is zero.
+                // A 33-base ORF on a 19 bp circle reports start 5, end 18 — an
+                // inclusive range of 14 bases, with start < end so nothing
+                // looks wrong — and a reader who slices those coordinates gets
+                // 14 bases of the wrong sequence. `Orf::bases` is always the
+                // length, and printing it is the only way it survives into a
+                // reader that cannot inspect the struct.
+                lines.push(format!(
+                    "{}..{} {} {} aa, {} bp, starts {}{}",
+                    o.start,
+                    o.end,
+                    if o.strand == pl_core::Strand::Reverse {
+                        "-"
+                    } else {
+                        "+"
+                    },
+                    o.aa_len,
+                    o.bases(),
+                    String::from_utf8_lossy(&o.start_codon),
+                    if o.laps > 0 {
                         format!(
-                            "{}..{} {} {} — {:.1}% identity, {:.0}% coverage{}",
-                            f.start,
-                            f.end,
-                            if f.strand == pl_core::Strand::Reverse {
-                                "-"
-                            } else {
-                                "+"
-                            },
-                            db.records[f.record].name,
-                            f.identity * 100.0,
-                            f.coverage * 100.0,
-                            if f.is_fragment { ", fragment" } else { "" }
+                            " (crosses origin, and wraps the whole molecule {} more time(s) — \
+                             the range above is {} whole lap(s) short of the ORF)",
+                            o.laps, o.laps
                         )
-                    })
-                    .collect();
-                if lines.is_empty() {
-                    lines.push("nothing found".into());
-                    // The same caveat as the empty-database branch above, for the
-                    // same reason, and it has to be in both places: that branch
-                    // only fires when NOTHING is reviewed, so signing the table off
-                    // on 2026-07-28 silenced it and left a bare "nothing found"
-                    // crossing the boundary. An assistant repeats what it is
-                    // handed, and "nothing found" out of an 84-record database gets
-                    // relayed as "this plasmid has no known features" — a claim
-                    // about the molecule made out of a fact about the database.
-                    // The count is the bound on what the answer can mean.
-                    lines.push(format!(
-                        "This means none of the {} curated record(s) searched were \
-                         found — not that the molecule has no known features. The \
-                         database is deliberately small and is not comprehensive.",
-                        db.records.len()
-                    ));
+                    } else if o.wrapped {
+                        " (crosses origin)".to_string()
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+            if orfs.len() > 40 {
+                lines.push(format!("... and {} more", orfs.len() - 40));
+            }
+            if !code.is_stop(b"TGA") {
+                lines.push(format!(
+                    "note: table {id} reads TGA as an amino acid, not a stop"
+                ));
+            }
+            text_result(lines.join("\n"))
+        }
+        "checksum" => {
+            let (m, report) = load(&text_arg(a, "path")?)?;
+            // SEGUID is defined over unambiguous *uppercase* DNA, and NCBI
+            // writes `ORIGIN` in lowercase. `Molecule::seq` is case-preserved,
+            // so the raw bytes went straight to the algorithm and a stock
+            // GenBank download came back as `NotInAlphabet('g')` — an error
+            // about the file's letter case, reported as though the molecule had
+            // no checksum. The CLI upper-cases and says that it did.
+            let seq = String::from_utf8_lossy(&m.seq).to_uppercase();
+            let lower = m.seq.iter().filter(|b| b.is_ascii_lowercase()).count();
+            let rc =
+                String::from_utf8_lossy(&pl_core::reverse_complement(seq.as_bytes())).into_owned();
+            // The *duplex* checksum is the identity claim, and it is the one
+            // this tool's description promises: the same however the molecule
+            // was rotated or whichever strand was written first. `lsseguid` is
+            // neither — it covers one strand — so two files holding the same
+            // linear duplex, one written as the reverse complement of the
+            // other, used to get different checksums from a tool whose
+            // description says they cannot. FASTA declares no topology and
+            // loads as linear, so that was the branch the commonest input took.
+            // `ldseguid` is what `pl checksum` prints for the linear case, and
+            // its preconditions hold here by construction because `rc` is the
+            // reverse complement of `seq`.
+            let duplex = if m.topology.is_circular() {
+                pl_core::cdseguid(&seq, &rc)
+            } else {
+                pl_core::ldseguid(&seq, &rc)
+            };
+            match duplex {
+                Ok(x) => {
+                    let mut lines = first_record_only(&report);
+                    if lower > 0 {
+                        lines.push(format!(
+                            "note: {lower} lowercase base(s) upper-cased for the checksum"
+                        ));
+                    }
+                    // No `"cdseguid: "` prefix in front of it: the SEGUID
+                    // string already carries its own, and formatting a second
+                    // one produced "lsseguid: lsseguid=…".
+                    lines.push(x);
+                    // Still offered, and hedged exactly as the terminal hedges
+                    // it, because it identifies one strand and not the molecule.
+                    match pl_core::lsseguid(&seq) {
+                        Ok(v) => lines.push(format!("{v}   (this strand alone)")),
+                        Err(e) => lines.push(format!("lsseguid: {e}")),
+                    }
+                    text_result(lines.join("\n"))
                 }
-                if proposed {
-                    lines.push(
-                        "These come from records no human has reviewed. Check each \
-                         against its source before treating it as an identification."
-                            .into(),
-                    );
-                }
-                text_result(lines.join("\n"))
+                // A checksum over a sequence with a character the algorithm
+                // does not define is not a checksum, and returning one
+                // anyway is how two different molecules come to look equal.
+                Err(e) => return Err(format!("no checksum for this sequence: {e}")),
+            }
+        }
+        "annotate" => {
+            let (m, report) = load(&text_arg(a, "path")?)?;
+            let (all, _) = pl_features::Db::builtin();
+            let proposed = flag_arg(a, "include_proposed")?.unwrap_or(false);
+            let db = if proposed {
+                all.clone()
+            } else {
+                all.reviewed()
+            };
+            let note = first_record_only(&report);
+            if db.records.is_empty() {
+                // The caveat has to survive the process boundary. An
+                // assistant repeats what it is handed, so "nothing found"
+                // without the reason would be read as "this plasmid has no
+                // known features".
+                let mut lines = note;
+                lines.push(format!(
+                    "Nothing was searched: {} of {} database records have been \
+                     reviewed by a named curator. The rest were assembled by \
+                     machine from public sources and are not used by default. \
+                     Set include_proposed to search them, and treat anything \
+                     found as a suggestion to check against its cited accession.",
+                    all.reviewed().records.len(),
+                    all.records.len()
+                ));
+                return Ok(text_result(lines.join("\n")));
+            }
+            let ann = pl_features::annotate::Annotator::new(
+                &db,
+                pl_features::annotate::Config::default(),
+            );
+            let found = ann.annotate(&m);
+            let mut lines: Vec<String> = note;
+            lines.extend(found.iter().map(|f| {
+                format!(
+                    "{}..{} {} {} — {:.1}% identity, {:.0}% coverage{}",
+                    f.start,
+                    f.end,
+                    if f.strand == pl_core::Strand::Reverse {
+                        "-"
+                    } else {
+                        "+"
+                    },
+                    db.records[f.record].name,
+                    f.identity * 100.0,
+                    f.coverage * 100.0,
+                    if f.is_fragment { ", fragment" } else { "" }
+                )
+            }));
+            if found.is_empty() {
+                lines.push("nothing found".into());
+                // The same caveat as the empty-database branch above, for the
+                // same reason, and it has to be in both places: that branch
+                // only fires when NOTHING is reviewed, so signing the table off
+                // on 2026-07-28 silenced it and left a bare "nothing found"
+                // crossing the boundary. An assistant repeats what it is
+                // handed, and "nothing found" out of an 84-record database gets
+                // relayed as "this plasmid has no known features" — a claim
+                // about the molecule made out of a fact about the database.
+                // The count is the bound on what the answer can mean.
+                lines.push(format!(
+                    "This means none of the {} curated record(s) searched were \
+                     found — not that the molecule has no known features. The \
+                     database is deliberately small and is not comprehensive.",
+                    db.records.len()
+                ));
+            }
+            if proposed {
+                lines.push(
+                    "These come from records no human has reviewed. Check each \
+                     against its source before treating it as an identification."
+                        .into(),
+                );
+            }
+            text_result(lines.join("\n"))
+        }
+        "methods" => match pl_doc::topic(&text_arg(a, "topic")?) {
+            Some(t) => text_result(pl_doc::methods(t)),
+            None => {
+                return Err(format!(
+                    "unknown topic; try one of {}",
+                    pl_doc::TOPICS
+                        .iter()
+                        .map(|t| t.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
             }
         },
-        "methods" => match pl_doc::topic(&arg("topic")) {
-            Some(t) => text_result(pl_doc::methods(t)),
-            None => tool_error(format!(
-                "unknown topic; try one of {}",
-                pl_doc::TOPICS
-                    .iter()
-                    .map(|t| t.name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-        },
-        other => tool_error(format!("unknown tool {other:?}")),
+        other => return Err(format!("unknown tool {other:?}")),
     })
 }
 
@@ -560,8 +770,9 @@ mod tests {
         p.display().to_string()
     }
 
-    /// Call one tool and return the text it replied with, error or not.
-    fn call_tool(name: &str, args: Vec<(&str, Value)>) -> String {
+    /// Call one tool and return the text it replied with, and whether the reply
+    /// was flagged `isError`.
+    fn call_tool_full(name: &str, args: Vec<(&str, Value)>) -> (String, bool) {
         let call = json::write(&obj(vec![
             ("jsonrpc", s("2.0")),
             ("id", Value::Number(99.0)),
@@ -573,17 +784,20 @@ mod tests {
         ]));
         let r = req(&call).expect("a reply");
         assert!(r.get("error").is_none(), "not a protocol error: {r:?}");
-        r.get("result")
-            .unwrap()
-            .get("content")
-            .unwrap()
-            .as_array()
-            .unwrap()[0]
+        let res = r.get("result").unwrap();
+        let text = res.get("content").unwrap().as_array().unwrap()[0]
             .get("text")
             .unwrap()
             .as_str()
             .unwrap()
-            .to_string()
+            .to_string();
+        let failed = res.get("isError").and_then(Value::as_bool).unwrap_or(false);
+        (text, failed)
+    }
+
+    /// Call one tool and return the text it replied with, error or not.
+    fn call_tool(name: &str, args: Vec<(&str, Value)>) -> String {
+        call_tool_full(name, args).0
     }
 
     #[test]
@@ -831,7 +1045,7 @@ mod tests {
         // back computed under a genetic code the caller did not ask for. 300
         // did reach the error and named 44, a number nobody sent.
         let path = fixture("orf.fa", ">x\nATGAAACCCGGGTAA\n");
-        for n in [267.0, -243.0, 300.0, 1e19] {
+        for n in [267.0, -243.0, 300.0] {
             let text = call_tool(
                 "open_reading_frames",
                 vec![("path", s(path.clone())), ("table", Value::Number(n))],
@@ -841,6 +1055,17 @@ mod tests {
                 "table {n} gave {text}"
             );
         }
+        // 1e19 used to reach the same message, which then named
+        // 9,223,372,036,854,775,807 — `n as i64` saturating to `i64::MAX`, a
+        // number nobody sent. Past 2^53 a JSON number no longer identifies a
+        // particular integer, so it is refused as out of range instead of being
+        // echoed back as though it did.
+        let text = call_tool(
+            "open_reading_frames",
+            vec![("path", s(path)), ("table", Value::Number(1e19))],
+        );
+        assert!(text.contains("table is out of range"), "{text}");
+        assert!(!text.contains("9223372036854775807"), "{text}");
     }
 
     #[test]
@@ -886,5 +1111,351 @@ mod tests {
             vec![("path", s(path)), ("min_aa", Value::Number(1000.0))],
         );
         assert!(text.contains("no ORF of 1000 aa or more"), "{text}");
+    }
+
+    /// 60 bp of ordinary sequence, used both ways round.
+    const SIXTY: &str = "GCTAAAGACAATTACATAACATACACGTCAGCACGAAACTTGTTGGCCCAGTGTGAATCG";
+
+    fn revcomp(seq: &str) -> String {
+        String::from_utf8(pl_core::reverse_complement(seq.as_bytes())).expect("ASCII")
+    }
+
+    #[test]
+    fn one_linear_duplex_written_either_way_round_gets_one_checksum() {
+        // The tool's own description promises a checksum that is "the same for
+        // the same molecule however it was rotated or which strand was written
+        // first". The linear branch returned `lsseguid`, which covers ONE
+        // STRAND and is not strand-invariant by construction, so two files
+        // holding the same duplex — one written as the reverse complement of
+        // the other — came back with different checksums under a description
+        // saying they could not. FASTA declares no topology and loads as
+        // linear, so this was the branch the commonest input took, and an
+        // assistant relayed "these are two different molecules".
+        let fwd = call_tool(
+            "checksum",
+            vec![("path", s(fixture("fwd.fa", &format!(">f\n{SIXTY}\n"))))],
+        );
+        let rev = call_tool(
+            "checksum",
+            vec![(
+                "path",
+                s(fixture("rev.fa", &format!(">r\n{}\n", revcomp(SIXTY)))),
+            )],
+        );
+        let duplex = |t: &str| {
+            t.lines()
+                .find(|l| l.starts_with("ldseguid="))
+                .unwrap_or_else(|| panic!("no duplex checksum in {t:?}"))
+                .to_string()
+        };
+        assert_eq!(
+            duplex(&fwd),
+            duplex(&rev),
+            "one duplex, two checksums:\n{fwd}\n---\n{rev}"
+        );
+        // The single-strand value is still offered and still differs — it has
+        // to carry the qualifier the terminal prints, or it reads as the
+        // molecule's identity.
+        assert!(fwd.contains("(this strand alone)"), "{fwd}");
+        assert_ne!(
+            fwd.lines().find(|l| l.starts_with("lsseguid=")),
+            rev.lines().find(|l| l.starts_with("lsseguid=")),
+        );
+        // The SEGUID string carries its own prefix; a second one made
+        // "lsseguid: lsseguid=…".
+        assert!(!fwd.contains("lsseguid: lsseguid="), "{fwd}");
+        assert!(!fwd.contains("ldseguid: ldseguid="), "{fwd}");
+    }
+
+    #[test]
+    fn a_circular_checksum_is_still_the_rotation_invariant_one() {
+        // The control. The circular branch was right and must stay right.
+        let gb = |name: &str, seq: &str| {
+            fixture(
+                name,
+                &format!(
+                    "LOCUS       c                       60 bp    DNA     circular SYN 01-JAN-2026\n\
+                     ORIGIN\n        1 {seq}\n//\n"
+                ),
+            )
+        };
+        let fwd = call_tool("checksum", vec![("path", s(gb("cf.gb", SIXTY)))]);
+        let rev = call_tool("checksum", vec![("path", s(gb("cr.gb", &revcomp(SIXTY))))]);
+        let cd = |t: &str| {
+            t.lines()
+                .find(|l| l.starts_with("cdseguid="))
+                .unwrap_or_else(|| panic!("no circular checksum in {t:?}"))
+                .to_string()
+        };
+        assert_eq!(cd(&fwd), cd(&rev), "{fwd}\n---\n{rev}");
+    }
+
+    #[test]
+    fn a_lowercase_record_is_checksummed_rather_than_refused() {
+        // SEGUID is defined over uppercase DNA and `Molecule::seq` is
+        // case-preserved, so a stock NCBI download — `ORIGIN` is written in
+        // lowercase — came back as an `isError` reply reading "no checksum for
+        // this sequence: NotInAlphabet('g')", an error about letter case
+        // presented as the molecule having no checksum. `pl checksum`
+        // upper-cases and says how many bases it touched.
+        let path = fixture(
+            "lower.gb",
+            &format!(
+                "LOCUS       l                       60 bp    DNA     linear   SYN 01-JAN-2026\n\
+                 ORIGIN\n        1 {}\n//\n",
+                SIXTY.to_lowercase()
+            ),
+        );
+        let (text, failed) = call_tool_full("checksum", vec![("path", s(path))]);
+        assert!(!failed, "a lowercase record has a checksum: {text}");
+        assert!(text.contains("ldseguid="), "{text}");
+        assert!(
+            text.contains("60 lowercase base(s) upper-cased"),
+            "the fold has to be stated, not silent: {text}"
+        );
+    }
+
+    /// Three FASTA records in one file: one EcoRI site, then three, then none.
+    fn three_records() -> String {
+        let a = format!("GAATTC{}", "A".repeat(54));
+        let b = format!("GAATTC{a14}GAATTC{a14}GAATTC{a14}", a14 = "A".repeat(14));
+        let c = "ACGT".repeat(15);
+        fixture("multi.fa", &format!(">recA\n{a}\n>recB\n{b}\n>recC\n{c}\n"))
+    }
+
+    #[test]
+    fn a_file_holding_more_than_one_record_says_so_on_every_tool() {
+        // `load_with_report` returns the report and the shared closure bound it
+        // to `_`, so every path tool answered about record 1 as though it were
+        // the file. "EcoRI: 1 cut(s)" is true of record 1 and false of the file
+        // — record 2 has three sites — and an assistant relayed "EcoRI is a
+        // single cutter in this plasmid". The CLI prints the count on every one
+        // of the matching verbs.
+        let path = three_records();
+        for (tool, args) in [
+            ("read_molecule", vec![]),
+            ("digest", vec![("enzymes", s("EcoRI"))]),
+            ("checksum", vec![]),
+            ("open_reading_frames", vec![("min_aa", Value::Number(1.0))]),
+            ("annotate", vec![]),
+        ] {
+            let mut all = vec![("path", s(path.clone()))];
+            all.extend(args);
+            let text = call_tool(tool, all);
+            assert!(
+                text.contains("this file holds 3 records"),
+                "{tool} answered about record 1 as though it were the file: {text}"
+            );
+        }
+        // And the digest answer it qualifies is still the record-1 one.
+        let text = call_tool("digest", vec![("path", s(path)), ("enzymes", s("EcoRI"))]);
+        assert!(text.contains("1 cut(s)"), "{text}");
+    }
+
+    #[test]
+    fn a_single_record_file_is_not_told_it_holds_more() {
+        // The control. A note on a file that lost nothing would be its own lie.
+        let text = call_tool(
+            "read_molecule",
+            vec![("path", s(fixture("one.fa", &format!(">one\n{SIXTY}\n"))))],
+        );
+        assert!(!text.contains("records"), "{text}");
+    }
+
+    #[test]
+    fn an_enzyme_the_table_does_not_hold_is_refused_rather_than_reported_as_no_cuts() {
+        // The requested names were only ever used to filter `digest_all`'s
+        // output, so a name absent from the 58 matched nothing and the empty
+        // result was reported as "no cuts" — a claim about the molecule
+        // manufactured out of a gap in the database. DpnI is the case that
+        // bites: GATC is in essentially every plasmid, it is the standard
+        // post-PCR template-removal step, and it is not in the table. The
+        // fixture below physically contains three GATC and three GGCC sites.
+        let path = fixture(
+            "sites.fa",
+            ">sites\nGGCCTTTTGATCAAAAGGCCTTTTGATCAAAAGGCCTTTTGATCAAAAGAATTCTTTTAAAA\n",
+        );
+        for name in ["DpnI", "HaeIII", "EcoR1"] {
+            let (text, failed) = call_tool_full(
+                "digest",
+                vec![("path", s(path.clone())), ("enzymes", s(name))],
+            );
+            assert!(failed, "{name} was not refused: {text}");
+            assert!(text.contains(name), "{text}");
+            assert!(
+                !text.contains("no cuts"),
+                "an unknown name became a negative result: {text}"
+            );
+        }
+        // Every miss is named at once, so three typos need one round trip.
+        let (text, _) = call_tool_full(
+            "digest",
+            vec![
+                ("path", s(path.clone())),
+                ("enzymes", s("DpnI, HaeIII, EcoRI")),
+            ],
+        );
+        assert!(text.contains("DpnI") && text.contains("HaeIII"), "{text}");
+        // The control: a name the table DOES hold, with no site here, is still
+        // "no cuts", and one with a site still cuts.
+        let (text, failed) = call_tool_full(
+            "digest",
+            vec![("path", s(path.clone())), ("enzymes", s("NotI"))],
+        );
+        assert!(!failed && text == "no cuts", "{text}");
+        let text = call_tool("digest", vec![("path", s(path)), ("enzymes", s("EcoRI"))]);
+        assert!(text.contains("EcoRI: 1 cut(s)"), "{text}");
+    }
+
+    /// A GenBank record declaring 5,386 bp with an `ORIGIN` that carries none.
+    /// Real and common — see `pl_core::Molecule::declared_len`.
+    fn declared_but_absent() -> String {
+        fixture(
+            "absent.gb",
+            "LOCUS       pBIG                  5386 bp    DNA     circular SYN 01-JAN-2026\n\
+             FEATURES             Location/Qualifiers\n\
+             \x20    CDS             100..900\n\
+             ORIGIN      \n//\n",
+        )
+    }
+
+    #[test]
+    fn a_record_that_declares_a_length_and_ships_no_bases_is_not_zero_bp() {
+        // `m.seq.len()` counts bases present, so a 5,386 bp plasmid whose file
+        // carries no sequence was described as "0 bp circular" — the same class
+        // of claim the GC field of that very line refuses to make. `pl info`
+        // prints the declared length and says the bases are missing.
+        let path = declared_but_absent();
+        let text = call_tool("read_molecule", vec![("path", s(path.clone()))]);
+        assert!(
+            text.contains("5386 bp DECLARED, but this file carries no bases"),
+            "{text}"
+        );
+        assert!(!text.starts_with("0 bp"), "{text}");
+        // And a digest of nothing is not "no cuts": `pl digest` exits with this
+        // sentence rather than answering.
+        let (text, failed) = call_tool_full("digest", vec![("path", s(path))]);
+        assert!(failed, "a digest of no bases succeeded: {text}");
+        assert!(text.contains("no bases to digest"), "{text}");
+    }
+
+    #[test]
+    fn a_standalone_annotation_track_is_not_described_as_zero_bp_linear() {
+        // UGENE exports these: features, no ORIGIN, and no bp field or topology
+        // word on the LOCUS line. It was reported as "0 bp linear", asserting
+        // both a length the features contradict and a topology the file never
+        // gave.
+        let path = fixture(
+            "track.gb",
+            "LOCUS       Annotations                                             19-MAR-2018\n\
+             FEATURES             Location/Qualifiers\n\
+             \x20    CDS             242..1015\n\
+             \x20    CDS             complement(1118..1951)\n//\n",
+        );
+        let text = call_tool("read_molecule", vec![("path", s(path))]);
+        assert!(text.contains("annotation track"), "{text}");
+        assert!(text.contains("1951 bp"), "{text}");
+        assert!(
+            !text.contains("linear"),
+            "a topology nothing declared: {text}"
+        );
+    }
+
+    #[test]
+    fn an_argument_of_the_wrong_json_type_is_refused_rather_than_silently_defaulted() {
+        // `as_i64().unwrap_or(30)` reads "absent" and "present but unreadable"
+        // as the same thing, so `{"min_aa": "1000"}` — a number written as a
+        // string, a routine tool-call artifact — silently became the default 30
+        // and the caller was handed a 121 aa ORF for a 1,000 aa request.
+        let path = fixture(
+            "orf371.fa",
+            &format!(">x\nATG{}TAAAAAAA\n", "GCC".repeat(120)),
+        );
+        for bad in [s("1000"), Value::Number(1000.5), Value::Bool(true)] {
+            let (text, failed) = call_tool_full(
+                "open_reading_frames",
+                vec![("path", s(path.clone())), ("min_aa", bad.clone())],
+            );
+            assert!(failed, "min_aa {bad:?} was accepted: {text}");
+            assert!(text.contains("min_aa must be a whole number"), "{text}");
+        }
+        let (text, failed) = call_tool_full(
+            "open_reading_frames",
+            vec![("path", s(path.clone())), ("table", s("2"))],
+        );
+        assert!(failed, "{text}");
+        assert!(text.contains("table must be a whole number"), "{text}");
+        // Omitted is still the default, and a real value still works.
+        let text = call_tool("open_reading_frames", vec![("path", s(path.clone()))]);
+        assert!(text.contains("min 30 aa"), "{text}");
+        let text = call_tool(
+            "open_reading_frames",
+            vec![("path", s(path)), ("min_aa", Value::Number(1000.0))],
+        );
+        assert!(text.contains("no ORF of 1000 aa or more"), "{text}");
+    }
+
+    #[test]
+    fn a_reply_that_lists_orfs_still_names_the_threshold_it_used() {
+        // The threshold appeared only in the "no ORF of N aa or more" line,
+        // which fires only when nothing was found — so the one case where a
+        // substituted default could be caught was the one case it could not
+        // reach. An assistant handed a list of ORFs had nothing to check the
+        // request against.
+        let path = fixture("orf.fa", ">x\nATGAAACCCGGGTAA\n");
+        let text = call_tool(
+            "open_reading_frames",
+            vec![("path", s(path)), ("min_aa", Value::Number(2.0))],
+        );
+        assert!(text.contains("min 2 aa"), "{text}");
+        assert!(text.contains(" aa, "), "an ORF was listed: {text}");
+    }
+
+    #[test]
+    fn an_orf_that_laps_a_circular_molecule_reports_its_real_length() {
+        // `start..end` is the ORF's extent only while `Orf::laps` is zero. On a
+        // 19 bp circle a 33-base ORF reports start 5, end 18 — an inclusive
+        // range of 14 bases, with start < end so nothing looks wrong — and the
+        // line crossed the boundary reading as the ORF's full extent. A reader
+        // who slices those coordinates gets 14 bases of the wrong sequence.
+        let path = fixture(
+            "tiny.gb",
+            "LOCUS       tiny                    19 bp    DNA     circular SYN 01-JAN-2026\n\
+             ORIGIN\n        1 CGTAATGCCTTTCCCTAAC\n//\n",
+        );
+        let text = call_tool(
+            "open_reading_frames",
+            vec![
+                ("path", s(path)),
+                ("table", Value::Number(1.0)),
+                ("min_aa", Value::Number(1.0)),
+            ],
+        );
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("5..18"))
+            .unwrap_or_else(|| panic!("no lapping ORF in {text:?}"));
+        assert!(line.contains("10 aa"), "{line}");
+        assert!(
+            line.contains("33 bp"),
+            "the range spans 14 bases and the ORF is 33: {line}"
+        );
+        assert!(
+            line.contains("whole lap(s) short"),
+            "nothing said the range is not the extent: {line}"
+        );
+    }
+
+    #[test]
+    fn an_orf_that_does_not_lap_says_nothing_about_laps() {
+        // The control. A wrap note on an ORF that does not wrap would send a
+        // reader looking for bases that are not there.
+        let path = fixture("orf.fa", ">x\nATGAAACCCGGGTAA\n");
+        let text = call_tool(
+            "open_reading_frames",
+            vec![("path", s(path)), ("min_aa", Value::Number(2.0))],
+        );
+        assert!(!text.contains("lap"), "{text}");
+        assert!(text.contains("15 bp"), "4 aa and a stop: {text}");
     }
 }

@@ -142,6 +142,12 @@ impl OpenError {
 /// `str::lines()` strips a trailing `\r`, so a cell ending in one silently
 /// loses it on round-trip there — and GenBank text written on Windows is full
 /// of `\r`.
+///
+/// A leading `#` is deliberately **not** escaped, even though a path beginning
+/// `#!` collides with the directive syntax. `parse` tells a directive from a
+/// row by position — above the column header or below it — so escaping here
+/// would change the bytes of every index on disk, and cost a `FORMAT` bump, to
+/// fix something already fixed for free. See the note beside that gate.
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -333,16 +339,29 @@ pub fn parse(data: &[u8]) -> Result<Library, OpenError> {
     };
     let mut header_seen = false;
     for (n, line) in table.lines().enumerate() {
-        if let Some(rest) = line.strip_prefix("#!") {
-            let (key, value) = rest.split_once(' ').unwrap_or((rest, ""));
-            match key {
-                "root" => lib.root = unescape(value),
-                "built" => lib.built_ns = value.parse().unwrap_or(0),
-                "complete" => lib.complete = value == "1",
-                "bases" => lib.packed_bases = value.parse().unwrap_or(0),
-                _ => {}
+        // Directives only ever precede the column header — `to_bytes` writes
+        // all six above it and none below — so the gate on `header_seen` is
+        // what keeps a *row* from being read as one. Ungated, a file literally
+        // named `#!readme.gb` (or a top-level folder `#!archive`; `#` and `!`
+        // are legal filename bytes on Windows and Unix) was emitted verbatim in
+        // the path cell and swallowed here, so `rows.len()` fell one short of
+        // the header's count and every open failed with "header says 2 records,
+        // table holds 1". That error is `rebuildable()`, the caller rebuilt,
+        // `to_bytes` is deterministic, the new file was byte-identical — the
+        // index was dead for that folder for ever. Gating costs nothing and
+        // leaves the on-disk bytes unchanged, so no `FORMAT` bump.
+        if !header_seen {
+            if let Some(rest) = line.strip_prefix("#!") {
+                let (key, value) = rest.split_once(' ').unwrap_or((rest, ""));
+                match key {
+                    "root" => lib.root = unescape(value),
+                    "built" => lib.built_ns = value.parse().unwrap_or(0),
+                    "complete" => lib.complete = value == "1",
+                    "bases" => lib.packed_bases = value.parse().unwrap_or(0),
+                    _ => {}
+                }
+                continue;
             }
-            continue;
         }
         if line.is_empty() {
             continue;
@@ -545,6 +564,44 @@ mod tests {
             "ends with backslash\\",
         ] {
             assert_eq!(unescape(&escape(s)), s, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn a_path_that_looks_like_a_directive_is_still_a_row() {
+        // `#` and `!` are legal filename bytes on both platforms, so a file
+        // named `#!readme.gb` -- or a top-level folder `#!archive` -- reaches
+        // the path cell verbatim. Read back as a directive, its row vanished,
+        // `rows.len()` fell short of the header count, and the index could
+        // never be opened again: the error is `rebuildable()`, so the caller
+        // rebuilt, `to_bytes` is deterministic, and the identical file failed
+        // identically for ever. `escaping_round_trips_including_a_lone_cr`
+        // cannot see this -- it round-trips a *cell*, and `escape` is innocent.
+        for path in [
+            "#!readme.gb",
+            "#!archive/old.gb",
+            // Keys that parse, which additionally corrupted `root` and
+            // `complete` on the way past.
+            "#!root C-evil.gb",
+            "#!complete 0.gb",
+            "#!bases 99.gb",
+            // Near misses, kept so a future fix that over-reaches is noticed.
+            "#readme.gb",
+            "!readme.gb",
+            "sub/#!x.gb",
+            "a#!b.gb",
+        ] {
+            let mut lib = sample();
+            lib.rows[3].path = path.to_string();
+            let back = parse(&to_bytes(&lib)).unwrap_or_else(|e| panic!("path {path:?}: {e}"));
+            assert_eq!(back.rows.len(), lib.rows.len(), "path {path:?}");
+            assert!(
+                back.rows.iter().any(|r| r.path == path),
+                "path {path:?} did not come back"
+            );
+            assert_eq!(back.root, lib.root, "path {path:?} rewrote root");
+            assert!(back.complete, "path {path:?} rewrote complete");
+            assert_eq!(back.packed_bases, lib.packed_bases, "path {path:?}");
         }
     }
 

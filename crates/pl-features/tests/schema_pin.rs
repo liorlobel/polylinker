@@ -158,9 +158,9 @@ fn the_two_implementations_of_the_content_digest_agree() {
     const FH: &str = "id\tname\taliases\tclass\tgenbank_key\treference_nt\treference_aa\tboundary_rule\tboundary_evidence\tdescription\treview_status\tcurator\tdate_added\tpatent_flag\tnotes";
     const PH: &str =
         "record_id\tfield\tsource_db\tsource_accession\tlicence\turl\tretrieved\tsha256";
-    // The alias cell is ` a | b |` and the patent flag is `TRUE`, both
-    // deliberately. The fixture used to be `a|b` with `0`, and it could not see
-    // either divergence the two implementations actually had:
+    // EVERY SIGNED CELL IN THIS FIXTURE IS NON-CANONICAL, deliberately, and
+    // that is the whole value of it. The fixture used to be `a|b` with `0` and
+    // could not see one of the divergences the two implementations really had:
     //
     //   * `Db::parse` trims aliases and drops empties; build.py joined them
     //     verbatim. A one-space curation typo therefore produced a signature
@@ -169,13 +169,26 @@ fn the_two_implementations_of_the_content_digest_agree() {
     //   * `parse_flag` lowercases and accepts eleven spellings; build.py used a
     //     case-sensitive membership test over five. `TRUE` hashed as 0 on one
     //     side and 1 on the other.
+    //   * `Db::parse` TRIMS every signed cell, lower-cases `class` and
+    //     `boundary_rule` through their own `parse` functions, and turns an
+    //     empty `genbank_key` into `misc_feature`. `check_signoff.py` hashed
+    //     the cells raw, so one trailing space on a description made that
+    //     script report a curator's approval LAPSED over content nobody had
+    //     touched. Hence: every cell below is padded with spaces, `class` and
+    //     `boundary_rule` arrive in upper case, and `genbank_key` is empty.
     //
-    // Both are invisible to a fixture that uses only canonical values, which is
-    // exactly why they survived. A pin that only exercises the easy case is not
-    // a pin.
+    // All of it is invisible to a fixture built from canonical values, which is
+    // exactly why it survived. A pin that only exercises the easy case is not a
+    // pin.
+    //
+    // The digest asserted below is the digest of the CANONICAL row, so the
+    // padding must NOT move it. build.py's `signed_row` holds that same
+    // canonical row directly — `cls="cds"`, `genbank_key="misc_feature"` — and
+    // the two sides meeting on one literal from opposite directions is the
+    // assertion.
     let f = format!(
-        "{FH}\nPLF:0000\tx\t a | b |\tcds\tCDS\tATGTAA\tM\torf_atg_to_stop\tX.1:1-6:+\td\t\
-         proposed\t\t2026-07-28\tTRUE\tn\n"
+        "{FH}\nPLF:0000\t x \t a | b |\t CDS \t\t ATGTAA \t M \t ORF_ATG_TO_STOP \t X.1:1-6:+ \t d \t\
+         proposed\t\t2026-07-28\tTRUE\t n \n"
     );
     let p = format!(
         "{PH}\nPLF:0000\treference_nt\tena\tX.1\tINSDC-free\thttps://www.ebi.ac.uk/\t\
@@ -185,7 +198,7 @@ fn the_two_implementations_of_the_content_digest_agree() {
     assert_eq!(db.records.len(), 1, "the fixture row must load");
     assert_eq!(
         db.content_digest(&db.records[0]),
-        "16ab78984c715df5cfa3cab396e8a6e11a56abe34318d10028648297194a947d",
+        "25b8783590b89116e394a31b946a86432f8139a510d6e0d4db934d2630c9c6e3",
         "the Rust and Python content digests have drifted. The same literal is \
          asserted by features/build/build.py's self_test; if you changed the \
          digest deliberately, change BOTH, and note that every existing \

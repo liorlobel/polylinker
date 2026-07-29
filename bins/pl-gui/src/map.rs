@@ -13,11 +13,39 @@ use crate::theme::{self, Palette};
 /// One drawable feature, resolved to positions on the molecule.
 pub struct Band {
     pub index: usize,
-    /// Each segment separately, in coordinate order. A feature with more than
-    /// one is a join — an intron-split CDS, or a span crossing the origin — and
-    /// drawing it as a single bar from start to end would silently claim the
-    /// gaps are part of the feature.
+    /// Every drawable part, in coordinate order and never running backwards.
+    ///
+    /// A feature with more than one segment is a join — an intron-split CDS —
+    /// and drawing it as a single bar from start to end would silently claim
+    /// the gaps are part of the feature. A *single* segment can need splitting
+    /// too: `end < start` on a circle is the ordinary origin-crossing form that
+    /// `Molecule::validate` accepts and that `Edit > Set origin at selected
+    /// feature` produces. Interpolating straight from `angle_of(start)` to
+    /// `angle_of(end)` then painted the complement arc — a 2,499 bp band, in
+    /// the feature's own colour under its own name, for a 187 bp feature — so
+    /// the split is done here, with `pl_draw::ranges`, which is the same
+    /// function the SVG/PDF exporter uses. The map and `pl export` now agree by
+    /// construction.
+    ///
+    /// May be empty: a segment lying wholly outside the molecule names no base,
+    /// and `ranges` drops it rather than collapsing it onto base 1.
     pub segs: Vec<(u64, u64)>,
+    /// The gaps between consecutive segments, as drawable parts.
+    ///
+    /// Taken in the segments' *file* order, not sorted, because that is the only
+    /// thing that distinguishes an intron from the rest of the plasmid:
+    /// `join(2600..2686, 1..100)` on a 2,686 bp circle is contiguous across the
+    /// origin and has no gap at all, while `join(1..100, 2600..2686)` has one of
+    /// 2,499 bp. Sorted, the two are the same set of coordinates.
+    pub joins: Vec<(u64, u64)>,
+    /// `(tip, back)` for the one arrowhead, in the direction the feature reads.
+    ///
+    /// Taken from the terminal part in *biological* order rather than in
+    /// coordinate order: the forward feature 2587..87 ends at base 87, not at
+    /// the end of its highest-numbered part, and reading the head off the sorted
+    /// parts put it at 2,686 pointing counter-clockwise — a forward feature
+    /// drawn as a reverse one.
+    pub head: Option<(u64, u64)>,
     pub start: u64,
     pub end: u64,
     pub reverse: bool,
@@ -94,24 +122,58 @@ pub fn label_slots(anchors: &[f32], min_gap: f32, lo: f32, hi: f32) -> Vec<f32> 
     placed
 }
 
+/// Resolve every feature to the parts a painter can draw.
+///
+/// Splitting is done against the same denominator `angle_of` and `x_of` use, so
+/// a part that survives here is one those functions can place.
 fn bands(mol: &Molecule) -> Vec<Band> {
+    let span = mol.annotation_span().max(1);
+    let circular = mol.topology.is_circular();
     let spans: Vec<(u64, u64)> = mol.features.iter().map(|f| (f.start(), f.end())).collect();
     let lane = lanes(&spans);
+    // A part is worth drawing only if it covers something; `ranges` emits a
+    // degenerate `(n, n)` for the zero-length hop from the last base to the
+    // first, which is a dot in the middle of a contiguous feature.
+    let split = |a: u64, b: u64| -> Vec<(u64, u64)> {
+        pl_draw::ranges(a, b, span, circular)
+            .into_iter()
+            .filter(|(s, e)| e > s)
+            .collect()
+    };
     mol.features
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            let mut segs: Vec<(u64, u64)> = f.segments.iter().map(|s| (s.start, s.end)).collect();
-            segs.sort_unstable();
-            if segs.is_empty() {
-                segs.push((f.start(), f.end()));
+            // File order, not sorted: see `Band::joins`.
+            let mut raw: Vec<(u64, u64)> = f.segments.iter().map(|s| (s.start, s.end)).collect();
+            if raw.is_empty() {
+                raw.push((f.start(), f.end()));
             }
+            // Biological order: each segment in the order the file gives them,
+            // and a wrapped segment as its pre-origin part followed by its
+            // post-origin one, which is `ranges`' own order.
+            let flow: Vec<(u64, u64)> = raw
+                .iter()
+                .flat_map(|&(a, b)| pl_draw::ranges(a, b, span, circular))
+                .collect();
+            let joins: Vec<(u64, u64)> =
+                raw.windows(2).flat_map(|w| split(w[0].1, w[1].0)).collect();
+            let reverse = f.strand.is_reverse();
+            let head = if reverse {
+                flow.first().map(|&(s, e)| (s, e))
+            } else {
+                flow.last().map(|&(s, e)| (e, s))
+            };
+            let mut segs = flow.clone();
+            segs.sort_unstable();
             Band {
                 index: i,
                 segs,
+                joins,
+                head,
                 start: f.start(),
                 end: f.end(),
-                reverse: f.strand.is_reverse(),
+                reverse,
                 lane: lane[i],
                 color: theme::feature_color(f),
                 name: f.name.clone(),
@@ -276,40 +338,35 @@ fn draw_circular(
         let emphasised = selected == Some(b.index) || hot == Some(b.index);
         let w = if emphasised { band_w + 3.0 } else { band_w };
 
-        // Each segment as its own arc; thin connectors show the joins.
-        for (k, &(s, e)) in b.segs.iter().enumerate() {
-            let a0 = angle_of(s, span);
-            let a1 = angle_of(e, span);
-            let pts = arc_points(center, base, a0, a1);
+        // Each part as its own arc, always the short way round: `bands` has
+        // already split anything that crosses the origin, so `s <= e` here and
+        // `arc_points` never interpolates backwards across the whole ring.
+        for &(s, e) in &b.segs {
+            let pts = arc_points(center, base, angle_of(s, span), angle_of(e, span));
             if pts.len() >= 2 {
                 p.add(Shape::line(pts, Stroke::new(w, b.color)));
             }
-            if k + 1 < b.segs.len() {
-                let gap0 = angle_of(e, span);
-                let gap1 = angle_of(b.segs[k + 1].0, span);
-                let hair = arc_points(center, base, gap0, gap1);
-                if hair.len() >= 2 {
-                    p.add(Shape::line(hair, Stroke::new(1.0, b.color)));
-                }
+        }
+        // Thin connectors show the joins, split the same way.
+        for &(s, e) in &b.joins {
+            let hair = arc_points(center, base, angle_of(s, span), angle_of(e, span));
+            if hair.len() >= 2 {
+                p.add(Shape::line(hair, Stroke::new(1.0, b.color)));
             }
         }
 
-        // One arrowhead, on the terminal segment, pointing the way it reads.
-        let (tip_pos, back_pos) = if b.reverse {
-            (b.segs[0].0, b.segs[0].1)
-        } else {
-            let last = b.segs[b.segs.len() - 1];
-            (last.1, last.0)
-        };
-        draw_arrowhead(
-            p,
-            center,
-            base,
-            angle_of(tip_pos, span),
-            angle_of(back_pos, span),
-            w,
-            b.color,
-        );
+        // One arrowhead, on the terminal part, pointing the way it reads.
+        if let Some((tip_pos, back_pos)) = b.head {
+            draw_arrowhead(
+                p,
+                center,
+                base,
+                angle_of(tip_pos, span),
+                angle_of(back_pos, span),
+                w,
+                b.color,
+            );
+        }
 
         // Hit-testing in polar space: on the band's radius, within any segment.
         if let Some(ptr) = pointer {
@@ -317,10 +374,13 @@ fn draw_circular(
             if (d - base).abs() <= band_w * 0.5 + 3.0 {
                 let a = (ptr.y - center.y).atan2(ptr.x - center.x);
                 for &(s, e) in &b.segs {
-                    let (mut lo, mut hi) = (angle_of(s, span), angle_of(e, span));
-                    if hi < lo {
-                        std::mem::swap(&mut lo, &mut hi);
-                    }
+                    // No lo/hi swap: `bands` guarantees `s <= e` on every part,
+                    // so the interval is the arc that was drawn. Swapping used
+                    // to be how an origin-crossing segment was handled here,
+                    // and it gave a 258-degree hover region for a 25-degree
+                    // feature — matching neither the band on screen nor the
+                    // bases the feature describes.
+                    let (lo, hi) = (angle_of(s, span), angle_of(e, span));
                     // Normalise by arithmetic, not by accumulation.
                     //
                     // `while a < lo - PI { a += TAU }` terminates only while
@@ -729,5 +789,132 @@ mod tests {
         for (i, w) in want.iter().enumerate() {
             assert_eq!(tick_pos(2686, i as u64), *w, "tick {i}");
         }
+    }
+
+    /// A 2,686 bp circle carrying one feature, on the given strand.
+    fn circle(segs: &[(u64, u64)], reverse: bool) -> Molecule {
+        let mut mol = Molecule {
+            seq: vec![b'A'; 2_686],
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let mut f = pl_core::Feature::new("bla", "CDS");
+        f.strand = if reverse {
+            pl_core::Strand::Reverse
+        } else {
+            pl_core::Strand::Forward
+        };
+        for &(s, e) in segs {
+            f.segments.push(pl_core::Segment::new(s, e));
+        }
+        mol.features.push(f);
+        mol
+    }
+
+    /// Degrees of arc the parts of a band actually paint.
+    fn drawn_degrees(b: &Band, span: u64) -> f32 {
+        b.segs
+            .iter()
+            .map(|&(s, e)| (angle_of(e, span) - angle_of(s, span)).abs())
+            .sum::<f32>()
+            .to_degrees()
+    }
+
+    /// PROVEN TO FAIL at dfd6ac9: `bands` kept `(2587, 87)` as one pair — the
+    /// assertion below reports `left: [(2587, 87)]` there — and `draw_circular`
+    /// interpolated straight from `angle_of(2587)` down to `angle_of(87)`,
+    /// painting 335.07 degrees, a 2,499 bp band in bla's colour under bla's
+    /// name, for a 187 bp feature that covers 25.1.
+    #[test]
+    fn an_origin_crossing_feature_is_drawn_as_the_arc_it_names() {
+        // What `Edit > Set origin at selected feature` produces: `Molecule::rotate`
+        // remaps each endpoint independently, and `validate()` deliberately
+        // accepts `end < start` on a circle as a wrap, so nothing warns.
+        let mol = circle(&[(2_587, 87)], false);
+        assert!(mol.validate().is_empty(), "the premise: a legal wrap");
+        let span = mol.annotation_span().max(1);
+        assert_eq!(span, 2_686);
+
+        let b = &bands(&mol)[0];
+        assert_eq!(
+            b.segs,
+            vec![(1, 87), (2_587, 2_686)],
+            "the two arcs `pl_draw::ranges` gives the exporter"
+        );
+        let mut exported = pl_draw::ranges(2_587, 87, span, true);
+        exported.sort_unstable();
+        assert_eq!(
+            b.segs, exported,
+            "the map and `pl export` describe the same molecule"
+        );
+        let deg = drawn_degrees(b, span);
+        assert!(
+            (20.0..30.0).contains(&deg),
+            "a 187 bp feature covers 25.1 degrees; this drew {deg}"
+        );
+
+        // The control: an ordinary feature is untouched.
+        let plain = circle(&[(2_400, 2_586)], false);
+        let pb = &bands(&plain)[0];
+        assert_eq!(pb.segs, vec![(2_400, 2_586)]);
+        let pdeg = drawn_degrees(pb, span);
+        assert!((20.0..30.0).contains(&pdeg), "{pdeg}");
+    }
+
+    /// The arrowhead and the join connectors, which the split also decides.
+    ///
+    /// Not runnable against dfd6ac9 — `Band` had neither field there — so this
+    /// covers the two consequences rather than reproducing the original defect;
+    /// `an_origin_crossing_feature_is_drawn_as_the_arc_it_names` is the one that
+    /// fails at HEAD.
+    #[test]
+    fn a_wrapped_feature_points_forwards_and_a_contiguous_join_has_no_connector() {
+        let span = 2_686;
+
+        // Forward 2587..87: the feature ends at base 87, so the head sits there
+        // and points clockwise. Read off the sorted parts it sat at 2,686 and
+        // pointed counter-clockwise — a forward feature drawn as a reverse one.
+        let fwd = &bands(&circle(&[(2_587, 87)], false))[0];
+        let (tip, back) = fwd.head.expect("a terminal part");
+        assert_eq!(tip, 87);
+        assert!(
+            angle_of(tip, span) > angle_of(back, span),
+            "the head must point the way the feature reads"
+        );
+
+        // Reverse 2587..87 reads the other way and ends at base 2,587.
+        let rev = &bands(&circle(&[(2_587, 87)], true))[0];
+        let (rtip, rback) = rev.head.expect("a terminal part");
+        assert_eq!(rtip, 2_587);
+        assert!(angle_of(rtip, span) < angle_of(rback, span));
+
+        // `join(2600..2686, 1..100)` is contiguous across the origin: no gap,
+        // so no connector. Sorted, its parts look exactly like the next case.
+        let contiguous = &bands(&circle(&[(2_600, 2_686), (1, 100)], false))[0];
+        assert_eq!(contiguous.segs, vec![(1, 100), (2_600, 2_686)]);
+        assert!(
+            contiguous.joins.is_empty(),
+            "a 335-degree hairline across the rest of the plasmid: {:?}",
+            contiguous.joins
+        );
+
+        // `join(1..100, 2600..2686)` is an intron-split feature with a real
+        // 2,499 bp gap, and the connector belongs there.
+        let split = &bands(&circle(&[(1, 100), (2_600, 2_686)], false))[0];
+        assert_eq!(split.segs, vec![(1, 100), (2_600, 2_686)]);
+        assert_eq!(split.joins, vec![(100, 2_600)]);
+    }
+
+    /// A segment naming no base of the molecule must not be drawn at all.
+    ///
+    /// `pl_draw::ranges` calls collapsing it onto base 1 "fabrication, which is
+    /// worse than loss"; the map used to do exactly that by way of `angle_of`.
+    #[test]
+    fn a_segment_wholly_outside_the_molecule_paints_nothing() {
+        let mut mol = circle(&[(1, 10)], false);
+        mol.features[0].segments = vec![pl_core::Segment::new(9_000, 9_100)];
+        let b = &bands(&mol)[0];
+        assert!(b.segs.is_empty(), "{:?}", b.segs);
+        assert!(b.head.is_none(), "and nothing to point at");
     }
 }

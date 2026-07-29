@@ -1564,3 +1564,187 @@ fn an_arrow_key_after_typing_at_the_end_does_not_walk_the_caret_back() {
     e.step(&mut d, -40, false);
     assert_eq!(e.caret, 64, "one row up from gap 104");
 }
+
+// ---------------------------------------------------------------------------
+// A selection that covers no bases is not a selection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_paste_after_a_wrapping_selection_is_shrunk_away_lands_at_the_caret() {
+    // Shift+Left from gap 0 and then Shift+Right back is a user changing their
+    // mind. It leaves `{anchor: 0, head: n, through_origin: true}`, the one
+    // empty shape `canonical` relocates: its `hi >= n` collapse sets
+    // `head = lo = 0` while the caret is at gap n. `target` returned it because
+    // `sel` was `Some`, so Ctrl+V inserted BEFORE base 1 where typing the same
+    // characters inserted after base n — every coordinate in the file shifted
+    // by the length of the paste and the origin moved, with no message, while
+    // the readout had just promised "numbering unchanged".
+    let mut m = mol("ACGTACGTACGT", true);
+    feature(&mut m, "AmpR", 5, 8);
+    let mut d = Document::of_molecule(m);
+    let mut e = SeqEdit::new();
+    e.caret = 0;
+    e.step(&mut d, -1, true);
+    e.step(&mut d, 1, true);
+
+    // The premise, stated so a change in the gesture cannot silently pass this.
+    assert_eq!(e.caret, 12);
+    let s = e.sel.expect("the gesture leaves a selection behind");
+    assert_eq!(
+        s,
+        Selection {
+            anchor: 0,
+            head: 12,
+            through_origin: true
+        }
+    );
+    assert!(s.is_empty(12), "and it covers no bases");
+    assert!(
+        e.readout(d.molecule()).contains("numbering unchanged"),
+        "{}",
+        e.readout(d.molecule())
+    );
+
+    assert_eq!(
+        e.target(&d),
+        Selection::point(12),
+        "an empty selection is not a selection; the caret is the target"
+    );
+
+    assert!(!e.paste(&mut d, "TTT"), "no consent needed for three T's");
+    assert_eq!(seq_of(&d), "ACGTACGTACGTTTT");
+    assert_eq!(coords(&d, "AmpR"), (5, 8), "nothing was renumbered");
+
+    // And typing from the identical state produces the identical document,
+    // which is the invariant that was broken.
+    let mut m2 = mol("ACGTACGTACGT", true);
+    feature(&mut m2, "AmpR", 5, 8);
+    let mut d2 = Document::of_molecule(m2);
+    let mut e2 = SeqEdit::new();
+    e2.caret = 0;
+    e2.step(&mut d2, -1, true);
+    e2.step(&mut d2, 1, true);
+    e2.type_text(&mut d2, "TTT", T0);
+    e2.commit(&mut d2);
+    assert_eq!(seq_of(&d2), seq_of(&d));
+    assert_eq!(coords(&d2, "AmpR"), coords(&d, "AmpR"));
+}
+
+#[test]
+fn a_non_empty_wrapping_selection_is_still_the_target() {
+    // The guard above must not disarm the origin-crossing paste itself.
+    let mut d = doc("ACGTACGTACGT", true);
+    let mut e = SeqEdit::new();
+    e.caret = 0;
+    e.step(&mut d, -1, true);
+    assert_eq!(selected(&e, d.molecule()), vec![12]);
+    let t = e.target(&d);
+    assert!(!t.is_empty(12), "one base is still a selection: {t:?}");
+    assert!(!e.paste(&mut d, "GG"));
+    assert_eq!(
+        seq_of(&d),
+        "ACGTACGTACGGG",
+        "base 12 was replaced by the pasted bases, not appended after it"
+    );
+}
+
+#[test]
+fn two_genbank_records_are_refused_rather_than_silently_truncated() {
+    // `genbank_origin_line` found the FIRST `ORIGIN` and the `take_while` in
+    // `sanitise_paste` stopped at the FIRST `//`, so record 2 vanished whole:
+    // its bases were counted by nothing, `rejected` stayed empty and `refused`
+    // stayed `None`, so `needs_consent` was false and the paste went in with no
+    // dialog. The notice was byte-identical to a single-record paste and said
+    // "this is a whole GenBank record", singular.
+    let rec = |name: &str, base: char| {
+        format!(
+            "LOCUS       {name}   12 bp\nFEATURES\nORIGIN\n\
+             \x20       1 {0}\n//\n",
+            base.to_string().repeat(12)
+        )
+    };
+    let one = sanitise_paste(&rec("recA", 'a'));
+    assert_eq!(one.bases, "aaaaaaaaaaaa", "the control still pastes");
+    assert!(one.refused.is_none());
+
+    let two = sanitise_paste(&format!("{}{}", rec("recA", 'a'), rec("recB", 'c')));
+    let why = two.refused.expect("two records are refused");
+    assert!(why.contains("2 GenBank records"), "{why}");
+    assert!(
+        two.bases.is_empty(),
+        "and nothing is pasted: {:?}",
+        two.bases
+    );
+
+    // Three behave the same, and so does the shape whose first `//` is missing
+    // — there the `take_while` used to run on and turn record 2's header
+    // letters into bases.
+    let three = sanitise_paste(&format!(
+        "{}{}{}",
+        rec("recA", 'a'),
+        rec("recB", 'c'),
+        rec("recC", 'g')
+    ));
+    assert!(three.refused.unwrap().contains("3 GenBank records"));
+
+    let unterminated = format!(
+        "LOCUS       recA   12 bp\nFEATURES\nORIGIN\n\x20       1 aaaaaaaaaaaa\n{}",
+        rec("recB", 'c')
+    );
+    let r = sanitise_paste(&unterminated);
+    assert!(
+        r.refused.is_some(),
+        "one ORIGIN but two terminators is still two records: {:?}",
+        r.bases
+    );
+    assert!(
+        !r.bases.contains('c') && !r.bases.contains('L'),
+        "no header letters became bases: {:?}",
+        r.bases
+    );
+}
+
+#[test]
+fn backspace_at_base_one_points_down_the_view_and_counts_rows_correctly() {
+    // The message said base `n` was "{n / per_row} rows away, off the top of
+    // this view". Base `n` is on the LAST row, which is the bottom-most row of
+    // the grid, so the direction was inverted in every case; the count was one
+    // row too many whenever `per_row` divided `n`; and for a circle short
+    // enough to fit on one row it read "0 rows away, off the top" for a base
+    // plainly visible beside the caret.
+    let say = |n: u64, per_row: u64| {
+        let mut d = doc(&"A".repeat(n as usize), true);
+        let mut e = SeqEdit::new();
+        e.set_per_row(per_row);
+        e.caret = 0;
+        e.backspace(&mut d, T0);
+        assert!(!d.edited(), "still a no-op");
+        e.notice.clone().unwrap()
+    };
+
+    let short = say(12, 40);
+    assert!(short.contains("base 12"), "{short}");
+    assert!(
+        short.contains("on this same row"),
+        "a 12 bp circle at 40 per row fits on one row: {short}"
+    );
+    assert!(!short.contains("off the top"), "{short}");
+
+    // `per_row` divides `n`: base 40 is the last cell of row 0, the caret's own
+    // row. `n / per_row` said one row away.
+    let exact = say(40, 40);
+    assert!(exact.contains("on this same row"), "{exact}");
+
+    let plasmid = say(5_386, 40);
+    assert!(plasmid.contains("base 5,386"), "{plasmid}");
+    assert!(
+        plasmid.contains("134 rows below"),
+        "(5386 - 1) / 40 = 134, below the caret, not above it: {plasmid}"
+    );
+    assert!(!plasmid.contains("off the top"), "{plasmid}");
+
+    // Plural agreement, on the range where the old code printed "1 rows".
+    let one_row = say(100, 60);
+    assert!(one_row.contains("1 row below"), "{one_row}");
+    assert!(!one_row.contains("1 rows"), "{one_row}");
+}

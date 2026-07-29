@@ -946,6 +946,95 @@ fn block_six(doc: &snapgene::Document) -> Vec<Block6Elem> {
     out
 }
 
+/// Every qualifier in a document's block 10, read straight out of the payload.
+///
+/// One `Vec` per `<Feature>` element, in file order, so the result indexes the
+/// same way `Molecule::features` does.
+///
+/// This is block 10's independent side, and block 10 did not have one. The
+/// comparison in the test below runs `x.segments != y.segments` and
+/// `a.features != b.features` with *both* sides produced by
+/// `snapgene::parse_features`, so anything that reader drops is dropped
+/// identically on both and cancels — exactly the trap this test's own doc
+/// comment describes for block 6, which was given an independent side and block
+/// 10 was not. It cost a whole vintage of real files every qualifier they
+/// carry: SnapGene spells them `<Q>`/`<V>` in files at export version 11 and
+/// above and `<Qualifier>`/`<QualifierValue …Val>` at 10/5, only the short form
+/// was matched, and `/codon_start`, `/transl_table`, `/locus_tag` and the entire
+/// protein `/translation` were lost on read with nothing reporting it and this
+/// test green.
+///
+/// So the recognition rule here is deliberately **shape-based rather than a copy
+/// of the reader's tag list**: any direct child of `<Feature>` that is not a
+/// `<Segment>` and carries a `name` attribute is a qualifier, whatever it is
+/// called, and its value is whichever typed attribute its own child carries. A
+/// reference that shared the reader's list of element names would share its
+/// blind spot and certify the loss.
+fn block_ten_qualifiers(doc: &snapgene::Document) -> Vec<Vec<(String, Option<String>)>> {
+    let Some(b) = doc
+        .blocks
+        .iter()
+        .find(|b| b.kind == snapgene::block::FEATURES)
+    else {
+        return Vec::new();
+    };
+    let payload = String::from_utf8_lossy(&b.payload);
+    let mut out: Vec<Vec<(String, Option<String>)>> = Vec::new();
+    let mut depth = 0usize;
+    let mut pending: Option<(String, Option<String>)> = None;
+    for ev in xml::scan(&payload) {
+        match ev {
+            xml::Event::Open {
+                name,
+                attrs,
+                self_closing,
+            } => {
+                if depth == 1 && name == "Feature" {
+                    out.push(Vec::new());
+                } else if depth == 2 && name != "Segment" {
+                    if let Some(k) = attrs
+                        .iter()
+                        .find(|(k, _)| k == "name")
+                        .map(|(_, v)| v.clone())
+                    {
+                        if self_closing {
+                            if let Some(f) = out.last_mut() {
+                                f.push((k, None));
+                            }
+                        } else {
+                            pending = Some((k, None));
+                        }
+                    }
+                } else if depth == 3 {
+                    if let Some(p) = pending.as_mut() {
+                        if let Some((_, v)) = attrs.iter().find(|(k, _)| {
+                            matches!(
+                                k.as_str(),
+                                "text" | "textVal" | "int" | "intVal" | "predef" | "predefVal"
+                            )
+                        }) {
+                            p.1 = Some(v.clone());
+                        }
+                    }
+                }
+                if !self_closing {
+                    depth += 1;
+                }
+            }
+            xml::Event::Close { .. } => {
+                depth = depth.saturating_sub(1);
+                if depth == 2 {
+                    if let (Some(p), Some(f)) = (pending.take(), out.last_mut()) {
+                        f.push(p);
+                    }
+                }
+            }
+            xml::Event::Text(_) => {}
+        }
+    }
+    out
+}
+
 /// Synthesise a `.dna` from the molecule alone, on every real file.
 ///
 /// `snapgene::write` re-emits the blocks it read, so a byte-exact round-trip
@@ -987,6 +1076,10 @@ fn a_synthesised_dna_preserves_everything_the_model_holds() {
     let (mut checked, mut features, mut quals) = (0usize, 0usize, 0usize);
     let (mut primers, mut sites) = (0usize, 0usize);
     let (mut notes_elems, mut notes_attrs, mut nested_reported) = (0usize, 0usize, 0usize);
+    // Qualifiers checked against the original block 10 bytes, which is a
+    // different and stronger claim than the `quals` above: that one counts
+    // qualifiers the model held on both sides of a rebuild.
+    let mut quals_in_file = 0usize;
     let mut problems: Vec<String> = Vec::new();
 
     for f in &files {
@@ -1126,6 +1219,32 @@ fn a_synthesised_dna_preserves_everything_the_model_holds() {
         if !orig.unrepresentable_notes.is_empty() {
             nested_reported += orig.unrepresentable_notes.len();
         }
+        // Block 10 against the file, for the same reason and with the same
+        // shape: the feature comparison above has both sides out of one reader
+        // and cancels anything that reader drops. See `block_ten_qualifiers`.
+        for (i, want) in block_ten_qualifiers(&orig).iter().enumerate() {
+            let Some(feat) = a.features.get(i) else {
+                problems.push(format!(
+                    "{}: block 10 holds feature {i} and the model does not",
+                    f.display()
+                ));
+                continue;
+            };
+            for q in want {
+                if !feat.qualifiers.contains(q) {
+                    problems.push(format!(
+                        "{}: feature {:?} lost qualifier {:?} = {:?}, which is in block 10; \
+                         the model holds {:?}",
+                        f.display(),
+                        feat.name,
+                        q.0,
+                        q.1,
+                        feat.qualifiers
+                    ));
+                }
+            }
+            quals_in_file += want.len();
+        }
         if a.double_stranded != b.double_stranded {
             problems.push(format!(
                 "{}: double_stranded {:?} became {:?}",
@@ -1183,6 +1302,10 @@ fn a_synthesised_dna_preserves_everything_the_model_holds() {
         "                                                                  {notes_elems} note \
          elements and {notes_attrs} note attributes checked against the original block 6; \
          {nested_reported} nested element(s) reported as unrepresentable"
+    );
+    eprintln!(
+        "                                                                  {quals_in_file} \
+         qualifier(s) checked against the original block 10"
     );
     assert!(checked > 0, "no .dna files parsed");
     assert!(

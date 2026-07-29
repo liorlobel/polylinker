@@ -332,11 +332,33 @@ fn searchable_text(mol: &Molecule) -> String {
 }
 
 /// Normalise a path for storage: relative to the root, `/`-separated.
+///
+/// The inverse of `abs`, and only because the separator fold is Windows-only.
+/// `\` is an ordinary filename byte on Unix — a zip that stored `\` as a
+/// separator and was extracted literally leaves files called `pUC19\backup.gb`
+/// — and folding it there turns one directory entry into a two-component path.
+/// Measured on Linux: the row was stored as `pUC19/backup.gb`, `abs` handed
+/// back a path that does not exist, and `pl index --verify` reported "1 file(s)
+/// changed without the index noticing" for a file nothing had touched, which no
+/// `--rebuild` could clear. With a real `pUC19/backup.gb` beside it, both files
+/// collapsed onto one stored path: the library listed it twice, `copy_rows`
+/// matched both on every rescan so the row count grew without bound, and
+/// opening the hit read the other molecule's bytes.
 pub fn rel(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    slash_separated(&path.strip_prefix(root).unwrap_or(path).to_string_lossy())
+}
+
+/// Rewrite the platform's directory separator to `/` for storage.
+#[cfg(windows)]
+pub(crate) fn slash_separated(p: &str) -> String {
+    p.replace('\\', "/")
+}
+
+/// Off Windows there is nothing to rewrite: `/` is already the separator and a
+/// backslash is part of a name. See `rel`.
+#[cfg(not(windows))]
+pub(crate) fn slash_separated(p: &str) -> String {
+    p.to_string()
 }
 
 /// Join a stored relative path back onto a root.
@@ -551,6 +573,50 @@ ORIGIN
         );
         // A path outside the root is kept whole rather than mangled.
         assert!(rel(root, Path::new("D:/elsewhere/y.gb")).contains("elsewhere"));
+    }
+
+    /// `\` is a legal byte in a Unix filename, and folding it lost files.
+    ///
+    /// Unix-only because on Windows the two spellings below name the same file,
+    /// so nothing there can tell the fold from the bug.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backslash_inside_a_unix_filename_is_not_a_separator() {
+        // One directory entry, whose name contains a backslash — what a zip
+        // that stored `\` as its separator leaves behind when it is extracted
+        // literally. Folded, its row was stored as `pUC19/backup.gb`, `abs`
+        // handed back a path that does not exist, and `pl index --verify`
+        // reported "1 file(s) changed without the index noticing" for a file
+        // nothing had touched. With the sub-directory file below also present,
+        // both collapsed onto one stored path and opening either read the
+        // other's bytes.
+        let root = Path::new("/lab");
+        let one_entry = Path::new(r"/lab/pUC19\backup.gb");
+        let in_a_sub_dir = Path::new("/lab/pUC19/backup.gb");
+        assert_eq!(rel(root, one_entry), r"pUC19\backup.gb");
+        assert_ne!(
+            rel(root, one_entry),
+            rel(root, in_a_sub_dir),
+            "two different files must never share one stored path"
+        );
+        assert_eq!(
+            abs(root, &rel(root, one_entry)),
+            one_entry,
+            "abs must invert rel, or verify re-reads the wrong file"
+        );
+    }
+
+    /// The control for the `cfg` above: on Windows the fold is still required.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_separator_is_still_folded_for_storage() {
+        // `DirEntry::path` hands back `\` here, and an index written on Windows
+        // has to read the same as one written anywhere else.
+        let root = Path::new(r"C:\lab\plasmids");
+        assert_eq!(
+            rel(root, Path::new(r"C:\lab\plasmids\sub dir\x.gb")),
+            "sub dir/x.gb"
+        );
     }
 
     #[test]

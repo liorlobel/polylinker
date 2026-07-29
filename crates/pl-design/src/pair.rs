@@ -50,7 +50,7 @@ use crate::fold;
 use crate::oligo::{evaluate, span_bases, Candidate, Side};
 use crate::params::{Constraints, Mode};
 use crate::report::{
-    js, specificity_caveat, Pair, Reason, Report, SpecNote, Tally, NO_SPECIFICITY_NOTE,
+    js, specificity_caveat, Geom, Pair, Reason, Report, SpecNote, Tally, NO_SPECIFICITY_NOTE,
     RT_PCR_CAVEAT,
 };
 use crate::specificity::{self, SeedIndex};
@@ -89,8 +89,29 @@ pub struct Primer {
     /// describes neither the annealing behaviour nor anything else real.
     pub gc: f64,
     pub dg_three_prime: f64,
+    /// The **footprint's** hairpin. This is the number `oligo::evaluate` gated
+    /// on and the number the ranking uses.
     pub hairpin: fold::Structure,
+    /// The **footprint's** 3'-end self-dimer, gated and ranked.
     pub self_dimer_three: fold::Structure,
+    /// The whole oligo's hairpin — tail included — or `None` when there is no
+    /// tail.
+    ///
+    /// **Reported, not gated.** A tail is 5' of the footprint so it correctly
+    /// contributes nothing to Tm; a hairpin is not a Tm. It is a property of the
+    /// molecule that goes to the synthesiser, and the tail is part of that
+    /// molecule. Measured over 40 random 4 kb templates with `--add-5 NotI
+    /// --add-3 XhoI --spacer TTGGCA`: 166 of 350 ordered oligos carry a
+    /// whole-oligo hairpin at or past the −5.0 kcal/mol gate the same run
+    /// applied to footprints, the worst at −9.7 with a 6 bp stem pairing spacer
+    /// and site bases against footprint bases. Gating on it would change which
+    /// pairs exist; printing it beside the gated number is what stops
+    /// `hairpin_dg37: 0.000` sitting three fields after an oligo whose real
+    /// screen value is −9.7.
+    pub hairpin_full: Option<fold::Structure>,
+    /// The whole oligo's 3'-end self-dimer. Reported, not gated; see
+    /// [`Primer::hairpin_full`].
+    pub self_dimer_three_full: Option<fold::Structure>,
 }
 
 impl Primer {
@@ -117,8 +138,10 @@ impl Primer {
             "{{\"oligo\": {}, \"length\": {}, \"footprint\": {}, \"footprint_length\": {}, \
              \"tail\": {}, \"tail_length\": {}, \"tail_adds\": {}, \"gc_percent\": {:.3}, \
              \"tm\": {:.3}, \"tm_basis\": \"footprint\", \"tm_whole_oligo\": {}, \
-             \"three_prime_dg37\": {:.3}, \"hairpin_dg37\": {:.3}, \
-             \"self_dimer_3p_dg37\": {:.3}, \"start\": {}, \"end\": {}, \"strand\": {}}}",
+             \"three_prime_dg37\": {:.3}, \"structure_basis\": \"footprint\", \
+             \"hairpin_dg37\": {:.3}, \"hairpin_dg37_whole_oligo\": {}, \
+             \"self_dimer_3p_dg37\": {:.3}, \"self_dimer_3p_dg37_whole_oligo\": {}, \
+             \"start\": {}, \"end\": {}, \"strand\": {}}}",
             js(&String::from_utf8_lossy(&oligo)),
             oligo.len(),
             js(&String::from_utf8_lossy(&self.footprint)),
@@ -140,7 +163,15 @@ impl Primer {
             },
             self.dg_three_prime,
             self.hairpin.dg,
+            match self.hairpin_full {
+                Some(s) => format!("{:.3}", s.dg),
+                None => "null".into(),
+            },
             self.self_dimer_three.dg,
+            match self.self_dimer_three_full {
+                Some(s) => format!("{:.3}", s.dg),
+                None => "null".into(),
+            },
             self.start,
             self.end,
             js(self.side.as_str())
@@ -164,7 +195,15 @@ pub(crate) fn run(
     let s = region.start as i64 - 1;
     let e = s + region_bp as i64 - 1;
 
-    let shortest_product = 2 * c.len_min + 1;
+    // Two footprints may ABUT. The separation gate is `f.hi >= r.lo`, so
+    // `r.lo == f.hi + 1` is accepted and the shortest span two `len_min`
+    // footprints can occupy is `2 * len_min`, not one more. The `+ 1` that used
+    // to be here refused a region of exactly `2 * len_min` bases with the
+    // sentence "the shortest product two 20 nt primers can make is 41 bases" --
+    // while the same tool, given one more base of region, reported a pair
+    // occupying exactly 40 of them and `pl_clone::pcr` agreed on 40. An
+    // arithmetic claim the next run disproves is worse than no claim.
+    let shortest_product = 2 * c.len_min;
     if c.mode == Mode::Within && region_bp < shortest_product as u64 {
         return Err(DesignError::RegionTooShort {
             bp: region_bp,
@@ -173,22 +212,44 @@ pub(crate) fn run(
         });
     }
     if c.mode == Mode::Contain && !circular {
-        // A linear molecule may simply not have template to put a primer on.
-        // Refused with the shortfall named rather than silently falling back to
-        // Within, which would change what is amplified.
-        let left = s;
-        let right = ni - 1 - e;
-        if left < 0 || right < 0 {
+        // `flank` bounds the primer's OUTER end, so a `Mode::Contain` footprint
+        // needs NO template outside the region: the forward may start at
+        // `lo = s` and the reverse may end at `hi = e`, and `--flank 0` pinning
+        // both to the selection is the seamless-cloning case `Mode::Contain`'s
+        // own doc describes. This guard used to count the bases *outside* the
+        // region and refuse when both sides had fewer than `len_min` of them,
+        // which refused `--region 1..n` on a linear molecule -- "amplify this
+        // whole fragment", the commonest design there is -- and steered the
+        // user to `--mode within`, whose product is missing both ends of the
+        // selection. What actually has to hold is that at least one enumerated
+        // span FITS on each side, which is a different arithmetic entirely.
+        if s < 0 || ni - 1 - e < 0 {
             return Err(DesignError::OutsideTemplate {
                 start: region.start,
                 end: region.end,
                 bp: n,
             });
         }
-        if (left as usize) < c.len_min && (right as usize) < c.len_min {
+        // Forward: the earliest 5' start `flank` allows is `max(0, s - flank)`,
+        // and the shortest footprint from there must still end on the molecule.
+        let f_room = ni - (s - c.flank as i64).max(0);
+        // Reverse: the latest 3' end `flank` allows is `min(n - 1, e + flank)`,
+        // and the shortest footprint back from there must not run past base 0.
+        let r_room = (e + c.flank as i64).min(ni - 1) + 1;
+        let f_short = f_room < c.len_min as i64;
+        let r_short = r_room < c.len_min as i64;
+        if f_short || r_short {
+            let (which, available) = match (f_short, r_short) {
+                (true, true) => ("at either end of the region", f_room.min(r_room)),
+                (true, false) => ("at the start of the region", f_room),
+                (false, true) => ("at the end of the region", r_room),
+                // Guarded by the `if` above; a branch that cannot be reached is
+                // not a branch worth inventing a message for.
+                (false, false) => unreachable!("one of the two sides is short"),
+            };
             return Err(DesignError::NoFlank {
-                which: "on both sides",
-                available: left.min(right) as u64,
+                which,
+                available: available.max(0) as u64,
                 needed: c.len_min,
                 bp: n,
             });
@@ -264,8 +325,34 @@ pub(crate) fn run(
         }
     }
 
+    // The geometry a remedy has to know before it names `--flank`: which side
+    // the molecule's end has clipped, and whether the region could hold a pair
+    // if the user were sent to `--mode within`.
+    let geom = |fwd: usize, rev: usize| Geom {
+        before: if circular {
+            None
+        } else {
+            Some(s.max(0) as u64)
+        },
+        after: if circular {
+            None
+        } else {
+            Some((ni - 1 - e).max(0) as u64)
+        },
+        region_bp,
+        forward: fwd > 0,
+        reverse: rev > 0,
+    };
+
     if forward.is_empty() || reverse.is_empty() {
-        let constraints = tally_advice(&tally, c, forward.len(), reverse.len(), enumerated);
+        let constraints = tally_advice(
+            &tally,
+            c,
+            forward.len(),
+            reverse.len(),
+            enumerated,
+            geom(forward.len(), reverse.len()),
+        );
         return Err(DesignError::NoCandidate {
             enumerated,
             tally: Box::new(tally),
@@ -281,11 +368,10 @@ pub(crate) fn run(
     let (survivors_forward, survivors_reverse) = (forward.len(), reverse.len());
     let bound = forward.len() > c.max_per_side || reverse.len() > c.max_per_side;
     cap(&mut forward, c);
-    cap(&mut reverse, c);
     // Restore the enumeration invariant the pairing loop's binary search needs:
-    // forward ascending by `lo`, reverse ascending by `hi`.
+    // forward ascending by `lo`. The reverse side is cut further down, once the
+    // product window is known, and sorted there.
     forward.sort_by_key(|k| (k.lo, k.len()));
-    reverse.sort_by_key(|k| (k.hi, k.len()));
 
     // -- pairing -----------------------------------------------------------
     //
@@ -314,10 +400,29 @@ pub(crate) fn run(
         });
     }
     // Saturating rather than clamped at zero: a span of 0 is impossible anyway
-    // (two non-overlapping footprints need `2 * len_min + 1`), and `PairOverlap`
+    // (two abutting footprints already occupy `2 * len_min`), and `PairOverlap`
     // is the gate that says so in its own words.
     let span_min = c.product_min.saturating_sub(tail_bp).max(1);
     let span_max = c.product_max - tail_bp;
+
+    // The reverse cut is conditioned on the forwards that survived theirs.
+    //
+    // Cutting the two sides independently is positionally blind, and in
+    // `Mode::Within` over a long region that is fatal rather than merely lossy:
+    // `cap` sorts on the per-oligo penalty with the coordinate only as a
+    // tie-break, so the retained candidates are spread uniformly over the
+    // region and the expected number of pairs is
+    // `max_per_side^2 * window / region_bp`. Measured on a 2 Mb region under
+    // `--rt` that is 1.6, and on a fifth of random templates it is zero: the
+    // tool refused a region containing hundreds of thousands of valid qPCR
+    // pairs, reported "0 pairs were rejected", and blamed Tm -- which 8.9
+    // million oligos had just passed. Keeping only reverses some retained
+    // forward can actually reach makes `built >= 1` whenever any in-window pair
+    // exists at all, and costs one binary search over at most `max_per_side`
+    // starts per candidate.
+    retain_pairable(&mut reverse, &forward, span_min, span_max);
+    cap(&mut reverse, c);
+    reverse.sort_by_key(|k| (k.hi, k.len()));
 
     let mut built = 0usize;
     let mut scored: Vec<(i64, i64, usize, i64, usize, Pair)> = Vec::new();
@@ -354,8 +459,19 @@ pub(crate) fn run(
             // footprints' outer ends -- both footprints ARE template
             // substrings, so this is exact and `pl_clone::pcr` is a genuine
             // independent check of it rather than the same arithmetic twice.
+            // `span_bases` refuses two things, and only one of them is
+            // reachable here: the loop bounds above already guarantee the span
+            // is inside `--product`, and both candidates passed `evaluate`, so
+            // neither runs off a linear end. What is left is the one-turn cap
+            // on a circle -- `hi - lo + 1 > n` -- so this counter means "the
+            // amplicon would be longer than the molecule", and nothing else.
+            // It used to be `Reason::ProductLength`, labelled "product outside
+            // {min}-{max} bp" and remedied with "Widen --product", on a 2,686 bp
+            // circle whose reported products were 2,600 bp: a statement that is
+            // false for every input that can reach it, beside the one remedy
+            // that makes it worse.
             let Some(middle) = span_bases(template, circular, f.lo, r.hi) else {
-                tally.bump(Reason::ProductLength);
+                tally.bump(Reason::SpanExceedsMolecule);
                 continue;
             };
             let mut product: Vec<u8> = Vec::with_capacity(middle.len() + 32);
@@ -400,7 +516,7 @@ pub(crate) fn run(
                         tail::NO_SPACER_WARNING
                     ));
                 }
-                warnings.push(format!("the {which} tail: {}", t.frame_note()));
+                warnings.push(format!("the {which} tail: {}", t.frame_note(which)));
             }
             if refused {
                 continue;
@@ -473,9 +589,50 @@ pub(crate) fn run(
     }
 
     if scored.is_empty() {
-        let constraints = tally.advice(c, enumerated, built, &clashes);
+        let mut constraints = String::new();
+        // Said first, for the reason the `--flank 0` clause is said first: it
+        // explains the size of the search rather than any one threshold. It
+        // used to reach only `Report::warnings`, which exists only on the Ok
+        // path -- so on the one run where the cut decided the answer, the user
+        // was never told a cut had happened at all.
+        if bound {
+            constraints.push_str(&bound_note(c));
+            constraints.push(' ');
+        }
+        if built == 0 {
+            // Every combination the product window excludes is skipped by the
+            // `partition_point`/`break` above, before `built += 1` and before
+            // any `tally.bump`, so a window no pair of survivors can satisfy
+            // leaves the tally holding candidate-stage counts only. `advice`
+            // then falls through to the largest of those and answers "Tm is the
+            // binding constraint. Widen the LENGTH range first", which is
+            // unfollowable: the enumeration bounds on `lo` and `hi` are fixed
+            // by --mode, --flank and --region, so no threshold moves the span.
+            // The one number that explains the refusal is this one, and it
+            // appeared nowhere.
+            let lo_span = (reverse[0].hi - forward[forward.len() - 1].lo + 1).max(0) as u64;
+            let hi_span = (reverse[reverse.len() - 1].hi - forward[0].lo + 1).max(0) as u64;
+            constraints.push_str(&format!(
+                "No pair of survivors has an amplicon inside --product {}..{} bp, so the \
+                 window refused every combination before any per-pair threshold saw one. \
+                 The survivors reach {} to {} bp of amplicon. Move --product, --region or \
+                 --flank; widening --len or --tm only adds candidates between the same \
+                 enumeration bounds.",
+                c.product_min,
+                c.product_max,
+                lo_span + tail_bp,
+                hi_span + tail_bp
+            ));
+        } else {
+            constraints.push_str(&tally.advice(c, enumerated, built, &clashes, geom(1, 1)));
+        }
         return Err(DesignError::NoPair {
-            survivors: forward.len() + reverse.len(),
+            // The PRE-cap counts. Read off `forward`/`reverse` after `cap`
+            // truncated them in place, this printed a flat 400 -- `2 *
+            // max_per_side` -- on a run where 8.9 million oligos had passed,
+            // one line above an attrition table from which the reader subtracts
+            // and gets a different number.
+            survivors: survivors_forward + survivors_reverse,
             enumerated,
             built,
             tally: Box::new(tally),
@@ -534,6 +691,22 @@ pub(crate) fn run(
     // separate verb nobody runs by accident, while every report printed
     // hairpin and dimer free energies with nothing beside them.
     warnings.push(fold::SCREEN_NOTE.to_string());
+    // A target the window cannot contain is a criterion the user asked for and
+    // did not get. It used to be dropped in silence -- no error, no warning, and
+    // no surface anywhere in the report that echoes the value they typed --
+    // while the weights line went on printing `product 1.0` beside a term that
+    // was structurally zero for every candidate.
+    if let Some(t) = c.product_target {
+        if !(c.product_min..=c.product_max).contains(&t) {
+            warnings.push(format!(
+                "the requested product size {t} bp is outside the {}-{} bp product window, \
+                 so no amplicon can reach it. The size term still ranks by log distance to \
+                 {t}, which means it ranks every candidate at the same end of the window; \
+                 put the target inside --product if that is not what you meant.",
+                c.product_min, c.product_max
+            ));
+        }
+    }
     // An ambiguity code inside the amplicon but outside both footprints is
     // legal here -- only the footprints have to be unambiguous -- but
     // `Composition::gc_percent` is over unambiguous bases, so the denominator
@@ -573,15 +746,7 @@ pub(crate) fn run(
         warnings.push(s);
     }
     if bound {
-        warnings.push(format!(
-            "more than {} candidates survived on one side, so only the best {} per \
-             side were paired. That is a bound on the search, not a criterion: the cut \
-             is by the per-oligo terms of the same score the pairs are ranked by -- Tm, \
-             hairpin, 3'-end self-dimer, 3'-end stability, GC clamp, length, GC -- and by \
-             nothing else. Narrow the region or --flank if you want the whole space \
-             considered.",
-            c.max_per_side, c.max_per_side
-        ));
+        warnings.push(bound_note(c));
     }
     if chosen
         .iter()
@@ -591,6 +756,21 @@ pub(crate) fn run(
             "lowercase is a 5' TAIL. It pairs with nothing, it has no coordinates on this \
              template, and it is not in the Tm. pl design has no in-frame mode and will \
              never pad a tail to preserve a reading frame."
+                .to_string(),
+        );
+        // The Tm split was labelled and the structure split was not, so a
+        // report could print `hairpin_dg37: 0.000` beside an oligo whose own
+        // screen value is -9.7 -- in the same run that discarded 56 candidates
+        // for a hairpin at or below -5.0. The gate cannot move without changing
+        // which pairs exist, so the whole-oligo numbers are printed beside the
+        // gated ones and this says which is which.
+        warnings.push(
+            "the hairpin, self-dimer and cross-dimer dG37 values that were GATED and RANKED \
+             are the FOOTPRINTS', because that is what the per-oligo gate had to work with. \
+             A tail is 5' of the footprint so it rightly stays out of the Tm, but it is part \
+             of the molecule that is ordered and it folds: the whole-oligo values are printed \
+             beside them, on the 'whole oligo' line and in the JSON, and they are not gated. \
+             Read them before ordering."
                 .to_string(),
         );
     }
@@ -673,7 +853,68 @@ fn cap(v: &mut Vec<Candidate>, c: &Constraints) {
     v.truncate(c.max_per_side);
 }
 
-fn tally_advice(t: &Tally, c: &Constraints, fwd: usize, rev: usize, enumerated: usize) -> String {
+/// Drop reverse candidates that no retained forward can pair with.
+///
+/// `forward` is sorted ascending by `lo`. A reverse ending at `hi` pairs with a
+/// forward starting at `lo` exactly when `lo + span_min - 1 <= hi <= lo +
+/// span_max - 1`, i.e. `hi - span_max + 1 <= lo <= hi - span_min + 1`, so one
+/// `partition_point` per candidate answers it.
+///
+/// This runs **before** `cap` on the reverse side, and that order is the whole
+/// point: it is what makes the surviving 200 cluster around the retained
+/// forwards instead of being spread over the region. See the call site for the
+/// measurement.
+fn retain_pairable(
+    reverse: &mut Vec<Candidate>,
+    forward: &[Candidate],
+    span_min: u64,
+    span_max: u64,
+) {
+    if forward.is_empty() {
+        return;
+    }
+    let los: Vec<i64> = forward.iter().map(|f| f.lo).collect();
+    let keep = |r: &Candidate| {
+        let lo_from = r.hi - span_max as i64 + 1;
+        let lo_to = r.hi - span_min as i64 + 1;
+        let from = los.partition_point(|l| *l < lo_from);
+        from < los.len() && los[from] <= lo_to
+    };
+    // Never empty the side here. If nothing pairs, the search genuinely has no
+    // amplicon inside `--product`, and that is a refusal the pairing loop has to
+    // be able to describe with `built == 0`; leaving `reverse` empty instead
+    // would report "no reverse candidate survived", which is a different claim
+    // and a false one -- they survived, the window is what has no room.
+    if reverse.iter().any(keep) {
+        reverse.retain(keep);
+    }
+}
+
+/// The sentence that discloses the search bound.
+///
+/// One function rather than one string per path: it reaches the success
+/// report's warnings AND the `NoPair` refusal, and those two used to say
+/// different things -- the refusal said nothing at all, on exactly the run where
+/// the cut was what emptied the search.
+fn bound_note(c: &Constraints) -> String {
+    format!(
+        "more than {} candidates survived on one side, so only the best {} per side \
+         were paired. That is a bound on the search, not a criterion: the cut is by \
+         the per-oligo terms of the same score the pairs are ranked by -- Tm, hairpin, \
+         3'-end self-dimer, 3'-end stability, GC clamp, length, GC -- and by nothing \
+         else. Narrow the region or --flank if you want the whole space considered.",
+        c.max_per_side, c.max_per_side
+    )
+}
+
+fn tally_advice(
+    t: &Tally,
+    c: &Constraints,
+    fwd: usize,
+    rev: usize,
+    enumerated: usize,
+    geom: Geom,
+) -> String {
     let plural = |n: usize| if n == 1 { "candidate" } else { "candidates" };
     let side = if fwd == 0 && rev == 0 {
         String::new()
@@ -688,7 +929,7 @@ fn tally_advice(t: &Tally, c: &Constraints, fwd: usize, rev: usize, enumerated: 
             plural(fwd)
         )
     };
-    format!("{side}{}", t.advice(c, enumerated, 0, &[]))
+    format!("{side}{}", t.advice(c, enumerated, 0, &[], geom))
 }
 
 /// The most distinct site clashes any one refusal will describe.
@@ -777,7 +1018,7 @@ fn accept_specificity(
     // from the one it drew. Cheap enough to leave on in debug builds; in
     // release the answer does not depend on it.
     debug_assert!(
-        scan.anchored,
+        scan.anchored || scan.unscannable,
         "the intended site {intended:?} was not among the bindings for a footprint taken \
          from the template"
     );
@@ -808,6 +1049,15 @@ fn build_pair(
         + rtail.as_ref().map(|t| t.len()).unwrap_or(0) as u64;
     let comp = pl_core::iupac::Composition::of(product);
     let (penalty, terms) = score(f, r, dtm, cross_any, cross_three, product_bp, c);
+    // The gated cross-dimer is the two FOOTPRINTS'. The two oligos that are
+    // ordered carry the tails, and two tails that pair are a designed
+    // primer-dimer the `a.enzyme.site == b.enzyme.site` guard below only sees
+    // when both tails add the same palindromic site. Reported, not gated.
+    let cross_dimer_three_full = if ftail.is_some() || rtail.is_some() {
+        Some(fold::dimer(&forward.oligo(), &reverse.oligo(), &Constraints::DG_TABLE).1)
+    } else {
+        None
+    };
 
     Pair {
         forward_three_prime: f.three_prime(),
@@ -827,18 +1077,31 @@ fn build_pair(
         delta_tm: dtm,
         cross_dimer_any: cross_any,
         cross_dimer_three: cross_three,
+        cross_dimer_three_full,
         pcr_check: Err("not run".into()),
         warnings,
     }
 }
 
 fn to_primer(cand: &Candidate, tail: Option<Tail>, n: u64, c: &Constraints) -> Primer {
+    let whole = tail
+        .as_ref()
+        .map(|t| [&t.bases[..], &cand.bases[..]].concat());
     // The whole-oligo Tm is computed for reporting and NEVER used to balance
     // the pair or to set the early cycles' annealing temperature.
-    let tm_full = tail.as_ref().and_then(|t| {
-        let oligo = [&t.bases[..], &cand.bases[..]].concat();
-        tm(&oligo, &c.tm_method).ok().map(|x| x.tm)
-    });
+    let tm_full = whole
+        .as_ref()
+        .and_then(|o| tm(o, &c.tm_method).ok().map(|x| x.tm));
+    // The whole-oligo structure numbers, likewise reported and not gated. The
+    // gate is on the footprint because that is what `oligo::evaluate` had; the
+    // oligo that is ordered is this one, and it folds against itself tail
+    // included.
+    let hairpin_full = whole
+        .as_ref()
+        .map(|o| fold::hairpin(o, &Constraints::DG_TABLE));
+    let self_dimer_three_full = whole
+        .as_ref()
+        .map(|o| fold::dimer(o, o, &Constraints::DG_TABLE).1);
     Primer {
         side: cand.side,
         footprint: cand.bases.clone(),
@@ -851,6 +1114,8 @@ fn to_primer(cand: &Candidate, tail: Option<Tail>, n: u64, c: &Constraints) -> P
         dg_three_prime: cand.dg_three_prime,
         hairpin: cand.hairpin,
         self_dimer_three: cand.self_dimer_three,
+        hairpin_full,
+        self_dimer_three_full,
     }
 }
 
@@ -888,11 +1153,29 @@ fn score(
         (unit(f.dg_three_prime, c.dg_three_prime) + unit(r.dg_three_prime, c.dg_three_prime)) / 2.0;
 
     // Log distance, because 400 vs 500 bp matters far less than 100 vs 200.
+    //
+    // Normalised by the LARGER of the two log distances to the window edges.
+    // Dividing by `ln(product_max / target)` alone made the term degenerate as
+    // the target approached the ceiling -- at `--product 100..500 --product-opt
+    // 499` the normaliser is `ln(500/499)` = 0.002, so a 428 bp and a 286 bp
+    // amplicon both scored the full 1.0, a step function rather than the log
+    // scale the flag advertises -- and the `product_max > target` guard sent
+    // `target == product_max` to the `_ => 0.0` arm, switching a criterion the
+    // user asked for off entirely while the report still printed `product 1.0`
+    // among the weights.
     let t_amp = match c.product_target {
-        Some(target) if target > 0 && c.product_max > target => {
-            let ratio = (product_bp as f64 / target as f64).ln().abs();
-            let span = (c.product_max as f64 / target as f64).ln().abs().max(1e-9);
-            (ratio / span).clamp(0.0, 1.0)
+        Some(target) if target > 0 => {
+            let up = (c.product_max as f64 / target as f64).ln().abs();
+            let down = (target as f64 / c.product_min.max(1) as f64).ln().abs();
+            let span = up.max(down);
+            if span < 1e-9 {
+                // A window with no width either side of the target: every
+                // admissible amplicon is the target, so there is nothing to
+                // rank and 0.0 is the honest term rather than a divide-by-zero.
+                0.0
+            } else {
+                ((product_bp as f64 / target as f64).ln().abs() / span).clamp(0.0, 1.0)
+            }
         }
         _ => 0.0,
     };

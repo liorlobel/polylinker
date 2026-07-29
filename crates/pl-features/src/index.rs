@@ -37,15 +37,31 @@
 //! nucleotides. `Index::build` gives such a record a length of 0 in the DNA
 //! index, seeds nothing from it, and therefore lists it in [`Index::short`] —
 //! **always, and for every one of them**. That is correct and is not a defect:
-//! there are no bases to seed. A reader who finds fourteen shipped rows sitting
-//! in the DNA index's short list and concludes something is broken is reading a
-//! true statement about the wrong index.
+//! there are no bases to seed. A reader who finds the shipped peptide-only rows
+//! sitting in the DNA index's short list and concludes something is broken is
+//! reading a true statement about the wrong index.
 //!
-//! `Annotator::unseedable` intersects the two short lists rather than uniting
-//! them, so those records are not reported as unreachable while translated
-//! matching is on. With `Config::protein` off they are, and that is also
-//! correct — with the protein index never consulted they really cannot be
-//! found by anything.
+//! There is deliberately no count in that sentence. It used to say "fourteen",
+//! and the shipped table held nineteen such rows by the time anyone read it, so
+//! it sent a reader hunting five bugs that were not there. `short().len()` is
+//! the count.
+//!
+//! `Annotator::unseedable` never consults the protein index's short list. It
+//! takes `dna.short()` and, while `Config::protein` is on, drops from it every
+//! record that **has** a peptide, because the exact scan reaches those. This
+//! paragraph used to say it "intersects the two short lists", which is a
+//! different and narrower predicate, not a rewording of the same one: a peptide
+//! every one of whose 5-residue windows carries an `X` indexes no protein word,
+//! so it sits in `protein.short()` and an intersection reports it unreachable —
+//! while `Annotator::scan_protein_exact` finds it wherever the query really
+//! translates to those residues. `Annotator::unseedable`'s own comment carries
+//! that argument in full, and
+//! `a_peptide_that_indexes_no_word_is_scanned_rather_than_written_off` names the
+//! restored intersection as one of the mutants it kills.
+//!
+//! With `Config::protein` off nothing is dropped and every peptide-only row is
+//! reported, and that is also correct — with the protein index never consulted
+//! they really cannot be found by anything.
 //!
 //! # Too few words is not the same failure as no words, and it used to be silent
 //!

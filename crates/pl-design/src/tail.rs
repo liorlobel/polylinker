@@ -3,7 +3,25 @@
 //! A restriction site added to a primer **is a tail**, in exactly
 //! `pl-primer`'s sense: 5' of the footprint, pairing with nothing, contributing
 //! nothing to Tm. No new machinery is needed for the concept, only for the
-//! three checks that make it safe.
+//! checks that make it safe: the internal-site scan, the no-spacer warning, the
+//! frame note — and the whole-oligo structure numbers, which are the one the
+//! list here used to omit.
+//!
+//! # A tail is not in the Tm, and it IS in the fold
+//!
+//! Those are different claims and the code made only the first. `oligo::evaluate`
+//! screens hairpins and dimers on the **footprint**, because that is all it has
+//! when a candidate is enumerated; the tail is built later, in `pair::run`. But
+//! a hairpin is not a Tm — it is a property of the molecule that is ordered, and
+//! the tail is part of that molecule. Measured over 40 random 4 kb templates
+//! with `--add-5 NotI --add-3 XhoI --spacer TTGGCA`: 166 of 350 ordered oligos
+//! carry a whole-oligo hairpin at or past the −5.0 kcal/mol gate the same run
+//! applied to footprints, the worst at −9.7 with a 6 bp stem pairing spacer and
+//! site bases against footprint bases, in a run that discarded 56 candidates for
+//! a hairpin at or below −5.0. Gating on it would change which pairs exist, so
+//! what is done instead is what was done for Tm: report both numbers, name which
+//! is which, and say so in [`crate::Report::warnings`]. See
+//! [`crate::Primer::hairpin_full`].
 //!
 //! # The tail is not part of the Tm, and the report says both numbers
 //!
@@ -116,21 +134,57 @@ impl Tail {
     }
 
     /// The sentence that goes beside this tail, in the case that matters most.
-    pub fn frame_note(&self) -> String {
+    ///
+    /// `which` is `"forward"` or `"reverse"`, because the two tails land at
+    /// opposite ends of the product's top strand and the note used to say "the
+    /// 5' end of the product" for both.
+    ///
+    /// # Two lengths, and the spacer is not in the one that matters
+    ///
+    /// The note used to do its arithmetic on `self.len()` — spacer plus site —
+    /// and then assert outright "this shifts the reading frame" whenever that
+    /// was not a multiple of three. The spacer is 5' of the recognition site,
+    /// therefore 5' of the cut, therefore discarded on digestion. Proved with
+    /// this project's own `pl digest`: tails of 6, 7 and 8 nt (no spacer,
+    /// `--spacer A`, `--spacer GG`, EcoRI + HindIII) yield a byte-identical
+    /// 433 nt insert, and the tool called two of those three a frameshift and
+    /// one not. What sits between the vector's frame and the first template base
+    /// after ligation is the **regenerated site**, so the frame-relevant length
+    /// is `enzyme.site.len()` and the spacer contributes exactly zero — for any
+    /// spacer, of any length, with any enzyme.
+    ///
+    /// So both lengths are stated, apart, and neither branch makes an
+    /// affirmative frame claim: an unqualified "this shifts the reading frame"
+    /// about a construct that is frame-neutral invites a user to compensate, and
+    /// compensating by trimming a footprint introduces the real +1 the module
+    /// doc calls "strictly worse than not offering the feature".
+    pub fn frame_note(&self, which: &str) -> String {
         let n = self.len();
-        if n % 3 == 0 {
-            format!(
-                "this tail adds {n} nt to the 5' end of the product. {n} is divisible by 3, \
-                 but that does not make a fusion in frame: frame depends on the vector's \
-                 reading frame at the insertion site, which Polylinker does not know. If you \
-                 are making a fusion protein, check the frame yourself."
-            )
+        let site = self.enzyme.site.len();
+        let end = if which == "reverse" {
+            "3' end of the product's top strand"
         } else {
-            format!(
-                "this tail adds {n} nt to the 5' end of the product. If you are cloning in \
-                 frame, this shifts the reading frame."
-            )
-        }
+            "5' end of the product's top strand"
+        };
+        format!(
+            "this tail adds {n} nt to the {end} of the PCR product ({} nt of spacer and the \
+             {site} nt {} site). If you digest and ligate, the spacer is cut away with the \
+             small fragment and what separates the vector from the first template base is \
+             the regenerated {site} nt site -- so {site}, not {n}, is the length that moves \
+             the frame there. {} Neither number makes a fusion in frame on its own: frame \
+             depends on the vector's reading frame at the insertion site, which Polylinker \
+             does not know. If you are making a fusion protein, check the frame yourself.",
+            self.spacer.len(),
+            self.enzyme.name,
+            if site % 3 == 0 {
+                format!("{site} is divisible by 3.")
+            } else {
+                format!(
+                    "{site} is not divisible by 3, so that junction shifts by {}.",
+                    site % 3
+                )
+            }
+        )
     }
 }
 
@@ -357,24 +411,65 @@ mod tests {
         .is_ok());
     }
 
+    /// The frame note reasons about the length the DIGEST leaves behind.
+    ///
+    /// PROVEN TO FAIL against the shipped `frame_note`, which did its modulo on
+    /// `spacer + site` and then asserted "this shifts the reading frame"
+    /// outright: `--spacer A` and `--spacer GG` on the same EcoRI design gave 7
+    /// and 8, so both printed the affirmative frameshift claim, while `pl digest`
+    /// on all three amplicons yields a byte-identical insert. The spacer is 5' of
+    /// the site, therefore 5' of the cut, therefore not there afterwards.
     #[test]
-    fn the_frame_note_is_loudest_where_a_user_would_assume_it_is_safe() {
-        let six = Tail::build(&Tailspec {
-            enzyme: ecori(),
-            spacer: Vec::new(),
-        })
-        .unwrap();
-        assert_eq!(six.len() % 3, 0);
-        let note = six.frame_note();
-        assert!(note.contains("divisible by 3"), "{note}");
-        assert!(note.contains("does not make a fusion in frame"), "{note}");
+    fn the_frame_note_reasons_about_the_site_the_digest_leaves_and_not_the_spacer() {
+        let mk = |spacer: &[u8]| {
+            Tail::build(&Tailspec {
+                enzyme: ecori(),
+                spacer: spacer.to_vec(),
+            })
+            .unwrap()
+        };
+        let (six, seven, eight) = (mk(b""), mk(b"A"), mk(b"GG"));
+        assert_eq!((six.len(), seven.len(), eight.len()), (6, 7, 8));
 
-        let seven = Tail::build(&Tailspec {
-            enzyme: ecori(),
-            spacer: b"A".to_vec(),
+        // All three regenerate the same 6 nt EcoRI site on ligation, so all
+        // three make the same frame claim -- which is the point.
+        for t in [&six, &seven, &eight] {
+            let note = t.frame_note("forward");
+            assert!(note.contains("6 nt EcoRI site"), "{note}");
+            assert!(note.contains("6, not"), "{note}");
+            assert!(note.contains("6 is divisible by 3"), "{note}");
+            assert!(
+                !note.contains("this shifts the reading frame"),
+                "an affirmative frame claim about a construct that is frame-neutral: {note}"
+            );
+            assert!(note.contains("does not know"), "{note}");
+        }
+        // The tail lengths are still stated -- they are what the PCR product
+        // gains, which is the number that matters for a blunt or Gibson clone.
+        assert!(seven.frame_note("forward").contains("adds 7 nt"));
+        assert!(eight.frame_note("forward").contains("adds 8 nt"));
+
+        // An 8 nt site is where the site length really does shift the frame,
+        // and the note says so about the site rather than about the tail.
+        let fsei = pl_enzymes::by_name("FseI").expect("FseI ships");
+        assert_eq!(fsei.site.len(), 8);
+        let f = Tail::build(&Tailspec {
+            enzyme: fsei,
+            spacer: b"G".to_vec(),
         })
         .unwrap();
-        assert!(seven.frame_note().contains("shifts the reading frame"));
+        assert_eq!(
+            f.len(),
+            9,
+            "the tail is a multiple of 3 and the site is not"
+        );
+        let note = f.frame_note("forward");
+        assert!(note.contains("8 is not divisible by 3"), "{note}");
+        assert!(note.contains("shifts by 2"), "{note}");
+
+        // And the two tails land at opposite ends of the product's top strand.
+        assert!(six.frame_note("forward").contains("5' end of the product"));
+        assert!(six.frame_note("reverse").contains("3' end of the product"));
     }
 
     #[test]

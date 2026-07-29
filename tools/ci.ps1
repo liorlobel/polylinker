@@ -136,9 +136,27 @@ Step 'wasm module vs native binary' {
 #
 # The split between the pure search engine and `pl-scan`, which owns all the
 # I/O, is the whole reason the engine can be reasoned about -- and a convention
-# nobody can check is a convention that decays. wasm32 has no filesystem, so
-# this step goes red the day a storage concern leaks in. It also means the
-# browser tool can search an in-memory Vec<Row> through the identical code.
+# nobody can check is a convention that decays.
+#
+# WHAT THIS STEP ACTUALLY ENFORCES, which is narrower than it used to claim.
+# This comment used to say "wasm32 has no filesystem, so this step goes red the
+# day a storage concern leaks in". It does not.  `wasm32-unknown-unknown` ships
+# the full std filesystem, environment, subprocess and clock surfaces through
+# its `unsupported` platform layer: `std::fs::read` compiles here, links here,
+# and returns `ErrorKind::Unsupported` at run time on a target this project
+# never runs. So this build catches a wasm-incompatible DEPENDENCY and an
+# OS-specific API -- both worth having, neither the same claim -- and cannot
+# catch a hand-written line of I/O at all.
+#
+# The source-level half is crates/pl-index/tests/purity.rs, run by the step
+# below, which reads the crate's own sources and rejects `std::fs`, `std::env`,
+# `std::process`, `std::net` and the ambient clocks, including through a braced
+# or rustfmt-wrapped `use`. Two files stating opposite things about one gate is
+# how a developer ends up debugging the wrong one, and the one they read first
+# is this one.
+#
+# The wasm build also means the browser tool can search an in-memory Vec<Row>
+# through the identical code.
 Step 'pl-index stays pure (wasm32)' {
     cargo build -p pl-index --target wasm32-unknown-unknown --profile wasm
 } { $hasWasm }

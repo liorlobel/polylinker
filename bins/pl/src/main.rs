@@ -35,7 +35,7 @@ USAGE:
     pl licences                          who the annotation data belongs to
 
     pl index   <dir>... [options]        build or refresh a folder's index
-    pl find    <dir> [query] [filters]   search it
+    pl find    <dir> [filters]           search it (--motif/--enzyme/--text/...)
     pl library <dir> [options]           what is indexed, and what could not be
 
 CONVERT OPTIONS:
@@ -160,10 +160,14 @@ DESIGN OPTIONS:
     --add-5 <ENZYME>             add this enzyme's site as a 5' tail, forward
     --add-3 <ENZYME>             ... reverse
     --spacer <BASES>             bases 5' of the added site. None by default; a
-                                 warning says why you may want some.
+                                 warning says why you may want some. Needs
+                                 --add-5 or --add-3: with no added site there is
+                                 nothing for a spacer to sit 5' of
     --vector <file>              count the added enzymes' sites in a vector too,
                                  with Dam/Dcm methylation applied: a blocked
-                                 site is not a usable single cutter
+                                 site is not a usable single cutter. Needs
+                                 --add-5 or --add-3 -- those are the sites that
+                                 get counted -- and the file must hold one record
     --vector-circular            read the vector as a plasmid. FASTA carries no
                                  topology, and a site straddling the origin of a
                                  vector read as linear is reported as absent
@@ -171,6 +175,8 @@ DESIGN OPTIONS:
                                  assumed PRESENT, which is an ordinary lab strain
     --cpg                        the vector is CpG methylated (a mammalian cell
                                  line, or M.SssI). Off by default
+                                 (--vector-circular, --dam-, --dcm- and --cpg all
+                                 describe a vector, so each needs --vector)
     --off-seed <N>               3'-anchored seed for the off-target scan, 8-32,
                                  default 12. Raising it makes the scan faster
                                  and BLINDER: 12 is pl-clone's own MIN_ANNEAL,
@@ -202,7 +208,8 @@ TM OPTIONS:
 
 FIND-MOTIF OPTIONS:
     --seq <BASES>                search this literal sequence instead of a file
-    --topology <circular|linear> default: linear
+    --topology <circular|linear> overrides the file's own topology; with --seq,
+                                 which carries none, the default is linear
 
 EXPORT OPTIONS:
     --width <px>                 canvas width  (default: 720)
@@ -211,7 +218,10 @@ EXPORT OPTIONS:
     --eps                        write EPS instead of SVG
     --mm <width>                 final printed width in millimetres
     --journal <name>             column width and type floor from a preset
-    --column <single|double>     which column width (default single)
+    --column <single|double>     which of the preset's two column widths
+                                 (default single). Needs --journal, since the
+                                 widths come from the preset, and cannot be
+                                 combined with --mm, which sets the width itself
     --check-contrast             measure every colour against WCAG 2.2 AA
     --no-ruler                   omit the base-position ruler
     -o, --outdir <dir>           where to write (default: beside the input)
@@ -506,6 +516,171 @@ fn note_first_record_only(label: &str, report: &pl_fileio::LoadReport, what: &st
     }
 }
 
+/// Say when the molecule contradicts itself, before answering questions about it.
+///
+/// `Molecule::validate()` was reached from exactly one place in the whole
+/// workspace — `pl-gui`'s document loader — so every check it performs was
+/// invisible to anyone using the terminal. The reachable case is dull and
+/// common: a GenBank record whose `//` terminator is missing and which has
+/// something after the sequence. The ORIGIN loop reads on to end of file, so a
+/// 12 bp record with a mail-client footer loads as
+/// `acgtacgtacgt--SentfrommyiPhone`, 30 bases, against a LOCUS line that says
+/// 12. Nothing was suspect, no location was unrepresentable, and `pl info`
+/// printed `30 bp` beside `declared_bp 12` without ever remarking that a file
+/// disagreeing with itself is a file to look at.
+///
+/// A notice, not a refusal: the bases may well be the ones the user wants, and
+/// `pl convert` writing a 30 bp record is a defensible thing to do as long as
+/// it says the header claimed 12. stderr for the same reason as
+/// `note_first_record_only` — a `--json` consumer keeps one parseable document.
+fn note_self_contradiction(label: &str, mol: &pl_core::Molecule) {
+    for problem in mol.validate() {
+        eprintln!("pl: {label}: {problem}");
+    }
+}
+
+/// Refuse to answer about a molecule that carries no bases.
+///
+/// `pl digest` has always done this ("no bases to digest") and `pl design`
+/// refuses both no-bases classes in `pl-design`'s own words. Six other verbs
+/// answered instead. On `anno.gb` — a GenBank record whose LOCUS line declares
+/// 4000 bp and whose ORIGIN is empty, which `pl info` correctly describes as
+/// "4000 bp DECLARED, but this file carries no bases" — `pl gel --cut EcoRI`
+/// printed "none of these enzymes cuts this molecule", `pl orfs` "no ORF of 30
+/// aa or more", `pl primers` "no binding site", `pl annotate` "nothing found",
+/// `pl find-motif` "no hits" and `pl goldengate --enzyme BsaI` "no structural
+/// fault found": six negative verdicts computed from zero bases, every one at
+/// exit 0, and every one printing `0 bp` for a record that declares 4000.
+/// `pl find` over the same file already says "0 of 1 records searched — 1 have
+/// no sequence (a declared length, no bases)"; these verbs are the
+/// single-molecule form of that question and have to be as honest.
+///
+/// The predicate is `seq.is_empty()`, the one `cmd_digest` uses — **not**
+/// `is_annotation_track()`, which requires `declared_len` to be 0 and is
+/// therefore false for exactly the commonest case, a GenBank record that
+/// declares a length and ships none of it.
+fn refuse_without_bases(label: &str, mol: &pl_core::Molecule, what: &str) -> Result<(), String> {
+    if !mol.seq.is_empty() {
+        return Ok(());
+    }
+    let declared = mol.declared_len.unwrap_or(0);
+    if declared > 0 {
+        return Err(format!(
+            "{label}: this file declares {declared} bases and carries none of them -- \
+             annotation-only GenBank. There is nothing here to {what}."
+        ));
+    }
+    if !mol.features.is_empty() {
+        return Err(format!(
+            "{label}: this is an annotation track: it carries {} feature{} and no bases, so \
+             there is nothing here to {what}. Open the sequence these coordinates describe.",
+            mol.features.len(),
+            if mol.features.len() == 1 { "" } else { "s" }
+        ));
+    }
+    Err(format!(
+        "{label}: this record carries no bases, so there is nothing here to {what}."
+    ))
+}
+
+/// Say what the record just written could not carry, from both directions.
+///
+/// Four channels, and `pl convert` learned each of them separately: what the
+/// *writer* could not carry (the `_reporting` variants fill a `Vec<String>` that
+/// the plain wrappers throw away), what the *reader* could not build out of the
+/// source's notes block or its exotic locations, and which features have no
+/// GenBank-expressible strand and go out as forward. `pl annotate --genbank`
+/// writes the same record with the same writer to the same stream and said none
+/// of the four: a `misc_feature join(1..10,J00194.1:200..300)` came out as
+/// `misc_feature 1..10` — 10 bp where the source claimed 111 — and a
+/// `gap(unk100)` feature vanished outright, with empty stderr and exit 0.
+/// Factored here so a fourth writer cannot forget them one at a time.
+///
+/// `written` is the molecule actually encoded, not the one loaded: `pl annotate`
+/// adds features before writing, and the orientation question is about what
+/// went into the file.
+fn note_output_losses(
+    label: &str,
+    format_name: &str,
+    unwritable: &[String],
+    report: &pl_fileio::LoadReport,
+    written: &pl_core::Molecule,
+    is_genbank: bool,
+) {
+    if !unwritable.is_empty() {
+        eprintln!(
+            "pl: {label}: {} item(s) the {format_name} writer could not carry: {}",
+            unwritable.len(),
+            unwritable
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    // The *reader's* half of the same sentence, and it has to be said by the
+    // verb that writes the lossy copy rather than only by `pl info`. A `.dna`
+    // whose block 6 holds `<References><Reference pubMedID=".." title=".."/>`
+    // — a published citation, on 3 of the 33 real files this was checked
+    // against — went through with exit 0, an empty stderr, and
+    // `<References></References>` in the output. Re-reading that output reports
+    // nothing, because by then there is nothing left to report: one hop and the
+    // loss is both total and invisible.
+    //
+    // Not folded into the line above: that one says "the writer could not
+    // carry", this says "the file held something the reader could not build".
+    // Ungated by format — GenBank and FASTA discard the notes block wholesale,
+    // so the statement is no less true there.
+    if !report.unrepresentable_notes.is_empty() {
+        eprintln!(
+            "pl: {label}: {} part(s) of the source's notes block this model cannot hold, so \
+             the output does not carry them: {}",
+            report.unrepresentable_notes.len(),
+            report
+                .unrepresentable_notes
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !report.unrepresentable_locations.is_empty() {
+        eprintln!(
+            "pl: {label}: {} location(s) the reader could not represent, so the output does \
+             not carry them: {}",
+            report.unrepresentable_locations.len(),
+            report
+                .unrepresentable_locations
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    // A different statement, and GenBank-only: GenBank cannot express an
+    // unoriented or bidirectional feature, so those are written as forward. Say
+    // so rather than letting the export publish a directional claim the source
+    // never made.
+    if is_genbank {
+        let lossy = written.features_without_expressible_orientation();
+        if !lossy.is_empty() {
+            eprintln!(
+                "pl: {label}: {} feature(s) have no GenBank-expressible strand and are written as forward: {}",
+                lossy.len(),
+                lossy
+                    .iter()
+                    .take(3)
+                    .map(|(_, f)| f.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+}
+
 /// Which input, if any, this destination would land on top of.
 ///
 /// The whole input list, not just the file being converted right now: `pl
@@ -580,6 +755,7 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                     json_str(&e.to_string())
                 )),
                 Ok((mol, fmt, report)) => {
+                    note_self_contradiction(&path.display().to_string(), &mol);
                     let sites: usize = mol.primers.iter().map(|p| p.sites.len()).sum();
                     let lower = mol.seq.iter().filter(|b| b.is_ascii_lowercase()).count();
                     // Notes, with their attributes. This is the only machine-
@@ -620,10 +796,28 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                             )
                         })
                         .collect();
+                    // `Feature::start`/`end` are a min and a max over the
+                    // segments, and this is the format that suffers most for
+                    // it. `genbank::write` emits an origin-crossing feature as
+                    // `join(2677..2686,1..7)`, so the min start is always
+                    // exactly 1 and the max end is always exactly the molecule
+                    // length: a 17 bp promoter came out of a shipped
+                    // machine-readable format as `"start": 1, "end": 2686`,
+                    // spanning the whole plasmid, with only `"segments": 2`
+                    // beside it and the real coordinates unrecoverable. Worse,
+                    // nothing about the record looks wrong. `extent` knows the
+                    // wrap and reports it the way `Molecule::subseq` reads a
+                    // pair — `end < start` means it crosses the origin — and
+                    // falls back to the same min/max for an ordinary spliced
+                    // join, where the min/max really is the extent.
+                    let circular = mol.topology.is_circular();
+                    let span = mol.span();
                     let feats: Vec<String> = mol
                         .features
                         .iter()
                         .map(|f| {
+                            let (start, end) =
+                                f.extent(span, circular).unwrap_or((f.start(), f.end()));
                             format!(
                                 "{{{}: {}, {}: {}, {}: {}, {}: {}, {}: {}, {}: {}}}",
                                 json_str("name"),
@@ -631,9 +825,9 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
                                 json_str("kind"),
                                 json_str(&f.kind),
                                 json_str("start"),
-                                f.start(),
+                                start,
                                 json_str("end"),
-                                f.end(),
+                                end,
                                 json_str("segments"),
                                 f.segments.len(),
                                 json_str("strand"),
@@ -703,6 +897,7 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
         match load_with_report(&data) {
             Err(e) => println!("{}\n   ERROR: {e}\n", path.display()),
             Ok((mol, fmt, report)) => {
+                note_self_contradiction(&path.display().to_string(), &mol);
                 println!("{}", path.display());
                 println!("   format     {}", fmt.name());
                 if report.truncated() {
@@ -891,6 +1086,7 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
         let data = read(path)?;
         let (mol, _fmt, report) =
             load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+        note_self_contradiction(&path.display().to_string(), &mol);
         if report.truncated() {
             // Converting would write record 1 and silently discard the rest.
             // A 124-record 36 KB .gbk became a 28 KB single-record file with
@@ -940,92 +1136,17 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
                 b
             }
         };
-        if !unwritable.is_empty() {
-            eprintln!(
-                "pl: {}: {} item(s) the {} writer could not carry: {}",
-                path.display(),
-                unwritable.len(),
-                ext,
-                unwritable
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            );
-        }
-
-        // The *reader's* half of the same sentence, and it has to be said here
-        // rather than only by `pl info`. `report` was bound above and only
-        // `truncated()` was ever read from it, so a `.dna` whose block 6 holds
-        // `<References><Reference pubMedID=".." title=".." journal=".."/></References>`
-        // — a published citation, on 3 of the 33 real files this was checked
-        // against — went through `pl convert --to dna` with exit 0, an empty
-        // stderr, and `<References></References>` in the output. Re-reading that
-        // output reports nothing, because by then there is nothing left to
-        // report: one hop and the loss is both total and invisible. That is
-        // verbatim the complaint audit #77 opened with, and wiring only the
-        // writer's channel left it true.
-        //
-        // Not folded into the `unwritable` line above: that line says "the
-        // writer could not carry", and this says "the file held something the
-        // reader could not build". Ungated by `out_fmt` — GenBank and FASTA
-        // discard the notes block wholesale, so the statement is no less true
-        // there.
-        if !report.unrepresentable_notes.is_empty() {
-            eprintln!(
-                "pl: {}: {} part(s) of the source's notes block this model cannot hold, so \
-                 the output does not carry them: {}",
-                path.display(),
-                report.unrepresentable_notes.len(),
-                report
-                    .unrepresentable_notes
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        // The same for the GenBank reader's exotic locations, for the same
-        // reason and by the same route: `pl info` said so and `pl convert`,
-        // which is the verb that writes the lossy copy, did not.
-        if !report.unrepresentable_locations.is_empty() {
-            eprintln!(
-                "pl: {}: {} location(s) the reader could not represent, so the output does \
-                 not carry them: {}",
-                path.display(),
-                report.unrepresentable_locations.len(),
-                report
-                    .unrepresentable_locations
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-
-        // A different statement, and still GenBank-only: GenBank cannot express
-        // an unoriented or bidirectional feature, so
-        // those are written as forward. Say so rather than letting the export
-        // publish a directional claim the source never made.
-        if is_gb {
-            let lossy = mol.features_without_expressible_orientation();
-            if !lossy.is_empty() {
-                eprintln!(
-                    "pl: {}: {} feature(s) have no GenBank-expressible strand and are written as forward: {}",
-                    path.display(),
-                    lossy.len(),
-                    lossy
-                        .iter()
-                        .take(3)
-                        .map(|(_, f)| f.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-        }
+        // All four loss channels, in `note_output_losses` so that `pl annotate
+        // --genbank` — which writes the same record with the same writer — says
+        // the same things. It said none of them until this was shared.
+        note_output_losses(
+            &path.display().to_string(),
+            ext,
+            &unwritable,
+            &report,
+            &mol,
+            is_gb,
+        );
 
         if to_stdout {
             use std::io::Write;
@@ -1099,13 +1220,37 @@ fn cmd_digest(args: &[String]) -> Result<(), String> {
     let wanted = a.get_all("enzyme");
     let mut results = pl_enzymes::digest_all(&mol);
     if !wanted.is_empty() {
-        results.retain(|d| wanted.iter().any(|w| w.eq_ignore_ascii_case(d.enzyme.name)));
-        if results.is_empty() {
+        // Every name is resolved before anything is digested, because the guard
+        // that used to stand here was per *call* and not per *name*: `retain`
+        // followed by `if results.is_empty()` only fires when EVERY name is
+        // unknown, so `pl digest x.fa --enzyme HaeIII --enzyme EcoRI` printed
+        // the EcoRI row, exited 0, and dropped HaeIII without a word. The
+        // answer was then a statement about one enzyme wearing the heading of
+        // two. DpnI and HaeIII are both absent from the 58-row table and are
+        // both ordinary things to ask for, so this is reachable by typing a
+        // real enzyme name rather than by mistyping one.
+        //
+        // All the misses are named at once — a caller who got three names wrong
+        // should not have to run this three times. `by_name` and `digest_all`
+        // search the same `ENZYMES` table with the same case-insensitive
+        // comparison, so no name that resolves here can vanish in the retain
+        // below. bins/pl-mcp and crates/pl-py already resolved per name; this
+        // was the last of the three that did not.
+        let missing: Vec<&str> = wanted
+            .iter()
+            .copied()
+            .filter(|w| pl_enzymes::by_name(w).is_none())
+            .collect();
+        if !missing.is_empty() {
             return Err(format!(
-                "no such enzyme in the built-in set: {}",
-                wanted.join(", ")
+                "no enzyme named {} in the built-in set of {}. `pl digest {}` \
+                 with no --enzyme lists every one of them",
+                missing.join(", "),
+                pl_enzymes::ENZYMES.len(),
+                path.display()
             ));
         }
+        results.retain(|d| wanted.iter().any(|w| w.eq_ignore_ascii_case(d.enzyme.name)));
     }
     if a.has("unique") {
         results.retain(|d| d.is_unique_cutter());
@@ -1384,7 +1529,41 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         })?),
         None => None,
     };
-    let double = a.get("column").map(|c| c == "double").unwrap_or(false);
+    // Every value that was not the exact lowercase `double` used to select the
+    // single-column width in silence, so `--column Double` — with `--journal`
+    // next door accepting `Nature` case-insensitively — exported the EPS at
+    // 89 mm instead of the requested 183 (measured: BoundingBox 0 0 253 253
+    // rather than 0 0 519 519) and then ran the journal's type floor against the
+    // wrong width, printing "smallest type is 3.0 pt, below nature's 5 pt
+    // minimum / raise --font-size, drop labels, or use --column double" — the
+    // remedy the user believed they had just applied. Refused positively, the
+    // way `--topology`, `--salt`, `--mode`, `--state` and `--to` all are.
+    let double = match a.get("column") {
+        None => false,
+        Some(v) if v.eq_ignore_ascii_case("double") => true,
+        Some(v) if v.eq_ignore_ascii_case("single") => false,
+        Some(v) => return Err(format!("--column {v:?}: expected single or double")),
+    };
+    // ... and a `--column` nothing reads is no better than a mistyped one: the
+    // width comes from `--mm` when it is given and from the journal preset
+    // otherwise, so with `--mm`, or with no preset at all, this flag was
+    // accepted and discarded.
+    if a.has("column") {
+        if a.has("mm") {
+            return Err(
+                "--column and --mm both set the printed width; --mm wins, so passing \
+                        both means one of them is not doing what you think. Give one."
+                    .into(),
+            );
+        }
+        if journal.is_none() {
+            return Err(
+                "--column picks between a journal's single- and double-column widths, \
+                        so it needs --journal <name>. Use --mm <width> to set a width directly."
+                    .into(),
+            );
+        }
+    }
     let width_mm: Option<f64> = match (a.get("mm"), journal) {
         (Some(v), _) => Some(
             v.parse::<f64>()
@@ -1569,6 +1748,46 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             );
             eprintln!("     a larger --width/--height fits more of them");
         }
+        // A shortened label is not a hidden one and had no print site at all,
+        // so the shortening happened silently in a figure headed for a journal.
+        // `pCMV-WPRE` going out as `pCMV-WP...` is a different plasmid's name.
+        if !drawn.labels_truncated.is_empty() {
+            eprintln!(
+                "pl: {}: {} label(s) were shortened with '...' to fit: {}{}",
+                path.display(),
+                drawn.labels_truncated.len(),
+                drawn
+                    .labels_truncated
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if drawn.labels_truncated.len() > 5 {
+                    ", ..."
+                } else {
+                    ""
+                }
+            );
+            eprintln!("     the SVG's <title> still carries each whole name");
+        }
+        // Half a feature is a worse lie than no feature: a 101 bp arrow drawn
+        // from one segment of `join(100..200,5000..6000)` is indistinguishable
+        // from a real 101 bp feature of that name.
+        if !drawn.partly_drawn.is_empty() {
+            eprintln!(
+                "pl: {}: {} feature(s) were drawn from only some of their segments: {}",
+                path.display(),
+                drawn.partly_drawn.len(),
+                drawn
+                    .partly_drawn
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         if !drawn.malformed.is_empty() {
             eprintln!(
                 "pl: {}: {} feature(s) have coordinates outside the molecule and are not drawn: {}",
@@ -1663,16 +1882,28 @@ fn cmd_find_motif(args: &[String]) -> Result<(), String> {
     let motif =
         pl_index::scan::Motif::new(&pattern).map_err(|e| format!("--motif {pattern:?}: {e}"))?;
 
-    let circular = match a.get("topology").unwrap_or("linear") {
-        "circular" => true,
-        "linear" => false,
-        other => return Err(format!("--topology {other:?}: expected circular or linear")),
+    // `--topology` *overrides* what the file declared; it does not stand in for
+    // it. This used to default to linear for a file as well as for `--seq`, so a
+    // 42 bp GenBank record whose LOCUS line says `circular` and whose only EcoRI
+    // site spans bases 40,41,42,1,2,3 printed "no hits" at exit 0 -- while `pl
+    // info`, `pl digest`, `pl primers` and `pl find` on the same bytes all read
+    // it as a circle and all found the site. `--seq` is bare bases and carries
+    // no topology, so linear stays the default there and only there.
+    let asked = match a.get("topology") {
+        None => None,
+        Some("circular") => Some(true),
+        Some("linear") => Some(false),
+        Some(other) => return Err(format!("--topology {other:?}: expected circular or linear")),
     };
 
     // `--seq` for a literal sequence; otherwise the remaining files, whose
     // first record is used.
-    let (seq, label) = match a.get("seq") {
-        Some(s) => (s.as_bytes().to_vec(), "<--seq>".to_string()),
+    let (seq, circular, label) = match a.get("seq") {
+        Some(s) => (
+            s.as_bytes().to_vec(),
+            asked.unwrap_or(false),
+            "<--seq>".to_string(),
+        ),
         None => {
             let path = a
                 .files
@@ -1682,7 +1913,12 @@ fn cmd_find_motif(args: &[String]) -> Result<(), String> {
             let (mol, _, report) =
                 load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
             note_first_record_only(&path.display().to_string(), &report, "searched");
-            (mol.seq.clone(), path.display().to_string())
+            refuse_without_bases(&path.display().to_string(), &mol, "search")?;
+            (
+                mol.seq.clone(),
+                asked.unwrap_or(mol.topology.is_circular()),
+                path.display().to_string(),
+            )
         }
     };
 
@@ -1792,15 +2028,33 @@ fn previous_index(path: &Path) -> Result<Option<pl_index::codec::Library>, Strin
     }
 }
 
-fn scan_options(a: &Args, previous: Option<pl_index::codec::Library>) -> pl_scan::ScanOptions {
+fn scan_options(
+    a: &Args,
+    previous: Option<pl_index::codec::Library>,
+) -> Result<pl_scan::ScanOptions, String> {
     let mut walk = pl_scan::WalkOptions {
         follow_links: a.has("follow-links"),
         ..Default::default()
     };
-    if let Some(d) = a.get("max-depth").and_then(|v| v.parse().ok()) {
-        walk.max_depth = d;
+    // Refused, not shrugged off. This was `.and_then(|v| v.parse().ok())`, so an
+    // unparseable value left `max_depth` at the default 32 and the run was
+    // character-for-character identical to one with no `--max-depth` at all --
+    // the only evidence a bound applied is the "scan incomplete: ... deeper than
+    // --max-depth N" line, which never printed. `parse_args`' own rule is that a
+    // typo which changes the answer must not be indistinguishable from the
+    // answer, and every other numeric option here (`--min-aa`, `--agarose`,
+    // `--seed`, `--mm`, ...) already refuses. It also catches `pl index root
+    // --max-depth $DEPTH --rebuild` with `$DEPTH` unset, where `--rebuild` is
+    // swallowed as the value and then discarded: both flags lost, exit 0. With
+    // `--follow-links` the stake is larger than a wider walk -- `WalkOptions`
+    // names `max_depth` the only thing standing between a link cycle and an
+    // endless one.
+    if let Some(v) = a.get("max-depth") {
+        walk.max_depth = v
+            .parse()
+            .map_err(|_| format!("--max-depth {v:?}: expected a number"))?;
     }
-    pl_scan::ScanOptions { walk, previous }
+    Ok(pl_scan::ScanOptions { walk, previous })
 }
 
 /// Print what a scan did. Never silent about what it could not do.
@@ -1907,7 +2161,7 @@ fn cmd_index(args: &[String]) -> Result<(), String> {
             continue;
         }
 
-        let (lib, report) = pl_scan::scan(root, now_ns(), &scan_options(&a, previous));
+        let (lib, report) = pl_scan::scan(root, now_ns(), &scan_options(&a, previous)?);
         report_scan(root, &report);
         report_size(&lib);
         pl_scan::save(&path, &lib).map_err(|e| e.to_string())?;
@@ -1922,7 +2176,7 @@ fn cmd_index(args: &[String]) -> Result<(), String> {
 /// re-read before answering — and the refresh is stated rather than hidden.
 fn open_library(a: &Args, root: &Path) -> Result<(pl_index::codec::Library, bool), String> {
     if a.has("no-index") {
-        let (lib, report) = pl_scan::scan(root, now_ns(), &scan_options(a, None));
+        let (lib, report) = pl_scan::scan(root, now_ns(), &scan_options(a, None)?);
         if let Some(why) = &report.incomplete {
             eprintln!("pl: scan incomplete: {why}");
         }
@@ -1931,7 +2185,7 @@ fn open_library(a: &Args, root: &Path) -> Result<(pl_index::codec::Library, bool
     let path = index_location(a, root)?;
     let previous = previous_index(&path)?;
     let had_index = previous.is_some();
-    let (lib, report) = pl_scan::scan(root, now_ns(), &scan_options(a, previous));
+    let (lib, report) = pl_scan::scan(root, now_ns(), &scan_options(a, previous)?);
 
     if !had_index {
         eprintln!(
@@ -1987,6 +2241,24 @@ fn cmd_find(args: &[String]) -> Result<(), String> {
     if !root.is_dir() {
         return Err(format!("{}: not a folder", root.display()));
     }
+    // USAGE advertised `pl find <dir> [query] [filters]` and no query was ever
+    // read: only `files[0]` is used, and `files[1..]` went nowhere. `pl find .
+    // GAATTC` and `pl find . ZZZZZZ` -- the second not even valid IUPAC -- both
+    // printed every record in the library and "1 record matched", so a search
+    // written the way `pl find-motif <IUPAC> <file>` is written returned the
+    // whole library as the answer, at exit 0. Refused rather than implemented:
+    // `--motif` and `--enzyme` are the two ways to ask, they disagree about
+    // which one a bare word would mean, and a wrong answer is worse than a
+    // missing shorthand. The USAGE line no longer promises a positional query.
+    if a.files.len() > 1 {
+        return Err(format!(
+            "pl find takes one folder and named filters, not a positional query -- {:?} was \
+             read as neither and would have been dropped, leaving every record a match. \
+             Use --motif {:?} for a sequence, --enzyme for a site, or --text/--name.",
+            a.files[1].display(),
+            a.files[1].display()
+        ));
+    }
 
     // The motif, from `--motif` or an enzyme's site.
     let motif = match (a.get("motif"), a.get("enzyme")) {
@@ -1997,12 +2269,25 @@ fn cmd_find(args: &[String]) -> Result<(), String> {
         (None, Some(name)) => {
             // Never fall through to treating the name as a motif: `--enzyme
             // BsaI` silently searching for the literal bases B-s-a-I would be
-            // absurd, and `BsaI` is not in the shipped table.
+            // absurd.
+            //
+            // Both counts are computed, because the sentence that stood here was
+            // hard-coded and every clause of it had gone false: it called the 58
+            // entries "58 Type IIP enzymes" when 8 of them are Type IIS, and it
+            // told anyone who mistyped any name at all that "there is no BsaI,
+            // BsmBI, BbsI or SapI yet — use --motif GGTCTC to ask about the site
+            // itself", while `--enzyme BsaI` resolved and searched, `pl digest
+            // --enzyme BsaI` worked, and the whole `pl goldengate --enzyme BsaI`
+            // verb shipped. The workaround it offered was not even a different
+            // search: `--enzyme BsaI` hands `Motif::new` the same "GGTCTC".
             let e = pl_enzymes::by_name(name).ok_or_else(|| {
+                let iis = pl_enzymes::ENZYMES
+                    .iter()
+                    .filter(|e| e.cuts_outside_site())
+                    .count();
                 format!(
-                    "--enzyme {name:?}: not in the shipped table of {} Type IIP enzymes.\n\
-                     there is no BsaI, BsmBI, BbsI or SapI yet — use --motif GGTCTC to ask \
-                     about the site itself.",
+                    "--enzyme {name:?}: not in the shipped table. {} enzymes are available, \
+                     {iis} of them Type IIS; pl digest --enzyme lists them.",
                     pl_enzymes::ENZYMES.len()
                 )
             })?;
@@ -2064,6 +2349,15 @@ fn cmd_find(args: &[String]) -> Result<(), String> {
 
     let (lib, _) = open_library(&a, &root)?;
     let results = pl_index::query::run(&lib.rows, &lib.packed, &q);
+    // Lenient on purpose, unlike `--max-depth` in `scan_options`, and the
+    // asymmetry is the point rather than an oversight. `--max-depth` is the only
+    // evidence that a walk was bounded, so a value that fails to parse erases the
+    // fact that anything was skipped. `--limit` is a display cap over a result
+    // set whose true size is stated either way -- the text path prints "showing
+    // N of M matching records" below, and `--json` emits `matched` from the full
+    // set, separately from the `matches` array -- so a bad value can only show
+    // more rows than asked for, never hide a record behind a claim that it is
+    // not there.
     let limit: usize = a.get("limit").and_then(|v| v.parse().ok()).unwrap_or(200);
 
     if a.has("json") {
@@ -2330,7 +2624,14 @@ fn cmd_tm(args: &[String]) -> Result<(), String> {
     for s in &seqs {
         match pl_thermo::tm(s.as_bytes(), &m) {
             Ok(t) => {
-                tms.push(t.tm);
+                // The length rides along with the Tm because the vendor rule
+                // printed two lines below has a length clause in it, and
+                // discarding the length made that clause unenforceable — see
+                // the `anneal_sized` call. `s.len()` is a sound base count:
+                // `pl_thermo::tm` returns `Ok` only after checking every
+                // ASCII-uppercased byte is A, C, G or T, so no multi-byte
+                // character can be in here.
+                tms.push((t.tm, s.len()));
                 println!(
                     "{:>7.1}C  {:>5.1}%  {:>9.1}  {:>9.1}  {}{}",
                     t.tm,
@@ -2372,13 +2673,23 @@ this set is unknown. Fix or drop them and run it again.",
     // Annealing advice, separately and per polymerase, exactly as the plan
     // insists: a Tm is a property of a duplex, a Ta is protocol advice.
     if !tms.is_empty() {
-        let low = tms.iter().cloned().fold(f64::INFINITY, f64::min);
+        // Which oligo produced the minimum, not just the value. A fold to the
+        // bare `f64` threw the length away one line before the rule that needs
+        // it, so `pl tm ATTTAGGTGACACTATAG` — the 18 nt SP6 primer, Tm 38.9C —
+        // advised "Phusion 42C" on the same printed line as the rule reserving
+        // that +3 for primers over 20 nt. The tie-break on length matches
+        // `anneal_sized`'s own documented rule: equal Tms pick the shorter
+        // primer, which is the cooler and therefore safer answer.
+        let &(low, low_nt) = tms
+            .iter()
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+            .expect("non-empty");
         println!(
             "
 annealing advice, from the lowest Tm ({low:.1}C):"
         );
         for p in pl_thermo::POLYMERASES {
-            let (lo, hi) = pl_thermo::anneal(low, None, p);
+            let (lo, hi) = pl_thermo::anneal_sized((low, low_nt), None, p);
             let range = if (lo - hi).abs() < 0.01 {
                 format!("{lo:.0}C")
             } else {
@@ -2431,12 +2742,47 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
         let (mol, _, report) =
             load_with_report(&data).map_err(|f| format!("{}: {f}", path.display()))?;
         note_first_record_only(&path.display().to_string(), &report, "digested");
+        refuse_without_bases(
+            &path.display().to_string(),
+            &mol,
+            "digest, and so no overhang set to check",
+        )?;
         let seq = String::from_utf8_lossy(&mol.seq).to_string();
-        let frags = pl_clone::cut(&pl_clone::Dseq::new(&seq, mol.topology.is_circular()), e);
+        // `try_cut`, so a refusal names its own reason. `cut` returns an empty
+        // Vec for a molecule that is not DNA, which then fell through to the
+        // empty-overhang guard below and blamed the enzyme: a file carrying one
+        // stray non-ASCII byte was told "BsaI leaves no overhang here -- 0
+        // fragment(s)" about a digest that never ran at all. `CutError::NotDna`
+        // names the offending character instead.
+        let frags = pl_clone::try_cut(&pl_clone::Dseq::new(&seq, mol.topology.is_circular()), e)
+            .map_err(|err| format!("{}: {err}", path.display()))?;
         for f in &frags {
             if let Some(o) = pl_clone::goldengate::left_overhang(f) {
                 overhangs.push(o);
             }
+        }
+        // `check(&[])` has an early return for the empty slice, so a digest that
+        // recovered no overhang at all came back with no faults and
+        // `"usable": true` -- a clean bill of health for a junction set that was
+        // never examined. Reproduced two ways: a file with no site for the
+        // enzyme, and audit #42's own fixture `AAAAAAAAAAAAGGTCTCAC`, a linear
+        // part whose BsaI site sits too close to the end for the overhang to
+        // form, which after #43 stopped being cut at all and so stopped
+        // reaching the Fault::Incompatible that #42 added. The printed
+        // "-> 1 fragment(s)" does not distinguish the two cases -- a circular
+        // molecule with one genuine BsaI junction prints exactly the same line
+        // -- and `--json` never emits the fragment count at all. Refused rather
+        // than noted, because exit 1 is the only channel a `--json` consumer
+        // can see.
+        if overhangs.is_empty() {
+            return Err(format!(
+                "{}: {} leaves no overhang here -- {} fragment(s), none of them with a \
+                 four-base end this could check. There is no set to report on, and an empty \
+                 set passes every structural check by default.",
+                path.display(),
+                e.name,
+                frags.len()
+            ));
         }
         source = format!(
             "{} cut with {} -> {} fragment(s)",
@@ -2748,6 +3094,7 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
         let (mol, _, report) =
             load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
         note_first_record_only(&path.display().to_string(), &report, "run on the gel");
+        refuse_without_bases(&path.display().to_string(), &mol, "digest and run")?;
 
         let mut lanes = vec![pl_gel::render::Lane {
             label: format!("{} ladder", ladder.name),
@@ -2970,6 +3317,7 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
         let (mol, _, report) =
             load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
         note_first_record_only(&path.display().to_string(), &report, "annotated");
+        refuse_without_bases(&path.display().to_string(), &mol, "annotate")?;
         let found = annotator.annotate(&mol);
         let shown: Vec<&pl_features::annotate::Annotation> = found
             .iter()
@@ -3030,10 +3378,27 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
                 }
                 out.features.push(feat);
             }
-            print!(
-                "{}",
-                pl_fileio::genbank::write(&out, &title_of(path), today())
+            // `write_reporting`, not `write`: the plain wrapper drops the
+            // writer's `Vec<String>` of items it could not carry, and this verb
+            // is one of the four call sites audit #77 recorded as still doing
+            // that. Both of the reader's channels are said here too — a
+            // `misc_feature join(1..10,J00194.1:200..300)` was written as
+            // `misc_feature 1..10`, claiming 10 bp where the source claimed 111,
+            // and a `gap(unk100)` feature disappeared, with empty stderr and
+            // exit 0. `pl convert <f> --to genbank --stdout` emits a
+            // byte-identical record and reported all four; only this verb was
+            // silent.
+            let (text, unwritable) =
+                pl_fileio::genbank::write_reporting(&out, &title_of(path), today());
+            note_output_losses(
+                &path.display().to_string(),
+                "gb",
+                &unwritable,
+                &report,
+                &out,
+                true,
             );
+            print!("{text}");
             continue;
         }
 
@@ -3427,6 +3792,7 @@ fn cmd_orfs(args: &[String]) -> Result<(), String> {
             let (mol, _, report) =
                 load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
             note_first_record_only(&path.display().to_string(), &report, "read for ORFs");
+            refuse_without_bases(&path.display().to_string(), &mol, "read for ORFs")?;
             (
                 mol.seq.clone(),
                 mol.topology.is_circular(),
@@ -3456,9 +3822,22 @@ fn cmd_orfs(args: &[String]) -> Result<(), String> {
         println!("{{\n  \"table\": {id},\n  \"orfs\": [");
         for (i, o) in orfs.iter().enumerate() {
             print!(
-                "    {{\"start\": {}, \"end\": {}, \"strand\": {}, \"frame\": {}, \"aa_len\": {}, \"start_codon\": {}, \"complete\": {}, \"wrapped\": {}, \"protein\": {}}}{}",
+                // `bp` and `laps` are not decoration. `start..end` is an
+                // inclusive span round the circle, and it stops being the ORF's
+                // extent the moment `laps > 0`: a stop-free run longer than the
+                // whole molecule comes back as 5..18 on a 19 bp circle for an
+                // ORF of 33 bases, with `start < end`, so nothing in the record
+                // looks wrong and the reader is 19 bases short with no way to
+                // tell. `bases_of` above already reads `o.bases()`, which is
+                // why `protein` was right while the coordinates printed beside
+                // it were a whole lap short — one line disagreeing with itself.
+                // Audit 2026-07-28 #6 added `Orf::laps` and `Orf::bases()` to
+                // pl-core and stopped there; this is the reader they were for.
+                "    {{\"start\": {}, \"end\": {}, \"bp\": {}, \"laps\": {}, \"strand\": {}, \"frame\": {}, \"aa_len\": {}, \"start_codon\": {}, \"complete\": {}, \"wrapped\": {}, \"protein\": {}}}{}",
                 o.start,
                 o.end,
+                o.bases(),
+                o.laps,
                 json_str(if o.strand == pl_core::Strand::Reverse { "-" } else { "+" }),
                 o.frame,
                 o.aa_len,
@@ -3494,7 +3873,22 @@ fn cmd_orfs(args: &[String]) -> Result<(), String> {
             o.end,
             o.aa_len,
             String::from_utf8_lossy(&o.start_codon),
-            if o.wrapped { "  crosses origin" } else { "" },
+            // A lap has to be said out loud, because the coordinates cannot say
+            // it: `start..end` is an inclusive span round the circle, so an ORF
+            // that runs past the origin and on past its own start reads as the
+            // short arc it ends on. On a 19 bp circle a 33-base ORF printed
+            // "5..18 + 10 aa", a range of 14 bases, with `start < end` so not
+            // even the wrap was visible. `bases_of` above already reads
+            // `o.bases()`, so the translation under `--translate` was the full
+            // length while the coordinates on this line were not.
+            match o.laps {
+                0 if o.wrapped => "  crosses origin".to_string(),
+                0 => String::new(),
+                l => format!(
+                    "  crosses origin, and laps the molecule {l} more time(s) — {} bp in all",
+                    o.bases()
+                ),
+            },
             if o.complete {
                 ""
             } else {
@@ -3576,6 +3970,7 @@ fn cmd_primers(args: &[String]) -> Result<(), String> {
             let (mol, _, report) =
                 load_with_report(&data).map_err(|e| format!("{}: {e}", path.display()))?;
             note_first_record_only(&path.display().to_string(), &report, "used as the template");
+            refuse_without_bases(&path.display().to_string(), &mol, "anneal a primer to")?;
             (
                 mol.seq.clone(),
                 mol.topology.is_circular(),
@@ -3770,7 +4165,18 @@ fn cmd_design(args: &[String]) -> Result<(), String> {
         c.flank = number(v, "--flank", 0.0, 100_000.0)? as u64;
     }
     if let Some(v) = a.get("len") {
-        let (lo, hi) = range(v, "--len", 8.0, 60.0)?;
+        // From the constants, not from 8.0/60.0 written out again. pl-design's
+        // widening advice now NAMES this lower bound as what the tool accepts
+        // ("--len accepts down to 8"), so a literal here and a constant there
+        // are two spellings of one contract that can drift apart silently — and
+        // the way it would show is advice telling the user to pass a value this
+        // parser then rejects.
+        let (lo, hi) = range(
+            v,
+            "--len",
+            pl_design::Constraints::LEN_HARD_MIN as f64,
+            pl_design::Constraints::LEN_HARD_MAX as f64,
+        )?;
         c.len_min = lo as usize;
         c.len_max = hi as usize;
         c.len_opt = c.len_opt.clamp(c.len_min, c.len_max);
@@ -3809,13 +4215,26 @@ fn cmd_design(args: &[String]) -> Result<(), String> {
         let (lo, hi) = range(v, "--product", 20.0, 100_000.0)?;
         c.product_min = lo as u64;
         c.product_max = hi as u64;
-        c.product_target = c
-            .product_target
-            .filter(|t| (c.product_min..=c.product_max).contains(t));
     }
     if let Some(v) = a.get("product-opt") {
         c.product_target = Some(number(v, "--product-opt", 20.0, 100_000.0)? as u64);
     }
+    // A target outside the window is kept and DISCLOSED rather than dropped.
+    //
+    // This used to be a `.filter()` on the `--product` arm above, which could
+    // only ever prune the `--rt` preset's target: argument order in this
+    // function is fixed, so a user's `--product-opt` was always read afterwards
+    // and never saw it. Two sources of the same field, one silently pruned and
+    // one not.
+    //
+    // Dropping the filter rather than moving it, because pl-design now says
+    // what it was hiding: `Constraints::describe()` prints
+    // "target N bp OUTSIDE that window", `Report::warnings` names it, and the
+    // size term still ranks monotonically, so an out-of-window target degrades
+    // to a visible preference instead of vanishing. Moving the filter down here
+    // would have made the two sources consistent by silencing both.
+    // bins/pl-gui/src/design.rs clamps in the panel, where the user can see the
+    // number move.
     if let Some(v) = a.get("max") {
         c.max_pairs = number(v, "--max", 1.0, 200.0)? as usize;
     }
@@ -3852,6 +4271,42 @@ fn cmd_design(args: &[String]) -> Result<(), String> {
             c.tail_five = Some(spec);
         } else {
             c.tail_three = Some(spec);
+        }
+    }
+
+    // A flag that silently does nothing is a defect here for the same reason an
+    // unknown flag is (see `parse_args`). Everything `--vector` produces comes
+    // out of the `[tail_five, tail_three]` loop at the end of this function, so
+    // with neither `--add-5` nor `--add-3` given, the vector was read, parsed
+    // and put through both no-bases gates -- and then never mentioned: `pl
+    // design t.fa --region 400..1000 --vector pUC19.gb` printed a full report in
+    // which the word "vector" did not occur once, exit 0, and `--json`'s
+    // `warnings` carried nothing about it either. Because the gates run first,
+    // an unusable vector errored loudly while a usable one produced total
+    // silence, so the silence read as a clean bill of health rather than as an
+    // ignored flag. `--spacer` is inert the same way: validated as DNA, then
+    // discarded.
+    if c.tail_five.is_none() && c.tail_three.is_none() {
+        if a.has("vector") {
+            return Err(
+                "--vector needs --add-5 or --add-3: what is counted in the vector is \
+                        the sites those flags add, and with neither there is nothing to count"
+                    .into(),
+            );
+        }
+        if a.has("spacer") {
+            return Err(
+                "--spacer needs --add-5 or --add-3: a spacer is the bases 5' of an \
+                        added site, and with neither flag no site is added"
+                    .into(),
+            );
+        }
+    }
+    for flag in ["vector-circular", "dam-", "dcm-", "cpg"] {
+        if a.has(flag) && !a.has("vector") {
+            return Err(format!(
+                "--{flag} needs --vector: it says how to read the vector, and no vector was given"
+            ));
         }
     }
 
@@ -3933,7 +4388,29 @@ fn cmd_design(args: &[String]) -> Result<(), String> {
     // linearises a dam+ prep, gets no cut, and loses a week.
     if let Some(v) = a.get("vector") {
         let data = read(Path::new(v))?;
-        let (mut vec_mol, _, _) = load_with_report(&data).map_err(|e| format!("{v}: {e}"))?;
+        let (mut vec_mol, _, vec_report) =
+            load_with_report(&data).map_err(|e| format!("{v}: {e}"))?;
+        // Refused, not noted. The load report was bound to `_` here -- the only
+        // `_`-bound one left in this binary -- so a two-record `multi.fa` whose
+        // first record has no EcoRI site and whose second has three was judged
+        // on record 1 and the verdict printed as a statement about the file:
+        // "EcoRI reads 0 sites in multi.fa (2000 bp, read as LINEAR) and cuts 0
+        // of them -- so it cannot open this vector", exit 0, empty stderr, and
+        // the same sentence inside `--json`'s `warnings[]` where a stderr note
+        // could not be seen at all. Passing the same file as template and
+        // vector in one command reported it honestly once and silently once.
+        // `note_first_record_only` is not enough here the way it is for
+        // `digest`: "which backbone" is not a question record 1 can answer, so
+        // this refuses the way `convert` and `export` refuse a multi-record
+        // input.
+        if vec_report.truncated() {
+            return Err(format!(
+                "--vector {v}: holds {} records and only the first would be scanned. \
+                 Which record is the backbone is not something this can guess -- split the \
+                 file and name the one you mean.",
+                vec_report.records
+            ));
+        }
         // The same two no-bases gates the template gets, in the same words --
         // an annotation track scored as "cuts 0 times -- so it cannot open
         // this vector" is a verdict derived from zero bases, and a user
@@ -4225,7 +4702,28 @@ fn cmd_cut_adapter(_args: &[String]) -> Result<(), String> {
             continue;
         };
         let d = pl_clone::Dseq::new(seq, topology == "circular");
-        let frags: Vec<String> = pl_clone::cut(&d, e)
+        // A refusal is reported, not spelled the same as "this enzyme does not
+        // cut". `cut` hands back an empty Vec when the molecule is not DNA, and
+        // this adapter printed that as `"fragments": []` — indistinguishable
+        // from a genuine non-cutter, in the one output whose whole job is to be
+        // compared against pydna. The success shape is untouched, so
+        // `reference/python/tests/xcheck_clone.py` reads exactly what it read
+        // before; the `error` key appears only on a case that could not run.
+        let cut = match pl_clone::try_cut(&d, e) {
+            Ok(f) => f,
+            Err(err) => {
+                println!(
+                    "{{{}: {}, {}: {}, {}: []}}",
+                    json_str("id"),
+                    json_str(id),
+                    json_str("error"),
+                    json_str(&err.to_string()),
+                    json_str("fragments")
+                );
+                continue;
+            }
+        };
+        let frags: Vec<String> = cut
             .iter()
             .map(|fr| {
                 format!(

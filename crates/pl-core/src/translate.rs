@@ -158,13 +158,21 @@ pub fn all_tables() -> impl Iterator<Item = Code> {
     })
 }
 
-/// The index of a codon in the NCBI ordering, or `None` if any base is not a
-/// plain `ACGT`.
+/// The index of a codon in the NCBI ordering, or `None` if any base is not
+/// `A`, `C`, `G`, `T` or `U`, in either case.
 ///
-/// Ambiguity codes deliberately do not resolve here even when they could (`GGN`
-/// is unambiguously glycine). Auto-annotation compares translated frames for
-/// equality, and quietly inventing an amino acid from an ambiguous codon would
-/// manufacture agreement that the sequence does not support.
+/// The fast path for a codon that is already fully determined. Ambiguity codes
+/// are resolved one level up, in [`codon_resolutions`], under the rule that a
+/// codon means whatever every base it allows agrees on.
+///
+/// This used to carry the opposite rationale — "ambiguity codes deliberately do
+/// not resolve here even when they could (`GGN` is unambiguously glycine) …
+/// quietly inventing an amino acid from an ambiguous codon would manufacture
+/// agreement that the sequence does not support". That rule was reversed
+/// deliberately, because it made `is_stop` read straight through `TAR` and an
+/// ORF's own protein disagree with where the ORF ended; see
+/// `ambiguity_resolves_only_when_every_reading_agrees` below. `GGN` is now
+/// glycine, and this function is not where that happens.
 fn codon_index(codon: &[u8]) -> Option<usize> {
     if codon.len() != 3 {
         return None;
@@ -615,6 +623,59 @@ mod tests {
         assert_eq!(TABLE1.codon(b"TAN"), b'X', "TAC is tyrosine, TAA is a stop");
         assert_eq!(TABLE1.codon(b"AT"), b'X');
         assert_eq!(TABLE1.codon(b"AT-"), b'X');
+    }
+
+    #[test]
+    fn codon_index_documents_the_rule_this_module_now_follows() {
+        // The companion to the test above, for the doc comment rather than the
+        // behaviour. `codon_index`'s `///` block kept the *rejected* rule's
+        // justification — "quietly inventing an amino acid from an ambiguous
+        // codon would manufacture agreement that the sequence does not support"
+        // — after the reversal above, and it is the entry point to the whole
+        // lookup: a maintainer reading it concludes the module refuses to
+        // resolve ambiguity, which makes `TAR`-as-a-stop look like a bug to be
+        // "fixed" back into `find_orfs` running straight through it. Asserted
+        // rather than eyeballed, because nothing else in the build reads doc
+        // comments.
+        //
+        // The rationale is allowed to survive as *history*, which is how the
+        // reversal is explained; what it may not do is stand as the current
+        // rule.
+        assert_eq!(TABLE1.codon(b"GGN"), b'G', "the rule the doc must describe");
+
+        let src = include_str!("translate.rs");
+        let head = src
+            .find("/// The index of a codon in the NCBI ordering")
+            .expect("codon_index still describes itself");
+        let item = src[head..]
+            .find("fn codon_index(")
+            .expect("codon_index is still here")
+            + head;
+        let doc = &src[head..item];
+        assert!(
+            doc.contains("[`codon_resolutions`]"),
+            "the doc has to say where ambiguity IS resolved: {doc}"
+        );
+        if let Some(stale) = doc.find("deliberately do not resolve here") {
+            let history = doc
+                .find("used to carry the opposite rationale")
+                .expect("the rejected rule may only appear as history");
+            assert!(
+                history < stale,
+                "the rejected rule must be marked as the past, not stated as the rule"
+            );
+        }
+
+        // The same block's alphabet claim. `None` "if any base is not a plain
+        // `ACGT`" was false: the lookup folds case and maps U to T first, which
+        // is what makes `rna_translates_as_dna_does` pass.
+        assert_eq!(codon_index(b"AUG"), codon_index(b"ATG"));
+        assert_eq!(codon_index(b"aug"), codon_index(b"ATG"));
+        assert!(codon_index(b"ATG").is_some());
+        assert!(
+            doc.contains("`U`") && doc.contains("in either case"),
+            "the accepted alphabet is A, C, G, T or U, in either case: {doc}"
+        );
     }
 
     #[test]

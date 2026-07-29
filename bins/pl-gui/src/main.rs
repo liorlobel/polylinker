@@ -425,12 +425,33 @@ impl App {
         match recover::recovery_dir() {
             Ok(dir) => {
                 app.stale = recover::stale(&dir);
-                app.recovery = Some(recover::recovery_path(&dir, 0));
+                // `claim`, not `recovery_path(&dir, 0)`. A PID identifies a run
+                // only while the run is alive, so a draft left by a crashed
+                // session that held our number is skipped by `stale` *and*
+                // targeted by `recovery_path` — hidden from the banner, then
+                // deleted by the next clean quit. `claim` lists it and takes the
+                // next free slot instead.
+                let (path, mine) = recover::claim(&dir);
+                app.stale.extend(mine);
+                // Newest first, the order `stale` returns and the banner shows.
+                app.stale.sort_by_key(|(p, s)| {
+                    (
+                        std::cmp::Reverse(s.as_ref().map(|s| s.saved_at).unwrap_or(0)),
+                        p.clone(),
+                    )
+                });
+                app.recovery = path;
                 if !app.stale.is_empty() {
                     app.status = format!(
                         "{} document(s) from a session that did not close cleanly — see Recover",
                         app.stale.len()
                     );
+                }
+                if app.recovery.is_none() {
+                    app.status =
+                        "autosave is off: every recovery slot for this process is taken by a \
+                         session that did not close cleanly — see Recover"
+                            .to_string();
                 }
             }
             // No recovery directory means no autosave, and saying so is the
@@ -469,7 +490,28 @@ impl App {
         self.edit = seqedit::SeqEdit::new();
         self.selected = None;
         self.hot = None;
+        // The design panel belongs to the molecule it was opened on. It used to
+        // survive a document swap holding the previous file's title, length,
+        // topology, target and report while being redrawn against the new
+        // molecule's bases — and "Add to document" then wrote file A's primer
+        // coordinates, under file A's name, into file B. Nothing in the panel
+        // says which file it came from once the title bar has changed, so it is
+        // closed rather than relabelled.
+        self.close_design("the design panel was closed: it was designed against the previous file");
         self.last_autosave = Some(std::time::Instant::now());
+    }
+
+    /// Drop the design panel, saying so if there was a report worth keeping.
+    ///
+    /// Silence would be its own defect: the panel holds constraints the user
+    /// typed and a report that took seconds to compute, and it vanishes for a
+    /// reason they cannot see.
+    fn close_design(&mut self, why: &str) {
+        if let Some(p) = self.design.take() {
+            if p.result.is_some() {
+                self.notice = Some(why.to_string());
+            }
+        }
     }
 
     fn load(&mut self, path: PathBuf) {
@@ -524,6 +566,15 @@ impl App {
                 self.error = Some(e);
                 self.document = None;
                 self.status.clear();
+                // Deliberate, and announced. `design_panel` took the panel out
+                // of `self` before it checked for a document, so a failed load
+                // dropped the panel, its constraints and its report on the
+                // floor in the same frame with nothing said. Putting the panel
+                // *back* would be worse — it would then reattach to whatever
+                // opens next.
+                self.close_design(
+                    "the design panel was closed: the document it described is no longer open",
+                );
             }
         }
     }
@@ -796,27 +847,14 @@ impl eframe::App for App {
             }
         }
 
-        // A paste is waiting on an answer, and these shortcuts are read
-        // straight off the context rather than from a widget, so no amount of
-        // modality in the dialog would stop them. Undoing while the question is
-        // on screen changes the document the question is about.
-        let asking = self.edit.pending_paste.is_some();
-        if !asking && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
+        let keys = self.global_shortcuts(&ctx);
+        if keys.open {
             self.pick_file();
         }
-        // Ctrl+Z / Ctrl+Y, plus Ctrl+Shift+Z for the mac-shaped habit.
-        let (undo, redo) = ctx.input(|i| {
-            let cmd = i.modifiers.command && !asking;
-            (
-                cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
-                cmd && (i.key_pressed(egui::Key::Y)
-                    || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
-            )
-        });
-        if undo {
+        if keys.undo {
             self.do_undo();
         }
-        if redo {
+        if keys.redo {
             self.do_redo();
         }
 
@@ -849,7 +887,66 @@ impl eframe::App for App {
     }
 }
 
+/// Which of the three application-wide shortcuts fired this frame.
+///
+/// Deciding is separated from acting because the actions are a native file
+/// dialog and a document mutation, and the *guards* are the part with a history
+/// of being wrong.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Shortcuts {
+    open: bool,
+    undo: bool,
+    redo: bool,
+}
+
 impl App {
+    /// Ctrl+O, Ctrl+Z and Ctrl+Y, and the three states in which they must not
+    /// fire.
+    ///
+    /// These are read straight off the context rather than from a widget, and
+    /// before a single widget has been built, so nothing downstream can take
+    /// them back — no amount of modality anywhere would stop them.
+    ///
+    /// - **A paste is waiting on an answer.** Undoing while the question is on
+    ///   screen changes the document the question is about.
+    /// - **A widget has keyboard focus.** `TextEdit` handles Ctrl+Z itself and
+    ///   reads its events with the non-consuming `filtered_events`, so both
+    ///   handlers used to fire: Ctrl+Z after a typo in the Features filter or
+    ///   the Library query undid the typo *and* the molecule, reverting a
+    ///   circularisation, clearing the selection and respawning the 58-enzyme
+    ///   digest — all of which the user attributes to the text box. Ctrl+O
+    ///   popped a file dialog out of a search box for the same reason.
+    ///   `sequence_keys` has guarded exactly this since it was written; this
+    ///   block did not.
+    /// - **The design panel is open**, for undo and redo only. Same rule as
+    ///   `sequence_keys`' third guard: the panel snapshots the target it is
+    ///   answering about, so an undo underneath it leaves the panel describing
+    ///   bases that are no longer there. The panel refuses to write a stale
+    ///   report either way, but a report that silently stops being addable
+    ///   because of a stray keystroke is a poor answer to a question the user
+    ///   is still looking at. Undo stays reachable from the toolbar, which
+    ///   closes nothing and surprises nobody.
+    fn global_shortcuts(&self, ctx: &egui::Context) -> Shortcuts {
+        let asking = self.edit.pending_paste.is_some();
+        let typing = ctx.memory(|m| m.focused()).is_some();
+        let designing = self.design.is_some();
+        if asking || typing {
+            return Shortcuts::default();
+        }
+        // Ctrl+Z / Ctrl+Y, plus Ctrl+Shift+Z for the mac-shaped habit.
+        ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            let edits = cmd && !designing;
+            Shortcuts {
+                open: cmd && i.key_pressed(egui::Key::O),
+                undo: edits && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
+                redo: edits
+                    && (i.key_pressed(egui::Key::Y)
+                        || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
+            }
+        })
+    }
+
     fn top_bar(&mut self, ui: &mut Ui) {
         egui::Panel::top(egui::Id::new("toolbar")).show(ui, |ui| {
             ui.add_space(4.0);
@@ -983,8 +1080,24 @@ impl App {
                         .clicked()
                     {
                         if let (Some(d), Some(i)) = (&self.document, sel) {
-                            if let Some(f) = d.molecule().features.get(i) {
-                                let origin = f.start();
+                            let m = d.molecule();
+                            if let Some(f) = m.features.get(i) {
+                                // `Feature::start` is the MINIMUM of the segment
+                                // starts, and an origin-crossing feature in the
+                                // join form `genbank::write` emits —
+                                // `join(2677..2686,1..7)` — always has a part
+                                // beginning at base 1. So this was always
+                                // `Rotate { origin: 1 }`, which hits
+                                // `if shift == 0 { return true; }`: the button
+                                // reported success, pushed an undo entry and
+                                // dirtied the document while renumbering
+                                // nothing. Worse, the one feature a user most
+                                // wants to rotate to the front is exactly the
+                                // one that straddles the origin.
+                                let origin = f
+                                    .extent(m.span(), m.topology.is_circular())
+                                    .map(|(s, _)| s)
+                                    .unwrap_or_else(|| f.start());
                                 self.edit(pl_core::OpKind::Rotate { origin });
                             }
                         }
@@ -1027,9 +1140,16 @@ impl App {
     }
 
     /// Run an edit and report a refusal instead of dropping it.
-    fn edit(&mut self, kind: pl_core::OpKind) {
+    ///
+    /// Returns whether it went in. Most callers issue one operation and the
+    /// `notice` is the whole answer, but a gesture that is two operations has
+    /// to know which of them landed: "Ctrl+Z twice to undo both" after only one
+    /// took undoes the user's previous, unrelated edit as well.
+    fn edit(&mut self, kind: pl_core::OpKind) -> bool {
         self.settle();
-        let Some(d) = &mut self.document else { return };
+        let Some(d) = &mut self.document else {
+            return false;
+        };
         let what = kind.describe();
         let n_before = d.molecule().len();
         match d.apply(kind.clone()) {
@@ -1044,13 +1164,17 @@ impl App {
                 self.edit.caret = seqedit::transport(self.edit.caret, &kind, n_before);
                 self.edit.sel = None;
                 self.edit.remember(d);
+                true
             }
             // The log refuses an edit that would leave the annotations
             // describing something the sequence does not contain. Saying which
             // edit and why is the whole point of refusing rather than
             // corrupting — and it goes to `notice`, with the document still on
             // screen, not to the "could not read that file" takeover.
-            Err(e) => self.notice = Some(format!("Cannot {what}: {e}.\nNothing was changed.")),
+            Err(e) => {
+                self.notice = Some(format!("Cannot {what}: {e}.\nNothing was changed."));
+                false
+            }
         }
     }
 
@@ -1420,6 +1544,10 @@ impl App {
         let mut hot = None;
         let mut clicked = None;
         let doc = self.document.as_ref().expect("checked by caller");
+        // Read once: `extent` needs the molecule the feature belongs to, and
+        // borrowing it inside the row closure would fight the iterator.
+        let span = doc.molecule().span();
+        let circular = doc.molecule().topology.is_circular();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, f) in doc.molecule().features.iter().enumerate() {
@@ -1447,15 +1575,20 @@ impl App {
                                         .monospace()
                                         .size(11.0),
                                 );
+                                // `start()`/`end()` are a min and a max over the
+                                // segments, so an origin-crossing feature in the
+                                // `join(2677..2686,1..7)` form every save through
+                                // `genbank::write` produces read as `1..2,686` —
+                                // a 17 bp promoter labelled as the whole plasmid,
+                                // in the panel whose entire job is saying where
+                                // things are.
+                                let (fs, fe) =
+                                    f.extent(span, circular).unwrap_or((f.start(), f.end()));
                                 ui.label(
-                                    RichText::new(format!(
-                                        "{}..{}",
-                                        fmt_int(f.start()),
-                                        fmt_int(f.end())
-                                    ))
-                                    .color(pal(ui).muted)
-                                    .monospace()
-                                    .size(11.0),
+                                    RichText::new(format!("{}..{}", fmt_int(fs), fmt_int(fe)))
+                                        .color(pal(ui).muted)
+                                        .monospace()
+                                        .size(11.0),
                                 );
                             });
                         });
@@ -1570,47 +1703,45 @@ impl App {
             ui.add_space(6.0);
         }
 
-        // The methylation verdict for each shown enzyme. Computed at the first
-        // site: every rule here is a property of the (enzyme, methylase) pair
-        // plus local context, so a per-site answer is what the model gives —
-        // this shows the first, which is exact for the unique cutters that
-        // matter most and indicative for the rest.
-        let mol = d.molecule();
-        let verdict = |dg: &pl_enzymes::Digest| -> Option<pl_enzymes::methylation::SiteEffect> {
-            // Ask the digester where the site was rather than deriving it back
-            // from the cut. `cut_sites` carries `site_start` alongside the
-            // position because it already knows both, so there is exactly one
-            // mapping from a match to a cut in the tree. Recomputing it here
-            // was a second one, and the two disagreed on any site wrapping the
-            // origin.
-            let site = pl_enzymes::cut_sites(&mol.seq, mol.topology, dg.enzyme)
-                .into_iter()
-                .next()?;
-            pl_enzymes::methylation::site_effect(
-                dg.enzyme,
-                &mol.seq,
-                (site.site_start - 1) as usize,
-                mol.topology,
-                &mol.methylation,
-            )
-        };
+        // The methylation verdict for each shown enzyme, computed at that
+        // enzyme's first site: every rule here is a property of the (enzyme,
+        // methylase) pair plus local context, so a per-site answer is what the
+        // model gives — this shows the first, which is exact for the unique
+        // cutters that matter most and indicative for the rest.
+        //
+        // Read off the worker's answer rather than recomputed. This used to
+        // call `cut_sites` over the whole molecule once per shown row, to
+        // recover one integer the worker had already had and discarded: 58
+        // full-molecule scans per frame, 1.58 s on the 4.6 Mb NC_000913.3 —
+        // which is `doc.rs`'s entire digest, back on the UI thread, on every
+        // repaint. `DigestState::verdict` is now a field read.
+        let verdict = |i: usize| d.digest.verdict(i);
 
-        let shown: Vec<_> = results.iter().filter(|x| set.admits(x)).collect();
-        let uniq: Vec<_> = shown.iter().filter(|x| x.is_unique_cutter()).collect();
-        let multi: Vec<_> = shown.iter().filter(|x| !x.is_unique_cutter()).collect();
+        // Indices are carried through the filter because they are the key into
+        // the verdict table.
+        let shown: Vec<(usize, &pl_enzymes::Digest)> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| set.admits(x))
+            .collect();
+        let uniq: Vec<_> = shown.iter().filter(|(_, x)| x.is_unique_cutter()).collect();
+        let multi: Vec<_> = shown
+            .iter()
+            .filter(|(_, x)| !x.is_unique_cutter())
+            .collect();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             if !uniq.is_empty() {
                 ui.label(RichText::new(format!("{} unique cutters", uniq.len())).strong());
                 ui.add_space(2.0);
-                for e in &uniq {
+                for (i, e) in &uniq {
                     enzyme_row(
                         ui,
                         e.enzyme.name,
                         e.enzyme.site,
                         &e.positions,
                         true,
-                        verdict(e),
+                        verdict(*i),
                         poor_single_site_note(e.enzyme.name, e.count()),
                     );
                 }
@@ -1622,14 +1753,14 @@ impl App {
                         .color(pal(ui).muted),
                 );
                 ui.add_space(2.0);
-                for e in &multi {
+                for (i, e) in &multi {
                     enzyme_row(
                         ui,
                         e.enzyme.name,
                         e.enzyme.site,
                         &e.positions,
                         false,
-                        verdict(e),
+                        verdict(*i),
                         poor_single_site_note(e.enzyme.name, e.count()),
                     );
                 }
@@ -2670,42 +2801,87 @@ impl App {
     }
 
     fn design_panel(&mut self, ctx: &egui::Context) {
+        // Checked *before* the take. Taking first and then returning on a
+        // missing document dropped the panel, its constraints and its report
+        // with nothing said — a failed load did it in the same frame as the
+        // "could not read that file" takeover. `load` now closes the panel
+        // deliberately and says so, which leaves this branch unreachable in
+        // practice; it stays because a panel that outlives its document is
+        // exactly the state that writes one file's primers into another.
+        if self.document.is_none() {
+            self.close_design(
+                "the design panel was closed: the document it described is no longer open",
+            );
+            return;
+        }
         let Some(mut panel) = self.design.take() else {
             return;
         };
         let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
-        let (seq, dark) = {
+        let (seq, at) = {
             let Some(d) = self.document.as_ref() else {
+                self.design = Some(panel);
                 return;
             };
-            (d.molecule().seq.clone(), dark)
+            (d.molecule().seq.clone(), d.log.cursor())
         };
+        // Where the document stands this frame. `Panel::run` copies it onto the
+        // report it produces, so the panel can tell whether the answer on
+        // screen is still about the molecule on screen.
+        panel.doc_at = at;
         let keep = design::show(ctx, &mut panel, &seq, dark);
 
         // Applied after the frame, because `App::edit` needs `&mut self` and
         // the panel is holding a borrow of it during the closure.
         if let Some(i) = panel.add_request.take() {
-            if let Some(Ok(r)) = &panel.result {
+            // The window is not modal, so the toolbar and the Edit menu stayed
+            // live between "Design" and "Add to document". A reverse complement
+            // in between left the footprint coordinates naming unrelated bases,
+            // with the length unchanged so `validate()` had nothing to say and
+            // the WouldCorrupt gate accepted both features.
+            if let Some(why) = panel.stale_reason() {
+                self.notice = Some(why.to_string());
+            } else if let Some(Ok(r)) = &panel.result {
                 if let Some(p) = r.pairs.get(i) {
                     let stem = design::stem_of(&panel.title);
                     let fs = design::features(p, &stem, i + 1);
                     let names: Vec<String> = fs.iter().map(|f| f.name.clone()).collect();
-                    for f in fs {
-                        self.edit(pl_core::OpKind::SetFeature {
-                            index: None,
-                            feature: Box::new(f),
-                        });
+                    let ok: Vec<bool> = fs
+                        .into_iter()
+                        .map(|f| {
+                            self.edit(pl_core::OpKind::SetFeature {
+                                index: None,
+                                feature: Box::new(f),
+                            })
+                        })
+                        .collect();
+                    let added = ok.iter().filter(|x| **x).count();
+                    // Counted, not assumed. Telling a user to press Ctrl+Z
+                    // twice when only one feature landed undoes their previous,
+                    // unrelated edit as well — the silent half-state ADR-2
+                    // exists to prevent, produced by the sentence meant to
+                    // prevent it. `App::edit` has already put the refusal
+                    // itself in `notice`.
+                    match added {
+                        2 => {
+                            panel.added.push(i);
+                            self.status = format!(
+                                "added 2 primer_bind features, {} and {} - Ctrl+Z twice to \
+                                 undo both",
+                                names[0], names[1]
+                            );
+                        }
+                        1 => {
+                            let which = if ok[0] { &names[0] } else { &names[1] };
+                            self.status = format!(
+                                "added 1 primer_bind feature, {which} - the other was \
+                                 refused - Ctrl+Z once to undo it"
+                            );
+                        }
+                        // Both refused: `notice` already says why, and the pair
+                        // stays addable so the user can retry after fixing it.
+                        _ => self.status = "no primer_bind feature was added".into(),
                     }
-                    panel.added.push(i);
-                    // Two operations, so one Ctrl+Z leaves half a pair in the
-                    // document. There is no OpKind that adds two features and
-                    // inventing one is out of scope, so this gets a sentence
-                    // rather than a shrug: a silent half-state is what ADR-2
-                    // exists to prevent.
-                    self.status = format!(
-                        "added 2 primer_bind features, {} and {} - Ctrl+Z twice to undo both",
-                        names[0], names[1]
-                    );
                 }
             }
         }
@@ -3486,5 +3662,248 @@ mod tests {
         assert_eq!(app.edit.caret, 0);
         assert_eq!(app.edit.sel, None);
         assert_eq!(app.selected, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // the three application-wide shortcuts, and the design panel's lifetime
+    // -----------------------------------------------------------------------
+
+    /// A raw input carrying one Ctrl+`key` press.
+    fn ctrl(key: egui::Key) -> egui::RawInput {
+        let modifiers = egui::Modifiers {
+            command: true,
+            ctrl: true,
+            ..Default::default()
+        };
+        egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// What `global_shortcuts` decides, with `focused` optionally holding focus.
+    fn shortcuts_with(app: &App, key: egui::Key, focused: Option<&str>) -> Shortcuts {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(ctrl(key));
+        if let Some(name) = focused {
+            ctx.memory_mut(|m| m.request_focus(egui::Id::new(name)));
+        }
+        let out = app.global_shortcuts(&ctx);
+        let _ = ctx.end_pass();
+        out
+    }
+
+    /// PROVEN TO FAIL at dfd6ac9 (see the report): with the block as it stood,
+    /// `undo` is true while the Features filter holds focus, so Ctrl+Z after a
+    /// typo in a search box undoes the *molecule* as well as the typo.
+    #[test]
+    fn a_shortcut_typed_into_a_focused_text_box_does_not_reach_the_document() {
+        let mut app = App::blank();
+        app.document =
+            Some(Document::from_bytes(b">a\nAAAACCCCGGGGTTTT\n", "a.fa".into(), None).unwrap());
+
+        // The control: nothing focused, so the shortcuts are the app's.
+        assert!(shortcuts_with(&app, egui::Key::Z, None).undo);
+        assert!(shortcuts_with(&app, egui::Key::Y, None).redo);
+        assert!(shortcuts_with(&app, egui::Key::O, None).open);
+
+        // The Features tab's filter box, the Library query and the design
+        // panel's Spacer field are all plain `TextEdit`s, and egui gives Ctrl+Z
+        // to the focused one without consuming it.
+        for who in ["features filter", "library query", "design spacer"] {
+            let k = shortcuts_with(&app, egui::Key::Z, Some(who));
+            assert!(!k.undo, "Ctrl+Z reached the document from {who}");
+            assert!(!shortcuts_with(&app, egui::Key::Y, Some(who)).redo, "{who}");
+            assert!(
+                !shortcuts_with(&app, egui::Key::O, Some(who)).open,
+                "Ctrl+O popped a file dialog out of {who}"
+            );
+        }
+    }
+
+    /// A 900 bp document with a selection, and the design panel open on it.
+    fn app_designing() -> App {
+        let seq: String = (0..900u32)
+            .scan(12_345u64, |s, _| {
+                *s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                Some(b"ACGT"[((*s >> 24) & 3) as usize] as char)
+            })
+            .collect();
+        let mut app = App::blank();
+        app.document = Some(
+            Document::from_bytes(format!(">a\n{seq}\n").as_bytes(), "a.fa".into(), None).unwrap(),
+        );
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 300,
+            head: 600,
+            through_origin: false,
+        });
+        app.open_design();
+        assert!(app.design.is_some(), "the panel opened");
+        app
+    }
+
+    /// Run one frame of the design panel, which is what refreshes `doc_at` and
+    /// services an `add_request`.
+    fn design_frame(app: &mut App) {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        app.design_panel(&ctx);
+        let _ = ctx.end_pass();
+    }
+
+    #[test]
+    fn an_undo_is_not_taken_while_the_design_panel_is_open() {
+        let app = app_designing();
+        assert!(!shortcuts_with(&app, egui::Key::Z, None).undo);
+        assert!(!shortcuts_with(&app, egui::Key::Y, None).redo);
+        // Opening another file is still allowed; it closes the panel and says so.
+        assert!(shortcuts_with(&app, egui::Key::O, None).open);
+    }
+
+    /// PROVEN TO FAIL at dfd6ac9: both `primer_bind` features land, at the
+    /// pre-reverse-complement coordinates, on the reverse-complemented molecule
+    /// — the length is unchanged so `validate()` reports nothing and the
+    /// WouldCorrupt gate accepts them.
+    #[test]
+    fn a_report_computed_before_an_edit_cannot_be_added_after_it() {
+        let mut app = app_designing();
+        design_frame(&mut app);
+        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        app.design.as_mut().unwrap().run(&seq);
+        assert!(
+            matches!(app.design.as_ref().unwrap().result, Some(Ok(_))),
+            "the premise: a report to add"
+        );
+
+        // The toolbar stayed live behind a non-modal window.
+        app.edit(pl_core::OpKind::ReverseComplement);
+        assert!(app
+            .document
+            .as_ref()
+            .unwrap()
+            .molecule()
+            .features
+            .is_empty());
+
+        app.design.as_mut().unwrap().add_request = Some(0);
+        design_frame(&mut app);
+        assert!(
+            app.document
+                .as_ref()
+                .unwrap()
+                .molecule()
+                .features
+                .is_empty(),
+            "a report about the previous molecule must not be written onto this one"
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("changed"),
+            "{:?}",
+            app.notice
+        );
+
+        // Pressing Design again makes it addable, against the molecule as it
+        // now stands.
+        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        app.design.as_mut().unwrap().run(&seq);
+        app.design.as_mut().unwrap().add_request = Some(0);
+        design_frame(&mut app);
+        assert_eq!(
+            app.document.as_ref().unwrap().molecule().features.len(),
+            2,
+            "and a current report still adds two features"
+        );
+        assert!(app.status.contains("Ctrl+Z twice"), "{}", app.status);
+    }
+
+    /// PROVEN TO FAIL at dfd6ac9: `load`'s error arm left `self.design` alone,
+    /// and `design_panel` then dropped the panel — constraints, report and all
+    /// — on its own early return, in the same frame, with nothing said.
+    #[test]
+    fn a_failed_load_closes_the_design_panel_and_says_so() {
+        let mut app = app_designing();
+        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        design_frame(&mut app);
+        app.design.as_mut().unwrap().run(&seq);
+
+        let bad = std::env::temp_dir().join(format!("pl-gui-notafile-{}.dna", std::process::id()));
+        std::fs::write(&bad, b"this is not a sequence file at all").unwrap();
+        app.load(bad.clone());
+        let _ = std::fs::remove_file(&bad);
+
+        assert!(app.error.is_some(), "the premise: the load failed");
+        assert!(app.design.is_none(), "the panel is gone");
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("design panel"),
+            "and it was said: {:?}",
+            app.notice
+        );
+    }
+
+    /// PROVEN TO FAIL at dfd6ac9: `adopt` reset the caret, the selection and the
+    /// highlight but not `self.design`, so the panel survived a document swap
+    /// holding the old file's title, length and report — and "Add to document"
+    /// wrote file A's primer coordinates, under file A's name, into file B.
+    #[test]
+    fn opening_another_file_closes_the_design_panel_rather_than_reusing_it() {
+        let mut app = app_designing();
+        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        design_frame(&mut app);
+        app.design.as_mut().unwrap().run(&seq);
+
+        let other: String = (0..900u32)
+            .scan(999u64, |s, _| {
+                *s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                Some(b"ACGT"[((*s >> 24) & 3) as usize] as char)
+            })
+            .collect();
+        let path = std::env::temp_dir().join(format!("pl-gui-other-{}.fa", std::process::id()));
+        std::fs::write(&path, format!(">b\n{other}\n")).unwrap();
+        app.load(path.clone());
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            app.document.is_some(),
+            "the premise: the second file opened"
+        );
+        assert!(app.design.is_none(), "the panel is gone");
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("previous file"),
+            "and it was said: {:?}",
+            app.notice
+        );
+    }
+
+    /// PROVEN TO FAIL at dfd6ac9: `GUI_TEMPLATE_LIMIT` was tested against
+    /// `panel.bp`, the length snapshotted when the panel opened, rather than
+    /// against the template the scan would read.
+    #[test]
+    fn the_template_limit_measures_the_sequence_it_is_about_to_scan() {
+        let mut app = app_designing();
+        let big = vec![b'A'; design::GUI_TEMPLATE_LIMIT as usize + 1];
+        app.design.as_mut().unwrap().run(&big);
+        let msg = match &app.design.as_ref().unwrap().result {
+            Some(Err(e)) => e.clone(),
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        assert!(msg.contains("stop responding"), "{msg}");
+        assert!(msg.contains(&fmt_int(big.len() as u64)), "{msg}");
     }
 }
