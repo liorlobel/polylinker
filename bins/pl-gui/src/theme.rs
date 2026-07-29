@@ -21,6 +21,13 @@ pub struct Palette {
     /// Secondary text: still meant to be read.
     pub ink2: Color32,
     /// Tertiary text: labels, units, counts.
+    ///
+    /// Tertiary, not decorative. It carries the sequence view's column ruler,
+    /// both coordinate gutters and the map's enzyme positions — all of them
+    /// numbers a reader has to get right, none of them above 11 pt. So it is
+    /// held to AA for normal text, 4.5:1, and not to the 3:1 large-text
+    /// threshold it used to be checked against: the light value was 3.78:1 and
+    /// the ruler it now prints is 9.5 pt.
     pub muted: Color32,
     /// Leader lines and hairlines.
     pub faint: Color32,
@@ -46,7 +53,11 @@ impl Palette {
             Palette {
                 ink: Color32::from_rgb(0x1c, 0x22, 0x26),
                 ink2: Color32::from_rgb(0x3d, 0x4a, 0x52),
-                muted: Color32::from_rgb(0x74, 0x83, 0x8c),
+                // #74838c was 3.78:1 on #fafbfc — fine as a hairline, short of
+                // AA for the 9.5 pt column ruler and the coordinate gutters
+                // this role now prints. Darkened to 4.99:1, which is still
+                // clearly a step below `ink2` at 8.84:1.
+                muted: Color32::from_rgb(0x62, 0x6f, 0x78),
                 faint: Color32::from_rgb(0xb8, 0xc2, 0xc8),
                 line: Color32::from_rgb(0x8d, 0x99, 0xa0),
                 accent: Color32::from_rgb(0x2f, 0x6f, 0x9a),
@@ -143,12 +154,37 @@ pub fn on_color(bg: Color32) -> Color32 {
     }
 }
 
-pub fn apply(visuals: &mut Visuals) {
-    visuals.panel_fill = if visuals.dark_mode {
+/// The window's background, which every rule and hairline is measured against.
+pub fn panel_fill(dark: bool) -> Color32 {
+    if dark {
         Color32::from_rgb(0x16, 0x1a, 0x1d)
     } else {
         Color32::from_rgb(0xfa, 0xfb, 0xfc)
-    };
+    }
+}
+
+pub fn apply(visuals: &mut Visuals) {
+    let dark = visuals.dark_mode;
+    visuals.panel_fill = panel_fill(dark);
+
+    // The splitter between the map and the details panel is drawn with these
+    // three strokes (egui 0.35 `panel.rs`: `noninteractive.bg_stroke` at rest,
+    // `hovered.fg_stroke` under the pointer, `active.fg_stroke` while
+    // dragging). egui's defaults are gray(60) on the dark panel — **1.57:1** —
+    // and gray(190) on the light one — **1.81:1**. Both fail SC 1.4.11's 3:1
+    // for the boundary of a UI component, and that line is now the only resting
+    // signal that the panel can be resized at all.
+    //
+    // `muted` is the palette role that clears 3:1 in both themes (3.78 light,
+    // 5.46 dark); `faint` is 1.75/2.29 and `line` is 2.82/4.54, so neither is
+    // usable for this. Colour is not the only channel — egui already sets
+    // `CursorIcon::ResizeHorizontal` on hover and `ResizeWest`/`ResizeEast` at
+    // the stops — so no grip graphic is added; that would be a new shape and a
+    // new colour needing its own clearance for no gain.
+    let p = Palette::of(dark);
+    visuals.widgets.noninteractive.bg_stroke.color = p.muted;
+    visuals.widgets.hovered.fg_stroke.color = p.ink;
+    visuals.widgets.active.fg_stroke.color = p.ink;
 }
 
 #[cfg(test)]
@@ -245,10 +281,16 @@ mod tests {
                 "ink2: {:.1}",
                 contrast(p.ink2, bg)
             );
-            // Muted is small supporting text; AA large-text threshold.
+            // Muted is small text too — the sequence view's column ruler is
+            // 9.5 pt and its coordinate gutters 11 — so it is held to the same
+            // 4.5:1 and not to the 18 pt large-text threshold. PROVEN TO FAIL
+            // before this run: light `muted` was #74838c at 3.78:1, sampled
+            // from the rendered ruler as #74838c on a #fafbfc panel.
             assert!(
-                contrast(p.muted, bg) >= 3.0,
-                "muted: {:.1}",
+                contrast(p.muted, bg) >= 4.5,
+                "muted on {} bg: {:.2}:1 — the ruler and both gutters are drawn \
+                 in this and none of them is large text",
+                if dark { "dark" } else { "light" },
                 contrast(p.muted, bg)
             );
             // The backbone must be visible without competing with features.
@@ -300,6 +342,41 @@ mod tests {
             worst_at.b()
         );
         assert!((worst - 4.58).abs() < 0.02, "{worst}");
+    }
+
+    /// The splitter's resting line is the only thing on screen saying the panel
+    /// can be resized, so it is a UI component boundary and SC 1.4.11 applies.
+    ///
+    /// PROVEN TO FAIL at bd96e5b (compile-only there — `apply` did not set
+    /// these, and `theme::panel_fill` did not exist). The numbers it replaces
+    /// are egui's defaults: gray(60) on `#161a1d` is 1.57:1 and gray(190) on
+    /// `#fafbfc` is 1.81:1, both a long way under 3.
+    #[test]
+    fn the_splitter_is_visible_at_rest_in_both_themes() {
+        use pl_draw::contrast::{passes_aa, ratio, Kind};
+        for dark in [true, false] {
+            let mut v = if dark {
+                Visuals::dark()
+            } else {
+                Visuals::light()
+            };
+            apply(&mut v);
+            let bg = panel_fill(dark);
+            let bg = (bg.r(), bg.g(), bg.b());
+            for (what, c) in [
+                ("at rest", v.widgets.noninteractive.bg_stroke.color),
+                ("hovered", v.widgets.hovered.fg_stroke.color),
+                ("dragging", v.widgets.active.fg_stroke.color),
+            ] {
+                let fg = (c.r(), c.g(), c.b());
+                assert!(
+                    passes_aa(fg, bg, Kind::Graphic),
+                    "the splitter {what} in {} mode is {:.2}:1",
+                    if dark { "dark" } else { "light" },
+                    ratio(fg, bg)
+                );
+            }
+        }
     }
 
     #[test]

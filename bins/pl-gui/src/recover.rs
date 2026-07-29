@@ -196,22 +196,35 @@ fn unescape(s: &str) -> String {
 /// Beside the index cache, under a directory of their own so a user can find
 /// and delete them without touching anything else.
 pub fn recovery_dir() -> Result<PathBuf, String> {
-    let base = if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .ok_or("LOCALAPPDATA is not set")?
-            .join("Polylinker")
-    } else if cfg!(target_os = "macos") {
-        home()?.join("Library/Application Support/Polylinker")
-    } else {
-        match std::env::var_os("XDG_STATE_HOME") {
-            Some(v) => PathBuf::from(v).join("polylinker"),
-            None => home()?.join(".local/state/polylinker"),
-        }
-    };
-    let dir = base.join("recovery");
+    let dir = state_base()?.join("recovery");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     Ok(dir)
+}
+
+/// This user's directory for everything the app remembers between runs.
+///
+/// Split out of [`recovery_dir`] so `settings.rs` can write *beside* the
+/// recovery directory rather than inside it. Not inside: [`stale`] filters on
+/// `.ends_with(".recover")`, so a stray file there would in fact be ignored,
+/// but that directory is documented as somewhere a user can find and delete
+/// crash drafts "without touching anything else" — and clearing crash drafts
+/// should not silently reset a window layout.
+///
+/// Creates nothing; the two callers create what they need.
+pub fn state_base() -> Result<PathBuf, String> {
+    if cfg!(windows) {
+        Ok(std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .ok_or("LOCALAPPDATA is not set")?
+            .join("Polylinker"))
+    } else if cfg!(target_os = "macos") {
+        Ok(home()?.join("Library/Application Support/Polylinker"))
+    } else {
+        match std::env::var_os("XDG_STATE_HOME") {
+            Some(v) => Ok(PathBuf::from(v).join("polylinker")),
+            None => Ok(home()?.join(".local/state/polylinker")),
+        }
+    }
 }
 
 fn home() -> Result<PathBuf, String> {

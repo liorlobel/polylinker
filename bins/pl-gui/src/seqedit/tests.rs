@@ -1748,3 +1748,319 @@ fn backspace_at_base_one_points_down_the_view_and_counts_rows_correctly() {
     assert!(one_row.contains("1 row below"), "{one_row}");
     assert!(!one_row.contains("1 rows"), "{one_row}");
 }
+
+// ---------------------------------------------------------------------------
+// Row geometry: the one place a column becomes an x, and back
+// ---------------------------------------------------------------------------
+
+/// COMPILE-ONLY FAILURE at bd96e5b: `RowLayout`, `col_x` and `x_col` do not
+/// exist there, so this fails to build rather than to assert. Said plainly
+/// because it matters: the inline arithmetic it replaces is already correct,
+/// since there are no gaps to be wrong about.
+///
+/// Its real proof is the MUTATION, which was run: changing `col_x` to
+/// `self.bases_x + (col + col / 10) as f32 * self.advance` — a separator cell
+/// every ten columns, painted but not told to the hit-test — turns the loop red
+/// at column 10 and the two explicit assertions red naming 59 and 60, with the
+/// painter putting column 59 five whole cells right of where `x_col` reads it.
+/// A test at column 0 passes under that mutation and under every other wrong
+/// formula, which is why the assertions are at the far end of the row.
+#[test]
+fn every_column_round_trips_including_the_last_gap_of_a_full_row() {
+    // The real measured advance, and a panel wide enough for sixty cells.
+    let g = gutter_w(8_117, 6.6);
+    let l = row_layout(g + 60.0 * 6.9 + 14.0, 6.9, 14.0, g);
+    assert_eq!(l.per_row, 60, "the premise: a full-width row");
+
+    // Every legal caret column, INCLUDING `per_row` itself, which names the gap
+    // after the row's last base — where the caret sits at the end of a row.
+    for col in 0..=l.per_row {
+        assert_eq!(l.x_col(l.col_x(col) - l.bases_x), col, "column {col}");
+    }
+
+    // Stated separately so a failure names them. With a separator every ten
+    // columns the painter would put column 59 at `bases_x + 64 * advance`
+    // while the hit-test still read `bases_x + 59 * advance`: five cells apart.
+    assert!((l.col_x(59) - l.bases_x - 59.0 * 6.9).abs() < 0.01);
+    assert!((l.col_x(60) - l.bases_x - 60.0 * 6.9).abs() < 0.01);
+
+    // The far end again, in the units a pointer arrives in. A click on the left
+    // part of the last cell is the gap before that base; past its middle is the
+    // gap after it; and anything beyond the row clamps THERE and never to
+    // `per_row + 1`.
+    let a = 6.9;
+    assert_eq!(
+        l.x_col(59.0 * a + 0.10 * a),
+        59,
+        "just inside the last base"
+    );
+    assert_eq!(l.x_col(59.0 * a + 0.60 * a), 60, "past its middle");
+    assert_eq!(l.x_col(60.0 * a + 10_000.0), 60, "clamped, not per_row + 1");
+    assert_eq!(l.x_col(-10_000.0), 0, "and clamped the other way");
+}
+
+/// The right-hand coordinate is bought with surplus width and never with base
+/// cells: "4,641,652" costs eight cells, which would take a 380 pt panel from
+/// 40 bases per row to 32.
+///
+/// COMPILE-ONLY FAILURE at bd96e5b — `row_layout` does not exist there. The
+/// mutation that must turn it red: compute the right gutter before `per_row`
+/// and subtract it from the usable width.
+#[test]
+fn the_right_hand_coordinate_appears_only_once_the_row_is_already_full() {
+    let a = 6.9;
+    let bar = 14.0;
+    // The gutter a genome asks for, which is the case the right-hand
+    // coordinate has to survive.
+    let g = gutter_w(4_641_652, 6.6);
+    // 380: the width this panel used to be fixed at. Forty per row, no gutter.
+    let narrow = row_layout(380.0, a, bar, g);
+    assert_eq!(narrow.per_row, 40);
+    assert_eq!(narrow.right_gutter, 0.0, "a gutter here would cost 8 bases");
+    // 500: the default. Sixty per row, still no room to spare.
+    let def = row_layout(500.0, a, bar, g);
+    assert_eq!(def.per_row, 60);
+    assert_eq!(def.right_gutter, 0.0);
+    // 800: sixty per row with room over, so the coordinate appears.
+    let wide = row_layout(800.0, a, bar, g);
+    assert_eq!(wide.per_row, 60, "never more than the GenBank sixty");
+    assert!(wide.right_gutter > 0.0, "{}", wide.right_gutter);
+    // And it never comes at the expense of a cell.
+    assert_eq!(wide.band_w(), 60.0 * a);
+}
+
+/// The gutter is measured from the molecule, and that is what let the default
+/// split come down far enough to leave the map pane square.
+///
+/// COMPILE-ONLY FAILURE at bd96e5b and before this run: `gutter_w` did not
+/// exist, the gutter was `const GUTTER_W: f32 = 62.0` for every file. The
+/// numbers below are the point of it — a plasmid pays for "8,117" and not for
+/// "4,641,652".
+#[test]
+fn the_coordinate_gutter_costs_what_this_molecules_coordinates_cost() {
+    let adv = 6.6;
+    // "8,117" is five characters; "4,641,652" is nine.
+    assert!((gutter_w(8_117, adv) - (5.0 * adv + 8.0)).abs() < 0.01);
+    assert!((gutter_w(4_641_652, adv) - (9.0 * adv + 8.0)).abs() < 0.01);
+    assert!(
+        gutter_w(4_641_652, adv) - gutter_w(8_117, adv) > 20.0,
+        "the 26 pt a plasmid stops spending on digits it will never print"
+    );
+    // The boundaries of the digit count, including the ones off by one.
+    assert!(
+        (gutter_w(1_000, adv) - (5.0 * adv + 8.0)).abs() < 0.01,
+        "1,000"
+    );
+    assert!((gutter_w(999, adv) - (3.0 * adv + 8.0)).abs() < 0.01);
+    // A tiny molecule takes the floor rather than a 15 pt gutter, so the
+    // coordinate never sits flush against column 0. `ilog10` also panics on
+    // zero, and an annotation-only file really is 0 bp.
+    assert_eq!(gutter_w(9, adv), 24.0);
+    assert_eq!(gutter_w(0, adv), 24.0, "no panic on an empty molecule");
+    // And it buys a whole extra block of ten on the user's own file.
+    let (a, bar) = (6.9, 14.0);
+    let w = 488.0;
+    assert_eq!(row_layout(w, a, bar, gutter_w(8_117, adv)).per_row, 60);
+    assert_eq!(
+        row_layout(w, a, bar, 62.0).per_row,
+        50,
+        "the fixed gutter did not reach sixty at this width"
+    );
+}
+
+/// INVARIANT TEST, and labelled as one: this PASSES at bd96e5b. `caret` and
+/// `Selection` are `u64` gap indices into the molecule and `set_per_row` writes
+/// only `per_row`, so nothing derives a caret from a row across frames. It is
+/// here because the splitter now changes `per_row` several times per gesture,
+/// and the day someone caches a (row, column) pair this goes red.
+#[test]
+fn the_caret_stays_on_the_same_base_when_the_row_width_changes() {
+    let mut e = SeqEdit::new();
+    e.caret = 4_000;
+    e.sel = Some(Selection {
+        anchor: 3_000,
+        head: 4_000,
+        through_origin: false,
+    });
+    for p in [40, 60, 30, 10, 60, 50] {
+        e.set_per_row(p);
+        assert_eq!(e.per_row(), p);
+        assert_eq!(e.caret, 4_000, "at {p} per row");
+        assert_eq!(e.sel.unwrap().anchor, 3_000);
+        assert_eq!(e.sel.unwrap().head, 4_000);
+    }
+}
+
+/// COMPILE-ONLY FAILURE at bd96e5b: `row_of` does not exist there.
+///
+/// The end of the range is the whole point. A row index one past the end makes
+/// `ScrollArea` clamp the offset, which silently moves the very anchor this
+/// function exists to preserve — and a test at base 0 cannot see it.
+#[test]
+fn a_base_lands_in_the_row_that_contains_it_including_the_last_one() {
+    assert_eq!(row_of(4_000, 60), 66);
+    assert_eq!(row_of(59, 60), 0, "the last base of row 0");
+    assert_eq!(row_of(60, 60), 1, "the first of row 1");
+    assert_eq!(row_of(0, 60), 0);
+    // Never divides by zero, whatever a caller passes.
+    assert_eq!(row_of(7, 0), 7);
+
+    for p in [10u64, 20, 30, 40, 50, 60] {
+        for b in [0u64, 1, 9, 10, 59, 60, 61, 4_000, 8_116, 4_641_651] {
+            let r = row_of(b, p);
+            assert!(r * p <= b && b < (r + 1) * p, "base {b} at {p} per row");
+        }
+        // The last base of a molecule is never one row past its end.
+        for n in [1u64, 59, 60, 61, 8_117, 4_641_652] {
+            assert!(
+                row_of(n - 1, p) < n.div_ceil(p),
+                "base {} of {n} at {p} per row",
+                n - 1
+            );
+        }
+    }
+
+    // Reversible: the row changes, the base does not.
+    let base = 4_000u64;
+    let there = row_of(base, 60);
+    let back = row_of(base, 40);
+    assert_eq!(there, 66);
+    assert_eq!(back, 100);
+    assert_eq!(base, 4_000, "the anchor is carried as a base, not as a row");
+}
+
+// ---------------------------------------------------------------------------
+// The annotations the row is drawn with
+// ---------------------------------------------------------------------------
+
+/// The spans one row of the grid would draw, as `(feature index, lo, hi)` in
+/// the half-open caret space the painter uses.
+fn drawn(ix: &crate::annot::AnnotIndex, from: u64, to: u64) -> Vec<(u32, u64, u64)> {
+    let mut got = Vec::new();
+    ix.query(from, to, &mut got);
+    let mut got: Vec<_> = got.iter().map(|i| (i.feat, i.lo, i.hi)).collect();
+    got.sort_unstable();
+    got
+}
+
+/// COMPILE-ONLY FAILURE at bd96e5b: nothing was drawn under the letters there,
+/// so `AnnotIndex` does not exist. The mutations that must turn it red, both
+/// run: adding `.to_ascii_uppercase()` inside `row_text`, and shifting the
+/// segment conversion in `AnnotIndex::build` by one.
+///
+/// Case is what tells a cloner which bases were added — a lowercase tail on an
+/// uppercase insert — and it survives here by construction rather than by care:
+/// the row is still one `painter.text` call at one colour, and every annotation
+/// is a rect or a line in a band the letters do not occupy.
+#[test]
+fn case_survives_annotation_rendering_and_the_spans_are_exact() {
+    let mut m = mol("ACGTacgtACGT", false);
+    feature(&mut m, "tail", 5, 8);
+    let d = Document::of_molecule(m);
+    let e = SeqEdit::new();
+
+    let mut line = String::new();
+    e.row_text(d.molecule(), 0, 12, &mut line);
+    assert_eq!(line, "ACGTacgtACGT", "the bases are handed over untouched");
+
+    let ix = crate::annot::AnnotIndex::build(d.molecule(), (0, None));
+    assert_eq!(
+        drawn(&ix, 0, 12),
+        vec![(0, 4, 8)],
+        "bases 5..8 are columns 4..8 half-open — one cell either way is the \
+         difference between a site inside a feature and one immediately after it"
+    );
+}
+
+/// The falsifiable one: a prediction against what the engine really does.
+///
+/// While a run is open the index is in COMMITTED coordinates and the view is in
+/// effective ones. If the translation disagrees with `remap_annotations`, the
+/// ribbon visibly snaps a second after the user stops typing — and it corrects
+/// itself, so it is unreproducible in a bug report.
+///
+/// COMPILE-ONLY at bd96e5b, but this one is not proved by a mutation: it
+/// compares new code against `pl_core::oplog`, which it does not own.
+#[test]
+fn the_pending_preview_matches_what_the_commit_actually_produces() {
+    /// What was typed, where, and over what: the shape of one case below.
+    struct Typed {
+        what: &'static str,
+        caret: Caret,
+        text: &'static str,
+        over: Option<(Caret, Caret)>,
+    }
+    let cases = [
+        // Typed strictly inside the feature: it GROWS over the typed bases.
+        Typed {
+            what: "inside",
+            caret: 14,
+            text: "ACG",
+            over: None,
+        },
+        // At its first base, and at the gap after its last.
+        Typed {
+            what: "at the start",
+            caret: 9,
+            text: "ACG",
+            over: None,
+        },
+        Typed {
+            what: "at the end",
+            caret: 20,
+            text: "ACG",
+            over: None,
+        },
+        // Before it entirely, so the whole thing shifts.
+        Typed {
+            what: "before",
+            caret: 2,
+            text: "ACG",
+            over: None,
+        },
+        // Typing over a selection: a replacement, not an insertion. This is the
+        // case that needs `run.removed` in the translation.
+        Typed {
+            what: "over a selection",
+            caret: 14,
+            text: "ACG",
+            over: Some((12, 18)),
+        },
+    ];
+    for Typed {
+        what,
+        caret,
+        text,
+        over,
+    } in cases
+    {
+        let mut m = mol(&"A".repeat(60), true);
+        feature(&mut m, "gene", 10, 20);
+        let mut d = Document::of_molecule(m);
+        let mut e = SeqEdit::new();
+        if let Some((a, b)) = over {
+            e.sel = Some(Selection {
+                anchor: a,
+                head: b,
+                through_origin: false,
+            });
+        }
+        e.caret = caret;
+        e.type_text(&mut d, text, T0);
+        let run = e.run().expect("a run is open").span();
+
+        let ix = crate::annot::AnnotIndex::build(d.molecule(), (0, None));
+        let mut previewed = Vec::new();
+        ix.query_run(0, 70, Some(run), &mut previewed);
+        let mut previewed: Vec<_> = previewed.iter().map(|i| (i.feat, i.lo, i.hi)).collect();
+        previewed.sort_unstable();
+
+        e.commit(&mut d);
+        let after = crate::annot::AnnotIndex::build(d.molecule(), (1, d.log.cursor()));
+        assert_eq!(
+            previewed,
+            drawn(&after, 0, 70),
+            "the ribbon moved when the run committed, typing {what}"
+        );
+    }
+}

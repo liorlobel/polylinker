@@ -8,12 +8,14 @@
 // in debug builds so panics and eprintln stay visible while developing.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod annot;
 mod design;
 mod doc;
 mod library;
 mod map;
 mod recover;
 mod seqedit;
+mod settings;
 mod theme;
 
 use std::path::PathBuf;
@@ -128,6 +130,73 @@ struct App {
     /// It holds a snapshot of the selection it was opened on, not a live
     /// reference to it -- see `design.rs`.
     design: Option<design::Panel>,
+
+    /// What this window remembers between runs. Read once in [`App::new`],
+    /// written once in `on_exit`.
+    layout: settings::Layout,
+
+    /// Bumped every time [`App::adopt`] replaces the document.
+    ///
+    /// The annotation index is keyed on `(this, log.cursor())` and the cursor
+    /// alone is not enough: a freshly opened document sits at cursor `None`, so
+    /// opening plasmid A and then plasmid B compares equal, the index is not
+    /// rebuilt, and A's features are painted onto B. Every ribbon lands
+    /// somewhere plausible, nothing errors, and it happens on the second file
+    /// the user opens.
+    doc_generation: u64,
+    /// Features by position, lanes, and the enzyme cuts — see `annot.rs`.
+    annot: annot::AnnotIndex,
+    /// The `(version, filter, digest-is-done)` the cut list was built for.
+    cuts_for: Option<(annot::Version, pl_enzymes::EnzymeSet, bool)>,
+    /// Scratch for the per-row index queries, kept so a frame does not allocate
+    /// forty vectors.
+    annot_scratch: Vec<annot::Iv>,
+
+    /// Last frame's row geometry for the Sequence tab, so a reflow can put the
+    /// scroll back on the base the user was reading rather than on the pixel
+    /// offset that base used to be at. See [`seqedit::row_of`].
+    seq_per_row: u64,
+    seq_row_h: f32,
+    /// Where the sequence grid was actually painted last frame.
+    ///
+    /// The same numbers `PL_GUI_DEBUG_GEOMETRY` prints, kept rather than only
+    /// printed so a test can put a pointer on a *named column*. The alternative
+    /// is a test that bakes in 6.92 px per cell and a panel edge at x = 790,
+    /// which stops testing the thing it names the moment the default font or
+    /// the frame margin changes — quietly, and while still passing.
+    seq_grid: Option<GridGeom>,
+    /// Where the readout ended up.
+    ///
+    /// Kept for the same reason as `seq_grid`: the defect this change replaced
+    /// was a sentence drawn past the panel's rect and cut by its clip rect, and
+    /// the only honest check of that is where the thing actually landed. A
+    /// panel is not a widget, so egui has no `Response` to ask.
+    seq_readout: Option<egui::Rect>,
+    /// What is under the pointer in the sequence grid, in words. Computed
+    /// inside the grid and shown by the readout, which is laid out *before* the
+    /// grid — so it is one frame old, and egui repaints on pointer motion.
+    seq_hover: Option<String>,
+    /// Whether this document's sequence rows reserve the enzyme strip.
+    ///
+    /// What the last COMPLETED digest of this document found, and deliberately
+    /// not what the live cut list holds: every edit restarts the digest, and
+    /// deriving the row height from a running worker reflowed the whole view
+    /// twice per keystroke on anything big enough for the scan to take a
+    /// moment. Cleared in `adopt`, written only in `refresh_annotations`.
+    enz_strip: bool,
+}
+
+/// Where one row of the sequence grid sits on screen.
+#[derive(Clone, Copy, Debug)]
+struct GridGeom {
+    /// x of column 0's left edge.
+    x0: f32,
+    advance: f32,
+    /// y of the top of the first visible row.
+    top: f32,
+    row_h: f32,
+    first_row: u64,
+    per_row: u64,
 }
 
 /// Which document the recovery file holds, and exactly where in its history.
@@ -394,6 +463,17 @@ impl App {
             last_autosave: None,
             dna_owner: None,
             design: None,
+            layout: settings::Layout::default(),
+            doc_generation: 0,
+            annot: annot::AnnotIndex::default(),
+            cuts_for: None,
+            annot_scratch: Vec::new(),
+            seq_per_row: 0,
+            seq_row_h: 0.0,
+            seq_grid: None,
+            seq_readout: None,
+            seq_hover: None,
+            enz_strip: false,
         }
     }
 
@@ -419,6 +499,10 @@ impl App {
         });
 
         let mut app = App::blank();
+        // Read once, and an absent or unreadable file falls back to the default
+        // without a word. The recovery file's *presence* is meaningful; a
+        // layout file's absence means nothing at all, and saying so is noise.
+        app.layout = settings::load();
         // Anything left in the recovery directory by another process is an
         // unclean exit. Listed, never auto-restored: which of two drafts is the
         // wanted one is something the user knows and this program does not.
@@ -485,6 +569,15 @@ impl App {
     /// on the frame after it opens.
     fn adopt(&mut self, d: Document) {
         self.document = Some(d);
+        // The annotation index's other half of its identity. Two documents can
+        // sit at the same cursor — every one of them starts at `None` — so
+        // without this the second file opened is drawn with the first file's
+        // features, plausibly and silently.
+        self.doc_generation = self.doc_generation.wrapping_add(1);
+        // A different molecule is a different question about whether the strip
+        // is needed, so the answer held across the previous file's re-digests
+        // does not carry over.
+        self.enz_strip = false;
         self.error = None;
         self.notice = None;
         self.edit = seqedit::SeqEdit::new();
@@ -763,6 +856,11 @@ impl eframe::App for App {
         if let Some(p) = &self.recovery {
             recover::clear(p);
         }
+        // Once, here, and not on drag-release or per frame — that would be a
+        // synchronous file write inside a paint loop. If the app crashes the
+        // layout is lost, and that is the right trade: a window layout is not
+        // the user's data.
+        settings::save(self.layout);
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -1228,12 +1326,81 @@ impl App {
         }
     }
 
+    /// The details panel never narrower than this.
+    ///
+    /// 300 is the 30-bases-per-row threshold, and the lowest width at which the
+    /// Features list's right-aligned coordinate column ("7,748..7,850 ←") stops
+    /// colliding with the names.
+    const MIN_PANEL: f32 = 300.0;
+    /// And never wider than the window less this.
+    ///
+    /// egui's only cap is `min(max, available_rect.width)` — it stops the panel
+    /// overflowing the *window*, not overrunning the CentralPanel. With no
+    /// maximum of our own the map pane goes to zero: `map::show` takes a
+    /// zero-width `max_rect`, `r = (min(0, h) * 0.5 - 132).max(40)` yields the
+    /// 40 pt floor, and everything is painted into a zero-width clip rect. The
+    /// map silently vanishes with nothing on screen explaining why. At 360 the
+    /// map is r = 48 — a token circle, poor to read and obviously *there*,
+    /// which is the point of a stop. Below 344 the 132 pt label reserve exceeds
+    /// the box and the leader lines are drawn outside it.
+    const MIN_MAP: f32 = 360.0;
+    /// Where the splitter sits until the user moves it.
+    ///
+    /// The smallest width that reaches the GenBank 60-base row with metric
+    /// headroom, and not one point more.
+    ///
+    /// Not a taste question. The width this does not take is width the map pane
+    /// keeps, and `map.rs` reserves a fixed 132 pt outside the backbone for its
+    /// enzyme labels — which binds only while the pane is NARROWER THAN IT IS
+    /// TALL, because the radius is `min(w, h) / 2 - 132`. Above that the pane
+    /// gives each side `w/2 - h/2 + 132` and every label fits; at or below it
+    /// each side gets exactly 132, and "EcoRI 7,530" renders as "coRI 7,530" —
+    /// a truncation that reads as a different enzyme rather than as damage.
+    /// 560 crossed that line on the user's own 1296 x 879 window and clipped
+    /// seven labels on both sides.
+    ///
+    /// So the default is the 60-base threshold plus a small margin, and the
+    /// threshold itself was moved down by measuring the coordinate gutter from
+    /// the molecule instead of reserving nine digits for every plasmid (see
+    /// [`seqedit::gutter_w`]). `the_default_split_has_headroom_and_leaves_the_map_square`
+    /// pins both halves: 60 bases at the default and at the default less 10,
+    /// and a map pane at least as wide as it is tall.
+    const DEF_PANEL: f32 = 500.0;
+
     fn side_panel(&mut self, ui: &mut Ui) {
-        egui::Panel::right(egui::Id::new("details"))
-            .exact_size(380.0)
+        // Recomputed every frame from the live window, which is what makes one
+        // clamp cover three situations identically: a width restored from disk
+        // that is wider than this monitor, a width being dragged now, and a
+        // window resized smaller after the fact.
+        //
+        // `.max(MIN_PANEL)` is the tie-break when the client is too narrow to
+        // hold both floors, and it is deliberate rather than accidental: below
+        // `MIN_PANEL + MIN_MAP` = 660 pt the panel wins and the map gets less
+        // than `MIN_MAP`. The panel is the functional surface — the tabs, the
+        // sequence, the file — and it degrades gracefully, `fit_per_row`
+        // bottoming out at ten bases a row. A map under 344 pt only has its
+        // leader lines clipped by the pane's own clip rect, which is cosmetic.
+        // `min_inner_size` is 880 x 560, so a window manager honouring it never
+        // reaches this; `SetWindowPos` ignores it, and the expression has to
+        // stay valid — `Rangef::new(lo, hi)` requires `lo <= hi` — when it does.
+        let max_panel = (ui.available_width() - Self::MIN_MAP).max(Self::MIN_PANEL);
+        // ORDER MATTERS, and getting it wrong ships silently. `default_size(d)`
+        // *widens* the range to include `d`; `size_range(r)` *clamps* the
+        // stored default into `r`. So `.default_size(w).size_range(lo..=hi)`
+        // clamps a restored 1,900 into the range, and the other order lets it
+        // blow the maximum open.
+        let r = egui::Panel::right(egui::Id::new("details"))
+            .resizable(true)
+            .default_size(self.layout.panel_w.unwrap_or(Self::DEF_PANEL))
+            .size_range(Self::MIN_PANEL..=max_panel)
             .show(ui, |ui| {
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
+                // Wrapped, not `horizontal`, which clips rather than wraps: at
+                // panel widths below about 357 the "File" tab is painted
+                // outside the clip rect and becomes unclickable. Without this
+                // the minimum could not go below 360 and the splitter could not
+                // be used to give the *map* more room, which is half the point.
+                ui.horizontal_wrapped(|ui| {
                     for (tab, label) in [
                         (Tab::Features, "Features"),
                         (Tab::Library, "Library"),
@@ -1264,6 +1431,9 @@ impl App {
                     Tab::File => self.file_tab(ui),
                 }
             });
+        // Captured every frame because `on_exit` receives no `Context` and must
+        // not reach into `egui::containers::PanelState`.
+        self.layout.panel_w = Some(r.response.rect.width());
     }
 
     fn library_tab(&mut self, ui: &mut Ui) {
@@ -1894,11 +2064,99 @@ impl App {
     /// rectangles for Ctrl+A. A contiguous base range meets a row in a
     /// contiguous span, so a selection contributes at most one rectangle per
     /// visible row: about forty, whatever the molecule.
+    /// Rebuild the annotation index if the document moved, and the cut list if
+    /// the digest finished or the filter changed.
+    ///
+    /// Eagerly, at the top of the tab and outside every paint closure, because
+    /// the row height depends on `lanes` which comes out of the build — and
+    /// because a lazy rebuild inside the closure would need interior
+    /// mutability this file does not otherwise use.
+    fn refresh_annotations(&mut self) {
+        let want = match &self.document {
+            Some(d) => (self.doc_generation, d.log.cursor()),
+            None => return,
+        };
+        if self.annot.version != want {
+            let ix = {
+                let d = self.document.as_ref().expect("checked above");
+                annot::AnnotIndex::build(d.molecule(), want)
+            };
+            self.annot = ix;
+            self.cuts_for = None;
+        }
+
+        let done = matches!(
+            self.document.as_ref().expect("checked above").digest,
+            DigestState::Done(_)
+        );
+        let key = (want, self.enzyme_set, done);
+        if self.cuts_for == Some(key) {
+            return;
+        }
+        let cuts = {
+            let d = self.document.as_ref().expect("checked above");
+            let mut cuts = Vec::new();
+            if done {
+                for (i, dg) in d.digest.results().iter().enumerate() {
+                    // Filtered here rather than at draw time, so the merged
+                    // vector a row walks is already the truth the panel is
+                    // showing — and so changing the filter is a rebuild from
+                    // data in hand rather than a rescan.
+                    if !self.enzyme_set.admits(dg) {
+                        continue;
+                    }
+                    let site_len = dg.enzyme.site.len() as u32;
+                    for s in d.digest.sites(i) {
+                        cuts.push(annot::Cut {
+                            // 1-based base 3' of the nick -> the 0-based gap
+                            // the nick is in, which is the caret's own space.
+                            at: s.position.saturating_sub(1),
+                            site_lo: s.site_start.saturating_sub(1),
+                            site_len,
+                            enzyme: i as u32,
+                        });
+                    }
+                }
+            }
+            cuts
+        };
+        self.annot.set_cuts(cuts);
+        // Only a FINISHED digest may change the reservation. While one runs the
+        // strip keeps whatever the last completed scan of this document said,
+        // so the row pitch does not depend on a worker's phase. `adopt` clears
+        // it, because the next document is a different question.
+        if done {
+            self.enz_strip = self.annot.cut_count() > 0;
+        }
+        self.cuts_for = Some(key);
+    }
+
+    /// The editing surface.
+    ///
+    /// Virtualised: only the visible rows are built, so this costs the same on
+    /// a 4.6 Mb genome as on a 5 kb plasmid (measured flat at 0.001–0.002 ms
+    /// per frame from 10 kb to 50 Mb). The caret and the selection are
+    /// arithmetic against `show_rows`' row range, never widgets — one
+    /// `Response` per base would be 3,600 widget ids per frame on a 60-row
+    /// viewport, and a selection painted per base would be 4.6 million
+    /// rectangles for Ctrl+A. A contiguous base range meets a row in a
+    /// contiguous span, so a selection contributes at most one rectangle per
+    /// visible row: about forty, whatever the molecule.
+    ///
+    /// The annotations are the same shape of promise. Every strip is a rect or
+    /// a line in a band the letters do not occupy: the row is still ONE
+    /// `painter.text` call, at one colour, at one `FontId`. That is what keeps
+    /// case legible — an eye scanning for the boundary where a lowercase tail
+    /// was added is reading x-height, and x-height only reads when the ink is
+    /// uniform — and it is why the feature channel is a ribbon and not a
+    /// background tint. A tint would force `theme::on_color` per base, flipping
+    /// the letters between black and white at exactly the kind of boundary the
+    /// case signal sits on.
     fn sequence_tab(&mut self, ui: &mut Ui) {
-        use seqedit::{Editability, Selection};
+        use seqedit::Selection;
 
         let now = ui.input(|i| i.time);
-        let gate = Editability::of(
+        let gate = seqedit::Editability::of(
             self.document
                 .as_ref()
                 .expect("checked by caller")
@@ -1918,6 +2176,10 @@ impl App {
             return;
         }
 
+        // Before any geometry: the row height depends on how many lanes this
+        // document needs, and that comes out of the build.
+        self.refresh_annotations();
+
         // ONE pitch, derived from the font the row is actually painted in, and
         // used by `show_rows`, by the y -> row hit-test and by the painter.
         //
@@ -1926,64 +2188,222 @@ impl App {
         // `interact_size` floor. Read-only that drift is cosmetic; the moment a
         // click has to name a base it is 8 rows of overshoot at the bottom of a
         // 60-row viewport, i.e. the user clicks one base and the caret lands
-        // 480 bases away.
+        // 480 bases away. The annotation strips make that trap wider, not
+        // narrower, so they are added into this one number and nowhere else.
         let font = egui::FontId::monospace(11.5);
         let gutter_font = egui::FontId::monospace(11.0);
-        let (row_h, advance) = ui.ctx().fonts_mut(|f| {
+        let ruler_font = egui::FontId::monospace(9.5);
+        let name_font = egui::FontId::proportional(9.0);
+        let (text_h, advance, gutter_advance) = ui.ctx().fonts_mut(|f| {
             (
                 f.row_height(&font).max(1.0),
                 f.glyph_width(&font, 'A').max(1.0),
+                f.glyph_width(&gutter_font, '0').max(1.0),
             )
         });
-        // The coordinate gutter, and then as many bases as are left over. The
-        // row width is measured, not assumed: sixty cells plus the gutter is
-        // wider than this panel, and a base that is off the edge cannot be
-        // clicked.
-        let gutter_w = 62.0;
-        let scrollbar = ui.spacing().scroll.bar_width + 4.0;
-        let per_row = seqedit::fit_per_row(ui.available_width() - gutter_w - scrollbar, advance);
-        self.edit.set_per_row(per_row);
 
         let n = self
             .edit
             .effective_len(self.document.as_ref().unwrap().molecule());
+
+        // The row width is measured, not assumed: sixty cells plus the gutter
+        // is wider than the panel was until this run, and a base that is off
+        // the edge cannot be clicked. Every horizontal number now comes out of
+        // this one value — see `seqedit::RowLayout`.
+        //
+        // The gutter is measured from THIS molecule. A constant sized for
+        // "4,641,652" costs a 8,117 bp plasmid 21 pt that come straight out of
+        // the base cells, and those 21 pt decide whether a 60-base row needs a
+        // 509 pt panel or a 488 pt one — which is width the map pane keeps.
+        let scrollbar = ui.spacing().scroll.bar_width + 4.0;
+        let layout = seqedit::row_layout(
+            ui.available_width(),
+            advance,
+            scrollbar,
+            seqedit::gutter_w(n, gutter_advance),
+        );
+        let per_row = layout.per_row;
+        self.edit.set_per_row(per_row);
         let rows = (n.div_ceil(per_row).max(1)) as usize;
 
-        self.sequence_header(ui, n, rows);
+        // The strips, per DOCUMENT and never per row. `show_rows` has a single
+        // pitch; a height that varied by row would put the y -> row hit-test
+        // back where it was.
+        //
+        // The enzyme strip is reserved whenever the document has an admitted
+        // cut anywhere, not whenever this row has one and not whenever the
+        // marks are currently drawn — suppressing the marks during a typing run
+        // must not make the whole view jump vertically while somebody types.
+        //
+        // And not whenever the digest has FINISHED, either, which is what
+        // `cut_count() > 0` really asked. Every `Document::apply` restarts the
+        // digest, so one keystroke emptied the cut list, took the strip away,
+        // and put it back when the worker landed. On the 4.6 Mb genome that
+        // digest takes 1,634 ms, so the row pitch went 43.41 -> 31.41 -> 43.41
+        // — a 28% reflow twice per keystroke, each one re-anchoring the whole
+        // view. `enz_strip` is a property of the DOCUMENT: what the last
+        // completed digest of this document said, held across the next one.
+        const ENZ_H: f32 = 12.0;
+        const TICK_H: f32 = 3.0;
+        const LANE_PITCH: f32 = 5.0;
+        const RIBBON_H: f32 = 4.0;
+        let has_cuts = self.enz_strip;
+        let enz_h = if has_cuts { ENZ_H } else { 0.0 };
+        let lanes = self.annot.lanes;
+        let row_h = enz_h + TICK_H + text_h + lanes as f32 * LANE_PITCH;
+
+        // A pending run is not in the log, so the digest describes the
+        // COMMITTED sequence. A typed base can create or destroy a site, so a
+        // mark translated into effective coordinates is not merely displaced —
+        // it can be a site that no longer exists, drawn confidently.
+        let typing = self.edit.run().is_some();
+        let show_cuts = !typing && self.annot.cut_count() > 0;
+
+        self.sequence_header(ui, n, rows, has_cuts, typing);
         self.sequence_keys(ui, now);
 
-        // `show_rows` computes its pitch as `row_height + item_spacing.y` from
-        // the *enclosing* ui, so zeroing the spacing here makes pitch == row_h
-        // and leaves one number for the renderer, the hit-test and the caret.
-        // Set after the header, which wants its ordinary spacing.
-        ui.spacing_mut().item_spacing.y = 0.0;
-
-        // Reserve the readout: it is the number a biologist reads out loud when
-        // they order a primer, so it does not scroll away.
-        let readout_h = 30.0;
-        let grid_h = (ui.available_height() - readout_h).max(60.0);
+        // The scroll follows a BASE across a reflow, not a pixel.
+        //
+        // `show_rows` maps a pixel offset to a row index and multiplies by
+        // `per_row`. The offset does not change when `per_row` does, so on the
+        // user's 8,117 bp file a view of base 4,000 at 40 per row (offset
+        // 1,330) becomes base 6,000 at 60 per row — 2,000 bases forward, while
+        // the user is dragging a splitter. Worse, it is not reversible: the
+        // content shrinks from 2,700 pt to 1,809, so an offset near the bottom
+        // is clamped on the way out and not restored on the way back, and that
+        // asymmetry is what reads as broken rather than merely jumpy.
+        let reflowed = (self.seq_per_row != 0 && self.seq_per_row != per_row)
+            || (self.seq_row_h != 0.0 && (self.seq_row_h - row_h).abs() > 0.01);
+        //
+        // `keep` is how far down the viewport the anchored row was sitting. Put
+        // back at offset zero instead, a reflow yanked the page: the caret was
+        // on the second visible row, and after one keystroke on the genome its
+        // row had been dragged to the first slot. What the reader wants
+        // preserved is where the thing they are looking at IS, not merely that
+        // it is still on screen.
+        let (anchor, keep) = if reflowed {
+            let old = self.seq_per_row.max(1);
+            let caret = self.edit.caret.min(n);
+            let caret_row = seqedit::row_of(caret, old);
+            let first = self.seq_grid.map_or(0, |g| g.first_row);
+            // On screen means the user is editing and wants to keep watching
+            // the caret; off screen means they are reading and want to keep
+            // their place.
+            if caret_row >= first && caret_row < first + self.edit.visible_rows.max(1) {
+                (caret, caret_row - first)
+            } else {
+                (first * old, 0)
+            }
+        } else {
+            (0, 0)
+        };
+        self.seq_per_row = per_row;
+        self.seq_row_h = row_h;
 
         let mut click: Option<(u64, bool)> = None;
         let mut drag_to: Option<u64> = None;
         let mut released = false;
         let mut double: Option<u64> = None;
         let mut visible = 1u64;
+        let mut grid: Option<GridGeom> = None;
+        let mut hover_out: Option<String> = None;
+        let mut scratch = std::mem::take(&mut self.annot_scratch);
+
+        // Reserved by construction, not by a constant, and laid out BEFORE the
+        // thing that would otherwise have eaten its space.
+        //
+        // `readout_h = 30.0` was a guess at the height of a sentence that is 72
+        // characters long — "insert at 1 · before base 1, at the origin · every
+        // feature's coordinates shift" — and wraps to two lines in a 364 pt
+        // content width, with two buttons and a warning line after it. Against
+        // a 30 pt reservation the overflow was drawn past the panel rect and
+        // cut by `set_clip_rect(visible_outer_rect)`, which is why the origin
+        // warning lost its second half and the Design primers button was
+        // sheared through the middle. A bottom panel sizes itself to its
+        // contents and takes that space out of the enclosing available rect
+        // before the grid asks, so `readout_h`, `grid_h`, the `.max(60.0)`
+        // floor that made a short window *worse* rather than better, and
+        // `.max_height(grid_h)` are all gone, and the class of bug with them.
+        self.sequence_readout(ui);
 
         {
-            let d = self.document.as_ref().expect("checked by caller");
-            let mol = d.molecule();
-            let edit = &self.edit;
-            let p = pal(ui);
-            let sel = edit
-                .sel
-                .map(|s| s.canonical(mol.len(), mol.topology.is_circular()));
-            let caret = edit.caret.min(n);
-            let mut line = String::with_capacity(per_row as usize);
+            {
+                let d = self.document.as_ref().expect("checked by caller");
+                let mol = d.molecule();
+                let edit = &self.edit;
+                let ix = &self.annot;
+                let p = pal(ui);
+                let sel = edit
+                    .sel
+                    .map(|s| s.canonical(mol.len(), mol.topology.is_circular()));
+                let caret = edit.caret.min(n);
+                let run = edit.run().map(|r| r.span());
+                let mut line = String::with_capacity(per_row as usize);
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .max_height(grid_h)
-                .show_rows(ui, row_h, rows, |ui, range| {
+                if debug_geometry() {
+                    eprintln!(
+                        "seqtab: max={:?} avail_h={:.1} clip={:?} row_h={row_h:.2}",
+                        ui.max_rect(),
+                        ui.available_height(),
+                        ui.clip_rect()
+                    );
+                }
+
+                // -- the sticky column header, outside the ScrollArea --------
+                //
+                // Labelled in COLUMNS, not in absolute coordinates: a sticky
+                // header cannot carry per-row numbers. The arithmetic that
+                // would otherwise demand — row_start + col - 1, with an
+                // off-by-one waiting in it — is never asked of the reader,
+                // because the right gutter gives the row's last coordinate
+                // directly and the hover line names the base under the pointer.
+                let (hrect, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 13.0), Sense::hover());
+                {
+                    let hp = ui.painter_at(hrect);
+                    let hx = hrect.left();
+                    hp.text(
+                        egui::pos2(hx + layout.left_gutter - 6.0, hrect.bottom() - 3.0),
+                        egui::Align2::RIGHT_BOTTOM,
+                        "column",
+                        ruler_font.clone(),
+                        p.muted,
+                    );
+                    for k in 1..=(per_row / 10) {
+                        let x = hx + layout.col_x(k * 10);
+                        hp.vline(
+                            x,
+                            (hrect.bottom() - 4.0)..=hrect.bottom(),
+                            egui::Stroke::new(1.0, p.muted),
+                        );
+                        // Right-aligned, so the label's right edge lands on the
+                        // boundary *after* the base it counts.
+                        hp.text(
+                            egui::pos2(x - 1.0, hrect.bottom() - 4.0),
+                            egui::Align2::RIGHT_BOTTOM,
+                            (k * 10).to_string(),
+                            ruler_font.clone(),
+                            p.muted,
+                        );
+                    }
+                }
+
+                // `show_rows` computes its pitch as `row_height +
+                // item_spacing.y` from the *enclosing* ui, so zeroing the
+                // spacing here makes pitch == row_h and leaves one number for
+                // the renderer, the hit-test and the caret.
+                ui.spacing_mut().item_spacing.y = 0.0;
+
+                let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                if reflowed {
+                    // ONLY on the frame the row width changed. Passing it on
+                    // any other frame pins the offset and the user cannot
+                    // scroll at all.
+                    area = area.vertical_scroll_offset(
+                        seqedit::row_of(anchor, per_row).saturating_sub(keep) as f32 * row_h,
+                    );
+                }
+                area.show_rows(ui, row_h, rows, |ui, range| {
                     visible = (range.end - range.start).max(1) as u64;
                     let first = range.start as u64;
                     let band = ui.max_rect();
@@ -1998,7 +2418,15 @@ impl App {
                         egui::Id::new("pl-sequence-grid"),
                         Sense::click_and_drag(),
                     );
-                    let x0 = rect.left() + gutter_w;
+                    let x0 = rect.left() + layout.bases_x;
+                    grid = Some(GridGeom {
+                        x0,
+                        advance,
+                        top: rect.top(),
+                        row_h,
+                        first_row: first,
+                        per_row,
+                    });
                     let painter = ui.painter_at(rect);
                     if debug_geometry() {
                         // The grid's own numbers, because a screenshot cannot
@@ -2006,23 +2434,54 @@ impl App {
                         // helper process is not per-monitor DPI aware, so
                         // Windows tells anything measuring the window
                         // *virtualised* coordinates.
+                        // Read off `grid` rather than off the locals, so the
+                        // numbers printed are exactly the ones a test will
+                        // later put a pointer on.
+                        let g = grid.expect("set immediately above");
                         eprintln!(
-                            "seqgrid: rect={:?} clip={:?} x0={x0:.1} advance={advance:.2} \
-                             row_h={row_h:.2} per_row={per_row} right_edge={:.1}",
+                            "seqgrid: rect={:?} clip={:?} x0={:.1} top={:.1} advance={:.2} \
+                             row_h={:.2} per_row={} first_row={} lanes={lanes} \
+                             right_gutter={:.1} right_edge={:.1}",
                             rect,
                             ui.clip_rect(),
-                            x0 + per_row as f32 * advance
+                            g.x0,
+                            g.top,
+                            g.advance,
+                            g.row_h,
+                            g.per_row,
+                            g.first_row,
+                            layout.right_gutter,
+                            g.x0 + layout.band_w()
                         );
                     }
 
-                    let hit = |pos: egui::Pos2| -> u64 {
-                        let r = (((pos.y - rect.top()) / row_h).floor() as i64)
+                    // THE ONLY PRODUCER OF AN X IN THIS FUNCTION.
+                    //
+                    // Not a convenience: the sentence in `RowLayout`'s own doc
+                    // comment is only true if it is. The strips added by this
+                    // change — tens ticks, enzyme chevron and bracket, ribbon
+                    // ends, margin swatches — each had their own inline
+                    // `x0 + col * advance`, so a mutation that grouped the
+                    // LETTERS in tens by spacing moved the letters and left
+                    // every annotation on the nominal grid, detaching each
+                    // ribbon from the base it annotates while the whole suite
+                    // stayed green.
+                    let cx = |col: u64| rect.left() + layout.col_x(col);
+
+                    // The one place a pointer becomes a caret. `x_col` is the
+                    // only consumer of an x in this file, so the four things
+                    // that used to compute this inline — this, the drag, the
+                    // caret vline and the selection rectangle — cannot drift
+                    // apart. The pointer's ROW, shared with the hover below.
+                    let row_at = |pos: egui::Pos2| -> u64 {
+                        (((pos.y - rect.top()) / row_h).floor() as i64)
                             .clamp(0, (range.end - range.start) as i64 - 1)
                             as u64
-                            + first;
-                        let col = (((pos.x - x0) / advance).round() as i64).clamp(0, per_row as i64)
-                            as u64;
-                        (r * per_row + col).min(n)
+                            + first
+                    };
+                    let hit = |pos: egui::Pos2| -> u64 {
+                        let col = layout.x_col(pos.x - x0);
+                        (row_at(pos) * per_row + col).min(n)
                     };
 
                     for r in range.clone() {
@@ -2030,8 +2489,11 @@ impl App {
                         let start = r * per_row;
                         let end = (start + per_row).min(n);
                         let y = rect.top() + (r - first) as f32 * row_h;
+                        let y_tick = y + enz_h;
+                        let y_text = y_tick + TICK_H;
+                        let y_lane = y_text + text_h;
 
-                        // Selection: one rectangle per row per contiguous
+                        // -- selection: one rectangle per row per contiguous
                         // range, clipped against this row. Nothing iterates the
                         // selection itself.
                         if let Some(s) = sel {
@@ -2041,49 +2503,381 @@ impl App {
                                 [(s.lo(), s.hi()), (0, 0)]
                             };
                             for (a, b) in spans {
-                                let a = a.max(start);
-                                let b = b.min(end);
+                                let (a, b) = (a.max(start), b.min(end));
                                 if b > a {
+                                    let xa = cx(a - start);
+                                    let xb = cx(b - start);
                                     painter.rect_filled(
                                         egui::Rect::from_min_max(
-                                            egui::pos2(x0 + (a - start) as f32 * advance, y),
-                                            egui::pos2(
-                                                x0 + (b - start) as f32 * advance,
-                                                y + row_h,
-                                            ),
+                                            egui::pos2(xa, y_text),
+                                            egui::pos2(xb, y_text + text_h),
                                         ),
                                         0.0,
                                         p.selection(),
                                     );
+                                    // Edges, so a selection running off a row
+                                    // edge is distinguishable from one ending
+                                    // there. The wash alone cannot say which.
+                                    let edge = egui::Stroke::new(1.0, p.accent);
+                                    if a > start || a == 0 {
+                                        painter.vline(xa, y_text..=(y_text + text_h), edge);
+                                    }
+                                    if b < end || b == n {
+                                        painter.vline(xb, y_text..=(y_text + text_h), edge);
+                                    }
                                 }
                             }
                         }
 
+                        // -- the row's coordinates -------------------------
                         painter.text(
-                            egui::pos2(rect.left() + gutter_w - 6.0, y),
+                            egui::pos2(rect.left() + layout.left_gutter - 6.0, y_text),
                             egui::Align2::RIGHT_TOP,
                             fmt_int(start + 1),
                             gutter_font.clone(),
                             p.muted,
                         );
+                        if layout.right_gutter > 0.0 && end > start {
+                            painter.text(
+                                egui::pos2(cx(per_row) + 6.0, y_text),
+                                egui::Align2::LEFT_TOP,
+                                fmt_int(end),
+                                gutter_font.clone(),
+                                p.muted,
+                            );
+                        }
+
+                        // -- grouping in tens, by PAINTING and not by spacing.
+                        //
+                        // A real gap every ten characters would move the x of a
+                        // base off `col * advance` and the error would be zero
+                        // at column 0 and five whole cells at column 55 — right
+                        // in a screenshot, wrong at base 47. It would also put
+                        // a hole in the caret model: a separator column is both
+                        // a rule and a legal caret position, and the pixels
+                        // inside it belong to neither neighbouring base.
+                        //
+                        // 3 px and confined to the top edge, so a tick at a
+                        // multiple of ten is never mistaken for the 1.5 px
+                        // accent caret, which can sit on exactly the same x.
+                        for k in 1..=(per_row / 10) {
+                            let x = cx(k * 10);
+                            painter.vline(
+                                x,
+                                y_tick..=(y_tick + TICK_H),
+                                egui::Stroke::new(1.0, p.muted),
+                            );
+                        }
+
+                        // -- enzymes, above the letters --------------------
+                        let mut hidden = 0usize;
+                        if show_cuts {
+                            let mut name_free_from = f32::MIN;
+                            // SITES touching the row, not cuts inside it. A
+                            // recognition sequence is six or more bases and a
+                            // row boundary falls wherever it falls: NcoI's
+                            // CCATGG at pKoV 6,119..6,124 cuts at 6,120, so the
+                            // row before drew a two-cell stub at its right edge
+                            // and the row whose first four bases ARE the rest
+                            // of that site drew nothing at all.
+                            for c in ix.sites_touching(start, end, n) {
+                                // The recognition site, as a bracket. Drawn
+                                // from `site_lo` and not from the cut: EcoRI is
+                                // G^AATTC, so the two are one base apart, and
+                                // `pl-enzymes` says site_start is not
+                                // recoverable from a cut position at all.
+                                //
+                                // Two spans, because a match on a circle can
+                                // run off the end and continue at base 1.
+                                let site_end = c.site_lo + c.site_len as u64;
+                                let wraps = site_end > n;
+                                // (lo, hi, lo is the site's real start, hi is
+                                // its real end). The origin is neither.
+                                let spans = [
+                                    (c.site_lo, site_end.min(n), true, !wraps),
+                                    if wraps {
+                                        (0, site_end - n, false, true)
+                                    } else {
+                                        (0, 0, false, false)
+                                    },
+                                ];
+                                for (lo, hi, real_lo, real_hi) in spans {
+                                    let s_lo = lo.max(start);
+                                    let s_hi = hi.min(end);
+                                    if s_hi <= s_lo {
+                                        continue;
+                                    }
+                                    let bx0 = cx(s_lo - start) + 0.5;
+                                    let bx1 = cx(s_hi - start) - 0.5;
+                                    let by = y_tick - 2.0;
+                                    let st = egui::Stroke::new(1.0, p.ink2);
+                                    painter.hline(bx0..=bx1, by, st);
+                                    // The bracket's feet only where the site
+                                    // really ends, so a site continuing onto
+                                    // the next row — or across the origin — is
+                                    // not drawn as one that stops there.
+                                    if real_lo && lo >= start {
+                                        painter.vline(bx0, (by - 2.0)..=by, st);
+                                    }
+                                    if real_hi && hi <= end {
+                                        painter.vline(bx1, (by - 2.0)..=by, st);
+                                    }
+                                }
+                            }
+                            // And the cuts, on the row that owns the BOND.
+                            //
+                            // A second loop and not a filter on the first: a
+                            // Type IIS enzyme cuts outside its own site — BsaI
+                            // is GGTCTC(1/5) — so a site at the end of one row
+                            // can be nicked on the next, and neither set
+                            // contains the other.
+                            for c in ix.cuts_in(start, end) {
+                                let x = cx(c.at - start);
+                                let cs = egui::Stroke::new(1.2, p.ink2);
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(x - 3.0, y_tick - 6.0),
+                                        egui::pos2(x, y_tick - 1.0),
+                                    ],
+                                    cs,
+                                );
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(x + 3.0, y_tick - 6.0),
+                                        egui::pos2(x, y_tick - 1.0),
+                                    ],
+                                    cs,
+                                );
+                                let name = d
+                                    .digest
+                                    .results()
+                                    .get(c.enzyme as usize)
+                                    .map(|dg| dg.enzyme.name)
+                                    .unwrap_or("?");
+                                let g = painter.layout_no_wrap(
+                                    name.to_string(),
+                                    name_font.clone(),
+                                    p.ink2,
+                                );
+                                let nx = x + 3.0;
+                                if nx >= name_free_from && nx + g.size().x <= rect.right() {
+                                    name_free_from = nx + g.size().x + 4.0;
+                                    painter.galley(egui::pos2(nx, y), g, p.ink2);
+                                } else {
+                                    // Not dropped. Counted, and named in the
+                                    // hover line: `docs/PLAN.md` item 33 is
+                                    // about a hidden site, and this is the same
+                                    // failure in the drawing layer.
+                                    hidden += 1;
+                                }
+                            }
+                        }
+
+                        // -- features, below the letters, one lane each ----
+                        //
+                        // Lanes, never composited tints: two alpha-blended
+                        // feature colours over the same base is mud whose
+                        // contrast cannot be known at build time. Inside a lane
+                        // a feature owns its pixels at alpha 1.0, so depth is
+                        // countable by eye.
+                        scratch.clear();
+                        ix.query_run(start, end, run, &mut scratch);
+                        // Lanes are coloured once over the whole document so a
+                        // feature cannot hop while the user scrolls, which is
+                        // right for everything that has a lane and wrong for
+                        // everything past the cap: a file six deep somewhere
+                        // hid lanes 3, 4 and 5 over their whole length, on rows
+                        // where lanes 1 and 2 were empty. Only the overflow is
+                        // re-placed, into this row's holes.
+                        hidden += annot::compact_row(&mut scratch, lanes);
+                        for iv in scratch.iter() {
+                            if iv.lane >= lanes {
+                                continue;
+                            }
+                            let Some(f) = mol.features.get(iv.feat as usize) else {
+                                continue;
+                            };
+                            let a = iv.lo.max(start);
+                            let b = iv.hi.min(end);
+                            if b <= a {
+                                continue;
+                            }
+                            let xa = cx(a - start);
+                            let xb = cx(b - start);
+                            let yl = y_lane + iv.lane as f32 * LANE_PITCH;
+                            let col = theme::feature_color(f);
+                            let rr = egui::Rect::from_min_max(
+                                egui::pos2(xa, yl),
+                                egui::pos2(xb, yl + RIBBON_H),
+                            );
+                            painter.rect_filled(rr, 0.0, col);
+                            // The outline is not decoration. Sweeping the RGB
+                            // cube, 43.9% of the colours a file can supply are
+                            // below 3:1 against the light panel and 25.9%
+                            // against the dark one, worst case 1.00:1 — so
+                            // without it nearly half of all real files draw an
+                            // invisible ribbon in light mode while looking
+                            // perfect in the dark-mode screenshot the developer
+                            // took. `muted` is the only palette role that
+                            // clears 3:1 in both themes.
+                            painter.rect_stroke(
+                                rr,
+                                0.0,
+                                egui::Stroke::new(1.0, p.muted),
+                                egui::StrokeKind::Inside,
+                            );
+
+                            // Boundaries, by shape: a ribbon that runs off the
+                            // right edge of a row and one that ends there look
+                            // identical otherwise.
+                            //
+                            // Two marks, because they say different things. A
+                            // full-height rule through the lane strip is the
+                            // FEATURE's own 5' or 3' end. A short rule confined
+                            // to the ribbon is an exon boundary — the edge of
+                            // one segment of a join, with more of the same
+                            // feature further along. pKoV's SacB used to get
+                            // the tall one in the middle of itself.
+                            let lane_bot = y_lane + lanes as f32 * LANE_PITCH;
+                            let bs = egui::Stroke::new(1.0, p.muted);
+                            let tick = |x: f32, whole: bool| {
+                                let top = if whole { y_lane - 2.0 } else { yl - 1.0 };
+                                let bot = if whole { lane_bot } else { yl + RIBBON_H + 1.0 };
+                                painter.vline(x, top..=bot, bs);
+                            };
+                            if iv.starts && iv.lo >= start && iv.lo < end {
+                                tick(xa, iv.feat_lo);
+                            }
+                            if iv.ends && iv.hi > start && iv.hi <= end {
+                                tick(xb, iv.feat_hi);
+                            }
+                            // Direction, by shape and not by colour: a solid
+                            // cap on the 3' terminus, the same grammar the map
+                            // already uses.
+                            //
+                            // INSIDE the ribbon. Drawn from `xb + 4.0` it was
+                            // 4 px — 0.58 of a base cell — of this feature's
+                            // ink painted over the next one, so an abutting
+                            // neighbour read as two thirds of a base shorter
+                            // than the file says it is. Nothing may paint
+                            // outside its own coordinates, which is the rule
+                            // the rest of this view is careful about.
+                            let cap = |tip_x: f32, back_x: f32| {
+                                painter.add(egui::Shape::convex_polygon(
+                                    vec![
+                                        egui::pos2(tip_x, yl + RIBBON_H * 0.5),
+                                        egui::pos2(back_x, yl - 1.0),
+                                        egui::pos2(back_x, yl + RIBBON_H + 1.0),
+                                    ],
+                                    col,
+                                    egui::Stroke::new(1.0, p.muted),
+                                ));
+                            };
+                            // Never wider than the ribbon it sits in, so a one-
+                            // or two-base feature is still an arrow and still
+                            // covers exactly its bases.
+                            let cap_w = 4.0f32.min(xb - xa);
+                            match f.strand {
+                                // The FEATURE's terminus, not the segment's: a
+                                // two-exon gene has one 3' end, and a reverse
+                                // one has it at the low end of its lowest
+                                // piece.
+                                Strand::Forward if iv.feat_hi && iv.hi <= end => {
+                                    cap(xb, xb - cap_w)
+                                }
+                                Strand::Reverse if iv.feat_lo && iv.lo >= start => {
+                                    cap(xa, xa + cap_w)
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // -- the bases: still one call, one colour, one font.
                         edit.row_text(mol, start, end, &mut line);
                         painter.text(
-                            egui::pos2(x0, y),
+                            egui::pos2(cx(0), y_text),
                             egui::Align2::LEFT_TOP,
                             &line,
                             font.clone(),
                             p.ink,
                         );
 
+                        // -- what this row holds, in words, in the surplus
+                        // width the splitter buys. The name is the primary
+                        // channel and the swatch the secondary one; colour is
+                        // never on its own.
+                        let names_x = cx(per_row) + layout.right_gutter.max(10.0) + 6.0;
+                        // Only when there is a margin column at all. At a
+                        // narrow split there is none, and every feature is
+                        // still drawn as a ribbon and still named on hover — so
+                        // badging every row would be crying wolf about a
+                        // channel this layout never offered.
+                        if rect.right() - names_x > 50.0 {
+                            let mut nx = names_x;
+                            let mut seen: Vec<u32> = Vec::new();
+                            for iv in scratch.iter() {
+                                if seen.contains(&iv.feat) {
+                                    continue;
+                                }
+                                seen.push(iv.feat);
+                                let Some(f) = mol.features.get(iv.feat as usize) else {
+                                    continue;
+                                };
+                                let g = painter.layout_no_wrap(
+                                    f.name.clone(),
+                                    name_font.clone(),
+                                    p.ink2,
+                                );
+                                // Counted, not silently dropped. pKoV rows
+                                // 5,401-5,881 carry decR and decR his, which
+                                // share a start AND a file colour; only the
+                                // second fitted, and nothing on the row said
+                                // the first was there. The badge means one
+                                // thing — "N things on this row I could not
+                                // show you" — whichever channel ran out.
+                                if nx + 8.0 + g.size().x > rect.right() - 2.0 {
+                                    hidden += 1;
+                                    continue;
+                                }
+                                let sw = egui::Rect::from_min_size(
+                                    egui::pos2(nx, y_text + 3.0),
+                                    egui::vec2(6.0, 6.0),
+                                );
+                                painter.rect_filled(sw, 0.0, theme::feature_color(f));
+                                painter.rect_stroke(
+                                    sw,
+                                    0.0,
+                                    egui::Stroke::new(1.0, p.muted),
+                                    egui::StrokeKind::Inside,
+                                );
+                                painter.galley(egui::pos2(nx + 8.0, y_text), g.clone(), p.ink2);
+                                nx += 8.0 + g.size().x + 8.0;
+                            }
+                        }
+
+                        if hidden > 0 {
+                            painter.text(
+                                egui::pos2(rect.left() + 2.0, y_text),
+                                egui::Align2::LEFT_TOP,
+                                format!("+{hidden}"),
+                                ruler_font.clone(),
+                                p.warn,
+                            );
+                        }
+
                         // The caret sits on the row that contains the gap. At
                         // the very end of the molecule that is the last row's
                         // right edge, not the first column of a row that does
-                        // not exist.
+                        // not exist. Painted LAST, above every new strip.
                         let on_this_row = (start..end).contains(&caret)
                             || (caret == end && (end == n || end == start));
                         if on_this_row && sel.is_none_or(|s| s.is_empty(mol.len())) {
-                            let x = x0 + (caret - start) as f32 * advance;
-                            painter.vline(x, y..=(y + row_h), egui::Stroke::new(1.5, p.accent));
+                            let x = cx(caret - start);
+                            painter.vline(
+                                x,
+                                y_text..=(y_text + text_h),
+                                egui::Stroke::new(1.5, p.accent),
+                            );
                         }
                     }
 
@@ -2107,10 +2901,79 @@ impl App {
                         }
                     }
                     released = resp.drag_stopped();
+
+                    // The non-colour channel for every channel above, and what
+                    // makes the column ruler an orientation aid rather than an
+                    // arithmetic exercise: the base is named absolutely, and so
+                    // is everything on it — including the features with no lane
+                    // and the enzyme names that could not be placed.
+                    // A BASE, not a gap. `hit` rounds to the nearer boundary,
+                    // which is what a caret wants and the opposite of what this
+                    // line wants: over the right half of every cell it named
+                    // the base after the one under the pointer, and then listed
+                    // that base's features. On pKoV the right half of base 585
+                    // — visibly under the yellow `pSC101 ori` ribbon — reported
+                    // base 586 with no feature at all, and at the last column
+                    // of a row it named a base sixty cells away.
+                    //
+                    // `x_base` also answers `None`, which the clamp could not:
+                    // past the last cell, and past the last base of the
+                    // molecule, there is nothing under the pointer to name.
+                    if let Some(at) = resp.hover_pos().and_then(|pos| {
+                        let col = layout.x_base(pos.x - x0)?;
+                        let at = row_at(pos) * per_row + col;
+                        (at < n).then_some(at)
+                    }) {
+                        let mut s = format!("base {}", fmt_int(at + 1));
+                        scratch.clear();
+                        ix.query_run(at, at + 1, run, &mut scratch);
+                        for iv in scratch.iter() {
+                            if let Some(f) = mol.features.get(iv.feat as usize) {
+                                s.push_str(&format!(
+                                    " · {} ({}, {})",
+                                    f.name,
+                                    f.kind,
+                                    strand_word(f.strand)
+                                ));
+                            }
+                        }
+                        if show_cuts {
+                            // The same query the bracket is drawn from, so the
+                            // words and the drawing cannot disagree about which
+                            // bases are inside a site. The `± 8` this replaces
+                            // was a guess that a cut is never more than eight
+                            // bases from its own site, which BsaI — GGTCTC(1/5)
+                            // — is, and MmeI is not.
+                            for c in ix.sites_touching(at, at + 1, n) {
+                                {
+                                    let name = d
+                                        .digest
+                                        .results()
+                                        .get(c.enzyme as usize)
+                                        .map(|dg| dg.enzyme.name)
+                                        .unwrap_or("?");
+                                    s.push_str(&format!(
+                                        " · {name} site {}..{}",
+                                        fmt_int(c.site_lo + 1),
+                                        fmt_int(c.site_lo + c.site_len as u64)
+                                    ));
+                                }
+                            }
+                        }
+                        hover_out = Some(s);
+                    }
                 });
+            }
         }
 
+        self.annot_scratch = scratch;
         self.edit.visible_rows = visible;
+        self.seq_grid = grid;
+        // Unconditionally. The grid closure runs on every frame this tab is
+        // open, so `None` genuinely means "the pointer is not on a base" —
+        // keeping the last answer left the readout naming base 3,930 while the
+        // pointer sat in the middle of the map pane.
+        self.seq_hover = hover_out;
 
         // -- apply the pointer, now that the borrows are done --------------
         if let Some((to, shift)) = click {
@@ -2157,15 +3020,31 @@ impl App {
         if let Some(at) = double {
             self.select_feature_under(at);
         }
+    }
 
-        // -- the readout ---------------------------------------------------
-        ui.add_space(3.0);
-        let (mol_line, other_arc) = {
+    /// The line a biologist reads out loud when they order a primer, plus the
+    /// two controls that act on it.
+    ///
+    /// The controls come FIRST and on a row of their own. A wrapped `Label`'s
+    /// last line ends at an arbitrary x, and a `Button` after it in the same
+    /// wrapped row lands wherever that happens to be — which is why the Design
+    /// primers button read as buried rather than merely low. Putting the
+    /// variable-length thing last means only it reflows and the buttons never
+    /// move.
+    ///
+    /// The sentence itself is never truncated or shortened. At the 300 pt
+    /// minimum it wraps to three lines and the region grows to hold them, which
+    /// is now correct behaviour: it is the one thing explaining the genuinely
+    /// confusing property of a circular molecule, and it was the half that got
+    /// cut.
+    fn sequence_readout(&mut self, ui: &mut Ui) {
+        let (mol_line, other_arc, has_sel) = {
             let d = self.document.as_ref().expect("checked by caller");
             let mol = d.molecule();
             let n_c = mol.len();
+            let circular = mol.topology.is_circular();
             // Offered only when there really are two arcs to choose between.
-            let two_arcs = mol.topology.is_circular()
+            let two_arcs = circular
                 && self
                     .edit
                     .sel
@@ -2175,78 +3054,123 @@ impl App {
                 let s = self.edit.sel.unwrap().canonical(n_c, true);
                 n_c - s.base_count(n_c)
             });
-            (self.edit.readout(mol), alt)
-        };
-        let (n_c, mol_circular) = {
-            let mol = self
-                .document
-                .as_ref()
-                .expect("checked by caller")
-                .molecule();
-            (mol.len(), mol.topology.is_circular())
-        };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(mol_line)
-                    .monospace()
-                    .size(11.5)
-                    .color(pal(ui).ink2),
-            );
-            // The explicit way to flip a bit that Shift+click cannot infer,
-            // because a click has no direction of travel. Both lengths are on
-            // screen so the choice is visible, and there is no shortest-arc
-            // heuristic: a tool that silently picks the 60 bp arc because it is
-            // shorter will one day silently pick the 4,921 bp one.
-            //
-            // A button rather than a shortcut because the obvious shortcut,
-            // Ctrl+O, is already Open File — bound globally, before this tab
-            // ever sees the event, so the "toggle" would have opened a file
-            // dialog and flipped the arc at the same time.
-            if let Some(alt) = other_arc {
-                if ui
-                    .button(
-                        RichText::new(format!("take the other arc ({} bp)", fmt_int(alt)))
-                            .size(11.0),
-                    )
-                    .on_hover_text(
-                        "Two carets on a circle name two arcs. This takes the other one.",
-                    )
-                    .clicked()
-                {
-                    // Flipped and stored raw. Canonical form is what the op
-                    // derivation and the painter ask for, and it is lossy about
-                    // the direction of travel this button exists to state.
-                    if let Some(s) = &mut self.edit.sel {
-                        s.through_origin = !s.through_origin;
-                    }
-                }
-            }
-
-            // Design lives beside the readout because that is where the
-            // selection is already described: the panel's target line repeats
-            // these numbers rather than deriving its own.
             let has_sel = self
                 .edit
                 .sel
-                .is_some_and(|s| !s.canonical(n_c, mol_circular).is_empty(n_c));
-            let b = ui.add_enabled(
-                has_sel && self.design.is_none(),
-                egui::Button::new(RichText::new("Design primers…").size(11.0)),
-            );
-            if !has_sel {
-                b.on_hover_text("Select the region to amplify first.");
-            } else if b.clicked() {
-                self.open_design();
+                .is_some_and(|s| !s.canonical(n_c, circular).is_empty(n_c));
+            (self.edit.readout(mol), alt, has_sel)
+        };
+        let hover = self.seq_hover.clone();
+        let notice = self.edit.notice.clone();
+        let can_design = self.design.is_none();
+        let mut flip = false;
+        let mut design = false;
+
+        let readout =
+            egui::Panel::bottom(egui::Id::new("seq-readout"))
+                .resizable(false)
+                .show(ui, |ui| {
+                    // The height is given, not taken. A `right_to_left(Align::Center)`
+                    // region expands to whatever vertical space it is offered, and
+                    // inside a content-sized bottom panel that is a feedback loop:
+                    // the row filled the panel, the panel grew to hold the row plus
+                    // the sentence, the row filled *that* — measured at 51 pt of
+                    // growth per frame, so the grid was down to two visible rows in
+                    // under a second and still shrinking.
+                    let row_h = ui.spacing().interact_size.y.max(22.0);
+                    let w = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(w, row_h),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            // Design lives beside the readout because that is where the
+                            // selection is already described: the panel's target line
+                            // repeats these numbers rather than deriving its own.
+                            let b = ui.add_enabled(
+                                has_sel && can_design,
+                                egui::Button::new(RichText::new("Design primers…").size(11.0)),
+                            );
+                            if !has_sel {
+                                b.on_hover_text("Select the region to amplify first.");
+                            } else if b.clicked() {
+                                design = true;
+                            }
+                            // The explicit way to flip a bit that Shift+click cannot infer,
+                            // because a click has no direction of travel. Both lengths are
+                            // on screen so the choice is visible, and there is no
+                            // shortest-arc heuristic: a tool that silently picks the 60 bp
+                            // arc because it is shorter will one day silently pick the
+                            // 4,921 bp one.
+                            //
+                            // A button rather than a shortcut because the obvious shortcut,
+                            // Ctrl+O, is already Open File — bound globally, before this tab
+                            // ever sees the event, so the "toggle" would have opened a file
+                            // dialog and flipped the arc at the same time.
+                            if let Some(alt) = other_arc {
+                                if ui
+                            .button(
+                                RichText::new(format!("take the other arc ({} bp)", fmt_int(alt)))
+                                    .size(11.0),
+                            )
+                            .on_hover_text(
+                                "Two carets on a circle name two arcs. This takes the other one.",
+                            )
+                            .clicked()
+                        {
+                            flip = true;
+                        }
+                            }
+                        },
+                    );
+                    ui.label(
+                        RichText::new(mol_line)
+                            .monospace()
+                            .size(11.5)
+                            .color(pal(ui).ink2),
+                    );
+                    // Always drawn, even when there is nothing under the pointer, so
+                    // the region's height does not flicker as the pointer moves.
+                    ui.label(
+                        RichText::new(hover.unwrap_or_else(|| {
+                            "point at a base to name it and what is on it".into()
+                        }))
+                        .size(11.0)
+                        .color(pal(ui).muted),
+                    );
+                    // In here too. It carries refusals like "3 features removed —
+                    // Ctrl+Z to undo", and a warning about data the user just lost is
+                    // not something that may be clipped.
+                    if let Some(msg) = notice {
+                        ui.label(RichText::new(msg).color(pal(ui).warn).size(11.0));
+                    }
+                });
+        self.seq_readout = Some(readout.response.rect);
+        if debug_geometry() {
+            eprintln!("seqreadout: rect={:?}", readout.response.rect);
+        }
+
+        if flip {
+            // Flipped and stored raw. Canonical form is what the op derivation
+            // and the painter ask for, and it is lossy about the direction of
+            // travel this button exists to state.
+            if let Some(s) = &mut self.edit.sel {
+                s.through_origin = !s.through_origin;
             }
-        });
-        if let Some(msg) = self.edit.notice.clone() {
-            ui.label(RichText::new(msg).color(pal(ui).warn).size(11.0));
+        }
+        if design {
+            self.open_design();
         }
     }
 
-    fn sequence_header(&mut self, ui: &mut Ui, n: u64, rows: usize) {
+    fn sequence_header(&mut self, ui: &mut Ui, n: u64, rows: usize, has_cuts: bool, typing: bool) {
         let d = self.document.as_ref().expect("checked by caller");
-        let pending = self.edit.run().is_some();
+        let scanning = d.digest.is_running();
+        let unavailable = match &d.digest {
+            DigestState::Unavailable(why) => Some(why.clone()),
+            _ => None,
+        };
+        let hidden = d.visibility(self.enzyme_set).hidden_sites;
+        let circular = d.molecule().topology.is_circular();
         // Wrapped, not `horizontal`: a `Label` inside a plain horizontal layout
         // extends past the panel and is clipped, so the origin note lost its
         // second half in a 380 px panel — a sentence explaining the one
@@ -2261,27 +3185,67 @@ impl App {
                 .color(pal(ui).muted)
                 .size(11.0),
             );
-            if pending {
+            if typing {
                 // Saying so is not decoration: between keystrokes the enzyme
                 // list and the map describe the document *before* this run.
                 ui.label(RichText::new("· typing").color(pal(ui).accent).size(11.0));
             }
-            if d.molecule().topology.is_circular() {
+            if circular {
                 ui.label(
                     RichText::new("· circular: row 1 and the last row meet at the origin")
                         .color(pal(ui).muted)
                         .size(11.0),
                 );
             }
+            // All three digest states are said out loud, because an empty strip
+            // and a not-yet-computed strip are otherwise indistinguishable —
+            // and on a 4.6 Mb genome the second one lasts nearly two seconds.
+            let enz = if let Some(why) = unavailable {
+                format!("· enzyme sites: {why}")
+            } else if scanning {
+                "· enzyme sites: scanning…".to_string()
+            } else if typing && has_cuts {
+                "· enzyme sites hidden while typing".to_string()
+            } else if hidden > 0 {
+                format!(
+                    "· {} site(s) hidden by the {} filter",
+                    fmt_int(hidden as u64),
+                    self.enzyme_set.label()
+                )
+            } else {
+                String::new()
+            };
+            if !enz.is_empty() {
+                ui.label(RichText::new(enz).color(pal(ui).muted).size(11.0));
+            }
         });
+        // The lane cap and the segments whose coordinates named nothing, said
+        // once here as well as counted per row. Three lanes drawn where five
+        // features overlap looks exactly like a file with three features, and
+        // `docs/PLAN.md` item 33 is the record of what a hidden thing costs.
+        let (depth, lanes, dropped) = (self.annot.depth, self.annot.lanes, self.annot.dropped);
+        if depth > lanes || dropped > 0 {
+            let mut say = String::new();
+            if depth > lanes {
+                say.push_str(&format!(
+                    "features overlap {depth} deep; {lanes} lanes are drawn and the rest are \
+                     counted in the row's +N and named on hover"
+                ));
+            }
+            if dropped > 0 {
+                if !say.is_empty() {
+                    say.push_str(" · ");
+                }
+                say.push_str(&format!(
+                    "{} segment(s) name no bases and are not drawn",
+                    fmt_int(dropped as u64)
+                ));
+            }
+            ui.label(RichText::new(say).color(pal(ui).warn).size(11.0));
+        }
         ui.add_space(2.0);
     }
 
-    /// Ctrl+C. Returns what belongs on the clipboard.
-    ///
-    /// Split out of the event arm so it can be tested: the whole of what these
-    /// two do wrong is in what they say afterwards, and a body inside a `match`
-    /// over `egui::Event` can only be exercised by driving a window.
     fn do_copy(&mut self) -> Option<String> {
         let d = self.document.as_ref()?;
         match self.edit.copy(d.molecule()) {
@@ -3030,6 +3994,24 @@ fn strand_glyph(s: Strand) -> &'static str {
     }
 }
 
+/// The same thing in words, for anywhere the arrows cannot be drawn.
+///
+/// egui's default proportional face has no U+2190, so a `←` set in it comes out
+/// as a tofu box; the features list gets away with the arrow only because it
+/// asks for `.monospace()`. The hover readout is the sequence view's non-colour
+/// channel — the one place a reverse feature's direction is stated in the
+/// sequence at all — and an empty box states nothing. Found by looking at the
+/// running app: `strand_glyphs_cover_every_variant` asserts the strings are
+/// non-empty, and a tofu box is a non-empty string.
+fn strand_word(s: Strand) -> &'static str {
+    match s {
+        Strand::Forward => "forward",
+        Strand::Reverse => "reverse",
+        Strand::Both => "both strands",
+        Strand::Unoriented => "no strand",
+    }
+}
+
 /// One enzyme, with whatever qualifies the answer.
 ///
 /// `blocked` is the methylation verdict: `docs/PLAN.md` §7.1 requires such
@@ -3132,6 +4114,12 @@ mod tests {
             Strand::Unoriented,
         ] {
             assert!(!strand_glyph(s).is_empty());
+            // In words as well, and ASCII, because the hover readout is set in
+            // egui's proportional face and that face has no U+2190: the arrow
+            // rendered there as an empty box. Non-empty was not enough to ask.
+            let w = strand_word(s);
+            assert!(!w.is_empty());
+            assert!(w.is_ascii(), "{w} needs a font we cannot count on");
         }
     }
 
@@ -3905,5 +4893,1085 @@ mod tests {
         };
         assert!(msg.contains("stop responding"), "{msg}");
         assert!(msg.contains(&fmt_int(big.len() as u64)), "{msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The split, and the grid it changes the shape of
+    //
+    // These drive real frames. A layout verified only by reading the code is
+    // not verified: the whole complaint being answered here is about where
+    // things ended up on screen.
+    // -----------------------------------------------------------------------
+
+    /// The user's window, at the size the screenshots were taken at.
+    fn window() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 840.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// The same window with the clock set.
+    ///
+    /// egui decides a press is a drag rather than a click once it has moved
+    /// more than `max_click_dist` (6 pt) OR been held longer than
+    /// `max_click_duration` (0.8 s). Six points is less than one cell, so a
+    /// test that starts a drag by *moving* cannot start it on a named column —
+    /// it starts on the next one. Holding still and advancing the clock starts
+    /// the drag exactly where the press landed, which is what a person's hand
+    /// does anyway.
+    fn window_at(t: f64) -> egui::RawInput {
+        egui::RawInput {
+            time: Some(t),
+            ..window()
+        }
+    }
+
+    fn pointer_to(to: egui::Pos2) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::PointerMoved(to)],
+            ..window()
+        }
+    }
+
+    fn pointer_to_at(to: egui::Pos2, t: f64) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::PointerMoved(to)],
+            ..window_at(t)
+        }
+    }
+
+    fn pointer_button(at: egui::Pos2, pressed: bool) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..window()
+        }
+    }
+
+    fn pointer_button_at(at: egui::Pos2, pressed: bool, t: f64) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..window_at(t)
+        }
+    }
+
+    /// How far past the bottom of the WINDOW the worst-placed thing in this
+    /// frame was drawn.
+    ///
+    /// The clipping defect measured directly rather than inferred. Deliberately
+    /// the window edge and not each shape's own clip rect: a `ScrollArea`
+    /// clips its own content on purpose, and by up to a whole row, so "outside
+    /// its clip rect" would flag ordinary scrolling. Nothing may be laid out
+    /// below the window, and at bd96e5b the readout was — by about 40 pt,
+    /// taking the origin warning's second half and the Design primers button
+    /// with it.
+    fn drawn_below_the_window(out: &egui::FullOutput, window_h: f32) -> f32 {
+        out.shapes
+            .iter()
+            .map(|cs| {
+                let b = cs.shape.visual_bounding_rect();
+                if b.is_finite() && b.is_positive() {
+                    (b.bottom() - window_h).max(0.0)
+                } else {
+                    0.0
+                }
+            })
+            .fold(0.0f32, f32::max)
+    }
+
+    /// One frame of the whole details panel.
+    fn paint(app: &mut App, ctx: &egui::Context, input: egui::RawInput) {
+        // The same shape `eframe::App::ui` is handed: a root `Ui` over the
+        // whole window, with the details panel taking its share of it and a
+        // CentralPanel behind for whatever is left. Driving `side_panel` inside
+        // an `Area` instead would give it an unbounded width, and the width is
+        // the entire question here.
+        let _ = paint_out(app, ctx, input);
+    }
+
+    fn paint_out(app: &mut App, ctx: &egui::Context, input: egui::RawInput) -> egui::FullOutput {
+        ctx.run_ui(input, |ui| {
+            app.side_panel(ui);
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.allocate_space(ui.available_size());
+            });
+        })
+    }
+
+    /// A plasmid the size of the user's, open on the Sequence tab.
+    fn seq_app() -> App {
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        let seq: String = (0..8_117)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                b"ACGT"[(s >> 33) as usize & 3] as char
+            })
+            .collect();
+        let mut d =
+            Document::from_bytes(format!(">p\n{seq}\n").as_bytes(), "p.fa".into(), None).unwrap();
+        d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        let mut app = App::blank();
+        app.adopt(d);
+        app.tab = Tab::Sequence;
+        app
+    }
+
+    /// PROVEN TO FAIL at bd96e5b, behaviourally, on the very first assertion:
+    /// `.exact_size(380.0)` sets `outer_size_range = Rangef::point(380)`, so
+    /// `fit_per_row` measures 40 bases and no drag can move it. Both halves
+    /// fail there — the resting width and the drag.
+    #[test]
+    fn the_split_moves_and_the_row_width_follows_it() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        paint(&mut app, &ctx, window());
+
+        assert_eq!(
+            app.edit.per_row(),
+            60,
+            "the default reaches the GenBank sixty; it was 40 at 380 pt"
+        );
+        let at_rest = app.layout.panel_w.expect("the panel reported its width");
+        assert!((at_rest - App::DEF_PANEL).abs() < 1.0, "{at_rest}");
+
+        // Grab the separator and drag it right, giving the map the room.
+        let sep = egui::pos2(1280.0 - at_rest, 400.0);
+        paint(&mut app, &ctx, pointer_to(sep));
+        paint(&mut app, &ctx, pointer_button(sep, true));
+        for x in [sep.x + 100.0, sep.x + 200.0, sep.x + 320.0] {
+            paint(&mut app, &ctx, pointer_to(egui::pos2(x, 400.0)));
+        }
+        paint(
+            &mut app,
+            &ctx,
+            pointer_button(egui::pos2(sep.x + 320.0, 400.0), false),
+        );
+        paint(&mut app, &ctx, window());
+
+        let narrow = app.layout.panel_w.expect("still reporting");
+        assert!(
+            (narrow - App::MIN_PANEL).abs() < 1.0,
+            "the drag ran into the 300 pt stop rather than past it: {narrow}"
+        );
+        assert_eq!(app.edit.per_row(), 30, "and the row followed it down");
+
+        // And back, so the gesture is not one-way.
+        let sep = egui::pos2(1280.0 - narrow, 400.0);
+        paint(&mut app, &ctx, pointer_to(sep));
+        paint(&mut app, &ctx, pointer_button(sep, true));
+        for x in [sep.x - 100.0, sep.x - 200.0, sep.x - 300.0] {
+            paint(&mut app, &ctx, pointer_to(egui::pos2(x, 400.0)));
+        }
+        paint(
+            &mut app,
+            &ctx,
+            pointer_button(egui::pos2(sep.x - 300.0, 400.0), false),
+        );
+        paint(&mut app, &ctx, window());
+        assert_eq!(app.edit.per_row(), 60, "back to sixty");
+        assert!(app.layout.panel_w.unwrap() > 560.0);
+    }
+
+    /// The panel may eat the window's width but never all of it.
+    ///
+    /// PROVEN TO FAIL at bd96e5b for the trivial reason that nothing moves
+    /// there at all. What it is really guarding is OURS, not egui's: egui only
+    /// caps the panel at the window width, so with no maximum of our own the
+    /// map pane goes to zero, `map::show` gets a zero-width `max_rect`, and the
+    /// map silently vanishes with nothing on screen explaining why.
+    #[test]
+    fn dragging_the_split_all_the_way_leaves_the_map_a_pane_to_live_in() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        paint(&mut app, &ctx, window());
+        let sep = egui::pos2(1280.0 - app.layout.panel_w.unwrap(), 400.0);
+        paint(&mut app, &ctx, pointer_to(sep));
+        paint(&mut app, &ctx, pointer_button(sep, true));
+        // Past the left edge of the window, and then some.
+        for x in [400.0f32, 100.0, -500.0] {
+            paint(&mut app, &ctx, pointer_to(egui::pos2(x, 400.0)));
+        }
+        paint(
+            &mut app,
+            &ctx,
+            pointer_button(egui::pos2(-500.0, 400.0), false),
+        );
+        paint(&mut app, &ctx, window());
+
+        let w = app.layout.panel_w.unwrap();
+        assert!(
+            w <= 1280.0 - App::MIN_MAP + 1.0,
+            "the map was left {} pt: {w}",
+            1280.0 - w
+        );
+        assert!(w >= App::MIN_PANEL, "{w}");
+        assert_eq!(app.edit.per_row(), 60, "still a full row at the stop");
+    }
+
+    /// COMPILE-ONLY FAILURE at bd96e5b, and said plainly: `App::seq_grid` does
+    /// not exist there, so this does not build rather than not passing. The
+    /// click arithmetic it exercises is *already correct* at bd96e5b, because
+    /// the grouping in this change is painted rather than spaced and no gap was
+    /// ever introduced — that is the point, not an omission.
+    ///
+    /// What it is really proof against is the mutation, which was run:
+    /// replacing the column mapping with one that adds a separator cell every
+    /// ten columns, matching a painter changed the same way, makes this fail at
+    /// column 59 while a test at column 0 goes on passing. Column 0 is correct
+    /// under every wrong formula.
+    ///
+    /// It is also the only place that shows the LAST column of a 60-base row is
+    /// reachable at all: at bd96e5b the row is 40 wide, so column 59 does not
+    /// exist and this click lands on base 120 instead of 180.
+    #[test]
+    fn a_click_on_the_last_column_of_a_row_lands_on_that_base() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        paint(&mut app, &ctx, window());
+        assert_eq!(app.edit.per_row(), 60, "the premise: a full-width row");
+        let g = app.seq_grid.expect("the grid was painted");
+        assert_eq!(g.first_row, 0);
+
+        // Row 2, its LAST cell, a fifth of the way in — so the nearest gap is
+        // the one BEFORE base 180, not the one after it.
+        let row = 2u64;
+        let col = 59u64;
+        let at = egui::pos2(
+            g.x0 + (col as f32 + 0.2) * g.advance,
+            g.top + (row - g.first_row) as f32 * g.row_h + g.row_h * 0.5,
+        );
+        paint(&mut app, &ctx, pointer_to(at));
+        paint(&mut app, &ctx, pointer_button(at, true));
+        paint(&mut app, &ctx, pointer_button(at, false));
+        assert_eq!(
+            app.edit.caret,
+            row * 60 + col,
+            "a click on column {col} of row {row}"
+        );
+
+        // Past the middle of the same cell is the gap AFTER it, and past the
+        // end of the row clamps to that same gap rather than running on into
+        // the next row's first base.
+        for (dx, want) in [(0.7f32, 60u64), (400.0, 60)] {
+            let at = egui::pos2(
+                g.x0 + (col as f32 + dx) * g.advance,
+                g.top + (row - g.first_row) as f32 * g.row_h + g.row_h * 0.5,
+            );
+            paint(&mut app, &ctx, pointer_to(at));
+            paint(&mut app, &ctx, pointer_button(at, true));
+            paint(&mut app, &ctx, pointer_button(at, false));
+            assert_eq!(app.edit.caret, row * 60 + want, "dx {dx}");
+        }
+    }
+
+    /// COMPILE-ONLY FAILURE at bd96e5b, same reason and same mutation. A drag
+    /// routes through the same `hit`, so this is the check that the *other*
+    /// consumers of the column mapping agree with it: the selection it asserts
+    /// on is what the highlight rectangle and the caret are drawn from.
+    #[test]
+    fn a_drag_across_a_row_boundary_selects_exactly_the_bases_dragged_over() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        paint(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("the grid was painted");
+        let at = |row: u64, col: u64| {
+            egui::pos2(
+                g.x0 + col as f32 * g.advance,
+                g.top + (row - g.first_row) as f32 * g.row_h + g.row_h * 0.5,
+            )
+        };
+
+        // From the gap before base 51 (row 0, column 50) to the gap before
+        // base 131 (row 2, column 10) — across two row boundaries.
+        let from = at(0, 50);
+        let to = at(2, 10);
+        paint(&mut app, &ctx, pointer_to_at(from, 0.0));
+        paint(&mut app, &ctx, pointer_button_at(from, true, 0.1));
+        // Held, not jogged: see `window_at`.
+        paint(&mut app, &ctx, pointer_to_at(from, 1.0));
+        paint(&mut app, &ctx, pointer_to_at(at(1, 30), 1.1));
+        paint(&mut app, &ctx, pointer_to_at(to, 1.2));
+        paint(&mut app, &ctx, pointer_button_at(to, false, 1.3));
+
+        let s = app.edit.sel.expect("a drag makes a selection");
+        assert_eq!(s.anchor, 50, "the gap the press landed on");
+        assert_eq!(s.head, 130, "the gap the release landed on");
+        assert!(!s.through_origin, "a forward drag is not a wrap");
+        // 80 bases: 10 on row 0, 60 on row 1, 10 on row 2.
+        assert_eq!(s.base_count(8_117), 80);
+    }
+
+    /// PROVEN TO FAIL at bd96e5b, behaviourally.
+    ///
+    /// The caret sentence for a circular molecule at caret 0 is 72 characters,
+    /// which wraps to two lines; the buttons landed on a third and the notice
+    /// on a fourth, against a fixed `readout_h = 30.0`. Everything past the
+    /// reservation was drawn below the panel rect and cut by its clip rect.
+    ///
+    /// Three passes rather than one, and that is not a fudge: a bottom panel
+    /// learns its content's height by laying it out, so the first pass sizes it
+    /// and the later ones show it. Twenty passes would not help at bd96e5b,
+    /// because 30.0 is a constant.
+    #[test]
+    fn the_readout_and_its_button_are_not_cut_off_at_any_split() {
+        for width in [App::DEF_PANEL, App::MIN_PANEL] {
+            let ctx = egui::Context::default();
+            let mut app = seq_app();
+            app.layout.panel_w = Some(width);
+            // Caret 0 on a circle: the longest form the sentence takes.
+            app.edit.caret = 0;
+            let mut out = paint_out(&mut app, &ctx, window());
+            for _ in 0..2 {
+                out = paint_out(&mut app, &ctx, window());
+            }
+
+            // The defect itself, measured: nothing in the panel is painted
+            // below the clip rect it was handed. THIS assertion compiles and
+            // runs at bd96e5b, where it fails by about 40 pt.
+            let lost = drawn_below_the_window(&out, 840.0);
+            assert!(
+                lost < 1.0,
+                "{lost:.0} pt of the readout is laid out below the window at a                  {width} pt split"
+            );
+
+            let r = app.seq_readout.expect("the readout was laid out");
+            assert!(
+                r.bottom() <= 840.5,
+                "the readout runs {:.0} pt past the window at a {width} pt panel",
+                r.bottom() - 840.0
+            );
+            assert!(
+                r.height() >= 40.0,
+                "the readout is {:.0} pt tall at a {width} pt panel, which cannot \
+                 hold a sentence that wraps plus a row of buttons",
+                r.height()
+            );
+            // And the grid above it did not get squeezed out of existence.
+            let g = app.seq_grid.expect("the grid was painted");
+            assert!(
+                g.top + 8.0 * g.row_h < r.top(),
+                "only {:.0} pt of sequence left above the readout at {width}",
+                r.top() - g.top
+            );
+        }
+    }
+
+    /// PROVEN TO FAIL against the MUTATION named in `annot.rs`: dropping
+    /// `doc_generation` from the index's version tuple. It is compile-only
+    /// against bd96e5b, where there is no index at all.
+    ///
+    /// Both documents sit at cursor `None` — every freshly opened one does — so
+    /// keying on the cursor alone compares them equal, skips the rebuild, and
+    /// paints the first file's features onto the second. Every ribbon lands
+    /// somewhere plausible and nothing errors.
+    #[test]
+    fn a_second_document_is_not_drawn_with_the_first_ones_features() {
+        let gb = |name: &str, at: u64| {
+            format!(
+                "LOCUS       x                      400 bp    DNA     linear   SYN 01-JAN-2026\n\
+                 FEATURES             Location/Qualifiers\n\
+                 \x20    gene            {at}..{}\n\
+                 \x20                    /label={name}\n\
+                 ORIGIN\n        1 {}\n//\n",
+                at + 49,
+                "acgt".repeat(100)
+            )
+        };
+        let mut app = App::blank();
+        app.adopt(Document::from_bytes(gb("first", 10).as_bytes(), "a.gb".into(), None).unwrap());
+        app.refresh_annotations();
+        let mut got = Vec::new();
+        app.annot.query(0, 400, &mut got);
+        assert_eq!(
+            got.iter().map(|i| (i.lo, i.hi)).collect::<Vec<_>>(),
+            vec![(9, 59)],
+            "the premise: A's feature"
+        );
+
+        app.adopt(Document::from_bytes(gb("second", 200).as_bytes(), "b.gb".into(), None).unwrap());
+        assert_eq!(
+            app.document.as_ref().unwrap().log.cursor(),
+            None,
+            "the collision this test is about: both documents are at cursor None"
+        );
+        app.refresh_annotations();
+        got.clear();
+        app.annot.query(0, 400, &mut got);
+        assert_eq!(
+            got.iter().map(|i| (i.lo, i.hi)).collect::<Vec<_>>(),
+            vec![(199, 249)],
+            "B is drawn with B's features"
+        );
+    }
+
+    /// The house pattern, from `doc.rs`: a ratio, not an absolute time, so it
+    /// means the same thing on a slow machine.
+    ///
+    /// A plasmid with a full-length `backbone` misc_feature is exactly the case
+    /// that makes the "binary search then walk backwards" shape degenerate into
+    /// a linear scan, which is why the index is an augmented tree and not that.
+    #[test]
+    fn a_frame_of_the_sequence_tab_does_not_scan_the_features() {
+        let n = 4_641_652u64;
+        let mut mol = pl_core::Molecule {
+            seq: vec![b'a'; 1_000],
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        // One genome-length feature first, then 9,000 ordinary ones — the shape
+        // MG1655 arrives in, and the shape that defeats a prefix-max walk.
+        let mut backbone = pl_core::Feature::new("backbone", "misc_feature");
+        backbone.segments.push(pl_core::Segment::new(1, n));
+        mol.features.push(backbone);
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        for i in 0..9_000u64 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let a = 1 + s % (n - 3_000);
+            let mut f = pl_core::Feature::new(format!("g{i}"), "CDS");
+            f.segments.push(pl_core::Segment::new(a, a + 900));
+            mol.features.push(f);
+        }
+        let ix = annot::AnnotIndex::build(&mol, (0, None));
+
+        // Twenty frames of forty visible rows.
+        let t = std::time::Instant::now();
+        let mut out = Vec::new();
+        let mut seen = 0usize;
+        for f in 0..20u64 {
+            for r in 0..40u64 {
+                let lo = (f * 40 + r) * 60;
+                out.clear();
+                ix.query(lo, lo + 60, &mut out);
+                seen += out.len();
+            }
+        }
+        let twenty_frames = t.elapsed();
+        std::hint::black_box(seen);
+
+        // ONE frame done the naive way: every feature, every segment, per row.
+        let t = std::time::Instant::now();
+        let mut seen = 0usize;
+        for r in 0..40u64 {
+            let (lo, hi) = (r * 60, r * 60 + 60);
+            for f in &mol.features {
+                for sg in &f.segments {
+                    if sg.start.saturating_sub(1) < hi && sg.end > lo {
+                        seen += 1;
+                    }
+                }
+            }
+        }
+        let one_naive_frame = t.elapsed();
+        std::hint::black_box(seen);
+
+        assert!(
+            twenty_frames * 10 < one_naive_frame,
+            "twenty frames of index queries took {twenty_frames:?}; one frame of \
+             the naive per-row scan took {one_naive_frame:?}"
+        );
+    }
+
+    /// The index rides along with an edit, so it has to be small against the
+    /// work that edit already does. `Document::apply` performs a defensive
+    /// `Molecule::clone`, measured in `seqedit.rs` at 3.85 ms on a 4.6 Mb
+    /// molecule; if the build were comparable it would belong on a worker.
+    #[test]
+    fn the_index_build_costs_less_than_the_clone_it_rides_along_with() {
+        let n = 4_641_652usize;
+        let mut mol = pl_core::Molecule {
+            seq: vec![b'a'; n],
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        for i in 0..9_000u64 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let a = 1 + s % (n as u64 - 3_000);
+            let mut f = pl_core::Feature::new(format!("g{i}"), "CDS");
+            f.segments.push(pl_core::Segment::new(a, a + 900));
+            mol.features.push(f);
+        }
+
+        let t = std::time::Instant::now();
+        let ix = annot::AnnotIndex::build(&mol, (0, None));
+        let build = t.elapsed();
+        std::hint::black_box(&ix);
+
+        let t = std::time::Instant::now();
+        let c = mol.clone();
+        let clone = t.elapsed();
+        std::hint::black_box(&c);
+
+        assert!(
+            build * 4 < clone * 10,
+            "index build {build:?} against the molecule clone {clone:?} that \
+             every edit already pays for"
+        );
+    }
+
+    /// PROVEN TO FAIL against the MUTATION: passing `vertical_scroll_offset`
+    /// on every frame instead of only on the frame `per_row` changed pins the
+    /// offset and nothing scrolls at all; dropping it entirely leaves the
+    /// pixel offset alone and the base at the top of the viewport jumps by the
+    /// ratio of the two row widths. Compile-only against bd96e5b, where the
+    /// row width cannot change in the first place.
+    ///
+    /// The measured version of the defect, on the user's own file: scrolled to
+    /// base 4,000 at 40 per row is offset 1,330; the same offset at 60 per row
+    /// is base 6,000. Two thousand bases forward, while the user is dragging a
+    /// splitter — and not reversible, because the content shrinks and an offset
+    /// near the bottom is clamped on the way out and not restored on the way
+    /// back.
+    #[test]
+    fn a_reflow_keeps_the_top_of_the_viewport_on_the_same_base() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        paint(&mut app, &ctx, window());
+        assert_eq!(app.edit.per_row(), 60);
+
+        // Scroll a long way down, with the pointer over the grid.
+        let g = app.seq_grid.expect("the grid was painted");
+        let over = egui::pos2(g.x0 + 100.0, g.top + 100.0);
+        for _ in 0..12 {
+            paint(
+                &mut app,
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(over),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -400.0),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..window()
+                },
+            );
+        }
+        paint(&mut app, &ctx, window());
+        let before = app.seq_grid.expect("still painted");
+        let base_at_top = before.first_row * before.per_row;
+        assert!(
+            base_at_top > 1_000,
+            "the premise: scrolled somewhere worth losing, not base {base_at_top}"
+        );
+
+        // Now narrow the panel, which takes the row from 60 bases to 30.
+        let sep = egui::pos2(1280.0 - app.layout.panel_w.unwrap(), 400.0);
+        paint(&mut app, &ctx, pointer_to(sep));
+        paint(&mut app, &ctx, pointer_button(sep, true));
+        for x in [sep.x + 100.0, sep.x + 200.0, sep.x + 320.0] {
+            paint(&mut app, &ctx, pointer_to(egui::pos2(x, 400.0)));
+        }
+        paint(
+            &mut app,
+            &ctx,
+            pointer_button(egui::pos2(sep.x + 320.0, 400.0), false),
+        );
+        paint(&mut app, &ctx, window());
+        paint(&mut app, &ctx, window());
+
+        let after = app.seq_grid.expect("still painted");
+        assert_eq!(after.per_row, 30, "the premise: the row really reflowed");
+        let now = after.first_row * after.per_row;
+        // Within one row of where it was. Without the anchor this is out by
+        // the ratio — half the file, on an 8 kb plasmid.
+        assert!(
+            now.abs_diff(base_at_top) <= after.per_row,
+            "the view was on base {base_at_top} and the reflow moved it to {now}"
+        );
+    }
+
+    /// And it keeps the caret where it was ON SCREEN, not merely on screen.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: setting the offset to
+    /// `row_of(anchor, per_row) * row_h` — the previous expression — drags the
+    /// caret's row to the top slot and this fails with "the caret's row moved
+    /// from slot 5 to slot 0". Compile-only against bd96e5b, where the row
+    /// width cannot change.
+    ///
+    /// The measured version: on the genome the caret sat on the second visible
+    /// row, one keystroke reflowed, and its row was pulled to the first. That
+    /// fires on every splitter step and, before the row-height fix above, twice
+    /// per keystroke.
+    #[test]
+    fn a_reflow_keeps_the_caret_at_the_same_height_in_the_viewport() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        paint(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        assert_eq!(g.per_row, 60);
+
+        // Scroll well down, then put the caret on a row a few slots below the
+        // top of what is showing.
+        let over = egui::pos2(g.x0 + 100.0, g.top + 100.0);
+        for _ in 0..12 {
+            paint(
+                &mut app,
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(over),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -400.0),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..window()
+                },
+            );
+        }
+        paint(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        let slot = 5u64;
+        let at = egui::pos2(
+            g.x0 + 3.5 * g.advance,
+            g.top + slot as f32 * g.row_h + g.row_h * 0.5,
+        );
+        paint(&mut app, &ctx, pointer_to(at));
+        paint(&mut app, &ctx, pointer_button(at, true));
+        paint(&mut app, &ctx, pointer_button(at, false));
+        paint(&mut app, &ctx, window());
+
+        let before = app.seq_grid.expect("painted");
+        let caret_row = seqedit::row_of(app.edit.caret, before.per_row);
+        assert_eq!(
+            caret_row - before.first_row,
+            slot,
+            "the premise: the caret is well below the top of the viewport"
+        );
+
+        // Reflow by dragging the splitter to the narrow stop.
+        let sep = egui::pos2(1280.0 - app.layout.panel_w.unwrap(), 400.0);
+        paint(&mut app, &ctx, pointer_to(sep));
+        paint(&mut app, &ctx, pointer_button(sep, true));
+        for x in [sep.x + 100.0, sep.x + 200.0, sep.x + 320.0] {
+            paint(&mut app, &ctx, pointer_to(egui::pos2(x, 400.0)));
+        }
+        paint(
+            &mut app,
+            &ctx,
+            pointer_button(egui::pos2(sep.x + 320.0, 400.0), false),
+        );
+        paint(&mut app, &ctx, window());
+        paint(&mut app, &ctx, window());
+
+        let after = app.seq_grid.expect("painted");
+        assert!(after.per_row < before.per_row, "the premise: it reflowed");
+        let now = seqedit::row_of(app.edit.caret, after.per_row);
+        assert_eq!(
+            now - after.first_row,
+            slot,
+            "the caret's row moved from slot {slot} to slot {}",
+            now.saturating_sub(after.first_row)
+        );
+    }
+
+    /// Everything a row draws is on the grid the LETTERS are on.
+    ///
+    /// COMPILE-ONLY at bd96e5b (`GridGeom` and `RowLayout` do not exist), but
+    /// this is the assertion the rest of the suite did not have, and its absence
+    /// was the real finding: four separate mutations of the column mapping were
+    /// run against the whole 194-test pl-gui suite and three of them stayed
+    /// green. The one that matters is the one the brief names — grouping the
+    /// bases in tens by inserting a space every ten characters. It renders as a
+    /// nicer GenBank-style view, puts the caret four bases left of the letter it
+    /// names by column 47, and nothing anywhere noticed, because every existing
+    /// check compared `col_x` with `x_col`: two pure functions over the same
+    /// expression.
+    ///
+    /// So this one reads the PAINTED geometry instead. It pulls the row's own
+    /// galley out of the frame and asks where the glyphs actually landed, then
+    /// asks the caret and the selection rectangle to agree with them. Both
+    /// mutations were run: inserting a separator every ten characters into the
+    /// painted string fails the pitch assertion at column 10, and adding a
+    /// separator cell to `col_x` alone fails the caret assertion at column 30.
+    #[test]
+    fn the_caret_and_the_selection_land_on_the_glyphs_that_were_painted() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        let mut out = paint_out(&mut app, &ctx, window());
+        let per_row = app.edit.per_row();
+        assert_eq!(per_row, 60, "the premise: a full-width row");
+
+        // The letters, as the frame really placed them.
+        //
+        // Compared against the nominal grid, not against a uniform float
+        // pitch, and the difference is worth stating because it was measured
+        // here rather than assumed.
+        //
+        // `epaint` snaps every glyph to a whole device pixel
+        // (`text_layout.rs`: `glyph.pos.x = round_to_pixel(glyph.pos.x)`), so
+        // at this metric — advance 6.9236 at ppp 1 — consecutive steps are 7,
+        // 6, 7, 7, 7... and the deviation from `x0 + k * advance` is a sawtooth
+        // in (-0.88, +0.08) that resets about every thirteenth glyph. Bounded
+        // and NOT cumulative, which is the whole question: an error that
+        // accumulated would be a cell and a half out by column 59 and would
+        // look perfect in a screenshot of column 0.
+        let xs = painted_row_glyphs(&out, per_row as usize);
+        assert_eq!(xs.len(), per_row as usize);
+        let adv = app.seq_grid.expect("painted").advance;
+        // One device pixel. Every wrong column formula is out by at least one
+        // whole advance, which is seven times this.
+        let tol = 1.01 / ctx.pixels_per_point();
+        for k in 1..xs.len() {
+            assert!(
+                (xs[k] - xs[0] - k as f32 * adv).abs() <= tol,
+                "glyph {k} was painted at {:.3}, which is {:.3} off the \
+                 {adv:.3} pt grid every other x in this view is computed from",
+                xs[k],
+                xs[k] - xs[0] - k as f32 * adv
+            );
+        }
+
+        // The caret, at both ends of the row and in the middle. Column 59 is
+        // the one that matters: column 0 is correct under every wrong formula.
+        for col in [0u64, 30, 59] {
+            app.edit.caret = col;
+            app.edit.sel = None;
+            out = paint_out(&mut app, &ctx, window());
+            let x = painted_caret(&out).unwrap_or_else(|| panic!("no caret at column {col}"));
+            let want = xs[col as usize];
+            assert!(
+                (x - want).abs() <= tol,
+                "the caret for column {col} is painted at {x:.2}, and that \
+                 column's letter at {want:.2}"
+            );
+        }
+        // And gap 60 — the one with no glyph of its own — is drawn at the
+        // START of the next row and not at the right edge of this one, because
+        // that gap is where the next row's first base begins. Only at the end
+        // of the MOLECULE does it belong to the row's right edge, which is what
+        // `on_this_row`'s second clause is for.
+        app.edit.caret = per_row;
+        app.edit.sel = None;
+        out = paint_out(&mut app, &ctx, window());
+        let x = painted_caret(&out).expect("a caret at the end-of-row gap");
+        assert!(
+            (x - xs[0]).abs() <= tol,
+            "the end-of-row gap is painted at {x:.2}; the next row starts at {:.2}",
+            xs[0]
+        );
+
+        // And the selection wash, whose two corners are the other two places an
+        // x is turned into a column.
+        app.edit.caret = 20;
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 10,
+            head: 20,
+            through_origin: false,
+        });
+        out = paint_out(&mut app, &ctx, window());
+        let r = painted_selection(&out, &ctx).expect("the wash was painted");
+        assert!(
+            (r.left() - xs[10]).abs() <= tol && (r.right() - xs[20]).abs() <= tol,
+            "the wash runs {:.2}..{:.2}; bases 11..20 are drawn at {:.2}..{:.2}",
+            r.left(),
+            r.right(),
+            xs[10],
+            xs[20]
+        );
+    }
+
+    /// Where the first full row's BASES were actually painted.
+    ///
+    /// Separators are tolerated in the string and skipped in the answer, on
+    /// purpose: the mutation this test exists for inserts a space every ten
+    /// characters, and it should fail on where the letters landed rather than
+    /// on the helper failing to recognise the row at all.
+    fn painted_row_glyphs(out: &egui::FullOutput, want: usize) -> Vec<f32> {
+        for cs in &out.shapes {
+            let egui::Shape::Text(t) = &cs.shape else {
+                continue;
+            };
+            let txt = t.galley.text();
+            if !txt.bytes().all(|b| b"ACGT ".contains(&b))
+                || txt.bytes().filter(|b| *b != b' ').count() != want
+            {
+                continue;
+            }
+            let row = &t.galley.rows[0];
+            return row
+                .glyphs
+                .iter()
+                .filter(|g| g.chr != ' ')
+                .map(|g| t.pos.x + row.pos.x + g.pos.x)
+                .collect();
+        }
+        panic!("no sequence row was painted");
+    }
+
+    /// The caret is the only 1.5 pt line in this view; every other rule — the
+    /// tens ticks, the boundary ticks, the selection edges — is 1.0.
+    fn painted_caret(out: &egui::FullOutput) -> Option<f32> {
+        out.shapes.iter().find_map(|cs| match &cs.shape {
+            egui::Shape::LineSegment { points, stroke }
+                if (stroke.width - 1.5).abs() < 0.01 && points[0].x == points[1].x =>
+            {
+                Some(points[0].x)
+            }
+            _ => None,
+        })
+    }
+
+    fn painted_selection(out: &egui::FullOutput, ctx: &egui::Context) -> Option<egui::Rect> {
+        let want = Palette::of(ctx.theme() == egui::Theme::Dark).selection();
+        out.shapes.iter().find_map(|cs| match &cs.shape {
+            egui::Shape::Rect(r) if r.fill == want => Some(r.rect),
+            _ => None,
+        })
+    }
+
+    /// A pointer over a base names THAT base, wherever in the cell it is.
+    ///
+    /// PROVEN TO FAIL before this run, behaviourally, on the second probe of
+    /// the first cell: the hover line read a caret gap index as a base index, so
+    /// past the middle of every glyph it named the base after it. Measured in
+    /// the running app on pKoV: 20% into base 180's cell said "base 180" and 75%
+    /// into the SAME cell said "base 181". At the last column of a row it named
+    /// the first base of the next row — sixty cells from the pointer.
+    ///
+    /// This line is the design's stated non-colour channel for every ribbon
+    /// above it, so it is also the thing a user checks a feature edge against.
+    #[test]
+    fn the_hover_line_names_the_cell_the_pointer_is_in_at_both_ends_of_a_row() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        paint(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        assert_eq!(g.per_row, 60, "the premise: a full-width row");
+
+        let hover = |app: &mut App, ctx: &egui::Context, row: u64, col: f32| -> Option<String> {
+            let at = egui::pos2(
+                g.x0 + col * g.advance,
+                g.top + (row - g.first_row) as f32 * g.row_h + g.row_h * 0.5,
+            );
+            paint(app, ctx, pointer_to(at));
+            app.seq_hover.clone()
+        };
+
+        // Column 0, and the last column of the row — the one where being out by
+        // a gap names a base on another row entirely.
+        for (row, col, want) in [
+            (0u64, 0u64, 1u64),
+            (0, 9, 10),
+            (0, 59, 60),
+            (2, 59, 180),
+            (2, 0, 121),
+        ] {
+            for frac in [0.05f32, 0.5, 0.95] {
+                let got = hover(&mut app, &ctx, row, col as f32 + frac);
+                assert_eq!(
+                    got.as_deref()
+                        .map(|s| s.split(' ').nth(1).unwrap_or("").to_string()),
+                    Some(fmt_int(want)),
+                    "row {row} column {col} at {frac} across the cell: {got:?}"
+                );
+            }
+        }
+
+        // And off the cells there is no base to name, rather than the nearest
+        // one. Past the right edge of a full row:
+        let off = egui::pos2(g.x0 + 60.5 * g.advance, g.top + g.row_h * 0.5);
+        paint(&mut app, &ctx, pointer_to(off));
+        assert_eq!(app.seq_hover, None, "past the last cell of the row");
+        // And in the gutter, left of column 0:
+        let gutter = egui::pos2(g.x0 - 4.0, g.top + g.row_h * 0.5);
+        paint(&mut app, &ctx, pointer_to(gutter));
+        assert_eq!(app.seq_hover, None, "in the coordinate gutter");
+    }
+
+    /// The hover line clears when the pointer leaves the grid.
+    ///
+    /// PROVEN TO FAIL before this run: the assignment was guarded by
+    /// `if hover_out.is_some()`, so the readout went on naming base 3,930 with
+    /// the pointer deep inside the map pane.
+    #[test]
+    fn the_hover_line_stops_naming_a_base_once_the_pointer_leaves() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        paint(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        let on = egui::pos2(g.x0 + 10.0 * g.advance, g.top + g.row_h * 1.5);
+        paint(&mut app, &ctx, pointer_to(on));
+        assert!(app.seq_hover.is_some(), "the premise: it named a base");
+        // Into the map pane, which is everything left of the panel.
+        paint(&mut app, &ctx, pointer_to(egui::pos2(200.0, 400.0)));
+        assert_eq!(app.seq_hover, None);
+    }
+
+    /// A plasmid whose digest has actually finished.
+    fn digested(app: &mut App) {
+        let t = std::time::Instant::now();
+        loop {
+            let d = app.document.as_mut().expect("a document");
+            if matches!(d.digest, DigestState::Done(_)) {
+                return;
+            }
+            d.digest.poll();
+            assert!(
+                t.elapsed() < std::time::Duration::from_secs(30),
+                "the digest never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// The row pitch is a property of the DOCUMENT, not of a background
+    /// worker's phase.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: taking the
+    /// reservation from `self.annot.cut_count() > 0` — the previous expression
+    /// — fails the last assertion with a row height of 26.41 against 38.41.
+    /// Compile-only against bd96e5b, which draws no strip at all.
+    ///
+    /// Measured on the 4.6 Mb genome, where the digest is 1,634 ms: one
+    /// keystroke took the pitch 43.41 -> 31.41 and back, so the whole view
+    /// reflowed and re-anchored twice, over a second apart, per typing burst.
+    /// On an 8 kb plasmid the scan is milliseconds and none of it is visible,
+    /// which is why it was not seen.
+    #[test]
+    fn one_keystroke_does_not_change_the_row_height_while_the_digest_reruns() {
+        let ctx = egui::Context::default();
+        let mut app = seq_app();
+        digested(&mut app);
+        paint(&mut app, &ctx, window());
+        let settled = app.seq_row_h;
+        assert!(
+            app.annot.cut_count() > 0 && app.enz_strip,
+            "the premise: this molecule has admitted cuts, so a strip is reserved"
+        );
+
+        // Any edit restarts the digest, and nothing polls it here.
+        app.document
+            .as_mut()
+            .expect("a document")
+            .apply(pl_core::OpKind::InsertAt {
+                at: 101,
+                seq: "acgt".into(),
+            })
+            .expect("a legal insert");
+        assert!(
+            app.document.as_ref().unwrap().digest.is_running(),
+            "the premise: the scan restarted"
+        );
+        paint(&mut app, &ctx, window());
+        assert_eq!(
+            app.annot.cut_count(),
+            0,
+            "the premise: the new scan has not landed, so nothing is drawn"
+        );
+        assert_eq!(
+            app.seq_row_h, settled,
+            "the row pitch followed the worker: {} while scanning against {settled} settled",
+            app.seq_row_h
+        );
+    }
+
+    /// The default split reaches the GenBank sixty and is not one point wider
+    /// than it has to be.
+    ///
+    /// Both halves matter and they pull against each other. Below the threshold
+    /// the row is not the row GenBank prints, which is the whole point of the
+    /// layout work. Above it, every extra point comes out of the map pane — and
+    /// once that pane is narrower than it is tall, `map.rs`'s fixed 132 pt label
+    /// reserve stops being enough and "EcoRI 7,530" renders as "coRI 7,530", a
+    /// truncation that reads as a different enzyme rather than as damage. At
+    /// 560 that was seven labels on the user's own window.
+    ///
+    /// COMPILE-ONLY at bd96e5b, where the panel is `exact_size(380.0)` and
+    /// neither number exists.
+    #[test]
+    fn the_default_split_reaches_sixty_and_takes_no_more_than_it_needs() {
+        for (w, want, why) in [
+            (
+                App::DEF_PANEL,
+                60u64,
+                "the default reaches the GenBank sixty",
+            ),
+            (
+                App::DEF_PANEL - 12.0,
+                60,
+                "with metric headroom: a wider scrollbar or a different \
+                 monospace face still gets sixty",
+            ),
+            (
+                App::DEF_PANEL - 40.0,
+                50,
+                "and it is not padded — 40 pt below the default the row is \
+                 already short, so the default is near the threshold and not \
+                 sitting 60 pt above it taking width off the map",
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = seq_app();
+            app.layout.panel_w = Some(w);
+            paint(&mut app, &ctx, window());
+            assert_eq!(app.edit.per_row(), want, "at a {w} pt panel: {why}");
+        }
+    }
+
+    /// A window narrower than both floors together keeps the PANEL usable and
+    /// lets the map take the loss, and nothing panics on the way.
+    ///
+    /// Not a defect but a stated trade, and this is where it is stated. It is
+    /// only reachable by ignoring `min_inner_size` (880 x 560 against a 660 pt
+    /// combined floor), which `SetWindowPos` does.
+    #[test]
+    fn a_window_too_narrow_for_both_floors_keeps_the_panel_and_shrinks_the_map() {
+        for (w, h) in [(660.0f32, 400.0f32), (584.0, 341.0), (404.0, 131.0)] {
+            let ctx = egui::Context::default();
+            let mut app = seq_app();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(w, h),
+                )),
+                ..Default::default()
+            };
+            for _ in 0..3 {
+                paint(&mut app, &ctx, input.clone());
+            }
+            let p = app.layout.panel_w.expect("the panel reported its width");
+            assert!(
+                p >= App::MIN_PANEL - 1.0 || p >= w - 1.0,
+                "the panel was squeezed to {p} in a {w} x {h} client"
+            );
+            assert!(
+                app.edit.per_row() >= 10,
+                "and the row still holds bases: {}",
+                app.edit.per_row()
+            );
+        }
     }
 }

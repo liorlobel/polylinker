@@ -26,6 +26,17 @@ pub struct Digested {
     /// Parallel to `results`: the methylation verdict at that enzyme's first
     /// site, or `None` if it does not cut or nothing methylates its site.
     verdicts: Vec<Option<SiteEffect>>,
+    /// Parallel to `results`: every match, with the cut it produced.
+    ///
+    /// Kept for the same reason the verdicts are. The sequence view draws the
+    /// recognition site as a bracket and the cut as a chevron, and they are
+    /// different objects: EcoRI is `G^AATTC`, so `CutSite::position` is
+    /// `site_start + 1`. `Digest` carries only the cut positions, and
+    /// `pl-enzymes`' own docstring says `site_start` is *not* recoverable from
+    /// one — the two strands map a match to a cut through different offsets, so
+    /// `position - fst5` is the wrong answer for half the hits. The worker
+    /// already had these in hand and threw them away.
+    sites: Vec<Vec<pl_enzymes::CutSite>>,
 }
 
 /// Digestion is O(sequence x enzymes). Measured at 1,712 ms for all 58 enzymes
@@ -68,6 +79,13 @@ impl DigestState {
         match self {
             DigestState::Done(v) => v.verdicts.get(i).copied().flatten(),
             _ => None,
+        }
+    }
+    /// Every match for `results()[i]`, cut and site both. See [`Digested`].
+    pub fn sites(&self, i: usize) -> &[pl_enzymes::CutSite] {
+        match self {
+            DigestState::Done(v) => v.sites.get(i).map(|v| v.as_slice()).unwrap_or(&[]),
+            _ => &[],
         }
     }
     pub fn is_running(&self) -> bool {
@@ -261,6 +279,7 @@ fn start_digest(mol: &Molecule) -> DigestState {
             // worker stops within one enzyme instead of finishing the genome.
             let mut results = Vec::with_capacity(pl_enzymes::ENZYMES.len());
             let mut verdicts = Vec::with_capacity(pl_enzymes::ENZYMES.len());
+            let mut all_sites = Vec::with_capacity(pl_enzymes::ENZYMES.len());
             for e in pl_enzymes::ENZYMES.iter() {
                 if flag.load(Ordering::Relaxed) {
                     return;
@@ -294,9 +313,14 @@ fn start_digest(mol: &Molecule) -> DigestState {
                     enzyme: e,
                     positions,
                 });
+                all_sites.push(sites);
             }
             // Send failing means the document was replaced; that is fine.
-            let _ = tx.send(Digested { results, verdicts });
+            let _ = tx.send(Digested {
+                results,
+                verdicts,
+                sites: all_sites,
+            });
         })
         .expect("spawn digest worker");
     DigestState::Running { rx, cancel }

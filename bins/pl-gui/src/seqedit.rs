@@ -59,6 +59,151 @@ pub fn fit_per_row(bases_width: f32, advance: f32) -> u64 {
     (fits / 10 * 10).clamp(10, MAX_PER_ROW)
 }
 
+/// The coordinate gutter on the left of every row: the row's first base.
+///
+/// Measured from the molecule, not fixed at the worst case in the corpus. A
+/// constant wide enough for "4,641,652" spends 62 pt on every plasmid that will
+/// never print more than "8,117", and those 21 pt are not free: they come
+/// straight out of the base cells, so a constant gutter pushes the panel width
+/// that first reaches a 60-base row up by the same amount — and that width is
+/// what the map pane gets to keep. See [`App::DEF_PANEL`](crate::App).
+pub fn gutter_w(n: u64, gutter_advance: f32) -> f32 {
+    // Digits plus the thousands separators `fmt_int` inserts, because the
+    // gutter prints "8,117" and not "8117".
+    let digits = if n < 10 { 1 } else { n.ilog10() as usize + 1 };
+    let chars = digits + (digits - 1) / 3;
+    // 6 pt of air between the number and column 0, which is what the painter's
+    // `left_gutter - 6.0` right-alignment assumes, plus 2 pt of slack so a
+    // fractional advance never shaves the leading digit.
+    (chars as f32 * gutter_advance.max(1.0) + 8.0).max(24.0)
+}
+
+/// The row's last coordinate, on the right, when there is width to spare.
+///
+/// Nine monospace cells holds "4,641,652" — the largest coordinate in the
+/// benchmark corpus — plus a little air.
+fn right_gutter_w(advance: f32) -> f32 {
+    9.0 * advance + 8.0
+}
+
+/// Every horizontal number the sequence grid uses, in one place.
+///
+/// Four things derive an x from a column or a column from an x: the painter,
+/// the click hit-test (which the drag-selection also routes through), the caret
+/// rectangle and the selection rectangle. They used to compute it inline, four
+/// times, and they agreed only because the formula was `col * advance` in all
+/// four. The moment anyone groups the bases in tens by inserting a real gap,
+/// three of them are still right and one is wrong, and the error is zero at
+/// column 0 and five whole cells at column 55 — right in a screenshot, wrong at
+/// base 47, wrong by a codon and a half at the end of the row.
+///
+/// So [`RowLayout::col_x`] is the only producer of an x and
+/// [`RowLayout::x_col`] the only consumer, and
+/// `every_column_round_trips_including_the_last_gap_of_a_full_row` asserts they
+/// are exact inverses over the whole legal domain — including `per_row` itself,
+/// which names the gap after the row's last base.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RowLayout {
+    pub per_row: u64,
+    pub left_gutter: f32,
+    /// Zero unless the row has already reached [`MAX_PER_ROW`] and there is
+    /// still width left over. Surplus width buys the gutter; base cells never
+    /// do — "4,641,652" costs eight cells, which would take a 380 pt panel from
+    /// 40 bases per row to 32.
+    pub right_gutter: f32,
+    /// Distance from the band's left edge to column 0.
+    pub bases_x: f32,
+    pub advance: f32,
+}
+
+/// Measure a row from the width the view actually has.
+pub fn row_layout(avail_w: f32, advance: f32, scrollbar: f32, left_gutter: f32) -> RowLayout {
+    let advance = advance.max(1.0);
+    let usable = avail_w - left_gutter - scrollbar;
+    let per_row = fit_per_row(usable, advance);
+    let rg = right_gutter_w(advance);
+    // The right gutter is asked for only once the row is already as wide as it
+    // is ever going to get, so it can never cost a base.
+    let right_gutter = if per_row >= MAX_PER_ROW && usable - per_row as f32 * advance >= rg {
+        rg
+    } else {
+        0.0
+    };
+    RowLayout {
+        per_row,
+        left_gutter,
+        right_gutter,
+        bases_x: left_gutter,
+        advance,
+    }
+}
+
+impl RowLayout {
+    /// The left edge of column `col`, measured from the band's left edge.
+    ///
+    /// `col == per_row` is legal and names the gap after the last base, which is
+    /// where the caret sits at the end of a row.
+    pub fn col_x(&self, col: u64) -> f32 {
+        self.bases_x + col as f32 * self.advance
+    }
+
+    /// The column nearest `dx`, measured from **column 0**, not from the band.
+    ///
+    /// Clamped to `0..=per_row`: a click in the empty space that appears to the
+    /// right of a full row at wide panel settings places the caret at the
+    /// end-of-row gap, the same as clicking past the end of a line in any text
+    /// editor. It must never return `per_row + 1`.
+    pub fn x_col(&self, dx: f32) -> u64 {
+        ((dx / self.advance).round() as i64).clamp(0, self.per_row as i64) as u64
+    }
+
+    /// The **cell** `dx` is inside, or `None` if it is not inside one.
+    ///
+    /// A different question from [`x_col`](Self::x_col) and it must stay a
+    /// different function. A caret is a gap, so it ROUNDS to the nearer
+    /// boundary — that is what makes clicking near the right of a glyph put the
+    /// caret after it, the way every text editor behaves. A pointer *reading* a
+    /// base is asking which cell it is over, which is a FLOOR into that cell.
+    ///
+    /// Sharing one mapping between the two was wrong over the right half of
+    /// every cell: hovering the right of base 585's glyph — visibly under the
+    /// `pSC101 ori` ribbon — named base 586 and reported no feature, and at the
+    /// last column of a row it named the first base of the *next* row. The
+    /// hover line is the non-colour channel for every ribbon above it, so it
+    /// contradicted the drawing exactly where a boundary was being read.
+    ///
+    /// `None` rather than a clamp, for the same reason: past the last cell
+    /// there is no base under the pointer, and answering with the nearest one
+    /// is the same lie in a different place.
+    pub fn x_base(&self, dx: f32) -> Option<u64> {
+        if dx < 0.0 {
+            return None;
+        }
+        let c = (dx / self.advance).floor();
+        (c < self.per_row as f32).then_some(c as u64)
+    }
+
+    /// Width of the cells themselves.
+    pub fn band_w(&self) -> f32 {
+        self.per_row as f32 * self.advance
+    }
+}
+
+/// The row `base` lands on at this row width.
+///
+/// The scroll is restored through this rather than kept in pixels because
+/// `ScrollArea::show_rows` maps a pixel offset to a row index and then
+/// multiplies by `per_row`: the offset does not change when `per_row` does, so
+/// the base at the top of the viewport jumps by the ratio. Measured on the
+/// user's 8,117 bp file: scrolled to base 4,000 at 40 per row is offset 1,330;
+/// the same offset at 60 per row is base 6,000. The view jumps 2,000 bases
+/// forward *while the user is dragging a splitter*, and it is not reversible,
+/// because the content shrinks from 2,700 pt to 1,809 and an offset near the
+/// bottom is clamped on the way out and not restored on the way back.
+pub fn row_of(base: u64, per_row: u64) -> u64 {
+    base / per_row.max(1)
+}
+
 /// A position *between* bases. See the module docs.
 pub type Caret = u64;
 
@@ -332,6 +477,15 @@ impl Run {
     /// Where the caret sits with this run applied.
     pub fn caret_after(&self) -> Caret {
         self.start + self.inserted.len() as u64
+    }
+
+    /// The three numbers the annotation preview needs, and nothing else.
+    pub fn span(&self) -> crate::annot::RunSpan {
+        crate::annot::RunSpan {
+            start: self.start,
+            removed: self.removed,
+            inserted: self.inserted.len() as u64,
+        }
     }
 
     pub fn is_full(&self) -> bool {
