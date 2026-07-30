@@ -693,3 +693,435 @@ fn a_feature_long_enough_for_a_full_arrowhead_keeps_one() {
     assert!((base - (a1 - 8.0 / mid)).abs() < 1e-12, "{base}");
     assert!(base > a0 && base < a1);
 }
+
+// ---------------------------------------------------------------------------
+// the label ring
+// ---------------------------------------------------------------------------
+
+/// The user's own plasmid, features only: the table its Features tab lists.
+///
+/// `mol.name` is left empty on purpose. That is what every SnapGene file gives
+/// this function, and it is the input that captioned the exported figure
+/// `unnamed`.
+/// pKoV's 22 unique cutters, including the three co-located pairs that decide
+/// whether folding is right: SalI/XbaI 6 bp apart, SphI/NsiI and XmaI/SmaI 2 bp.
+fn pkov_sites() -> Vec<(String, u64)> {
+    [
+        ("AflII", 271u64),
+        ("SpeI", 562),
+        ("NdeI", 1_682),
+        ("HindIII", 2_059),
+        ("SnaBI", 2_648),
+        ("BsrGI", 2_713),
+        ("SalI", 4_413),
+        ("XbaI", 4_419),
+        ("SphI", 4_758),
+        ("NsiI", 4_760),
+        ("BglII", 4_886),
+        ("SacI", 5_171),
+        ("PmeI", 5_345),
+        ("PstI", 5_464),
+        ("BamHI", 5_588),
+        ("MluI", 5_932),
+        ("BclI", 6_561),
+        ("XmaI", 6_917),
+        ("SmaI", 6_919),
+        ("ScaI", 7_117),
+        ("EcoRI", 7_530),
+        ("BbsI", 7_963),
+    ]
+    .iter()
+    .map(|(n, p)| (n.to_string(), *p))
+    .collect()
+}
+
+fn pkov() -> Molecule {
+    let mut mol = plasmid(8_117, true);
+    mol.name.clear();
+    for &(name, start, end, rev) in &[
+        ("cat promoter", 7_748u64, 7_850u64, true),
+        ("CmR", 7_088, 7_747, true),
+        ("sacB promoter", 3_398, 3_843, true),
+        ("SacB", 1_976, 3_397, true),
+        ("f1 ori", 3_945, 4_399, true),
+        ("pSC101 ori", 363, 585, false),
+        ("Rep101(Ts)", 633, 1_583, false),
+        ("decR", 5_423, 5_878, false),
+        ("decR his", 5_423, 5_905, false),
+    ] {
+        let mut f = feat(name, "misc_feature", start, end);
+        f.strand = if rev {
+            pl_core::Strand::Reverse
+        } else {
+            pl_core::Strand::Forward
+        };
+        mol.features.push(f);
+    }
+    mol
+}
+
+/// Every leader in a scene, as `(first point, last point)`.
+///
+/// A leader is the only thing drawn with `ink::LEADER_STROKE`, which is what
+/// makes it findable without reaching into the layout.
+fn leaders(scene: &Scene) -> Vec<((f64, f64), (f64, f64))> {
+    scene
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Path { segs, stroke, .. } if stroke.as_deref() == Some(ink::LEADER_STROKE) => {
+                let pts: Vec<(f64, f64)> = segs
+                    .iter()
+                    .map(|s| match *s {
+                        Seg::Move(x, y) | Seg::Line(x, y) => (x, y),
+                        Seg::Arc { cx, cy, r, to, .. } => scene::on_circle(cx, cy, r, to),
+                        Seg::Close => (f64::NAN, f64::NAN),
+                    })
+                    .collect();
+                Some((*pts.first()?, *pts.last()?))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// PROVEN TO FAIL at e087e27, on the leader length.
+///
+/// One column per side pins a label's `x` to `cx ± (ro + 26)` whatever its
+/// angle, so the leader has to run `26 + ro(1 - |sin a|)` horizontally to reach
+/// it: `f1 ori`, at 185 degrees on this plasmid, got a 241 pt leader across a
+/// 242 pt radius — 0.995 of it, at a degree and a half off horizontal. That is
+/// the "long, near-horizontal leader lines that are hard to trace back to their
+/// tick" the user reported, and it is the same defect on the screen and in the
+/// figure because both had a fixed two-column layout.
+///
+/// Written against `Options::default()` and features alone so it compiles at
+/// e087e27, where `Options` has no `sites` and no `title`.
+#[test]
+fn no_leader_runs_most_of_the_ring_radius() {
+    let (scene, report) = scene(&pkov(), Options::default());
+    assert!(report.labels_placed >= 8, "{report:?}");
+    let ls = leaders(&scene);
+    assert_eq!(ls.len(), report.labels_placed, "one leader per label");
+
+    // The ring, taken from the scene rather than recomputed: the backbone is the
+    // one full-turn arc drawn in the backbone's own ink.
+    let cx = 720.0 / 2.0;
+    let cy = 720.0 / 2.0;
+    let ro = ls
+        .iter()
+        .map(|(tip, _)| ((tip.0 - cx).powi(2) + (tip.1 - cy).powi(2)).sqrt())
+        .fold(0.0_f64, f64::max);
+    assert!(ro > 100.0, "the ring came out at {ro}");
+
+    for (tip, end) in &ls {
+        let run = ((end.0 - tip.0).powi(2) + (end.1 - tip.1).powi(2)).sqrt();
+        assert!(
+            run <= 0.6 * ro,
+            "a leader runs {run:.1} pt across a {ro:.1} pt radius; \
+             a reader cannot follow that back to its tick"
+        );
+    }
+}
+
+/// The leader bound as a property over shapes, not one fixture.
+///
+/// `no_leader_runs_most_of_the_ring_radius` above runs one molecule at
+/// `Options::default()`, where `sites` is empty — so it exercises feature labels
+/// on pKoV and nothing else, and the headline "-43% on the longest leader" it
+/// guards was measured on that same file. It did not generalise: with a
+/// full-canvas twelve-o'clock row, pGhost9ISS1's worst leader was 290 pt and
+/// NC_017320's 243, against the 241 pt on pKoV that started this. Both are files
+/// where a cluster of sites sits near the origin, which is the shape this covers.
+///
+/// The bound here is on the ROW runs specifically, because that is what
+/// [`ring::row_span`] fixed and what a fixture-of-one could not see: a row member's
+/// tick is inside `tick_r * sin(30 deg)` of centre by construction, so a row that
+/// reaches the canvas edge reproduces exactly the near-horizontal run the two
+/// columns produced.
+#[test]
+fn a_row_leader_is_bounded_whatever_the_molecule() {
+    let named = |list: &[(&str, u64)]| -> Vec<(String, u64)> {
+        list.iter().map(|(n, p)| (n.to_string(), *p)).collect()
+    };
+    // Three shapes, all real: sites spread evenly; a polylinker straddling the
+    // origin (pGhost9ISS1's eight sites within 30 bp of base 1); and a dense
+    // cluster away from the origin (pET28a's twelve MCS cutters).
+    let corpus: Vec<(&str, Vec<(String, u64)>)> = vec![
+        (
+            "spread",
+            named(&[
+                ("AflII", 271),
+                ("NdeI", 1_682),
+                ("SnaBI", 2_648),
+                ("SalI", 4_413),
+                ("BglII", 4_886),
+                ("BamHI", 5_588),
+                ("BclI", 6_561),
+                ("EcoRI", 7_530),
+            ]),
+        ),
+        (
+            "polylinker across the origin",
+            named(&[
+                ("EcoRI", 4_573),
+                ("PstI", 4_583),
+                ("XmaI", 4_585),
+                ("SmaI", 4_587),
+                ("SpeI", 4_597),
+                ("EagI", 8),
+                ("NotI", 8),
+                ("SacII", 20),
+            ]),
+        ),
+        (
+            "a dense cluster off the origin",
+            named(&[
+                ("NcoI", 2_000),
+                ("EcoRI", 2_010),
+                ("SacI", 2_020),
+                ("KpnI", 2_030),
+                ("XmaI", 2_040),
+                ("SmaI", 2_050),
+                ("BamHI", 2_060),
+                ("XbaI", 2_070),
+                ("SalI", 2_080),
+                ("PstI", 2_090),
+                ("SbfI", 2_100),
+                ("HindIII", 2_110),
+            ]),
+        ),
+    ];
+    for (why, sites) in corpus {
+        let opts = Options {
+            sites,
+            ..Default::default()
+        };
+        let (sc, report) = scene(&pkov(), opts);
+        assert!(report.labels_placed >= 12, "{why}: {report:?}");
+        let (cx, cy) = (360.0, 360.0);
+        let ls = leaders(&sc);
+        let ro = ls
+            .iter()
+            .map(|(tip, _)| ((tip.0 - cx).powi(2) + (tip.1 - cy).powi(2)).sqrt())
+            .fold(0.0_f64, f64::max);
+        for (tip, end) in &ls {
+            // A row leader is the one whose last leg is vertical-ish; a column's
+            // is horizontal-ish. Bound the horizontal run of a row label, which
+            // is what the unbounded row gave away.
+            let dx = (end.0 - tip.0).abs();
+            let dy = (end.1 - tip.1).abs();
+            if dy > dx {
+                assert!(
+                    dx <= ro,
+                    "{why}: a row leader runs {dx:.1} pt sideways across a {ro:.1} pt radius"
+                );
+            }
+            let run = (dx * dx + dy * dy).sqrt();
+            assert!(
+                run <= 1.35 * ro,
+                "{why}: a leader runs {run:.1} pt across a {ro:.1} pt radius"
+            );
+        }
+    }
+}
+
+/// The two-pass note is exact, not approximate.
+///
+/// `bins/pl` and `bins/pl-gui` both build the disclosure line by rendering once
+/// to get the counts and again to draw them. That is only honest if adding the
+/// line cannot change what it is counting, and it cannot: `note` reaches
+/// `centre_room` -> `keep_clear` -> the ruler's radius and nothing there feeds
+/// back into the reserve, the geometry or the packing. Asserted rather than left
+/// as a claim in a comment, because a comment is where that claim was.
+#[test]
+fn the_note_does_not_change_what_it_counts() {
+    let sites: Vec<(String, u64)> = pkov_sites();
+    let base = Options {
+        sites: sites.clone(),
+        title: Some("pKoV with His decR".into()),
+        ..Default::default()
+    };
+    let (_, first) = scene(&pkov(), base.clone());
+    let told = ring::Disclosure {
+        cutters: 40,
+        labelled: first.sites_named,
+        dual: 12,
+        multi: 6,
+        hidden: first.sites_dropped,
+        shortened: first.sites_shortened,
+    };
+    assert!(told.closes(), "{told:?}");
+    let (sc, second) = scene(
+        &pkov(),
+        Options {
+            note: Some(told),
+            ..base
+        },
+    );
+    assert_eq!(first.sites_named, second.sites_named);
+    assert_eq!(first.sites_dropped, second.sites_dropped);
+    assert_eq!(first.sites_shortened, second.sites_shortened);
+    assert_eq!(first.labels_hidden, second.labels_hidden);
+    assert_eq!(first.labels_truncated, second.labels_truncated);
+    // And the line is actually in the figure, which is the point of it.
+    assert!(
+        sc.items.iter().any(
+            |i| matches!(i, Item::Text { text, .. } if text.contains("cutters") && text.contains("dual"))
+        ),
+        "the figure does not say what it is not showing"
+    );
+}
+
+/// The exported figure states its own filter, or says nothing at all — never a
+/// count with an ellipsis through it.
+#[test]
+fn the_figure_narrows_its_disclosure_by_choosing_a_form_not_by_cutting_one() {
+    let told = ring::Disclosure {
+        cutters: 40,
+        labelled: 22,
+        dual: 12,
+        multi: 6,
+        hidden: 0,
+        shortened: 16,
+    };
+    let mut seen = 0;
+    for w in [720.0, 520.0, 420.0, 360.0, 300.0, 260.0] {
+        let (sc, _) = scene(
+            &pkov(),
+            Options {
+                width: w,
+                height: w,
+                note: Some(told),
+                sites: pkov_sites(),
+                ..Default::default()
+            },
+        );
+        let lines: Vec<&String> = sc
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Text { text, .. } if text.contains('/') || text.contains("cutters") => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        for l in &lines {
+            assert!(
+                !l.contains("..."),
+                "at {w}: the disclosure line was cut to {l:?}, which puts an ellipsis \
+                 through a count"
+            );
+        }
+        if lines.iter().any(|l| l.contains("40")) {
+            seen += 1;
+        }
+    }
+    assert!(
+        seen >= 4,
+        "the line was dropped at {} of six sizes",
+        6 - seen
+    );
+}
+
+/// COMPILE-ONLY at e087e27: `Options::sites` does not exist there, which is the
+/// defect — `pl-draw` held no reference to an enzyme anywhere, so every exported
+/// figure of this plasmid had no restriction sites on it at all. The behaviour is
+/// proven at e087e27 by the `pl export` test in `bins/pl/tests/cli.rs`, which
+/// runs the shipped binary and finds no enzyme in the SVG.
+#[test]
+fn a_folded_site_label_never_costs_the_ring_its_radius() {
+    let named = |list: &[(&str, u64)]| -> Vec<(String, u64)> {
+        list.iter().map(|(n, p)| (n.to_string(), *p)).collect()
+    };
+    // The same list twice, once with a co-located pair in it and once without.
+    // XmaI and SmaI cut two bases apart, so they fold; `HindIII  2,059` is the
+    // widest single label in both. The radius must therefore be the same, and
+    // under the rule this replaces it was not: the folded label
+    // `XmaI/SmaI  6,917-6,919` is eight characters wider than HindIII and took
+    // 53 pt of radius off the ring to fit itself in.
+    let sites = named(&[("XmaI", 6_917), ("SmaI", 6_919), ("HindIII", 2_059)]);
+    let bare = Options {
+        sites: named(&[("XmaI", 6_917), ("HindIII", 2_059)]),
+        ..Default::default()
+    };
+    let with = Options {
+        sites: sites.clone(),
+        ..Default::default()
+    };
+    let radius_of = |o: Options| -> f64 {
+        let (s, _) = scene(&pkov(), o);
+        s.items
+            .iter()
+            .find_map(|it| match *it {
+                Item::Circle { r, ref stroke, .. } if stroke == ink::BACKBONE_STROKE => Some(r),
+                _ => None,
+            })
+            .expect("the backbone was drawn")
+    };
+    let (r0, r1) = (radius_of(bare), radius_of(with));
+    assert!(
+        (r0 - r1).abs() < 1.0,
+        "folding a co-located pair cost the ring {:.1} pt of radius",
+        r0 - r1
+    );
+
+    // And both enzymes are still named, at both coordinates.
+    let (s, _) = scene(
+        &pkov(),
+        Options {
+            sites,
+            ..Default::default()
+        },
+    );
+    let texts: Vec<&str> = s
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let joined = texts.join(" | ");
+    assert!(joined.contains("XmaI"), "{joined}");
+    assert!(joined.contains("SmaI"), "{joined}");
+    assert!(joined.contains("6,917"), "{joined}");
+    assert!(joined.contains("6,919"), "{joined}");
+}
+
+/// COMPILE-ONLY at e087e27: `Options::title` does not exist there. The behaviour
+/// is proven at e087e27 by `bins/pl/tests/cli.rs`, where the shipped `pl export`
+/// writes `<title>unnamed</title>` for this molecule.
+#[test]
+fn a_real_molecule_name_beats_the_filename_and_the_filename_beats_unnamed() {
+    let bare = pkov();
+    assert!(bare.name.is_empty(), "the premise: SnapGene has no name");
+
+    let title_of = |mol: &Molecule, given: Option<&str>| -> String {
+        let (s, _) = scene(
+            mol,
+            Options {
+                title: given.map(str::to_string),
+                ..Default::default()
+            },
+        );
+        s.title.clone()
+    };
+
+    assert_eq!(title_of(&bare, None), "unnamed", "nothing to go on");
+    assert_eq!(
+        title_of(&bare, Some("pKoV with His decR")),
+        "pKoV with His decR"
+    );
+    // Blank is nothing to go on either, not a name made of spaces.
+    assert_eq!(title_of(&bare, Some("   ")), "unnamed");
+
+    let mut named = pkov();
+    named.name = "SYNPUC19CV".into();
+    assert_eq!(
+        title_of(&named, Some("pKoV with His decR")),
+        "SYNPUC19CV",
+        "a LOCUS name is a real name and a filename is a guess"
+    );
+}

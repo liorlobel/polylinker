@@ -44,9 +44,15 @@ pub mod eps;
 mod labels;
 pub mod page;
 pub mod pdf;
+pub mod ring;
 pub mod scene;
 pub mod trace;
 pub use labels::{isotonic, place_column, LabelBox, Placement};
+pub use ring::{
+    bases_per_arc, centre_room, inside_of, inward_radius, keep_clear_for, label_room, merge_sites,
+    place_ring, radius, reserve_for, side_of, Disclosure, Inside, Reserve, Ring, RingGeom,
+    RingLabel, RingPlacement, Side, Site,
+};
 pub use scene::{Anchor, Item, Scene, Seg};
 
 #[cfg(test)]
@@ -55,7 +61,11 @@ mod tests;
 const TAU: f64 = std::f64::consts::TAU;
 
 /// Rendering knobs. Defaults produce a figure-sized map.
-#[derive(Debug, Clone, Copy)]
+///
+/// No longer `Copy`: [`Options::title`] and [`Options::sites`] carry owned
+/// strings, and the alternative — a lifetime on every call site — buys nothing
+/// for a struct that is built once per file.
+#[derive(Debug, Clone)]
 pub struct Options {
     pub width: f64,
     pub height: f64,
@@ -66,6 +76,50 @@ pub struct Options {
     /// Below this many degrees a feature is a tick, not an arrow — an
     /// arrowhead smaller than a pixel reads as dirt on the figure.
     pub min_feature_degrees: f64,
+    /// What to call the molecule when the file did not name it.
+    ///
+    /// The `.dna` container carries no molecule name at all, so `mol.name` is
+    /// empty for every SnapGene file and the centre caption fell through to the
+    /// literal string `"unnamed"` — in the SVG `<title>` as well. The map on
+    /// screen said "pKoV with His decR.dna" and the figure that goes into the
+    /// paper said "unnamed", and neither `bins/pl` nor `bins/pl-gui` passed the
+    /// filename in for it to say anything else.
+    ///
+    /// `mol.name` still wins when there is one: a GenBank LOCUS name is a real
+    /// name and a filename is a guess.
+    pub title: Option<String>,
+    /// Restriction sites to label, as `(enzyme, cut position)`.
+    ///
+    /// Pairs rather than a `Digest`, so this crate stays enzyme-agnostic and
+    /// needs no dependency on `pl-enzymes` to be tested. Empty by default,
+    /// which is what every exported figure used to be: `pl-draw` has no
+    /// reference to an enzyme anywhere, so "Map SVG…" on a plasmid the user had
+    /// just read 22 unique cutters off produced a map with **no restriction
+    /// sites on it at all**.
+    pub sites: Vec<(String, u64)>,
+    /// One line under the bp count saying what the figure is *not* showing.
+    ///
+    /// The desktop map says `22 of 40 cutters labelled · 12 dual, 6 multi not
+    /// drawn`; the figure said nothing at all, in the SVG or on stderr, and
+    /// [`Options::sites`] defaults to unique cutters — so every default export
+    /// dropped 18 of the user's 40 enzymes silently. `docs/PLAN.md` item 33 calls
+    /// a silent filter "the one documented case of this software category costing
+    /// a user a month of bench time", and the figure is the artefact that leaves
+    /// the machine: on screen the Enzymes tab is one click away, on a printed
+    /// page nothing is.
+    ///
+    /// The counts and not a string, so this crate picks the widest of
+    /// [`ring::Disclosure`]'s three forms that the ring can hold, and drops the
+    /// line when none of them fits — a sentence wider than the ring is written
+    /// across the backbone and the feature bands, which is worse than not
+    /// written. **Never shortened with an ellipsis**: `22 of 40 cutters labelled
+    /// · 12 du...` puts a cut through a count, and half a count is a number a
+    /// reader would act on. Picking a form is the only honest way to narrow it.
+    ///
+    /// Passing the counts rather than the sentence also means the wording and the
+    /// arithmetic live in one place for both painters, which is the divergence
+    /// this whole layer exists to close.
+    pub note: Option<ring::Disclosure>,
 }
 
 impl Default for Options {
@@ -77,6 +131,9 @@ impl Default for Options {
             font_size: 12.0,
             ruler: true,
             min_feature_degrees: 1.2,
+            title: None,
+            sites: Vec::new(),
+            note: None,
         }
     }
 }
@@ -152,6 +209,29 @@ pub struct Report {
     /// `labels_hidden`: there the whole name is one hover away, which is not
     /// true of a printed page.
     pub labels_truncated: Vec<String>,
+    /// How many of [`Options::sites`] ended up named on the figure.
+    ///
+    /// **Enzymes, not labels.** A folded tick carries several names in one label,
+    /// so `labels_placed` understates what the reader can see and the difference
+    /// is exactly the number a disclosure line gets wrong: on pET28a the map said
+    /// `14 of 31 cutters labelled` when 23 were, and `14 + 7 + 1` visibly failed
+    /// to reach the 31 it claimed. See [`ring::Disclosure`], which will not
+    /// compose a line whose arithmetic does not close.
+    pub sites_named: usize,
+    /// How many of [`Options::sites`] the ring could not fit, by the same count.
+    pub sites_dropped: usize,
+    /// How many site labels were drawn shortened.
+    pub sites_shortened: usize,
+    /// The centre caption was too wide for the ring and was drawn cut short.
+    ///
+    /// Its own field rather than an entry in [`Report::labels_truncated`], which
+    /// is a list of *label* names: a caption is not a label, and folding the two
+    /// together makes "no name was shortened" unaskable. Reported because a
+    /// truncated molecule name on a printed figure is the same class of wrongness
+    /// as a truncated enzyme name — `NC_000913.3 Escherichia coli str. K-12...`
+    /// is at least recognisable, and `Scene::title` and the SVG `<title>` still
+    /// carry the whole string, but a reader of the page has neither.
+    pub title_truncated: bool,
 }
 
 /// Round to two decimals. Float noise triples an SVG's size and destroys
@@ -346,6 +426,64 @@ fn mid_base(parts: &[(u64, u64)], span: u64) -> u64 {
     parts.first().map_or(1, |p| p.0)
 }
 
+/// Half-width of the twelve- and six-o'clock label rows, in degrees.
+///
+/// See [`ring::RingGeom::row_half`] for why 30 and not 40.
+const ROW_HALF_DEGREES: f64 = 30.0;
+
+/// Everything between the backbone and the first glyph of a side-column label.
+///
+/// The leader leaves the ring at `ro + 2` and the text starts at
+/// `ro + LEADER_GAP`, so 34 is the sum of that gap and the small clearance the
+/// canvas edge keeps. Held as a constant because `ring::reserve_for` takes it
+/// as an argument and the number is the difference between the reserve and the
+/// room — the arithmetic `map.rs` used to leave out entirely.
+const LABEL_MARGIN: f64 = 34.0;
+
+/// Distance from the ring's outer radius to a label's own anchor.
+const LEADER_GAP: f64 = 26.0;
+
+/// The stroke of the mark a cut site puts on the ring.
+///
+/// Also the threshold two sites are folded into one tick at, via
+/// [`ring::bases_per_arc`]: below this the two marks are the same mark.
+const SITE_TICK_STROKE: f64 = 1.25;
+
+/// A cut site's resistance to being dropped when a run overflows.
+///
+/// Above **any** feature weight, which is `1 + log10(1 + span)` and so cannot
+/// exceed 1 + log10(u64::MAX) = 20.3 even for a hostile file. Deliberately not a
+/// nudge: a cut coordinate is what a reader plans a digest from, and a feature
+/// name is a description of something the map already draws as a coloured arc
+/// with its own `<title>`. On stock pET28a the 137-character
+/// `Multiple Cloning Site (MCS); contains unique sites for NcoI, EcoRI, ...`
+/// outweighed all nine of the enzyme labels it was describing and evicted every
+/// one of them, so the figure carried a note about a polylinker and no polylinker.
+///
+/// It resists *displacement* by the same factor, which is also what you want: a
+/// site label pinned beside its own tick and a feature label pushed a line along
+/// is the right way round.
+const SITE_WEIGHT: f64 = 24.0;
+
+/// One thing wanting a label on the ring: a feature, or a cut site.
+#[derive(Debug, Clone)]
+struct Label {
+    text: String,
+    angle: f64,
+    weight: f64,
+    /// A restriction site rather than a feature. Sites also get a tick on the
+    /// ring, because a leader alone points at a place and a tick says a cut
+    /// happens there.
+    site: bool,
+    /// How many enzymes this one label names — more than one when a tick folded.
+    ///
+    /// Carried so [`Report::sites_named`] can count enzymes rather than labels.
+    /// A disclosure line built from the label count understates itself by exactly
+    /// this excess and its arithmetic stops closing, which reads as enzymes having
+    /// gone missing.
+    names: usize,
+}
+
 /// How wide a label is *assumed* to be when the ring reserves room for it.
 ///
 /// The estimate, not Helvetica's real advances, and it is used for the radius
@@ -396,9 +534,22 @@ fn drawn_width(name: &str, font_size: f64) -> f64 {
 ///
 /// The ellipsis is three ASCII full stops, not U+2026, because three dots are
 /// three dots in every encoding and the real character is not.
+///
+/// A cut-site label is `EcoRI  7,530` — a name, two spaces, a coordinate — and
+/// the coordinate goes **whole or not at all**. Cutting into it produces
+/// `EcoRI  7,5...`, which reads as a cut position and is not one, and a wrong
+/// coordinate on a plasmid map is the failure this whole pass is about. A name
+/// with no coordinate beside it claims nothing; the caller counts it as
+/// shortened either way.
 fn fit_label(name: &str, room: f64, font_size: f64) -> Option<String> {
     if drawn_width(name, font_size) <= room {
         return Some(name.to_string());
+    }
+    // Two spaces, so an ordinary feature name with one space in it is untouched.
+    if let Some((head, _)) = name.rsplit_once("  ") {
+        if !head.is_empty() && drawn_width(head, font_size) <= room {
+            return Some(head.to_string());
+        }
     }
     const ELLIPSIS: &str = "...";
     let mut kept = String::new();
@@ -429,20 +580,147 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     let len = mol.span().max(1);
     let circular = mol.topology.is_circular();
     let (cx, cy) = (opts.width / 2.0, opts.height / 2.0);
+    let pane_min = opts.width.min(opts.height);
+    let row_half = ROW_HALF_DEGREES.to_radians();
 
-    // Reserve room for the widest label so the ring is as large as it can be
-    // without labels running off the canvas.
-    let widest = mol
-        .features
-        .iter()
-        .map(|f| label_width(&f.name, opts.font_size))
-        .fold(0.0_f64, f64::max);
-    let margin = (widest + 34.0).min(opts.width.min(opts.height) * 0.3);
-    let ro = (opts.width.min(opts.height) / 2.0 - margin).max(40.0);
+    // Resolve every feature to the parts a painter can draw, *before* the ring
+    // knows how big it is. The radius depends on which labels land in a side
+    // column, and that depends on their angles, so the angles have to exist
+    // first. This loop used to sit below the radius and push labels as it went.
+    struct Drawn {
+        name: String,
+        parts: Vec<(u64, u64)>,
+        colour: String,
+        degrees: f64,
+        arrow_on: isize,
+        strand: Strand,
+    }
+    let mut drawn: Vec<Drawn> = Vec::new();
+    let mut anchors: Vec<Label> = Vec::new();
+
+    for f in &mol.features {
+        let mut parts: Vec<(u64, u64)> = Vec::with_capacity(f.segments.len());
+        // Counted per segment, not over the whole feature. `ranges` returns
+        // nothing for a segment lying wholly past the end, and a feature with
+        // one such segment and one good one still has a non-empty `parts` — so
+        // the all-or-nothing check below never fired for it and half of
+        // `CDS join(100..200,5000..6000)` on a 1000 bp plasmid went out as a
+        // whole 101 bp `orfX` with nothing said.
+        let mut lost_segments = 0usize;
+        for s in &f.segments {
+            let r = ranges(s.start, s.end, len, circular);
+            if r.is_empty() {
+                lost_segments += 1;
+            }
+            parts.extend(r);
+        }
+        if parts.is_empty() {
+            report.malformed.push(f.name.clone());
+            continue;
+        }
+        if lost_segments > 0 {
+            report.partly_drawn.push(f.name.clone());
+        }
+        let span: u64 = parts.iter().map(|(a, b)| b - a + 1).sum();
+        let mid = mid_base(&parts, span);
+        anchors.push(Label {
+            text: f.name.clone(),
+            angle: angle(mid, len),
+            weight: 1.0 + (1.0 + span as f64).log10(),
+            site: false,
+            names: 1,
+        });
+        drawn.push(Drawn {
+            name: f.name.clone(),
+            colour: safe_color(f.color(), colour_for(&f.kind)),
+            degrees: (span as f64 / len as f64) * 360.0,
+            arrow_on: match f.strand {
+                Strand::Forward => parts.len() as isize - 1,
+                Strand::Reverse => 0,
+                _ => -1,
+            },
+            strand: f.strand,
+            parts,
+        });
+    }
+
+    // Restriction sites, one label each to begin with. The radius is decided
+    // over these, before anything is folded together, because merging may not
+    // buy itself room: an honest merged label carries every name and the range —
+    // see [`ring::Site::label`] for why it must — so it is always wider than
+    // either name alone, and sizing the ring to hold `XmaI/SmaI  6,917-6,919`
+    // costs a quarter of the radius to gain tidiness.
+    let site_label = |name: &str, pos: u64| Label {
+        text: format!("{name}  {}", commas(pos)),
+        angle: angle(pos, len),
+        weight: SITE_WEIGHT,
+        site: true,
+        names: 1,
+    };
+    let widest_of = |labels: &[Label]| -> f64 {
+        labels
+            .iter()
+            .filter(|l| matches!(ring::side_of(l.angle, row_half), Side::Left | Side::Right))
+            .map(|l| label_width(&l.text, opts.font_size))
+            .fold(0.0_f64, f64::max)
+    };
+    let mut unmerged: Vec<Label> = anchors.clone();
+    unmerged.extend(opts.sites.iter().map(|(n, p)| site_label(n, *p)));
+    // The row strip is what the twelve- and six-o'clock runs need vertically:
+    // the leader gap, one line, and the canvas padding twice. Charged to the
+    // height, while the reserve is charged to the width — see [`ring::radius`]
+    // for the 26% of radius the single-axis rule gave away on a wide figure.
+    let row_strip = LEADER_GAP + opts.font_size + 3.0 + 2.0 * 8.0;
+    let ro = ring::radius(
+        opts.width,
+        opts.height,
+        ring::reserve_for(widest_of(&unmerged), LABEL_MARGIN, pane_min).reserve,
+        row_strip,
+    );
+
+    // Now fold the sites that share a tick — but only where the honest label
+    // fits the room the individual names had already earned. Where it does not,
+    // the sites stay separate and the packer moves them one line apart. Untidy
+    // and true: the alternative is an ellipsis through a merged label, which can
+    // drop a whole enzyme name, and that is the failure `Site::label` exists to
+    // prevent.
+    //
+    // The room is `cx - (tick_r + LEADER_GAP)` with the same `tick_r` the labels
+    // are placed with, not `ro`. Reading it off `ro` left the two 2 units apart,
+    // which is enough for a folded label to pass this check and then be
+    // shortened by `fit_label` — and shortening a folded label is how a whole
+    // enzyme name disappears from a figure that still shows its slash.
+    let site_room = cx - (ro + 2.0 + LEADER_GAP);
+    if !opts.sites.is_empty() {
+        // The tick's own stroke, in bases. Two cuts closer than the mark that
+        // draws them ARE one mark; two cuts a label-height apart are two marks
+        // whose names collide, which is the packer's problem and not a fact
+        // about the molecule.
+        let within = ring::bases_per_arc(SITE_TICK_STROKE, ro + 2.0, len);
+        for s in ring::merge_sites(&opts.sites, within) {
+            let folded = s.label();
+            if s.names.len() == 1 || label_width(&folded, opts.font_size) <= site_room {
+                anchors.push(Label {
+                    text: folded,
+                    angle: angle(s.anchor(), len),
+                    weight: SITE_WEIGHT,
+                    site: true,
+                    names: s.names.len(),
+                });
+            } else {
+                anchors.extend(
+                    s.names
+                        .iter()
+                        .zip(&s.positions)
+                        .map(|(n, p)| site_label(n, *p)),
+                );
+            }
+        }
+    }
     // What is left for a label once the ring has taken its radius, on either
-    // side: a label runs outward from `cx ± (ro + 26)`, so both columns have the
-    // same room, and a label wider than this is cropped by the viewBox, the
-    // /MediaBox and the %%BoundingBox alike.
+    // side, is `cx - (ro + LEADER_GAP)` — computed at each use site below,
+    // because the twelve- and six-o'clock rows are limited by the canvas width
+    // instead and a single `room` cannot describe both.
     //
     // Uncapped the reservation closes with 8 units to spare **in the estimate's
     // units** — and that is not the unit the figure is cropped in. `label_width`
@@ -451,11 +729,104 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     // comment used to end at "8 units to spare whatever the name", which was the
     // reason nobody looked: `pCMV-WPRE` had 8 units of estimated slack and ran
     // 5.93 pt off the page. `fit_label` therefore decides in `drawn_width`, so
-    // the cap and the floor below are no longer the only ways to overflow the
+    // the cap and the floor are no longer the only ways to overflow the
     // reservation — they are just the ways that overflow it by a lot.
-    let room = cx - (ro + 26.0);
     let ri = ro - opts.ring_width;
     let mid_r = (ro + ri) / 2.0;
+
+    // --- labels, placed exactly, in an L-shaped ring ---
+    //
+    // Two columns and two rows rather than two columns. A label within 30
+    // degrees of twelve or six o'clock leaves the side column for a horizontal
+    // run above or below the ring, which is what stops its leader running most
+    // of the radius at a degree and a half off horizontal. See
+    // [`ring::place_ring`] for the measurements, and [`ring::row_span`] for why
+    // the rows stop at the columns' inner edge.
+    //
+    // Decided here, above the ruler, because the ring's geometry is what bounds
+    // the lines written in the middle and the middle is what the ruler has to be
+    // kept off.
+    let line_h = opts.font_size + 3.0;
+    let pad = 8.0;
+    let geom = RingGeom {
+        cx,
+        cy,
+        tick_r: ro + 2.0,
+        gap: LEADER_GAP,
+        row_half,
+        row_gap: 10.0,
+        left: pad,
+        right: opts.width - pad,
+        top: pad + opts.font_size,
+        bottom: opts.height - pad,
+    };
+
+    // --- what is written in the middle ---
+    //
+    // Cut to the ring before the ruler is placed, never after. `mol.name` first,
+    // because a GenBank LOCUS name is a real name and a filename is a guess;
+    // `"unnamed"` last, because it is not a name at all — it was the centre
+    // caption *and* the SVG `<title>` of every figure ever exported from a `.dna`
+    // file, since the SnapGene container carries no molecule name and nothing
+    // passed the filename in.
+    let title = if !mol.name.is_empty() {
+        mol.name.clone()
+    } else if let Some(t) = opts
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        t.to_string()
+    } else {
+        "unnamed".to_string()
+    };
+    let ruler_size = opts.font_size * 0.72;
+    // The widest number the ruler will draw. `commas(len)` is an upper bound on
+    // every tick's text, because a tick position is at most the length.
+    let widest_number = drawn_width(&commas(len), ruler_size);
+    let centre_room = ring::centre_room(ri, 0.0, 0.0, ruler_size, widest_number);
+    // Elided, not dropped: this is the line with a `<title>` behind it carrying
+    // the whole string, and `Scene::title` below keeps it whole whatever the
+    // drawn form. A 69-character filename off NCBI typesets about 517 pt wide,
+    // and deriving the ruler's clearance from *that* is what cost a 4.6 Mb genome
+    // its entire scale.
+    let title_drawn = fit_label(&title, centre_room, opts.font_size * 1.25);
+    let bp = format!("{} bp", commas(len));
+    let bp_drawn = fit_label(&bp, centre_room, opts.font_size * 0.9);
+    let note_size = opts.font_size * 0.8;
+    let note_drawn = opts.note.as_ref().and_then(|d| {
+        [d.long(), d.short(), d.tiny()]
+            .into_iter()
+            .find(|f| drawn_width(f, note_size) <= centre_room)
+    });
+    let centre_w = [
+        title_drawn
+            .as_deref()
+            .map_or(0.0, |t| drawn_width(t, opts.font_size * 1.25)),
+        bp_drawn
+            .as_deref()
+            .map_or(0.0, |t| drawn_width(t, opts.font_size * 0.9)),
+        note_drawn
+            .as_deref()
+            .map_or(0.0, |t| drawn_width(t, note_size)),
+    ]
+    .into_iter()
+    .fold(0.0_f64, f64::max);
+    // No inward feature lanes: this renderer draws every feature OUTSIDE the
+    // backbone, so the only two things sharing the inside are the ruler and the
+    // caption. That is still one collision more than none — at
+    // `--width 340` the caption was typeset straight across the backbone and
+    // through `2,000` and `6,000`, and `pl export` reported label drops and
+    // shortenings and said nothing about it.
+    let inside = ring::inside_of(
+        ri,
+        0.0,
+        0.0,
+        1,
+        ruler_size,
+        ring::keep_clear_for(centre_w, widest_number),
+    );
 
     // --- backbone ---
     if circular {
@@ -495,8 +866,8 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
         let mut base = step;
         while base <= len {
             let a = angle(base, len);
-            let (x0, y0) = polar(cx, cy, ri - 4.0, a);
-            let (x1, y1) = polar(cx, cy, ri - 9.0, a);
+            let (x0, y0) = polar(cx, cy, inside.ruler_tick.1, a);
+            let (x1, y1) = polar(cx, cy, inside.ruler_tick.0, a);
             items.push(Item::Path {
                 segs: vec![Seg::Move(x0, y0), Seg::Line(x1, y1)],
                 fill: None,
@@ -504,16 +875,23 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                 stroke_width: 1.0,
                 title: None,
             });
-            let (tx, ty) = polar(cx, cy, ri - 18.0, a);
-            items.push(Item::Text {
-                x: tx,
-                y: ty,
-                size: opts.font_size * 0.72,
-                anchor: Anchor::Middle,
-                color: ink::SUBTITLE_FILL.into(),
-                bold: false,
-                text: commas(base),
-            });
+            // The mark is drawn either way; the number only when the middle has
+            // room for it. See `ring::Inside::numbers` — a caller that bounds its
+            // centre lines with `centre_room` never reaches the false branch, and
+            // this one does, but the branch is the honest answer for a canvas so
+            // small that nothing fits.
+            if inside.numbers {
+                let (tx, ty) = polar(cx, cy, inside.ruler_text_r, a);
+                items.push(Item::Text {
+                    x: tx,
+                    y: ty,
+                    size: ruler_size,
+                    anchor: Anchor::Middle,
+                    color: ink::SUBTITLE_FILL.into(),
+                    bold: false,
+                    text: commas(base),
+                });
+            }
             // `base + step` is not safe at the top of the u64 range, and `len`
             // comes straight off a GenBank LOCUS line. For a declared length of
             // 18446744073709551615 the step is 2e18, the ninth tick is 1.8e19,
@@ -529,47 +907,9 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     }
 
     // --- features ---
-    struct Label {
-        text: String,
-        angle: f64,
-        weight: f64,
-    }
-    let mut anchors: Vec<Label> = Vec::new();
-
-    for f in &mol.features {
-        let mut parts: Vec<(u64, u64)> = Vec::with_capacity(f.segments.len());
-        // Counted per segment, not over the whole feature. `ranges` returns
-        // nothing for a segment lying wholly past the end, and a feature with
-        // one such segment and one good one still has a non-empty `parts` — so
-        // the all-or-nothing check below never fired for it and half of
-        // `CDS join(100..200,5000..6000)` on a 1000 bp plasmid went out as a
-        // whole 101 bp `orfX` with nothing said.
-        let mut lost_segments = 0usize;
-        for s in &f.segments {
-            let r = ranges(s.start, s.end, len, circular);
-            if r.is_empty() {
-                lost_segments += 1;
-            }
-            parts.extend(r);
-        }
-        if parts.is_empty() {
-            report.malformed.push(f.name.clone());
-            continue;
-        }
-        if lost_segments > 0 {
-            report.partly_drawn.push(f.name.clone());
-        }
-        let colour = safe_color(f.color(), colour_for(&f.kind));
-        let span: u64 = parts.iter().map(|(a, b)| b - a + 1).sum();
-        let degrees = (span as f64 / len as f64) * 360.0;
-        let arrow_on = match f.strand {
-            Strand::Forward => parts.len() as isize - 1,
-            Strand::Reverse => 0,
-            _ => -1,
-        };
-
-        for (i, &(a, b)) in parts.iter().enumerate() {
-            if degrees < opts.min_feature_degrees {
+    for d in &drawn {
+        for (i, &(a, b)) in d.parts.iter().enumerate() {
+            if d.degrees < opts.min_feature_degrees {
                 // Below a pixel an arrowhead reads as dirt on the figure, so a
                 // very short feature is a tick instead.
                 let ang = angle(a, len);
@@ -578,13 +918,13 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                 items.push(Item::Path {
                     segs: vec![Seg::Move(x0, y0), Seg::Line(x1, y1)],
                     fill: None,
-                    stroke: Some(colour.clone()),
+                    stroke: Some(d.colour.clone()),
                     stroke_width: 1.75,
-                    title: Some(f.name.clone()),
+                    title: Some(d.name.clone()),
                 });
             } else {
-                let arrow = if i as isize == arrow_on {
-                    match f.strand {
+                let arrow = if i as isize == d.arrow_on {
+                    match d.strand {
                         Strand::Reverse => Arrow::Start,
                         _ => Arrow::End,
                     }
@@ -593,114 +933,158 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                 };
                 items.push(Item::Path {
                     segs: arc_segs(cx, cy, ri, ro, angle(a, len), angle_past(b, len), arrow),
-                    fill: Some(colour.clone()),
+                    fill: Some(d.colour.clone()),
                     stroke: Some(ink::FEATURE_STROKE.into()),
                     stroke_width: 0.6,
-                    title: Some(f.name.clone()),
+                    title: Some(d.name.clone()),
                 });
             }
         }
-
-        let mid = mid_base(&parts, span);
-        anchors.push(Label {
-            text: f.name.clone(),
-            angle: angle(mid, len),
-            weight: 1.0 + (1.0 + span as f64).log10(),
-        });
     }
 
-    // --- labels, placed exactly ---
-    let line_h = opts.font_size + 3.0;
-    let pad = 8.0;
+    // The rows are Middle-anchored, so their box is the *drawn* width — the one
+    // the viewBox, the /MediaBox and the %%BoundingBox crop against — and not
+    // the 0.55 em estimate the radius is reserved with. Packing a row in
+    // estimate units and cropping it in Helvetica's is the same mistake
+    // `fit_label` was moved off, one axis over.
+    // Read off the geometry the label is actually placed with, not rebuilt from
+    // `ro`. The two drifted by the 2 units the leader starts outside the ring,
+    // and `pCMV-WPRE` went 1.27 pt past a 720 pt canvas with `labels_truncated`
+    // empty — the same class of defect as deciding in one unit and drawing in
+    // another. One number for every run, because a label the rows cannot hold
+    // ends up in a column: see [`ring::label_room`].
+    let room = ring::label_room(&geom, cx);
+    let texts: Vec<Option<String>> = anchors
+        .iter()
+        .map(|l| fit_label(&l.text, room, opts.font_size))
+        .collect();
+    let boxes: Vec<RingLabel> = anchors
+        .iter()
+        .zip(&texts)
+        .map(|(l, t)| RingLabel {
+            angle: l.angle,
+            width: t.as_deref().map_or(0.0, |t| drawn_width(t, opts.font_size)),
+            height: line_h,
+            weight: l.weight,
+        })
+        .collect();
+    let placed = ring::place_ring(&boxes, &geom);
+    for &d in &placed.dropped {
+        report.labels_hidden.push(anchors[d].text.clone());
+    }
+
     let mut overlay: Vec<Item> = Vec::new();
-    for right in [true, false] {
-        let idx: Vec<usize> = (0..anchors.len())
-            .filter(|&i| (anchors[i].angle.sin() >= 0.0) == right)
-            .collect();
-        let boxes: Vec<LabelBox> = idx
-            .iter()
-            .map(|&i| LabelBox {
-                ideal: polar(cx, cy, ro + 14.0, anchors[i].angle).1,
-                height: line_h,
-                weight: anchors[i].weight,
-            })
-            .collect();
-        let placed = place_column(&boxes, pad + opts.font_size, opts.height - pad);
-        for d in &placed.dropped {
-            report.labels_hidden.push(anchors[idx[*d]].text.clone());
+    for (i, l) in anchors.iter().enumerate() {
+        let Some(p) = placed.placed[i] else { continue };
+        let Some(text) = texts[i].clone() else {
+            // Not even one character and an ellipsis fit. Drawing the leader
+            // with nothing on the end of it would look like a renderer bug
+            // rather than a canvas too small to hold the name, so the label
+            // goes, and it is named.
+            report.labels_hidden.push(l.text.clone());
+            continue;
+        };
+        if text != l.text {
+            report.labels_truncated.push(l.text.clone());
+            if l.site {
+                report.sites_shortened += 1;
+            }
         }
-        for (k, &i) in idx.iter().enumerate() {
-            let Some(y) = placed.positions[k] else {
-                continue;
-            };
-            let text = match fit_label(&anchors[i].text, room, opts.font_size) {
-                Some(t) => {
-                    if t != anchors[i].text {
-                        report.labels_truncated.push(anchors[i].text.clone());
-                    }
-                    t
-                }
-                None => {
-                    // Not even one character and an ellipsis fit. Drawing the
-                    // leader with nothing on the end of it would look like a
-                    // renderer bug rather than a canvas too small to hold the
-                    // name, so the label goes, and it is named.
-                    report.labels_hidden.push(anchors[i].text.clone());
-                    continue;
-                }
-            };
-            let dir = if right { 1.0 } else { -1.0 };
-            let lx = cx + dir * (ro + 26.0);
-            let (tx, ty) = polar(cx, cy, ro + 2.0, anchors[i].angle);
-            let (ex, ey) = polar(cx, cy, ro + 12.0, anchors[i].angle);
-            overlay.push(Item::Path {
-                segs: vec![
-                    Seg::Move(tx, ty),
-                    Seg::Line(ex, ey),
-                    Seg::Line(lx - dir * 4.0, y),
-                ],
+        if l.site {
+            report.sites_named += l.names;
+        }
+        // A cut site gets a mark on the ring as well as a leader: a leader
+        // alone points at a place, a tick says a cut happens there.
+        if l.site {
+            let (sx, sy) = polar(cx, cy, ro, l.angle);
+            let (ex, ey) = polar(cx, cy, ro + 6.0, l.angle);
+            items.push(Item::Path {
+                segs: vec![Seg::Move(sx, sy), Seg::Line(ex, ey)],
                 fill: None,
-                stroke: Some(ink::LEADER_STROKE.into()),
-                stroke_width: 0.9,
-                title: None,
+                stroke: Some(ink::BACKBONE_STROKE.into()),
+                stroke_width: 1.25,
+                title: Some(l.text.clone()),
             });
-            overlay.push(Item::Text {
-                x: lx,
-                y,
-                size: opts.font_size,
-                anchor: if right { Anchor::Start } else { Anchor::End },
-                color: ink::LABEL_FILL.into(),
-                bold: false,
-                text,
-            });
-            report.labels_placed += 1;
         }
+        // The last leg stops short of the glyphs so the rule never touches the
+        // text it points at.
+        let stop = match p.side {
+            Side::Right => (p.at.0 - 4.0, p.at.1),
+            Side::Left => (p.at.0 + 4.0, p.at.1),
+            Side::Top => (p.at.0, p.at.1 + line_h * 0.5),
+            Side::Bottom => (p.at.0, p.at.1 - line_h * 0.5),
+        };
+        overlay.push(Item::Path {
+            segs: vec![
+                Seg::Move(p.tip.0, p.tip.1),
+                Seg::Line(p.bend.0, p.bend.1),
+                Seg::Line(stop.0, stop.1),
+            ],
+            fill: None,
+            stroke: Some(ink::LEADER_STROKE.into()),
+            stroke_width: 0.9,
+            title: None,
+        });
+        overlay.push(Item::Text {
+            x: p.at.0,
+            y: p.at.1,
+            size: opts.font_size,
+            anchor: p.anchor,
+            color: ink::LABEL_FILL.into(),
+            bold: false,
+            text,
+        });
+        report.labels_placed += 1;
     }
+    // Enzymes the filter admitted and the ring could not fit. Derived by
+    // subtraction from what was *asked for*, so a name lost anywhere between the
+    // fold and the paint is counted — a `sites_dropped` accumulated at each drop
+    // site is a `sites_dropped` that misses the next drop site somebody adds.
+    report.sites_dropped = opts.sites.len().saturating_sub(report.sites_named);
 
     // --- centre ---
-    let title = if mol.name.is_empty() {
-        "unnamed".to_string()
-    } else {
-        mol.name.clone()
-    };
-    overlay.push(Item::Text {
-        x: cx,
-        y: cy - 4.0,
-        size: opts.font_size * 1.25,
-        anchor: Anchor::Middle,
-        color: ink::TITLE_FILL.into(),
-        bold: true,
-        text: title.clone(),
-    });
-    overlay.push(Item::Text {
-        x: cx,
-        y: cy + opts.font_size + 2.0,
-        size: opts.font_size * 0.9,
-        anchor: Anchor::Middle,
-        color: ink::SUBTITLE_FILL.into(),
-        bold: false,
-        text: format!("{} bp", commas(len)),
-    });
+    //
+    // Each line already cut to `centre_room` above, because the ruler's radius
+    // was derived from what these actually measure. `Scene::title` keeps the
+    // whole name whatever was drawn, so the SVG `<title>`, the PDF `/Title` and
+    // a hover all still carry it.
+    if let Some(text) = title_drawn {
+        report.title_truncated = text != title;
+        overlay.push(Item::Text {
+            x: cx,
+            y: cy - 4.0,
+            size: opts.font_size * 1.25,
+            anchor: Anchor::Middle,
+            color: ink::TITLE_FILL.into(),
+            bold: true,
+            text,
+        });
+    }
+    if let Some(text) = bp_drawn {
+        overlay.push(Item::Text {
+            x: cx,
+            y: cy + opts.font_size + 2.0,
+            size: opts.font_size * 0.9,
+            anchor: Anchor::Middle,
+            color: ink::SUBTITLE_FILL.into(),
+            bold: false,
+            text,
+        });
+    }
+    // What the figure is NOT showing, in the figure. The desktop map has said
+    // this since the L-ring landed; the SVG, the PDF and the EPS said nothing,
+    // and `--sites unique` — the default — drops every dual and multi cutter.
+    if let Some(text) = note_drawn {
+        overlay.push(Item::Text {
+            x: cx,
+            y: cy + opts.font_size * 2.4,
+            size: note_size,
+            anchor: Anchor::Middle,
+            color: ink::SUBTITLE_FILL.into(),
+            bold: false,
+            text,
+        });
+    }
 
     items.extend(overlay);
     (

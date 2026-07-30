@@ -214,6 +214,10 @@ FIND-MOTIF OPTIONS:
 EXPORT OPTIONS:
     --width <px>                 canvas width  (default: 720)
     --height <px>                canvas height (default: 720)
+    --sites <unique|dual|all|none>
+                                 which restriction sites to label (default:
+                                 unique -- the same rule the desktop map
+                                 applies, so the two agree)
     --pdf                        write PDF instead of SVG
     --eps                        write EPS instead of SVG
     --mm <width>                 final printed width in millimetres
@@ -1487,10 +1491,63 @@ fn cmd_checksum(args: &[String]) -> Result<(), String> {
 /// whatever size the journal asks for, and a raster of it does not. The output
 /// is self-contained — no external stylesheet, no font file, no script — so it
 /// opens in Illustrator, Inkscape and a browser alike.
+/// Which cutters `pl export` puts on the figure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sites {
+    Unique,
+    Dual,
+    All,
+    None,
+}
+
+impl Sites {
+    /// Every `(enzyme, cut position)` this filter admits, and what it excluded.
+    ///
+    /// Sorted by position and then by name so the figure is byte-identical for
+    /// identical input, which is the whole point of `pl-draw`.
+    ///
+    /// The `Disclosure` comes back with it because the filter is the only thing
+    /// that knows what it turned away, and the figure is where that has to be
+    /// said: `--sites unique` is the default, so `pl export` on the user's own
+    /// plasmid omitted twelve dual and six multi cutters and neither the SVG nor
+    /// stderr mentioned any of them. A dual cutter is exactly what you reach for
+    /// to excise an insert.
+    fn of(self, mol: &pl_core::Molecule) -> (Vec<(String, u64)>, pl_draw::ring::Disclosure) {
+        let mut out: Vec<(String, u64)> = Vec::new();
+        let mut d = pl_draw::ring::Disclosure::default();
+        for r in pl_enzymes::digest_all(mol) {
+            let n = r.count();
+            if n == 0 {
+                continue;
+            }
+            d.cutters += 1;
+            let keep = match self {
+                Sites::Unique => n == 1,
+                Sites::Dual => (1..=2).contains(&n),
+                Sites::All => true,
+                Sites::None => false,
+            };
+            if keep {
+                out.extend(r.positions.iter().map(|p| (r.enzyme.name.to_string(), *p)));
+            } else if n == 2 {
+                d.dual += 1;
+            } else {
+                d.multi += 1;
+            }
+        }
+        // `--sites dual` admits both, so nothing is a "dual cutter not drawn";
+        // the buckets have to describe this filter and not the default one.
+        out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        (out, d)
+    }
+}
+
 fn cmd_export(args: &[String]) -> Result<(), String> {
     let a = parse_args(
         args,
-        &["outdir", "o", "width", "height", "mm", "journal", "column"],
+        &[
+            "outdir", "o", "width", "height", "mm", "journal", "column", "sites",
+        ],
         &["pdf", "eps", "stdout", "no-ruler", "check-contrast"],
     )?;
     a.require_files()?;
@@ -1505,11 +1562,31 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
                 .ok_or_else(|| format!("--{name} '{v}' is not a size between 16 and 20000")),
         }
     };
-    let opts = pl_draw::Options {
+    let base_opts = pl_draw::Options {
         width: num("width", 720.0)?,
         height: num("height", 720.0)?,
         ruler: !a.has("no-ruler"),
         ..Default::default()
+    };
+
+    // Which restriction sites go on the figure.
+    //
+    // `pl-draw` held no reference to an enzyme anywhere, so every exported map
+    // had none: a user reads 22 unique cutters off the desktop map, exports the
+    // figure, and gets a picture with nothing to plan a digest from. `unique`
+    // is the default because it is the rule the desktop map applies, so the two
+    // produce the same figure for the same molecule.
+    //
+    // Refused positively, the way `--column`, `--topology`, `--salt` and `--to`
+    // all are: a mistyped filter that silently means something else is how a
+    // user comes to believe a site is absent.
+    let sites = match a.get("sites").map(|s| s.to_ascii_lowercase()) {
+        None => Sites::Unique,
+        Some(v) if v == "unique" => Sites::Unique,
+        Some(v) if v == "dual" => Sites::Dual,
+        Some(v) if v == "all" => Sites::All,
+        Some(v) if v == "none" => Sites::None,
+        Some(v) => return Err(format!("--sites {v:?}: expected unique, dual, all or none")),
     };
 
     // Physical size. A figure exported at "720 pixels" arrives in a manuscript
@@ -1640,18 +1717,56 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             ));
         }
 
+        // One `Options` per file: the title, the site list and the disclosure
+        // line are properties of *this* molecule, not of the run.
+        let (site_list, filtered) = sites.of(&mol);
+        let mut opts = pl_draw::Options {
+            title: Some(pl_fileio::caption_of(&title_of(path)).to_string()),
+            sites: site_list,
+            ..base_opts.clone()
+        };
+        // Built in two passes, because the line has to name how many labels the
+        // ring could not fit and only placing them answers that.
+        //
+        // Exact rather than approximate, and provably so: the note reaches only
+        // `centre_room` -> `keep_clear` -> the ruler's radius, and nothing there
+        // feeds back into the reserve, the geometry or the packing. So pass one's
+        // counts describe pass two's picture. `the_note_does_not_change_what_it_counts`
+        // asserts that rather than leaving it as a claim in a comment.
+        let note = {
+            let (_, first) = pl_draw::scene(&mol, opts.clone());
+            let d = pl_draw::ring::Disclosure {
+                labelled: first.sites_named,
+                hidden: first.sites_dropped,
+                shortened: first.sites_shortened,
+                ..filtered
+            };
+            // The invariant, checked and not assumed: every cutting enzyme in
+            // exactly one bucket. A line whose arithmetic does not close tells
+            // the reader enzymes went missing that did not.
+            debug_assert!(d.closes(), "{d:?} does not account for every cutter");
+            (d.cutters > 0).then_some(d)
+        };
+        // On stderr as well as in the figure, because a filter that hides is the
+        // one thing this command must not be quiet about — and stderr has no
+        // width limit, so it always gets the long form.
+        if let Some(d) = &note {
+            eprintln!("pl: {}: {}", path.display(), d.long());
+        }
+        opts.note = note;
+
         let as_pdf = a.has("pdf");
         let as_eps = a.has("eps");
         let (bytes, drawn, font) = if as_eps {
-            let (scene, d) = pl_draw::scene(&mol, opts);
+            let (scene, d) = pl_draw::scene(&mol, opts.clone());
             let fit = width_mm.map(|mm| pl_draw::page::Fit::to_width_mm(&scene, mm));
             let (text, f) = pl_draw::eps::to_eps(&scene, fit.map_or(1.0, |f| f.scale));
             (text.into_bytes(), d, Some(f))
         } else if as_pdf {
-            let (b, d, f) = pl_draw::circular_pdf(&mol, opts);
+            let (b, d, f) = pl_draw::circular_pdf(&mol, opts.clone());
             (b, d, Some(f))
         } else {
-            let (s, d) = pl_draw::circular_svg(&mol, opts);
+            let (s, d) = pl_draw::circular_svg(&mol, opts.clone());
             (s.into_bytes(), d, None)
         };
 
@@ -1661,7 +1776,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         // figure whoever authored the colour, and saying so is the only way it
         // gets noticed before print.
         if a.has("check-contrast") {
-            let (scene, _) = pl_draw::scene(&mol, opts);
+            let (scene, _) = pl_draw::scene(&mol, opts.clone());
             let scale =
                 width_mm.map_or(1.0, |mm| pl_draw::page::Fit::to_width_mm(&scene, mm).scale);
             let findings = pl_draw::contrast::audit(&scene, "#ffffff", scale);
@@ -1688,7 +1803,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         // whatever the format, because it is a property of the figure and not
         // of the encoder.
         if let Some(mm) = width_mm {
-            let (scene, _) = pl_draw::scene(&mol, opts);
+            let (scene, _) = pl_draw::scene(&mol, opts.clone());
             let fit = pl_draw::page::Fit::to_width_mm(&scene, mm);
             eprintln!(
                 "pl: {}: {:.1} x {:.1} mm at final size",
@@ -1770,6 +1885,17 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
                 }
             );
             eprintln!("     the SVG's <title> still carries each whole name");
+        }
+        // The molecule's own name is not a label and has its own field, but a
+        // caption cut short on a printed figure is the same class of wrongness:
+        // `NC_000913.3 Escherichia coli str. K-12...` is recognisable and
+        // `pCMV-WP...` is a different plasmid.
+        if drawn.title_truncated {
+            eprintln!(
+                "pl: {}: the caption was too wide for the ring and was shortened; \
+                 the <title> carries the whole name",
+                path.display()
+            );
         }
         // Half a feature is a worse lie than no feature: a 101 bp arrow drawn
         // from one segment of `join(100..200,5000..6000)` is indistinguishable

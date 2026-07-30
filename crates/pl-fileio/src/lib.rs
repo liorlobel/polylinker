@@ -292,6 +292,50 @@ pub fn load_with_report(data: &[u8]) -> Result<(Molecule, Format, LoadReport), L
     Ok((all.into_iter().next().unwrap_or_default(), format, report))
 }
 
+/// A file name reduced to what a map should print in the middle of the ring.
+///
+/// The fallback to the filename is **correct and stays**: the `.dna` container
+/// carries no molecule name at all — [`snapgene`]'s reader lifts only a
+/// `Description` note, and `pl info` confirms there is no name field — so for a
+/// SnapGene file there is nothing else to print. What was wrong was printing
+/// the container's extension as though it were part of the plasmid's name.
+/// "pKoV with His decR.dna" is a filename; "pKoV with His decR" is what the
+/// user calls the plasmid.
+///
+/// Only the **final** extension goes, and nothing else is touched:
+///
+/// ```text
+/// "pKoV with His decR.dna"  ->  "pKoV with His decR"
+/// "pBR322.v2.gb"            ->  "pBR322.v2"     (rsplit, not split)
+/// "pUC19"                   ->  "pUC19"         (no extension)
+/// ".hidden"                 ->  ".hidden"       (empty stem: kept whole)
+/// ```
+///
+/// **Neither existing helper does this**, which is why there is a third.
+/// [`genbank::locus_name`] sanitises every non-alphanumeric to `_` and truncates
+/// to 16, so it would caption this file `pKoV_with_His_de` — mangled *and* still
+/// not the plasmid's name; it is the right function for an output *filename* and
+/// the wrong one for a caption. `pl-gui`'s `design::stem_of` splits on the
+/// *first* dot, so `pBR322.v2.gb` becomes `pBR322`.
+///
+/// A real molecule name always wins over this — see the caller in
+/// `bins/pl-gui/src/main.rs` and `pl_draw::Options::title`. This is only what
+/// to say when the file did not say anything.
+pub fn caption_of(file_name: &str) -> &str {
+    let base = file_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(file_name)
+        .trim();
+    match base.rsplit_once('.') {
+        // An empty stem is a dotfile, not an extension: `.hidden` names the
+        // whole thing. Captioning it with the empty string would leave a map
+        // with no title at all.
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => base,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +353,40 @@ ORIGIN
         1 TTTTGGGG
 //
 ";
+
+    /// COMPILE-ONLY at e087e27: `caption_of` does not exist there, and the
+    /// caption was `d.title` with its extension on. The behaviour it fixes is
+    /// proven at e087e27 by the frame test in `bins/pl-gui`, which paints the
+    /// caption and reads "pKoV with His decR.dna" off it.
+    #[test]
+    fn a_caption_loses_the_container_and_nothing_else() {
+        // The user's own file.
+        assert_eq!(caption_of("pKoV with His decR.dna"), "pKoV with His decR");
+        // rsplit, not split: `stem_of` in the GUI's design panel splits on the
+        // FIRST dot and would caption this `pBR322`.
+        assert_eq!(caption_of("pBR322.v2.gb"), "pBR322.v2");
+        // No extension is not an empty name.
+        assert_eq!(caption_of("pUC19"), "pUC19");
+        // A dotfile is all stem. Captioning it with the empty string would
+        // leave a ring with no title in the middle of it.
+        assert_eq!(caption_of(".hidden"), ".hidden");
+        assert_eq!(caption_of(""), "");
+        // A path, from a drop or a recent-files entry, is not a name.
+        assert_eq!(
+            caption_of(r"C:\plasmids\pKoV with His decR.dna"),
+            "pKoV with His decR"
+        );
+        assert_eq!(caption_of("/home/lior/pKoV.gb"), "pKoV");
+        // And nothing is sanitised. `genbank::locus_name` would answer
+        // `pKoV_with_His_de` here -- mangled, truncated to 16, and still not the
+        // plasmid's name. It is the right function for an output filename and
+        // the wrong one for a caption.
+        assert_ne!(
+            caption_of("pKoV with His decR.dna"),
+            genbank::locus_name("pKoV with His decR")
+        );
+        assert!(caption_of("a b (c) 2.dna").contains(' '));
+    }
 
     #[test]
     fn load_all_returns_every_record_where_load_returns_one() {

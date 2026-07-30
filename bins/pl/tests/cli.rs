@@ -1865,3 +1865,171 @@ fn an_origin_crossing_feature_reports_the_wrap_and_not_the_whole_molecule() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- the exported figure: what it is called, and what is on it -------------
+
+/// A circular plasmid with exactly one EcoRI site and nothing else notable.
+///
+/// `ACGT` repeated never spells `GAATTC`, so the one copy inserted here is the
+/// only one and EcoRI is a unique cutter.
+fn one_site_plasmid() -> String {
+    let mut seq = "ACGT".repeat(100);
+    seq.push_str("GAATTC");
+    seq.push_str(&"ACGT".repeat(100));
+    genbank("pKoVtest", &seq, true)
+}
+
+/// PROVEN TO FAIL at e087e27, on both assertions.
+///
+/// `pl_draw::scene` fell through to the literal string `"unnamed"` when the
+/// molecule had no name, and nothing passed a filename in for it to say anything
+/// else — so the centre caption and the SVG `<title>` of every figure ever
+/// exported from a `.dna` read `unnamed`, while the map on screen said
+/// "pKoV with His decR.dna". The `.dna` container carries no molecule name at
+/// all, so this is every SnapGene file.
+///
+/// And `crates/pl-draw` held no reference to an enzyme anywhere, so the figure
+/// carried no restriction sites either: a user reads the cutters off the map to
+/// plan a digest, exports the figure, and gets a picture with nothing to plan
+/// from.
+#[test]
+fn an_exported_figure_is_named_after_the_file_and_carries_its_cut_sites() {
+    let dir = scratch("export-title");
+    write(&dir, "pKoV with His decR.gb", &one_site_plasmid());
+    let c = run(&dir, &["convert", "pKoV with His decR.gb", "--to", "dna"]);
+    assert!(c.status.success(), "{}", stderr(&c));
+    // `convert` names its output through `locus_name` on the INPUT filename,
+    // which sanitises every non-alphanumeric and truncates to 16 — right for a
+    // filename and exactly the function a caption must not go through, since it
+    // answers `pKoV_with_His_de` for this file. Put the output back under the
+    // name a person would give it.
+    std::fs::rename(
+        dir.join("pKoV_with_His_de.dna"),
+        dir.join("pKoV with His decR.dna"),
+    )
+    .unwrap_or_else(|e| panic!("{e}: {}", stdout(&c)));
+
+    let o = run(&dir, &["export", "pKoV with His decR.dna", "--stdout"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let svg = stdout(&o);
+    assert!(
+        !svg.contains("unnamed"),
+        "the figure that goes into a paper is captioned `unnamed`"
+    );
+    assert!(
+        svg.contains("<title>pKoV with His decR</title>"),
+        "the caption is the file's name without its container: {}",
+        svg.lines().take(6).collect::<Vec<_>>().join(" ")
+    );
+    assert!(
+        svg.contains("EcoRI"),
+        "the one unique cutter is nowhere on the exported map"
+    );
+}
+
+/// The control, and it PASSES at e087e27: a real molecule name wins.
+///
+/// Paired with the test above on purpose. The fix adds a fallback and must not
+/// touch the case where the file said what the molecule is called — a GenBank
+/// LOCUS name is a real name and a filename is a guess.
+#[test]
+fn a_locus_name_still_beats_the_filename_it_was_saved_under() {
+    let dir = scratch("export-locus");
+    write(&dir, "some other name.gb", &one_site_plasmid());
+    let o = run(&dir, &["export", "some other name.gb", "--stdout"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let svg = stdout(&o);
+    assert!(svg.contains("<title>pKoVtest</title>"), "{svg:.400}");
+    assert!(!svg.contains("some other name"));
+}
+
+/// PROVEN TO FAIL at e087e27 — there is no `--sites` there, so the run is
+/// refused with "unknown option".
+///
+/// Refused positively rather than ignored, the way `--column`, `--topology` and
+/// `--to` all are: a mistyped filter that silently means something else is how a
+/// user comes to believe a site is absent.
+#[test]
+fn the_site_filter_is_stated_and_a_typo_is_refused() {
+    let dir = scratch("export-sites");
+    write(&dir, "map.gb", &one_site_plasmid());
+
+    let none = run(&dir, &["export", "map.gb", "--sites", "none", "--stdout"]);
+    assert!(none.status.success(), "{}", stderr(&none));
+    assert!(
+        !stdout(&none).contains("EcoRI"),
+        "--sites none asked for no sites"
+    );
+
+    // `dual` admits the single cutters as well: an excision wants a pair of
+    // sites and one of them is often the only copy of its enzyme.
+    let dual = run(&dir, &["export", "map.gb", "--sites", "dual", "--stdout"]);
+    assert!(dual.status.success(), "{}", stderr(&dual));
+    assert!(stdout(&dual).contains("EcoRI"));
+
+    let typo = run(&dir, &["export", "map.gb", "--sites", "uniqe", "--stdout"]);
+    assert!(!typo.status.success(), "a typo must not be ignored");
+    assert!(
+        stderr(&typo).contains("unique") && stderr(&typo).contains("dual"),
+        "and it must say what is allowed: {}",
+        stderr(&typo)
+    );
+}
+
+/// PROVEN TO FAIL at e087e27 and against the working tree as handed over: the
+/// figure never said what it was not showing, and neither did the command.
+///
+/// `--sites unique` is the DEFAULT, so `pl export` on an ordinary plasmid drops
+/// every dual and multi cutter — 18 of 40 on the user's own file — with nothing
+/// in the SVG, nothing in the PDF and nothing on stderr. The desktop map has said
+/// it since the L-ring landed; `docs/PLAN.md` item 33 calls a silent filter "the
+/// one documented case of this software category costing a user a month of bench
+/// time", and of the two artefacts the figure is the one that leaves the machine
+/// and reaches a reader with no Enzymes tab to check it against.
+///
+/// The arithmetic has to close as well as be present. On pET28a the on-screen
+/// line read `14 of 31 cutters labelled · 7 dual, 1 multi not drawn` — 14 + 7 + 1
+/// against a stated 31 — because it counted LABELS, and a folded tick names
+/// several enzymes.
+#[test]
+fn the_figure_and_the_command_both_say_which_cutters_were_left_out() {
+    let dir = scratch("export-disclosure");
+    write(&dir, "map.gb", &one_site_plasmid());
+
+    let o = run(&dir, &["export", "map.gb", "--stdout"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let (svg, err) = (stdout(&o), stderr(&o));
+
+    assert!(
+        svg.contains("cutters"),
+        "the exported figure does not state its own filter: {svg:.600}"
+    );
+    assert!(
+        err.contains("cutters labelled"),
+        "the command does not state it either: {err}"
+    );
+
+    // `<labelled> of <cutters>` plus the dual and multi it says are not drawn is
+    // exactly `<cutters>`, or the line tells the reader enzymes went missing that
+    // did not.
+    let line = err
+        .lines()
+        .find(|l| l.contains("cutters labelled"))
+        .expect("the line is there");
+    let nums: Vec<u32> = line
+        .rsplit(':')
+        .next()
+        .unwrap_or(line)
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert!(nums.len() >= 4, "{line}");
+    let (labelled, cutters, dual, multi) = (nums[0], nums[1], nums[2], nums[3]);
+    assert_eq!(
+        labelled + dual + multi,
+        cutters,
+        "{line} does not account for every cutter"
+    );
+    assert!(labelled >= 1, "{line}: EcoRI cuts once and is on the map");
+}

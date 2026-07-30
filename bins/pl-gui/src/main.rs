@@ -31,6 +31,71 @@ fn pal(ui: &Ui) -> Palette {
     Palette::of(ui.visuals().dark_mode)
 }
 
+/// How wide a string is, laid out in the font it will actually be drawn in.
+fn text_width(ui: &Ui, s: &str, size: f32) -> f32 {
+    ui.painter()
+        .layout_no_wrap(
+            s.to_string(),
+            egui::FontId::proportional(size),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x
+}
+
+/// A string cut to fit `room`, with a trailing ellipsis when anything went.
+///
+/// Used for the toolbar's filename, which is the one part of the title block
+/// that may give: the whole path is on hover, so nothing becomes unrecoverable.
+/// Three ASCII full stops rather than U+2026, matching `pl-draw` — three dots
+/// are three dots in every encoding and the real character is not.
+fn elide(ui: &Ui, s: &str, room: f32) -> String {
+    elide_at(ui, s, room, egui::TextStyle::Body.resolve(ui.style()).size)
+}
+
+/// [`elide`] at a stated size, for text not drawn in the body style.
+///
+/// The status line is drawn at 12 and `TextStyle::Body` is not 12, so measuring
+/// it with the body size is deciding in one unit and drawing in another — the
+/// mistake `pl_draw::fit_label` was moved off for the same reason.
+fn elide_at(ui: &Ui, s: &str, room: f32, size: f32) -> String {
+    // No room means nothing, not everything.
+    //
+    // `room <= 0.0 || fits` returned the string UNCHANGED for non-positive room,
+    // which inverts the degradation order at exactly the moment it matters:
+    // `room` is `available_width - state_w - 12`, so a long status string drives
+    // it negative, and the branch then paid out the *whole* filename on top of
+    // the un-elided status. Both ran over the reserved right-hand cluster and the
+    // theme switch was painted through the letters — the same collision the
+    // cluster-first layout was supposed to end, running the other way. It is not
+    // a synthetic path length: the user's own genome files sit 160 characters
+    // deep in OneDrive, so saving beside a source file overflowed every time.
+    //
+    // The `kept.is_empty()` arm below already answers this correctly for room
+    // that is merely small; there was no reason for zero to be different.
+    if room <= 0.0 {
+        return String::new();
+    }
+    if text_width(ui, s, size) <= room {
+        return s.to_string();
+    }
+    let mut kept = String::new();
+    for c in s.chars() {
+        let trial = format!("{kept}{c}...");
+        if text_width(ui, &trial, size) > room {
+            break;
+        }
+        kept.push(c);
+    }
+    if kept.is_empty() {
+        // Not even one character: better an empty label than a bare "..."
+        // claiming a name is there when nothing of it can be read.
+        String::new()
+    } else {
+        kept + "..."
+    }
+}
+
 /// Set `PL_GUI_DEBUG_GEOMETRY=1` to print the layout rects each frame.
 ///
 /// Worth keeping in the shipped binary: when a window looks wrong, this is the
@@ -708,26 +773,127 @@ impl App {
         } else {
             pl_fileio::genbank::write(d.molecule(), &d.title, today())
         };
-        let lossy = if as_fasta {
-            Vec::new()
+        let note = if as_fasta {
+            // FASTA is bases and a header, and that is all. The GenBank path
+            // carefully warns that unoriented features become forward while
+            // this one set `lossy = Vec::new()` and said nothing at all — so
+            // the format that discards *every* feature, every note and the
+            // topology was the quieter of the two.
+            let m = d.molecule();
+            let mut lost: Vec<String> = Vec::new();
+            if !m.features.is_empty() {
+                lost.push(format!("{} feature(s)", m.features.len()));
+            }
+            if m.topology.is_circular() {
+                lost.push("the topology (it will reopen as linear)".into());
+            }
+            if lost.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "FASTA keeps only the bases; this drops {}",
+                    lost.join(" and ")
+                )
+            }
         } else {
-            d.molecule().features_without_expressible_orientation()
-        };
-        let note = if lossy.is_empty() {
-            String::new()
-        } else {
-            // GenBank has no way to say "unoriented", so those features are
-            // written as forward. For about half of them that is a directional
-            // claim the source never made.
-            format!(
-                "  —  {} feature(s) written as forward; GenBank cannot express their strand",
-                lossy.len()
-            )
+            let lossy = d.molecule().features_without_expressible_orientation();
+            if lossy.is_empty() {
+                String::new()
+            } else {
+                // GenBank has no way to say "unoriented", so those features are
+                // written as forward. For about half of them that is a
+                // directional claim the source never made.
+                format!(
+                    "{} feature(s) written as forward; GenBank cannot express their strand",
+                    lossy.len()
+                )
+            }
         };
         match std::fs::write(&path, text) {
-            Ok(()) => self.status = format!("wrote {}{note}", path.display()),
+            Ok(()) => self.wrote(&path, &note),
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
         }
+    }
+
+    /// Report a file written, with any consequence of writing it FIRST.
+    ///
+    /// `format!("wrote {path}{note}")` put the bookkeeping in front of the
+    /// warning, and the status line is finite: saving FASTA to a 150-character
+    /// path left the bar reading `wrote C:\Users\…\scratchpad\vout\seq` with the
+    /// whole of `FASTA keeps only the bases; this drops 9 feature(s) and the
+    /// topology` off the window. The clause that has to survive clipping must be
+    /// leftmost, and the path is the part the user already knows — they chose it
+    /// in the dialog a second ago, and it is still on hover.
+    ///
+    /// The user's own genome files sit 160 characters deep in OneDrive, so
+    /// "saving beside a source file" was the ordinary case, not an edge one.
+    fn wrote(&mut self, path: &std::path::Path, note: &str) {
+        self.status = if note.is_empty() {
+            format!("wrote {}", path.display())
+        } else {
+            format!("{note}  —  wrote {}", path.display())
+        };
+    }
+
+    /// What the figure exporters should draw, for the open document.
+    ///
+    /// The one place the app decides what a figure is, so "Map SVG…" and
+    /// "Map PDF…" cannot differ. Two things go in that never used to:
+    ///
+    /// - the **title**, because `pl_draw::scene` falls back to the literal
+    ///   `"unnamed"` and no caller passed a name in. The map on screen said
+    ///   "pKoV with His decR.dna" and the exported figure said `unnamed`, in
+    ///   the centre of the ring and in the SVG `<title>`, for every `.dna`
+    ///   file ever exported.
+    /// - the **cut sites**, because `pl-draw` has no reference to an enzyme
+    ///   anywhere. The user reads 22 unique cutters off the map to plan a
+    ///   digest, clicks "Figure SVG…", and gets a map with no restriction
+    ///   sites on it at all.
+    ///
+    /// Unique cutters only, which is the same rule the on-screen map applies,
+    /// so the figure is the picture the user was looking at when they exported
+    /// it.
+    fn figure_options(d: &doc::Document) -> pl_draw::Options {
+        let mut opts = pl_draw::Options {
+            title: Some(pl_fileio::caption_of(&d.title).to_string()),
+            sites: d
+                .digest
+                .results()
+                .iter()
+                .filter(|x| x.is_unique_cutter())
+                .map(|x| (x.enzyme.name.to_string(), x.positions[0]))
+                .collect(),
+            ..Default::default()
+        };
+        // And the line saying what the figure is NOT showing, which the screen
+        // has had since the L-ring landed and the figure did not — not in the
+        // SVG, not in the PDF, not in the EPS. Unique cutters only is a filter,
+        // and `docs/PLAN.md` item 33 is about filters that hide without saying
+        // so; of the two artefacts the figure is the one that leaves the machine
+        // and reaches a reader with no Enzymes tab to check against.
+        //
+        // Two passes, because the line has to name how many labels the ring
+        // could not fit and only placing them answers that. Exact, not
+        // approximate: the note reaches `centre_room` -> `keep_clear` -> the
+        // ruler's radius and nothing there feeds back into the reserve, the
+        // geometry or the packing, so the first pass's counts describe the
+        // second pass's picture. `the_note_does_not_change_what_it_counts` holds
+        // that rather than trusting it.
+        let results = d.digest.results();
+        let cutting = |f: &dyn Fn(usize) -> bool| results.iter().filter(|x| f(x.count())).count();
+        let mut told = pl_draw::ring::Disclosure {
+            cutters: cutting(&|n| n > 0),
+            dual: cutting(&|n| n == 2),
+            multi: cutting(&|n| n > 2),
+            ..Default::default()
+        };
+        let (_, first) = pl_draw::scene(d.molecule(), opts.clone());
+        told.labelled = first.sites_named;
+        told.hidden = first.sites_dropped;
+        told.shortened = first.sites_shortened;
+        debug_assert!(told.closes(), "{told:?} does not account for every cutter");
+        opts.note = (told.cutters > 0).then_some(told);
+        opts
     }
 
     /// Write the map as PDF.
@@ -749,42 +915,79 @@ impl App {
         else {
             return;
         };
-        let (bytes, drawn, font) = pl_draw::circular_pdf(d.molecule(), pl_draw::Options::default());
+        let (bytes, drawn, font) = pl_draw::circular_pdf(d.molecule(), Self::figure_options(d));
 
-        let mut note = String::new();
-        if !drawn.labels_hidden.is_empty() {
-            note.push_str(&format!(
-                "  —  {} label(s) did not fit: {}",
-                drawn.labels_hidden.len(),
-                drawn.labels_hidden.join(", ")
-            ));
-        }
-        if !drawn.malformed.is_empty() {
-            note.push_str(&format!(
-                "  —  {} feature(s) lie outside the molecule and are not drawn: {}",
-                drawn.malformed.len(),
-                drawn.malformed.join(", ")
-            ));
-        }
+        let mut note = Self::figure_note(&drawn);
         if !font.unencodable.is_empty() {
-            note.push_str(&format!(
-                "  —  {} name(s) hold characters Helvetica cannot show and were written with '?': {}. Export SVG to keep them",
+            note.push(format!(
+                "{} name(s) hold characters Helvetica cannot show and were written with '?': {}. Export SVG to keep them",
                 font.unencodable.len(),
                 font.unencodable.join(", ")
             ));
         }
         match std::fs::write(&path, bytes) {
-            Ok(()) => self.status = format!("wrote {}{note}", path.display()),
+            Ok(()) => self.wrote(&path, &note.join("  —  ")),
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
         }
     }
 
+    /// What a figure lost, as clauses to put in front of the destination path.
+    ///
+    /// A map missing three labels looks exactly like a plasmid with three fewer
+    /// features, so the count goes somewhere rather than nowhere.
+    ///
+    /// `labels_truncated` is in here because it was in neither exporter's status
+    /// while `pl export` printed it on stderr: a shortened name was named on the
+    /// command line and silent in the app, and `pCMV-WP...` is a different
+    /// plasmid's name from `pCMV-WPRE`.
+    fn figure_note(drawn: &pl_draw::Report) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if !drawn.labels_hidden.is_empty() {
+            out.push(format!(
+                "{} label(s) did not fit: {}",
+                drawn.labels_hidden.len(),
+                drawn.labels_hidden.join(", ")
+            ));
+        }
+        if !drawn.labels_truncated.is_empty() {
+            out.push(format!(
+                "{} label(s) shortened with '...': {}",
+                drawn.labels_truncated.len(),
+                drawn.labels_truncated.join(", ")
+            ));
+        }
+        if !drawn.malformed.is_empty() {
+            out.push(format!(
+                "{} feature(s) lie outside the molecule and are not drawn: {}",
+                drawn.malformed.len(),
+                drawn.malformed.join(", ")
+            ));
+        }
+        if !drawn.partly_drawn.is_empty() {
+            out.push(format!(
+                "{} feature(s) drawn from only some of their segments: {}",
+                drawn.partly_drawn.len(),
+                drawn.partly_drawn.join(", ")
+            ));
+        }
+        if drawn.title_truncated {
+            out.push(
+                "the caption was too wide for the ring and was shortened; \
+                 the SVG's <title> carries the whole name"
+                    .into(),
+            );
+        }
+        out
+    }
+
     /// Write the map as SVG.
     ///
-    /// Deliberately the default `pl_draw::Options`, the same ones `pl export`
-    /// uses, so the app and the command line produce byte-identical files for
-    /// the same molecule. A figure that changes depending on which of the two
-    /// you reached for is a figure you cannot cite.
+    /// Deliberately the same `pl_draw::Options` as "Map PDF…" and, but for the
+    /// enzyme list, as `pl export`, so the app and the command line produce
+    /// byte-identical files for the same molecule and the same sites. A figure
+    /// that changes depending on which of the two you reached for is a figure
+    /// you cannot cite. `pl export` reaches the same sites with
+    /// `--sites unique`, which is its default.
     fn export_svg(&mut self) {
         self.settle();
         let Some(d) = &self.document else { return };
@@ -796,28 +999,10 @@ impl App {
         else {
             return;
         };
-        let (svg, drawn) = pl_draw::circular_svg(d.molecule(), pl_draw::Options::default());
+        let (svg, drawn) = pl_draw::circular_svg(d.molecule(), Self::figure_options(d));
 
-        // A map missing three labels looks exactly like a plasmid with three
-        // fewer features, so the count goes in the status line rather than
-        // nowhere.
-        let mut note = String::new();
-        if !drawn.labels_hidden.is_empty() {
-            note.push_str(&format!(
-                "  —  {} label(s) did not fit: {}",
-                drawn.labels_hidden.len(),
-                drawn.labels_hidden.join(", ")
-            ));
-        }
-        if !drawn.malformed.is_empty() {
-            note.push_str(&format!(
-                "  —  {} feature(s) lie outside the molecule and are not drawn: {}",
-                drawn.malformed.len(),
-                drawn.malformed.join(", ")
-            ));
-        }
         match std::fs::write(&path, svg) {
-            Ok(()) => self.status = format!("wrote {}{note}", path.display()),
+            Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
         }
     }
@@ -955,6 +1140,9 @@ impl eframe::App for App {
         if keys.redo {
             self.do_redo();
         }
+        if keys.save && self.document.is_some() {
+            self.export(false);
+        }
 
         // The digest worker cannot wake the UI, so poll it and keep repainting
         // while it runs.
@@ -985,16 +1173,51 @@ impl eframe::App for App {
     }
 }
 
-/// Which of the three application-wide shortcuts fired this frame.
+/// Which of the four application-wide shortcuts fired this frame.
 ///
 /// Deciding is separated from acting because the actions are a native file
 /// dialog and a document mutation, and the *guards* are the part with a history
 /// of being wrong.
+///
+/// Ctrl+Shift+S — "open the Save menu", for symmetry with the Ctrl+Shift+Z
+/// already here — is deliberately **not** wired. egui has no supported way to
+/// open a `menu_button`'s popup from a keystroke; doing it would mean writing
+/// into the menu's private memory by id, and a shortcut that silently does
+/// nothing when that id changes is worse than a shortcut that was never
+/// advertised. Ctrl+S covers the frequent case and the format choice is one
+/// click away.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Shortcuts {
     open: bool,
     undo: bool,
     redo: bool,
+    /// Ctrl+S: save the molecule, defaulting to GenBank.
+    ///
+    /// The single most reflexive keystroke in any document application did
+    /// nothing — there was no `egui::Key::S` anywhere in this binary, and four
+    /// of the eight toolbar buttons had no shortcut and advertised none.
+    ///
+    /// Safe to bind despite writing a file: `export` goes through
+    /// `rfd::FileDialog::save_file()`, so a stray Ctrl+S opens a dialog and can
+    /// never silently overwrite anything. GenBank rather than FASTA because
+    /// that is what the visible button has always done and what `pl convert`
+    /// defaults to; the GUI and the CLI must not disagree about what "save"
+    /// means.
+    ///
+    /// Two of the three guards, and deliberately not the third. It takes the
+    /// pending-paste guard and the focused-widget guard — a Ctrl+S typed into the
+    /// Features filter must not open a dialog any more than a Ctrl+Z there may
+    /// reach the document. It does **not** take the design-panel guard, for the
+    /// same reason `open` does not: that guard exists because an undo underneath
+    /// the panel changes the bases the panel is describing, and saving changes
+    /// nothing. Writing the file you are looking at while a primer report is open
+    /// is a reasonable thing to want.
+    ///
+    /// Stated because the doc block above opens with "the *guards* are the part
+    /// with a history of being wrong", and it read "inherits all three" while the
+    /// field was computed from `cmd` rather than `edits`. Both existing guard
+    /// tests now assert `save` as well, so the answer is pinned either way.
+    save: bool,
 }
 
 impl App {
@@ -1041,6 +1264,12 @@ impl App {
                 redo: edits
                     && (i.key_pressed(egui::Key::Y)
                         || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
+                // Decided here, with the other three, so it inherits all three
+                // guards. A Ctrl+S handled at a widget would reintroduce
+                // exactly what the `typing` guard exists to stop, and the
+                // symptom — a save dialog opening mid-word while renaming a
+                // feature — would be blamed on the text box.
+                save: cmd && !i.modifiers.shift && i.key_pressed(egui::Key::S),
             }
         })
     }
@@ -1049,58 +1278,117 @@ impl App {
         egui::Panel::top(egui::Id::new("toolbar")).show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
+                // Three runs, separated: what goes in and out as a molecule,
+                // what goes out as a picture, and the open document.
+                //
+                // The row was eight buttons spanning three unrelated jobs with
+                // nothing between them, and it did not fit: measured on the
+                // user's own file the buttons alone run to 467 pt and the bar's
+                // natural width is about 940, against a `min_inner_size` of
+                // 880. At the smallest size the app will let you make the
+                // window, the status line was clipped mid-word to "SnapGene
+                // .dna · 8,117 bp · cir" — the first thing to go being the
+                // topology, which is the most consequential fact about a
+                // plasmid. So a separator between the four middle buttons was
+                // not available: each one is 9 pt in the wrong direction.
+                //
+                // Collapsing the format choice one level down instead makes the
+                // distinction *lexical* — "Save" takes the molecule out,
+                // "Export map" takes a picture out — which survives a
+                // monochrome screenshot, a screen reader and a narrow window,
+                // none of which a separator does. It also takes the run from
+                // 467 pt to about 323.
+                //
+                // Undo and Redo stay visible buttons and are deliberately not
+                // folded into a menu: `global_shortcuts` switches Ctrl+Z and
+                // Ctrl+Y off while the design panel is open, and that decision
+                // ends "Undo stays reachable from the toolbar, which closes
+                // nothing and surprises nobody".
+                //
+                // Ellipsis discipline: "…" means "this opens a file dialog".
+                // The menu buttons do not carry one; the leaf items that reach
+                // `rfd::FileDialog` do.
+                //
+                // No disclosure caret either, and it was tried and photographed:
+                // egui's `menu_button` paints a plain button, so a triangle has
+                // to be a glyph, and the default faces have none. U+25BE came out
+                // as an empty box on all three menus — the same trap
+                // `strand_word` already documents for U+2190, which rendered as a
+                // box in the proportional face. So a menu is told from a button
+                // by what it says rather than by its shape, which is why all
+                // three are nouns for what they write out and why "Edit" — a
+                // verb, and the platform's name for a menu holding Undo and
+                // Redo — could not stay.
                 if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
                     self.pick_file();
                 }
                 let has = self.document.is_some();
                 ui.add_enabled_ui(has, |ui| {
-                    if ui.button("Save GenBank…").clicked() {
-                        self.export(false);
-                    }
-                    if ui.button("FASTA…").clicked() {
-                        self.export(true);
-                    }
-                    if ui
-                        .button("Map SVG…")
-                        .on_hover_text("Vector map, for a figure")
-                        .clicked()
-                    {
-                        self.export_svg();
-                    }
-                    if ui
-                        .button("Map PDF…")
-                        .on_hover_text("The same map, for a manuscript")
-                        .clicked()
-                    {
-                        self.export_pdf();
-                    }
+                    ui.menu_button("Save", |ui| {
+                        if ui.button("GenBank…").clicked() {
+                            self.export(false);
+                            ui.close();
+                        }
+                        if ui
+                            .button("FASTA…")
+                            .on_hover_text("bases only: no features, no topology")
+                            .clicked()
+                        {
+                            self.export(true);
+                            ui.close();
+                        }
+                    })
+                    .response
+                    .on_hover_text("Ctrl+S — save the molecule");
+                });
+
+                ui.separator();
+                ui.add_enabled_ui(has, |ui| {
+                    // "Map" is kept, and it is only now honest. Beside a map on
+                    // screen "Map SVG…" reads as "save what I am looking at",
+                    // and until this change it was not: the exported figure had
+                    // no restriction sites on it at all and said "unnamed" in
+                    // the middle. It now carries the same sites and the same
+                    // caption, laid out by the same `pl_draw::ring`, so the word
+                    // describes the file the user gets. It still is not
+                    // pixel-for-pixel the screen — `pl-draw` puts every feature
+                    // on one ring and carries strand in the arrowhead, where the
+                    // map stacks lanes inside and outside the backbone.
+                    ui.menu_button("Export map", |ui| {
+                        if ui
+                            .button("SVG…")
+                            .on_hover_text("Vector map, for a figure")
+                            .clicked()
+                        {
+                            self.export_svg();
+                            ui.close();
+                        }
+                        if ui
+                            .button("PDF…")
+                            .on_hover_text("The same map, for a manuscript")
+                            .clicked()
+                        {
+                            self.export_pdf();
+                            ui.close();
+                        }
+                    })
+                    .response
+                    .on_hover_text("the plasmid map as a picture");
                 });
 
                 ui.separator();
                 self.edit_group(ui);
 
                 ui.separator();
-                if let Some(d) = &self.document {
-                    // A dot rather than the usual asterisk-in-the-title: the
-                    // point is that edits exist and are undoable, not that a
-                    // file is dirty — nothing here writes over the original.
-                    let shown = if d.edited() {
-                        format!("{} •", d.title)
-                    } else {
-                        d.title.clone()
-                    };
-                    let title = ui.label(RichText::new(shown).strong());
-                    if let Some(p) = &d.path {
-                        title.on_hover_text(p.display().to_string());
-                    }
-                    ui.label(RichText::new(&self.status).color(pal(ui).muted).size(12.0));
-                } else {
-                    ui.label(
-                        RichText::new("Open a .dna, GenBank or FASTA file, or drop one here")
-                            .color(pal(ui).muted),
-                    );
-                }
-
+                // The right edge is allocated FIRST, and the title block gets
+                // what is left.
+                //
+                // Laid out the other way round the theme switch was painted on
+                // top of the status text: at 912 pt the final "r" of "circular"
+                // sat under the sun glyph, and at the app's own 880 pt
+                // `min_inner_size` the switch had left the window entirely
+                // while the status read "SnapGene .dna · 8,117 bp · cir". They
+                // were not competing for the space, they were both taking it.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     egui::global_theme_preference_switch(ui);
                     if let Some(d) = &self.document {
@@ -1109,17 +1397,93 @@ impl App {
                             ui.label(RichText::new("digesting").color(pal(ui).muted).size(12.0));
                         }
                     }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        if let Some(d) = &self.document {
+                            // A dot rather than the usual asterisk-in-the-title:
+                            // the point is that edits exist and are undoable,
+                            // not that a file is dirty — nothing here writes
+                            // over the original.
+                            let marker = if d.edited() { " •" } else { "" };
+                            // What gives under pressure, and in which order:
+                            // the FILENAME, because the whole path is one hover
+                            // away; never the state string, which is short,
+                            // fixed for a given file, and the thing the user is
+                            // reading; never the edited marker, because losing
+                            // the signal that there are unsaved edits is not a
+                            // cosmetic loss. This used to be exactly backwards.
+                            // And the state gives too, once the filename has gone
+                            // to nothing.
+                            //
+                            // "Never the state string" was right as a *priority*
+                            // and wrong as a guarantee: it was the overflow
+                            // source. `FASTA keeps only the bases; this drops 9
+                            // feature(s) and the topology (it will reopen as
+                            // linear)  —  wrote <150-character path>` is 230
+                            // characters, and an un-elided label simply runs off —
+                            // measured at 1,712 pt in an 880 pt window, through
+                            // the theme switch and out of the window, cut
+                            // mid-token by egui's own galley truncation with no
+                            // ellipsis and no hover, so the reader cannot even
+                            // tell something is missing. Second in line and
+                            // hoverable is the honest form of "last to give".
+                            //
+                            // Both budgets are taken from ONE reading of
+                            // `available_width`, before either label is drawn.
+                            // Asking again afterwards reports about zero — the
+                            // inner left-to-right layout inside a right-to-left
+                            // parent has no width left to advertise — so the
+                            // second call elided the status to nothing and the bar
+                            // went blank. Same shape as the whole
+                            // decide-in-one-unit-draw-in-another family: measure
+                            // once, spend twice.
+                            let state = self.status.clone();
+                            // From the RECT the parent left for this block, not
+                            // from `available_width()`. Inside a right-to-left
+                            // layout the nested left-to-right `Ui` reports about
+                            // zero available width whatever is actually free, so
+                            // `room` was non-positive on every frame — which is
+                            // how `elide`'s `room <= 0` branch came to be the one
+                            // that mattered, and why it looked harmless in a wide
+                            // window where the label happened to fit anyway.
+                            let total = (ui.max_rect().width() - 8.0).max(0.0);
+                            let state_w = text_width(ui, &state, 12.0).min(total);
+                            let room = total - state_w - 12.0;
+                            let name = elide(ui, &format!("{}{marker}", d.title), room);
+                            let title = ui.label(RichText::new(name).strong());
+                            if let Some(p) = &d.path {
+                                title.on_hover_text(p.display().to_string());
+                            }
+                            let shown = elide_at(ui, &state, state_w, 12.0);
+                            let lbl = ui.label(
+                                RichText::new(shown.clone()).color(pal(ui).muted).size(12.0),
+                            );
+                            if shown != state {
+                                lbl.on_hover_text(&state);
+                            }
+                        } else {
+                            ui.label(
+                                RichText::new(
+                                    "Open a .dna, GenBank or FASTA file, or drop one here",
+                                )
+                                .color(pal(ui).muted),
+                            );
+                        }
+                    });
                 });
             });
             ui.add_space(4.0);
         });
     }
 
-    /// Undo, redo, and the edits that need no selection.
+    /// The history controls, and the operations on the molecule as a whole.
     ///
     /// Every one of these goes through the operation log, so every one is
     /// undoable and every one shows up in the History tab. There is no other
     /// path that mutates a molecule.
+    ///
+    /// The doc used to read "Undo, redo, and the edits that need no selection",
+    /// which two of the four menu items contradict: "Set origin at selected
+    /// feature" and "Remove selected feature" both need one.
     fn edit_group(&mut self, ui: &mut Ui) {
         let (can_undo, can_redo) = match &self.document {
             Some(d) => (d.log.can_undo(), d.log.can_redo()),
@@ -1132,14 +1496,53 @@ impl App {
             }
         });
         ui.add_enabled_ui(can_redo, |ui| {
-            if ui.button("Redo").on_hover_text("Ctrl+Y").clicked() {
+            // Ctrl+Shift+Z has been wired since the shortcut block was written
+            // and was advertised nowhere.
+            if ui
+                .button("Redo")
+                .on_hover_text("Ctrl+Y, or Ctrl+Shift+Z")
+                .clicked()
+            {
                 self.do_redo();
             }
         });
 
+        // Which is where the history controls end.
+        //
+        // The POSITION complaint below is only answered by this line. Renaming
+        // "Edit" to "Molecule" fixed the noun and left the control the third
+        // identical rounded button in a run of three, with no separator and — the
+        // caret having rendered as an empty box — nothing but the word to say it
+        // is a dropdown. Two of the three faults the comment levels at "Edit"
+        // shipped unchanged. The row has the room: it fits at the app's own
+        // 880 pt minimum with slack.
+        ui.separator();
+
         let has = self.document.is_some();
         ui.add_enabled_ui(has, |ui| {
-            ui.menu_button("Edit", |ui| {
+            // "Edit" was wrong three times over, which is why it read as
+            // ambiguous next to Undo and Redo.
+            //
+            // Its POSITION lied: no separator between it and two history
+            // controls, and the same shape as both, so it read as a third
+            // immediate verb or a read-only toggle. It is neither — it is a
+            // dropdown. Answered by the `ui.separator()` above.
+            //
+            // Its NOUN lied: nothing behind it edits bases. Insert, delete,
+            // replace and paste — what a biologist means by editing a plasmid —
+            // are in the Sequence tab. A user hunting for "where do I edit the
+            // sequence" clicked here and was sent the wrong way, which is worse
+            // than an unlabelled control.
+            //
+            // And it COLLIDED with the platform: on Windows "Edit" is the menu
+            // holding Undo, Redo, Cut, Copy and Paste. This one sat next to
+            // Undo and Redo and contained none of them.
+            //
+            // Every item acts on the whole molecule or on the selected feature,
+            // and "Molecule" is the word `pl_core`, `pl info` and the rest of
+            // this file already use for that object. Not "Sequence", "Features"
+            // or "File": those are tab names.
+            ui.menu_button("Molecule", |ui| {
                 let circular = self
                     .document
                     .as_ref()
@@ -1337,34 +1740,49 @@ impl App {
     /// egui's only cap is `min(max, available_rect.width)` — it stops the panel
     /// overflowing the *window*, not overrunning the CentralPanel. With no
     /// maximum of our own the map pane goes to zero: `map::show` takes a
-    /// zero-width `max_rect`, `r = (min(0, h) * 0.5 - 132).max(40)` yields the
-    /// 40 pt floor, and everything is painted into a zero-width clip rect. The
-    /// map silently vanishes with nothing on screen explaining why. At 360 the
-    /// map is r = 48 — a token circle, poor to read and obviously *there*,
-    /// which is the point of a stop. Below 344 the 132 pt label reserve exceeds
-    /// the box and the leader lines are drawn outside it.
+    /// zero-width rect, `pl_draw::ring::radius` bottoms out at its 40 pt floor,
+    /// and everything is painted into a zero-width clip rect. The map silently
+    /// vanishes with nothing on screen explaining why. At 360 the map is a token
+    /// circle — poor to read and obviously *there*, which is the point of a stop.
+    ///
+    /// The floor no longer has a second job. It used to also be where "the 132 pt
+    /// label reserve exceeds the box and the leader lines are drawn outside it"
+    /// started, and there is no 132: `map.rs` computes the reserve from the widest
+    /// label that will land in a side column, so it shrinks with the pane instead
+    /// of overrunning it, and the labels it cannot hold whole are shortened and
+    /// counted in the line under the caption. 360 is now only "small enough to be
+    /// a thumbnail, large enough not to look broken".
     const MIN_MAP: f32 = 360.0;
     /// Where the splitter sits until the user moves it.
     ///
     /// The smallest width that reaches the GenBank 60-base row with metric
     /// headroom, and not one point more.
     ///
-    /// Not a taste question. The width this does not take is width the map pane
-    /// keeps, and `map.rs` reserves a fixed 132 pt outside the backbone for its
-    /// enzyme labels — which binds only while the pane is NARROWER THAN IT IS
-    /// TALL, because the radius is `min(w, h) / 2 - 132`. Above that the pane
-    /// gives each side `w/2 - h/2 + 132` and every label fits; at or below it
-    /// each side gets exactly 132, and "EcoRI 7,530" renders as "coRI 7,530" —
-    /// a truncation that reads as a different enzyme rather than as damage.
-    /// 560 crossed that line on the user's own 1296 x 879 window and clipped
-    /// seven labels on both sides.
+    /// Not a taste question, and the reason has changed. The width this does not
+    /// take is width the map pane keeps.
     ///
-    /// So the default is the 60-base threshold plus a small margin, and the
-    /// threshold itself was moved down by measuring the coordinate gutter from
-    /// the molecule instead of reserving nine digits for every plasmid (see
+    /// It used to be about a *fixed* 132 pt reserve, which bound only while the
+    /// pane was narrower than it was tall — `min(w, h) / 2 - 132` — and below that
+    /// line gave each side exactly 132 and rendered "EcoRI 7,530" as
+    /// "coRI 7,530", a truncation that reads as a different enzyme rather than as
+    /// damage. 560 crossed it on the user's own 1296 x 879 window and clipped
+    /// seven labels on both sides. There is no 132 any more:
+    /// `pl_draw::ring::reserve_for` derives the reserve from the widest label that
+    /// will actually land in a side column, `ring::radius` charges it to the
+    /// *width* and the row strip to the *height*, and what still will not fit is
+    /// shortened by `ring::label_room` and counted in the line under the caption.
+    /// So a narrow pane now costs radius and states what it cost, instead of
+    /// cutting the front off a name.
+    ///
+    /// What is left of the argument, and it is still an argument: a wider panel is
+    /// a smaller ring, a smaller ring is a shorter `label_room`, and a shorter
+    /// `label_room` is more names shortened. The default is therefore the 60-base
+    /// threshold plus a small margin and not one point more, and the threshold
+    /// itself was moved down by measuring the coordinate gutter from the molecule
+    /// instead of reserving nine digits for every plasmid (see
     /// [`seqedit::gutter_w`]). `the_default_split_has_headroom_and_leaves_the_map_square`
-    /// pins both halves: 60 bases at the default and at the default less 10,
-    /// and a map pane at least as wide as it is tall.
+    /// pins both halves: 60 bases at the default and at the default less 10, and a
+    /// map pane at least as wide as it is tall.
     const DEF_PANEL: f32 = 500.0;
 
     fn side_panel(&mut self, ui: &mut Ui) {
@@ -1384,6 +1802,13 @@ impl App {
         // reaches this; `SetWindowPos` ignores it, and the expression has to
         // stay valid — `Rangef::new(lo, hi)` requires `lo <= hi` — when it does.
         let max_panel = (ui.available_width() - Self::MIN_MAP).max(Self::MIN_PANEL);
+        if debug_geometry() {
+            eprintln!(
+                "geometry: before panel avail={:?} stored={:?} max_panel={max_panel}",
+                ui.available_rect_before_wrap(),
+                self.layout.panel_w
+            );
+        }
         // ORDER MATTERS, and getting it wrong ships silently. `default_size(d)`
         // *widens* the range to include `d`; `size_range(r)` *clamps* the
         // stored default into `r`. So `.default_size(w).size_range(lo..=hi)`
@@ -3704,11 +4129,26 @@ impl App {
                 return;
             }
 
+            // The fallback stays; only the extension goes. `map.rs` is right
+            // that the `.dna` container carries no molecule name and that the
+            // filename is the only thing left to print — but "pKoV with His
+            // decR.dna" is what the *container* is called and "pKoV with His
+            // decR" is what the plasmid is called. `Document::title` keeps the
+            // whole filename, because the toolbar, the hover and the recovery
+            // header all want the real one.
             let caption = if d.molecule().name.is_empty() {
-                d.title.as_str()
+                pl_fileio::caption_of(&d.title)
             } else {
                 d.molecule().name.as_str()
             };
+            if debug_geometry() {
+                eprintln!(
+                    "geometry: central max={:?} avail={:?} clip={:?}",
+                    ui.max_rect(),
+                    ui.available_rect_before_wrap(),
+                    ui.clip_rect()
+                );
+            }
             let r = map::show(ui, d.molecule(), caption, d.digest.results(), selected, hot);
             hovered_out = r.hovered;
             clicked_out = r.clicked;
@@ -4653,6 +5093,151 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // the toolbar's title block
+    // -----------------------------------------------------------------------
+
+    /// PROVEN TO FAIL against the working tree as handed over, on the first
+    /// assertion: `elide` opened with `if room <= 0.0 || fits { return s }`, so
+    /// non-positive room paid out the WHOLE string.
+    ///
+    /// That inverts the documented degradation order at exactly the moment it
+    /// matters. `room` is `available_width - state_w - 12`, so a long status
+    /// string drives it negative, and the filename then gave nothing back while
+    /// both it and the un-elided status overran the reserved right-hand cluster —
+    /// the theme switch painted through the letters and the path cut mid-token at
+    /// the window edge with no ellipsis. It is not a synthetic path length: the
+    /// user's own genome files sit 160 characters deep in OneDrive.
+    #[test]
+    fn no_room_elides_to_nothing_and_not_to_everything() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        egui::Area::new(egui::Id::new("t")).show(&ctx, |ui| {
+            for room in [0.0, -1.0, -400.0] {
+                assert_eq!(
+                    elide(ui, "pKoV with His decR.dna", room),
+                    "",
+                    "room {room} paid out the whole name"
+                );
+            }
+            // Small but positive: something, ending in an ellipsis, and shorter
+            // than what was asked for.
+            let some = elide(ui, "pKoV with His decR.dna", 40.0);
+            assert!(some.ends_with("..."), "{some:?}");
+            assert!(some.len() < "pKoV with His decR.dna".len());
+            // Ample: untouched, with no ellipsis invented.
+            assert_eq!(
+                elide(ui, "pKoV with His decR.dna", 4_000.0),
+                "pKoV with His decR.dna"
+            );
+            // Not even one character and an ellipsis: empty, never a bare "...",
+            // which would claim a name is there when none of it can be read.
+            assert_eq!(elide(ui, "pKoV", 3.0), "");
+        });
+        let _ = ctx.end_pass();
+    }
+
+    /// The whole toolbar inside the window, and nothing over the theme switch.
+    ///
+    /// Item 4 shipped with no automated coverage at all: every measured claim
+    /// about the bar rested on screenshots, and `elide` — one caller, no test —
+    /// held the defect above. This paints real frames at the app's own
+    /// `min_inner_size` and asks the two questions the screenshots were asked.
+    #[test]
+    fn the_toolbar_stays_inside_the_window_however_long_the_status_is() {
+        for status in [
+            "SnapGene .dna · 8,117 bp · circular",
+            // What a real export writes: a 99-character consequence in front of
+            // a 150-character path.
+            "FASTA keeps only the bases; this drops 9 feature(s) and the topology (it will \
+             reopen as linear)  —  wrote C:\\Users\\alf22\\AppData\\Local\\Temp\\claude\\\
+             C--Users-alf22-Zotero\\bb0d8734-3b4e-44e4-86d3-d1d2dcab7b48\\scratchpad\\vout\\seq.fa",
+            // And a pathological one, to establish there is no length at which
+            // the bar gives up quietly.
+            &"x".repeat(600),
+        ] {
+            // 880 x 560 is `min_inner_size`; 1280 x 840 is the default.
+            for (w, h) in [(880.0f32, 560.0f32), (1280.0, 840.0)] {
+                let ctx = egui::Context::default();
+                let mut app = seq_app();
+                app.status = status.to_string();
+                let win = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(w, h),
+                    )),
+                    ..Default::default()
+                };
+                // The toolbar alone. `paint_out` drives `side_panel` and a filler
+                // CentralPanel and never calls `top_bar`, which is exactly the gap
+                // this test exists to close.
+                let mut shapes = Vec::new();
+                for _ in 0..2 {
+                    app.status = status.to_string();
+                    let out = ctx.run_ui(win.clone(), |ui| {
+                        app.top_bar(ui);
+                    });
+                    shapes = flat_shapes(&out.shapes);
+                }
+                // Every text in the window, found by content rather than by a
+                // guessed y-band: the toolbar's own height is not this test's
+                // business and getting it wrong makes the test about the wrong
+                // widgets.
+                let texts: Vec<(String, egui::Rect)> = shapes
+                    .iter()
+                    .filter_map(|s| match s {
+                        egui::Shape::Text(t) => Some((
+                            t.galley.text().to_string(),
+                            egui::Rect::from_min_size(t.pos, t.galley.size()),
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(texts.len() >= 8, "{w}x{h}: only {} texts", texts.len());
+                for (text, r) in &texts {
+                    assert!(
+                        r.right() <= w + 0.5 && r.left() >= -0.5,
+                        "{w}x{h}: {text:?} is drawn at {r:?}, outside a {w} pt window"
+                    );
+                }
+                // The status is drawn whole, or drawn with a mark saying it was
+                // cut. Never cut in silence.
+                //
+                // This is the assertion that distinguishes a fix from no fix. "Is
+                // it inside the window" holds either way, because with no elision
+                // of our own egui truncates the galley itself and the rect stays
+                // put; what it does not do is leave a mark. The bar simply read
+                // `wrote C:\Users\alf22\AppData\Local\Temp\claude\C--Users*lf2`
+                // and stopped, mid-token, with no ellipsis and no hover, so a
+                // reader could not tell there was more — and what was cut off was
+                // `FASTA keeps only the bases; this drops 9 feature(s) and the
+                // topology`. A silently truncated warning is the same defect as a
+                // silently dropped label.
+                let head: String = status.chars().take(10).collect();
+                let drawn: Vec<&String> = texts
+                    .iter()
+                    .map(|(t, _)| t)
+                    // `!t.is_empty()`, because every string starts with "" and
+                    // the elided filename beside the status is legitimately empty.
+                    .filter(|t| {
+                        !t.is_empty() && (t.starts_with(&head) || status.starts_with(t.as_str()))
+                    })
+                    .collect();
+                assert!(
+                    !drawn.is_empty(),
+                    "{w}x{h}: the status is not on screen at all"
+                );
+                for t in &drawn {
+                    assert!(
+                        *t == status || t.ends_with("..."),
+                        "{w}x{h}: a {}-character status was cut to {t:?} with nothing saying so",
+                        status.len()
+                    );
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // the three application-wide shortcuts, and the design panel's lifetime
     // -----------------------------------------------------------------------
 
@@ -4702,6 +5287,8 @@ mod tests {
         assert!(shortcuts_with(&app, egui::Key::Y, None).redo);
         assert!(shortcuts_with(&app, egui::Key::O, None).open);
 
+        assert!(shortcuts_with(&app, egui::Key::S, None).save);
+
         // The Features tab's filter box, the Library query and the design
         // panel's Spacer field are all plain `TextEdit`s, and egui gives Ctrl+Z
         // to the focused one without consuming it.
@@ -4712,6 +5299,13 @@ mod tests {
             assert!(
                 !shortcuts_with(&app, egui::Key::O, Some(who)).open,
                 "Ctrl+O popped a file dialog out of {who}"
+            );
+            // Ctrl+S is the most reflexive keystroke there is, and a file dialog
+            // popping out of a search box is the same surprise as a file dialog
+            // popping out of it for Ctrl+O.
+            assert!(
+                !shortcuts_with(&app, egui::Key::S, Some(who)).save,
+                "Ctrl+S opened a Save dialog out of {who}"
             );
         }
     }
@@ -4754,6 +5348,17 @@ mod tests {
         assert!(!shortcuts_with(&app, egui::Key::Y, None).redo);
         // Opening another file is still allowed; it closes the panel and says so.
         assert!(shortcuts_with(&app, egui::Key::O, None).open);
+        // And so is saving, deliberately. The panel guard exists because an undo
+        // underneath the panel changes the bases the panel is describing; saving
+        // changes nothing, and writing the file you are looking at while a primer
+        // report is open is a reasonable thing to want. Pinned here because the
+        // doc block on `Shortcuts` claimed all three guards applied and this one
+        // never did — either answer is defensible, an undocumented one is not.
+        assert!(
+            shortcuts_with(&app, egui::Key::S, None).save,
+            "Ctrl+S is deliberately NOT gated on the design panel; if that changed, \
+             the doc on `Shortcuts::save` has to change with it"
+        );
     }
 
     /// PROVEN TO FAIL at dfd6ac9: both `primer_bind` features land, at the
@@ -5903,11 +6508,13 @@ mod tests {
     ///
     /// Both halves matter and they pull against each other. Below the threshold
     /// the row is not the row GenBank prints, which is the whole point of the
-    /// layout work. Above it, every extra point comes out of the map pane — and
-    /// once that pane is narrower than it is tall, `map.rs`'s fixed 132 pt label
-    /// reserve stops being enough and "EcoRI 7,530" renders as "coRI 7,530", a
-    /// truncation that reads as a different enzyme rather than as damage. At
-    /// 560 that was seven labels on the user's own window.
+    /// layout work. Above it, every extra point comes out of the map pane, and a
+    /// narrower pane is a smaller ring, a shorter `ring::label_room` and more
+    /// enzyme names shortened. It used to be worse than "shortened": with a
+    /// *fixed* 132 pt reserve, a pane narrower than it was tall rendered
+    /// "EcoRI 7,530" as "coRI 7,530" — a truncation that reads as a different
+    /// enzyme rather than as damage — and at 560 that was seven labels on the
+    /// user's own window.
     ///
     /// COMPILE-ONLY at bd96e5b, where the panel is `exact_size(380.0)` and
     /// neither number exists.
@@ -5973,5 +6580,922 @@ mod tests {
                 app.edit.per_row()
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The plasmid map: the label ring, the ruler's band, and the caption
+    //
+    // These paint real frames and assert on the shapes that came back, because
+    // every complaint being answered here is about where something ended up on
+    // screen — and `map.rs` can be self-consistent about its numbers while the
+    // picture is wrong. That is exactly what shipped: `LABEL_RESERVE = 132.0`
+    // was a perfectly consistent constant that cut the front off `EcoRI 7,530`.
+    // -----------------------------------------------------------------------
+
+    /// The user's own plasmid: 8,117 bp circular, with the feature table the
+    /// Features tab lists for it.
+    ///
+    /// Built here rather than read from `pKoV with His decR.dna`, because a test
+    /// that needs a file in one person's Downloads folder fails on every other
+    /// machine. The coordinates are that file's, taken off the Features tab.
+    fn pkov() -> pl_core::Molecule {
+        let mut s = 0x1234_5678_9abc_def1u64;
+        let seq: Vec<u8> = (0..8_117)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                b"ACGT"[(s >> 33) as usize & 3]
+            })
+            .collect();
+        let mut mol = pl_core::Molecule {
+            seq,
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        for &(name, start, end, strand) in &[
+            ("cat promoter", 7_748u64, 7_850u64, Strand::Reverse),
+            ("CmR", 7_088, 7_747, Strand::Reverse),
+            ("sacB promoter", 3_398, 3_843, Strand::Reverse),
+            // The reverse feature that matters twice: it is the magenta arc that
+            // painted over the "3,247" ruler tick, and 3,247 falls inside it.
+            ("SacB", 1_976, 3_397, Strand::Reverse),
+            ("f1 ori", 3_945, 4_399, Strand::Reverse),
+            ("pSC101 ori", 363, 585, Strand::Unoriented),
+            ("Rep101(Ts)", 633, 1_583, Strand::Forward),
+            ("decR", 5_423, 5_878, Strand::Unoriented),
+            ("decR his", 5_423, 5_905, Strand::Unoriented),
+        ] {
+            let mut f = pl_core::Feature::new(name, "misc_feature");
+            f.strand = strand;
+            f.segments = vec![pl_core::Segment::new(start, end)];
+            mol.features.push(f);
+        }
+        mol
+    }
+
+    /// pKoV's 22 unique cutters, at the coordinates the map printed for them.
+    ///
+    /// A `Digest` by hand rather than `digest_all` on the synthetic sequence
+    /// above: the *positions* are what the layout is being tested against, and
+    /// three of these pairs — SalI/XbaI 6 bp apart, SphI/NsiI and XmaI/SmaI 2 bp
+    /// apart — are the co-located cases that decide whether merging is right.
+    fn pkov_cutters() -> Vec<pl_enzymes::Digest> {
+        pkov_cutter_names()
+            .iter()
+            .map(|&(name, pos)| pl_enzymes::Digest {
+                enzyme: pl_enzymes::by_name(name)
+                    .unwrap_or_else(|| panic!("{name} is not in the shipped enzyme table")),
+                positions: vec![pos],
+            })
+            .collect()
+    }
+
+    fn pkov_cutter_names() -> Vec<(&'static str, u64)> {
+        vec![
+            ("AflII", 271),
+            ("SpeI", 562),
+            ("NdeI", 1_682),
+            ("HindIII", 2_059),
+            ("SnaBI", 2_648),
+            ("BsrGI", 2_711),
+            ("SalI", 4_413),
+            ("XbaI", 4_419),
+            ("SphI", 4_758),
+            ("NsiI", 4_760),
+            ("BglII", 4_886),
+            ("SacI", 5_171),
+            ("PmeI", 5_345),
+            ("PstI", 5_464),
+            ("BamHI", 5_588),
+            ("MluI", 5_932),
+            ("BclI", 6_561),
+            ("XmaI", 6_917),
+            ("SmaI", 6_919),
+            ("ScaI", 7_117),
+            ("EcoRI", 7_530),
+            ("BbsI", 7_963),
+        ]
+    }
+
+    /// One frame of nothing but the map, filling a pane of the given size.
+    ///
+    /// `Frame::NONE`, so the pane the map is handed *is* the rect returned and
+    /// "did a label run off the pane" is a question about numbers this test
+    /// knows. Two passes because egui's first frame has no galley cache and the
+    /// map measures its own labels to decide the radius.
+    fn paint_map(
+        mol: &pl_core::Molecule,
+        caption: &str,
+        digest: &[pl_enzymes::Digest],
+        w: f32,
+        h: f32,
+    ) -> (Vec<egui::Shape>, egui::Rect) {
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+        let input = egui::RawInput {
+            screen_rect: Some(rect),
+            ..Default::default()
+        };
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |ui| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        map::show(ui, mol, caption, digest, None, None);
+                    });
+            });
+            shapes = flat_shapes(&out.shapes);
+        }
+        (shapes, rect)
+    }
+
+    /// Every painted shape, with `Shape::Vec` expanded.
+    fn flat_shapes(clipped: &[egui::epaint::ClippedShape]) -> Vec<egui::Shape> {
+        fn walk(s: &egui::Shape, out: &mut Vec<egui::Shape>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                other => out.push(other.clone()),
+            }
+        }
+        let mut out = Vec::new();
+        for cs in clipped {
+            walk(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    /// Every text drawn in one font, as `(text, rect)`.
+    ///
+    /// Family as well as size: the enzyme labels are monospace 10 and the line
+    /// saying what the map is not showing is proportional 10, and a test that
+    /// mixed them would assert about the wrong thing.
+    fn texts_in(
+        shapes: &[egui::Shape],
+        size: f32,
+        family: egui::FontFamily,
+    ) -> Vec<(String, egui::Rect)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => {
+                    let f = &t.galley.job.sections.first()?.format.font_id;
+                    ((f.size - size).abs() < 0.01 && f.family == family).then(|| {
+                        (
+                            t.galley.text().to_string(),
+                            egui::Rect::from_min_size(t.pos, t.galley.size()),
+                        )
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every hairline polyline: leaders, ruler ticks, join hairs.
+    fn hairlines(shapes: &[egui::Shape]) -> Vec<Vec<egui::Pos2>> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::LineSegment { points, stroke } if stroke.width <= 1.6 => {
+                    Some(points.to_vec())
+                }
+                egui::Shape::Path(p) if p.stroke.width <= 1.6 && p.points.len() >= 2 => {
+                    Some(p.points.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every feature band, as `(polyline, half the stroke width)`.
+    ///
+    /// Picked out by weight: a band is 9 pt, the backbone is 1.5 and every
+    /// leader is 1 or less, so there is nothing to confuse it with.
+    fn feature_bands(shapes: &[egui::Shape]) -> Vec<(Vec<egui::Pos2>, f32)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Path(p) if p.stroke.width >= 6.0 && p.points.len() >= 2 => {
+                    Some((p.points.clone(), p.stroke.width * 0.5))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every vertex of every painted shape, so "did any ink leave the pane" is a
+    /// question about numbers.
+    fn all_vertices(shapes: &[egui::Shape]) -> Vec<egui::Pos2> {
+        let mut out = Vec::new();
+        for s in shapes {
+            match s {
+                egui::Shape::Path(p) => out.extend(p.points.iter().copied()),
+                egui::Shape::LineSegment { points, .. } => out.extend(points.iter().copied()),
+                egui::Shape::Circle(c) => out.extend([
+                    egui::Pos2::new(c.center.x - c.radius, c.center.y - c.radius),
+                    egui::Pos2::new(c.center.x + c.radius, c.center.y + c.radius),
+                ]),
+                egui::Shape::Text(t) => {
+                    out.extend([t.pos, t.pos + t.galley.size()]);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// PROVEN TO FAIL at e087e27 and in the working tree before this pass.
+    ///
+    /// pET28a's `rep_origin` is `2464` — a single-base GenBank location, and a
+    /// real one: the file's own note is "base 2464 represents the first base of
+    /// the newly synthesized single strand". `arc_points` floored the sweep it
+    /// counted STEPS with and interpolated with the raw `a1 - a0`, so the arc came
+    /// back as three coincident points, and `Shape::line` over a zero-length path
+    /// with a 9 pt stroke tessellated into a translucent wedge across half the map
+    /// pane. `draw_arrowhead` did the same with `sweep == 0`, giving `head == 0`
+    /// and three vertices on one ray. It showed up on four of nine real files as
+    /// feature-coloured lines drawn through the backbone, the caption and the
+    /// disclosure line, and it is radius-dependent — absent at a maximised window
+    /// and present at the default — so a change that alters every radius on the map
+    /// cannot leave it alone.
+    #[test]
+    fn a_feature_a_few_bases_long_does_not_tessellate_across_the_pane() {
+        let mut mol = pkov();
+        // One base, three bases, nine bases: the shapes seen in the field, on a
+        // 1 bp, a 3 bp CDS and a 9 bp `-10` box respectively.
+        for (name, start, end, strand) in [
+            ("rep_origin", 2_464u64, 2_464u64, Strand::Unoriented),
+            ("phoE", 6_163, 6_165, Strand::Forward),
+            ("-35", 46, 51, Strand::Reverse),
+            ("-10", 191, 199, Strand::Forward),
+        ] {
+            let mut f = pl_core::Feature::new(name, "misc_feature");
+            f.strand = strand;
+            f.segments = vec![pl_core::Segment::new(start, end)];
+            mol.features.push(f);
+        }
+        for (w, h) in [(706.0f32, 756.0f32), (880.0, 620.0), (1400.0, 950.0)] {
+            // Asserted on the TESSELLATED mesh, not on the shapes.
+            //
+            // The shapes were always in the pane: `arc_points` returned three
+            // points on the ring and they were coincident, not distant. The wedge
+            // is manufactured one stage later, where the tessellator computes a
+            // segment normal from a zero-length segment and gets infinities. So a
+            // test that walks `Shape` vertices passes with the defect present —
+            // this one was written that way first and did.
+            let ctx = egui::Context::default();
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+            let input = egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            };
+            let mut clipped = Vec::new();
+            for _ in 0..2 {
+                let out = ctx.run_ui(input.clone(), |ui| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ui, |ui| {
+                            map::show(ui, &mol, "pET28a", &pkov_cutters(), None, None);
+                        });
+                });
+                clipped = out.shapes;
+            }
+            let grown = rect.expand(2.0);
+            let mut verts = 0usize;
+            for prim in ctx.tessellate(clipped, 1.0) {
+                if let egui::epaint::Primitive::Mesh(m) = prim.primitive {
+                    for v in &m.vertices {
+                        verts += 1;
+                        assert!(
+                            v.pos.x.is_finite() && v.pos.y.is_finite(),
+                            "{w}x{h}: a mesh vertex is at {:?}",
+                            v.pos
+                        );
+                        assert!(
+                            grown.contains(v.pos),
+                            "{w}x{h}: a mesh vertex at {:?} is outside the {rect:?} pane",
+                            v.pos
+                        );
+                    }
+                }
+            }
+            assert!(
+                verts > 500,
+                "{w}x{h}: only {verts} mesh vertices — nothing drawn"
+            );
+
+            // And the short features are still drawn, as marks. Dropping them
+            // would satisfy everything above and lose four features.
+            let shapes = flat_shapes(
+                &ctx.run_ui(input.clone(), |ui| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ui, |ui| {
+                            map::show(ui, &mol, "pET28a", &pkov_cutters(), None, None);
+                        });
+                })
+                .shapes,
+            );
+            let (centre, r) = backbone(&shapes);
+            let marks = shapes
+                .iter()
+                .filter(|s| match s {
+                    egui::Shape::LineSegment { points, stroke } => {
+                        (stroke.width - 1.75).abs() < 0.01
+                            && (points[0] - centre).length() > r * 0.5
+                    }
+                    _ => false,
+                })
+                .count();
+            assert!(marks >= 4, "{w}x{h}: {marks} radial marks, not 4");
+        }
+    }
+
+    /// PROVEN TO FAIL against the working tree as handed over: `map::show` took
+    /// `ui.max_rect()`, the whole CentralPanel, while `recovery_banner` and the
+    /// notice strip are laid out inside the same panel above the map.
+    ///
+    /// At e087e27 that was harmless, because `label_slots` only ever produced two
+    /// side columns and the top of the pane was empty. `ring::place_ring` puts a
+    /// row there, and `EcoRI  7,530   BbsI  7,963   AflII  271   SpeI  562` was
+    /// painted across the banner's own text with SpeI's leader drawn down through
+    /// the `Discard` button. The banner is the recover-or-discard decision for an
+    /// unsaved draft, so map ink over its buttons is worse than cosmetic.
+    #[test]
+    fn the_map_is_drawn_below_whatever_shares_its_panel() {
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0, 800.0));
+        let input = egui::RawInput {
+            screen_rect: Some(rect),
+            ..Default::default()
+        };
+        let mol = pkov();
+        let cutters = pkov_cutters();
+        // A strip standing in for the banner: the same shape, laid out first in
+        // the same panel, and tall enough to reach where the twelve-o'clock row
+        // goes.
+        // 130 pt, which is what the real banner occupies inside the panel once
+        // its path line and its two buttons are laid out. A shorter strip is not a
+        // test: at 96 the twelve-o clock row lands at y = 99 on this pane and
+        // clears it by three points, so the assertion passes with the defect
+        // present. Measured, then chosen.
+        let banner_h = 130.0;
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |ui| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        ui.allocate_space(egui::vec2(ui.available_width(), banner_h));
+                        map::show(ui, &mol, "pKoV with His decR", &cutters, None, None);
+                    });
+            });
+            shapes = flat_shapes(&out.shapes);
+        }
+        let labels = texts_in(&shapes, 10.0, egui::FontFamily::Monospace);
+        assert!(labels.len() >= 15, "only {} labels", labels.len());
+        for (text, r) in &labels {
+            assert!(
+                r.top() >= banner_h - 0.5,
+                "{text:?} is drawn at {r:?}, inside the {banner_h} pt strip above the map"
+            );
+        }
+        for v in all_vertices(&shapes) {
+            assert!(
+                v.y >= banner_h - 0.5 || !v.is_finite(),
+                "map ink at {v:?} is inside the {banner_h} pt strip above the map"
+            );
+        }
+    }
+
+    /// The backbone: the widest circle on the map.
+    fn backbone(shapes: &[egui::Shape]) -> (egui::Pos2, f32) {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Circle(c) => Some((c.center, c.radius)),
+                _ => None,
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .expect("the backbone was drawn")
+    }
+
+    /// PROVEN TO FAIL at e087e27, on the "inside the pane" assertion.
+    ///
+    /// There, `room` works out to `132 - 63 = 69` pt whatever the window size —
+    /// `lx` is pinned to `cx ± (tick_r + 22)` and `tick_r` grows with the same
+    /// `w/2` the radius shrinks by, so the two cancel — which is 11 characters
+    /// at this font's 6 pt advance. `HindIII  2,059` is 14 and ran 19 pt past the
+    /// right edge; `BamHI  5,588` and eight others ran off the left. A cut
+    /// coordinate is a *wrong* coordinate, and the label the reader is left with
+    /// still looks like an enzyme name: `EcoRI  7,530` reads as `coRI  7,530`.
+    ///
+    /// The other three assertions pass at e087e27 and are here to stop the fix
+    /// buying room by breaking something that already worked.
+    #[test]
+    fn every_enzyme_label_is_whole_inside_the_pane_and_points_at_its_own_tick() {
+        let mol = pkov();
+        let cutters = pkov_cutters();
+        for (w, h) in [(706.0f32, 756.0f32), (880.0, 620.0), (560.0, 900.0)] {
+            let (shapes, pane) = paint_map(&mol, "pKoV with His decR", &cutters, w, h);
+            let (centre, r) = backbone(&shapes);
+            let labels = texts_in(&shapes, 10.0, egui::FontFamily::Monospace);
+            assert!(
+                labels.len() >= 15,
+                "{w}x{h}: only {} labels on a plasmid with 22 unique cutters",
+                labels.len()
+            );
+
+            // 1. Whole, and inside the pane. This is the one that fails at
+            //    e087e27.
+            for (text, rect) in &labels {
+                assert!(
+                    !text.ends_with("..."),
+                    "{w}x{h}: {text:?} did not fit the room reserved for it"
+                );
+                assert!(
+                    rect.left() >= pane.left() - 0.5
+                        && rect.right() <= pane.right() + 0.5
+                        && rect.top() >= pane.top() - 0.5
+                        && rect.bottom() <= pane.bottom() + 0.5,
+                    "{w}x{h}: {text:?} is drawn at {rect:?}, outside the {pane:?} pane"
+                );
+            }
+
+            // 2. No two overlap.
+            for i in 0..labels.len() {
+                for j in i + 1..labels.len() {
+                    let hit = labels[i].1.intersects(labels[j].1);
+                    assert!(
+                        !hit,
+                        "{w}x{h}: {:?} at {:?} overlaps {:?} at {:?}",
+                        labels[i].0, labels[i].1, labels[j].0, labels[j].1
+                    );
+                }
+            }
+
+            // 3. Every enzyme that cuts once is still named somewhere. Merging
+            //    two co-located sites into one tick must not lose either name,
+            //    and dropping a label must not be how the map fits.
+            //
+            //    A folded label is `A  1,234 / B  1,236` — every name carrying
+            //    its own coordinate — so the parse splits on " / " first. It used
+            //    to be `A/B  1,234-1,236`, a range, which is the form this pass
+            //    removed: five names against two numbers on pET28a's polylinker,
+            //    with three of the five cut positions printed nowhere.
+            let mut named: Vec<&str> = Vec::new();
+            for (text, _) in &labels {
+                for part in text.split(" / ") {
+                    let head = part.split("  ").next().unwrap_or_default();
+                    named.extend(head.split('/'));
+                }
+            }
+            for (want, _) in pkov_cutter_names() {
+                assert!(
+                    named.contains(&want),
+                    "{w}x{h}: {want} cuts once and is nowhere on the map: {named:?}"
+                );
+            }
+
+            // 4. Every leader ends at its own tick and nobody else's.
+            let lines = hairlines(&shapes);
+            for (text, rect) in &labels {
+                // The FIRST coordinate in the label, which is the tick's own
+                // base: `Site::anchor` is `positions.first()`, and a folded label
+                // lists its members in coordinate order.
+                let coord: u64 = text
+                    .split(" / ")
+                    .next()
+                    .and_then(|first| first.rsplit("  ").next())
+                    .map(|c| c.replace(',', ""))
+                    .and_then(|c| c.parse().ok())
+                    .unwrap_or_else(|| panic!("no coordinate in {text:?}"));
+                // The leader is the hairline ending nearest this label.
+                let anchor = rect.center();
+                let leader = lines
+                    .iter()
+                    .filter(|l| l.len() >= 2)
+                    .min_by(|a, b| {
+                        let d = |l: &Vec<egui::Pos2>| {
+                            (*l.last().unwrap() - anchor)
+                                .length()
+                                .min((l[0] - anchor).length())
+                        };
+                        d(a).partial_cmp(&d(b)).unwrap()
+                    })
+                    .expect("some hairline was drawn");
+                let far = if (leader[0] - anchor).length()
+                    > (*leader.last().unwrap() - anchor).length()
+                {
+                    leader[0]
+                } else {
+                    *leader.last().unwrap()
+                };
+                // Where the tick for THIS coordinate is: on the ray at its own
+                // angle, outside the backbone.
+                let a = -std::f32::consts::FRAC_PI_2
+                    + (coord.saturating_sub(1)) as f32 / 8_117.0 * std::f32::consts::TAU;
+                let v = far - centre;
+                assert!(
+                    v.length() > r,
+                    "{w}x{h}: {text:?}'s leader starts inside the ring"
+                );
+                let off = (v.y * a.cos() - v.x * a.sin()).abs() / v.length().max(1.0);
+                assert!(
+                    off < 0.02,
+                    "{w}x{h}: {text:?}'s leader starts at {far:?}, which is not on the ray \
+                     to base {coord} from {centre:?}"
+                );
+            }
+        }
+    }
+
+    /// PROVEN TO FAIL at e087e27: the "3,247" tick is painted over by SacB.
+    ///
+    /// The ruler and the reverse-strand lanes shared radii there — the number
+    /// sat at `r - 16` in a 9 pt face, spanning `r-21.5 .. r-11.5`, and reverse
+    /// lane 0 spans `r-13.5 .. r-4.5` — and the features are painted second, so
+    /// the features always won. Exactly one of the five labelled ticks broke on
+    /// this file, which is not luck: it is the one tick that happens to fall
+    /// inside a reverse feature.
+    #[test]
+    fn a_ruler_number_is_clear_of_every_feature_band() {
+        let mol = pkov();
+        let (shapes, _) = paint_map(&mol, "pKoV with His decR", &pkov_cutters(), 706.0, 756.0);
+        let numbers = texts_in(&shapes, 9.0, egui::FontFamily::Monospace);
+        assert_eq!(
+            numbers.len(),
+            5,
+            "every other tick of ten is labelled: {numbers:?}"
+        );
+        assert!(
+            numbers.iter().any(|(t, _)| t == "3,247"),
+            "the tick the user could not read is drawn at all: {numbers:?}"
+        );
+
+        let bands = feature_bands(&shapes);
+        assert!(!bands.is_empty(), "the features were drawn");
+        for (text, rect) in &numbers {
+            for (points, half) in &bands {
+                // The band is a thick polyline; test its centre line and the
+                // midpoint of each step against the number's box grown by half
+                // the band's width. `arc_points` samples about every 1.5
+                // degrees, which is a few points across a box this size.
+                let grown = rect.expand(*half);
+                for w in points.windows(2) {
+                    let mid = egui::pos2((w[0].x + w[1].x) * 0.5, (w[0].y + w[1].y) * 0.5);
+                    for p in [w[0], mid, w[1]] {
+                        assert!(
+                            !grown.contains(p),
+                            "the ruler number {text:?} at {rect:?} is painted over by a \
+                             feature band passing through {p:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A label too wide for its column loses its coordinate whole.
+    ///
+    /// COMPILE-AND-RUN at e087e27 and it PASSES there, for the wrong reason:
+    /// nothing was ever shortened, it was silently cropped by the clip rect
+    /// instead, so the galley always held the full text. This is a guard on the
+    /// shortening introduced here — `EcoRI  7,5...` reads as a cut position and
+    /// is not one, which is the same class of wrongness as the clipping it
+    /// replaces.
+    #[test]
+    fn a_shortened_label_never_shows_half_a_coordinate() {
+        let mol = pkov();
+        let cutters = pkov_cutters();
+        let full: Vec<String> = cutters
+            .iter()
+            .map(|d| format!("{}  {}", d.enzyme.name, doc::fmt_int(d.positions[0])))
+            .collect();
+        let mut ever_shortened = false;
+        for (w, h) in [(350.0f32, 480.0f32), (420.0, 520.0), (500.0, 600.0)] {
+            let (shapes, _) = paint_map(&mol, "pKoV with His decR", &cutters, w, h);
+            for (text, _) in texts_in(&shapes, 10.0, egui::FontFamily::Monospace) {
+                if full.contains(&text) {
+                    continue;
+                }
+                ever_shortened = true;
+                let body = text.strip_suffix("...").unwrap_or(&text);
+                // Whatever is drawn must be a prefix of some label's NAME —
+                // never of the coordinate, and never a merged group cut in half.
+                let ok = full.iter().any(|f| {
+                    let name = f.rsplit_once("  ").map_or(f.as_str(), |(n, _)| n);
+                    name.starts_with(body) && !body.is_empty()
+                });
+                assert!(
+                    ok,
+                    "{w}x{h}: {text:?} is not a name, it is part of a number"
+                );
+            }
+        }
+        assert!(
+            ever_shortened,
+            "a check that cannot fail proves nothing: no pane here was narrow enough"
+        );
+    }
+
+    /// A guard on a defect this phase INTRODUCED, and it passes at e087e27.
+    ///
+    /// Giving the ruler a band of its own means flooring it clear of whatever is
+    /// written in the middle, and at the app's own 880 x 560 minimum the map pane
+    /// is about 350 pt wide — narrow enough that the line saying what the map is
+    /// not showing was wider than the ring. The floor then pushed "6,494" and
+    /// "3,247" *outside* the backbone and in among the enzyme names, which is
+    /// worse than the collision it was avoiding. Dodging a centre line the ring
+    /// cannot hold is not possible, so the line is shortened or dropped and the
+    /// floor is bounded.
+    #[test]
+    fn nothing_written_in_the_middle_leaves_the_ring() {
+        let mol = pkov();
+        let cutters = pkov_cutters();
+        for (w, h) in [(350.0f32, 480.0f32), (300.0, 300.0), (706.0, 756.0)] {
+            let (shapes, _) = paint_map(&mol, "pKoV with His decR", &cutters, w, h);
+            let (centre, r) = backbone(&shapes);
+            for (text, rect) in texts_in(&shapes, 9.0, egui::FontFamily::Monospace) {
+                let far = [
+                    rect.left_top(),
+                    rect.right_top(),
+                    rect.left_bottom(),
+                    rect.right_bottom(),
+                ]
+                .iter()
+                .map(|c| (*c - centre).length())
+                .fold(0.0f32, f32::max);
+                assert!(
+                    far <= r,
+                    "{w}x{h}: the ruler number {text:?} reaches {far:.1} pt, outside the                      {r:.1} pt ring"
+                );
+            }
+            // And nothing written in the middle is crossed by a ruler number,
+            // which is what the ruler's own band exists for.
+            let mut middle: Vec<(String, egui::Rect)> =
+                texts_in(&shapes, 10.0, egui::FontFamily::Proportional);
+            middle.extend(texts_in(&shapes, 15.0, egui::FontFamily::Proportional));
+            middle.extend(texts_in(&shapes, 11.0, egui::FontFamily::Monospace));
+            // The NOTE is the line this code chooses, so it is the one held to
+            // the ring's width. The caption is the plasmid's name at a fixed 15
+            // pt and can overhang a token ring: at a 300 pt pane it crosses the
+            // 1.5 pt backbone hairline by about 7 pt at each end, which is an
+            // overhang and not a legibility failure — the note running across
+            // the coloured feature bands was.
+            for (text, rect) in texts_in(&shapes, 10.0, egui::FontFamily::Proportional) {
+                assert!(
+                    rect.width() <= 2.0 * r,
+                    "{w}x{h}: the centre note {text:?} is {:.1} pt wide across a {:.1} pt ring",
+                    rect.width(),
+                    2.0 * r
+                );
+            }
+            for (num, nr) in texts_in(&shapes, 9.0, egui::FontFamily::Monospace) {
+                for (text, rect) in &middle {
+                    assert!(
+                        !nr.intersects(*rect),
+                        "{w}x{h}: the ruler number {num:?} at {nr:?} crosses {text:?} at {rect:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// PROVEN TO FAIL at e087e27: the caption reads "pKoV with His decR.dna".
+    ///
+    /// The fallback to the filename is right and stays — the `.dna` container
+    /// carries no molecule name at all, so there is nothing else to print. What
+    /// was wrong is printing the container's extension as part of the plasmid's
+    /// name. The second half of this test is the control, and it PASSES at
+    /// e087e27: a real molecule name beats the filename, and the fix must not
+    /// disturb that.
+    #[test]
+    fn the_caption_drops_the_extension_and_still_prefers_a_real_name() {
+        let mol = pkov();
+
+        // A .dna, which carries no name field of any kind.
+        let dna = pl_fileio::snapgene::from_molecule(&mol);
+        let d = Document::from_bytes(&dna, "pKoV with His decR.dna".into(), None)
+            .expect("the synthesised .dna reads back");
+        assert!(
+            d.molecule().name.is_empty(),
+            "the premise: SnapGene has no name field"
+        );
+        assert_eq!(
+            d.title, "pKoV with His decR.dna",
+            "and the document keeps the whole filename, for the toolbar and the hover"
+        );
+        assert_eq!(caption_of_map(d), "pKoV with His decR");
+
+        // A GenBank file, which does. Its LOCUS name must win over the filename.
+        let gb = pl_fileio::genbank::write(&mol, "ignored.gb", today());
+        let d = Document::from_bytes(gb.as_bytes(), "some other name.gb".into(), None)
+            .expect("the GenBank reads back");
+        let locus = d.molecule().name.clone();
+        assert!(!locus.is_empty(), "the premise: GenBank names its molecule");
+        assert_eq!(
+            caption_of_map(d),
+            locus,
+            "a LOCUS name is a real name and a filename is a guess"
+        );
+    }
+
+    /// What the map actually paints in the middle of the ring, for one document.
+    ///
+    /// Read off a painted frame rather than by calling the expression in
+    /// `central`, because the defect was at the call site: `map.rs`'s own comment
+    /// about the fallback was correct and `d.title` was the wrong thing to hand
+    /// it.
+    fn caption_of_map(d: Document) -> String {
+        let ctx = egui::Context::default();
+        let mut app = App::blank();
+        app.adopt(d);
+        let mut shown = String::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(window(), |ui| app.central(ui));
+            let texts = texts_in(
+                &flat_shapes(&out.shapes),
+                15.0,
+                egui::FontFamily::Proportional,
+            );
+            shown = texts.first().map(|(t, _)| t.clone()).unwrap_or_default();
+        }
+        shown
+    }
+
+    /// The layout is shared, so the ordering must not depend on the font.
+    ///
+    /// COMPILE-ONLY at e087e27: `pl_draw::ring` does not exist there, and neither
+    /// does any shared placement to test — that is the divergence this phase
+    /// closed. What it asserts is the property that makes one layout able to
+    /// serve two painters: the GUI measures its labels with egui's monospace
+    /// galleys and the exporters measure theirs with Helvetica's advances, so the
+    /// two disagree about every width, and the run a label lands in and its order
+    /// within that run must still come out identical.
+    #[test]
+    fn the_screen_and_the_figure_order_the_ring_identically() {
+        let sites = pkov_cutter_names();
+        let texts: Vec<String> = sites
+            .iter()
+            .map(|&(name, pos)| format!("{name}  {pos}"))
+            .collect();
+
+        // The screen's metric, taken from inside a frame because that is the
+        // only place egui will lay out a galley.
+        let ctx = egui::Context::default();
+        let mut screen_w: Vec<f64> = Vec::new();
+        let _ = ctx.run_ui(window(), |ui| {
+            screen_w = texts
+                .iter()
+                .map(|t| {
+                    ui.painter()
+                        .layout_no_wrap(t.clone(), egui::FontId::monospace(10.0), pal(ui).ink2)
+                        .size()
+                        .x as f64
+                })
+                .collect();
+        });
+        assert_eq!(screen_w.len(), texts.len());
+        let order_with = |widths: &[f64]| -> Vec<(pl_draw::ring::Side, usize)> {
+            let labels: Vec<pl_draw::ring::RingLabel> = sites
+                .iter()
+                .zip(widths)
+                .map(|(&(_, pos), &width)| pl_draw::ring::RingLabel {
+                    angle: (pos.saturating_sub(1)) as f64 / 8_117.0 * std::f64::consts::TAU,
+                    width,
+                    height: 13.0,
+                    weight: 1.0,
+                })
+                .collect();
+            let g = pl_draw::ring::RingGeom {
+                cx: 353.0,
+                cy: 378.0,
+                tick_r: 242.0,
+                gap: 26.0,
+                row_half: 30f64.to_radians(),
+                row_gap: 10.0,
+                left: 6.0,
+                right: 700.0,
+                top: 19.0,
+                bottom: 750.0,
+            };
+            let ring = pl_draw::ring::place_ring(&labels, &g);
+            let mut out: Vec<(pl_draw::ring::Side, usize, f64)> = ring
+                .placed
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    p.map(|p| {
+                        let key = match p.side {
+                            pl_draw::ring::Side::Left | pl_draw::ring::Side::Right => p.at.1,
+                            _ => p.at.0,
+                        };
+                        (p.side, i, key)
+                    })
+                })
+                .collect();
+            out.sort_by(|a, b| {
+                format!("{:?}", a.0)
+                    .cmp(&format!("{:?}", b.0))
+                    .then(a.2.partial_cmp(&b.2).unwrap())
+            });
+            out.into_iter().map(|(s, i, _)| (s, i)).collect()
+        };
+
+        let on_screen = order_with(&screen_w);
+        // The figure's metric: Helvetica's real advances at the figure's own
+        // type size, which is what the PDF and EPS back ends crop against.
+        let figure_w: Vec<f64> = texts
+            .iter()
+            .map(|t| pl_draw::pdf::text_width_in(t, 12.0, false))
+            .collect();
+        assert!(
+            screen_w
+                .iter()
+                .zip(&figure_w)
+                .any(|(a, b)| (a - b).abs() > 1.0),
+            "the premise: the two metrics disagree about the widths"
+        );
+        let in_figure = order_with(&figure_w);
+
+        assert!(!on_screen.is_empty());
+        assert_eq!(
+            on_screen, in_figure,
+            "the two painters put the same label in a different place"
+        );
+    }
+
+    /// The app's figure and `pl export`'s figure are the SAME figure.
+    ///
+    /// Both now build a `ring::Disclosure` for themselves — the app from
+    /// `Document::digest`, `bins/pl` from `pl_enzymes::digest_all` — and if those
+    /// two disagree by one enzyme the two figures differ by a line of text, which
+    /// is a figure you cannot cite. Checked here rather than by hashing one
+    /// exported file, because a hash tells you that today's two agreed and this
+    /// tells you why they must.
+    ///
+    /// `pl export`'s own filter is reproduced from the same table, so the
+    /// comparison is between the two callers' arithmetic and not between two
+    /// copies of one call.
+    #[test]
+    fn the_app_and_pl_export_ask_the_same_question_of_the_same_molecule() {
+        let mut app = App::blank();
+        // A real file, not the synthetic fixture: the counts are the point.
+        let gb = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/export-fixture/hostile-names.gb"
+        ))
+        .expect("the export fixture is in the tree");
+        let d = Document::from_bytes(&gb, "hostile-names.gb".into(), None).unwrap();
+        app.adopt(d);
+        // `figure_options` reads `d.digest`, which a worker fills. Wait for the
+        // real one rather than faking it: the whole question is whether what the
+        // app has agrees with what the table says, so substituting the table here
+        // would be asking the table twice.
+        let doc = app.document.as_mut().unwrap();
+        for _ in 0..2_000 {
+            if doc.digest.poll() && !doc.digest.is_running() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let d = app.document.as_ref().unwrap();
+        assert!(
+            !d.digest.results().is_empty(),
+            "the digest worker did not finish"
+        );
+
+        let opts = App::figure_options(d);
+        let told = opts.note.expect("the figure carries the disclosure");
+
+        // What `bins/pl` computes, from the shipped table rather than from the
+        // document's cached digest.
+        let mut cli = pl_draw::ring::Disclosure::default();
+        for r in pl_enzymes::digest_all(d.molecule()) {
+            let n = r.count();
+            if n == 0 {
+                continue;
+            }
+            cli.cutters += 1;
+            if n == 2 {
+                cli.dual += 1;
+            } else if n > 2 {
+                cli.multi += 1;
+            }
+        }
+        assert_eq!(told.cutters, cli.cutters, "a different number of cutters");
+        assert_eq!(told.dual, cli.dual);
+        assert_eq!(told.multi, cli.multi);
+        assert!(told.closes(), "{told:?} does not account for every cutter");
+        // And the counts are enzymes: a folded tick names several, and counting
+        // labels understated pET28a by nine.
+        assert!(
+            told.labelled >= opts.sites.len().saturating_sub(told.hidden),
+            "{told:?} against {} sites asked for",
+            opts.sites.len()
+        );
     }
 }

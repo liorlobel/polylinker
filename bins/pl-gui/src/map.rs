@@ -1,14 +1,36 @@
 //! Plasmid map painting: circular for circular molecules, a track for linear.
 //!
-//! Layout is separated from painting on purpose. `lanes` and `label_slots` are
-//! ordinary functions over numbers with no egui in sight, so the fiddly parts —
-//! overlap packing and label collision — are unit-testable without a window.
+//! Layout is separated from painting on purpose. `lanes` is an ordinary function
+//! over numbers with no egui in sight, and everything the circular map decides
+//! about *where* — the radius, the ruler's own band, which cut sites share a
+//! tick, and the label ring itself — is now [`pl_draw::ring`], which the SVG and
+//! PDF exporters call as well. That is the point of it being there: this file and
+//! `pl_draw::scene` had two independent layouts sharing only `pl_draw::ranges`,
+//! so a label fix on the screen left the figure that goes into a paper untouched.
+//!
+//! What is left here is ink, measurement and hit-testing. `label_slots` still
+//! serves the *linear* track, which has no ring and no columns.
+//!
+//! The picture is verified as a picture: the frame tests in `main.rs` paint a map
+//! and assert on the shapes that came back, because this file can be
+//! self-consistent about its arithmetic and still draw a label off the pane —
+//! which is exactly what `LABEL_RESERVE = 132.0` did.
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use pl_core::{Molecule, Topology};
+use pl_draw::ring::{self, RingGeom, RingLabel, Side};
 use pl_enzymes::Digest;
 
 use crate::theme::{self, Palette};
+
+/// The label font, in one place so measuring and drawing cannot disagree.
+///
+/// The whole `LABEL_RESERVE` defect was a decision made in one unit and a
+/// drawing made in another; a second literal at the paint site is how that
+/// comes back.
+fn label_font() -> FontId {
+    FontId::monospace(10.0)
+}
 
 /// One drawable feature, resolved to positions on the molecule.
 pub struct Band {
@@ -187,6 +209,15 @@ pub struct MapResponse {
     pub hovered: Option<usize>,
     /// Feature index clicked this frame.
     pub clicked: Option<usize>,
+    /// Where the centre caption was drawn and what it says in full, when the
+    /// ring was too narrow to hold the whole name.
+    ///
+    /// The caption gives way to the ruler rather than the reverse — see
+    /// `ring::centre_room` — and this is what makes that trade honest: on a
+    /// 4.6 Mb genome the caption is a 69-character filename, and truncating it
+    /// with the whole string a hover away costs nothing, while dropping the
+    /// scale annotation cost the map its only statement of size.
+    pub caption_full: Option<(Rect, String)>,
 }
 
 /// Draw the molecule. `selected` highlights one feature; `hot` is the one the
@@ -200,17 +231,58 @@ pub fn show(
     hot: Option<usize>,
 ) -> MapResponse {
     let pal = Palette::of(ui.visuals().dark_mode);
-    // Take the panel's own rect, and a painter clipped to it.
+    // Take what is LEFT of the panel, and a painter clipped to it.
     //
     // `available_size()` reported far more than this panel actually owns, so a
     // map sized from it grew until it covered the side panel and ran off the
     // bottom of the window. The map is painted last, so it simply hid them.
-    let rect = ui.max_rect();
+    //
+    // `max_rect()` was the whole CentralPanel, which was harmless only while
+    // every label was in one of two side columns: the top of the pane was empty,
+    // so nothing was drawn over the crash-recovery banner laid out above the map
+    // in the same panel. `ring::place_ring` now puts a row there, and
+    // `EcoRI  7,530   BbsI  7,963   AflII  271   SpeI  562` was painted across
+    // the banner's path with SpeI's leader drawn down through the `Discard`
+    // button. That banner is the recover-or-discard decision for an unsaved
+    // draft; map ink over its buttons is worse than cosmetic. So the vertical
+    // extent comes from what is left after the banner.
+    //
+    // And both extents are intersected with the CLIP rect, because the layout
+    // rect and the clip rect do not agree once the splitter has been dragged
+    // inwards. Measured with `PL_GUI_DEBUG_GEOMETRY=1` on the user's own file
+    // after dragging the splitter from 716 pt to 376: the details panel really is
+    // 911.2 pt of a 1,280 pt window, the CentralPanel's clip is `0..368.8`
+    // exactly as it should be — and its layout rect is `8..663.6`, 295 pt wider,
+    // on every frame and not only the drag frame. So the map centred itself on
+    // 336, put its whole right-hand column behind the panel, cut the caption
+    // mid-word at `pKoV with His`, and counted none of it as hidden — because
+    // `shortened_to`, `place_ring`'s bounds and the disclosure line were all
+    // computed against a rect the user cannot see.
+    //
+    // The clip rect is the one that cannot be wrong: it is by definition what
+    // reaches the screen. Taking the smaller of the two is not a patch over
+    // egui's bookkeeping, it is the correct question — how much of this can be
+    // seen — asked of the only thing that knows the answer.
+    let rect = {
+        let a = ui.available_rect_before_wrap();
+        let c = ui.clip_rect();
+        // A pane with nothing left in it is still a rect: `from_min_max` with
+        // `max < min` gives negative extents, and the 40 pt radius floor cannot
+        // save that because the centre itself would be outside the window.
+        Rect::from_min_max(
+            a.min,
+            Pos2::new(
+                a.max.x.min(c.max.x).max(a.min.x + 1.0),
+                a.max.y.min(c.max.y).max(a.min.y + 1.0),
+            ),
+        )
+    };
     let response = ui.allocate_rect(rect, Sense::click());
     let painter = ui.painter_at(rect);
     let mut out = MapResponse {
         hovered: None,
         clicked: None,
+        caption_full: None,
     };
 
     let span = mol.annotation_span().max(1);
@@ -231,6 +303,10 @@ pub fn show(
     if response.clicked() {
         out.clicked = out.hovered;
     }
+    if let Some((at, full)) = &out.caption_full {
+        ui.interact(*at, ui.id().with("caption"), Sense::hover())
+            .on_hover_text(full);
+    }
     out
 }
 
@@ -238,10 +314,68 @@ pub fn show(
 // circular
 // ---------------------------------------------------------------------------
 
-/// Space kept clear outside the backbone for enzyme labels.
-const LABEL_RESERVE: f32 = 132.0;
 /// How close a label may come to the edge of the panel.
 const LABEL_PAD: f32 = 6.0;
+/// Height of one line in a label column.
+const LINE_H: f32 = 13.0;
+/// From the outermost feature lane to where a leader starts.
+const TICK_GAP: f32 = 6.0;
+/// From where a leader starts to the label's own anchor.
+const LEADER_GAP: f32 = 26.0;
+/// Radial thickness of a feature band, and the pitch between lanes.
+const BAND_W: f32 = 9.0;
+const LANE_STEP: f32 = 13.0;
+/// Stroke of the mark a cut site puts on the ring, and the arc below which two
+/// sites are one mark. See `pl_draw::ring::bases_per_arc`.
+const TICK_STROKE: f32 = 1.5;
+
+/// Below this many degrees a feature is drawn as a radial mark, not an arc.
+///
+/// `pl_draw::Options::min_feature_degrees`' default, so the screen and the figure
+/// make the same call about the same feature. Two reasons it has to exist here
+/// too, and the second is the serious one.
+///
+/// An arrowhead smaller than a pixel reads as dirt on the figure — that is the
+/// exporter's reason. And a band whose arc is a few bases long *tessellates into
+/// garbage*: `arc_points` floors only the `sweep` it counts steps with, and
+/// interpolates with the raw `a1 - a0`, so pET28a's single-base `rep_origin`
+/// (2,464..2,464, a real GenBank location) yielded three coincident points, and
+/// `Shape::line` over a zero-length path with a 9 pt stroke painted a translucent
+/// wedge across half the map pane. `draw_arrowhead` did the same with three
+/// collinear vertices. It appeared on four of nine real files — a 3 bp CDS on
+/// pACYC184, a 9 bp `-10` box on the E. coli genome, two more on a Borrelia
+/// plasmid — as feature-coloured straight lines drawn through the backbone, the
+/// centre caption and the note. It is *radius-dependent*, absent at a maximised
+/// window and present at the default, so it is not something this pass could
+/// change every radius on the map and leave alone.
+///
+/// A mark rather than a floored arc: a 1 bp feature drawn as a 4 pt arc overstates
+/// its extent, and the exporter already chose the mark for exactly that reason.
+const MIN_FEATURE_DEGREES: f32 = 1.2;
+
+/// Everything between the backbone and the first glyph of a side-column label.
+///
+/// This is the number `LABEL_RESERVE = 132.0` left out. The reserve was a flat
+/// constant and the leader spent 54 pt of it before a lane was charged, so on
+/// the user's own pKoV — two feature lanes — a label had 65 pt, which is 10.8
+/// characters at this font's 6 pt advance. `EcoRI 7,530` is 12 and was drawn
+/// `coRI 7,530`; `HindIII 2,059` came out `HindIII 2,`. A cut coordinate is a
+/// *wrong* coordinate, and it is not rare: of five ordinary plasmids measured
+/// at the shipped pane size, four clipped every label they drew.
+///
+/// Note what the arithmetic does to the obvious remedy. `room = reserve -
+/// outward`, so *reducing* the reserve to win back radius reduces the room as
+/// well — the sign is the opposite of the intuition, which is why the
+/// `DEF_PANEL` doc comment could diagnose the symptom exactly and still ship
+/// it: it computed the room as 132.
+///
+/// Only **forward** lanes are charged. Reverse lanes stack inward and cost the
+/// outward budget nothing; the old `outer` took the maximum lane over all
+/// bands, so a reverse-heavy plasmid spent its whole label reserve on lanes
+/// drawn on the other side of the backbone.
+fn outward_of(forward_lanes: usize) -> f32 {
+    BAND_W + forward_lanes as f32 * LANE_STEP + TICK_GAP + LEADER_GAP
+}
 
 /// The 1-based coordinate of the `i`th tenth-of-the-molecule ruler tick.
 ///
@@ -297,31 +431,360 @@ fn draw_circular(
     out: &mut MapResponse,
 ) {
     let center = rect.center();
-    // Leave room outside the backbone for ticks, leader lines and the enzyme
-    // labels themselves. An enzyme name plus a formatted position runs to about
-    // 110 px at this font, and the labels sit outside the leaders.
-    let r = (rect.width().min(rect.height()) * 0.5 - LABEL_RESERVE).max(40.0);
-    let lane_step = 13.0;
-    let band_w = 9.0;
+    let lane_step = LANE_STEP;
+    let band_w = BAND_W;
+    let pane_min = rect.width().min(rect.height());
+
+    // Lanes counted per side. Reverse bands stack *inward* and cost the outward
+    // label budget nothing, which the old single `max` over all bands did not
+    // know.
+    let lanes_of = |reverse: bool| {
+        bands
+            .iter()
+            .filter(|b| b.reverse == reverse && !b.segs.is_empty())
+            .map(|b| b.lane + 1)
+            .max()
+            .unwrap_or(0)
+    };
+    let (fwd_lanes, rev_lanes) = (lanes_of(false), lanes_of(true));
+    let outward = outward_of(fwd_lanes);
+
+    // What the map labels, and what it is therefore not showing.
+    let unique: Vec<(String, u64)> = digest
+        .iter()
+        .filter(|d| d.is_unique_cutter())
+        .map(|d| (d.enzyme.name.to_string(), d.positions[0]))
+        .collect();
+    let cutters = digest.iter().filter(|d| d.count() > 0).count();
+    let dual = digest.iter().filter(|d| d.count() == 2).count();
+    let multi = digest.iter().filter(|d| d.count() > 2).count();
+
+    let measure = |s: &str| {
+        p.layout_no_wrap(s.to_string(), label_font(), pal.ink2)
+            .size()
+            .x
+    };
+    // A label's angle in `pl_draw`'s convention: zero at twelve o'clock, `x`
+    // from the sine. egui's map runs `-PI/2 + frac * TAU` off the cosine, which
+    // is the same circle a quarter turn back, so adding it here means every
+    // point `place_ring` returns is already a screen position.
+    let ring_angle = |pos: u64| (angle_of(pos, span) + std::f32::consts::FRAC_PI_2) as f64;
+    let row_half = 30f64.to_radians();
+    let widest_column = |labels: &[(String, u64)]| -> f32 {
+        labels
+            .iter()
+            .filter(|(_, pos)| {
+                matches!(
+                    ring::side_of(ring_angle(*pos), row_half),
+                    Side::Left | Side::Right
+                )
+            })
+            .map(|(text, _)| measure(text))
+            .fold(0.0_f32, f32::max)
+    };
+    // The pane is wider than it is tall as often as not, and the two axes do
+    // not need the same clearance: a side column spends horizontal room on the
+    // widest name, while the twelve- and six-o'clock rows spend a fixed
+    // vertical strip. `min(w, h) * 0.5 - reserve` charged the widest name to
+    // both. The rule lives in `pl_draw::ring::radius` so the exporter has it
+    // too — it did not, and gave away 26% of the radius on a wide figure.
+    let radius_for = |widest: f32| -> f32 {
+        // The one point of cushion is not decoration. The reserve is decided in
+        // f64 inside `pl-draw` and the room is measured back in f32 here, and
+        // when the two are exactly equal — the common case, since the reserve
+        // is *derived* from the widest label — the round trip can land a
+        // fraction the wrong side and shorten a name that fits.
+        let reserve =
+            ring::reserve_for(widest as f64, outward as f64, pane_min as f64).reserve as f64 + 1.0;
+        let vertical = (outward + LINE_H + LABEL_PAD * 2.0) as f64;
+        ring::radius(rect.width() as f64, rect.height() as f64, reserve, vertical) as f32
+    };
+
+    // The radius is decided by the widest **unmerged** label, before anything is
+    // folded together, because merging may not buy itself room.
+    //
+    // An honest merged label carries every name and the range — see
+    // `ring::Site::label` for why it must — so it is always wider than either of
+    // the names in it: `XmaI/SmaI  6,917-6,919` is 22 characters against
+    // `HindIII  2,059`'s 14. Sizing the ring to hold it costs 47 pt of radius on
+    // the user's own file, a quarter of the ring, to gain tidiness.
+    let one_each: Vec<(String, u64)> = unique
+        .iter()
+        .map(|(n, pos)| (format!("{n}  {}", crate::doc::fmt_int(*pos)), *pos))
+        .collect();
+    let r = radius_for(widest_column(&one_each));
+    let outer = r + band_w + fwd_lanes as f32 * lane_step;
+    let tick_r = outer + TICK_GAP;
+    let geom = RingGeom {
+        cx: center.x as f64,
+        cy: center.y as f64,
+        tick_r: tick_r as f64,
+        gap: LEADER_GAP as f64,
+        row_half,
+        row_gap: 10.0,
+        left: (rect.left() + LABEL_PAD) as f64,
+        right: (rect.right() - LABEL_PAD) as f64,
+        top: (rect.top() + LABEL_PAD + LINE_H) as f64,
+        bottom: (rect.bottom() - LABEL_PAD) as f64,
+    };
+    // What a label may actually use, read off the geometry it is placed with
+    // rather than rebuilt from `r`, and one number for all four runs because a
+    // label the rows cannot hold ends up in a column. See `ring::label_room`.
+    let room = ring::label_room(&geom, (rect.width() * 0.5) as f64) as f32;
+
+    // Sites whose ticks are the same tick become one label — but only if the
+    // honest form of that label fits the room the individual names had already
+    // earned.
+    //
+    // When it does not, the sites stay separate and the packer moves them one
+    // line apart. Untidy and true: the alternative is a merged label with an
+    // ellipsis through it, and shortening `XmaI  6,917 / SmaI  6,919` can drop a
+    // whole enzyme, which is the failure `Site::label` exists to prevent. Two
+    // ordinary labels a line apart tell no lie.
+    //
+    // The threshold is the TICK's stroke, not a label height. A label height in
+    // bases grows as the ring shrinks, so the same molecule folded sites 10 bp
+    // apart at a maximised window and 126 bp apart at 704 pt — resizing the
+    // window changed what the map claimed about the plasmid, and NsiI's own
+    // 4,760 appeared nowhere.
+    let within = ring::bases_per_arc(TICK_STROKE as f64, tick_r as f64, span);
+    let folded = ring::merge_sites(&unique, within);
+    // Name counts alongside the labels, because the line under the caption
+    // counts ENZYMES and a folded tick names several. Counting labels is
+    // invisible until a fold fires and then understates itself: pET28a claimed
+    // `14 of 31 cutters labelled` with 23 on the map, and 14 + 7 + 1 did not
+    // reach the 31 it had just stated.
+    let mut labels: Vec<(String, u64)> = Vec::new();
+    let mut names_in: Vec<usize> = Vec::new();
+    for s in folded {
+        if s.names.len() == 1 || measure(&s.label()) <= room {
+            labels.push((s.label(), s.anchor()));
+            names_in.push(s.names.len());
+        } else {
+            for (n, p) in s.names.iter().zip(&s.positions) {
+                labels.push((format!("{n}  {}", crate::doc::fmt_int(*p)), *p));
+                names_in.push(1);
+            }
+        }
+    }
+
+    // Cut sites, outside everything, in an L-shaped ring.
+    //
+    // One column per side was the shipped answer and it is what produces the
+    // complaint: 16 labels stacked down the left against 6 on the right, with
+    // leaders running most of the radius at a degree or two off horizontal.
+    // `label_slots` was not the cause — measured on this file it leaves 13 of
+    // the 16 exactly at their anchors and the column is 27% full — and
+    // rebalancing the sides makes it worse, not better: BbsI's tick is 31 pt
+    // left of centre, so moving it to the right-hand column lengthens its
+    // leader from 249 pt to 312 and drags it across the top of the ring.
+    // Labels near twelve and six o'clock take a horizontal run instead, which
+    // on this molecule halves the median leader and cuts the longest by 42%.
+    //
+    // Placed here, before anything is painted, because one of the lines written
+    // in the middle of the ring reports the outcome — and the middle is what the
+    // ruler and the inward lanes have to be kept off.
+    let shortened_to = |text: &str| -> Option<String> {
+        if measure(text) <= room {
+            return Some(text.to_string());
+        }
+        // The coordinate goes whole or not at all. `EcoRI  7,5...` reads as a cut
+        // position and is not one, and a wrong coordinate on a plasmid map is the
+        // failure this whole pass is about — `EcoRI` with nothing after it claims
+        // nothing, and the line under the caption counts it as shortened either
+        // way. Two spaces, so a name with one space in it is left alone.
+        if let Some((head, _)) = text.rsplit_once("  ") {
+            if !head.is_empty() && measure(head) <= room {
+                return Some(head.to_string());
+            }
+        }
+        // Three ASCII full stops, not U+2026: three dots are three dots in
+        // every encoding and the real character is not.
+        let mut kept = String::new();
+        for c in text.chars() {
+            let trial = format!("{kept}{c}...");
+            if measure(&trial) > room {
+                break;
+            }
+            kept.push(c);
+        }
+        (!kept.is_empty()).then(|| kept + "...")
+    };
+    // Every run, including the rows. Exempting a row label from shortening did
+    // not remove the clipping this pass is about, it moved it into the run the
+    // fix created: on stock pET28a the top row ran off the pane edge mid-glyph at
+    // `Hind`, which is a name one letter from reading as a different enzyme, with
+    // no ellipsis and nothing in the note about it.
+    let drawn: Vec<Option<String>> = labels.iter().map(|(text, _)| shortened_to(text)).collect();
+    let boxes: Vec<RingLabel> = labels
+        .iter()
+        .zip(&drawn)
+        .map(|((_, pos), text)| RingLabel {
+            angle: ring_angle(*pos),
+            width: text.as_deref().map_or(0.0, |t| measure(t) as f64),
+            height: LINE_H as f64,
+            weight: 1.0,
+        })
+        .collect();
+    let placed = ring::place_ring(&boxes, &geom);
+
+    // What the map is *not* showing, said in the map.
+    //
+    // 58 enzymes are digested, 40 cut this plasmid and 22 cut it exactly once.
+    // The other 18 — twelve dual cutters and six multi — were drawn nowhere and
+    // mentioned nowhere, and a dual cutter is exactly what you want for an
+    // excision. `docs/PLAN.md` item 33 calls a silent filter "the one documented
+    // case of this software category costing a user a month of bench time";
+    // `pl_enzymes::Visibility` exists so that what a filter hides can never be
+    // silent, and this map was hiding 18 enzymes without it.
+    //
+    // The Enzymes tab's own `EnzymeSet` is deliberately *not* what the map
+    // draws. Its default is "All cutters", which on this file is 40 enzymes and
+    // about 100 ticks — a map nobody can read, arrived at without the user
+    // asking for it. The map keeps its own rule, and states it.
+    // Enzymes, never labels. `names_in` is what makes the difference visible.
+    let labelled: usize = (0..labels.len())
+        .filter(|&i| placed.placed[i].is_some() && drawn[i].is_some())
+        .map(|i| names_in[i])
+        .sum();
+    let told = ring::Disclosure {
+        cutters,
+        labelled,
+        dual,
+        multi,
+        hidden: unique.len().saturating_sub(labelled),
+        shortened: (0..labels.len())
+            .filter(|&i| placed.placed[i].is_some())
+            .filter(|&i| drawn[i].as_deref().is_some_and(|s| s != labels[i].0))
+            .count(),
+    };
+    let bp = format!("{} bp", crate::doc::fmt_int(mol.span()));
+    let width_of = |s: &str, f: FontId| p.layout_no_wrap(s.to_string(), f, pal.ink).size().x;
+
+    // Everything written in the middle is cut to the ring BEFORE the ruler is
+    // placed, and never the other way round.
+    //
+    // Deriving the ruler's clearance from an unbounded caption and then dropping
+    // whichever of the two was checked second is what cost a 4.6 Mb genome its
+    // whole scale: `caption_of` leaves a 69-character filename, which is 517 pt
+    // of proportional 15, and no radius on this pane clears that. The caption is
+    // the line with a hover behind it and the ruler is not, so the caption is the
+    // one that gives way. See `ring::centre_room`.
+    let widest_number = width_of(&crate::doc::fmt_int(span), FontId::monospace(9.0));
+    let centre_room = ring::centre_room(
+        r as f64,
+        band_w as f64,
+        lane_step as f64,
+        9.0,
+        widest_number as f64,
+    ) as f32;
+    let cut_to = |text: &str, font: FontId| -> Option<String> {
+        if width_of(text, font.clone()) <= centre_room {
+            return Some(text.to_string());
+        }
+        let mut kept = String::new();
+        for c in text.chars() {
+            if width_of(&format!("{kept}{c}..."), font.clone()) > centre_room {
+                break;
+            }
+            kept.push(c);
+        }
+        (!kept.is_empty()).then(|| kept + "...")
+    };
+    let caption_drawn = cut_to(caption, FontId::proportional(15.0));
+    let bp_drawn = cut_to(&bp, FontId::monospace(11.0));
+    // Two forms, and the longer one only when the middle is wide enough to hold
+    // it. A sentence wider than the ring is drawn across the backbone and the
+    // features, in `pal.muted` over whatever colour the file chose, and that is
+    // a worse answer than the short form. At a pane too small for even the short
+    // form the line goes: the Enzymes tab lists every cutter with its count, so
+    // this is a signpost and not the only record. Never an ellipsis — half a
+    // count is a number the reader would act on.
+    let note = (cutters > 0)
+        .then(|| [told.long(), told.short(), told.tiny()])
+        .and_then(|forms| {
+            forms
+                .into_iter()
+                .find(|f| width_of(f, FontId::proportional(10.0)) <= centre_room)
+        });
+
+    // The footprint of what was actually drawn, so the ruler and the inward
+    // lanes can be kept off it. Twenty mutually overlapping reverse features used
+    // to spiral inward until "8,117 bp" was `pal.muted` on a coloured band at
+    // 2.9:1.
+    //
+    // The *note* counts as well, and on a plasmid with plenty of dual cutters it
+    // is the widest of the three lines. Measuring only the caption would keep
+    // the bands off the plasmid's name and let them cross the sentence saying
+    // what the map is not showing.
+    let centre_w = [
+        caption_drawn
+            .as_deref()
+            .map_or(0.0, |t| width_of(t, FontId::proportional(15.0))),
+        bp_drawn
+            .as_deref()
+            .map_or(0.0, |t| width_of(t, FontId::monospace(11.0))),
+        note.as_deref()
+            .map_or(0.0, |n| width_of(n, FontId::proportional(10.0))),
+    ]
+    .into_iter()
+    .fold(0.0_f32, f32::max);
+    let inside = ring::inside_of(
+        r as f64,
+        band_w as f64,
+        lane_step as f64,
+        rev_lanes,
+        9.0,
+        ring::keep_clear_for(centre_w as f64, widest_number as f64),
+    );
 
     // backbone
     p.circle_stroke(center, r, Stroke::new(1.5, pal.line));
 
-    // Ticks every 10% of the molecule, labelled in bp.
+    // Ticks every 10% of the molecule, labelled in bp, in a radial band of
+    // their own under every inward lane.
+    //
+    // The "3,247" tick on the user's pKoV was painted over by SacB, a reverse
+    // feature: the number spanned `r-21.5..r-11.5` and reverse lane 0 spans
+    // `r-15..r-3` when emphasised, so the ruler and the lanes shared radii and
+    // the features — drawn second — always won. Exactly one of the five
+    // labelled ticks broke, which is not luck: it is the one tick that happened
+    // to fall inside a reverse feature.
+    //
+    // Painting the ruler *last* instead was measured and rejected. It puts
+    // `pal.muted` on SacB's `#993366` at 2.17:1, on CmR's `#ccffcc` at 2.86:1
+    // and on f1 ori's `#ffff00` at 2.98:1 — under half of AA — while
+    // `theme.rs`'s contrast test measures `muted` against the *background* and
+    // stays green. That is a legibility bug traded for an accessibility bug no
+    // gate can see.
+    // A number OR a mark at each tick, never both.
+    //
+    // The mark is offset radially from the number's centre by a little over half
+    // the text's HEIGHT, and a number is two and a half times as wide as it is
+    // tall: along a ray near the horizontal — 72 degrees on this plasmid, the
+    // "1,624" tick — the box reaches further outward than the mark begins and the
+    // hairline was drawn through the last digit. Clearing it in every direction
+    // would mean reserving the box's half-diagonal instead of its half-height,
+    // which costs the inward lanes 9 pt for a mark that says nothing the number
+    // does not: a number centred on the ray already locates the tick.
+    let (tick_in, tick_out) = (inside.ruler_tick.0 as f32, inside.ruler_tick.1 as f32);
     for i in 0..10 {
         let pos = tick_pos(span, i);
         let a = angle_of(pos, span);
-        p.line_segment(
-            [polar(center, r - 5.0, a), polar(center, r + 5.0, a)],
-            Stroke::new(1.0, pal.line),
-        );
-        if i % 2 == 0 {
+        // Every other tick is numbered, and on a pane too small for numbers at
+        // all every tick gets a mark instead. See `Inside::numbers`.
+        if i % 2 == 0 && inside.numbers {
             p.text(
-                polar(center, r - 16.0, a),
+                polar(center, inside.ruler_text_r as f32, a),
                 Align2::CENTER_CENTER,
                 crate::doc::fmt_int(pos),
                 FontId::monospace(9.0),
                 pal.muted,
+            );
+        } else {
+            p.line_segment(
+                [polar(center, tick_in, a), polar(center, tick_out, a)],
+                Stroke::new(1.0, pal.line),
             );
         }
     }
@@ -329,43 +792,68 @@ fn draw_circular(
     // features
     for b in bands {
         // Reverse-strand features sit inside the backbone, forward outside:
-        // the convention that lets you read direction without a legend.
+        // the convention that lets you read direction without a legend. The
+        // inward radius is floored: unclamped it went negative from lane 17 on
+        // a 218 pt ring, and `polar` then mirrored those arcs to the opposite
+        // side of the map under the wrong coordinates, where the hit test
+        // `(d - base).abs() <= 7.5` against a negative `base` could never reach
+        // them. Drawn and unreachable is worse than drawn twice.
         let base = if b.reverse {
-            r - band_w - b.lane as f32 * lane_step
+            ring::inward_radius(r as f64, band_w as f64, lane_step as f64, b.lane, &inside) as f32
         } else {
             r + band_w + b.lane as f32 * lane_step
         };
         let emphasised = selected == Some(b.index) || hot == Some(b.index);
         let w = if emphasised { band_w + 3.0 } else { band_w };
 
-        // Each part as its own arc, always the short way round: `bands` has
-        // already split anything that crosses the origin, so `s <= e` here and
-        // `arc_points` never interpolates backwards across the whole ring.
-        for &(s, e) in &b.segs {
-            let pts = arc_points(center, base, angle_of(s, span), angle_of(e, span));
-            if pts.len() >= 2 {
-                p.add(Shape::line(pts, Stroke::new(w, b.color)));
+        // A feature too short to draw to scale is a mark across the band, the
+        // same call `pl_draw` makes at the same threshold. See
+        // `MIN_FEATURE_DEGREES` for the wedge that came out of drawing it as an
+        // arc instead.
+        let bases: u64 = b.segs.iter().map(|&(s, e)| e - s + 1).sum();
+        let tiny = (bases as f64 / span as f64) * 360.0 < MIN_FEATURE_DEGREES as f64;
+        if tiny {
+            for &(s, _) in &b.segs {
+                let a = angle_of(s, span);
+                p.line_segment(
+                    [
+                        polar(center, base - w * 0.5, a),
+                        polar(center, base + w * 0.5, a),
+                    ],
+                    Stroke::new(1.75, b.color),
+                );
             }
-        }
-        // Thin connectors show the joins, split the same way.
-        for &(s, e) in &b.joins {
-            let hair = arc_points(center, base, angle_of(s, span), angle_of(e, span));
-            if hair.len() >= 2 {
-                p.add(Shape::line(hair, Stroke::new(1.0, b.color)));
+        } else {
+            // Each part as its own arc, always the short way round: `bands` has
+            // already split anything that crosses the origin, so `s <= e` here
+            // and `arc_points` never interpolates backwards across the whole
+            // ring.
+            for &(s, e) in &b.segs {
+                let pts = arc_points(center, base, angle_of(s, span), angle_of(e, span));
+                if pts.len() >= 2 {
+                    p.add(Shape::line(pts, Stroke::new(w, b.color)));
+                }
             }
-        }
+            // Thin connectors show the joins, split the same way.
+            for &(s, e) in &b.joins {
+                let hair = arc_points(center, base, angle_of(s, span), angle_of(e, span));
+                if hair.len() >= 2 {
+                    p.add(Shape::line(hair, Stroke::new(1.0, b.color)));
+                }
+            }
 
-        // One arrowhead, on the terminal part, pointing the way it reads.
-        if let Some((tip_pos, back_pos)) = b.head {
-            draw_arrowhead(
-                p,
-                center,
-                base,
-                angle_of(tip_pos, span),
-                angle_of(back_pos, span),
-                w,
-                b.color,
-            );
+            // One arrowhead, on the terminal part, pointing the way it reads.
+            if let Some((tip_pos, back_pos)) = b.head {
+                draw_arrowhead(
+                    p,
+                    center,
+                    base,
+                    angle_of(tip_pos, span),
+                    angle_of(back_pos, span),
+                    w,
+                    b.color,
+                );
+            }
         }
 
         // Hit-testing in polar space: on the band's radius, within any segment.
@@ -380,7 +868,14 @@ fn draw_circular(
                     // and it gave a 258-degree hover region for a 25-degree
                     // feature — matching neither the band on screen nor the
                     // bases the feature describes.
+                    // Widened by the same floor the drawing uses. A one-base
+                    // feature subtends 0.04 degrees, so the unwidened interval
+                    // was a window no pointer could land in: the mark was drawn
+                    // and could not be hovered, which is the same
+                    // drawn-and-unreachable failure `inward_radius` was floored
+                    // for one radius in.
                     let (lo, hi) = (angle_of(s, span), angle_of(e, span));
+                    let hi = hi.max(lo + MIN_FEATURE_DEGREES.to_radians());
                     // Normalise by arithmetic, not by accumulation.
                     //
                     // `while a < lo - PI { a += TAU }` terminates only while
@@ -408,82 +903,95 @@ fn draw_circular(
         }
     }
 
-    // Unique cutters, outside everything, with labels fanned to avoid overlap.
-    let uniq: Vec<(&str, u64)> = digest
-        .iter()
-        .filter(|d| d.is_unique_cutter())
-        .map(|d| (d.enzyme.name, d.positions[0]))
-        .collect();
-
-    let outer =
-        r + band_w + (bands.iter().map(|b| b.lane).max().unwrap_or(0) as f32 + 1.0) * lane_step;
-    let tick_r = outer + 6.0;
-
-    // Split left and right so labels stack vertically on each side.
-    let mut left: Vec<(usize, f32)> = Vec::new();
-    let mut right: Vec<(usize, f32)> = Vec::new();
-    for (i, (_, pos)) in uniq.iter().enumerate() {
+    // Cut sites: one leader each, ending at its own tick.
+    for (i, (_, pos)) in labels.iter().enumerate() {
+        let Some(pl) = placed.placed[i] else { continue };
+        let Some(shown) = drawn[i].clone() else {
+            continue;
+        };
         let a = angle_of(*pos, span);
-        let y = center.y + (tick_r + 14.0) * a.sin();
-        if a.cos() < 0.0 {
-            left.push((i, y));
-        } else {
-            right.push((i, y));
-        }
-    }
-
-    for (side, sign) in [(&left, -1.0f32), (&right, 1.0f32)] {
-        let anchors: Vec<f32> = side.iter().map(|(_, y)| *y).collect();
-        let placed = label_slots(&anchors, 13.0, rect.top() + 12.0, rect.bottom() - 12.0);
-        for (k, (i, _)) in side.iter().enumerate() {
-            let (name, pos) = uniq[*i];
-            let a = angle_of(pos, span);
-            let from = polar(center, outer, a);
-            let to = polar(center, tick_r + 8.0, a);
-            p.line_segment([from, to], Stroke::new(1.0, pal.muted));
-
-            // Keep the label inside the panel. Without this the text runs under
-            // the side panel and enzyme names on the right are cut in half.
-            let lx = (center.x + sign * (tick_r + 22.0))
-                .clamp(rect.left() + LABEL_PAD, rect.right() - LABEL_PAD);
-            let ly = placed[k];
-            p.line_segment([to, Pos2::new(lx, ly)], Stroke::new(0.8, pal.faint));
-            p.text(
-                Pos2::new(lx + sign * 4.0, ly),
-                if sign < 0.0 {
-                    Align2::RIGHT_CENTER
-                } else {
-                    Align2::LEFT_CENTER
-                },
-                format!("{name}  {}", crate::doc::fmt_int(pos)),
-                FontId::monospace(10.0),
-                pal.ink2,
-            );
-        }
+        p.line_segment(
+            [polar(center, outer, a), polar(center, tick_r, a)],
+            Stroke::new(1.0, pal.muted),
+        );
+        let at = Pos2::new(pl.at.0 as f32, pl.at.1 as f32);
+        let stop = match pl.side {
+            Side::Right => Pos2::new(at.x - 4.0, at.y),
+            Side::Left => Pos2::new(at.x + 4.0, at.y),
+            Side::Top => Pos2::new(at.x, at.y + LINE_H * 0.5),
+            Side::Bottom => Pos2::new(at.x, at.y - LINE_H * 0.5),
+        };
+        p.add(Shape::line(
+            vec![
+                Pos2::new(pl.tip.0 as f32, pl.tip.1 as f32),
+                Pos2::new(pl.bend.0 as f32, pl.bend.1 as f32),
+                stop,
+            ],
+            Stroke::new(0.8, pal.faint),
+        ));
+        p.text(
+            at,
+            match pl.side {
+                Side::Right => Align2::LEFT_CENTER,
+                Side::Left => Align2::RIGHT_CENTER,
+                Side::Top | Side::Bottom => Align2::CENTER_CENTER,
+            },
+            shown,
+            label_font(),
+            pal.ink2,
+        );
     }
 
     // Centre caption. The .dna container carries no molecule name at all, so
     // fall back to what the user actually called the file.
-    p.text(
-        center - Vec2::new(0.0, 9.0),
-        Align2::CENTER_CENTER,
-        caption,
-        FontId::proportional(15.0),
-        pal.ink,
-    );
-    p.text(
-        center + Vec2::new(0.0, 11.0),
-        Align2::CENTER_CENTER,
-        format!("{} bp", crate::doc::fmt_int(mol.span())),
-        FontId::monospace(11.0),
-        pal.muted,
-    );
+    if let Some(text) = caption_drawn {
+        let cut = text != caption;
+        let at = p.text(
+            center - Vec2::new(0.0, 9.0),
+            Align2::CENTER_CENTER,
+            text,
+            FontId::proportional(15.0),
+            pal.ink,
+        );
+        // Whose whole form is one hover away, which is the reason this is the
+        // line that gives way to the ruler rather than the other way round.
+        if cut {
+            out.caption_full = Some((at, caption.to_string()));
+        }
+    }
+    if let Some(text) = bp_drawn {
+        p.text(
+            center + Vec2::new(0.0, 11.0),
+            Align2::CENTER_CENTER,
+            text,
+            FontId::monospace(11.0),
+            pal.muted,
+        );
+    }
+    if let Some(note) = note {
+        p.text(
+            center + Vec2::new(0.0, 28.0),
+            Align2::CENTER_CENTER,
+            note,
+            FontId::proportional(10.0),
+            pal.muted,
+        );
+    }
 }
 
 /// Sample an arc into a polyline. Enough segments that curvature is smooth at
 /// any size, few enough that a genome with hundreds of features stays cheap.
 fn arc_points(center: Pos2, radius: f32, a0: f32, a1: f32) -> Vec<Pos2> {
-    let sweep = (a1 - a0).abs().max(0.004);
+    // Floor the sweep that is INTERPOLATED, not only the one that counts steps.
+    // The two were different numbers: `sweep` was floored at 0.004 for `steps`
+    // while the interpolation below used the raw `(a1 - a0)`, so a one-base
+    // feature produced three coincident points and `Shape::line` with a 9 pt
+    // stroke tessellated them into a wedge covering half the pane. The floor
+    // belongs here as well as at the caller, because a degenerate polyline is a
+    // hazard to whoever calls this next and not only to today's caller.
+    let raw = a1 - a0;
+    let sweep = raw.abs().max(0.004);
+    let a1 = a0 + if raw < 0.0 { -sweep } else { sweep };
     // Capped, because `a0`/`a1` derive from file coordinates. A feature ending
     // at u64::MAX produced a sweep large enough that `steps` reached usize::MAX
     // and the `collect` below panicked with "capacity overflow", killing the
@@ -506,8 +1014,15 @@ fn draw_arrowhead(
 ) {
     // Point the head along the direction of travel, shrinking it for very short
     // features so it never overshoots the feature it belongs to.
-    let sweep = (tip_angle - back_angle).abs();
-    let head = (w * 1.6 / radius.max(1.0)).min(sweep * 0.9);
+    //
+    // Floored, because `sweep == 0` gave `head == 0`, which put all three
+    // vertices on one ray and handed `Shape::convex_polygon` a degenerate
+    // triangle: a black wedge over half the map pane on pET28a's single-base
+    // `rep_origin`. The caller now draws a mark instead of an arc below
+    // `MIN_FEATURE_DEGREES` and never reaches this, and the floor stays anyway
+    // because a degenerate polygon is a hazard to the next caller too.
+    let sweep = (tip_angle - back_angle).abs().max(0.004);
+    let head = (w * 1.6 / radius.max(1.0)).min(sweep * 0.9).max(0.002);
     let dir = if tip_angle >= back_angle { 1.0 } else { -1.0 };
     let base_a = tip_angle - dir * head;
     let tip = polar(center, radius, tip_angle);
