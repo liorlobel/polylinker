@@ -43,22 +43,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
 
+      # `--locked` on every cargo invocation that resolves, from here down.
+      #
+      # Committing Cargo.lock is most of the fix, but not all of it: cargo will
+      # quietly rewrite the lock whenever it decides it has to, and a CI run that
+      # rewrites the lock is back to testing a graph nobody chose. `--locked`
+      # turns that into an error instead, so the job either builds exactly the
+      # dependency set in the commit or fails saying it could not.
+      #
+      # It also makes an upstream yank or a Cargo.toml edit that outgrows the
+      # lock visible as a CI failure rather than as a silent version bump.
       - name: Format
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked
 
       - name: Unit tests
-        run: cargo test --workspace --lib --bins
+        run: cargo test --workspace --lib --bins --locked
 
       - name: Build release
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked
 
       # The corpus tests are expected to skip here. Running them anyway proves
       # they skip cleanly rather than failing when PL_CORPUS is unset.
       - name: Corpus tests (skip without a corpus)
-        run: cargo test -p pl-fileio --test corpus -- --nocapture
+        run: cargo test -p pl-fileio --test corpus --locked -- --nocapture
 
       # `--lib --bins` above excludes every integration suite, and this is the
       # one that independently validates the shipped data: the nt->aa
@@ -69,13 +79,13 @@ jobs:
       # same pattern as the step above; the other two read features.tsv
       # directly and do the work.
       - name: Feature database, against the shipped table
-        run: cargo test -p pl-features --test corpus -- --nocapture
+        run: cargo test -p pl-features --test corpus --locked -- --nocapture
 
       # The two schema definitions, in two languages, compared directly. The
       # pin used to work only through the generated header, so a Python-side
       # column rename left the whole suite green until somebody rebuilt.
       - name: The Python builder and the Rust loader agree on the schema
-        run: cargo test -p pl-features --test schema_pin -- --nocapture
+        run: cargo test -p pl-features --test schema_pin --locked -- --nocapture
 
   wasm:
     name: wasm32 build
@@ -87,10 +97,10 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Build the browser core
-        run: cargo build -p pl-wasm --target wasm32-unknown-unknown --profile wasm
+        run: cargo build -p pl-wasm --target wasm32-unknown-unknown --profile wasm --locked
       - name: Drive the real module
         run: |
-          cargo build -p pl --release
+          cargo build -p pl --release --locked
           node crates/pl-wasm/tests/drive_wasm.mjs \
             target/wasm32-unknown-unknown/wasm/pl_wasm.wasm \
             target/release/pl
@@ -112,7 +122,7 @@ jobs:
         run: pip install biopython seguid pydna
 
       - name: Build
-        run: cargo build -p pl --release
+        run: cargo build -p pl --release --locked
 
       - name: SEGUID checksums vs the reference implementation
         run: python reference/python/tests/xcheck_seguid.py target/release/pl
