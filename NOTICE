@@ -10,16 +10,16 @@ Third-party components
 
 No third-party CODE is vendored into this repository. Two third-party FONT FILES
 are, as of 2026-07-30, under `bins/pl-gui/fonts/`; they are the first two entries
-below. Five third-party LICENCE TEXTS are there too -- one covering those two
-faces and one for each of the four that arrive through a crate -- because three
+below. Six third-party LICENCE TEXTS are there too -- one covering those two
+faces and one for each of the five that arrive through a crate -- because four
 of those licences require their text to accompany every copy, and a path into a
 Cargo registry is not something a recipient of `dist/` has.
 
 Fonts embedded in the SHIPPED BINARY
 ------------------------------------
 
-Six faces, 1,787,572 bytes, in polylinker.exe. Two are checked in here and four
-arrive through a crate.
+Seven faces, 2,282,880 bytes, in polylinker.exe. Two are checked in here and
+five arrive through a crate.
 
 What the two vendored faces cost, measured rather than estimated: a release
 build of `bins/pl-gui` went from 8,682,496 bytes at 0aa0f88 to 9,082,368 with
@@ -184,16 +184,23 @@ this file is the only place that notice can travel at all.
     NOTHING HERE IS LEGAL ADVICE. This is the item to put to counsel if anyone
     ever proposes subsetting a Plex face.
 
-  No icon font is embedded. `egui-phosphor` 0.13.0 was evaluated and rejected;
-  see "Considered and not shipped" below.
+  AN ICON FONT IS EMBEDDED, AND THIS FILE SAID THE OPPOSITE UNTIL 2026-07-30.
+  It read "No icon font is embedded. `egui-phosphor` 0.13.0 was evaluated and
+  rejected", and the rejection is recorded below under "Considered and not
+  shipped" for the reasoning it contains, marked as SUPERSEDED. Lior asked for
+  Phosphor after being shown that reasoning, so the decision changed; what did
+  not change is the hazard, which is why the face is installed in a family of
+  its own that no text in the application is laid out in. See the Phosphor
+  entry among the crate-delivered faces below.
 
-The four remaining faces arrive through a crate. THE FONT FILES are not checked
+The five remaining faces arrive through a crate. THE FONT FILES are not checked
 in here; THEIR LICENCE TEXTS NOW ARE, and that is a change made on 2026-07-30
 after a review found the release package shipping one licence text for six
 embedded faces. `bins/pl-gui` enables eframe's `default_fonts` feature, which
 pulls `epaint_default_fonts` 0.35.0; that crate `include_bytes!`es four font
 files, so every distributed copy of the GUI carries 1,414,020 bytes of font data
-it did not choose and all of its attribution obligations.
+it did not choose and all of its attribution obligations. The fifth, Phosphor,
+was chosen deliberately and arrives through `egui-phosphor` 0.13.0.
 
 WHY THE TEXTS ARE COPIED IN RATHER THAN POINTED AT. Three of these four licences
 require their text to accompany every copy, and a path into a Cargo registry is
@@ -290,6 +297,121 @@ Noto's notice and the UFL text alone does not carry Ubuntu's.
     From:   epaint_default_fonts-0.35.0/fonts/emoji-icon-font-mit-license.txt,
             byte-identical.
 
+  Phosphor Icons Bold      495,308 bytes   Version 2.1  (`name` ID 5)
+    THE ICON FACE, ADDED 2026-07-30, and the one face in this list that is not
+    text. It draws exactly two glyphs: U+E08A ARROW_U_UP_LEFT on Undo and
+    U+E08C ARROW_U_UP_RIGHT on Redo. 495 KB for two arrows is the trade, stated
+    plainly rather than justified by listing icons nothing uses.
+    MIT. Copyright (c) 2020 Phosphor Icons.
+    Font file:  egui-phosphor-0.13.0/res/Phosphor-Bold.ttf
+    sha256      10a0a1cb4f8156a420f9f84cf34c4e9871e58ed2ddea1f6a8079ad07243a7fb2
+    Delivered by: egui-phosphor 0.13.0, MIT OR Apache-2.0,
+            (c) 2023 Romet Tagobert, https://github.com/amPerl/egui-phosphor
+            (.crate sha256
+             249826f9529c1757d71dbbb3a22ec101b21110ab663c45fb771c2b86121379e4,
+             confirmed against index.crates.io's own cksum for 0.13.0 -- an
+             independent witness, not merely a successful download;
+             .cargo_vcs_info.json git sha1
+             2e7ec7ad6155cb9a5a713c9ba15f402d34c83ace).
+            Taken under MIT: Apache-2.0 would add a patent grant that buys
+            nothing for a font wrapper and a NOTICE-file obligation of its own.
+            The version is PINNED EXACTLY, `=0.13.0`, because a caret range lets
+            `cargo update` pull a 0.13.x whose res/*.ttf differs from the digest
+            recorded here, and a hash that can drift from its bytes records
+            nothing. `default-features = false, features = ["bold"]` is what
+            keeps the other four faces out of the binary: `Variant::font_bytes`
+            is a match over `#[cfg(feature = ..)]` arms, so an un-enabled
+            variant's `include_bytes!` does not exist.
+    Read from the .ttf's own `name` table with fontTools, not from a README:
+      ID 5  = "Version 2.1"          -- the version recorded above
+      ID 13 = "MIT"
+      ID 14 = https://raw.githubusercontent.com/phosphor-icons/homepage/master/LICENSE
+      ID 9  = "Tobias Fried & Helena Zhang"
+      ID 0  = "Phosphor Icons"  -- and ID 0 is normally the COPYRIGHT field.
+              Here it holds the family name, so this face carries no copyright
+              notice in band at all.
+      ID 7  = ABSENT. No trademark string; see TRADEMARKS.md, which says so
+              explicitly rather than leaving a silent absence.
+      OS/2 fsType = 0, Installable Embedding.
+    SO THE COPYRIGHT LINE ABOVE IS AN OBLIGATION AND NOT A COURTESY, exactly as
+    for emoji-icon-font: MIT requires "the above copyright notice and this
+    permission notice" in all copies, and nothing inside polylinker.exe states
+    who owns Phosphor unless this file does. The designers named in ID 9 are
+    reproduced as attribution, which MIT does not require.
+    Text:   bins/pl-gui/fonts/Phosphor-MIT.txt                  1,071 bytes
+    sha256  6918b72504641180600cbbd4a86b0dfa9dfccf788775694325b71b9a029f6eb4
+    From:   the URL in the font's own `name` ID 14, fetched 2026-07-30. THE
+            CRATE SHIPS NO FONT LICENCE FILE -- its LICENSE-MIT covers the
+            Rust wrapper, (c) 2023 Romet Tagobert, and not the typeface -- so
+            unlike the four texts above this one could not be copied out of a
+            crate and hashed against it. It was transcribed from that URL, and
+            BYTE-FOR-BYTE IDENTITY WITH UPSTREAM WAS NOT ESTABLISHED: the sha256
+            here is of the committed bytes, and a verifier should compare the
+            TEXT against that URL rather than expect this digest to match a
+            GitHub blob. Said plainly because every other digest in this file
+            does have an upstream to check against.
+    A KNOWN DIVERGENCE, recorded so a later reader does not "correct" it. The
+    crate's README points at https://github.com/phosphor-icons/web, whose
+    LICENSE gives the copyright as "(c) 2020-2021 Phosphor Icons". Both were
+    fetched; the permission text is identical and only the year line differs.
+    The one reproduced is the one the FONT points at, because ID 14 is the
+    machine-readable licence-URL field inside the very bytes being embedded and
+    this file's stated rule is to read from those bytes.
+    Layout:  IT LIGATES, AND ON THE DNA ALPHABET, WHICH IS THE WHOLE STORY.
+            Its cmap covers space, hyphen and all 26 lowercase letters, every
+            one of them with an `hmtx` advance of ZERO -- `' '` at 512/1024 is
+            the only non-zero advance in the entire printable-ASCII range -- and
+            it carries a `liga` feature with 1,513 ligature rules. With Phosphor
+            ahead of the text face in the Monospace chain a 60-base lowercase
+            row lays out 115.0 pt instead of 414.0, with x going backwards
+            between glyphs 5 and 6: 43 cells of drift by the end of a row, and
+            every click in the sequence view lands on the wrong base.
+            THAT IS WHY IT IS NOT IN EITHER TEXT CHAIN. It is registered as a
+            THIRD family, `FontFamily::Name("icons")`, holding this one face and
+            appended to nothing. epaint 0.35 resolves a family by one
+            `BTreeMap::get` on the whole key and selects faces only from that
+            family's own vector (`fonts.rs:1026`, `fonts.rs:683`), and shaping
+            happens per resolved face (`text_layout.rs:1370`), so a `liga`
+            lookup in Phosphor cannot fire on a run laid out in Monospace.
+            Unreachable by construction rather than by ordering -- which is the
+            distinction the rejection below drew, and it still stands.
+            `egui_phosphor::add_to_fonts` IS NOT USED. At 0.13.0 it is in fact
+            harmless -- it inserts at Proportional index 1 and never touches
+            Monospace -- but it is safe only by an ordering nothing asserts, and
+            its own changelog records shipping the dangerous ordering once
+            (0.7.2 "top priority font", 0.7.3 same day "phosphor overriding some
+            normal latin text glyphs"). It also panics on an empty Proportional
+            chain and cannot name a family. The four lines that replace it are
+            in `bins/pl-gui/src/main.rs::font_definitions`.
+            BOLD RATHER THAN REGULAR, and that is measured. Every LigatureSubst
+            rule in all five variants was reverse-mapped through the cmap:
+            Phosphor Regular has forty rules spelled entirely from the IUPAC
+            nucleotide alphabet -- `at`, `cat`, `tag`, `dna`, `scan`, `star`,
+            `bug`, `nut`, `sun`, `van` among them -- and Bold, Fill, Light and
+            Thin have ZERO, because every non-regular variant suffixes the icon
+            name with the variant and a rule needing `a,t,-,b,o,l,d` cannot fire
+            on a sequence row. Nothing is lost: the five generated constant
+            files are byte-identical (121,165 bytes each) and the five cmaps are
+            the same 1,543 codepoints, so `bold::ARROW_U_UP_LEFT` and
+            `regular::ARROW_U_UP_LEFT` are both U+E08A. Defence in depth only:
+            the zero advances are in Bold too.
+    The other four faces' digests, recorded so nobody re-derives them if the
+    variant is ever changed -- only Bold is embedded:
+      Phosphor.ttf        488,636  06b91e022b7ee899a63efced879392a74f0bacbda54e4467e9f663220d173a10
+      Phosphor-Fill.ttf   449,252  a53f5d2630cab5e3b7536ecb9d69d71519a2190298c22b1f8d770dd37bc2940a
+      Phosphor-Light.ttf  536,628  a10ef7a0631da04626fca2eab921d14b391749fddfa3465749368f21b28fd46c
+      Phosphor-Thin.ttf   535,152  f40473506b4ab4fcfd2b5c32fb235f9e22def891e58e01da866e1e18974e79f2
+    NOT SUBSETTED, and the reason is NOT the one that bars subsetting the Plex
+    faces. Phosphor is MIT with no Reserved Font Name, so a subset would be
+    permitted; a two-glyph subset would be about 5 KB instead of 495 KB and
+    would delete a-z and `liga` outright. It is refused because it would break
+    the upstream-verifiable sha256 above, turn 1,510 of the crate's name
+    constants into silent tofu for the next person, and -- the non-obvious one
+    -- make the shaping guard unable to detect Phosphor entering the Monospace
+    chain, because a subsetted Phosphor entering that chain would be harmless.
+    The trade to write down if anyone wants the 490 KB back: "we bought 490 KB
+    and paid for it with a guard that can no longer fail."
+
 HOW THE OBLIGATION TRAVELS, and what is still owed.
 
   DONE 2026-07-30: `tools/release.ps1` copies NOTICE, LICENSE, TRADEMARKS.md and
@@ -312,17 +434,34 @@ HOW THE OBLIGATION TRAVELS, and what is still owed.
   running `tools/release.ps1` and reading the file listing, rather than reading
   the list in the script.
 
+  ALSO DONE 2026-07-30, in the same pass that added Phosphor: the notices list
+  in `tools/release.ps1` went from five font licence texts to six. It was RUN
+  and its file listing read, not merely edited -- which is the lesson of the
+  paragraph above, where a five-line list covering two of six faces looked
+  exactly like a five-line list covering all of them.
+
   STILL OWED: `pl licences` prints the compiled-in feature-database attribution
   and does not print this font block. Note that it is `pl.exe`, which embeds no
-  fonts at all -- the six faces are in `polylinker.exe`, which has no licence
+  fonts at all -- the seven faces are in `polylinker.exe`, which has no licence
   view of its own. So the honest statement of the gap is that the GUI cannot yet
   state its own font attribution from inside itself, and it should be able to.
-  Two more OFL faces make that worse rather than better.
+  Two more OFL faces made that worse rather than better, and Phosphor makes it
+  worse again: like emoji-icon-font it carries no copyright in its own `name`
+  table, so this file is the only place its MIT notice can travel.
 
 Considered and NOT shipped
 --------------------------
 
-  egui-phosphor 0.13.0 + Phosphor Icons 2.1
+  egui-phosphor 0.13.0 + Phosphor Icons 2.1  -- SUPERSEDED 2026-07-30, SHIPPED
+    THIS ENTRY IS NO LONGER THE PROJECT'S POSITION AND IS KEPT BECAUSE ITS
+    REASONING IS. It was written the same day, rejecting the crate; Lior was
+    then shown the reasoning and asked for the icons anyway, which is his call
+    to make. Reason 1 below is the hazard and it is unchanged and unrefuted --
+    what changed is that the face now goes into a family of its own that the
+    sequence grid cannot reach, so "safe only by chain ordering, with nothing
+    asserting the ordering" no longer describes the install. Reasons 2, 3 and 4
+    were each answered rather than waived; the answers are noted inline. The
+    live record is the Phosphor entry among the embedded faces above.
     Downloaded, verified and rejected on 2026-07-30. Recorded because the
     evaluation found something worth not forgetting, and because the crate is
     the obvious thing for the next person to reach for.
@@ -351,18 +490,43 @@ Considered and NOT shipped
          measures 172.5 pt instead of 414.0 and "acgt" renders at zero width --
          the column-to-base map drifts and every click lands on the wrong base.
          It is safe only by chain ordering, with nothing asserting the ordering.
+         STILL TRUE, AND ANSWERED BY THE INSTALL RATHER THAN BY A CHOICE OF
+         FACE. The face is in a third family and in neither text chain, so
+         there is no ordering to be safe by; the figure has since been re-
+         measured at 115.0 pt on a row that also ligates, worse than the 172.5
+         recorded here. Bold's rules cannot be spelled from the DNA alphabet,
+         which removes one of the two mechanisms and is not what makes it safe.
       2. The icon audit found exactly one control in the whole application where
          an icon says something a word does not: the three toolbar menus, which
          look identical to buttons. That is a triangle. A triangle is three
          points, and `main::menu_with_caret` paints them -- no font, no bytes,
          no cmap, no licence entry, no tofu.
+         THE CARET IS STILL A POLYGON. The audit missed a second case and the
+         re-audit named it: Undo and Redo are four-letter words differing in one
+         interior letter, in identical adjacent buttons, reached fastest and
+         under the most time pressure. A mirrored arrow carries DIRECTION, which
+         is pre-attentive where the words are not. Two glyphs, and nothing else
+         in the application gets one.
       3. `accesskit` is enabled. Phosphor's glyphs live in the Private Use
          Area, so any control whose visible text is an icon exposes a PUA
          codepoint, or nothing, as its accessible name.
+         ANSWERED BY PAINTING THE GLYPH RATHER THAN PASSING IT AS TEXT.
+         `Atoms::text()` concatenates text atoms and `Button` hands the result
+         to `WidgetInfo::labeled`, so an icon atom would put "\u{E08A} Undo"
+         into the accessible name. `main::button_with_icon` reserves the space
+         with an empty Atom and paints into the button's own rect, exactly as
+         `menu_with_caret` does, so the accessible name stays the bare word.
       4. 488,636 bytes for one triangle -- 5.63% of the 8,682,496-byte binary
          it was measured against, 5.38% of the 9,082,368 the Plex faces left.
          The denominator is named because a bare percentage stops being true
          the next time the executable changes size.
+         PAID, AND MEASURED ON THE REAL BINARY RATHER THAN PROJECTED FROM THE
+         FILE SIZE. Bold rather than Regular, so 495,308 bytes of face;
+         polylinker.exe went from 9,082,368 bytes at 7ce59c1 to 9,580,032 with
+         the icon face and the two arrows in, +497,664 (+5.48%). The extra 2,356
+         over the face itself is the crate's generated constants and the two
+         painted glyphs, after `lto = true` and `strip = true`. It buys two
+         arrows, and the denominator is named for the same reason as above.
 
 Test-time only (not distributed, not linked):
 

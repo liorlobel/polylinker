@@ -19,21 +19,34 @@ or sponsored by** any company named on this page.
 | Bitstream, Vera | Bitstream, Inc. |
 | Noto | Google Inc. |
 | Ubuntu, Canonical | Canonical Ltd. |
+| Phosphor Icons | Phosphor Icons (Tobias Fried, Helena Zhang) |
 
 All other trademarks are the property of their respective owners.
 
 ## Marks carried inside the shipped binary
 
-The last four entries above are different in kind from the rest of this page.
-They are not referenced in documentation — they are **embedded in
-`polylinker.exe`**, in the `name` tables of font files it carries. That is an
-obligation rather than a courtesy for at least one of them, and it is separate
-from the copyright notice recorded in NOTICE.
+Four of the entries above — IBM Plex, Bitstream/Vera, Noto, and
+Ubuntu/Canonical — are different in kind from the rest of this page. They are
+not referenced in documentation; they are **embedded in `polylinker.exe`**, in
+the `name` tables of font files it carries. That is an obligation rather than a
+courtesy for at least one of them, and it is separate from the copyright notice
+recorded in NOTICE.
 
-The list is the four faces whose `name` ID 7 is non-empty, read from the shipped
-`.ttf` files rather than from anyone's documentation. Hack's ID 7 is empty and
-emoji-icon-font's is empty, which is why neither appears; Hack's mark obligation
-comes through the Bitstream Vera licence text instead.
+The list is the faces whose `name` ID 7 is non-empty, read from the shipped
+`.ttf` files rather than from anyone's documentation. It is four of the seven.
+Hack's ID 7 is empty and emoji-icon-font's is empty, which is why neither
+appears; Hack's mark obligation comes through the Bitstream Vera licence text
+instead.
+
+**Phosphor Icons adds NOTHING to this section, and this paragraph exists so that
+the absence is a statement rather than an oversight.** Phosphor Icons 2.1 Bold
+was embedded on 2026-07-30 as the icon face. Its `name` ID 7 is absent
+altogether — not empty, absent — so there is no trademark string inside those
+bytes and nothing here to reproduce. Its ID 0, which is normally the copyright
+field, holds the family name "Phosphor Icons"; that is a name, not a mark
+notice, and the MIT copyright obligation it leaves unmet is discharged in NOTICE.
+"Phosphor Icons" appears in the table above only because this project's own prose
+names it, which is the *referenced in documentation* case and not this one.
 
 **IBM Plex**, verbatim from `name` ID 7 of both IBM Plex Mono 2.005 and IBM Plex
 Sans 3.005, added when those faces were vendored on 2026-07-30:

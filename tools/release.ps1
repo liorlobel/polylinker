@@ -112,11 +112,12 @@ if (-not $artifacts) { throw 'the build produced nothing to ship' }
 # The notices have to travel with the binaries, and until 2026-07-30 they did
 # not: dist/ held four executables and a checksum file.
 #
-# This is an obligation, not a courtesy. polylinker.exe embeds six font files
-# under four licences, and three of those require their text to accompany every
+# This is an obligation, not a courtesy. polylinker.exe embeds seven font files
+# under four licences, and four of those require their text to accompany every
 # copy: SIL OFL 1.1 clause 2 ("provided that each copy contains the above
 # copyright notice and this license"), the Bitstream Vera licence reached through
-# Hack, and MIT for emoji-icon-font. Shipping the exe by itself put the project
+# Hack, MIT for emoji-icon-font, and MIT for Phosphor. Shipping the exe by itself
+# put the project
 # out of step with licences it had correctly recorded in the repository and then
 # left behind at the packaging step. The failure mode is that the record looks
 # complete from inside the source tree, which is the only place anyone looked.
@@ -124,7 +125,8 @@ if (-not $artifacts) { throw 'the build produced nothing to ship' }
 # The IBM Plex faces are what forced the issue rather than what caused it: they
 # took the count of unaccompanied OFL faces from one to three.
 #
-# ALL SIX FACES, NOT JUST THE TWO THIS REPOSITORY CHOSE. The first version of
+# EVERY FACE, NOT JUST THE TWO THIS REPOSITORY CHOSE -- six of them when this was
+# written and seven since Phosphor. The first version of
 # this block copied IBMPlex-OFL.txt alone and left the four faces that arrive
 # through epaint_default_fonts with no licence text at all -- including the two
 # the paragraph above names by licence. Their texts are now vendored under
@@ -135,6 +137,14 @@ if (-not $artifacts) { throw 'the build produced nothing to ship' }
 # Noto Emoji gets its OWN copy of the OFL rather than sharing the Plex one. OFL
 # clause 2 asks for "the above copyright notice and this license", and the
 # copyright above the Plex text is IBM's, with the reserved name "Plex".
+#
+# SIX FONT LICENCE TEXTS SINCE 2026-07-30, not five: Phosphor Icons 2.1 Bold is
+# now embedded as the icon face and is MIT, and like emoji-icon-font it carries
+# no copyright in its own `name` table -- ID 0 holds the family name and ID 7 is
+# absent -- so a copy that ships without Phosphor-MIT.txt is a copy with no
+# Phosphor permission notice anywhere in it. Unlike the four texts above, this
+# one does NOT come out of a crate: egui-phosphor ships a licence for its own
+# Rust wrapper and none for the typeface. See NOTICE.
 $notices = @(
     @{ From = 'NOTICE';        To = 'NOTICE.txt' }
     @{ From = 'LICENSE';       To = 'LICENSE.txt' }
@@ -149,6 +159,8 @@ $notices = @(
        To   = 'licences/NotoEmoji-OFL.txt' }               # NOT the Plex OFL
     @{ From = 'bins/pl-gui/fonts/emoji-icon-font-MIT.txt'
        To   = 'licences/emoji-icon-font-MIT.txt' }         # emoji-icon-font
+    @{ From = 'bins/pl-gui/fonts/Phosphor-MIT.txt'
+       To   = 'licences/Phosphor-MIT.txt' }                # Phosphor Icons Bold
 )
 foreach ($n in $notices) {
     if (-not (Test-Path $n.From)) {

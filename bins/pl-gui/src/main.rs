@@ -91,6 +91,138 @@ const PLEX_MONO: &[u8] = include_bytes!("../fonts/IBMPlexMono-Regular.ttf");
 /// a different enzyme, so this is legibility as correctness, not as taste.
 const PLEX_SANS: &[u8] = include_bytes!("../fonts/IBMPlexSans-Regular.ttf");
 
+/// The icon face: Phosphor Icons 2.1 **Bold**, MIT, arriving through
+/// `egui-phosphor` 0.13.0 rather than being vendored here — the same route the
+/// four `default_fonts` faces take, and NOTICE records it the same way.
+///
+/// **THIS FACE IS DANGEROUS AND IS SHIPPED ANYWAY, WHICH IS ONLY DEFENSIBLE
+/// BECAUSE OF WHERE IT IS INSTALLED.** Its cmap covers all 26 lowercase letters,
+/// space and hyphen, every one of them with an `hmtx` advance of ZERO — `' '` at
+/// 512/1024 is the only non-zero advance anywhere in printable ASCII — and it
+/// carries a `liga` feature with 1,513 ligature rules on top of that. Put it in
+/// the Monospace chain ahead of Plex Mono and a 60-base lowercase row lays out
+/// 115.00 pt wide where the grid computes 414.00, with x going *backwards*
+/// between glyphs 5 and 6. `seqedit` rests on `x(base) = x0 + col * advance`, so
+/// that is 43 cells of drift by the end of a row and every click lands on the
+/// wrong base. Measured, not supposed; see [`font_definitions`] for the
+/// containment and `NOTICE` for the history.
+///
+/// BOLD RATHER THAN REGULAR, AND THE REASON IS MEASURED. Every LigatureSubst
+/// rule in all five faces was reverse-mapped through the cmap: Phosphor Regular
+/// has forty rules spelled entirely from the IUPAC nucleotide alphabet —
+/// including `at`, `cat`, `tag`, `dna`, `scan`, `star` — and 200-odd spelled
+/// from the amino-acid alphabet, because the rule names come from the icon set's
+/// own `selection.json`. Bold, Fill, Light and Thin have ZERO, because every
+/// non-regular variant suffixes the icon name with the variant, so a rule needs
+/// `a,t,-,b,o,l,d` and cannot fire on a sequence row. Nothing is lost by the
+/// choice: the five generated constant files are byte-identical (121,165 bytes
+/// each) and the five cmaps are the same 1,543 codepoints, so
+/// `bold::ARROW_U_UP_LEFT` and `regular::ARROW_U_UP_LEFT` are both U+E08A.
+/// Bold also holds the most ink per pixel at toolbar sizes, which is the axis
+/// that decides whether a stroked glyph clears 3:1 after antialiasing.
+///
+/// That is DEFENCE IN DEPTH and not the defence: the zero advances are in Bold
+/// too, so Bold in the Monospace chain destroys the grid just as thoroughly.
+/// The isolation is what makes this safe. The variant only removes one of the
+/// two mechanisms, for free.
+fn phosphor() -> &'static [u8] {
+    egui_phosphor::Variant::Bold.font_bytes()
+}
+
+/// The family the icon face is installed under, and the only family it is in.
+///
+/// **A NAMED CONSTANT RATHER THAN A LITERAL AT EACH USE SITE**, for the reason
+/// [`MOLECULE_MENU`] is one: `FontFamily::Name(Arc<str>)` is a `BTreeMap` key
+/// compared by string equality, so `Name("icons")` and `Name("Icons")` are two
+/// different families — and asking for one that was never registered is not a
+/// fallback but a PANIC, `FontsImpl::font`'s
+/// `panic!("FontFamily::{family:?} is not bound to any fonts")` (epaint 0.35
+/// `fonts.rs:1031`). A typo there is a crash on first paint with no compile
+/// error anywhere.
+static ICON_FAMILY: std::sync::LazyLock<egui::FontFamily> =
+    std::sync::LazyLock::new(|| egui::FontFamily::Name("icons".into()));
+
+/// The `FontDefinitions` the binary installs, as a value a test can inspect.
+///
+/// **SPLIT OUT OF [`install_fonts`] SO THE GUARDS READ THE SHIPPED VALUE RATHER
+/// THAN A COPY OF IT.** A structural test that rebuilds the definitions itself
+/// asserts something about the test, not about the binary; that is the same
+/// class of mistake as measuring a `Context` the fonts were never installed
+/// into, which `test_ctx` exists to prevent.
+///
+/// The two text chains are untouched — `.insert(0, ..)` prepends, nothing is
+/// removed — and Phosphor is added as a THIRD FAMILY rather than as a fourth
+/// entry in either of them. See [`install_fonts`] for the resolved order and
+/// `the_icon_face_is_in_its_own_family_and_in_neither_text_chain` for the
+/// assertion.
+fn font_definitions() -> egui::FontDefinitions {
+    // `FontDefinitions::default()` is already the four `default_fonts` faces in
+    // their default order; this prepends to that rather than replacing it.
+    let mut defs = egui::FontDefinitions::default();
+    for (name, bytes) in [
+        ("IBMPlexMono", PLEX_MONO),
+        ("IBMPlexSans", PLEX_SANS),
+        // Registered as DATA. Being in `font_data` puts a face in the binary
+        // and in nothing's fallback chain; only the `families` map below can
+        // make it reachable from a `FontId`.
+        ("Phosphor", phosphor()),
+    ] {
+        defs.font_data.insert(
+            name.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(bytes)),
+        );
+    }
+    for (family, name) in [
+        (egui::FontFamily::Monospace, "IBMPlexMono"),
+        (egui::FontFamily::Proportional, "IBMPlexSans"),
+    ] {
+        defs.families
+            .entry(family)
+            .or_default()
+            .insert(0, name.to_owned());
+    }
+
+    // A THIRD FAMILY, HOLDING ONE FACE, APPENDED TO NOTHING.
+    //
+    // **DO NOT REPLACE THIS WITH `egui_phosphor::add_to_fonts`.** It is the
+    // crate's own documented helper and it is the obvious thing to reach for,
+    // and it is wrong here — not because it is unsafe today, which it is not.
+    // Read at 0.13.0 it inserts "phosphor" at Proportional index 1 and touches
+    // Monospace not at all, and measured through the real `Fonts` against this
+    // very chain it moves nothing: 414.00 pt Monospace, 329.44 pt Proportional,
+    // byte-identical to a build without it. It is refused because it is safe
+    // only by an ORDERING that nothing asserts. Index 1 is harmless purely
+    // because Plex Sans sits at index 0 and covers a-z; rewrite the loop above
+    // to `.push(name)`, or drop the Plex Sans prepend, and every proportional
+    // label in the app is handed the lowercase alphabet of a zero-advance
+    // ligating face. The crate has already shipped that defect once — its own
+    // changelog reads "0.7.2 add_to_fonts now sets phosphor as top priority
+    // font instead of last", then "0.7.3, same day, Fixed issue with phosphor
+    // overriding some normal latin text glyphs in egui". Reproduced here at
+    // Proportional index 0: a feature named "cat" renders as one 9.00 pt cat
+    // icon, and `main.rs`'s `name_font` draws feature names proportionally at
+    // 9 pt. Nineteen of the 89 curated rows in `features/features.tsv` contain
+    // a Phosphor ligature name; `tag` is an icon, and epitope tags are the most
+    // common annotation class in a plasmid. It also `Vec::insert(1, ..)`s,
+    // which panics on the empty Proportional chain a `default_fonts`-off build
+    // would have, and it hard-codes the `font_data` key with no way to name a
+    // family, so it cannot express this shape at all. Eleven lines replaced by
+    // four.
+    //
+    // ONE FACE, WITH NO TEXT FACE BEHIND IT, AND THAT IS DELIBERATE.
+    // `CachedFamily::new` looks for U+25FB and then '?' to choose a replacement
+    // face; Phosphor has neither, so it logs `Failed to find replacement
+    // characters ... Will use empty glyph` once and every family member that
+    // misses renders at zero width — "Save" laid out in this family is three
+    // glyphs and 0.00 pt wide. That is the correct behaviour and the warning is
+    // an honest signal, not a defect to silence: a label that strays into the
+    // icon family must be an obvious hole in the UI at review time rather than
+    // a slightly-wrong-looking word that ships. Do not add a text face here.
+    defs.families
+        .insert(ICON_FAMILY.clone(), vec!["Phosphor".to_owned()]);
+    defs
+}
+
 /// Install the vendored faces at the head of both family chains.
 ///
 /// **THIS FUNCTION EXISTS AS A FUNCTION, RATHER THAN AS FOUR LINES INSIDE
@@ -109,6 +241,7 @@ const PLEX_SANS: &[u8] = include_bytes!("../fonts/IBMPlexSans-Regular.ttf");
 ///
 ///   Monospace     IBM Plex Mono, Hack, Ubuntu-Light, NotoEmoji, emoji-icon-font
 ///   Proportional  IBM Plex Sans, Ubuntu-Light, NotoEmoji, emoji-icon-font
+///   icons         Phosphor
 ///
 /// The fallbacks are load-bearing and not politeness. Plex Mono has no U+25B6,
 /// which is `HISTORY_HERE`, the History tab's cursor on the current state; it
@@ -117,30 +250,24 @@ const PLEX_SANS: &[u8] = include_bytes!("../fonts/IBMPlexSans-Regular.ttf");
 /// tofu boxes, which is the concrete reason the Ubuntu Font Licence question was
 /// worth answering rather than sidestepping.
 ///
-/// NO ICON FONT IS INSTALLED, and that is a decision rather than an omission —
-/// see the toolbar's caret in [`App::top_bar`] for what replaced it, and NOTICE
-/// for why 488 KB of Phosphor would have put `a + t -> uniE0AC` in reach of a
-/// lowercase plasmid.
+/// **AN ICON FONT IS NOW INSTALLED, AND THE PARAGRAPH THAT USED TO STAND HERE
+/// SAID THE OPPOSITE.** It read "NO ICON FONT IS INSTALLED, and that is a
+/// decision rather than an omission ... 488 KB of Phosphor would have put
+/// `a + t -> uniE0AC` in reach of a lowercase plasmid". The hazard was real and
+/// is unchanged; what changed is that the face is now in a family of its own
+/// that no text in this application is laid out in, so the grid cannot reach it
+/// by any ordering. See [`phosphor`] for the measurements and
+/// [`font_definitions`] for the containment. Both text chains above are exactly
+/// what they were at 7ce59c1 — verified, not assumed: the 60-base row still
+/// lays out 414.00 pt in Monospace and 329.44 pt in Proportional, to the last
+/// hundredth.
+///
+/// THE CARET IN [`menu_with_caret`] IS STILL A POLYGON, and that was never
+/// contingent on this. `CARET_DOWN` (U+E136) is now installed and available and
+/// is still the wrong tool for that mark; the reasons are in that function's own
+/// doc comment and none of them was "we have no icon font".
 fn install_fonts(ctx: &egui::Context) {
-    // `FontDefinitions::default()` is already the four `default_fonts` faces in
-    // their default order; this prepends to that rather than replacing it.
-    let mut defs = egui::FontDefinitions::default();
-    for (name, bytes) in [("IBMPlexMono", PLEX_MONO), ("IBMPlexSans", PLEX_SANS)] {
-        defs.font_data.insert(
-            name.to_owned(),
-            std::sync::Arc::new(egui::FontData::from_static(bytes)),
-        );
-    }
-    for (family, name) in [
-        (egui::FontFamily::Monospace, "IBMPlexMono"),
-        (egui::FontFamily::Proportional, "IBMPlexSans"),
-    ] {
-        defs.families
-            .entry(family)
-            .or_default()
-            .insert(0, name.to_owned());
-    }
-    ctx.set_fonts(defs);
+    ctx.set_fonts(font_definitions());
 }
 
 /// A `Context` with the shipped fonts in it, which is the only kind any test
@@ -201,14 +328,31 @@ const CARET_H: f32 = 3.5;
 
 /// A menu button that says it is a menu.
 ///
-/// **THE ONLY ICON IN THIS APPLICATION, and it is a polygon rather than a
-/// glyph.** The toolbar's own comment records that a caret was tried at 0ebaa41
-/// and photographed: `egui::menu_button` paints a plain button, so a triangle had
-/// to be a character, U+25BE is in none of the embedded faces, and it came out an
+/// **THE ONLY ICON IN THIS APPLICATION THAT IS A POLYGON, AND HERE IS WHY IT
+/// STAYS ONE.** That sentence used to read "the only icon in this application",
+/// full stop, and the Undo and Redo glyphs below made it false. The caret's own
+/// argument is untouched by their arrival and was never contingent on it.
+///
+/// The toolbar's own comment records that a caret was tried at 0ebaa41 and
+/// photographed: `egui::menu_button` paints a plain button, so a triangle had to
+/// be a character, U+25BE is in none of the embedded faces, and it came out an
 /// empty box on all three menus. That is an argument against font-delivered
 /// chrome, not against the caret — three points need no `cmap`, cannot tofu,
 /// cannot ligate, need no licence entry, and scale with the widget rather than
 /// with a text size.
+///
+/// AND THE LAST OF THOSE IS NOW THE DECIDING ONE, because Phosphor's
+/// `CARET_DOWN` (U+E136) is installed and available and is still refused.
+/// `CARET_W`/`CARET_H` are 7.0 x 3.5, a deliberately non-square 2:1 chevron
+/// sized to the BUTTON; a glyph is laid out as text at 1.000 em square, so it
+/// would be sized by a font size, land as a 1:1 box, and need a size and an
+/// offset picked by eye and re-derived every time the button padding moves.
+/// `the_disclosure_caret_clears_three_to_one_on_the_button_it_is_drawn_on`
+/// measures the polygon's `pal(ui).ink` against the button fill; a glyph takes
+/// `visuals.widgets.*.fg_stroke.color` instead, so swapping in a glyph would
+/// leave that test green while measuring a colour the caret no longer uses —
+/// the exact failure this project names most often. Three menus, a working
+/// tested zero-byte polygon, and nothing visible to gain.
 ///
 /// WHAT IT BUYS, which is the test every candidate icon in the audit had to pass
 /// and the only one that did. A menu is otherwise distinguished from a button
@@ -225,9 +369,10 @@ const CARET_H: f32 = 3.5;
 /// on the last letter, and the triangle is then painted from the button's own
 /// right edge inward. Cost: `CARET_W` plus one `icon_spacing` per menu, about
 /// 11 pt each and 33 pt over the three — which is why the audit stopped at three
-/// and did not put one on `Open…`, `Undo` or `Redo`, whose words are already
-/// unambiguous and which would have spent 99 pt of an 880 pt window to say
-/// nothing.
+/// and did not put a CARET on `Open…`, `Undo` or `Redo`: none of them opens
+/// anything, so the mark would have been a lie as well as 99 pt of an 880 pt
+/// window. Undo and Redo did later get an icon, and a different one, for a
+/// different reason; see [`button_with_icon`].
 fn menu_with_caret<R>(
     ui: &mut Ui,
     label: &str,
@@ -263,6 +408,109 @@ fn menu_with_caret<R>(
         egui::Stroke::NONE,
     ));
     out
+}
+
+/// The Undo and Redo glyphs, and the point size an icon is laid out at.
+///
+/// U-TURN ARROWS AND NOT `ARROW_COUNTER_CLOCKWISE` / `ARROW_CLOCKWISE`, which
+/// are the obvious picks and are the wrong ones. A circular arrow is the
+/// near-universal *reload* idiom — it is what a browser's reload button looks
+/// like and what Phosphor itself uses for refresh — so on a control that mutates
+/// the user's molecule it would suggest the wrong operation. The house rule is
+/// that an icon must not replace text whose meaning could be mistaken; an icon
+/// that INTRODUCES a mistakable meaning is worse than none.
+///
+/// `ICON_SIZE` doubles as the reserved width because Phosphor's `hmtx` advance
+/// is 1024/1024 upem: an icon is exactly 1.000 em, so 13 pt of font size is
+/// 13 pt of toolbar and no measurement is needed to say so.
+const ICON_UNDO: &str = egui_phosphor::bold::ARROW_U_UP_LEFT;
+const ICON_REDO: &str = egui_phosphor::bold::ARROW_U_UP_RIGHT;
+const ICON_SIZE: f32 = 13.0;
+
+/// A button whose word is preceded by an icon that the screen reader never sees.
+///
+/// **THE TWO CONTROLS THIS IS USED ON ARE UNDO AND REDO, AND NOTHING ELSE.**
+/// 495 KB of face for two arrows, and the specification says so plainly rather
+/// than padding the list to justify the payload. "Undo" and "Redo" are
+/// four-letter words differing in one interior letter, in the same weight, the
+/// same colour and the same button shape, sitting adjacent — the worst
+/// discriminability case in the bar, on the pair reached fastest and under the
+/// most time pressure, usually straight after doing something regrettable. A
+/// MIRRORED ARROW ENCODES DIRECTION, which is a pre-attentive channel the words
+/// do not have: it is legible in peripheral vision, which is the condition these
+/// two are actually clicked in. Every other control in the bar is either a
+/// distinct noun ("Open…", "Save", "Export map", "Molecule") or already carries
+/// a caret, and none is reached in a hurry. The six details tabs get nothing:
+/// they live in a `horizontal_wrapped` whose own comment records the File tab
+/// going unclickable below ~357 pt, six icons is ~96 pt out of a width already
+/// contested with the map pane, and six unambiguous nouns have no
+/// discriminability problem to solve. U+26A0, the hidden-cut warning, keeps its
+/// real Unicode character rather than moving to Phosphor's `WARNING`: a PUA
+/// codepoint is a downgrade for anything a screen reader or a copied string
+/// might touch.
+///
+/// **THE ICON IS PAINTED, NOT PASSED AS A TEXT ATOM, AND THAT IS AN
+/// ACCESSIBILITY DECISION RATHER THAN A LAYOUT ONE.** `Atoms::text()` (egui 0.35
+/// `atomics/atoms.rs:51`) concatenates every text atom with a space and `Button`
+/// hands the result straight to `WidgetInfo::labeled` (`widgets/button.rs:401`),
+/// so `ui.button((icon_text, "Undo"))` gives accesskit the name
+/// `"\u{E08A} Undo"` — a Private Use Area codepoint read out to a screen-reader
+/// user. That is one of NOTICE's three recorded reasons for rejecting an icon
+/// font and it survives the family isolation untouched. Reserving the space with
+/// an empty [`egui::Atom`] and then painting into the button's own rect from the
+/// `Response` — [`menu_with_caret`]'s mechanism exactly — keeps the accessible
+/// name the bare word "Undo", keeps the word visible beside the glyph, and names
+/// the family explicitly in the `FontId` at the call site, so a hand-painted
+/// icon can never inherit Monospace or Proportional even by accident.
+///
+/// CONTRAST, SAMPLED OFF THE RUNNING APP RATHER THAN COMPUTED FROM TWO PALETTE
+/// CONSTANTS. The glyph takes the same `fg_stroke.color` the button's own label
+/// takes, so arithmetic would say it is exactly as contrasty as the word beside
+/// it — but the real question for a STROKED glyph is whether enough ink survives
+/// antialiasing for any pixel to reach that colour, and that is the thing
+/// `main.rs:73-80` had to photograph for the Plex swap too. Measured on this
+/// machine's 120 dpi screenshots, enabled Undo, against the BUTTON FILL and not
+/// the panel (the trap `ring.rs` records):
+///
+///   dark   ink 180,180,180 on fill 60,60,60    5.32:1, 35 fully-inked pixels
+///   light  ink  60, 60, 60 on fill 230,230,230 8.84:1, 35 fully-inked pixels
+///
+/// Identical to the label's own 5.32 and 8.84 in the same button, so the ink
+/// does survive at 13 pt and Bold is carrying its weight. SC 1.4.11 asks 3:1 of
+/// UI chrome.
+///
+/// The DISABLED state measures 2.86:1 and is EXEMPT under the same criterion's
+/// "inactive user interface component" carve-out — the disabled word measures
+/// the same, because both take the faded colour from the same place. Written
+/// down so that nobody later "fixes" a greyed-out Undo by making it look
+/// enabled, which would be a real regression dressed as an accessibility one.
+fn button_with_icon(ui: &mut Ui, icon: &str, label: &str) -> egui::Response {
+    use egui::AtomExt as _;
+    let r = ui.button((
+        egui::Atom::default().atom_size(egui::vec2(ICON_SIZE, ICON_SIZE)),
+        label,
+    ));
+    let pad = ui.spacing().button_padding.x;
+    let at = egui::pos2(r.rect.left() + pad + ICON_SIZE * 0.5, r.rect.center().y);
+    // Not `pal(ui).ink`: this is inside a button, and a button's foreground is
+    // whichever `WidgetVisuals` the interaction state selects. Taking it from
+    // the same place `Button` takes its label colour is what keeps the glyph and
+    // the word in step through hover, press and `add_enabled_ui(false)` — the
+    // painter's own fade handles the last of those, so nothing here has to know
+    // about it.
+    let colour = ui.style().interact(&r).fg_stroke.color;
+    ui.painter().text(
+        at,
+        egui::Align2::CENTER_CENTER,
+        icon,
+        // The family, named at the call site. `FontId::monospace` or
+        // `::proportional` here would put a PUA codepoint into a text chain that
+        // has no glyph for it and paint a tofu box; the icons family is the only
+        // one that can draw this and the only one Phosphor is in.
+        egui::FontId::new(ICON_SIZE, ICON_FAMILY.clone()),
+        colour,
+    );
+    r
 }
 
 /// How wide a string is, laid out in the font it will actually be drawn in.
@@ -1543,6 +1791,15 @@ impl App {
                 // none of which a separator does. It also takes the run from
                 // 467 pt to about 323.
                 //
+                // AND 34.4 PT OF THAT SAVING WAS SPENT AGAIN on 2026-07-30, on
+                // the Undo and Redo icons: two glyphs at 1.000 em of 13 pt plus
+                // an `icon_spacing` each. Measured off the running app rather
+                // than predicted — the title block moved 43 physical px right at
+                // 1.25 scale — so the run is about 357 pt and the bar's natural
+                // width about 975. That is affordable and it is not free, and
+                // `the_toolbar_stays_inside_the_window_however_long_the_status_is`
+                // is what says so at the 880 pt minimum rather than this comment.
+                //
                 // Undo and Redo stay visible buttons and are deliberately not
                 // folded into a menu: `global_shortcuts` switches Ctrl+Z and
                 // Ctrl+Y off while the design panel is open, and that decision
@@ -1743,16 +2000,25 @@ impl App {
             None => (false, false),
         };
 
+        // The one pair in this bar where an icon says something the word does
+        // not: mirrored arrows carry DIRECTION, which is pre-attentive, where
+        // "Undo" and "Redo" differ by one interior letter at the same weight in
+        // adjacent identical buttons. The words stay, and stay first in the
+        // accessible name. See `button_with_icon` for why the glyph is painted
+        // rather than passed as text, and for the two controls that got one and
+        // the several that deliberately did not.
         ui.add_enabled_ui(can_undo, |ui| {
-            if ui.button("Undo").on_hover_text("Ctrl+Z").clicked() {
+            if button_with_icon(ui, ICON_UNDO, "Undo")
+                .on_hover_text("Ctrl+Z")
+                .clicked()
+            {
                 self.do_undo();
             }
         });
         ui.add_enabled_ui(can_redo, |ui| {
             // Ctrl+Shift+Z has been wired since the shortcut block was written
             // and was advertised nowhere.
-            if ui
-                .button("Redo")
+            if button_with_icon(ui, ICON_REDO, "Redo")
                 .on_hover_text("Ctrl+Y, or Ctrl+Shift+Z")
                 .clicked()
             {
@@ -5341,11 +5607,46 @@ mod tests {
     /// Plex Mono with one LigatureSubst rule `a + c -> A` appended and `hmtx` left
     /// alone passes this test with the uppercase row and fails it with the lowercase
     /// one. Half the ligature-bait alphabet was unwatched.
+    ///
+    /// **THIS IS THE LOAD-BEARING GUARD ON THE PHOSPHOR INSTALL, AND IT IS
+    /// BEHAVIOURAL RATHER THAN STRUCTURAL, WHICH IS WHY IT IS THE ONE TO TRUST.**
+    /// It never mentions a font name or a `font_data` key: it measures the row the
+    /// painter would draw. So it reddens whichever way the icon face reaches the
+    /// grid — prepended to `families[Monospace]`, appended under a second key,
+    /// smuggled in by `egui_phosphor::add_to_fonts`, or brought in by a future
+    /// face swap that ligates. Demonstrated rather than argued: with Phosphor Bold
+    /// inserted at Monospace index 0 this test fails property 3 at glyph 8 with
+    /// `('-') shaped to x=40.000, -5.600 pt off the 5.7000 pt grid — -0.98 cells`.
+    ///
+    /// AND IT IS THE ONLY ONE THAT CATCHES THE BYTES CHANGING UNDER A NAME. Its
+    /// structural sibling,
+    /// `the_icon_face_is_in_its_own_family_and_in_neither_text_chain`, asserts the
+    /// spelling of both chains; register the icon face under the existing
+    /// `"IBMPlexMono"` key and that test and the byte-level one both stay green
+    /// while this one goes red. Measured, not argued. The converse also holds and
+    /// is why the sibling is kept: append Phosphor to the END of the Monospace
+    /// chain and this test stays green, because nothing in a sequence row ever
+    /// resolves that far down.
+    ///
+    /// It says nothing about the grid's CHOICE of family, and that gap is real:
+    /// every assertion here asks about `FontFamily::Monospace`, and if the sequence
+    /// view were ever moved to a named family of its own the greenness below would
+    /// be a fact about a family nothing paints.
     #[test]
     fn a_sequence_row_shapes_to_one_glyph_per_base_on_one_pitch() {
         // Ligature-prone pairs that survive `is_ascii_graphic`, padded with bases.
+        //
+        // THE BASE RUN AT THE FRONT IS `ATCATAG` AND IT IS NOT ARBITRARY. The
+        // fixture used to open `ACGT--` and repeat, and scanning it there was no
+        // `a` immediately followed by a `t` anywhere in sixty cells — so it caught
+        // a zero-advance face by property 3 and could not have caught a LIGATING
+        // one at all. `at`, `cat` and `tag` are the three rules Phosphor Regular
+        // spells from the DNA alphabet, and `ATCATAG` lowercases to a string
+        // holding all three. The count is preserved exactly: 7 + 2 for the first
+        // run, eight runs of `ACGT` + pair, then `A<>` — sixty, with all ten pairs
+        // still present.
         let mol = pl_core::Molecule {
-            seq: b"ACGT--ACGT**ACGT..ACGT->ACGT=>ACGT<=ACGT!=ACGT::ACGT//ACGT<>++".to_vec(),
+            seq: b"ATCATAG--ACGT**ACGT..ACGT->ACGT=>ACGT<=ACGT!=ACGT::ACGT//A<>".to_vec(),
             topology: pl_core::Topology::Circular,
             ..Default::default()
         };
@@ -5353,7 +5654,7 @@ mod tests {
         let mut row = String::new();
         e.row_text(&mol, 0, 60, &mut row);
         assert_eq!(row.chars().count(), 60, "sixty cells: {row:?}");
-        for pair in ["--", "**", "..", "->", "=>", "<=", "!=", "::", "//"] {
+        for pair in ["--", "**", "..", "->", "=>", "<=", "!=", "::", "//", "<>"] {
             assert!(
                 row.contains(pair),
                 "{pair:?} did not survive row_text, so this proves nothing about \
@@ -5369,6 +5670,21 @@ mod tests {
             "the lowercase twin is identical to the row, so it is not testing a \
              second alphabet -- the fixture must contain letters"
         );
+        // And the LOWERCASE twin is what has to carry the ligature bait, because a
+        // ligature rule is spelled in lowercase and `Molecule::seq` is
+        // case-preserved — the user's own pKoV renders entirely lowercase. Checked
+        // against the string `row_text` actually emitted rather than against the
+        // literal above, for the reason the pair loop already exists: a future
+        // change to `row_text` could stop emitting these and the test would go on
+        // claiming to watch them.
+        for bait in ["at", "cat", "tag"] {
+            assert!(
+                lower.contains(bait),
+                "{bait:?} is not in the lowercase row, and it is a Phosphor ligature \
+                 name — without it this test watches the zero-advance failure only \
+                 and not the ligature one: {lower:?}"
+            );
+        }
 
         let ctx = test_ctx();
         // One device pixel. `epaint` snaps every glyph's x to a whole device pixel
@@ -5379,12 +5695,25 @@ mod tests {
 
         // All four properties as one function returning WHICH one broke, so the same
         // code can be pointed at a row that must pass and a row that must fail.
-        let check = |text: &str, size: f32| -> Result<(), String> {
+        //
+        // THE REFERENCE ADVANCE IS ALWAYS MONOSPACE'S, WHATEVER FAMILY THE ROW IS
+        // LAID OUT IN, and that is what stops the icon-family case below from
+        // passing vacuously. `advance` models the number the GRID computes, and
+        // `main.rs:2877` computes it from `glyph_width(.., 'A')` — uppercase A,
+        // which is absent from Phosphor's cmap in all five variants. So in a build
+        // where Phosphor had reached the Monospace chain, the arithmetic would
+        // still read Plex Mono's 6.90 while the painted lowercase row collapsed;
+        // that is precisely the failure, and pairing a family's own broken advance
+        // with its own broken layout would hide it. Asking the icons family for
+        // `glyph_width('A')` returns 0.00 — with a zero advance every glyph sits
+        // at `x0 + k*0`, properties 3 and 4 hold trivially, and the check could
+        // never fail.
+        let check = |text: &str, size: f32, family: egui::FontFamily| -> Result<(), String> {
             let chars: Vec<char> = text.chars().collect();
             let advance = ctx.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(size), 'A'));
             let job = egui::text::LayoutJob::simple_singleline(
                 text.to_string(),
-                egui::FontId::monospace(size),
+                egui::FontId::new(size, family),
                 egui::Color32::WHITE,
             );
             let g = ctx.fonts_mut(|f| f.layout_job(job));
@@ -5440,7 +5769,7 @@ mod tests {
 
         for (case, text) in [("upper", &row), ("lower", &lower)] {
             for size in [9.5f32, 11.0, 11.5] {
-                check(text, size).unwrap_or_else(|e| {
+                check(text, size, egui::FontFamily::Monospace).unwrap_or_else(|e| {
                     panic!(
                         "at {size} pt the {case}case sequence row does not shape to a \
                          grid: {e}"
@@ -5448,6 +5777,78 @@ mod tests {
                 });
             }
         }
+
+        // AND THE SAME ROW IN THE ICON FAMILY, WITH THE POLARITY INVERTED. This is
+        // the half that makes the half above mean something. Green in Monospace is
+        // a fact about the CHAIN only if the face kept out of that chain is
+        // genuinely capable of destroying it; without this, somebody could quietly
+        // swap in an icon face with no `liga` and no zero advances, the isolation
+        // would stop mattering, and nothing would say so.
+        //
+        // The BASES out of the same lowercase row, and not the whole row, because
+        // the whole row also fails property 1 here — Phosphor's cmap has no `!`,
+        // `=`, `<`, `>`, `:`, `*` or `/`, and with no replacement face behind it
+        // those characters produce no glyph at all, so sixty characters come back
+        // as forty-three. That is a true failure but a less interesting one; the
+        // failure this design exists to prevent is the one where every character IS
+        // covered and the cells still collapse. Filtering to a-z gives exactly that
+        // case, and it is derived from the fixture rather than written out, so it
+        // cannot drift away from the row above.
+        let bases: String = lower.chars().filter(|c| c.is_ascii_lowercase()).collect();
+        assert!(
+            bases.len() >= 40 && bases.contains("at") && bases.contains("cat"),
+            "the base-only twin has to be a real run of lowercase bases: {bases:?}"
+        );
+        for size in [9.5f32, 11.0, 11.5] {
+            let err = check(&bases, size, ICON_FAMILY.clone()).expect_err(
+                "a run of lowercase bases laid out in the ICON family satisfied the grid \
+                 properties, which would mean the face this whole design keeps out of the \
+                 Monospace chain is harmless — either Phosphor was replaced by something \
+                 with real advances and no ligatures, in which case the isolation is no \
+                 longer load-bearing and every comment saying it is has become false, or \
+                 this check has stopped measuring what it says it does",
+            );
+            // It must break by COLLAPSE — properties 3 and 4 — and not by absence.
+            // Measured: a two-glyph subset of this same face fails property 1 here
+            // instead ("the shaper returned 0 glyphs for 40 characters"), because
+            // subsetting deletes a-z outright. That is a different world and the
+            // message has to say so, since a subsetted icon face in the Monospace
+            // chain would be harmless and the isolation would have stopped
+            // mattering. See NOTICE, "NOT SUBSETTED", for why that trade is refused.
+            assert!(
+                err.contains("off the") || err.contains("wide against"),
+                "at {size} pt the icon family broke the bases by the wrong property: \
+                 {err}. Property 3 or 4 -- a collapse -- is what a zero-advance or \
+                 ligating face does. A count failure instead means the face no longer \
+                 covers a-z at all, which most likely means it has been subsetted; a \
+                 subsetted icon face cannot destroy the grid, so the isolation would no \
+                 longer be load-bearing and the comments saying it is would be false."
+            );
+        }
+        // And the concrete form of it, so the number is in the failure message: every
+        // base is covered, every glyph is emitted, and the whole run is nothing wide.
+        let icon_job = egui::text::LayoutJob::simple_singleline(
+            bases.clone(),
+            egui::FontId::new(11.5, ICON_FAMILY.clone()),
+            egui::Color32::WHITE,
+        );
+        let icon_row = ctx.fonts_mut(|f| f.layout_job(icon_job));
+        assert_eq!(
+            icon_row.rows[0].glyphs.len(),
+            bases.chars().count(),
+            "the icon family dropped a base, so the width below is not measuring a \
+             collapse — it is measuring an absence"
+        );
+        let mono_w = ctx.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(11.5), 'A'))
+            * bases.chars().count() as f32;
+        assert!(
+            icon_row.size().x < mono_w * 0.25,
+            "{} lowercase bases in the icon family came out {:.2} pt against the grid's \
+             {mono_w:.2} pt; the point of this assertion is that they come out at \
+             essentially nothing",
+            bases.chars().count(),
+            icon_row.size().x
+        );
 
         // THE CHECK CAN FAIL, in the SHIPPED monospace face, on exactly the failure a
         // ligating face produces. `A` followed by U+0301 COMBINING ACUTE shapes in
@@ -5461,7 +5862,7 @@ mod tests {
         // `is_ascii_graphic`, and U+0301 is not ASCII — so this is a probe, not a live
         // defect.
         let collapsing = "A\u{0301}A";
-        let err = check(collapsing, 11.5)
+        let err = check(collapsing, 11.5, egui::FontFamily::Monospace)
             .expect_err("a zero-advance combining mark passed every assertion above");
         assert!(
             err.contains("off the") || err.contains("wide against"),
@@ -5828,6 +6229,241 @@ mod tests {
             "Plex Sans's `kern` reaches ASCII -- that is what kerning is -- and its \
              `mark` lookups do not, for the same reason the monospace face's do not"
         );
+    }
+
+    /// The icon face CAN ligate on the alphabet the grid paints — which is the
+    /// premise the whole isolation rests on, asserted rather than assumed.
+    ///
+    /// This is the byte-level guard: no egui, no shaper, no `Context`. It reads
+    /// the same `sfnt` walk the monospace guard's verdict comes from and points it
+    /// at Phosphor, where the answer must be the OPPOSITE. Stated as one sentence:
+    /// *this face can substitute inside a run of printable ASCII, therefore it must
+    /// not be in the family the sequence grid is laid out in.* If it ever reads
+    /// empty, the isolation has stopped being load-bearing and every comment in
+    /// this file that explains why it exists has quietly become false — which is a
+    /// thing to notice deliberately, not to discover.
+    ///
+    /// Plex Mono's empty answer is restated beside it so the two are read together,
+    /// and so this test carries its own positive-and-negative control: the same
+    /// function, the same run, opposite verdicts on two files the binary embeds.
+    ///
+    /// ITS BLIND SPOT, stated because it is exactly complementary to the shaping
+    /// gate's: this is a statement about the FONT and not about the INSTALL. A
+    /// build that vendors a perfectly dangerous Phosphor and then puts it straight
+    /// into the Monospace chain passes this test with flying colours.
+    /// `a_sequence_row_shapes_to_one_glyph_per_base_on_one_pitch` is what catches
+    /// that. Neither substitutes for the other.
+    ///
+    /// PROVEN TO FAIL at 7ce59c1 only by not compiling — `phosphor()` did not exist
+    /// there and no icon face was in the tree, so there is nothing at that commit
+    /// for this to be run against. Said plainly rather than dressed up as a
+    /// behavioural proof.
+    ///
+    /// IT IS SHOWN TO FAIL ON A REAL FILE INSTEAD. Point `phosphor()` at a
+    /// two-glyph subset of the very same face — 1,100 bytes, built with fontTools,
+    /// which is the ~5 KB alternative NOTICE names and rejects — and this test goes
+    /// red at the vacuity check with "the icon face advertises no GSUB feature at
+    /// all". That is the intended behaviour and not a nuisance: a subsetted face is
+    /// harmless in any chain, so its arrival means the isolation has stopped being
+    /// load-bearing and every comment explaining it has to be rewritten or the
+    /// isolation deliberately relaxed.
+    #[test]
+    fn the_icon_face_can_ligate_on_the_alphabet_the_grid_paints() {
+        // Not vacuous: Phosphor advertises a FeatureList the parser really reads.
+        let all = sfnt::feature_tags(phosphor(), b"GSUB")
+            .expect("the icon face parses")
+            .expect("Phosphor has a GSUB table");
+        assert!(
+            !all.is_empty(),
+            "the icon face advertises no GSUB feature at all, so the verdict below \
+             would be about a file the parser did not read"
+        );
+
+        let live =
+            sfnt::ascii_reachable_default_on(phosphor(), b"GSUB").expect("the icon face parses");
+        assert!(
+            live.contains(b"liga"),
+            "the icon face no longer has a `liga` rule reachable from printable ASCII \
+             (the walk found {}). That is the premise `font_definitions` is built on: \
+             this face can substitute inside a run of the characters `row_text` emits, \
+             so it must never be in the Monospace or Proportional chain. If the face \
+             really has become harmless, the isolation is no longer load-bearing and \
+             the comments claiming it is must be rewritten -- do not simply delete \
+             this assertion.",
+            sfnt::show(&live)
+        );
+
+        // The same walk on the face the grid IS set in, so the two verdicts sit side
+        // by side and a walk that answered the same thing about both would fail here.
+        assert!(
+            sfnt::ascii_reachable_default_on(PLEX_MONO, b"GSUB")
+                .expect("the monospace face parses")
+                .is_empty(),
+            "the monospace face now has a live ASCII-reachable substitution, which is \
+             the existing font-swap alarm and is checked in full by \
+             `the_monospace_face_advertises_no_feature_the_shaper_turns_on`"
+        );
+    }
+
+    /// Phosphor is registered as its own family and is in neither text chain.
+    ///
+    /// **THE WEAKEST OF THE THREE GUARDS ON THIS CHANGE, AND KEPT ANYWAY** because
+    /// it is the one whose failure message can name the invariant in one line, and
+    /// because it is the only one that can catch the install being safe BY ORDERING.
+    /// Measured, not asserted: appending `"Phosphor"` to the end of the Monospace
+    /// chain leaves `a_sequence_row_shapes_to_one_glyph_per_base_on_one_pitch`
+    /// perfectly green — Plex Mono covers everything a row can hold, so nothing
+    /// resolves to the icon face and the row still lays out on one pitch — and this
+    /// test goes red. That is exactly the arrangement `egui_phosphor::add_to_fonts`
+    /// ships and exactly the arrangement `font_definitions` refuses.
+    ///
+    /// **AND HERE IS WHAT IT CANNOT SEE, MEASURED THE SAME WAY.** It asserts the
+    /// SPELLING of the two chains, not the bytes behind the names in them: register
+    /// the icon face under the existing `"IBMPlexMono"` key and this test passes,
+    /// `the_icon_face_can_ligate_on_the_alphabet_the_grid_paints` passes, and the
+    /// grid is destroyed — only the shaping gate goes red. The two are complements
+    /// and neither substitutes for the other. (The narrower blind spot one might
+    /// expect — the same bytes registered under a SECOND key and pushed onto
+    /// Monospace — is closed here, but by the chain equality below rather than by
+    /// the name check above, so it is closed as a side effect and should not be
+    /// leant on.)
+    ///
+    /// It reads [`font_definitions`]'s return value — the value the binary installs
+    /// — and not a copy built here. A structural test that rebuilds the definitions
+    /// itself proves nothing at all about the application.
+    ///
+    /// The equality against `FontDefinitions::default()` is doing two jobs at once:
+    /// it says nothing was added to either chain, and it says nothing was REMOVED.
+    /// Plex Mono has no U+25B6 (the History tab's cursor, served by Hack) and
+    /// neither Plex face has U+26A0 (the hidden-cut warning, served by Noto Emoji),
+    /// so a chain that lost its tail would draw two live controls as tofu. Comparing
+    /// against the upstream default rather than against a hard-coded list of face
+    /// names keeps that true across an epaint bump.
+    ///
+    /// PROVEN TO FAIL at 7ce59c1 only by not compiling: `font_definitions` and
+    /// `ICON_FAMILY` do not exist there, and neither does the icon face. Said
+    /// plainly rather than dressed up. Against this commit it reddens on both
+    /// mutations above.
+    #[test]
+    fn the_icon_face_is_in_its_own_family_and_in_neither_text_chain() {
+        let defs = font_definitions();
+        let base = egui::FontDefinitions::default();
+
+        for (family, ours) in [
+            (egui::FontFamily::Monospace, "IBMPlexMono"),
+            (egui::FontFamily::Proportional, "IBMPlexSans"),
+        ] {
+            let got = defs
+                .families
+                .get(&family)
+                .unwrap_or_else(|| panic!("{family:?} is not bound to any fonts"));
+            assert!(
+                !got.iter().any(|n| n == "Phosphor"),
+                "{family:?} resolves to {got:?}, which includes the icon face. Phosphor \
+                 covers a-z with a zero `hmtx` advance and carries 1,513 ligature rules; \
+                 in a text chain it takes a 60-base lowercase row from 414.00 pt to \
+                 115.00 pt and every click in the sequence view lands on the wrong base. \
+                 It belongs in {:?} and nowhere else.",
+                *ICON_FAMILY
+            );
+            let mut want = base
+                .families
+                .get(&family)
+                .expect("egui's own defaults bind both text families")
+                .clone();
+            want.insert(0, ours.to_owned());
+            assert_eq!(
+                got, &want,
+                "{family:?} is no longer the vendored face followed by egui's own \
+                 defaults. Nothing may be appended to these chains and nothing may be \
+                 dropped from them: Plex Mono has no U+25B6 and neither Plex face has \
+                 U+26A0, so a shortened chain draws the History cursor and the \
+                 hidden-cut warning as tofu boxes."
+            );
+        }
+
+        assert_eq!(
+            defs.families.get(&ICON_FAMILY.clone()).map(Vec::as_slice),
+            Some(["Phosphor".to_owned()].as_slice()),
+            "the icons family must hold exactly the one icon face. A text face behind \
+             it would turn a stray label from a visible hole into a slightly-wrong \
+             word that ships; a missing family is worse still, because \
+             `FontsImpl::font` panics rather than falling back."
+        );
+        assert!(
+            defs.font_data.contains_key("Phosphor"),
+            "the icons family names a face that was never registered as font data, \
+             which panics on the first paint that asks for it"
+        );
+    }
+
+    /// A screen reader hears "Undo", not U+E08A.
+    ///
+    /// **THE THIRD OF NOTICE'S FOUR REASONS FOR REJECTING AN ICON FONT WAS THIS
+    /// ONE, AND UNLIKE THE FIRST IT IS NOT ANSWERED BY THE FAMILY ISOLATION AT
+    /// ALL.** `Atoms::text()` (egui 0.35 `atomics/atoms.rs:51`) concatenates every
+    /// text atom with a space and `Button` hands the result to
+    /// `WidgetInfo::labeled` (`widgets/button.rs:401`), so the obvious spelling —
+    /// `ui.button((ICON_UNDO, "Undo"))` — names the control `"\u{E08A} Undo"` for
+    /// accesskit, which is on in this binary. [`button_with_icon`] reserves the
+    /// space with an empty `Atom` and paints the glyph instead, and this is what
+    /// says that actually worked rather than a comment claiming it.
+    ///
+    /// PROVEN TO FAIL: swap the empty `Atom` in [`button_with_icon`] for `icon`
+    /// and the PUA assertion goes red with the name `"\u{e08a} Undo"`. Measured.
+    ///
+    /// The PUA sweep is over EVERY node, not just the two buttons, because the
+    /// failure it guards against is a private codepoint reaching assistive
+    /// technology from anywhere — and the range is checked rather than the two
+    /// literals, so a third icon added later is covered without anyone
+    /// remembering to extend this.
+    #[test]
+    fn the_icon_buttons_read_as_their_word_and_not_as_a_private_use_codepoint() {
+        let ctx = test_ctx();
+        ctx.enable_accesskit();
+        // Two passes: the first turns accesskit on, the second is the one that
+        // carries a tree. A single pass yields None and the assertions below
+        // would then be about nothing.
+        let mut update = None;
+        for _ in 0..2 {
+            let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                button_with_icon(ui, ICON_UNDO, "Undo");
+                button_with_icon(ui, ICON_REDO, "Redo");
+            });
+            update = out.platform_output.accesskit_update;
+        }
+        let update = update.expect("accesskit is enabled, so a tree is produced");
+
+        let labels: Vec<String> = update
+            .nodes
+            .iter()
+            .filter_map(|(_, n)| n.label().map(str::to_owned))
+            .collect();
+        assert!(
+            !labels.is_empty(),
+            "the accessibility tree has no labelled node at all, so the assertions \
+             below would pass on an empty set"
+        );
+        for want in ["Undo", "Redo"] {
+            assert!(
+                labels.iter().any(|l| l == want),
+                "no control is named exactly {want:?}; the labels are {labels:?}. If one \
+                 of them reads \"\\u{{E08A}} Undo\" the icon has been passed as a text \
+                 atom, and `Atoms::text()` concatenated it into the accessible name."
+            );
+        }
+        for l in &labels {
+            for c in l.chars() {
+                assert!(
+                    !('\u{E000}'..='\u{F8FF}').contains(&c),
+                    "the accessible name {l:?} contains U+{:04X}, a Private Use Area \
+                     codepoint. A screen reader has no name for it, so a user is told \
+                     nothing or told a number. Icons are painted, never passed as text \
+                     atoms -- see `button_with_icon`.",
+                    c as u32
+                );
+            }
+        }
     }
 
     /// The guard must FAIL CLOSED, or it is the same defect wearing a parser.
@@ -6334,6 +6970,28 @@ mod tests {
                 1_069,
                 "b9d2c1d909aa149996fd4c91dcb92b2362a04431640c1d200959da94caf8cde1",
             ),
+            // The icon face, added 2026-07-30. It arrives through a crate like the
+            // four above, but unlike them it is a face this project CHOSE, and the
+            // `=0.13.0` pin in Cargo.toml exists so that this digest and the bytes
+            // cannot drift apart. If `cargo update` were ever able to move it, this
+            // assertion is what would notice.
+            (
+                "Phosphor Icons 2.1 Bold",
+                phosphor(),
+                495_308,
+                "10a0a1cb4f8156a420f9f84cf34c4e9871e58ed2ddea1f6a8079ad07243a7fb2",
+            ),
+            // Its licence text, which unlike the four above could NOT be copied out
+            // of the crate: egui-phosphor ships a licence for its Rust wrapper and
+            // none for the typeface. Transcribed from the URL in the font's own
+            // `name` ID 14; NOTICE says so, and says byte-for-byte identity with
+            // upstream was not established.
+            (
+                "the Phosphor MIT text",
+                include_bytes!("../fonts/Phosphor-MIT.txt"),
+                1_071,
+                "6918b72504641180600cbbd4a86b0dfa9dfccf788775694325b71b9a029f6eb4",
+            ),
         ] {
             assert_eq!(
                 bytes.len(),
@@ -6359,11 +7017,19 @@ mod tests {
             );
         }
 
-        // The one embedded face whose copyright cannot be read out of its own
-        // `name` table — IDs 0, 7 and 13 are all empty in emoji-icon-font.ttf — so
-        // NOTICE is the ONLY place its MIT notice can travel. Named explicitly
-        // because a hash check would not notice it going missing.
-        for owed in ["John Slegers", "Canonical Ltd", "Google Inc", "Bold Monday"] {
+        // The embedded faces whose copyright cannot be read out of their own `name`
+        // table — IDs 0, 7 and 13 are all empty in emoji-icon-font.ttf, and in
+        // Phosphor ID 0 holds the family name "Phosphor Icons" where the copyright
+        // should be and ID 7 is absent — so NOTICE is the ONLY place their MIT
+        // notices can travel. Named explicitly because a hash check would not
+        // notice one going missing.
+        for owed in [
+            "John Slegers",
+            "Canonical Ltd",
+            "Google Inc",
+            "Bold Monday",
+            "Phosphor Icons",
+        ] {
             assert!(
                 NOTICE_TEXT.contains(owed),
                 "NOTICE no longer names {owed:?}. Every embedded face's copyright \

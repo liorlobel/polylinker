@@ -38,3 +38,30 @@ eframe = { version = "0.35", default-features = false, features = [
     "x11",
 ] }
 rfd = "0.17"
+
+# The icon face, and NOTHING about how it is installed: see `install_fonts` in
+# src/main.rs, which builds `FontDefinitions` by hand rather than calling this
+# crate's `add_to_fonts`.
+#
+# PINNED WITH `=`, WHICH IS NOT DECORATION. NOTICE records the sha256 of the
+# .ttf this crate carries, and the whole point of recording a hash is that the
+# hash and the bytes cannot drift apart. A caret range lets `cargo update` pull a
+# future 0.13.x whose `res/*.ttf` differs, and the recorded hash would then
+# describe a file nobody ships.
+#
+# `default-features = false` matters too. `default = ["regular"]`, and
+# `Variant::font_bytes` is a `match` over `#[cfg(feature = ..)]` arms, so the
+# feature list decides which `include_bytes!` calls exist at all. Only `bold` is
+# enabled, so only res/Phosphor-Bold.ttf is in the binary — 495,308 bytes, not
+# five faces' worth.
+#
+# AND BOLD IS NOT A TASTE. Phosphor Regular's 1,512 ligature rules include forty
+# spelled entirely from the IUPAC nucleotide alphabet — `at`, `cat`, `tag`,
+# `dna`, `scan` — because the icon names come from the icon set's own
+# selection.json. Every non-regular variant suffixes the name with the variant,
+# so Bold's rules need `a,t,-,b,o,l,d` and none of them can fire on a sequence
+# row. That is defence in depth BEHIND the family isolation, not instead of it:
+# all five faces still cover a-z at zero advance.
+egui-phosphor = { version = "=0.13.0", default-features = false, features = [
+    "bold",
+] }
