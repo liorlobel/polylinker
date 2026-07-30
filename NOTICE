@@ -8,23 +8,214 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
 Third-party components
 ================================================================================
 
-No third-party code is vendored into this repository at present.
+No third-party CODE is vendored into this repository. Two third-party FONT FILES
+are, as of 2026-07-30, under `bins/pl-gui/fonts/`; they are the first two entries
+below. Five third-party LICENCE TEXTS are there too -- one covering those two
+faces and one for each of the four that arrive through a crate -- because three
+of those licences require their text to accompany every copy, and a path into a
+Cargo registry is not something a recipient of `dist/` has.
 
 Fonts embedded in the SHIPPED BINARY
 ------------------------------------
 
-About polylinker.exe, not about this repository -- which is why the record was
-missing until the 2026-07-30 typography pass went looking for it. `bins/pl-gui`
-enables eframe's `default_fonts` feature, which pulls `epaint_default_fonts`
-0.35.0; that crate `include_bytes!`es four font files, so every distributed copy
-of the GUI carries 1,414,020 bytes of third-party font data (16.8% of an 8.4 MB
-exe) and its attribution obligations. None of it is checked in here.
+Six faces, 1,787,572 bytes, in polylinker.exe. Two are checked in here and four
+arrive through a crate.
+
+What the two vendored faces cost, measured rather than estimated: a release
+build of `bins/pl-gui` went from 8,682,496 bytes at 0aa0f88 to 9,082,368 with
+them in, +399,872 (+4.61%). The faces themselves are 373,552 of that; the
+remaining 26,320 is what `lto = true` and `strip = true` did with the rest of
+the change and is not attributable to the fonts alone. Font bytes reach `.rdata`
+verbatim -- link-time optimisation does not compress them -- which is why they
+are close to 1:1 on the executable and why the subsetting question below was
+worth answering rather than assuming.
+
+The two vendored ones came in with the 2026-07-30 typography pass. Everything
+about them below was read from the bytes committed to this repository -- the
+version from the file's own `name` table, the advance from its `hmtx`, the
+licence from the `LICENSE.txt` in the same release archive -- and not from a
+changelog, a README, or the repository badge on the upstream project. That
+distinction is deliberate: `features/SOURCING.md` records the Sequence Ontology
+entry being overturned because a machine-generated LICENSE restating a badge was
+mistaken for independent corroboration, and a GitHub `spdx_id` is the same class
+of artefact. api.github.com reports IBM/plex as OFL-1.1, and that is recorded
+here as corroboration only.
+
+TWO VERSION NUMBERS PER FACE, AND THEY DISAGREE ON PURPOSE. The npm package tag
+and the typeface version are independent counters -- `@ibm/plex-mono@2.5.0` ships
+a font whose `name` ID 5 reads "Version 2.005". Only the typeface version can be
+read back out of the shipped .exe, so a record carrying only the tag cannot be
+checked against the binary.
+
+The sha256 of each committed file is the one a third party can verify against
+IBM's own release archive, because neither face is subsetted or re-encoded. See
+"Why neither Plex face is subsetted" below.
+
+EVERY SHA256 IN THIS SECTION IS ASSERTED, AND ASSERTED AGAINST THIS FILE.
+`the_vendored_faces_are_the_files_notice_records` hashes the committed bytes and
+then requires the digest to appear in NOTICE, which it reads with `include_str!`.
+The first version of that test compared the bytes against a literal in the test
+while this paragraph claimed the protection anyway: two copies of the same hash
+with nothing joining them, so it could fail if somebody swapped a font and could
+NOT fail if somebody mistyped the record of one. The same test requires each
+embedded face's copyright holder to be named here, because for emoji-icon-font
+this file is the only place that notice can travel at all.
+
+  IBM Plex Mono            173,052 bytes   typeface 2.005, package 2.5.0
+    The sequence grid, both coordinate gutters, the rulers and every enzyme
+    label on the map. Regular only; no bold, no italic.
+    SIL OPEN FONT LICENSE 1.1.
+      Copyright (c) 2017 IBM Corp. with Reserved Font Name "Plex"
+      (c) 2017 IBM Corp. All rights reserved.  (`name` ID 0)
+      Designers: Mike Abbink, Paul van der Laan, Pieter van Rosmalen (ID 9)
+      Manufacturer: Bold Monday (ID 8)
+      Named in acknowledgement, which OFL clause 4 permits and distinguishes
+      from promotion or endorsement.
+    File:   bins/pl-gui/fonts/IBMPlexMono-Regular.ttf
+    sha256  7c6fbddca4b700be918f5f6183d9bd4464fa427fe435f0b480d77fe2bb8c5a43
+    From:   https://github.com/IBM/plex/releases/download/%40ibm/
+            plex-mono%402.5.0/ibm-plex-mono.zip
+            (6,940,652 bytes,
+             sha256 6d23f01257663d8cc49a0d64c22ced630b79e0e2a0ac08a0da86e9a38bbc481c)
+            member ibm-plex-mono/fonts/complete/ttf/IBMPlexMono-Regular.ttf
+    Advance: 600/1000 = 0.600000 em, uniform over all 95 printable ASCII
+            codepoints. The sequence grid rests on x = x0 + col * advance, so
+            this is a correctness property and not a metric; see
+            `the_advance_band_that_keeps_every_per_row_expectation`.
+    Layout:  GSUB advertises 23 features and GPOS one. Three of those ARE in
+            the set harfrust enables by default -- `ccmp` and `locl` in GSUB,
+            `mark` in GPOS -- and NONE of the rules behind them can be spelled
+            from printable ASCII: the thirteen `ccmp` ligature rules and all
+            five `ccmp` chain contexts need a combining mark, `locl`'s four
+            SingleSubsts have no ASCII input, and `mark` is mark-to-base. So
+            the face cannot ligate or reposition inside a sequence row under
+            egui 0.35, which has no way to pass a user-feature list. Walked
+            from these bytes by
+            `the_monospace_face_advertises_no_feature_the_shaper_turns_on`.
+            No `liga`, `clig`, `calt`, `rlig`, `rclt`, `kern` or `dist` at all.
+            THIS ENTRY SAID "NONE OF THEM" FOR ONE REVIEW CYCLE, which was
+            false and was false in the direction that mattered: the guard's
+            list of harfrust defaults held six tags where harfrust has
+            fourteen, so `ccmp` -- where this very face keeps thirteen
+            LigatureSubst rules -- was not being looked at. Two guards phrased
+            the obvious way are both wrong here: "no LigatureSubst lookups"
+            rejects this healthy face over `frac` and `ccmp`, and "no default-on
+            feature advertised" rejects it over `ccmp`, `locl` and `mark`. Only
+            reachability separates it from a face that ligates.
+
+  IBM Plex Sans            200,500 bytes   typeface 3.005, package 1.1.0
+    The preferred proportional face: tabs, buttons, feature names, status.
+    Ubuntu Light remains behind it as a fallback and was not removed.
+    SIL OPEN FONT LICENSE 1.1, the IDENTICAL licence file as Plex Mono --
+    byte-for-byte the same sha256 in both release archives, so one licence
+    text covers both faces.
+      Copyright (c) 2017 IBM Corp. with Reserved Font Name "Plex"
+      (c) 2018 IBM Corp. All rights reserved.  (`name` ID 0)
+    File:   bins/pl-gui/fonts/IBMPlexSans-Regular.ttf
+    sha256  975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5
+    From:   https://github.com/IBM/plex/releases/download/%40ibm/
+            plex-sans%401.1.0/ibm-plex-sans.zip
+            (9,921,777 bytes,
+             sha256 fb365d910566e6d199cc2c15579a7dd9a267128e18431a394ed81f1970c69200)
+            member ibm-plex-sans/fonts/complete/ttf/IBMPlexSans-Regular.ttf
+    Layout:  IT LIGATES, and that is recorded rather than glossed. GSUB
+            advertises `liga` -- one rule, f + i -> fi, both glyphs printable
+            ASCII -- and GPOS advertises `kern`; both fire under egui 0.35 on
+            ordinary words such as "purification" and "modified". Accepted,
+            because no proportional text in this application carries a
+            position-to-index mapping and every proportional width is taken
+            from a real egui layout, which shapes. It must never be put in the
+            Monospace chain. Asserted by
+            `the_proportional_face_ligates_and_that_is_recorded_not_denied`,
+            which doubles as the POSITIVE CONTROL for the monospace guard: the
+            same reachability walk, on a face this repository ships, reports
+            `liga` and `kern` as live and correctly reports this face's `ccmp`,
+            `locl` and `mark` -- the same mark-only rules Plex Mono has -- as
+            not. A walk that answered "reachable" for everything, or for
+            nothing, fails that test, which is what makes the monospace
+            verdict mean something.
+
+  Licence text for both Plex faces, committed and shipped:
+    bins/pl-gui/fonts/IBMPlex-OFL.txt          4,456 bytes
+    sha256  7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da
+    This is the root LICENSE.txt of both archives. A SECOND, non-identical copy
+    exists at fonts/complete/ttf/license.txt inside each archive (4,360 bytes,
+    sha256 91c25c350d3cac39da2736d74f7ba37ef648f5237a4e330a240615bc8d8c4360);
+    the two were diffed and differ only in line wrapping and two blank lines --
+    the copyright line, the Reserved Font Name and all five numbered conditions
+    are byte-identical. The fuller one is the one committed.
+
+  Why embedding is permitted, on three independent grounds:
+    1. OFL 1.1 PERMISSION & CONDITIONS grants the right to "embed" by name, and
+       clause 2 permits Original Versions to be "bundled, redistributed and/or
+       sold with any software, provided that each copy contains the above
+       copyright notice and this license". CLAUSE 2 IS WHAT LETS AN APACHE-2.0
+       EXECUTABLE CARRY AN OFL FACE, and the condition attached to it -- that
+       the notice and the licence travel with each copy -- is what
+       `tools/release.ps1` exists to satisfy. Clause 1 forbids only selling the
+       Font Software BY ITSELF, which this project does not do and does not
+       sell at all.
+       A SEPARATE QUESTION, ANSWERED BY A SEPARATE CLAUSE, and the two were
+       conflated here for one review cycle: clause 5 keeps the FONT under OFL
+       and carves out "any document created using the Font Software" -- that
+       is the .dna and .gb files Polylinker writes, which are not OFL and do
+       not become OFL. It says nothing about an executable that embeds the
+       font file, because an executable is not a document created using it.
+       Clause 2 does that work. The conclusion is unchanged; the reasoning was
+       wrong and this paragraph is the project's stated position, so it is the
+       kind of thing that gets quoted back later.
+    2. OS/2 fsType = 0 in both faces: Installable Embedding, the least
+       restrictive value the specification defines. The font's own
+       machine-readable permission, agreeing with its licence.
+    3. OFL is already on this project's allow-list for embedded fonts -- Noto
+       Emoji below is recorded under it and accepted without a question flag.
+       These two faces needed no new policy decision.
+
+  Why neither Plex face is subsetted, which is the one real constraint:
+    The Reserved Font Name is "Plex". OFL 1.1 defines a Modified Version as any
+    derivative made by "adding to, deleting, or substituting -- in part or in
+    whole -- any of the components of the Original Version". A subset DELETES
+    components, so a subset is a Modified Version, and clause 3 then forbids it
+    carrying "Plex" as its primary font name. Subsetting would therefore cost a
+    rename, and NOTICE would then record a sha256 and an upstream URL for a file
+    that exists nowhere upstream -- which defeats the purpose of recording
+    either. 373,552 bytes of unmodified, independently verifiable face is a
+    better trade than roughly 60 KB and a broken provenance chain.
+    NOTHING HERE IS LEGAL ADVICE. This is the item to put to counsel if anyone
+    ever proposes subsetting a Plex face.
+
+  No icon font is embedded. `egui-phosphor` 0.13.0 was evaluated and rejected;
+  see "Considered and not shipped" below.
+
+The four remaining faces arrive through a crate. THE FONT FILES are not checked
+in here; THEIR LICENCE TEXTS NOW ARE, and that is a change made on 2026-07-30
+after a review found the release package shipping one licence text for six
+embedded faces. `bins/pl-gui` enables eframe's `default_fonts` feature, which
+pulls `epaint_default_fonts` 0.35.0; that crate `include_bytes!`es four font
+files, so every distributed copy of the GUI carries 1,414,020 bytes of font data
+it did not choose and all of its attribution obligations.
+
+WHY THE TEXTS ARE COPIED IN RATHER THAN POINTED AT. Three of these four licences
+require their text to accompany every copy, and a path into a Cargo registry is
+not something a recipient of `dist/` has. Pointing at
+`epaint_default_fonts-0.35.0/fonts/` was honest for someone reading this source
+tree and invisible to someone holding the zip -- which is exactly how the gap
+survived being recorded correctly. The copies below are byte-identical to the
+crate's, hashed here, and copied into the release directory by
+`tools/release.ps1`, which refuses to ship without them.
 
 Sizes and versions below were read out of the shipped .ttf files' own `name`
-tables, not from a changelog. Licence texts travel with the crate, under
-`epaint_default_fonts-0.35.0/fonts/`.
+tables, not from a changelog. EACH FACE'S COPYRIGHT LINE IS REPRODUCED HERE
+because that is what the licences actually ask for and because two of the four
+licence texts are generic: the crate's `OFL.txt` and `UFL.txt` are the bare
+licences and name no copyright holder, so the OFL text alone does not carry
+Noto's notice and the UFL text alone does not carry Ubuntu's.
 
   Hack                     309,408 bytes   Version 3.003
+    STILL LOAD-BEARING after the Plex swap, one place down the Monospace chain,
+    and for a reason worth writing down: IBM Plex Mono has no U+25B6, the
+    History tab's cursor on the current state, and Hack serves it as a
+    fallback. Dropping `default_fonts` would draw that control as a tofu box.
     THREE licences at once, and the third is not boilerplate:
       - the Hack work itself: MIT, (c) 2018 Source Foundry Authors
       - the DejaVu work it derives from: committed to the public domain
@@ -35,29 +226,143 @@ tables, not from a changelog. Licence texts travel with the crate, under
         itself, and becomes null and void for modified fonts distributed under
         the Vera names. Polylinker embeds it unmodified and sells nothing, so
         what is owed is the notice -- this one.
-    Text: fonts/Hack-Regular.txt   https://github.com/source-foundry/Hack
+    Copyright (`name` ID 0, read from the shipped face):
+      Copyright (c) 2018 Source Foundry Authors /
+      Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved.
+    Text:   bins/pl-gui/fonts/Hack-MIT-and-BitstreamVera.txt    3,734 bytes
+    sha256  47c0cccbeec7e8614548cc485588b28149e7874188df5f41b36efebcee285c87
+    From:   epaint_default_fonts-0.35.0/fonts/Hack-Regular.txt, byte-identical.
+            Upstream https://github.com/source-foundry/Hack
+            It holds BOTH permission notices -- MIT and Bitstream Vera -- in one
+            file, which is why one copied file discharges two obligations.
 
   Ubuntu Light             361,676 bytes   Version 0.83
-    UBUNTU FONT LICENCE 1.0. Neither OFL nor Apache-2.0, and so NOT on this
-    project's own allow-list for embedded fonts -- recorded as a question for
-    Lior rather than presented as settled. UFL does permit bundling and
-    embedding; it requires that the fonts and any derivative not be released
-    under any other licence.
-    Text: fonts/UFL.txt
+    UBUNTU FONT LICENCE 1.0. Neither OFL nor Apache-2.0, and so not on this
+    project's original allow-list for embedded fonts. PUT TO LIOR AND ACCEPTED
+    (0aa0f88): UFL stays, named here. UFL does permit bundling and embedding;
+    it requires that the fonts and any derivative not be released under any
+    other licence.
+    That decision is what makes the Plex swap safe, which was not obvious when
+    it was taken. Ubuntu Light is no longer the primary proportional face --
+    IBM Plex Sans sits ahead of it -- but it remains in both chains, and
+    `default_fonts` staying on is what keeps U+25B6 (via Hack) and U+26A0 (via
+    Noto Emoji) on screen. Neither Plex face has either character.
+    Copyright (`name` ID 0, read from the shipped face):
+      Copyright 2011 Canonical Ltd.  Licensed under the Ubuntu Font Licence 1.0
+    UFL condition 1 accepts that notice "in the appropriate machine-readable
+    metadata fields within text or binary files", which the `name` table is, so
+    the copyright already travelled inside the .ttf. The LICENCE TEXT did not,
+    and condition 1 asks for both; `name` ID 13 is empty in this face.
+    Text:   bins/pl-gui/fonts/Ubuntu-UFL.txt                    4,673 bytes
+    sha256  2f0015108d68627bd788d313f529c21ff4da2c2c42a5e1f3883acc83480f9002
+    From:   epaint_default_fonts-0.35.0/fonts/UFL.txt, byte-identical.
 
   Noto Emoji               418,804 bytes   Version 1.05 uh
-    SIL Open Font License 1.1.   Text: fonts/OFL.txt
+    SIL Open Font License 1.1.
     Load-bearing rather than decorative: U+26A0, the hidden-cut-sites warning
     marker, is absent from BOTH Hack and Ubuntu Light and is served only from
     here or from emoji-icon-font. Turning `default_fonts` off would draw the
     app's safety marker as a tofu box.
+    Copyright (`name` ID 0, read from the shipped face):
+      Copyright 2013 Google Inc. All Rights Reserved.
+    THIS FACE NEEDS ITS OWN OFL COPY and cannot share the Plex one. OFL clause 2
+    requires "the above copyright notice and this license", and the "above" in
+    the Plex text is IBM's, with the Reserved Font Name "Plex". The crate's
+    OFL.txt is the bare licence naming no holder, so the copyright line above is
+    the only place Google's notice appears in what a recipient is given.
+    Text:   bins/pl-gui/fonts/NotoEmoji-OFL.txt                 4,301 bytes
+    sha256  6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2
+    From:   epaint_default_fonts-0.35.0/fonts/OFL.txt, byte-identical.
 
   emoji-icon-font          324,132 bytes   Version 1.1
-    MIT.   Text: fonts/emoji-icon-font-mit-license.txt
+    MIT, Copyright (c) 2014 John Slegers.
+    THE COPYRIGHT LINE IS THE POINT OF THIS ENTRY. MIT requires "the above
+    copyright notice and this permission notice" in all copies, and this is the
+    one embedded face that can supply neither in band: `name` IDs 0, 7 and 13
+    are ALL EMPTY, verified from the shipped .ttf. Until 2026-07-30 the holder's
+    name appeared nowhere in this repository -- not here, not in TRADEMARKS.md,
+    not in the release package -- so every copy distributed was short a notice
+    that costs one line. The other five faces each carry their copyright in
+    their own `name` table; this one is only ever as attributed as this file
+    makes it.
+    Text:   bins/pl-gui/fonts/emoji-icon-font-MIT.txt           1,069 bytes
+    sha256  b9d2c1d909aa149996fd4c91dcb92b2362a04431640c1d200959da94caf8cde1
+    From:   epaint_default_fonts-0.35.0/fonts/emoji-icon-font-mit-license.txt,
+            byte-identical.
 
-`pl licences` prints the compiled-in feature-database attribution. It does not
-yet print this font block, and it should, so the obligation travels with the
-binary and not only with the repository.
+HOW THE OBLIGATION TRAVELS, and what is still owed.
+
+  DONE 2026-07-30: `tools/release.ps1` copies NOTICE, LICENSE, TRADEMARKS.md and
+  ALL FIVE font licence texts into the release directory, and refuses to ship if
+  any of them is missing. Until then `dist/` held four executables and a checksum
+  file and nothing else, so every copy distributed from it was out of step with
+  three licences this file had correctly recorded -- OFL clause 2, the Bitstream
+  Vera notice reached through Hack, and MIT for emoji-icon-font. The record was
+  complete and the package was not. The Plex faces did not create that gap; they
+  took the count of unaccompanied OFL faces from one to three, which is what made
+  anyone look.
+
+  AND THE FIRST ATTEMPT AT THIS FIXED ONE OF THE THREE AND SAID IT HAD FIXED ALL
+  OF THEM, which is worth recording because it is the same failure one level up.
+  That version copied `IBMPlex-OFL.txt` only, so the package still carried no MIT
+  permission notice and no Bitstream Vera permission notice -- the two the
+  script's own comment named -- while this paragraph read DONE in the past tense.
+  A five-line list that covers two of six faces looks exactly like a five-line
+  list that covers all of them. What made the difference on the second pass was
+  running `tools/release.ps1` and reading the file listing, rather than reading
+  the list in the script.
+
+  STILL OWED: `pl licences` prints the compiled-in feature-database attribution
+  and does not print this font block. Note that it is `pl.exe`, which embeds no
+  fonts at all -- the six faces are in `polylinker.exe`, which has no licence
+  view of its own. So the honest statement of the gap is that the GUI cannot yet
+  state its own font attribution from inside itself, and it should be able to.
+  Two more OFL faces make that worse rather than better.
+
+Considered and NOT shipped
+--------------------------
+
+  egui-phosphor 0.13.0 + Phosphor Icons 2.1
+    Downloaded, verified and rejected on 2026-07-30. Recorded because the
+    evaluation found something worth not forgetting, and because the crate is
+    the obvious thing for the next person to reach for.
+    Crate:  MIT OR Apache-2.0, (c) 2023 Romet Tagobert.
+            .crate sha256
+            249826f9529c1757d71dbbb3a22ec101b21110ab663c45fb771c2b86121379e4,
+            confirmed against index.crates.io's own cksum for 0.13.0 -- an
+            independent witness, not merely a successful download. Its egui
+            requirement is "0.35", matching this workspace; 0.12.0 requires
+            ^0.34 and would not have worked.
+    Font:   Phosphor Icons 2.1, MIT, (c) 2020 Phosphor Icons, by Tobias Fried &
+            Helena Zhang. The crate ships the 488,636-byte face with NO licence
+            file beside it -- only a README URL -- and the font's own `name` ID
+            14 points at a DIFFERENT repository than the crate's README does,
+            whose LICENSE gives the copyright year as 2020 against the other's
+            2020-2021. Nothing was shipped, so no notice is owed; the
+            discrepancy is recorded so that whoever ships it knows there is a
+            choice to make about which notice to reproduce.
+    WHY REJECTED, in order of weight:
+      1. Its cmap covers space, hyphen and ALL 26 lowercase letters, every one
+         of them with an hmtx advance of ZERO, and it carries a single `liga`
+         feature holding 1,512 ligature rules. Three of those rules are spelled
+         entirely from the DNA alphabet: a+t, c+a+t and t+a+g. `Molecule::seq`
+         is case-preserved, so lowercase sequence is a real input. With Phosphor
+         ahead of the text face in the Monospace chain a 60-base lowercase row
+         measures 172.5 pt instead of 414.0 and "acgt" renders at zero width --
+         the column-to-base map drifts and every click lands on the wrong base.
+         It is safe only by chain ordering, with nothing asserting the ordering.
+      2. The icon audit found exactly one control in the whole application where
+         an icon says something a word does not: the three toolbar menus, which
+         look identical to buttons. That is a triangle. A triangle is three
+         points, and `main::menu_with_caret` paints them -- no font, no bytes,
+         no cmap, no licence entry, no tofu.
+      3. `accesskit` is enabled. Phosphor's glyphs live in the Private Use
+         Area, so any control whose visible text is an icon exposes a PUA
+         codepoint, or nothing, as its accessible name.
+      4. 488,636 bytes for one triangle -- 5.63% of the 8,682,496-byte binary
+         it was measured against, 5.38% of the 9,082,368 the Plex faces left.
+         The denominator is named because a bare percentage stops being true
+         the next time the executable changes size.
 
 Test-time only (not distributed, not linked):
 

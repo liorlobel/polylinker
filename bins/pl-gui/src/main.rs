@@ -16,6 +16,12 @@ mod map;
 mod recover;
 mod seqedit;
 mod settings;
+/// The ligature guard reads the vendored faces at test time and nothing at run
+/// time, so it is not compiled into the shipped binary. Gated rather than left
+/// dead because `clippy -D warnings` is right to object to an unused parser, and
+/// because a reader should be able to tell an assertion from a feature.
+#[cfg(test)]
+mod sfnt;
 mod theme;
 
 use std::path::PathBuf;
@@ -25,6 +31,140 @@ use pl_core::Strand;
 
 use doc::{describe, fmt_int, DigestState, Document};
 use theme::Palette;
+
+/// The monospace face the sequence grid, the gutters and the map labels are set
+/// in. IBM Plex Mono 2.005 Regular, SIL Open Font License 1.1.
+///
+/// Vendored unmodified, byte-for-byte the file in IBM's own release archive, so
+/// the sha256 in NOTICE is checkable by a third party against upstream. It is
+/// deliberately NOT subsetted: OFL 1.1 defines a Modified Version as any
+/// derivative made by "deleting ... any of the components of the Original
+/// Version", a subset deletes components, and clause 3 then forbids the result
+/// carrying the Reserved Font Name "Plex" as its primary name. Subsetting would
+/// buy about 60 KB and cost a rename plus a hash that matches nothing upstream.
+///
+/// WHAT THE SWAP COSTS, RECORDED BECAUSE IT IS THE ONE THING THAT GOT WORSE and
+/// no assertion in this file can see it. `OS/2.sxHeight` is 516/1000 = 0.5160 em
+/// here against Hack 3.003's 1120/2048 = 0.5469 -- 5.6% less lowercase at the
+/// same nominal size, 6.29 pt of x-height at the grid's 11.5 pt becoming 5.93.
+/// Sampled off the running app on the user's own plasmid, a row of sixty
+/// lowercase bases carries 16.8% less ink than it did.
+///
+/// IT IS ACCEPTED AT 11.5 PT AND THE OBVIOUS COMPENSATION IS BARRED. The advance
+/// band is in em, so a size bump does not move the ratio -- but `per_row` is in
+/// POINTS, and 11.5 -> 12.0 pt widens the cell from 6.900 to 7.200 and loses the
+/// sixtieth base. The whole headroom is 0.60375/0.600 x 11.5 = 11.5719 pt, which
+/// is 0.0719 pt, and the same bound caps any `FontTweak.scale` at 1.00625.
+///
+/// TAKE 0.60375 FROM THE BAND TEST'S OWN OUTPUT AND NOT FROM HERE. It is the
+/// band's measured upper edge FOR THE SHIPPED FACE, and it moved when the face
+/// did: at 0aa0f88, with Hack, the same bisection printed 0.60400 and the chrome
+/// it is measured against was 30.00 pt rather than 30.16. This comment carried
+/// the Hack figures for one review cycle, which put the stated `FontTweak.scale`
+/// cap ABOVE the real edge -- a maintainer who scaled to the number written here
+/// would have lost the sixtieth base and had no test say so. Run
+/// `cargo test -p pl-gui the_advance_band -- --nocapture` and read the line.
+/// It is bisected to +/-0.00025, so treat the edge as a bound to stay under
+/// rather than a value to sit on.
+///
+/// If the grid ever does need to be larger the lever is `App::DEF_PANEL`, and
+/// moving it re-opens the band calibration and takes width off the map pane.
+///
+/// CONTRAST IS UNAFFECTED AND THAT WAS CHECKED RATHER THAN ASSUMED. A WCAG ratio
+/// is a function of two luminances and contains no typeface term, so the palette
+/// numbers cannot move; the question a font swap really raises is whether a
+/// lighter stem puts so little ink under antialiasing that the SAMPLED foreground
+/// drifts toward the background. Measured off screenshots of both builds at this
+/// machine's 120 dpi: the ruler and both gutters still reach `muted`'s full
+/// 5.46:1 in dark mode and the bases still reach 14.83:1. Fewer inked pixels, the
+/// same colour in the ones that are inked.
+const PLEX_MONO: &[u8] = include_bytes!("../fonts/IBMPlexMono-Regular.ttf");
+
+/// The proportional face: IBM Plex Sans 3.005 Regular, same licence, same
+/// archive, also unsubsetted for the same reason.
+///
+/// Chosen over the inherited Ubuntu Light for one measured reason. Ubuntu
+/// Light's capital `I` is a bare stem 0.068 em wide, all but indistinguishable
+/// from `l` at 0.141 em; Plex Sans gives it crossbars at 0.280 em against `l` at
+/// 0.156. This app's proportional text is enzyme names, and `HindIII`, `SfiI`,
+/// `AflII` and `BspLU11III` all end in runs of capital I. Mis-reading one names
+/// a different enzyme, so this is legibility as correctness, not as taste.
+const PLEX_SANS: &[u8] = include_bytes!("../fonts/IBMPlexSans-Regular.ttf");
+
+/// Install the vendored faces at the head of both family chains.
+///
+/// **THIS FUNCTION EXISTS AS A FUNCTION, RATHER THAN AS FOUR LINES INSIDE
+/// [`App::new`], BECAUSE OF THE FAILURE THAT WOULD OTHERWISE HAVE MADE EVERY
+/// TEST IN THIS FILE A LIE.** Every font-touching test builds its own
+/// `egui::Context`. Had the install lived in `App::new` — the only place with a
+/// `CreationContext` — then the shipped binary would draw Plex while all thirty
+/// or so of those tests went on measuring Hack and Ubuntu Light, and the one
+/// assertion written to catch a face change, the advance band's pin on the
+/// incumbent ratio, would have stayed green through the swap. `test_ctx` below
+/// calls this, so the tests and the binary install the same fonts by
+/// construction rather than by anyone remembering to.
+///
+/// `eframe`'s `default_fonts` feature stays on and nothing is removed from
+/// either chain, so the resolved order is:
+///
+///   Monospace     IBM Plex Mono, Hack, Ubuntu-Light, NotoEmoji, emoji-icon-font
+///   Proportional  IBM Plex Sans, Ubuntu-Light, NotoEmoji, emoji-icon-font
+///
+/// The fallbacks are load-bearing and not politeness. Plex Mono has no U+25B6,
+/// which is `HISTORY_HERE`, the History tab's cursor on the current state; it
+/// comes from Hack. Neither Plex face has U+26A0, the hidden-cut-sites warning
+/// marker; it comes from Noto Emoji. Dropping `default_fonts` would draw both as
+/// tofu boxes, which is the concrete reason the Ubuntu Font Licence question was
+/// worth answering rather than sidestepping.
+///
+/// NO ICON FONT IS INSTALLED, and that is a decision rather than an omission —
+/// see the toolbar's caret in [`App::top_bar`] for what replaced it, and NOTICE
+/// for why 488 KB of Phosphor would have put `a + t -> uniE0AC` in reach of a
+/// lowercase plasmid.
+fn install_fonts(ctx: &egui::Context) {
+    // `FontDefinitions::default()` is already the four `default_fonts` faces in
+    // their default order; this prepends to that rather than replacing it.
+    let mut defs = egui::FontDefinitions::default();
+    for (name, bytes) in [("IBMPlexMono", PLEX_MONO), ("IBMPlexSans", PLEX_SANS)] {
+        defs.font_data.insert(
+            name.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(bytes)),
+        );
+    }
+    for (family, name) in [
+        (egui::FontFamily::Monospace, "IBMPlexMono"),
+        (egui::FontFamily::Proportional, "IBMPlexSans"),
+    ] {
+        defs.families
+            .entry(family)
+            .or_default()
+            .insert(0, name.to_owned());
+    }
+    ctx.set_fonts(defs);
+}
+
+/// A `Context` with the shipped fonts in it, which is the only kind any test
+/// that measures a glyph may use.
+///
+/// **THE PASS IS NOT OPTIONAL.** `Context::set_fonts` does not install anything;
+/// it parks the definitions in `Memory::new_font_definitions` (egui 0.35
+/// `context.rs:2038`) and the next pass picks them up. A context that is built,
+/// handed the fonts and then measured without running a pass returns the DEFAULT
+/// face and looks entirely healthy doing it. That is the second way this change
+/// could have shipped a green suite that proved nothing about the binary, and it
+/// is why the `run_ui` below is part of the helper instead of being left to each
+/// caller to remember.
+///
+/// `the_test_context_installs_the_faces_the_binary_ships` is the proof that this
+/// function does something: it measures the advance through a bare
+/// `Context::default()` and through this, and asserts they DIFFER.
+#[cfg(test)]
+pub(crate) fn test_ctx() -> egui::Context {
+    let ctx = egui::Context::default();
+    install_fonts(&ctx);
+    let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+    ctx
+}
 
 /// The toolbar menu holding the whole-molecule operations.
 ///
@@ -53,6 +193,76 @@ pub fn set_origin_path() -> String {
 /// Theme-resolved colours for whatever `ui` is currently drawing into.
 fn pal(ui: &Ui) -> Palette {
     Palette::of(ui.visuals().dark_mode)
+}
+
+/// How wide the disclosure caret's own space is, and how tall the triangle in it.
+const CARET_W: f32 = 7.0;
+const CARET_H: f32 = 3.5;
+
+/// A menu button that says it is a menu.
+///
+/// **THE ONLY ICON IN THIS APPLICATION, and it is a polygon rather than a
+/// glyph.** The toolbar's own comment records that a caret was tried at 0ebaa41
+/// and photographed: `egui::menu_button` paints a plain button, so a triangle had
+/// to be a character, U+25BE is in none of the embedded faces, and it came out an
+/// empty box on all three menus. That is an argument against font-delivered
+/// chrome, not against the caret — three points need no `cmap`, cannot tofu,
+/// cannot ligate, need no licence entry, and scale with the widget rather than
+/// with a text size.
+///
+/// WHAT IT BUYS, which is the test every candidate icon in the audit had to pass
+/// and the only one that did. A menu is otherwise distinguished from a button
+/// only by the private convention "nouns are menus, verbs are buttons" — a rule
+/// the user cannot know. The caret says *this opens, it does not act*, before the
+/// click rather than after it.
+///
+/// IT ACCOMPANIES AND DOES NOT REPLACE. The label is still the word: "Save",
+/// "Export map", "Molecule". `accesskit` is on, and the accessible name is that
+/// word, unchanged — which an icon font could not have said, because a Private
+/// Use Area codepoint is what a screen reader would have been handed.
+///
+/// The space is reserved by an empty [`egui::Atom`] so the triangle cannot land
+/// on the last letter, and the triangle is then painted from the button's own
+/// right edge inward. Cost: `CARET_W` plus one `icon_spacing` per menu, about
+/// 11 pt each and 33 pt over the three — which is why the audit stopped at three
+/// and did not put one on `Open…`, `Undo` or `Redo`, whose words are already
+/// unambiguous and which would have spent 99 pt of an 880 pt window to say
+/// nothing.
+fn menu_with_caret<R>(
+    ui: &mut Ui,
+    label: &str,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<Option<R>> {
+    use egui::AtomExt as _;
+    let out = ui.menu_button(
+        (
+            label,
+            egui::Atom::default().atom_size(egui::vec2(CARET_W, CARET_H)),
+        ),
+        add,
+    );
+    let r = out.response.rect;
+    let pad = ui.spacing().button_padding.x;
+    let right = r.right() - pad;
+    let mid = r.center().y;
+    // UI chrome, so SC 1.4.11 applies and 3:1 is the bar. `ink` is the body-text
+    // ink and clears 4.5:1 in both themes, so it clears 3:1 with room; `faint`
+    // (1.75 light / 2.29 dark) and `line` (2.82 light) do not, and the trap of
+    // picking a palette role that passes against the panel and fails against the
+    // thing it is actually drawn on is already recorded in `ring.rs`. Measured
+    // against the button fill, not the panel, by
+    // `the_disclosure_caret_clears_three_to_one_on_the_button_it_is_drawn_on`.
+    let ink = pal(ui).ink;
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(right - CARET_W, mid - CARET_H * 0.5),
+            egui::pos2(right, mid - CARET_H * 0.5),
+            egui::pos2(right - CARET_W * 0.5, mid + CARET_H * 0.5),
+        ],
+        ink,
+        egui::Stroke::NONE,
+    ));
+    out
 }
 
 /// How wide a string is, laid out in the font it will actually be drawn in.
@@ -580,6 +790,11 @@ impl App {
     }
 
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Before any style is read and before anything measures a glyph. The
+        // faces decide the row height the map's label columns are packed at and
+        // the advance the sequence grid's column mapping rests on, so a pass
+        // that ran with the default chain and then swapped would lay out twice.
+        install_fonts(&cc.egui_ctx);
         // Styles are per-theme in egui 0.35, so adjust both rather than
         // stamping one over the user's light/dark preference.
         cc.egui_ctx.all_styles_mut(|style| {
@@ -1338,22 +1553,28 @@ impl App {
                 // The menu buttons do not carry one; the leaf items that reach
                 // `rfd::FileDialog` do.
                 //
-                // No disclosure caret either, and it was tried and photographed:
-                // egui's `menu_button` paints a plain button, so a triangle has
-                // to be a glyph, and the default faces have none. U+25BE came out
-                // as an empty box on all three menus — the same trap
-                // `strand_word` already documents for U+2190, which rendered as a
-                // box in the proportional face. So a menu is told from a button
-                // by what it says rather than by its shape, which is why all
-                // three are nouns for what they write out and why "Edit" — a
-                // verb, and the platform's name for a menu holding Undo and
-                // Redo — could not stay.
+                // The three menus now carry a disclosure caret, and the nouns
+                // still do the work. Both channels, not one: the word says which
+                // menu, the caret says it is a menu at all.
+                //
+                // It was tried as a GLYPH at 0ebaa41 and photographed failing.
+                // U+25BE is in none of the embedded faces and came out an empty
+                // box on all three — the same trap `strand_word` documents for
+                // U+2190 in the proportional face. The conclusion recorded here
+                // was "no caret", and it was the wrong one: a triangle is three
+                // points, and `menu_with_caret` paints them. Nothing about that
+                // failure was about the caret; it was about asking a font for it.
+                //
+                // The nouns are kept for the reason they were chosen. "Edit" — a
+                // verb, and the platform's name for a menu holding Undo and Redo
+                // — still could not come back, because it named the wrong thing
+                // and the caret does not fix a wrong word.
                 if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
                     self.pick_file();
                 }
                 let has = self.document.is_some();
                 ui.add_enabled_ui(has, |ui| {
-                    ui.menu_button("Save", |ui| {
+                    menu_with_caret(ui, "Save", |ui| {
                         if ui.button("GenBank…").clicked() {
                             self.export(false);
                             ui.close();
@@ -1383,7 +1604,7 @@ impl App {
                     // pixel-for-pixel the screen — `pl-draw` puts every feature
                     // on one ring and carries strand in the arrowhead, where the
                     // map stacks lanes inside and outside the backbone.
-                    ui.menu_button("Export map", |ui| {
+                    menu_with_caret(ui, "Export map", |ui| {
                         if ui
                             .button("SVG…")
                             .on_hover_text("Vector map, for a figure")
@@ -1574,7 +1795,7 @@ impl App {
             // and "Molecule" is the word `pl_core`, `pl info` and the rest of
             // this file already use for that object. Not "Sequence", "Features"
             // or "File": those are tab names.
-            ui.menu_button(MOLECULE_MENU, |ui| {
+            menu_with_caret(ui, MOLECULE_MENU, |ui| {
                 let circular = self
                     .document
                     .as_ref()
@@ -2679,8 +2900,9 @@ impl App {
         // prints them. They read "21 pt", "509" and "488" until 2026-07-30, all
         // three from an algebraic model that put the gutter's 8 pt of air on the
         // wrong side and came out 4 pt optimistic everywhere. 488 in particular
-        // reads as the knife edge it is not: the default has 13.5 pt of slack
-        // over the threshold, not 12.
+        // reads as the knife edge it is not: the default has 14.8 pt of slack
+        // over the threshold, not 12. (13.5 under Hack; the IBM Plex Mono swap
+        // took the threshold from 486.5 pt to 485.2 and widened the slack.)
         let scrollbar = ui.spacing().scroll.bar_width + 4.0;
         let layout = seqedit::row_layout(
             ui.available_width(),
@@ -4490,13 +4712,19 @@ fn strand_glyph(s: Strand) -> &'static str {
 
 /// The same thing in words, for anywhere the arrows cannot be drawn.
 ///
-/// egui's default proportional face has no U+2190, so a `←` set in it comes out
-/// as a tofu box; the features list gets away with the arrow only because it
-/// asks for `.monospace()`. The hover readout is the sequence view's non-colour
-/// channel — the one place a reverse feature's direction is stated in the
-/// sequence at all — and an empty box states nothing. Found by looking at the
-/// running app: `strand_glyphs_cover_every_variant` asserts the strings are
-/// non-empty, and a tofu box is a non-empty string.
+/// Written when the proportional face was Ubuntu Light, which has no U+2190: a
+/// `←` set in it came out a tofu box, and the features list got away with the
+/// arrow only because it asks for `.monospace()`. Found by looking at the running
+/// app, because `strand_glyphs_cover_every_variant` asserts the strings are
+/// non-empty and a tofu box is a non-empty string.
+///
+/// **IBM PLEX SANS HAS U+2190, so that specific box is gone — and the words
+/// stay.** The reason was never only the missing glyph. The hover readout is the
+/// sequence view's non-colour channel, the one place a reverse feature's
+/// direction is stated in the sequence at all, and "reverse" is legible to a
+/// screen reader, in a monochrome screenshot and to someone who does not read
+/// arrows as direction. Keeping this because a font swap happened to fix the
+/// symptom would be reasoning from the defect instead of from the requirement.
 fn strand_word(s: Strand) -> &'static str {
     match s {
         Strand::Forward => "forward",
@@ -4608,9 +4836,11 @@ mod tests {
             Strand::Unoriented,
         ] {
             assert!(!strand_glyph(s).is_empty());
-            // In words as well, and ASCII, because the hover readout is set in
-            // egui's proportional face and that face has no U+2190: the arrow
-            // rendered there as an empty box. Non-empty was not enough to ask.
+            // In words as well, and ASCII. The original reason was that the
+            // hover readout is set in the proportional face and Ubuntu Light had
+            // no U+2190, so the arrow rendered as an empty box; IBM Plex Sans has
+            // it, and the words stay anyway — see `strand_word`. Non-empty was
+            // never enough to ask.
             let w = strand_word(s);
             assert!(!w.is_empty());
             assert!(w.is_ascii(), "{w} needs a font we cannot count on");
@@ -4667,8 +4897,7 @@ mod tests {
 
     #[test]
     fn the_tofu_oracle_answers_both_ways_before_anything_relies_on_it() {
-        let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let ctx = test_ctx();
         // A CJK ideograph is in none of the four embedded faces, in either family.
         for fam in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
             assert!(
@@ -4681,20 +4910,31 @@ mod tests {
             );
         }
         // And the two families genuinely differ, which is the reason the monospace
-        // gate cannot be inferred from the proportional one: U+2192 is in Hack and
-        // in nothing else `default_fonts` embeds, and Hack is not in the
-        // proportional chain.
+        // gate cannot be inferred from the proportional one.
+        //
+        // THIS ASKED U+2192 UNTIL THE PLEX SWAP AND HAD TO CHANGE, which is worth
+        // recording because the reason is not that the test was wrong. U+2192 was
+        // in Hack and in nothing else `default_fonts` embeds, and Hack is not in
+        // the proportional chain — so the arrow was the cheapest character that
+        // separated the two families. IBM Plex Sans HAS U+2192 (checked in its own
+        // cmap), so prepending it to the proportional chain made the old
+        // assertion false while changing nothing about the property being tested.
+        // U+25B8 replaces it: absent from BOTH Plex faces and from Ubuntu-Light,
+        // present in Hack, and Hack is still monospace-only. Measured from the
+        // four cmaps rather than assumed, because picking a character that turned
+        // out to be in Plex Sans as well would have left this passing for the
+        // wrong reason and taken the oracle's calibration with it.
         assert!(!renders_as_tofu(
             &ctx,
             egui::FontFamily::Monospace,
             11.0,
-            '\u{2192}'
+            '\u{25B8}'
         ));
         assert!(renders_as_tofu(
             &ctx,
             egui::FontFamily::Proportional,
             11.0,
-            '\u{2192}'
+            '\u{25B8}'
         ));
     }
 
@@ -4716,13 +4956,23 @@ mod tests {
     /// A hard-coded C is a number that rots the first time egui changes a margin;
     /// a measured one cannot.
     ///
-    /// What the band buys, concretely: IBM Plex Mono and JetBrains Mono are
-    /// 0.600 em and Cascadia Mono is 0.585938 (measured with fontTools), so all
-    /// three drop in with NO constant moved. Fira Code is 0.615385 and breaks
-    /// `DEF_PANEL - 12`; Iosevka is 0.500 and breaks `DEF_PANEL - 40` in the other
-    /// direction. Whoever picks a face outside the band must move `DEF_PANEL` --
-    /// not edit the expectation, because the "and it is not padded" half of that
-    /// test is what stops the details panel quietly eating the map pane.
+    /// What the band bought, and this is now history rather than a forecast: it
+    /// predicted that IBM Plex Mono at 0.600 em would reach sixty at `DEF_PANEL`
+    /// with no constant moved, and the swap then moved none. Fira Code is 0.615385
+    /// and breaks `DEF_PANEL - 12`; Iosevka is 0.500 and breaks `DEF_PANEL - 40` in
+    /// the other direction. Whoever picks a face outside the band must move
+    /// `DEF_PANEL` -- not edit the expectation, because the "and it is not padded"
+    /// half of that test is what stops the details panel quietly eating the map
+    /// pane.
+    ///
+    /// **THE BAND IS HORIZONTAL AND SEES NOTHING VERTICAL, which the swap proved
+    /// the hard way.** Plex Mono's line box is 1.300 em against Hack's 1.164, so at
+    /// the map's 10 pt label size the drawn height went from 11.64 pt to exactly
+    /// 13.00 — into `map.rs`'s then-pinned `LINE_H = 13.0`, leaving a column of
+    /// stacked enzyme labels with zero gap and `Rect::intersects` counting touching
+    /// as overlapping. A face can sit in the middle of this band and still collide
+    /// its own labels. `map::line_h` is the answer and derives the pitch from the
+    /// face; do not read a green band here as clearance.
     #[test]
     fn the_advance_band_that_keeps_every_per_row_expectation() {
         const LEN: u64 = 8_117; // `seq_app`'s molecule, so a 5-character gutter
@@ -4732,14 +4982,21 @@ mod tests {
         };
 
         // --- measure C, and the face we have, from the real painter -----------
-        let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
-        let hack = ctx.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(11.5), 'A')) / 11.5;
-        // Hack-Regular 3.003 is 1233/2048; if this moves, the numbers in the doc
-        // above are about a different font than the one in the binary.
+        let ctx = test_ctx();
+        let mono = ctx.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(11.5), 'A')) / 11.5;
+        // IBM Plex Mono 2.005 is 600/1000, a terminating rational and not a
+        // rounding: read from the vendored file's own `hmtx`, where all 95
+        // printable ASCII codepoints share one advance of 600 units over a
+        // unitsPerEm of 1000. If this moves, the numbers in the doc above are
+        // about a different font than the one in the binary.
+        //
+        // The tolerance is NOT widened when the number changes. This assertion
+        // exists to break on a face swap, and 1e-4 is what makes it able to: at
+        // 1e-2 it would have accepted Hack's 0.602051 and Plex's 0.600000 alike
+        // and told the next reader nothing.
         assert!(
-            (hack - 0.602_051).abs() < 1e-4,
-            "the incumbent monospace advance ratio is {hack}, not Hack's 0.602051"
+            (mono - 0.600_000).abs() < 1e-4,
+            "the monospace advance ratio is {mono}, not IBM Plex Mono's 0.600000"
         );
 
         // The smallest panel that reaches sixty, from the painter itself.
@@ -4747,7 +5004,7 @@ mod tests {
         // and a 0.5 pt linear sweep cost this test 27 seconds of a suite that
         // people have to be willing to run.
         let reaches = |p: f32| -> bool {
-            let ctx = egui::Context::default();
+            let ctx = test_ctx();
             let mut app = seq_app();
             app.layout.panel_w = Some(p);
             paint(&mut app, &ctx, window());
@@ -4764,7 +5021,7 @@ mod tests {
             }
         }
         let sixty = hi_p;
-        let c = sixty - 60.0 * (11.5 * hack) - seqedit::gutter_w(LEN, 11.0 * hack);
+        let c = sixty - 60.0 * (11.5 * mono) - seqedit::gutter_w(LEN, 11.0 * mono);
         // A quarter of a point of quantisation from the 0.5 pt search, no more.
         assert!(
             (0.0..64.0).contains(&c),
@@ -4778,7 +5035,7 @@ mod tests {
             (App::DEF_PANEL - 40.0, 50),
         ] {
             assert_eq!(
-                per_row(panel, hack, c),
+                per_row(panel, mono, c),
                 want,
                 "the model disagrees with the painter at {panel} pt for the face in \
                  the binary; C = {c}"
@@ -4830,12 +5087,19 @@ mod tests {
         eprintln!(
             "advance band: [{lo:.5}, {hi:.5}] em, resolved to +/-{STEP}  |  \
              sixty at {sixty:.2} pt  |  chrome C = {c:.2} pt  |  \
-             face in the binary = {hack:.6} em"
+             face in the binary = {mono:.6} em"
         );
         // Measured with fontTools on this machine, except where marked.
         for (name, ratio, inside) in [
-            ("Hack 3.003 (the incumbent)", 0.602_051f32, true),
-            ("IBM Plex Mono", 0.600, true),
+            // Read from the file committed at bins/pl-gui/fonts, not from a table:
+            // all 95 printable ASCII codepoints are 600/1000. It sits 0.00400 em
+            // below the upper edge where Hack sat 0.00195 below it, so the swap
+            // moved the shipped face FURTHER from the edge that loses sixty.
+            ("IBM Plex Mono 2.005 (shipped)", 0.600f32, true),
+            // Still in the binary, one place down the Monospace chain, and still
+            // the supplier of U+25B6. Kept in this table because a fallback that
+            // served a base would silently change the grid pitch.
+            ("Hack 3.003 (fallback)", 0.602_051, true),
             ("JetBrains Mono", 0.600, true),
             ("Cascadia Mono 2404.023", 0.585_938, true),
             ("DejaVu Sans Mono", 0.602, true),
@@ -4903,9 +5167,7 @@ mod tests {
         e.delete_forward(&mut after, NOW);
         let at_end = e.notice.clone().expect("a refusal past the last base");
 
-        let ctx = egui::Context::default();
-        // One frame, so the font set exists.
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let ctx = test_ctx();
         for msg in [&at_start, &at_end] {
             // The path a user is sent down has to be the one that is there.
             assert!(
@@ -4939,13 +5201,22 @@ mod tests {
     /// Measured against the four embedded faces' `cmap`s with fontTools, and the
     /// first two lines are why this is not a formality:
     ///
-    ///   U+2192 `→`  Hack yes · Ubuntu-Light MISSING · NotoEmoji MISSING · emoji-icon MISSING
-    ///   U+2190 `←`  Hack yes · all three others MISSING
-    ///   U+2194 `↔`  Hack yes · NotoEmoji yes
-    ///   U+25B6 `▶`  Hack yes · both emoji fonts yes · Ubuntu-Light MISSING
+    ///   U+2192 `→`  Plex Mono yes · Plex Sans yes · Hack yes · the rest MISSING
+    ///   U+2190 `←`  Plex Mono yes · Plex Sans yes · Hack yes · the rest MISSING
+    ///   U+2194 `↔`  Plex Mono yes · Plex Sans yes · Hack yes · NotoEmoji yes
+    ///   U+25B6 `▶`  Plex Mono MISSING · Plex Sans MISSING · Hack yes · both emoji fonts yes
     ///
-    /// The forward and reverse arrows have exactly ONE supplier in the binary and it
-    /// is the face being swapped. They are `strand_glyph`'s two commonest values,
+    /// Re-measured after the swap, from the two vendored files' own `cmap`s. The
+    /// arrows gained two suppliers and are no longer a single point of failure.
+    /// **U+25B6 lost its primary one:** `HISTORY_HERE`, the History tab's cursor on
+    /// the current state, is now served by Hack as a FALLBACK, one place down the
+    /// Monospace chain. That is fine and it is not invisible — the test below asks
+    /// the chain, so it stays green — but it means the Ubuntu Font Licence decision
+    /// that kept `default_fonts` is what keeps this glyph on screen. Drop
+    /// `default_fonts` and the History tab draws a box.
+    ///
+    /// The forward and reverse arrows used to have exactly ONE supplier in the
+    /// binary, and it was the face that got swapped. They are `strand_glyph`'s two commonest values,
     /// drawn `.monospace()` in the Features panel's coordinate column, and that
     /// column is where a reverse feature's direction is stated without colour. Swap
     /// to a face without them and the panel fills with tofu boxes — which is not
@@ -4963,8 +5234,7 @@ mod tests {
     /// invisible until someone looks at the running app.
     #[test]
     fn the_monospace_face_has_every_glyph_the_app_sets_in_it() {
-        let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let ctx = test_ctx();
         // Every character the app hands the monospace family, with where from.
         let mut want: Vec<(String, &str)> = vec![
             (
@@ -4993,9 +5263,17 @@ mod tests {
         for b in 0x21u8..=0x7E {
             want.push(((b as char).to_string(), "printable ASCII, via row_text"));
         }
-        // The sizes the app really asks for: 9.0 and 9.5 are the map's ruler and the
-        // sequence view's, 11.0 and 11.5 everything else.
-        for size in [9.0f32, 9.5, 11.0, 11.5] {
+        // The sizes the app really asks for: 9.0 is the map's ruler, 9.5 the
+        // sequence view's, 10.0 every enzyme site label on the map
+        // (`map::label_font`), 11.0 and 11.5 everything else.
+        //
+        // 10.0 WAS MISSING FROM THIS LIST while the comment above it claimed the
+        // list was what the app asks for. Nothing was broken by the omission —
+        // coverage does not vary with size — but the sibling test
+        // `the_sequence_grid_has_one_advance_at_every_size_it_is_drawn` does include
+        // 10.0, so the two lists disagreed about the same application, and the one
+        // that was wrong was also the one that stated it in prose.
+        for size in [9.0f32, 9.5, 10.0, 11.0, 11.5] {
             for (s, why) in &want {
                 for c in s.chars() {
                     assert!(
@@ -5055,6 +5333,14 @@ mod tests {
     /// The fixture is a real `Molecule` through the real `row_text` so the alphabet
     /// is what the app can actually paint: `row_text` pushes `b as char` for every
     /// `is_ascii_graphic` byte, which is all 94 printable ASCII, and `?` otherwise.
+    ///
+    /// AND IT IS RUN IN BOTH CASES, which it was not until this was reviewed. The
+    /// row below is uppercase, `Molecule::seq` is case-preserved, and the user's own
+    /// pKoV renders entirely lowercase on screen — so the gate was looking at an
+    /// alphabet the application mostly does not draw. Measured: the committed IBM
+    /// Plex Mono with one LigatureSubst rule `a + c -> A` appended and `hmtx` left
+    /// alone passes this test with the uppercase row and fails it with the lowercase
+    /// one. Half the ligature-bait alphabet was unwatched.
     #[test]
     fn a_sequence_row_shapes_to_one_glyph_per_base_on_one_pitch() {
         // Ligature-prone pairs that survive `is_ascii_graphic`, padded with bases.
@@ -5074,9 +5360,17 @@ mod tests {
                  ligatures: {row:?}"
             );
         }
+        // The same sixty cells with the bases in the case the app actually shows
+        // them in. `to_ascii_lowercase` leaves every punctuation pair above alone,
+        // so this is the same fixture with one variable changed.
+        let lower = row.to_ascii_lowercase();
+        assert_ne!(
+            lower, row,
+            "the lowercase twin is identical to the row, so it is not testing a \
+             second alphabet -- the fixture must contain letters"
+        );
 
-        let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let ctx = test_ctx();
         // One device pixel. `epaint` snaps every glyph's x to a whole device pixel
         // (`text_layout.rs`: `glyph.pos.x = round_to_pixel(glyph.pos.x)`), so a
         // correct face still shows a bounded sawtooth of about 0.87 pt at this
@@ -5144,10 +5438,15 @@ mod tests {
             Ok(())
         };
 
-        for size in [9.5f32, 11.0, 11.5] {
-            check(&row, size).unwrap_or_else(|e| {
-                panic!("at {size} pt the sequence row does not shape to a grid: {e}")
-            });
+        for (case, text) in [("upper", &row), ("lower", &lower)] {
+            for size in [9.5f32, 11.0, 11.5] {
+                check(text, size).unwrap_or_else(|e| {
+                    panic!(
+                        "at {size} pt the {case}case sequence row does not shape to a \
+                         grid: {e}"
+                    )
+                });
+            }
         }
 
         // THE CHECK CAN FAIL, in the SHIPPED monospace face, on exactly the failure a
@@ -5233,8 +5532,7 @@ mod tests {
         // measured, all 94 are uniform in Hack, Cascadia Mono, Cascadia Code and
         // Fira Code alike, so asking the whole range costs nothing and matches what
         // the function under test can actually emit.
-        let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let ctx = test_ctx();
         for size in [9.0f32, 9.5, 10.0, 11.0, 11.5] {
             let id = egui::FontId::monospace(size);
             let want = ctx.fonts_mut(|f| f.glyph_width(&id, 'A'));
@@ -5260,6 +5558,820 @@ mod tests {
             "the proportional face suddenly has one advance, so the check above \
              proves nothing about monospace"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // the vendored faces
+    // -----------------------------------------------------------------------
+
+    /// **THE PROOF THAT EVERY OTHER FONT TEST IN THIS FILE IS ABOUT THE SHIPPED
+    /// BINARY.**
+    ///
+    /// PROVEN TO FAIL at 0aa0f88: `install_fonts`, `test_ctx` and the vendored
+    /// files did not exist, so this does not compile there. That is a
+    /// compile-only failure and it is stated as one — but the assertion it makes
+    /// is not vacuous, and this is where the danger was.
+    ///
+    /// The install has to happen in `App::new`, because that is the only place
+    /// with a `CreationContext`. Tests never call `App::new`; all thirty-odd
+    /// font-touching tests build their own `Context`. Put those two facts
+    /// together and the swap could have shipped with the binary drawing Plex, the
+    /// suite measuring Hack, and the advance band's pin on 0.602051 — the one
+    /// assertion written to break on a face change — still green. So this
+    /// measures the same glyph both ways and asserts they DISAGREE. If someone
+    /// later drops the install from `test_ctx`, or the fonts stop reaching the
+    /// context, this goes red rather than the whole suite going quietly stale.
+    ///
+    /// It also pins the deferred-effect trap. `set_fonts` does not install
+    /// anything: it parks the definitions in `Memory::new_font_definitions`
+    /// (`context.rs:2038`) for the next pass to pick up. The third measurement
+    /// below is a context that was handed the fonts and then measured with NO
+    /// pass in between, and it still reports Hack's advance.
+    #[test]
+    fn the_test_context_installs_the_faces_the_binary_ships() {
+        let id = egui::FontId::monospace(11.5);
+        let width = |ctx: &egui::Context| ctx.fonts_mut(|f| f.glyph_width(&id, 'A')) / 11.5;
+
+        let bare = egui::Context::default();
+        let _ = bare.run_ui(egui::RawInput::default(), |_| {});
+        let before = width(&bare);
+        let after = width(&test_ctx());
+
+        assert!(
+            (before - 0.602_051).abs() < 1e-4,
+            "a context with no fonts installed should measure Hack's 0.602051, not {before} \
+             -- if this moved, `default_fonts` changed and the rest of this test is \
+             comparing two unknowns"
+        );
+        assert!(
+            (after - 0.600_000).abs() < 1e-4,
+            "`test_ctx` should measure IBM Plex Mono's 0.600000, not {after}"
+        );
+        assert_ne!(
+            before, after,
+            "`test_ctx` measures the same face as a bare Context, so it installs \
+             nothing and every font test in this file is about a font the binary \
+             does not ship"
+        );
+
+        // And the pass is what makes it take effect, not the call. One pass first,
+        // because a context that has never run has no font set at all and
+        // `glyph_width` panics rather than answering — which is its own small proof
+        // that measuring and installing are separate events.
+        let deferred = egui::Context::default();
+        let _ = deferred.run_ui(egui::RawInput::default(), |_| {});
+        install_fonts(&deferred);
+        let no_pass = width(&deferred);
+        assert!(
+            (no_pass - 0.602_051).abs() < 1e-4,
+            "a `set_fonts` with no pass after it measured {no_pass}, so it took effect \
+             immediately -- egui changed, and `test_ctx`'s `run_ui` is no longer what \
+             is keeping the tests honest. Check `Memory::new_font_definitions` before \
+             deleting anything."
+        );
+    }
+
+    /// THE LIGATURE GUARD, asked of the bytes in the repository.
+    ///
+    /// PROVEN TO FAIL at 0aa0f88 by mutation, and the mutation is recorded here
+    /// because a guard nobody has seen go red is a guess: pointing `PLEX_MONO` at
+    /// `IBMPlexSans-Regular.ttf` — a one-word edit, and exactly the kind of edit
+    /// a hurried maintainer makes — turns this red with
+    /// `IBM Plex Mono advertises liga, which harfrust applies by default`.
+    ///
+    /// This is the guard that replaces the one that could not fail. The old check
+    /// asserted `Fonts::glyph_width` was bit-identical across the alphabet;
+    /// `glyph_width` reads `hmtx`, a ligature is a GSUB substitution, and `hmtx`
+    /// is untouched by one — so it measured a quantity a ligature cannot move and
+    /// would have passed a fully ligating face. This reads the FeatureList.
+    ///
+    /// Three things it deliberately does, each of which the obvious version gets
+    /// wrong:
+    ///
+    ///  1. It asks which rules can FIRE — not which lookups exist, and not which
+    ///     features are advertised. Plex Mono ships two LigatureSubst lookups (34
+    ///     fraction rules behind `frac`, 13 mark-stacking rules behind `ccmp`), so
+    ///     a "no LookupType 4" test goes red on the healthy shipped face; and it
+    ///     advertises `ccmp`, `locl` and GPOS `mark`, all three of which harfrust
+    ///     turns on, so a "no default-on feature" test goes red on it too.
+    ///  2. It checks GPOS as well as GSUB. Kerning moves x without touching GSUB
+    ///     and would break the column grid invisibly to a GSUB-only guard.
+    ///  3. It is scoped to the MONOSPACE face. Plex Sans has a live `f + i -> fi`
+    ///     and is shipped anyway — see
+    ///     `the_proportional_face_ligates_and_that_is_recorded_not_denied`.
+    ///
+    /// WHY IT IS NO LONGER THE TAG TEST IT WAS. Until this was reviewed,
+    /// `SHAPER_DEFAULTS` held six tags and this asserted the intersection was
+    /// empty. harfrust turns on FOURTEEN: `ccmp`, `locl`, `mark`, `mkmk`, `abvm`,
+    /// `blwm`, `curs` and `dist` were all missing from the premise, so the guard
+    /// was blind to the place a ligature would most plausibly hide. `ccmp` is the
+    /// normal home for composition rules and this very face already keeps thirteen
+    /// LigatureSubst rules there. The fix could not be to widen the list and keep
+    /// the assertion — that is red on IBM Plex Mono — so the question became
+    /// reachability: can any rule behind a default-on feature be SPELLED from the
+    /// characters `row_text` emits.
+    ///
+    /// What it cannot see, so nobody mistakes it for total: it reads the file in
+    /// the repository, so Hack — still in the chain — is out of reach, and it
+    /// takes harfrust's default set as a premise. If egui gains user-feature
+    /// control and someone enables `frac`, Plex Mono's 34 fraction ligatures
+    /// become live and `1/2` in a coordinate would collapse; `SHAPER_DEFAULTS` is
+    /// what would have to widen.
+    #[test]
+    fn the_monospace_face_advertises_no_feature_the_shaper_turns_on() {
+        // Not vacuous: this face advertises 23 distinct features, so the parser is
+        // demonstrably reading a real FeatureList and still saying "none of them".
+        // Without this, a parser that returned an empty list for every input would
+        // pass the assertion below and prove nothing.
+        let all = sfnt::feature_tags(PLEX_MONO, b"GSUB")
+            .expect("the vendored monospace face parses")
+            .expect("IBM Plex Mono has a GSUB table");
+        let mut distinct: Vec<_> = all.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(
+            distinct.len() >= 20,
+            "only {} distinct GSUB features in the monospace face ({}); the parser is \
+             probably not reading the FeatureList, which would make the check below \
+             pass for the wrong reason",
+            distinct.len(),
+            sfnt::show(&distinct)
+        );
+
+        // The tags a text face must not carry at all. `liga`, `clig`, `calt`,
+        // `rlig` and `rclt` substitute and `kern` and `dist` move x, all of them
+        // FOR the alphabet, so a face advertising one is not a thing to
+        // investigate — it is the wrong face.
+        for table in [b"GSUB", b"GPOS"] {
+            let on = sfnt::default_on_features(PLEX_MONO, table)
+                .expect("the vendored monospace face parses");
+            let banned: Vec<_> = on
+                .iter()
+                .copied()
+                .filter(|t| sfnt::NEVER_IN_A_MONOSPACE_TEXT_FACE.contains(t))
+                .collect();
+            assert!(
+                banned.is_empty(),
+                "the monospace face advertises {} in {}, which harfrust applies by \
+                 default and egui 0.35 cannot switch off. A ligature collapses two \
+                 glyphs into one advance, so x(base) = x0 + col * advance stops being \
+                 true and a click lands on the wrong base.",
+                sfnt::show(&banned),
+                String::from_utf8_lossy(table)
+            );
+        }
+
+        // THE VERDICT: the tags it does carry must have nothing behind them a
+        // sequence row can spell.
+        for table in [b"GSUB", b"GPOS"] {
+            let live = sfnt::ascii_reachable_default_on(PLEX_MONO, table)
+                .expect("the vendored monospace face parses");
+            assert!(
+                live.is_empty(),
+                "in {} the monospace face has a rule behind {} that can fire on a run \
+                 of printable ASCII. harfrust turns that feature on and egui 0.35 \
+                 cannot switch it off, so the shaper may substitute or reposition \
+                 inside a sequence row: x(base) = x0 + col * advance stops being true \
+                 and a click lands on the wrong base.",
+                String::from_utf8_lossy(table),
+                sfnt::show(&live)
+            );
+        }
+
+        // AND THE WALK IS NOT VACUOUS EITHER, which is the assertion the six-tag
+        // version had no way to make. Plex Mono really does advertise three
+        // features harfrust turns on, so the empty answer above is the result of
+        // walking real lookups and ruling every one of them out: 13 ligature rules
+        // and 5 chain contexts behind `ccmp`, 4 SingleSubsts behind `locl`, 4
+        // MarkBasePos behind `mark` — each needing a combining mark `row_text`
+        // cannot emit. If either of these ever reads EMPTY, the reachability check
+        // above has stopped being exercised and is passing without looking at
+        // anything.
+        assert_eq!(
+            sfnt::show(&sfnt::default_on_features(PLEX_MONO, b"GSUB").expect("it parses")),
+            "ccmp locl",
+            "the monospace face should still advertise exactly `ccmp` and `locl` among \
+             the default-on features -- those are what give the reachability walk \
+             something to reject"
+        );
+        assert_eq!(
+            sfnt::show(&sfnt::default_on_features(PLEX_MONO, b"GPOS").expect("it parses")),
+            "mark",
+            "the monospace face should still advertise GPOS `mark`, the only default-on \
+             positioning feature the walk gets to reject"
+        );
+    }
+
+    /// The guard's positive control, on a face this repository actually ships.
+    ///
+    /// PROVEN TO FAIL at 0aa0f88: compile-only there, but the assertion is a
+    /// measurement of a real file and not a tautology — it says the detector says
+    /// YES when handed something that ligates. Without it,
+    /// `the_monospace_face_advertises_no_feature_the_shaper_turns_on` is a check
+    /// whose sensitivity nobody has ever observed, which is the shape of every
+    /// defect this area has produced.
+    ///
+    /// IBM Plex Sans advertises `liga` — one rule, `f + i -> fi` — and GPOS
+    /// `kern`. Both fire under egui 0.35, on ordinary words: "purification",
+    /// "modified", "verification". That is recorded rather than fixed, because it
+    /// is not a correctness bug HERE and the reason is checkable: no proportional
+    /// text in this app carries a position-to-index mapping. The sequence grid,
+    /// both gutters, the strand column and the map's site labels are all
+    /// monospace (`map::label_font` is `FontId::monospace(10.0)`), and every
+    /// proportional width is taken from a real egui layout — `width_of`, `cut_to`,
+    /// `layout_no_wrap` — which shapes, so a ligature is already inside the
+    /// measurement rather than missing from it.
+    ///
+    /// The line to hold: a ligating face is acceptable in Proportional and is not
+    /// acceptable in Monospace. If anyone ever puts Plex Sans, or any face this
+    /// test reports as ligating, into the Monospace chain, the guard above is what
+    /// catches it.
+    #[test]
+    fn the_proportional_face_ligates_and_that_is_recorded_not_denied() {
+        let gsub = sfnt::default_on_features(PLEX_SANS, b"GSUB").expect("Plex Sans parses");
+        assert_eq!(
+            sfnt::show(&gsub),
+            "ccmp liga locl",
+            "IBM Plex Sans should advertise `liga` among the default-on features, \
+             alongside the same `ccmp` and `locl` the monospace face carries. If \
+             `liga` has gone the detector may have gone blind and the monospace \
+             guard proves nothing; if it lists MORE, the proportional face changed \
+             and the reasoning above needs redoing."
+        );
+        let gpos = sfnt::default_on_features(PLEX_SANS, b"GPOS").expect("Plex Sans parses");
+        assert_eq!(
+            sfnt::show(&gpos),
+            "kern mark",
+            "Plex Sans kerns; it is proportional"
+        );
+
+        // AND THE REACHABILITY WALK — the part the monospace guard's verdict rests
+        // on — SAYS YES ABOUT THIS FACE. It is the same code path, on a file this
+        // repository ships, giving the opposite answer: `f + i -> fi` is a
+        // LigatureSubst whose first glyph and whose one component are both
+        // printable ASCII, so it is reported; `ccmp` and `locl` carry the same
+        // mark-only rules here as in the monospace face and are correctly NOT
+        // reported. A walk that answered "reachable" for every default-on tag would
+        // fail this line, and so would one that answered "unreachable" for all of
+        // them — which is the whole difficulty with a guard of this shape.
+        assert_eq!(
+            sfnt::show(&sfnt::ascii_reachable_default_on(PLEX_SANS, b"GSUB").expect("it parses")),
+            "liga",
+            "the walk should find Plex Sans's `f + i -> fi` reachable from printable \
+             ASCII and nothing else in GSUB. EMPTY means it cannot see a live \
+             ligature at all and the monospace verdict is worthless; MORE means it \
+             is over-reporting and would eventually reject a healthy face."
+        );
+        assert_eq!(
+            sfnt::show(&sfnt::ascii_reachable_default_on(PLEX_SANS, b"GPOS").expect("it parses")),
+            "kern",
+            "Plex Sans's `kern` reaches ASCII -- that is what kerning is -- and its \
+             `mark` lookups do not, for the same reason the monospace face's do not"
+        );
+    }
+
+    /// The guard must FAIL CLOSED, or it is the same defect wearing a parser.
+    ///
+    /// PROVEN TO FAIL at 0aa0f88: compile-only. The assertions are real.
+    ///
+    /// "No GSUB table, therefore no ligatures" is true of a font and false of
+    /// everything else. Without the container check, a renamed JPEG, a WOFF, a
+    /// font collection or a truncated download would all sail through the guard
+    /// above reporting no ligatures — and the guard would be green precisely when
+    /// the file was unusable. Each case below is a thing that could plausibly end
+    /// up at `bins/pl-gui/fonts/` after a bad merge or a mangled checkout.
+    #[test]
+    fn the_ligature_guard_refuses_to_pass_a_file_it_cannot_read() {
+        let cases: [(&str, Vec<u8>); 5] = [
+            ("empty", Vec::new()),
+            (
+                "a JPEG renamed to .ttf",
+                vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 16, 0, 0],
+            ),
+            ("a WOFF", b"wOFF\x00\x01\x00\x00\x00\x00\x00\x10".to_vec()),
+            (
+                "a font COLLECTION, whose faces are one level down",
+                b"ttcf\x00\x01\x00\x00\x00\x00\x00\x02".to_vec(),
+            ),
+            // A real sfnt header claiming more tables than the file holds: the
+            // shape a truncated download takes.
+            ("a truncated face", {
+                let mut v = vec![0x00, 0x01, 0x00, 0x00, 0x00, 0x09];
+                v.extend_from_slice(&[0u8; 6]);
+                v.extend_from_slice(b"head");
+                v
+            }),
+        ];
+        for (what, bytes) in cases {
+            let got = sfnt::default_on_features(&bytes, b"GSUB");
+            assert!(
+                got.is_err(),
+                "{what} was accepted, and reported {:?} ligature features. A guard that \
+                 answers \"no ligatures\" about a file that is not a font is green \
+                 exactly when it should be loudest.",
+                got.map(|t| sfnt::show(&t))
+            );
+        }
+
+        // And the other direction, so the refusals above are known not to be a
+        // parser that rejects everything: a hand-built sfnt carrying a GSUB whose
+        // FeatureList holds `liga` must be READ, and reported.
+        let synthetic = synthetic_face_advertising(b"liga");
+        assert_eq!(
+            sfnt::show(&sfnt::default_on_features(&synthetic, b"GSUB").expect("it parses")),
+            "liga",
+            "the parser could not find `liga` in a FeatureList built to contain it, \
+             so its silence about the real faces means nothing"
+        );
+        // The same blob with a benign tag, so the filter is doing the filtering
+        // rather than the parser finding `liga` in every input.
+        let benign = synthetic_face_advertising(b"frac");
+        assert!(
+            sfnt::default_on_features(&benign, b"GSUB")
+                .expect("it parses")
+                .is_empty(),
+            "`frac` was reported as default-on; it is not, and Plex Mono has 34 \
+             fraction ligatures behind it that would then read as a defect"
+        );
+    }
+
+    /// THE HOLE THE SIX-TAG GUARD HAD, HELD OPEN AS A RUNNING TEST.
+    ///
+    /// PROVEN TO FAIL by construction, and this is the one place in the change
+    /// where the failing case is a permanent fixture rather than a mutation
+    /// somebody applied once and reverted. Two faces differing in ONE GLYPH ID —
+    /// the second component of a single ligature rule — must get opposite answers.
+    ///
+    /// Both advertise `ccmp` and nothing else. Under the list this module shipped
+    /// with for one review cycle, `ccmp` was not even in `SHAPER_DEFAULTS`, so
+    /// BOTH read as clean; harfrust has turned `ccmp` on the whole time
+    /// (`ot_shape.rs:87`, `F_GLOBAL`), and `ccmp` is where composition rules
+    /// normally live — IBM Plex Mono keeps thirteen LigatureSubst rules there. A
+    /// ligating face only had to spell its rule `ccmp` instead of `liga` to walk
+    /// past the guard entirely.
+    ///
+    /// Widening the list is not by itself the fix, and the second assertion here
+    /// is what says so: Plex Mono advertises `ccmp` too, so a widened TAG test is
+    /// red on the healthy shipped face. Only asking whether the rule can be
+    /// SPELLED from printable ASCII separates these two.
+    #[test]
+    fn a_ccmp_ligature_on_ascii_is_caught_and_one_on_marks_is_not() {
+        // a + c -> A. Every glyph in it is one `row_text` can emit, so this is the
+        // exact failure the sequence grid cannot survive: two columns become one
+        // advance and every base after it is named wrong.
+        let dangerous = synthetic_ccmp_ligature(GID_C);
+        // a + U+0301 COMBINING ACUTE -> A. Structurally identical, one glyph id
+        // different, and unreachable because `row_text` substitutes `?` for every
+        // byte that is not `is_ascii_graphic`. This is the shape of all thirteen
+        // of Plex Mono's real `ccmp` rules.
+        let harmless = synthetic_ccmp_ligature(GID_ACUTE);
+
+        // First: the shortcut the guard applies before the walk cannot tell these
+        // apart, and must not be mistaken for the thing that does.
+        for (what, face) in [("dangerous", &dangerous), ("harmless", &harmless)] {
+            let on = sfnt::default_on_features(face, b"GSUB").expect("it parses");
+            assert_eq!(
+                sfnt::show(&on),
+                "ccmp",
+                "the {what} fixture should advertise exactly `ccmp`"
+            );
+            assert!(
+                !on.iter()
+                    .any(|t| sfnt::NEVER_IN_A_MONOSPACE_TEXT_FACE.contains(t)),
+                "the {what} fixture tripped the never-in-a-text-face list, so this \
+                 test is no longer about the reachability walk"
+            );
+        }
+
+        // Then: the walk, which is the part that has to be right.
+        assert_eq!(
+            sfnt::show(&sfnt::ascii_reachable_default_on(&dangerous, b"GSUB").expect("it parses")),
+            "ccmp",
+            "a LigatureSubst spelled `a` + `c` -> `A`, behind `ccmp`, was NOT reported \
+             as reachable. Both glyphs are printable ASCII and harfrust turns `ccmp` \
+             on globally, so this collapses two columns of a sequence row into one \
+             advance and every click past it lands on the wrong base."
+        );
+        assert!(
+            sfnt::ascii_reachable_default_on(&harmless, b"GSUB")
+                .expect("it parses")
+                .is_empty(),
+            "a `ccmp` rule whose second component is a combining mark was reported as \
+             reachable. `row_text` cannot emit one, so this is over-reporting -- and \
+             it would reject IBM Plex Mono, whose thirteen real `ccmp` ligature rules \
+             all have exactly this shape."
+        );
+    }
+
+    // The glyph ids `synthetic_ccmp_ligature` assigns. Named because the whole
+    // point of the fixture is that ONE of them is the difference between a face
+    // that breaks the grid and one that does not.
+    const GID_A_LOWER: u16 = 1;
+    const GID_C: u16 = 2;
+    const GID_A_UPPER: u16 = 3;
+    const GID_ACUTE: u16 = 4;
+
+    /// A face advertising `ccmp` with one LigatureSubst rule behind it:
+    /// `a` + `component` -> `A`.
+    ///
+    /// Hand-assembled, with every offset written out, because the point is to
+    /// control exactly one variable — the second component's glyph id — and to
+    /// exercise the reader's real path: FeatureList -> Feature -> LookupList ->
+    /// Lookup -> LigatureSubst -> Coverage -> LigatureSet -> Ligature, plus a cmap
+    /// the walk has to read to know which glyph ids are printable at all.
+    ///
+    /// The cmap is format 12 rather than the format 4 both Plex faces carry, which
+    /// is deliberate: it means the two cmap readers in `sfnt` are each exercised by
+    /// something, format 4 by the real faces and format 12 by this.
+    fn synthetic_ccmp_ligature(component: u16) -> Vec<u8> {
+        // cmap format 12: four single-codepoint groups, sorted by codepoint as the
+        // format requires. 'A' -> 3, 'a' -> 1, 'c' -> 2, U+0301 -> 4.
+        let mut sub: Vec<u8> = Vec::new();
+        sub.extend_from_slice(&12u16.to_be_bytes()); // format
+        sub.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        sub.extend_from_slice(&(16u32 + 4 * 12).to_be_bytes()); // length
+        sub.extend_from_slice(&0u32.to_be_bytes()); // language
+        sub.extend_from_slice(&4u32.to_be_bytes()); // numGroups
+        for (cp, gid) in [
+            (0x41u32, GID_A_UPPER),
+            (0x61, GID_A_LOWER),
+            (0x63, GID_C),
+            (0x0301, GID_ACUTE),
+        ] {
+            sub.extend_from_slice(&cp.to_be_bytes());
+            sub.extend_from_slice(&cp.to_be_bytes());
+            sub.extend_from_slice(&(gid as u32).to_be_bytes());
+        }
+        let mut cmap: Vec<u8> = Vec::new();
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        cmap.extend_from_slice(&3u16.to_be_bytes()); // platformID: Windows
+        cmap.extend_from_slice(&10u16.to_be_bytes()); // encodingID: full repertoire
+        cmap.extend_from_slice(&12u32.to_be_bytes()); // subtableOffset
+        cmap.extend_from_slice(&sub);
+
+        // GSUB, laid out at fixed offsets so every Offset16 below is a constant
+        // that can be checked by eye against the spec.
+        //
+        //   0  header (10 bytes)          10 ScriptList: count 0
+        //  12  FeatureList                20 Feature
+        //  26  LookupList                 30 Lookup
+        //  38  LigatureSubst              46 Coverage
+        //  52  LigatureSet                56 Ligature
+        let mut g: Vec<u8> = Vec::new();
+        g.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); // version 1.0
+        g.extend_from_slice(&10u16.to_be_bytes()); // scriptListOffset
+        g.extend_from_slice(&12u16.to_be_bytes()); // featureListOffset
+        g.extend_from_slice(&26u16.to_be_bytes()); // lookupListOffset
+        g.extend_from_slice(&0u16.to_be_bytes()); // @10 scriptCount = 0
+        g.extend_from_slice(&1u16.to_be_bytes()); // @12 featureCount
+        g.extend_from_slice(b"ccmp");
+        g.extend_from_slice(&8u16.to_be_bytes()); // -> 12 + 8 = 20
+        g.extend_from_slice(&0u16.to_be_bytes()); // @20 featureParams
+        g.extend_from_slice(&1u16.to_be_bytes()); // lookupIndexCount
+        g.extend_from_slice(&0u16.to_be_bytes()); // lookupListIndices[0]
+        g.extend_from_slice(&1u16.to_be_bytes()); // @26 lookupCount
+        g.extend_from_slice(&4u16.to_be_bytes()); // -> 26 + 4 = 30
+        g.extend_from_slice(&4u16.to_be_bytes()); // @30 lookupType = LigatureSubst
+        g.extend_from_slice(&0u16.to_be_bytes()); // lookupFlag
+        g.extend_from_slice(&1u16.to_be_bytes()); // subTableCount
+        g.extend_from_slice(&8u16.to_be_bytes()); // -> 30 + 8 = 38
+        g.extend_from_slice(&1u16.to_be_bytes()); // @38 substFormat
+        g.extend_from_slice(&8u16.to_be_bytes()); // coverageOffset -> 38 + 8 = 46
+        g.extend_from_slice(&1u16.to_be_bytes()); // ligatureSetCount
+        g.extend_from_slice(&14u16.to_be_bytes()); // -> 38 + 14 = 52
+        g.extend_from_slice(&1u16.to_be_bytes()); // @46 coverageFormat
+        g.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
+        g.extend_from_slice(&GID_A_LOWER.to_be_bytes()); // the ligature's first glyph
+        g.extend_from_slice(&1u16.to_be_bytes()); // @52 ligatureCount
+        g.extend_from_slice(&4u16.to_be_bytes()); // -> 52 + 4 = 56
+        g.extend_from_slice(&GID_A_UPPER.to_be_bytes()); // @56 ligatureGlyph
+        g.extend_from_slice(&2u16.to_be_bytes()); // componentCount, first included
+        g.extend_from_slice(&component.to_be_bytes()); // the one variable
+
+        assemble_face(&[
+            (b"GSUB", &g),
+            (b"cmap", &cmap),
+            (b"head", &[]),
+            (b"hmtx", &[]),
+            (b"maxp", &[]),
+        ])
+    }
+
+    /// Wrap hand-built tables in an sfnt table directory.
+    fn assemble_face(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        // The directory must be sorted by tag, as the format requires, even though
+        // this reader does not depend on it.
+        let mut sorted = tables.to_vec();
+        sorted.sort_by_key(|(t, _)| **t);
+
+        let mut out = vec![0x00, 0x01, 0x00, 0x00];
+        out.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0u8; 6]); // searchRange, entrySelector, rangeShift
+        let mut at = 12 + 16 * sorted.len();
+        let mut body = Vec::new();
+        for (tag, data) in &sorted {
+            out.extend_from_slice(*tag);
+            out.extend_from_slice(&0u32.to_be_bytes()); // checkSum, unchecked
+            out.extend_from_slice(&(at as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            at += data.len();
+            body.extend_from_slice(data);
+        }
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A minimal but structurally valid TrueType face whose GSUB advertises one
+    /// feature, for [`the_ligature_guard_refuses_to_pass_a_file_it_cannot_read`].
+    ///
+    /// Hand-assembled rather than subsetted from a real font, because the point is
+    /// to control exactly one variable — the feature tag — and a subsetting tool
+    /// decides too much. The four required tables are present and empty: the guard
+    /// checks that they EXIST, which is what stops a non-font passing, and reads
+    /// none of them.
+    fn synthetic_face_advertising(tag: &[u8; 4]) -> Vec<u8> {
+        // GSUB: version 1.0, then three Offset16s. Script and Lookup lists point
+        // at an empty count; the FeatureList holds one record.
+        let mut gsub = vec![0x00, 0x01, 0x00, 0x00];
+        gsub.extend_from_slice(&10u16.to_be_bytes()); // scriptList -> empty count
+        gsub.extend_from_slice(&12u16.to_be_bytes()); // featureList
+        gsub.extend_from_slice(&10u16.to_be_bytes()); // lookupList -> empty count
+        gsub.extend_from_slice(&0u16.to_be_bytes()); // the shared empty count at 10
+        gsub.extend_from_slice(&1u16.to_be_bytes()); // featureCount, at 12
+        gsub.extend_from_slice(tag);
+        gsub.extend_from_slice(&0u16.to_be_bytes()); // featureOffset, unfollowed
+
+        assemble_face(&[
+            (b"GSUB", &gsub),
+            (b"cmap", &[]),
+            (b"head", &[]),
+            (b"hmtx", &[]),
+            (b"maxp", &[]),
+        ])
+    }
+
+    /// The disclosure caret is UI chrome, so SC 1.4.11 applies: 3:1, against what
+    /// it is actually drawn on.
+    ///
+    /// PROVEN TO FAIL at 0aa0f88: compile-only there, `CARET_W` and the caret did
+    /// not exist. The assertion is a real measurement.
+    ///
+    /// **AGAINST THE BUTTON FILL, NOT THE PANEL, and that distinction is the whole
+    /// point.** `ring.rs` already records the trap of choosing a palette role that
+    /// clears the panel background and then fails against the thing it is painted
+    /// over; a toolbar button has its own `bg_fill`, which in dark mode is lighter
+    /// than the panel and in light mode darker. Checking the easy background would
+    /// have produced a passing number about the wrong pair of colours.
+    ///
+    /// The negative half is not decoration either: `faint` and `line` are the two
+    /// palette roles a reasonable person would reach for when drawing a hairline
+    /// triangle, and both fail. If a later edit picks one, the assertion above
+    /// catches it; this half proves the assertion is capable of catching it.
+    #[test]
+    fn the_disclosure_caret_clears_three_to_one_on_the_button_it_is_drawn_on() {
+        use pl_draw::contrast::{ratio, Kind};
+        let min = Kind::Graphic.min_ratio();
+
+        // FIRST, and this half is why the test is not a tautology: the carets are
+        // actually painted, and there are three of them.
+        //
+        // Everything below this block is a statement about a palette role that
+        // predates the caret, and on its own it would pass unchanged at 0aa0f88
+        // where no caret exists — a check that cannot fail, for the fourth time in
+        // this project. So find the real polygons in the real toolbar, by their
+        // shape, and count them.
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        let win = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 840.0),
+            )),
+            ..Default::default()
+        };
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(win.clone(), |ui| {
+                app.top_bar(ui);
+            });
+            shapes = flat_shapes(&out.shapes);
+        }
+        let ink = Palette::of(ctx.theme() == egui::Theme::Dark).ink;
+        // Found by GEOMETRY ALONE — three points at the caret's own size — and
+        // asked as a shape rather than by an `Id`, because what has to be true is
+        // that a user sees a triangle.
+        //
+        // COLOUR IS DELIBERATELY NOT IN THIS FILTER, and it was. Painting the
+        // caret in `faint` then dropped the count to zero and the test reported
+        // "0 disclosure carets painted in the toolbar", which is the wrong
+        // diagnosis for a contrast defect: it sends the next reader to the
+        // toolbar when the fault is in the palette role. The count says the
+        // triangles are there, the assertion under it says what they are filled
+        // with, and only then does the ratio below have a subject.
+        let carets: Vec<&egui::epaint::PathShape> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Path(p) => {
+                    let b = egui::Rect::from_points(&p.points);
+                    (p.points.len() == 3
+                        && (b.width() - CARET_W).abs() < 0.51
+                        && (b.height() - CARET_H).abs() < 0.51)
+                        .then_some(p)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            carets.len(),
+            3,
+            "{} disclosure carets painted in the toolbar, not 3. The three menus \
+             are Save, Export map and Molecule; a button that opens a menu and does not \
+             say so is the defect `menu_with_caret` exists to fix.",
+            carets.len()
+        );
+        for c in &carets {
+            assert_eq!(
+                c.fill, ink,
+                "a caret is filled {:?}, not the palette's `ink` {ink:?}. Every ratio \
+                 asserted below is about `ink`; a caret drawn in anything else is not \
+                 covered by any of them, and `faint` and `line` are exactly the two \
+                 roles a hairline triangle invites.",
+                c.fill
+            );
+        }
+
+        for dark in [true, false] {
+            let mut v = if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            theme::apply(&mut v);
+            let p = Palette::of(dark);
+            let mode = if dark { "dark" } else { "light" };
+            // Every surface a menu button presents while it is on screen: at rest,
+            // hovered, and open. An open menu's button is drawn `active`, which is
+            // exactly when the caret matters most.
+            for (state, bg) in [
+                ("at rest", v.widgets.inactive.bg_fill),
+                ("hovered", v.widgets.hovered.bg_fill),
+                ("open", v.widgets.active.bg_fill),
+                ("the panel behind it", theme::panel_fill(dark)),
+            ] {
+                let bg = (bg.r(), bg.g(), bg.b());
+                let fg = (p.ink.r(), p.ink.g(), p.ink.b());
+                let got = ratio(fg, bg);
+                assert!(
+                    got >= min,
+                    "the caret on a {state} button in {mode} mode is {got:.2}:1, under \
+                     the {min}:1 SC 1.4.11 asks of UI chrome"
+                );
+            }
+            // And the roles that must NOT be used, so the check above is known to be
+            // able to say no.
+            //
+            // `faint` fails in BOTH themes; `line` fails in light only and clears
+            // 3:1 in dark. Stated per theme rather than as one loop, because
+            // writing it as "these two always fail" is false, and a negative
+            // control that is false about its own subject is worth less than none —
+            // it would have to be loosened the first time someone ran it, and
+            // loosening is how a demonstration turns back into an assumption.
+            let bg = theme::panel_fill(dark);
+            let bg = (bg.r(), bg.g(), bg.b());
+            let mut failing = vec![("faint", p.faint)];
+            if !dark {
+                failing.push(("line", p.line));
+            }
+            for (what, c) in failing {
+                let fg = (c.r(), c.g(), c.b());
+                let got = ratio(fg, bg);
+                assert!(
+                    got < min,
+                    "`{what}` now reaches {got:.2}:1 in {mode} mode, so this test no \
+                     longer demonstrates that the threshold can fail. Pick another \
+                     failing role rather than deleting the demonstration."
+                );
+            }
+        }
+    }
+
+    /// The vendored files are the ones NOTICE says they are.
+    ///
+    /// PROVEN TO FAIL at 0aa0f88: compile-only, and the assertion is a real
+    /// measurement of the committed bytes.
+    ///
+    /// NOTICE records a sha256 for each face so a recipient can check the shipped
+    /// binary against IBM's own release archive. A hash in a text file that
+    /// nothing compares is a hash that goes stale the first time someone
+    /// re-downloads a face and forgets — and then the provenance chain the "do not
+    /// subset" decision was made to protect is broken, silently, in the direction
+    /// of looking fine. This is the comparison.
+    ///
+    /// The lengths are here as well because they are the cheap half: a truncated
+    /// checkout gets caught by the byte count before anyone reads the hash.
+    ///
+    /// **AND IT READS NOTICE, WHICH IT DID NOT UNTIL THIS WAS REVIEWED.** The
+    /// first version compared each file against a string literal in this test, and
+    /// NOTICE claimed in its own prose that the comparison protected IT. It did
+    /// not: the hash existed twice, in two files, with nothing joining them, so a
+    /// mistyped or stale digit in NOTICE stayed green forever. That is the "a
+    /// check that cannot fail proves nothing" defect applied to the wrong axis —
+    /// it could fail if somebody swapped a font and could not fail if somebody
+    /// mistyped the record OF the font. `include_str!` is the join.
+    ///
+    /// THE LICENCE TEXTS ARE IN HERE TOO, and they are the reason the count is
+    /// five rather than two. They are not linked into the binary — they travel
+    /// beside it, copied by `tools/release.ps1` — so nothing else in the build
+    /// would notice if one were truncated, re-wrapped by an editor, or replaced
+    /// with the wrong face's licence. A licence text that has quietly become the
+    /// wrong bytes is worse than a missing one, because the package still looks
+    /// complete.
+    #[test]
+    fn the_vendored_faces_are_the_files_notice_records() {
+        // The record itself. Compiled in so that a change to either side has to
+        // be a change to both.
+        const NOTICE_TEXT: &str = include_str!("../../../NOTICE");
+
+        for (what, bytes, len, want) in [
+            (
+                "IBM Plex Mono 2.005 Regular",
+                PLEX_MONO,
+                173_052usize,
+                "7c6fbddca4b700be918f5f6183d9bd4464fa427fe435f0b480d77fe2bb8c5a43",
+            ),
+            (
+                "IBM Plex Sans 3.005 Regular",
+                PLEX_SANS,
+                200_500,
+                "975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5",
+            ),
+            // The four licence texts vendored on 2026-07-30 for the faces
+            // `default_fonts` embeds. Each is byte-identical to the copy in
+            // epaint_default_fonts-0.35.0/fonts/, which is what makes a recipient
+            // able to check it against the crate.
+            (
+                "the Hack MIT + Bitstream Vera text",
+                include_bytes!("../fonts/Hack-MIT-and-BitstreamVera.txt"),
+                3_734,
+                "47c0cccbeec7e8614548cc485588b28149e7874188df5f41b36efebcee285c87",
+            ),
+            (
+                "the Ubuntu Font Licence 1.0 text",
+                include_bytes!("../fonts/Ubuntu-UFL.txt"),
+                4_673,
+                "2f0015108d68627bd788d313f529c21ff4da2c2c42a5e1f3883acc83480f9002",
+            ),
+            (
+                "the Noto Emoji OFL text",
+                include_bytes!("../fonts/NotoEmoji-OFL.txt"),
+                4_301,
+                "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+            ),
+            (
+                "the emoji-icon-font MIT text",
+                include_bytes!("../fonts/emoji-icon-font-MIT.txt"),
+                1_069,
+                "b9d2c1d909aa149996fd4c91dcb92b2362a04431640c1d200959da94caf8cde1",
+            ),
+        ] {
+            assert_eq!(
+                bytes.len(),
+                len,
+                "{what} is {} bytes, not {len}",
+                bytes.len()
+            );
+            let got = pl_core::sha256::sha256_hex(bytes);
+            assert_eq!(
+                got, want,
+                "{what} hashes to {got}, and this test says {want}. Either the file \
+                 was replaced without updating the record — in which case the licence \
+                 record and the trademark notice may now describe something else — or \
+                 the expectation is wrong. Do not edit the expectation without \
+                 re-deriving it from the upstream source."
+            );
+            assert!(
+                NOTICE_TEXT.contains(got.as_str()),
+                "NOTICE does not contain {got}, the sha256 of {what}. NOTICE is what a \
+                 recipient checks the shipped bytes against, so a hash that is only \
+                 correct in this file is a hash nobody will ever use. Update the \
+                 entry in NOTICE."
+            );
+        }
+
+        // The one embedded face whose copyright cannot be read out of its own
+        // `name` table — IDs 0, 7 and 13 are all empty in emoji-icon-font.ttf — so
+        // NOTICE is the ONLY place its MIT notice can travel. Named explicitly
+        // because a hash check would not notice it going missing.
+        for owed in ["John Slegers", "Canonical Ltd", "Google Inc", "Bold Monday"] {
+            assert!(
+                NOTICE_TEXT.contains(owed),
+                "NOTICE no longer names {owed:?}. Every embedded face's copyright \
+                 holder has to appear here: four of the six licences require the \
+                 copyright notice in each copy, and the crate's generic OFL.txt and \
+                 UFL.txt name no holder at all."
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -5808,7 +6920,7 @@ mod tests {
     /// user's own genome files sit 160 characters deep in OneDrive.
     #[test]
     fn no_room_elides_to_nothing_and_not_to_everything() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         ctx.begin_pass(egui::RawInput::default());
         egui::Area::new(egui::Id::new("t")).show(&ctx, |ui| {
             for room in [0.0, -1.0, -400.0] {
@@ -5856,7 +6968,7 @@ mod tests {
         ] {
             // 880 x 560 is `min_inner_size`; 1280 x 840 is the default.
             for (w, h) in [(880.0f32, 560.0f32), (1280.0, 840.0)] {
-                let ctx = egui::Context::default();
+                let ctx = test_ctx();
                 let mut app = seq_app();
                 app.status = status.to_string();
                 let win = egui::RawInput {
@@ -5962,7 +7074,7 @@ mod tests {
 
     /// What `global_shortcuts` decides, with `focused` optionally holding focus.
     fn shortcuts_with(app: &App, key: egui::Key, focused: Option<&str>) -> Shortcuts {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         ctx.begin_pass(ctrl(key));
         if let Some(name) = focused {
             ctx.memory_mut(|m| m.request_focus(egui::Id::new(name)));
@@ -6034,7 +7146,7 @@ mod tests {
     /// Run one frame of the design panel, which is what refreshes `doc_at` and
     /// services an `add_request`.
     fn design_frame(app: &mut App) {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         ctx.begin_pass(egui::RawInput::default());
         app.design_panel(&ctx);
         let _ = ctx.end_pass();
@@ -6348,7 +7460,7 @@ mod tests {
     /// fail there — the resting width and the drag.
     #[test]
     fn the_split_moves_and_the_row_width_follows_it() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         paint(&mut app, &ctx, window());
 
@@ -6407,7 +7519,7 @@ mod tests {
     /// map silently vanishes with nothing on screen explaining why.
     #[test]
     fn dragging_the_split_all_the_way_leaves_the_map_a_pane_to_live_in() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         paint(&mut app, &ctx, window());
         let sep = egui::pos2(1280.0 - app.layout.panel_w.unwrap(), 400.0);
@@ -6451,7 +7563,7 @@ mod tests {
     /// exist and this click lands on base 120 instead of 180.
     #[test]
     fn a_click_on_the_last_column_of_a_row_lands_on_that_base() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         paint(&mut app, &ctx, window());
         assert_eq!(app.edit.per_row(), 60, "the premise: a full-width row");
@@ -6496,7 +7608,7 @@ mod tests {
     /// on is what the highlight rectangle and the caret are drawn from.
     #[test]
     fn a_drag_across_a_row_boundary_selects_exactly_the_bases_dragged_over() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         paint(&mut app, &ctx, window());
         let g = app.seq_grid.expect("the grid was painted");
@@ -6541,7 +7653,7 @@ mod tests {
     #[test]
     fn the_readout_and_its_button_are_not_cut_off_at_any_split() {
         for width in [App::DEF_PANEL, App::MIN_PANEL] {
-            let ctx = egui::Context::default();
+            let ctx = test_ctx();
             let mut app = seq_app();
             app.layout.panel_w = Some(width);
             // Caret 0 on a circle: the longest form the sentence takes.
@@ -6754,7 +7866,7 @@ mod tests {
     /// back.
     #[test]
     fn a_reflow_keeps_the_top_of_the_viewport_on_the_same_base() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         paint(&mut app, &ctx, window());
         assert_eq!(app.edit.per_row(), 60);
@@ -6828,7 +7940,7 @@ mod tests {
     /// per keystroke.
     #[test]
     fn a_reflow_keeps_the_caret_at_the_same_height_in_the_viewport() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         paint(&mut app, &ctx, window());
         let g = app.seq_grid.expect("painted");
@@ -6922,7 +8034,7 @@ mod tests {
     /// separator cell to `col_x` alone fails the caret assertion at column 30.
     #[test]
     fn the_caret_and_the_selection_land_on_the_glyphs_that_were_painted() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         let mut out = paint_out(&mut app, &ctx, window());
         let per_row = app.edit.per_row();
@@ -7069,7 +8181,7 @@ mod tests {
     /// above it, so it is also the thing a user checks a feature edge against.
     #[test]
     fn the_hover_line_names_the_cell_the_pointer_is_in_at_both_ends_of_a_row() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         paint(&mut app, &ctx, window());
         let g = app.seq_grid.expect("painted");
@@ -7122,7 +8234,7 @@ mod tests {
     /// the pointer deep inside the map pane.
     #[test]
     fn the_hover_line_stops_naming_a_base_once_the_pointer_leaves() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         paint(&mut app, &ctx, window());
         let g = app.seq_grid.expect("painted");
@@ -7166,7 +8278,7 @@ mod tests {
     /// which is why it was not seen.
     #[test]
     fn one_keystroke_does_not_change_the_row_height_while_the_digest_reruns() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = seq_app();
         digested(&mut app);
         paint(&mut app, &ctx, window());
@@ -7239,7 +8351,7 @@ mod tests {
                  sitting 60 pt above it taking width off the map",
             ),
         ] {
-            let ctx = egui::Context::default();
+            let ctx = test_ctx();
             let mut app = seq_app();
             app.layout.panel_w = Some(w);
             paint(&mut app, &ctx, window());
@@ -7256,7 +8368,7 @@ mod tests {
     #[test]
     fn a_window_too_narrow_for_both_floors_keeps_the_panel_and_shrinks_the_map() {
         for (w, h) in [(660.0f32, 400.0f32), (584.0, 341.0), (404.0, 131.0)] {
-            let ctx = egui::Context::default();
+            let ctx = test_ctx();
             let mut app = seq_app();
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -7390,7 +8502,7 @@ mod tests {
         w: f32,
         h: f32,
     ) -> (Vec<egui::Shape>, egui::Rect) {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
         let input = egui::RawInput {
             screen_rect: Some(rect),
@@ -7544,7 +8656,7 @@ mod tests {
             // segment normal from a zero-length segment and gets infinities. So a
             // test that walks `Shape` vertices passes with the defect present —
             // this one was written that way first and did.
-            let ctx = egui::Context::default();
+            let ctx = test_ctx();
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
             let input = egui::RawInput {
                 screen_rect: Some(rect),
@@ -7624,7 +8736,7 @@ mod tests {
     /// unsaved draft, so map ink over its buttons is worse than cosmetic.
     #[test]
     fn the_map_is_drawn_below_whatever_shares_its_panel() {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0, 800.0));
         let input = egui::RawInput {
             screen_rect: Some(rect),
@@ -7697,7 +8809,36 @@ mod tests {
     fn every_enzyme_label_is_whole_inside_the_pane_and_points_at_its_own_tick() {
         let mol = pkov();
         let cutters = pkov_cutters();
-        for (w, h) in [(706.0f32, 756.0f32), (880.0, 620.0), (560.0, 900.0)] {
+        // Four pane sizes, widened from three when the font swap made this the
+        // acceptance test for a new face.
+        //
+        // 706x756 is the map pane at the shipped default split on the user's own
+        // window and is the size the original 23/23-clipped measurement was taken
+        // at. 880x620 and 560x900 are the extremes of the splitter. 400x420 is
+        // added: `MIN_PANEL` is 300, the radius has a 40 pt floor, and the
+        // regimes in `ring::label_room` that are face-INDEPENDENT — the 30 % cap
+        // and the row term — only bind on a small pane. A face change moves
+        // `widest` and not the cap, so a small pane is where the two can come
+        // apart, and none was tested.
+        //
+        // A FIFTH PANE, 340x900, WAS TRIED AND TAKEN BACK OUT, and the reason is
+        // worth keeping because the obvious reading of it is wrong. It goes red
+        // on assertion 1 with `"Hin..."`. That is not this swap: measured at
+        // 0aa0f88 on the same molecule the same pane gives `"Hi..."` — the
+        // ellipsis is `map::shortened_to`'s designed last resort at a width where
+        // the reserve simply cannot hold a name, and IBM Plex Mono keeps one more
+        // character there than Hack did. Nor can the rest of this test mean
+        // anything at that width: all 22 labels come out as bare enzyme names, so
+        // "points at its own tick" has no coordinate to point with. The pane is
+        // outside the regime this test is about, so it is recorded here rather
+        // than asserted about, and `a_shortened_label_never_shows_half_a_coordinate`
+        // remains what covers the shortening itself.
+        for (w, h) in [
+            (706.0f32, 756.0f32),
+            (880.0, 620.0),
+            (560.0, 900.0),
+            (400.0, 420.0),
+        ] {
             let (shapes, pane) = paint_map(&mol, "pKoV with His decR", &cutters, w, h);
             let (centre, r) = backbone(&shapes);
             let labels = texts_in(&shapes, 10.0, egui::FontFamily::Monospace);
@@ -7759,18 +8900,52 @@ mod tests {
             }
 
             // 4. Every leader ends at its own tick and nobody else's.
+            //
+            // Only for labels that still carry a coordinate. On a pane small
+            // enough that `ring::label_room`'s 30 % cap binds, shortening drops the
+            // WHOLE coordinate rather than cutting it — which is correct, and is
+            // what `a_shortened_label_never_shows_half_a_coordinate` exists to
+            // require — leaving `"AflII"` with nothing to match a tick against.
+            // Discovered by adding the 400x420 pane above: this block panicked
+            // with `no coordinate in "AflII"`, which was this assertion meeting a
+            // regime it was never written for, not a defect in the map.
+            //
+            // The skip is guarded so it cannot quietly swallow the cases that
+            // matter. At the three panes wide enough to print coordinates it must
+            // cover EVERY label; at 400x420 a label may drop its coordinate, but
+            // only WHOLE — a label with no parseable coordinate must carry no
+            // digit at all, because a digit left behind is a partial coordinate
+            // and a partial coordinate is a wrong one. Without that second half
+            // "no coordinate" would become a way for this assertion to stop
+            // asserting.
+            //
+            // Do NOT restore a blanket `checked > 0` here. It held at 400x420 only
+            // by a single label — `SpeI  562`, which fits in IBM Plex Mono's
+            // 0.600 em and did not in Hack's 0.602051, so at 0aa0f88 the count was
+            // zero — and an assertion that survives on one label's worth of
+            // rounding is an assertion about the face, not about the map.
             let lines = hairlines(&shapes);
+            let mut checked = 0usize;
             for (text, rect) in &labels {
                 // The FIRST coordinate in the label, which is the tick's own
                 // base: `Site::anchor` is `positions.first()`, and a folded label
                 // lists its members in coordinate order.
-                let coord: u64 = text
+                let Some(coord) = text
                     .split(" / ")
                     .next()
                     .and_then(|first| first.rsplit("  ").next())
                     .map(|c| c.replace(',', ""))
-                    .and_then(|c| c.parse().ok())
-                    .unwrap_or_else(|| panic!("no coordinate in {text:?}"));
+                    .and_then(|c| c.parse::<u64>().ok())
+                else {
+                    assert!(
+                        !text.chars().any(|c| c.is_ascii_digit()),
+                        "{w}x{h}: {text:?} has no coordinate this can read but does carry a \
+                         digit, so the coordinate was cut rather than dropped -- which is a \
+                         wrong coordinate on a plasmid map"
+                    );
+                    continue;
+                };
+                checked += 1;
                 // The leader is the hairline ending nearest this label.
                 let anchor = rect.center();
                 let leader = lines
@@ -7806,6 +8981,19 @@ mod tests {
                     off < 0.02,
                     "{w}x{h}: {text:?}'s leader starts at {far:?}, which is not on the ray \
                      to base {coord} from {centre:?}"
+                );
+            }
+            // The wide panes must print a coordinate on EVERY label. If a label
+            // ever loses one here, the `continue` above turns from a narrow-pane
+            // allowance into a hole, and this is what notices.
+            if w >= 560.0 {
+                assert_eq!(
+                    checked,
+                    labels.len(),
+                    "{w}x{h}: {} of {} labels lost their coordinate on a pane wide \
+                     enough to print one",
+                    labels.len() - checked,
+                    labels.len()
                 );
             }
         }
@@ -8009,7 +9197,7 @@ mod tests {
     /// about the fallback was correct and `d.title` was the wrong thing to hand
     /// it.
     fn caption_of_map(d: Document) -> String {
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut app = App::blank();
         app.adopt(d);
         let mut shown = String::new();
@@ -8044,7 +9232,7 @@ mod tests {
 
         // The screen's metric, taken from inside a frame because that is the
         // only place egui will lay out a galley.
-        let ctx = egui::Context::default();
+        let ctx = test_ctx();
         let mut screen_w: Vec<f64> = Vec::new();
         let _ = ctx.run_ui(window(), |ui| {
             screen_w = texts

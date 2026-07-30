@@ -371,8 +371,49 @@ pub fn show(
 
 /// How close a label may come to the edge of the panel.
 const LABEL_PAD: f32 = 6.0;
-/// Height of one line in a label column.
-const LINE_H: f32 = 13.0;
+/// Air between two labels stacked in the same column.
+///
+/// The gap Hack happened to leave under the pinned `LINE_H = 13.0` this replaces
+/// was 1.36 pt. This is that number made deliberate, so the clearance is a
+/// property of the layout instead of a leftover of one face's line box.
+const LINE_GAP: f32 = 1.5;
+
+/// The size the ruler's numbers are drawn at, on both the circular and the
+/// linear map, in one place because it is passed to `pl_draw` as a clearance and
+/// drawn as text and the two must be the same number.
+const RULER_PT: f32 = 9.0;
+
+/// The vertical pitch of a label column: the label font's own drawn height,
+/// plus [`LINE_GAP`].
+///
+/// **THIS WAS `const LINE_H: f32 = 13.0` AND THE FONT SWAP IS WHAT PROVED IT
+/// COULD NOT STAY ONE.** `place_column` packs labels by this height and treats
+/// the positions it returns as centres, so tightly stacked labels end up exactly
+/// this far apart; `texts_in` then measures each drawn label as
+/// `Rect::from_min_size(t.pos, t.galley.size())`, the face's REAL row height.
+/// The two numbers were 13.0 and 11.64 under Hack — 1.36 pt of accidental
+/// clearance — and `epaint` takes a family's line box from the FIRST face in the
+/// chain, so installing IBM Plex Mono made the drawn height 1.300 em, which at
+/// the 10 pt label size is exactly 13.00. Zero gap, and `Rect::intersects`
+/// counts touching as intersecting, so
+/// `every_enzyme_label_is_whole_inside_the_pane_and_points_at_its_own_tick`
+/// went red on its no-two-labels-overlap assertion. A pinned pitch beside a
+/// measured height is a defect waiting for whoever changes the face next.
+///
+/// Note what is NOT the fix: loosening that assertion to `expand(-0.5)`, which
+/// would have made the suite green and the labels touching.
+///
+/// The advance band cannot see any of this. It models the painter horizontally,
+/// and a line box is vertical.
+fn line_h(p: &egui::Painter) -> f32 {
+    // Through the same `layout_no_wrap` the labels are measured and drawn with,
+    // rather than `row_height`, so the packer's pitch and the drawn rect come
+    // from one measurement and cannot disagree about the face.
+    p.layout_no_wrap("Ag".to_owned(), label_font(), Color32::WHITE)
+        .size()
+        .y
+        + LINE_GAP
+}
 /// From the outermost feature lane to where a leader starts.
 const TICK_GAP: f32 = 6.0;
 /// From where a leader starts to the label's own anchor.
@@ -444,7 +485,8 @@ const MIN_FEATURE_DEGREES: f32 = 1.2;
 /// This is the number `LABEL_RESERVE = 132.0` left out. The reserve was a flat
 /// constant and the leader spent 54 pt of it before a lane was charged, so on
 /// the user's own pKoV — two feature lanes — a label had 65 pt, which is 10.8
-/// characters at this font's 6 pt advance. `EcoRI 7,530` is 12 and was drawn
+/// characters at IBM Plex Mono's 6.000 pt advance (this was written against
+/// Hack's 6.021 and rounded to "6 pt"; it is now exact). `EcoRI 7,530` is 12 and was drawn
 /// `coRI 7,530`; `HindIII 2,059` came out `HindIII 2,`. A cut coordinate is a
 /// *wrong* coordinate, and it is not rare: of five ordinary plasmids measured
 /// at the shipped pane size, four clipped every label they drew.
@@ -609,6 +651,10 @@ fn draw_circular(
             .size()
             .x
     };
+    // Measured once, beside the width that is measured the same way, because the
+    // reserve, the column pitch and the leader's attach point must all be talking
+    // about the same face. See `line_h`.
+    let line_h = line_h(p);
     // A label's angle in `pl_draw`'s convention: zero at twelve o'clock, `x`
     // from the sine. egui's map runs `-PI/2 + frac * TAU` off the cosine, which
     // is the same circle a quarter turn back, so adding it here means every
@@ -653,7 +699,7 @@ fn draw_circular(
         // fraction the wrong side and shorten a name that fits.
         let reserve =
             ring::reserve_for(widest as f64, outward as f64, pane_min as f64).reserve as f64 + 1.0;
-        let vertical = (outward + LINE_H + LABEL_PAD * 2.0) as f64;
+        let vertical = (outward + line_h + LABEL_PAD * 2.0) as f64;
         ring::radius(rect.width() as f64, rect.height() as f64, reserve, vertical) as f32
     };
 
@@ -681,7 +727,7 @@ fn draw_circular(
         row_gap: 10.0,
         left: (rect.left() + LABEL_PAD) as f64,
         right: (rect.right() - LABEL_PAD) as f64,
-        top: (rect.top() + LABEL_PAD + LINE_H) as f64,
+        top: (rect.top() + LABEL_PAD + line_h) as f64,
         bottom: (rect.bottom() - LABEL_PAD) as f64,
     };
     // What a label may actually use, read off the geometry it is placed with
@@ -790,7 +836,7 @@ fn draw_circular(
         .map(|((_, pos), text)| RingLabel {
             angle: ring_angle(*pos),
             width: text.as_deref().map_or(0.0, |t| measure(t) as f64),
-            height: LINE_H as f64,
+            height: line_h as f64,
             weight: 1.0,
         })
         .collect();
@@ -857,6 +903,20 @@ fn draw_circular(
     debug_assert!(told.closes(), "{told:?} does not account for every cutter");
     let bp = format!("{} bp", crate::doc::fmt_int(mol.span()));
     let width_of = |s: &str, f: FontId| p.layout_no_wrap(s.to_string(), f, pal.ink).size().x;
+    // The ruler number's DRAWN height, which is not its font size.
+    //
+    // `ring::centre_room` and `ring::inside_of` both use `text_h * 0.5` as a
+    // half-height, and both were handed the literal `9.0` — the point size. Under
+    // Hack the real drawn height was 10.48 pt, so the clearance was already 0.74 pt
+    // short; IBM Plex Mono's line box is 1.300 em against Hack's 1.164, making it
+    // 11.70 pt and the shortfall 1.35 pt. That number is spent at the 40 pt radius
+    // floor, where `nothing_written_in_the_middle_leaves_the_ring` and
+    // `a_ruler_number_is_clear_of_every_feature_band` are exercised, and it is the
+    // margin between a legible scale and `3,247` sitting on a feature band.
+    let ruler_h = p
+        .layout_no_wrap("0".to_owned(), FontId::monospace(RULER_PT), pal.ink)
+        .size()
+        .y;
 
     // Everything written in the middle is cut to the ring BEFORE the ruler is
     // placed, and never the other way round.
@@ -867,12 +927,12 @@ fn draw_circular(
     // of proportional 15, and no radius on this pane clears that. The caption is
     // the line with a hover behind it and the ruler is not, so the caption is the
     // one that gives way. See `ring::centre_room`.
-    let widest_number = width_of(&crate::doc::fmt_int(span), FontId::monospace(9.0));
+    let widest_number = width_of(&crate::doc::fmt_int(span), FontId::monospace(RULER_PT));
     let centre_room = ring::centre_room(
         r as f64,
         band_w as f64,
         lane_step as f64,
-        9.0,
+        ruler_h as f64,
         widest_number as f64,
     ) as f32;
     let cut_to = |text: &str, font: FontId| -> Option<String> {
@@ -931,7 +991,7 @@ fn draw_circular(
         band_w as f64,
         lane_step as f64,
         rev_lanes,
-        9.0,
+        ruler_h as f64,
         ring::keep_clear_for(centre_w as f64, widest_number as f64),
     );
 
@@ -975,7 +1035,7 @@ fn draw_circular(
                 polar(center, inside.ruler_text_r as f32, a),
                 Align2::CENTER_CENTER,
                 crate::doc::fmt_int(pos),
-                FontId::monospace(9.0),
+                FontId::monospace(RULER_PT),
                 pal.muted,
             );
         } else {
@@ -1156,8 +1216,8 @@ fn draw_circular(
         let stop = match pl.side {
             Side::Right => Pos2::new(at.x - 4.0, at.y),
             Side::Left => Pos2::new(at.x + 4.0, at.y),
-            Side::Top => Pos2::new(at.x, at.y + LINE_H * 0.5),
-            Side::Bottom => Pos2::new(at.x, at.y - LINE_H * 0.5),
+            Side::Top => Pos2::new(at.x, at.y + line_h * 0.5),
+            Side::Bottom => Pos2::new(at.x, at.y - line_h * 0.5),
         };
         p.add(Shape::line(
             vec![
@@ -1350,7 +1410,7 @@ fn draw_linear(
                 Pos2::new(x, y + 18.0),
                 Align2::CENTER_CENTER,
                 crate::doc::fmt_int(pos),
-                FontId::monospace(9.0),
+                FontId::monospace(RULER_PT),
                 pal.muted,
             );
         }
@@ -1557,7 +1617,7 @@ mod tests {
         );
 
         for (w, h) in [(706.0f32, 756.0f32), (880.0, 560.0), (1296.0, 879.0)] {
-            let ctx = egui::Context::default();
+            let ctx = crate::test_ctx();
             let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(w, h));
             let input = egui::RawInput {
                 screen_rect: Some(rect),
@@ -1903,7 +1963,7 @@ mod tests {
 
     /// One frame of the circular map, and the shapes it painted.
     fn paint(mol: &Molecule, w: f32, h: f32) -> (Vec<Shape>, Rect) {
-        let ctx = egui::Context::default();
+        let ctx = crate::test_ctx();
         let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(w, h));
         let input = egui::RawInput {
             screen_rect: Some(rect),
@@ -2450,7 +2510,7 @@ mod tests {
     fn emphasis_lengthens_the_head_and_shortens_the_body_by_the_same_amount() {
         let span = 2_686u64;
         let mol = forward(&[(400, 1_400)]);
-        let ctx = egui::Context::default();
+        let ctx = crate::test_ctx();
         let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(706.0, 756.0));
         let input = egui::RawInput {
             screen_rect: Some(rect),
@@ -2588,7 +2648,7 @@ mod tests {
         );
 
         for emphasis in [None, Some(0), Some(1)] {
-            let ctx = egui::Context::default();
+            let ctx = crate::test_ctx();
             let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(706.0, 756.0));
             let input = egui::RawInput {
                 screen_rect: Some(rect),

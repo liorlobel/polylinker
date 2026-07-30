@@ -40,8 +40,9 @@ use crate::doc::{fmt_int, Document};
 ///
 /// Sixty is the GenBank ORIGIN convention and what people read sequence in. It
 /// is a *maximum* rather than a constant because it does not fit: sixty
-/// monospace cells at 11.5 pt plus the coordinate gutter is about 476 px, and
-/// the side panel this view lives in is 380. Read-only that overflow merely
+/// monospace cells at 11.5 pt plus this molecule's coordinate gutter is 455.0 pt
+/// -- 60 x 6.900 for the cells, 41.0 for the gutter, in IBM Plex Mono at 0.600 em
+/// -- and the side panel this view lives in is 380. Read-only that overflow merely
 /// clipped the right-hand bases and the ruler, which is how it survived. With a
 /// caret it is worse than cosmetic — you cannot click a base you cannot see,
 /// and a caret in column 55 gets painted outside the panel — so the row width
@@ -62,13 +63,19 @@ pub fn fit_per_row(bases_width: f32, advance: f32) -> u64 {
 /// The coordinate gutter on the left of every row: the row's first base.
 ///
 /// Measured from the molecule, not fixed at the worst case in the corpus. A
-/// constant wide enough for "4,641,652" spends 67.6 pt on every plasmid that
-/// will never print more than "8,117"'s 41.1, and those 26.5 pt are not free:
+/// constant wide enough for "4,641,652" spends 67.4 pt on every plasmid that
+/// will never print more than "8,117"'s 41.0, and those 26.4 pt are not free:
 /// they come straight out of the base cells, so a constant gutter pushes the
-/// panel width that first reaches a 60-base row up by the same amount — 486.5 pt
-/// to 513.0 — and that width is what the map pane gets to keep. Both measured by
-/// bisecting the painter in
-/// `the_advance_band_that_keeps_every_per_row_expectation`.
+/// panel width that first reaches a 60-base row up by the same amount — 485.2 pt
+/// to 511.6 — and that width is what the map pane gets to keep. The first of
+/// those two is measured by bisecting the painter in
+/// `the_advance_band_that_keeps_every_per_row_expectation`; the second follows
+/// from it by the 26.4 pt difference.
+///
+/// Every number in this paragraph is a function of the monospace advance and all
+/// of them moved when the face did — Hack's 0.602051 em gave 67.6, 41.1, 26.5 and
+/// 486.5. They are recorded to one decimal because that is the resolution the
+/// bisection has (0.25 pt), not because they are exact.
 /// See [`App::DEF_PANEL`](crate::App).
 pub fn gutter_w(n: u64, gutter_advance: f32) -> f32 {
     // Digits plus the thousands separators `fmt_int` inserts, because the
@@ -84,7 +91,10 @@ pub fn gutter_w(n: u64, gutter_advance: f32) -> f32 {
 /// The row's last coordinate, on the right, when there is width to spare.
 ///
 /// Nine monospace cells holds "4,641,652" — the largest coordinate in the
-/// benchmark corpus — plus a little air.
+/// benchmark corpus — plus a little air: 70.1 pt at IBM Plex Mono's 6.900 pt
+/// advance, which is when the right-hand coordinate first appears on an 8,117 bp
+/// molecule at a panel width of about 555 pt. Not asserted for a real face — the
+/// unit tests pass a literal advance — so a face change moves this silently.
 fn right_gutter_w(advance: f32) -> f32 {
     9.0 * advance + 8.0
 }

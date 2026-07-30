@@ -109,6 +109,58 @@ if (Test-Path $pyBuilt) {
 
 if (-not $artifacts) { throw 'the build produced nothing to ship' }
 
+# The notices have to travel with the binaries, and until 2026-07-30 they did
+# not: dist/ held four executables and a checksum file.
+#
+# This is an obligation, not a courtesy. polylinker.exe embeds six font files
+# under four licences, and three of those require their text to accompany every
+# copy: SIL OFL 1.1 clause 2 ("provided that each copy contains the above
+# copyright notice and this license"), the Bitstream Vera licence reached through
+# Hack, and MIT for emoji-icon-font. Shipping the exe by itself put the project
+# out of step with licences it had correctly recorded in the repository and then
+# left behind at the packaging step. The failure mode is that the record looks
+# complete from inside the source tree, which is the only place anyone looked.
+#
+# The IBM Plex faces are what forced the issue rather than what caused it: they
+# took the count of unaccompanied OFL faces from one to three.
+#
+# ALL SIX FACES, NOT JUST THE TWO THIS REPOSITORY CHOSE. The first version of
+# this block copied IBMPlex-OFL.txt alone and left the four faces that arrive
+# through epaint_default_fonts with no licence text at all -- including the two
+# the paragraph above names by licence. Their texts are now vendored under
+# bins/pl-gui/fonts/ and hashed in NOTICE, rather than read out of a Cargo
+# registry: a release has to be cuttable from a checkout, and a populated
+# %USERPROFILE%\.cargo is not part of one.
+#
+# Noto Emoji gets its OWN copy of the OFL rather than sharing the Plex one. OFL
+# clause 2 asks for "the above copyright notice and this license", and the
+# copyright above the Plex text is IBM's, with the reserved name "Plex".
+$notices = @(
+    @{ From = 'NOTICE';        To = 'NOTICE.txt' }
+    @{ From = 'LICENSE';       To = 'LICENSE.txt' }
+    @{ From = 'TRADEMARKS.md'; To = 'TRADEMARKS.md' }
+    @{ From = 'bins/pl-gui/fonts/IBMPlex-OFL.txt'
+       To   = 'licences/IBMPlex-OFL.txt' }                 # Plex Mono + Plex Sans
+    @{ From = 'bins/pl-gui/fonts/Hack-MIT-and-BitstreamVera.txt'
+       To   = 'licences/Hack-MIT-and-BitstreamVera.txt' }  # both notices, one file
+    @{ From = 'bins/pl-gui/fonts/Ubuntu-UFL.txt'
+       To   = 'licences/Ubuntu-UFL.txt' }                  # Ubuntu Light
+    @{ From = 'bins/pl-gui/fonts/NotoEmoji-OFL.txt'
+       To   = 'licences/NotoEmoji-OFL.txt' }               # NOT the Plex OFL
+    @{ From = 'bins/pl-gui/fonts/emoji-icon-font-MIT.txt'
+       To   = 'licences/emoji-icon-font-MIT.txt' }         # emoji-icon-font
+)
+foreach ($n in $notices) {
+    if (-not (Test-Path $n.From)) {
+        throw "the notice $($n.From) is missing; refusing to ship a binary without it"
+    }
+    $dest = Join-Path $Out $n.To
+    $parent = Split-Path $dest -Parent
+    if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Force $parent | Out-Null }
+    Copy-Item $n.From $dest -Force
+}
+Say "  notices: $($notices.Count) file(s)"
+
 # Signing. Absent credentials this reports and continues; it never silently
 # produces something that looks signed.
 $signed = @()
