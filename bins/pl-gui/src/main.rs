@@ -11,6 +11,7 @@
 mod annot;
 mod design;
 mod doc;
+mod featedit;
 mod library;
 mod map;
 mod recover;
@@ -311,6 +312,14 @@ pub(crate) fn test_ctx() -> egui::Context {
 pub const MOLECULE_MENU: &str = "Molecule";
 /// The item in [`MOLECULE_MENU`] that renumbers the plasmid.
 pub const SET_ORIGIN_ITEM: &str = "Set origin at selected feature";
+/// The item in [`MOLECULE_MENU`] that opens the feature editor on nothing.
+///
+/// A const for the same reason as the two above: the tests name it, and a
+/// literal in the menu and another in a test drift apart the first time the
+/// wording is improved.
+pub const ADD_FEATURE_ITEM: &str = "Add feature…";
+/// The item in [`MOLECULE_MENU`] that opens the feature editor on the selection.
+pub const EDIT_FEATURE_ITEM: &str = "Edit selected feature…";
 
 /// The path a user has to walk to set the origin, as prose points at it.
 pub fn set_origin_path() -> String {
@@ -678,6 +687,26 @@ struct App {
     /// reference to it -- see `design.rs`.
     design: Option<design::Panel>,
 
+    /// The Feature editor, if it is open.
+    ///
+    /// Holds a CLONE of the feature and the index it was opened on, never a
+    /// borrow: `RemoveFeature` shifts every later index and `remap_annotations`
+    /// drops a feature whose bases were all deleted, so a live index is a
+    /// different feature after any other edit. `featedit::Panel::stale_reason`
+    /// is what refuses to write through a moved one.
+    ///
+    /// Only one of this and [`App::design`] may be open at a time. Both are
+    /// non-modal `egui::Window`s and both suppress the sequence keys, so two of
+    /// them up together means each is guarding the keyboard for a reason the
+    /// other does not know about.
+    feature_edit: Option<featedit::Panel>,
+
+    /// How many times the feature editor has been opened this session.
+    ///
+    /// Salts the editor body's `ScrollArea` id so each open starts at the top;
+    /// see `featedit::Panel::generation`.
+    feature_editor_opens: u64,
+
     /// What this window remembers between runs. Read once in [`App::new`],
     /// written once in `on_exit`.
     layout: settings::Layout,
@@ -1010,6 +1039,8 @@ impl App {
             last_autosave: None,
             dna_owner: None,
             design: None,
+            feature_edit: None,
+            feature_editor_opens: 0,
             layout: settings::Layout::default(),
             doc_generation: 0,
             annot: annot::AnnotIndex::default(),
@@ -1143,6 +1174,13 @@ impl App {
         // says which file it came from once the title bar has changed, so it is
         // closed rather than relabelled.
         self.close_design("the design panel was closed: it was designed against the previous file");
+        // And for the same reason: the editor holds an INDEX into the previous
+        // file's feature list plus a clone of the feature at it. Left open
+        // across a document swap, one press of Save writes file A's feature over
+        // whatever happens to sit at that index in file B.
+        self.close_feature_editor(
+            "the feature editor was closed: it was opened on the previous file",
+        );
         self.last_autosave = Some(std::time::Instant::now());
     }
 
@@ -1156,6 +1194,153 @@ impl App {
             if p.result.is_some() {
                 self.notice = Some(why.to_string());
             }
+        }
+    }
+
+    /// Drop the feature editor, saying so only if there was unsaved work in it.
+    ///
+    /// The same contract as [`App::close_design`], and silence is right for the
+    /// untouched case: a panel opened and closed without a keystroke has nothing
+    /// to mourn, and a notice for it would train the user to ignore notices.
+    fn close_feature_editor(&mut self, why: &str) {
+        if let Some(p) = self.feature_edit.take() {
+            if p.dirty() {
+                self.notice = Some(why.to_string());
+            }
+        }
+    }
+
+    /// The sequence selection as a segment: 1-based inclusive, wrap bit read
+    /// rather than inferred.
+    ///
+    /// Two conversions, each of which has already been got wrong once in this
+    /// file. **Carets sit BETWEEN bases and a segment is 1-based inclusive**, so
+    /// selecting the first ten bases is `anchor 0, head 10` and the segment is
+    /// `1..10`; `select_feature_under` does the inverse with a documented
+    /// `saturating_sub`. Off by one here and every feature drawn from a
+    /// selection is one base out at one end, permanently, with nothing anywhere
+    /// to contradict it — the feature is legal, it is just not where the user
+    /// drew it.
+    ///
+    /// And `through_origin` is READ, never inferred from the ordering: a pair of
+    /// carets on a circle names two arcs, and the app already ships a "take the
+    /// other arc" button rather than guess. This is the same expression
+    /// `design::Panel::open` uses, for the same reason.
+    fn selection_segment(&self) -> Option<pl_core::Segment> {
+        let d = self.document.as_ref()?;
+        let mol = d.molecule();
+        let n = mol.len();
+        let circular = mol.topology.is_circular();
+        let sel = self.edit.sel?.canonical(n, circular);
+        if sel.is_empty(n) {
+            return None;
+        }
+        let (a, b) = if sel.through_origin {
+            (sel.hi() + 1, sel.lo())
+        } else {
+            (sel.lo() + 1, sel.hi())
+        };
+        Some(pl_core::Segment::new(a, b))
+    }
+
+    /// Open the feature editor: `None` adds, `Some(i)` edits feature `i`.
+    ///
+    /// The commit comes first for the same reason `open_design`'s does: between
+    /// keystrokes the log is one run behind the screen, and a feature whose
+    /// coordinates were read from the committed molecule while three more typed
+    /// bases are visible is a feature in the wrong place.
+    fn open_feature_editor(&mut self, index: Option<usize>) {
+        self.settle();
+        let Some(d) = self.document.as_ref() else {
+            return;
+        };
+        let mol = d.molecule();
+        let base = match index {
+            Some(i) => match mol.features.get(i) {
+                Some(f) => f.clone(),
+                None => {
+                    self.notice = Some(format!("There is no feature {i}.\nNothing was changed."));
+                    return;
+                }
+            },
+            None => {
+                let mut f = pl_core::Feature::new("", "misc_feature");
+                // Seeded from the selection when there is one, and from base 1
+                // otherwise. Never from nothing: a feature with no segments is
+                // `Invalid::FeatureWithoutSegments`, which the gate always
+                // refuses, so an empty table would open a form that cannot be
+                // saved until the user works out why.
+                f.segments.push(
+                    self.selection_segment()
+                        .unwrap_or(pl_core::Segment::new(1, 1)),
+                );
+                f
+            }
+        };
+        let (span, circular, at) = (
+            mol.annotation_span(),
+            mol.topology.is_circular(),
+            d.log.cursor(),
+        );
+        match featedit::Panel::open(index, base, span, circular, at) {
+            Ok(mut p) => {
+                // Only one non-modal window may guard the keyboard.
+                self.close_design(
+                    "the design panel was closed: the feature editor took the keyboard",
+                );
+                // A new id for the body's ScrollArea, so this open starts at the
+                // top. See `featedit::Panel::generation`.
+                self.feature_editor_opens = self.feature_editor_opens.wrapping_add(1);
+                p.generation = self.feature_editor_opens;
+                self.feature_edit = Some(p);
+                // THE FEATURE BEING EDITED IS THE HIGHLIGHTED ONE, from every
+                // entry point, because the alternative was reachable from two of
+                // them: egui delivers `clicked()` on the first press of a
+                // double-click, and both the Features row and the map arc TOGGLE
+                // on a click, so double-clicking an already-selected feature
+                // deselected it. The editor then opened on a feature the list was
+                // no longer highlighting, the map arc lost its highlight, and
+                // Edit…/Duplicate/Remove went disabled behind the window —
+                // leaving the window title "Feature 4" as the only clue which
+                // feature was open. Set HERE and not at each call site, so a
+                // future entry point cannot forget it.
+                if index.is_some() {
+                    self.selected = index;
+                }
+            }
+            Err(e) => self.notice = Some(e),
+        }
+    }
+
+    /// Remove feature `i`, and put its NAME in the status line.
+    ///
+    /// `OpKind::RemoveFeature::describe()` reads "remove feature 3" — an index
+    /// and no name, so a deletion cannot be read back a week later. Fixing that
+    /// means putting the name into the op, which changes `OpKind::content`,
+    /// which changes every `OpId` ever derived: a provenance break for one word
+    /// of prose. So the History tab keeps the hash-stable sentence and the line
+    /// the user actually reads gets the name, exactly as the primer path already
+    /// overwrites the generic status with its own.
+    ///
+    /// `hot` is cleared alongside `selected`, which the old call site did not do.
+    /// `mol.features.remove(index)` shifts every later index, so a pointer
+    /// resting on the removed row leaves `hot` naming a different feature — drawn
+    /// highlighted on the map, under someone else's name.
+    fn remove_feature(&mut self, i: usize) {
+        let name = self
+            .document
+            .as_ref()
+            .and_then(|d| d.molecule().features.get(i))
+            .map(|f| f.name.clone())
+            .unwrap_or_default();
+        if self.edit(pl_core::OpKind::RemoveFeature { index: i }) {
+            self.status = if name.is_empty() {
+                format!("removed feature {i} — Ctrl+Z to undo")
+            } else {
+                format!("removed \"{name}\" — Ctrl+Z to undo")
+            };
+            self.selected = None;
+            self.hot = None;
         }
     }
 
@@ -1219,6 +1404,9 @@ impl App {
                 // opens next.
                 self.close_design(
                     "the design panel was closed: the document it described is no longer open",
+                );
+                self.close_feature_editor(
+                    "the feature editor was closed: the document it described is no longer open",
                 );
             }
         }
@@ -1662,6 +1850,7 @@ impl eframe::App for App {
         self.central(ui);
         self.paste_dialog(&ctx);
         self.design_panel(&ctx);
+        self.feature_editor(&ctx);
     }
 }
 
@@ -1742,7 +1931,14 @@ impl App {
     fn global_shortcuts(&self, ctx: &egui::Context) -> Shortcuts {
         let asking = self.edit.pending_paste.is_some();
         let typing = ctx.memory(|m| m.focused()).is_some();
-        let designing = self.design.is_some();
+        // The feature editor is guarded for exactly the design panel's reason,
+        // and a sharper one: it holds an INDEX. An undo underneath it can shift
+        // every index (`RemoveFeature`) or drop a feature outright (the
+        // annotation remap), after which Save writes over a different feature.
+        // The panel's own `stale_reason` refuses that either way; a form that
+        // silently stops being savable because of a stray keystroke is still a
+        // poor answer to a question the user is looking at.
+        let designing = self.design.is_some() || self.feature_edit.is_some();
         if asking || typing {
             return Shortcuts::default();
         }
@@ -2126,11 +2322,28 @@ impl App {
                 });
 
                 ui.separator();
+                // The keyboard and screen-reader path to the feature editor.
+                // The button in the Features tab, the double-click on the map
+                // and this item are three routes to one panel; a menu is the
+                // only one of the three a keyboard user can reach.
+                if ui
+                    .button(ADD_FEATURE_ITEM)
+                    .on_hover_text("uses the sequence selection when there is one")
+                    .clicked()
+                {
+                    self.open_feature_editor(None);
+                    ui.close();
+                }
+                ui.add_enabled_ui(sel.is_some(), |ui| {
+                    if ui.button(EDIT_FEATURE_ITEM).clicked() {
+                        self.open_feature_editor(sel);
+                        ui.close();
+                    }
+                });
                 ui.add_enabled_ui(sel.is_some(), |ui| {
                     if ui.button("Remove selected feature").clicked() {
                         if let Some(i) = sel {
-                            self.edit(pl_core::OpKind::RemoveFeature { index: i });
-                            self.selected = None;
+                            self.remove_feature(i);
                         }
                         ui.close();
                     }
@@ -2182,7 +2395,27 @@ impl App {
                 // on Rotate and on Circular->Linear because the arc they name
                 // may no longer exist.
                 self.edit.caret = seqedit::transport(self.edit.caret, &kind, n_before);
-                self.edit.sel = None;
+                // ...but an annotation-only edit moves no bases, so the arc the
+                // selection names is exactly where it was.
+                //
+                // This was unconditional, justified for the ops that move bases
+                // — "Selections are collapsed on Rotate and on Circular->Linear
+                // because the arc they name may no longer exist." `SetFeature`
+                // and `RemoveFeature` move nothing; `transport` already knows
+                // that and returns the caret untouched for both. Under the old
+                // rule the first thing a SnapGene user does with the feature
+                // editor misfired: select 900 bp, add the CDS, and the highlight
+                // vanished on a molecule where nothing had moved, so the
+                // promoter and the RBS that come next had to be re-dragged by
+                // hand at 60 bases a row. That is how a feature ends up starting
+                // one base late, and there is no gate for off-by-one —
+                // `validate()` has nothing to say about a CDS at 1975.
+                if !matches!(
+                    &kind,
+                    pl_core::OpKind::SetFeature { .. } | pl_core::OpKind::RemoveFeature { .. }
+                ) {
+                    self.edit.sel = None;
+                }
                 self.edit.remember(d);
                 true
             }
@@ -2648,6 +2881,42 @@ impl App {
 
     fn features_tab(&mut self, ui: &mut Ui) {
         ui.add_space(4.0);
+        // `horizontal_wrapped`, NOT `horizontal`, for the same reason the tab
+        // strip is: below about 357 pt of panel a `horizontal` row is painted
+        // outside the clip rect and stops being clickable, which would cap the
+        // splitter's usable travel and take away half its point.
+        let mut open_new = false;
+        let mut open_edit = None;
+        let mut duplicate = None;
+        let mut remove = None;
+        ui.horizontal_wrapped(|ui| {
+            let has_sel = self.selected.is_some();
+            if ui
+                .button("New…")
+                .on_hover_text("uses the sequence selection when there is one")
+                .clicked()
+            {
+                open_new = true;
+            }
+            ui.add_enabled_ui(has_sel, |ui| {
+                if ui.button("Edit…").clicked() {
+                    open_edit = self.selected;
+                }
+                // One `SetFeature { index: None }` with a renamed clone: no new
+                // machinery, and it is how a biologist makes a variant of a
+                // four-qualifier CDS without retyping any of it.
+                if ui
+                    .button("Duplicate")
+                    .on_hover_text("a copy, with every qualifier and colour")
+                    .clicked()
+                {
+                    duplicate = self.selected;
+                }
+                if ui.button("Remove").clicked() {
+                    remove = self.selected;
+                }
+            });
+        });
         ui.horizontal(|ui| {
             ui.label("filter");
             ui.text_edit_singleline(&mut self.filter);
@@ -2657,6 +2926,9 @@ impl App {
 
         let mut hot = None;
         let mut clicked = None;
+        let mut open_row = None;
+        let mut dup_row = None;
+        let mut rm_row = None;
         let doc = self.document.as_ref().expect("checked by caller");
         // Read once: `extent` needs the molecule the feature belongs to, and
         // borrowing it inside the row closure would fight the iterator.
@@ -2734,6 +3006,24 @@ impl App {
                 if resp.clicked() {
                     clicked = Some(i);
                 }
+                // SnapGene's own muscle memory, and one branch.
+                if resp.double_clicked() {
+                    open_row = Some(i);
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Edit…").clicked() {
+                        open_row = Some(i);
+                        ui.close();
+                    }
+                    if ui.button("Duplicate").clicked() {
+                        dup_row = Some(i);
+                        ui.close();
+                    }
+                    if ui.button("Remove").clicked() {
+                        rm_row = Some(i);
+                        ui.close();
+                    }
+                });
                 ui.add_space(3.0);
             }
         });
@@ -2747,6 +3037,53 @@ impl App {
             } else {
                 Some(i)
             };
+        }
+
+        // Acted on after the scroll area, because every one of these needs
+        // `&mut self` and the row closure is holding a borrow of the document.
+        if open_new {
+            self.open_feature_editor(None);
+        }
+        if let Some(i) = open_edit.or(open_row) {
+            // After the click above has been handled, which toggles `selected`:
+            // `open_feature_editor` puts the highlight back on the feature it
+            // opens, for every entry point at once.
+            self.open_feature_editor(Some(i));
+        }
+        if let Some(i) = duplicate.or(dup_row) {
+            self.duplicate_feature(i);
+        }
+        if let Some(i) = remove.or(rm_row) {
+            self.remove_feature(i);
+        }
+    }
+
+    /// Append a copy of feature `i`, named "<name> copy".
+    ///
+    /// A CLONE of the feature and not a rebuild, for the reason the whole
+    /// feature editor exists: the qualifiers, their valueless-ness, the
+    /// per-segment colours, the `translated` flags and the segment order all
+    /// come along, and none of them has a control here to be forgotten at.
+    fn duplicate_feature(&mut self, i: usize) {
+        let Some(mut f) = self
+            .document
+            .as_ref()
+            .and_then(|d| d.molecule().features.get(i))
+            .cloned()
+        else {
+            return;
+        };
+        f.name = format!("{} copy", f.name);
+        let last = self
+            .document
+            .as_ref()
+            .map(|d| d.molecule().features.len())
+            .unwrap_or(0);
+        if self.edit(pl_core::OpKind::SetFeature {
+            index: None,
+            feature: Box::new(f),
+        }) {
+            self.selected = Some(last);
         }
     }
 
@@ -4016,9 +4353,10 @@ impl App {
         };
         let hover = self.seq_hover.clone();
         let notice = self.edit.notice.clone();
-        let can_design = self.design.is_none();
+        let can_design = self.design.is_none() && self.feature_edit.is_none();
         let mut flip = false;
         let mut design = false;
+        let mut annotate = false;
 
         let readout =
             egui::Panel::bottom(egui::Id::new("seq-readout"))
@@ -4031,11 +4369,23 @@ impl App {
                     // the sentence, the row filled *that* — measured at 51 pt of
                     // growth per frame, so the grid was down to two visible rows in
                     // under a second and still shrinking.
+                    //
+                    // WRAPPED, and that is a regression fix and not a
+                    // preference. This row held one button; it now holds three,
+                    // and measured at a 300 pt split the content is 416 px
+                    // against ~361 px of panel — so "take the other arc (8,090
+                    // bp)" rendered as "her arc (8,090 bp)" and the readout line
+                    // "4..30 · 27 bp" rendered as "27 bp", the coordinates cut
+                    // off the panel whose entire job is showing them. Same fix,
+                    // same clip-rect reason, as `sequence_header` above and the
+                    // Features toolbar. The height stays GIVEN — wrapping grows
+                    // the region from its CONTENT, which is stable, rather than
+                    // from the space on offer, which is the loop.
                     let row_h = ui.spacing().interact_size.y.max(22.0);
                     let w = ui.available_width();
                     ui.allocate_ui_with_layout(
                         egui::vec2(w, row_h),
-                        Layout::right_to_left(Align::Center),
+                        Layout::right_to_left(Align::Center).with_main_wrap(true),
                         |ui| {
                             // Design lives beside the readout because that is where the
                             // selection is already described: the panel's target line
@@ -4048,6 +4398,20 @@ impl App {
                                 b.on_hover_text("Select the region to amplify first.");
                             } else if b.clicked() {
                                 design = true;
+                            }
+                            // The SnapGene gesture, next to the readout that
+                            // already names the arc it will annotate: select the
+                            // bases, then say what they are. Same enabling
+                            // predicate as Design, and the same voice on the
+                            // disabled hover.
+                            let a = ui.add_enabled(
+                                has_sel && can_design,
+                                egui::Button::new(RichText::new("New feature…").size(11.0)),
+                            );
+                            if !has_sel {
+                                a.on_hover_text("Select the bases first.");
+                            } else if a.clicked() {
+                                annotate = true;
                             }
                             // The explicit way to flip a bit that Shift+click cannot infer,
                             // because a click has no direction of travel. Both lengths are
@@ -4113,6 +4477,9 @@ impl App {
         }
         if design {
             self.open_design();
+        }
+        if annotate {
+            self.open_feature_editor(None);
         }
     }
 
@@ -4334,6 +4701,12 @@ impl App {
         // and the panel's snapshot would then name bases that are no longer
         // there.
         if self.design.is_some() {
+            return;
+        }
+        // Same reason again. Without it, arrow keys move the caret and Backspace
+        // deletes bases underneath a window whose coordinate boxes are describing
+        // exactly those bases.
+        if self.feature_edit.is_some() {
             return;
         }
         let events = ui.input(|i| i.events.clone());
@@ -4573,6 +4946,7 @@ impl App {
         let hot = self.hot;
         let mut hovered_out = None;
         let mut clicked_out = None;
+        let mut opened_out = None;
 
         // Asked here, outside the paint closure, and answered from a memo.
         // Which application owns the extension is *read*, never changed —
@@ -4605,7 +4979,17 @@ impl App {
                     .fill(pal(ui).selection())
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        // THE BUTTON IS RESERVED FIRST. Laid out after the
+                        // label, a long message pushed Dismiss past the
+                        // CentralPanel's right edge and it read "Dism" — on a
+                        // banner whose only control is the way to make it go
+                        // away. A right-to-left layout takes the button's width
+                        // off the top, so the label wraps into what is left
+                        // however long it gets.
+                        ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                            if ui.button("Dismiss").clicked() {
+                                dismiss = true;
+                            }
                             ui.vertical(|ui| {
                                 ui.label(RichText::new(msg).color(pal(ui).ink));
                                 // Literally true: `OpLog::apply` works on a
@@ -4619,9 +5003,6 @@ impl App {
                                         .size(11.0),
                                 );
                             });
-                            if ui.button("Dismiss").clicked() {
-                                dismiss = true;
-                            }
                         });
                     });
             }
@@ -4681,6 +5062,7 @@ impl App {
             let r = map::show(ui, d.molecule(), caption, d.digest.results(), selected, hot);
             hovered_out = r.hovered;
             clicked_out = r.clicked;
+            opened_out = r.double_clicked;
         });
 
         if dismiss {
@@ -4696,6 +5078,13 @@ impl App {
                 Some(i)
             };
             self.tab = Tab::Features;
+        }
+        // After the click has been handled: egui delivers both, and a
+        // double-click that left `selected` toggled off would open the editor on
+        // a feature the panel is no longer highlighting. `open_feature_editor`
+        // is where the highlight is put back, for every entry point at once.
+        if let Some(i) = opened_out {
+            self.open_feature_editor(Some(i));
         }
     }
 
@@ -4728,7 +5117,14 @@ impl App {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| mol.name.clone());
         match design::Panel::open(title, mol.len(), mol.topology.is_circular(), sel) {
-            Ok(p) => self.design = Some(p),
+            Ok(p) => {
+                // The other direction of the same rule the feature editor
+                // applies: only one non-modal window may guard the keyboard.
+                self.close_feature_editor(
+                    "the feature editor was closed: the design panel took the keyboard",
+                );
+                self.design = Some(p);
+            }
             Err(e) => self.notice = Some(e),
         }
     }
@@ -4820,6 +5216,107 @@ impl App {
         }
         if keep {
             self.design = Some(panel);
+        }
+    }
+
+    /// Run the feature editor for a frame, and service whatever it asked for.
+    ///
+    /// The shape is `design_panel`'s, including the check before the take: a
+    /// panel that outlives its document is exactly the state that writes one
+    /// file's coordinates into another.
+    fn feature_editor(&mut self, ctx: &egui::Context) {
+        if self.document.is_none() {
+            self.close_feature_editor(
+                "the feature editor was closed: the document it described is no longer open",
+            );
+            return;
+        }
+        let Some(mut panel) = self.feature_edit.take() else {
+            return;
+        };
+        let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
+        let sel = self
+            .selection_segment()
+            .map(|s| (s.start, s.end, s.end < s.start));
+        // Where the document stands THIS frame. The panel compares it against
+        // where it stood on open, and refuses to commit through a moved index.
+        panel.doc_at = self.document.as_ref().and_then(|d| d.log.cursor());
+        let mut keep = featedit::show(ctx, &mut panel, sel, dark);
+
+        // After the frame: `App::edit` needs `&mut self`, which the draw closure
+        // is holding.
+        if std::mem::take(&mut panel.delete) {
+            // Into the PANEL, not `self.notice`. `central` paints the notice
+            // banner at the top-left of the map, which is where this window sits
+            // by default: photographed, the explanation rendered behind the
+            // editor with a sliver showing, so the user pressed a button,
+            // nothing happened, and the reason was underneath the thing they
+            // were looking at.
+            if let Some(why) = panel.stale_reason() {
+                panel.notice = Some(why.to_string());
+            } else if let Some(i) = panel.index {
+                self.remove_feature(i);
+                keep = false;
+            }
+        }
+        if std::mem::take(&mut panel.save) {
+            // Asked again here, and not only where the button was drawn. The
+            // button's disabled state is a claim made by one frame's layout;
+            // this is the claim the document acts on, and the two must not be
+            // able to disagree — the gate's own refusal names a feature index
+            // that, for an add, does not exist after the refusal.
+            let refusals = panel.refusals();
+            if let Some(why) = panel.stale_reason() {
+                panel.notice = Some(why.to_string());
+            } else if let Some(first) = refusals.first() {
+                panel.notice = Some(format!("{first} Nothing was changed."));
+            } else if panel.is_noop() {
+                // An operation that changes nothing still derives an id, spends
+                // an undo step and dirties the document, and the title bar then
+                // claims unsaved changes that do not exist. Harmless to the file,
+                // corrosive to trust in the dirty flag.
+                self.status = "nothing was changed, so nothing was recorded".into();
+                keep = false;
+            } else {
+                let f = panel.to_feature();
+                let (name, kind) = (f.name.clone(), f.kind.clone());
+                let adding = panel.index.is_none();
+                if self.edit(pl_core::OpKind::SetFeature {
+                    index: panel.index,
+                    feature: Box::new(f),
+                }) {
+                    if adding {
+                        // `SetFeature { index: None }` pushes, so the new
+                        // feature is the last one. Selecting it is what puts it
+                        // under the highlight the user is already looking at.
+                        let last = self
+                            .document
+                            .as_ref()
+                            .map(|d| d.molecule().features.len())
+                            .unwrap_or(0);
+                        self.selected = last.checked_sub(1);
+                    }
+                    // The Features filter matches name and kind, so renaming
+                    // `SacB` to `levansucrase` under a filter of "sac" makes the
+                    // row vanish the instant Save lands. The filter is NOT
+                    // cleared — the user set it — but a row disappearing without
+                    // a word is the kind of thing people file bugs about.
+                    let needle = self.filter.to_lowercase();
+                    if !needle.is_empty()
+                        && !name.to_lowercase().contains(&needle)
+                        && !kind.to_lowercase().contains(&needle)
+                    {
+                        self.status = format!(
+                            "{} — it no longer matches the filter \"{}\"",
+                            self.status, self.filter
+                        );
+                    }
+                    keep = false;
+                }
+            }
+        }
+        if keep {
+            self.feature_edit = Some(panel);
         }
     }
 
@@ -7768,8 +8265,17 @@ mod tests {
 
         // The Features tab's filter box, the Library query and the design
         // panel's Spacer field are all plain `TextEdit`s, and egui gives Ctrl+Z
-        // to the focused one without consuming it.
-        for who in ["features filter", "library query", "design spacer"] {
+        // to the focused one without consuming it. So are the feature editor's
+        // Name box, its free-text Type box, its colour box and every qualifier
+        // value — Ctrl+Z typed into one of those must undo the typo, not the
+        // molecule.
+        for who in [
+            "features filter",
+            "library query",
+            "design spacer",
+            "feature name",
+            "feature qualifier value",
+        ] {
             let k = shortcuts_with(&app, egui::Key::Z, Some(who));
             assert!(!k.undo, "Ctrl+Z reached the document from {who}");
             assert!(!shortcuts_with(&app, egui::Key::Y, Some(who)).redo, "{who}");
@@ -7978,6 +8484,872 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The feature editor
+    //
+    // Everything here goes through `App::edit` -> `Document::apply` ->
+    // `OpLog::apply`, which is the whole point: nothing writes
+    // `Molecule::features`, so undo, the annotation remap and the WouldCorrupt
+    // gate are inherited rather than reimplemented.
+    // -----------------------------------------------------------------------
+
+    /// The one feature that carries everything a form can silently destroy.
+    /// Mirrors `featedit::tests::fixture`, and pKoV's `SacB` before it.
+    fn rich_feature() -> pl_core::Feature {
+        let mut f = pl_core::Feature::new("SacB", "CDS");
+        f.strand = Strand::Reverse;
+        f.segments = vec![
+            pl_core::Segment {
+                start: 100,
+                end: 200,
+                color: Some("#993366".into()),
+                translated: true,
+                kind: "standard".into(),
+            },
+            pl_core::Segment {
+                start: 201,
+                end: 260,
+                color: Some("#993366".into()),
+                translated: true,
+                kind: "standard".into(),
+            },
+        ];
+        f.set_qualifier("codon_start", "1");
+        f.set_flag_qualifier("pseudo");
+        f.set_qualifier("transl_table", "11");
+        f.set_qualifier("replace", "");
+        f
+    }
+
+    /// A 400 bp circular document with `rich_feature` already on it.
+    fn app_with_feature() -> App {
+        let seq: String = (0..400u32)
+            .scan(4_242u64, |s, _| {
+                *s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                Some(b"ACGT"[((*s >> 24) & 3) as usize] as char)
+            })
+            .collect();
+        let mut app = App::blank();
+        app.document = Some(
+            Document::from_bytes(format!(">p\n{seq}\n").as_bytes(), "p.fa".into(), None).unwrap(),
+        );
+        assert!(app.edit(pl_core::OpKind::SetTopology(pl_core::Topology::Circular)));
+        assert!(app.edit(pl_core::OpKind::SetFeature {
+            index: None,
+            feature: Box::new(rich_feature()),
+        }));
+        app
+    }
+
+    /// One frame of the feature editor, which is what refreshes `doc_at` and
+    /// services a Save or a Delete.
+    fn feature_frame(app: &mut App) {
+        let ctx = test_ctx();
+        ctx.begin_pass(egui::RawInput::default());
+        app.feature_editor(&ctx);
+        let _ = ctx.end_pass();
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: `App` had no `feature_edit` field and no
+    /// `open_feature_editor`, so there was no way to add a feature from the GUI
+    /// at all — `SetFeature` was constructed at exactly one place, the primer
+    /// path.
+    #[test]
+    fn a_feature_added_from_a_selection_covers_the_bases_that_were_selected() {
+        let mut app = app_with_feature();
+        // Carets sit BETWEEN bases: this is bases 10..29 inclusive.
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 9,
+            head: 29,
+            through_origin: false,
+        });
+        app.open_feature_editor(None);
+        let p = app.feature_edit.as_mut().expect("the editor opened");
+        assert_eq!(
+            (p.segments[0].start, p.segments[0].end),
+            (10, 29),
+            "one base out at either end is a feature that is legal and in the \
+             wrong place, and nothing anywhere would contradict it"
+        );
+        p.name = "myPromoter".into();
+        p.kind = "promoter".into();
+        p.save = true;
+        feature_frame(&mut app);
+
+        assert!(app.feature_edit.is_none(), "the window closed on success");
+        let mol = app.document.as_ref().unwrap().molecule();
+        assert_eq!(mol.features.len(), 2);
+        let f = mol.features.last().unwrap();
+        assert_eq!(f.name, "myPromoter");
+        assert_eq!(f.kind, "promoter");
+        assert_eq!(f.segments.len(), 1);
+        assert_eq!((f.segments[0].start, f.segments[0].end), (10, 29));
+        assert_eq!(
+            app.selected,
+            Some(1),
+            "and the new feature is the selected one"
+        );
+
+        // ONE operation, so ONE undo.
+        app.do_undo();
+        assert_eq!(
+            app.document.as_ref().unwrap().molecule().features.len(),
+            1,
+            "one undo removes it"
+        );
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: `App::edit` cleared `edit.sel` after every
+    /// successful operation, including the two that move no bases. Select 900 bp,
+    /// add the CDS, and the highlight vanished on a molecule where nothing had
+    /// moved — so the promoter and the RBS that come next had to be re-dragged
+    /// by hand.
+    #[test]
+    fn an_annotation_edit_keeps_the_selection_and_a_base_edit_does_not() {
+        let mut app = app_with_feature();
+        let sel = seqedit::Selection {
+            anchor: 9,
+            head: 29,
+            through_origin: false,
+        };
+
+        app.edit.sel = Some(sel);
+        assert!(app.edit(pl_core::OpKind::SetFeature {
+            index: None,
+            feature: Box::new(rich_feature()),
+        }));
+        assert_eq!(
+            app.edit.sel,
+            Some(sel),
+            "SetFeature moves no bases, so the arc is exactly where it was"
+        );
+
+        assert!(app.edit(pl_core::OpKind::RemoveFeature { index: 1 }));
+        assert_eq!(app.edit.sel, Some(sel), "and neither does RemoveFeature");
+
+        // The ops that DO move bases must still collapse it: the arc they name
+        // may no longer exist.
+        app.edit.sel = Some(sel);
+        assert!(app.edit(pl_core::OpKind::InsertAt {
+            at: 5,
+            seq: "AAAA".into(),
+        }));
+        assert_eq!(app.edit.sel, None, "an insertion still clears it");
+        app.edit.sel = Some(sel);
+        assert!(app.edit(pl_core::OpKind::ReverseComplement));
+        assert_eq!(app.edit.sel, None, "and so does a reverse complement");
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: no feature editor to edit through.
+    ///
+    /// The App-level half of `featedit::tests::renaming_a_feature_changes_only_
+    /// its_name`: the same claim, but made about what actually landed in the
+    /// document through `OpKind::SetFeature` and the corruption gate.
+    #[test]
+    fn renaming_through_the_editor_keeps_every_qualifier_colour_and_segment() {
+        let mut app = app_with_feature();
+        let before = app.document.as_ref().unwrap().molecule().features[0].clone();
+
+        app.open_feature_editor(Some(0));
+        let p = app.feature_edit.as_mut().expect("the editor opened");
+        p.name = "levansucrase".into();
+        p.save = true;
+        feature_frame(&mut app);
+
+        let after = &app.document.as_ref().unwrap().molecule().features[0];
+        assert_eq!(after.name, "levansucrase");
+        assert_eq!(after.segments.len(), 2, "still two segments");
+        for (i, (a, b)) in after.segments.iter().zip(&before.segments).enumerate() {
+            assert_eq!(a.start, b.start, "segment {i} start");
+            assert_eq!(a.end, b.end, "segment {i} end");
+            assert_eq!(a.color, b.color, "segment {i} colour");
+            assert_eq!(a.translated, b.translated, "segment {i} translated");
+            assert_eq!(a.kind, b.kind, "segment {i} kind");
+        }
+        assert!(after.has_qualifier("pseudo"), "the flag qualifier survived");
+        assert_eq!(after.qualifier("pseudo"), None, "and is still valueless");
+        assert_eq!(after.qualifier("replace"), Some(""), "empty is still empty");
+        assert_eq!(
+            after.qualifiers, before.qualifiers,
+            "order, repeats and all"
+        );
+        assert_eq!(after.strand, before.strand);
+
+        // One operation, one undo, and the History line names the feature.
+        let last = app.document.as_ref().unwrap().log.path().len();
+        assert_eq!(last, 3, "SetTopology, SetFeature, and this one");
+        app.do_undo();
+        assert_eq!(
+            app.document.as_ref().unwrap().molecule().features[0].name,
+            "SacB"
+        );
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: no feature editor.
+    ///
+    /// Struct equality after `SetFeature` does not prove the WRITER kept
+    /// anything, and the writers are where the valueless qualifier and the
+    /// per-segment colour actually go missing.
+    #[test]
+    fn a_feature_added_here_survives_a_round_trip_through_dna_and_genbank() {
+        let mut app = app_with_feature();
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 299,
+            head: 340,
+            through_origin: false,
+        });
+        app.open_feature_editor(None);
+        let p = app.feature_edit.as_mut().expect("the editor opened");
+        p.name = "decR".into();
+        p.kind = "CDS".into();
+        p.kind_other = false;
+        p.color = featedit::ColorMode::One("#993366".into());
+        p.segments[0].translated = true;
+        p.quals.push(featedit::QualRow {
+            key: "pseudo".into(),
+            has_value: false,
+            value: String::new(),
+        });
+        p.quals.push(featedit::QualRow {
+            key: "codon_start".into(),
+            has_value: true,
+            value: "1".into(),
+        });
+        p.save = true;
+        feature_frame(&mut app);
+
+        let mol = app.document.as_ref().unwrap().molecule().clone();
+        assert_eq!(mol.features.len(), 2, "the premise: it landed");
+
+        // .dna
+        let bytes = pl_fileio::snapgene::from_molecule(&mol);
+        let (back, _) = pl_fileio::load(&bytes).expect("the .dna reads");
+        let f = back
+            .features
+            .iter()
+            .find(|f| f.name == "decR")
+            .expect(".dna kept the feature");
+        assert_eq!((f.segments[0].start, f.segments[0].end), (300, 340));
+        assert_eq!(f.color(), Some("#993366"), ".dna kept the colour");
+        assert!(f.segments[0].translated, ".dna kept the translated flag");
+        assert!(f.has_qualifier("pseudo"), ".dna kept /pseudo");
+        assert_eq!(f.qualifier("pseudo"), None, ".dna kept it VALUELESS");
+        assert_eq!(f.qualifier("codon_start"), Some("1"));
+
+        // GenBank
+        let (text, unwritable) = pl_fileio::genbank::write_reporting(&mol, "p", today());
+        assert!(unwritable.is_empty(), "{unwritable:?}");
+        let back = pl_fileio::genbank::parse(&text);
+        let f = back
+            .features
+            .iter()
+            .find(|f| f.name == "decR")
+            .expect(".gb kept the feature");
+        assert_eq!((f.segments[0].start, f.segments[0].end), (300, 340));
+        assert_eq!(f.color(), Some("#993366"), ".gb kept the colour");
+        assert!(f.has_qualifier("pseudo"), ".gb kept /pseudo");
+        assert_eq!(
+            f.qualifier("pseudo"),
+            None,
+            ".gb wrote it BARE — a /pseudo=\"\" here is a pseudogene exported as \
+             an ordinary protein-coding one"
+        );
+        assert_eq!(f.qualifier("codon_start"), Some("1"));
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: no feature editor.
+    #[test]
+    fn an_origin_crossing_feature_added_here_still_crosses_the_origin() {
+        let mut app = app_with_feature();
+        // The other arc: from base 380 forwards through base 1 to base 40.
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 40,
+            head: 379,
+            through_origin: true,
+        });
+        app.open_feature_editor(None);
+        let p = app.feature_edit.as_mut().expect("the editor opened");
+        assert_eq!((p.segments[0].start, p.segments[0].end), (380, 40));
+        assert!(p.segments[0].wraps, "read from the selection, not guessed");
+        assert_eq!(p.row_bases(&p.segments[0]), 400 - 380 + 1 + 40);
+        p.name = "across".into();
+        p.save = true;
+        feature_frame(&mut app);
+
+        let mol = app.document.as_ref().unwrap().molecule();
+        let f = mol.features.iter().find(|f| f.name == "across").unwrap();
+        assert_eq!((f.segments[0].start, f.segments[0].end), (380, 40));
+        assert_eq!(f.extent(400, true), Some((380, 40)));
+
+        // Through GenBank it comes back as the two-part join that is INSDC's only
+        // spelling, and `extent` still reads it as the same wrap. That is not a
+        // loss and must not be re-merged on load.
+        let text = pl_fileio::genbank::write(mol, "p", today());
+        let back = pl_fileio::genbank::parse(&text);
+        let f = back.features.iter().find(|f| f.name == "across").unwrap();
+        assert_eq!(f.segments.len(), 2, "join(380..400,1..40)");
+        assert_eq!(f.extent(400, true), Some((380, 40)));
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: no feature editor, so no guard to test.
+    #[test]
+    fn an_undo_is_not_taken_while_the_feature_editor_is_open() {
+        let mut app = app_with_feature();
+        app.open_feature_editor(Some(0));
+        assert!(app.feature_edit.is_some(), "the premise");
+        assert!(!shortcuts_with(&app, egui::Key::Z, None).undo);
+        assert!(!shortcuts_with(&app, egui::Key::Y, None).redo);
+        // Opening another file is still allowed; it closes the editor and says so.
+        assert!(shortcuts_with(&app, egui::Key::O, None).open);
+        // And saving, for the same reason as the design panel: an undo changes
+        // what the window is describing, and a save changes nothing.
+        assert!(shortcuts_with(&app, egui::Key::S, None).save);
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: no feature editor.
+    ///
+    /// Two non-modal windows each guarding the keyboard for a reason the other
+    /// does not know about is the state the design panel's own comment warns
+    /// against.
+    #[test]
+    fn the_feature_editor_and_the_design_panel_are_never_both_open() {
+        let mut app = app_designing();
+        app.open_feature_editor(None);
+        assert!(app.feature_edit.is_some());
+        assert!(app.design.is_none(), "the design panel gave way");
+
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 300,
+            head: 600,
+            through_origin: false,
+        });
+        app.open_design();
+        assert!(app.design.is_some());
+        assert!(app.feature_edit.is_none(), "and the other way round");
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: no feature editor.
+    ///
+    /// An operation that changes nothing still derives an id, spends an undo
+    /// step and dirties the document, and the title bar then claims unsaved
+    /// changes that do not exist.
+    #[test]
+    fn a_save_that_changes_nothing_records_no_operation() {
+        let mut app = app_with_feature();
+        let before = app.document.as_ref().unwrap().log.all_ops().len();
+        app.open_feature_editor(Some(0));
+        app.feature_edit.as_mut().unwrap().save = true;
+        feature_frame(&mut app);
+        assert_eq!(
+            app.document.as_ref().unwrap().log.all_ops().len(),
+            before,
+            "nothing was recorded"
+        );
+        assert!(app.feature_edit.is_none(), "and the window still closed");
+        assert!(app.status.contains("nothing was changed"), "{}", app.status);
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: no feature editor.
+    ///
+    /// The user must never be able to press OK into a `WouldCorrupt`. Its
+    /// message is pitched at the whole molecule — "feature 9 'PhoP' segment 0:
+    /// 9000 is past the 8,117 bp molecule" — and for an add the index names a
+    /// feature that does not exist after the refusal.
+    #[test]
+    fn a_save_with_a_refusal_outstanding_never_reaches_the_document() {
+        // A type with a space: the writer's key column swallows the rest as
+        // coordinates and the feature vanishes on the next open, with exit 0.
+        // `validate()` has nothing to say about it, so only the form can.
+        let mut app = app_with_feature();
+        let ops = app.document.as_ref().unwrap().log.all_ops().len();
+        app.open_feature_editor(Some(0));
+        app.feature_edit.as_mut().unwrap().kind = "signal peptide".into();
+        app.feature_edit.as_mut().unwrap().save = true;
+        feature_frame(&mut app);
+        assert_eq!(
+            app.document.as_ref().unwrap().molecule().features[0].kind,
+            "CDS",
+            "nothing landed"
+        );
+        assert_eq!(app.document.as_ref().unwrap().log.all_ops().len(), ops);
+        assert!(
+            app.feature_edit.is_some(),
+            "and the window stayed open, with every box as the user left it"
+        );
+        // IN THE PANEL, not in `App::notice`. `central` paints that banner at
+        // the top-left of the map, which is where this window sits: the
+        // explanation rendered behind the thing the user was looking at.
+        let notice = app
+            .feature_edit
+            .as_ref()
+            .unwrap()
+            .notice
+            .clone()
+            .unwrap_or_default();
+        assert!(notice.contains("space"), "{notice}");
+        assert!(
+            app.notice.is_none(),
+            "and not behind the window: {:?}",
+            app.notice
+        );
+
+        // A COORDINATE PAST THE END IS REFUSED, NOT TRUNCATED. This assertion
+        // used to read the other way — "the control clamped it to the molecule;
+        // 9,000 was never committed" — and that was the defect written down as
+        // a virtue. The clamp it was describing is `DragValue`'s
+        // `clamp_existing_to_range`, which does not only stop the user TYPING
+        // 9,000: it rewrites a coordinate the FILE carried, on a plain layout
+        // pass with no input at all. See the comment at that DragValue for what
+        // it cost on this repository's own `odd.gb`. The form's own sentence is
+        // the answer, and it names the box.
+        app.feature_edit.as_mut().unwrap().notice = None;
+        app.feature_edit.as_mut().unwrap().kind = "CDS".into();
+        app.feature_edit.as_mut().unwrap().segments[0].end = 9_000;
+        app.feature_edit.as_mut().unwrap().save = true;
+        feature_frame(&mut app);
+        let mol = app.document.as_ref().unwrap().molecule();
+        assert_eq!(
+            mol.features[0].segments[0].end, 200,
+            "nothing landed: the feature is still the one the document had"
+        );
+        assert_eq!(app.document.as_ref().unwrap().log.all_ops().len(), ops);
+        let notice = app
+            .feature_edit
+            .as_ref()
+            .unwrap()
+            .notice
+            .clone()
+            .unwrap_or_default();
+        assert!(
+            notice.contains("9,000") && notice.contains("400 bp"),
+            "the refusal names the number and the molecule: {notice}"
+        );
+        assert!(
+            !notice.contains("inconsistent"),
+            "and it is the FORM's sentence, not the gate's whole-molecule one: {notice}"
+        );
+    }
+
+    /// One frame of the feature editor, keeping the shapes.
+    ///
+    /// A real `screen_rect`, unlike `feature_frame`: with `RawInput::default()`
+    /// an `egui::Window` has no screen to be placed on and the pass emits no
+    /// shapes at all, so a test reading them would pass by seeing nothing.
+    /// The same `ctx` across calls, because a window's size is learnt from the
+    /// pass before.
+    fn feature_frame_out(app: &mut App, ctx: &egui::Context) -> egui::FullOutput {
+        ctx.begin_pass(window());
+        app.feature_editor(ctx);
+        ctx.end_pass()
+    }
+
+    /// The colour a piece of text was drawn in, if it was drawn.
+    fn text_colour(out: &egui::FullOutput, needle: &str) -> Option<egui::Color32> {
+        out.shapes.iter().find_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) if t.galley.text() == needle => {
+                Some(t.galley.job.sections.first()?.format.color)
+            }
+            _ => None,
+        })
+    }
+
+    /// PROVEN TO FAIL against the working code as delivered: `Delete feature`
+    /// was drawn outside the `refusals.is_empty() && stale_reason().is_none()`
+    /// that gates Save, so on a stale form the two footer buttons made
+    /// contradictory claims about one state — and the only one greyed out was
+    /// the safe one. Pressing it produced a notice instead of the action it
+    /// advertised, and that notice went behind the window.
+    #[test]
+    fn a_stale_form_greys_the_delete_button_as_well_as_save() {
+        let mut app = app_with_feature();
+        let mut other = pl_core::Feature::new("AmpR", "CDS");
+        other.segments.push(pl_core::Segment::new(300, 350));
+        assert!(app.edit(pl_core::OpKind::SetFeature {
+            index: None,
+            feature: Box::new(other),
+        }));
+        app.open_feature_editor(Some(1));
+
+        // Live first, so this cannot pass by the button never being drawn.
+        let ctx = test_ctx();
+        let mut out = feature_frame_out(&mut app, &ctx);
+        for _ in 0..2 {
+            out = feature_frame_out(&mut app, &ctx);
+        }
+        let pal = theme::Palette::of(true);
+        assert_eq!(
+            text_colour(&out, "Delete feature"),
+            Some(pal.warn),
+            "the premise: on a live form it is offered"
+        );
+
+        // The window is not modal: the toolbar stayed live behind it.
+        assert!(app.edit(pl_core::OpKind::RemoveFeature { index: 0 }));
+        let out = feature_frame_out(&mut app, &ctx);
+        assert!(
+            app.feature_edit.as_ref().unwrap().stale_reason().is_some(),
+            "the premise: the document moved"
+        );
+        assert_eq!(
+            text_colour(&out, "Delete feature"),
+            Some(pal.muted),
+            "and now it is drawn as unavailable, like Save beside it"
+        );
+    }
+
+    /// PROVEN TO FAIL against the working code as delivered: the per-segment
+    /// colour box used `desired_width(72.0)` inside an `egui::Grid` and
+    /// photographed as `#993`, four of seven characters — in the one control
+    /// whose entire job is the exact colour, on the code path that exists so
+    /// disagreeing segment colours are not silently flattened. `#993366` and
+    /// `#9933ff` are the same box until the last two characters are on screen.
+    ///
+    /// It is the trap the qualifier key box already documents and fixes: a
+    /// `TextEdit` sizes to `min(desired, available)`, and inside a Grid
+    /// `available` is last frame's column width, which never grows for a widget
+    /// that only ever asks for what is available.
+    #[test]
+    fn the_per_segment_colour_box_shows_a_whole_colour() {
+        let mut app = app_with_feature();
+        app.open_feature_editor(Some(0));
+        app.feature_edit.as_mut().unwrap().color = featedit::ColorMode::PerSegment;
+        let ctx = test_ctx();
+        let mut out = feature_frame_out(&mut app, &ctx);
+        for _ in 0..3 {
+            out = feature_frame_out(&mut app, &ctx);
+        }
+
+        // The galley is laid out whole and CUT by the widget's clip rect, so the
+        // text is present either way and only the geometry tells the truth.
+        let mut seen = 0;
+        for cs in &out.shapes {
+            if let egui::Shape::Text(t) = &cs.shape {
+                if t.galley.text() != "#993366" {
+                    continue;
+                }
+                seen += 1;
+                let b = egui::Rect::from_min_size(t.pos, t.galley.size());
+                let cut = (cs.clip_rect.left() - b.left())
+                    .max(b.right() - cs.clip_rect.right())
+                    .max(0.0);
+                assert!(cut < 1.0, "{cut:.0} pt of #993366 is cut off its own box");
+            }
+        }
+        assert_eq!(
+            seen, 2,
+            "the premise: two segment rows, each with the colour in a box"
+        );
+    }
+
+    /// PROVEN TO FAIL against the working code as delivered: `open_row` never
+    /// set `selected`, so double-clicking a Features row opened the editor with
+    /// the row unhighlighted, the map arc unhighlighted and the toolbar's
+    /// Edit…/Duplicate/Remove all disabled — the window title was the only clue
+    /// which feature was open. The map path had the line; the list path did not.
+    #[test]
+    fn opening_the_editor_highlights_the_feature_it_opened_on() {
+        let mut app = app_with_feature();
+        // What a double-click leaves behind: egui delivers `clicked()` on the
+        // first press, and every row handler in this file toggles.
+        app.selected = Some(0);
+        app.selected = None;
+        app.open_feature_editor(Some(0));
+        assert_eq!(
+            app.selected,
+            Some(0),
+            "the list, the map and the toolbar all read this"
+        );
+
+        // An add highlights nothing until it lands — there is no index yet.
+        app.feature_edit = None;
+        app.selected = None;
+        app.open_feature_editor(None);
+        assert_eq!(app.selected, None);
+    }
+
+    /// PROVEN TO FAIL against the WORKING CODE AS DELIVERED, on this
+    /// repository's own fixture, with no input at all.
+    ///
+    /// `egui::DragValue` defaults to `clamp_existing_to_range(true)`, which
+    /// rewrites a value it was merely asked to draw. `tests/library-fixture/
+    /// odd.gb` is a 7 bp circular record carrying `CDS 1..9` and `misc_feature
+    /// 10..15` — coordinates the app's own title bar reports as problems the
+    /// moment the file opens, which is exactly the file a user opens the editor
+    /// ON. Measured before the fix: one frame turned `10..15` into `7..7`, so
+    /// renaming "spacer" committed a feature five of whose six bases were gone
+    /// and which had moved three bases, with `notice == None` and a status line
+    /// that said only "edit feature 1". The `WouldCorrupt` gate cannot help,
+    /// because the edit REDUCES the `PastEnd` count.
+    ///
+    /// Every form-level test in `featedit` is blind to this class: none of them
+    /// draws.
+    #[test]
+    fn drawing_the_form_does_not_move_a_coordinate_the_file_carried() {
+        let gb = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/library-fixture/odd.gb"
+        ))
+        .expect("the library fixture is in the tree");
+        let mut app = App::blank();
+        app.adopt(Document::from_bytes(&gb, "odd.gb".into(), None).unwrap());
+
+        let before = app.document.as_ref().unwrap().molecule().features.clone();
+        // NON-VACUITY: this test is worthless on a molecule whose features all
+        // fit. `odd.gb` is in the tree precisely because they do not.
+        assert!(
+            app.document
+                .as_ref()
+                .unwrap()
+                .molecule()
+                .validate()
+                .iter()
+                .any(|x| x.kind() == "past the end"),
+            "the fixture has nothing to lose: {before:?}"
+        );
+
+        for (i, want) in before.iter().enumerate() {
+            app.open_feature_editor(Some(i));
+            feature_frame(&mut app);
+            let p = app.feature_edit.as_ref().expect("the editor stayed open");
+            assert_eq!(
+                &p.to_feature(),
+                want,
+                "one layout pass, no input, and feature {i} came back different"
+            );
+            assert!(
+                !p.dirty(),
+                "an untouched form is not unsaved work: closing it would raise a \
+                 false warning, and `is_noop` would let a Save spend an undo step"
+            );
+            assert!(
+                !p.refusals().is_empty(),
+                "and the number IS refused, so Save is disabled and the user is told why"
+            );
+            app.feature_edit = None;
+        }
+
+        // The rename a user would actually do, all the way through: refused,
+        // because the coordinate the file carries is still on screen and still
+        // wrong. Nothing is committed and nothing is truncated.
+        let ops = app.document.as_ref().unwrap().log.all_ops().len();
+        app.open_feature_editor(Some(1));
+        feature_frame(&mut app);
+        app.feature_edit.as_mut().unwrap().name = "spacer2".into();
+        app.feature_edit.as_mut().unwrap().save = true;
+        feature_frame(&mut app);
+        assert_eq!(
+            app.document.as_ref().unwrap().molecule().features,
+            before,
+            "nothing landed"
+        );
+        assert_eq!(app.document.as_ref().unwrap().log.all_ops().len(), ops);
+        let notice = app
+            .feature_edit
+            .as_ref()
+            .and_then(|p| p.notice.clone())
+            .unwrap_or_default();
+        assert!(notice.contains("past the"), "{notice}");
+    }
+
+    /// PROVEN TO FAIL against the working code as delivered.
+    ///
+    /// `genbank::parse` stores `/ApEinfo_fwdcolor="cyan"` verbatim, and every
+    /// ApE- and Benchling-authored plasmid in circulation carries a name rather
+    /// than a hex triple. Refusing it meant Save was permanently greyed on a
+    /// feature the user had never touched, with a hover blaming a box they had
+    /// not filled in — and the one escape, "from its type", discards the file's
+    /// colour. A rename must not cost a colour.
+    #[test]
+    fn a_colour_the_file_carried_does_not_block_a_rename_and_is_not_discarded() {
+        let gb = "LOCUS       x                      400 bp    DNA     circular SYN 01-JAN-2026\n\
+                  FEATURES             Location/Qualifiers\n     \
+                  CDS             100..200\n                     \
+                  /label=\"AmpR\"\n                     \
+                  /ApEinfo_fwdcolor=\"cyan\"\n\
+                  ORIGIN\n//\n";
+        let mut app = App::blank();
+        app.adopt(Document::from_bytes(gb.as_bytes(), "x.gb".into(), None).unwrap());
+        assert_eq!(
+            app.document.as_ref().unwrap().molecule().features[0].segments[0].color,
+            Some("cyan".into()),
+            "the premise: the reader keeps it verbatim"
+        );
+
+        app.open_feature_editor(Some(0));
+        feature_frame(&mut app);
+        {
+            let p = app.feature_edit.as_mut().unwrap();
+            assert!(
+                p.refusals().is_empty(),
+                "Save must not be disabled on a file the user has not touched: {:?}",
+                p.refusals()
+            );
+            assert!(
+                p.warnings().iter().any(|w| w.contains("cyan")),
+                "but the user is told the map cannot draw it: {:?}",
+                p.warnings()
+            );
+            p.name = "bla".into();
+            p.save = true;
+        }
+        feature_frame(&mut app);
+        let f = &app.document.as_ref().unwrap().molecule().features[0];
+        assert_eq!(f.name, "bla", "the rename landed");
+        assert_eq!(
+            f.segments[0].color,
+            Some("cyan".into()),
+            "and the file's own colour is still the file's own colour"
+        );
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: `describe()` reads "remove feature 0" and the
+    /// Molecule-menu path cleared `selected` but left `hot`, so the pointer's
+    /// feature index survived a removal that shifted every later index — a
+    /// different feature, drawn highlighted on the map.
+    #[test]
+    fn removing_a_feature_names_it_and_clears_the_hot_row() {
+        let mut app = app_with_feature();
+        app.selected = Some(0);
+        app.hot = Some(0);
+        app.open_feature_editor(Some(0));
+        app.feature_edit.as_mut().unwrap().delete = true;
+        feature_frame(&mut app);
+
+        assert!(app
+            .document
+            .as_ref()
+            .unwrap()
+            .molecule()
+            .features
+            .is_empty());
+        assert!(
+            app.status.contains("SacB"),
+            "the line the user reads names the feature: {}",
+            app.status
+        );
+        assert_eq!(app.selected, None);
+        assert_eq!(
+            app.hot, None,
+            "the pointer's index would name another feature"
+        );
+        assert!(app.feature_edit.is_none());
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: no feature editor.
+    ///
+    /// `RemoveFeature` shifts every later index, so a form holding `Some(1)`
+    /// across one writes its feature over whatever is now at index 1.
+    #[test]
+    fn an_edit_underneath_the_editor_refuses_the_save_rather_than_writing_through() {
+        let mut app = app_with_feature();
+        let mut other = pl_core::Feature::new("AmpR", "CDS");
+        other.segments.push(pl_core::Segment::new(300, 350));
+        assert!(app.edit(pl_core::OpKind::SetFeature {
+            index: None,
+            feature: Box::new(other),
+        }));
+
+        app.open_feature_editor(Some(1));
+        feature_frame(&mut app);
+        app.feature_edit.as_mut().unwrap().name = "renamed".into();
+
+        // The window is not modal: the toolbar stayed live behind it.
+        assert!(app.edit(pl_core::OpKind::RemoveFeature { index: 0 }));
+
+        app.feature_edit.as_mut().unwrap().save = true;
+        feature_frame(&mut app);
+        assert_eq!(
+            app.document.as_ref().unwrap().molecule().features[0].name,
+            "AmpR",
+            "the feature that moved into index 1's old place was not overwritten"
+        );
+        // In the panel, where the button that was refused is.
+        assert!(
+            app.feature_edit
+                .as_ref()
+                .and_then(|p| p.notice.as_deref())
+                .unwrap_or_default()
+                .contains("changed"),
+            "{:?}",
+            app.feature_edit.as_ref().and_then(|p| p.notice.clone())
+        );
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: no `duplicate_feature`.
+    #[test]
+    fn duplicating_a_feature_copies_everything_the_model_holds() {
+        let mut app = app_with_feature();
+        app.duplicate_feature(0);
+        let mol = app.document.as_ref().unwrap().molecule();
+        assert_eq!(mol.features.len(), 2);
+        let (a, b) = (&mol.features[0], &mol.features[1]);
+        assert_eq!(b.name, "SacB copy");
+        assert_eq!(b.segments, a.segments, "both segments, both colours");
+        assert_eq!(b.qualifiers, a.qualifiers, "including the valueless one");
+        assert_eq!(b.strand, a.strand);
+        assert_eq!(app.selected, Some(1));
+    }
+
+    /// PROVEN TO FAIL at 04afbb6: the two menu items did not exist.
+    #[test]
+    fn the_molecule_menu_names_the_feature_editor() {
+        // Consts rather than literals, for the reason `SET_ORIGIN_ITEM` is one:
+        // prose elsewhere points at these paths and drifts silently otherwise.
+        assert!(ADD_FEATURE_ITEM.ends_with('…'), "it opens a window");
+        assert!(EDIT_FEATURE_ITEM.ends_with('…'));
+        assert_ne!(ADD_FEATURE_ITEM, EDIT_FEATURE_ITEM);
+    }
+
+    /// PROVEN TO FAIL at the first cut of this window, which was photographed:
+    /// the row buttons were `✕` and the qualifier disclosure was `▾`/`▸`, and
+    /// all three came out as empty boxes on screen. Same trap as
+    /// `menu_with_caret`'s U+25BE and `strand_word`'s U+2190 — the third time
+    /// this project has paid for asking a font for chrome, and the first time a
+    /// test catches it instead of a screenshot.
+    #[test]
+    fn the_feature_editors_own_glyphs_are_in_the_face_that_draws_them() {
+        let ctx = test_ctx();
+        // The premise: the oracle really does say no to the characters that were
+        // wrong. Without this the test could pass by being blind.
+        for bad in ['\u{2715}', '\u{25BE}', '\u{25B8}', '\u{21C5}'] {
+            assert!(
+                renders_as_tofu(&ctx, egui::FontFamily::Proportional, 11.0, bad),
+                "U+{:04X} is drawable after all, so this test proves nothing",
+                bad as u32
+            );
+        }
+
+        // A panel wound up to say as much as it can: every refusal and every
+        // warning, which is where the prose — and any character in it — lives.
+        let mut f = rich_feature();
+        f.strand = Strand::Unoriented;
+        f.segments.push(pl_core::Segment::new(150, 260));
+        f.segments.push(pl_core::Segment::new(120, 130));
+        f.set_qualifier("label", "x");
+        f.set_qualifier("note", "clone #1a2b3c from the -80");
+        let mut p = featedit::Panel::open(Some(0), f, 400, false, None).unwrap();
+        p.kind = "signal peptide and a very long one".into();
+        p.color = featedit::ColorMode::One("#abc".into());
+        p.name.clear();
+
+        let mut said: Vec<String> = vec![featedit::UP.into(), featedit::DELETE.into()];
+        said.extend(p.refusals());
+        said.extend(p.warnings());
+        said.extend(featedit::KINDS.iter().map(|k| (*k).to_string()));
+        assert!(said.len() > 8, "the premise: it had plenty to say");
+
+        for s in &said {
+            for c in s.chars() {
+                assert!(
+                    !renders_as_tofu(&ctx, egui::FontFamily::Proportional, 11.0, c),
+                    "U+{:04X} {c:?} has no glyph in the face that draws the feature \
+                     editor, so it renders as an empty box: {s:?}",
+                    c as u32
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // The split, and the grid it changes the shape of
     //
     // These drive real frames. A layout verified only by reading the code is
@@ -8078,6 +9450,50 @@ mod tests {
                 }
             })
             .fold(0.0f32, f32::max)
+    }
+
+    /// The worst horizontal clipping of any text laid out in the band `y`, as
+    /// `(points cut, the text)`. A zero first element means nothing is cut.
+    ///
+    /// Measured against each shape's OWN `clip_rect`, which is the rectangle
+    /// egui will really cut it against. Comparing against the panel's response
+    /// rect instead is circular, and was tried first: an overflowing row makes
+    /// that rect wider, so the band grows with the defect and the check passes
+    /// over it. Measured on the unwrapped row, `seq_readout` came back 350 pt
+    /// wide inside a 284 pt clip, with `take the other arc (8,090 bp)` starting
+    /// 54 pt left of it.
+    ///
+    /// Text only, and deliberately: egui clips at paint time, so a galley that
+    /// does not fit is still laid out at full width and simply has its left end
+    /// cut. That is the failure — a label reading "her arc (8,090 bp)" — and the
+    /// shape list is where it is visible. Backgrounds and separators
+    /// legitimately span their whole clip rect.
+    fn text_clipped_horizontally(out: &egui::FullOutput, y: egui::Rangef) -> (f32, String) {
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => {
+                    let b = egui::Rect::from_min_size(t.pos, t.galley.size());
+                    if !b.is_finite() || !b.is_positive() || !y.contains(b.center().y) {
+                        return None;
+                    }
+                    let cut = (cs.clip_rect.left() - b.left())
+                        .max(b.right() - cs.clip_rect.right())
+                        .max(0.0);
+                    Some((cut, t.galley.text().to_string()))
+                }
+                _ => None,
+            })
+            .fold(
+                (0.0f32, String::new()),
+                |acc, x| {
+                    if x.0 > acc.0 {
+                        x
+                    } else {
+                        acc
+                    }
+                },
+            )
     }
 
     /// One frame of the whole details panel.
@@ -8316,47 +9732,77 @@ mod tests {
     /// learns its content's height by laying it out, so the first pass sizes it
     /// and the later ones show it. Twenty passes would not help at bd96e5b,
     /// because 30.0 is a constant.
+    /// The `sel` half is a CONFIRMED REGRESSION of the feature editor's own
+    /// making, and this test could not see it: it ran with no selection at all,
+    /// so `take the other arc` — the widest button in the row — was never drawn,
+    /// and it asserted only VERTICAL containment. Measured with the new
+    /// "New feature…" button beside "Design primers…": 416 px of content against
+    /// ~361 px of panel at a 300 pt split, so the arc button rendered as
+    /// `her arc (8,090 bp)` and the readout line `4..30 · 27 bp` as `27 bp` —
+    /// the coordinates cut off the panel whose entire job is showing them.
     #[test]
     fn the_readout_and_its_button_are_not_cut_off_at_any_split() {
+        let selections = [
+            None,
+            // Bases 4..30 on the circle: enough of a selection that both dialog
+            // buttons enable AND `take the other arc (8,090 bp)` is offered.
+            Some(seqedit::Selection {
+                anchor: 3,
+                head: 30,
+                through_origin: false,
+            }),
+        ];
         for width in [App::DEF_PANEL, App::MIN_PANEL] {
-            let ctx = test_ctx();
-            let mut app = seq_app();
-            app.layout.panel_w = Some(width);
-            // Caret 0 on a circle: the longest form the sentence takes.
-            app.edit.caret = 0;
-            let mut out = paint_out(&mut app, &ctx, window());
-            for _ in 0..2 {
-                out = paint_out(&mut app, &ctx, window());
+            for sel in selections {
+                let ctx = test_ctx();
+                let mut app = seq_app();
+                app.layout.panel_w = Some(width);
+                // Caret 0 on a circle: the longest form the sentence takes.
+                app.edit.caret = 0;
+                app.edit.sel = sel;
+                let mut out = paint_out(&mut app, &ctx, window());
+                for _ in 0..2 {
+                    out = paint_out(&mut app, &ctx, window());
+                }
+
+                // The defect itself, measured: nothing in the panel is painted
+                // below the clip rect it was handed. THIS assertion compiles and
+                // runs at bd96e5b, where it fails by about 40 pt.
+                let lost = drawn_below_the_window(&out, 840.0);
+                assert!(
+                    lost < 1.0,
+                    "{lost:.0} pt of the readout is laid out below the window at a \
+                     {width} pt split"
+                );
+
+                let r = app.seq_readout.expect("the readout was laid out");
+                assert!(
+                    r.bottom() <= 840.5,
+                    "the readout runs {:.0} pt past the window at a {width} pt panel",
+                    r.bottom() - 840.0
+                );
+                assert!(
+                    r.height() >= 40.0,
+                    "the readout is {:.0} pt tall at a {width} pt panel, which cannot \
+                     hold a sentence that wraps plus a row of buttons",
+                    r.height()
+                );
+                // SIDEWAYS, which is what the new button broke. A wrapped row
+                // grows downwards, which the assertions above already bound.
+                let (cut, what) = text_clipped_horizontally(&out, r.y_range());
+                assert!(
+                    cut < 1.0,
+                    "{cut:.0} pt of {what:?} is cut off the side of a {width} pt panel with \
+                     sel={sel:?}"
+                );
+                // And the grid above it did not get squeezed out of existence.
+                let g = app.seq_grid.expect("the grid was painted");
+                assert!(
+                    g.top + 8.0 * g.row_h < r.top(),
+                    "only {:.0} pt of sequence left above the readout at {width}",
+                    r.top() - g.top
+                );
             }
-
-            // The defect itself, measured: nothing in the panel is painted
-            // below the clip rect it was handed. THIS assertion compiles and
-            // runs at bd96e5b, where it fails by about 40 pt.
-            let lost = drawn_below_the_window(&out, 840.0);
-            assert!(
-                lost < 1.0,
-                "{lost:.0} pt of the readout is laid out below the window at a                  {width} pt split"
-            );
-
-            let r = app.seq_readout.expect("the readout was laid out");
-            assert!(
-                r.bottom() <= 840.5,
-                "the readout runs {:.0} pt past the window at a {width} pt panel",
-                r.bottom() - 840.0
-            );
-            assert!(
-                r.height() >= 40.0,
-                "the readout is {:.0} pt tall at a {width} pt panel, which cannot \
-                 hold a sentence that wraps plus a row of buttons",
-                r.height()
-            );
-            // And the grid above it did not get squeezed out of existence.
-            let g = app.seq_grid.expect("the grid was painted");
-            assert!(
-                g.top + 8.0 * g.row_h < r.top(),
-                "only {:.0} pt of sequence left above the readout at {width}",
-                r.top() - g.top
-            );
         }
     }
 

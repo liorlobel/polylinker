@@ -748,6 +748,19 @@ fn qualifier_lines(key: &str, value: &str, out: &mut String) {
 }
 
 /// Write one qualifier. `None` emits the bare `/key` form.
+///
+/// # A newline inside a value
+///
+/// GenBank has no spelling for one. Column 1-10 blank is a continuation and the
+/// reader joins continuations with a space, so a line break can only ever come
+/// back as a space. What it must NOT do is reach the file raw, and it used to:
+/// this function split on `' '` alone, so `/note="line one\nline two"` was
+/// emitted with the break intact and column 1 of the next line holding `l`. The
+/// reader then read that as a new record and everything after it was lost —
+/// measured, `/note="line one\nline two"` followed by `/codon_start="1"` came
+/// back as `note = "line one /codon_start="` with `codon_start` GONE, and
+/// `unwritable` was empty. The break is now normalised to a space here and
+/// [`write_reporting`] says so; the qualifier that follows survives.
 fn qualifier_lines_opt(key: &str, value: Option<&str>, out: &mut String) {
     const PAD: &str = "                     "; // 21 spaces
     let Some(value) = value else {
@@ -760,7 +773,8 @@ fn qualifier_lines_opt(key: &str, value: Option<&str>, out: &mut String) {
         out.push('\n');
         return;
     };
-    let raw = format!("/{}=\"{}\"", key, value.replace('"', "\"\""));
+    let flat = flatten_value(value);
+    let raw = format!("/{}=\"{}\"", key, flat.replace('"', "\"\""));
     let mut line = String::from(PAD);
     for word in raw.split(' ') {
         if line.len() + word.len() + 1 > 79 && line.trim() != "" {
@@ -777,6 +791,30 @@ fn qualifier_lines_opt(key: &str, value: Option<&str>, out: &mut String) {
         out.push_str(&line);
         out.push('\n');
     }
+}
+
+/// Every control character in a qualifier value replaced by a space.
+///
+/// `\r\n` collapses to ONE space rather than two, so a value pasted from a
+/// Windows editor does not gain a run of blanks. Anything else below U+0020 —
+/// a stray tab, a form feed out of a lab notebook export — goes the same way:
+/// the GenBank line format is column-significant and none of them has a
+/// meaning inside a quoted value.
+fn flatten_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut last_was_break = false;
+    for c in v.chars() {
+        if (c as u32) < 0x20 {
+            if !(last_was_break && (c == '\n' || c == '\r')) {
+                out.push(' ');
+            }
+            last_was_break = c == '\n' || c == '\r';
+        } else {
+            out.push(c);
+            last_was_break = false;
+        }
+    }
+    out
 }
 
 /// The LOCUS line, in the columns the specification names.
@@ -920,6 +958,20 @@ pub fn write_reporting(
             {
                 continue;
             }
+            // Reported, because `flatten_value` is a lossy rescue and not a
+            // round trip: the value reaches the file whole and the qualifier
+            // after it survives, but the line break itself is a space from here
+            // on. Silence would make a `.gb` and a `.dna` of the same document
+            // disagree with nothing anywhere to say which one changed.
+            if v.as_deref()
+                .is_some_and(|s| s.chars().any(|c| (c as u32) < 0x20))
+            {
+                unwritable.push(format!(
+                    "feature {:?}: qualifier /{k} contains a line break, which GenBank cannot \
+                     express inside a value; it was written as a space (.dna keeps it exactly)",
+                    f.name
+                ));
+            }
             qualifier_lines_opt(k, v.as_deref(), &mut out);
         }
         if let Some(c) = f.color() {
@@ -1046,6 +1098,75 @@ mod tests {
         // ...and the qualifier that genuinely followed still arrived.
         assert_eq!(f.qualifier("codon_start"), Some("1"));
         assert_eq!(f.qualifiers.len(), 2, "{:?}", f.qualifiers);
+    }
+
+    /// PROVEN TO FAIL against this file as it stood: `qualifier_lines_opt` split
+    /// on `' '` alone and never looked at `'\n'`, so the break reached the file
+    /// raw and column 1 of the next line held the value's own text. Measured,
+    /// `/note="line one\nline two"` followed by `/codon_start="1"` came back as
+    ///
+    /// ```text
+    /// [("label", Some("x")), ("note", Some("line one /codon_start="))]
+    /// ```
+    ///
+    /// — the note truncated and mangled, `codon_start` GONE, `unwritable` empty
+    /// and exit clean. The `.dna` writer keeps the value byte for byte, so the
+    /// two formats disagreed about the same document with nothing anywhere to
+    /// say so.
+    ///
+    /// The feature editor is the first surface in the program that can put a
+    /// newline in a value — its qualifier box is the only `TextEdit::multiline`
+    /// in the GUI — so one Enter, or one pasted note, reached this.
+    #[test]
+    fn a_line_break_in_a_value_does_not_eat_the_qualifier_after_it() {
+        let mut m = Molecule {
+            declared_len: Some(12),
+            ..Default::default()
+        };
+        m.seq = "acgtacgtacgt".into();
+        let mut f = Feature::new("x", "CDS");
+        f.segments.push(Segment::new(1, 12));
+        f.set_qualifier("note", "line one\nline two");
+        f.set_qualifier("codon_start", "1");
+        m.features.push(f);
+
+        let (text, unwritable) = write_reporting(&m, "t", (1, 0, 2026));
+        // Non-vacuity: without the newline there is nothing here to lose.
+        assert!(
+            m.features[0].qualifier("note").unwrap().contains('\n'),
+            "the fixture has no line break to lose"
+        );
+        // Every line of a FEATURES block either starts a feature (columns 6-20)
+        // or is a continuation (columns 1-21 blank). A raw newline broke that.
+        for line in text.lines().skip_while(|l| !l.starts_with("FEATURES")) {
+            if line.starts_with("ORIGIN") || line.starts_with("//") {
+                break;
+            }
+            assert!(
+                line.starts_with("     ") || line.starts_with("FEATURES"),
+                "a value's own text reached column 1: {line:?}"
+            );
+        }
+
+        let back = parse(&text);
+        let g = &back.features[0];
+        assert_eq!(
+            g.qualifier("codon_start"),
+            Some("1"),
+            "the qualifier AFTER the break survived: {:?}",
+            g.qualifiers
+        );
+        assert_eq!(
+            g.qualifier("note"),
+            Some("line one line two"),
+            "and the value itself is whole, with the break as a space"
+        );
+        // Reported, because that space is a real loss and the `.dna` writer
+        // does not make it.
+        assert!(
+            unwritable.iter().any(|u| u.contains("line break")),
+            "{unwritable:?}"
+        );
     }
 
     #[test]

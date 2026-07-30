@@ -264,6 +264,13 @@ pub struct MapResponse {
     pub hovered: Option<usize>,
     /// Feature index clicked this frame.
     pub clicked: Option<usize>,
+    /// Feature index double-clicked this frame.
+    ///
+    /// The map is where a plasmid biologist looks first, so it is where a
+    /// double-click has to open the feature editor. Taken from the same hit
+    /// answer `clicked` uses — no geometry, lane, arrowhead, leader or ruler code
+    /// is touched.
+    pub double_clicked: Option<usize>,
     /// Where the centre caption was drawn and what it says in full, when the
     /// ring was too narrow to hold the whole name.
     ///
@@ -337,6 +344,7 @@ pub fn show(
     let mut out = MapResponse {
         hovered: None,
         clicked: None,
+        double_clicked: None,
         caption_full: None,
     };
 
@@ -357,6 +365,9 @@ pub fn show(
 
     if response.clicked() {
         out.clicked = out.hovered;
+    }
+    if response.double_clicked() {
+        out.double_clicked = out.hovered;
     }
     if let Some((at, full)) = &out.caption_full {
         ui.interact(*at, ui.id().with("caption"), Sense::hover())

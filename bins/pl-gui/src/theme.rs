@@ -87,7 +87,14 @@ fn by_kind(kind: &str) -> Color32 {
     }
 }
 
-fn parse_hex(s: &str) -> Option<Color32> {
+/// `#rrggbb`, exactly, and nothing else.
+///
+/// Public because the feature editor refuses what this cannot read. A colour
+/// stored faithfully in the model and written faithfully to the file, then
+/// rendered as the *type* colour with nothing anywhere saying the value was
+/// ignored, is worse than a refusal at the box the user typed it into — and the
+/// two answers have to come from one function or they will drift.
+pub fn parse_hex(s: &str) -> Option<Color32> {
     let h = s.strip_prefix('#')?;
     if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
