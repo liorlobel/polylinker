@@ -26,6 +26,30 @@ use pl_core::Strand;
 use doc::{describe, fmt_int, DigestState, Document};
 use theme::Palette;
 
+/// The toolbar menu holding the whole-molecule operations.
+///
+/// Named here and not written out at the two places that need it, because
+/// [`seqedit`]'s caret refusals quote this path IN PROSE — "use Molecule > Set
+/// origin at selected feature" — and 0ebaa41 renamed the menu from "Edit"
+/// without touching them. A user told to use a menu that does not exist is worse
+/// off than one told nothing: they go looking, and the app is the thing that
+/// lied. Two literals cannot be kept in step by care; one const can.
+///
+/// The separator in the prose is a plain `>` and not U+25B8 `▸`, which the
+/// messages used. U+25B8 is present in Hack and in NOTHING else compiled into
+/// the binary — not Ubuntu-Light, not either emoji font — and those messages are
+/// drawn PROPORTIONALLY (`RichText::new(msg).size(11.0)`, `sequence_tab`), where
+/// the fallback chain has no Hack in it. It rendered as a tofu box. `strand_word`
+/// exists for the same reason one family up.
+pub const MOLECULE_MENU: &str = "Molecule";
+/// The item in [`MOLECULE_MENU`] that renumbers the plasmid.
+pub const SET_ORIGIN_ITEM: &str = "Set origin at selected feature";
+
+/// The path a user has to walk to set the origin, as prose points at it.
+pub fn set_origin_path() -> String {
+    format!("{MOLECULE_MENU} > {SET_ORIGIN_ITEM}")
+}
+
 /// Theme-resolved colours for whatever `ui` is currently drawing into.
 fn pal(ui: &Ui) -> Palette {
     Palette::of(ui.visuals().dark_mode)
@@ -885,6 +909,11 @@ impl App {
             cutters: cutting(&|n| n > 0),
             dual: cutting(&|n| n == 2),
             multi: cutting(&|n| n > 2),
+            // Zero because the filter above is `is_unique_cutter`, which never
+            // turns a single cutter away. `pl`'s `Sites::of` needs the term
+            // because `--sites none` turns away all of them; if this filter ever
+            // widens, `closes()` below fails rather than misdescribing a class.
+            single: 0,
             ..Default::default()
         };
         let (_, first) = pl_draw::scene(d.molecule(), opts.clone());
@@ -1484,6 +1513,9 @@ impl App {
     /// The doc used to read "Undo, redo, and the edits that need no selection",
     /// which two of the four menu items contradict: "Set origin at selected
     /// feature" and "Remove selected feature" both need one.
+    ///
+    /// The menu's own name and the origin item's are [`MOLECULE_MENU`] and
+    /// [`SET_ORIGIN_ITEM`], not literals — see those.
     fn edit_group(&mut self, ui: &mut Ui) {
         let (can_undo, can_redo) = match &self.document {
             Some(d) => (d.log.can_undo(), d.log.can_redo()),
@@ -1542,7 +1574,7 @@ impl App {
             // and "Molecule" is the word `pl_core`, `pl info` and the rest of
             // this file already use for that object. Not "Sequence", "Features"
             // or "File": those are tab names.
-            ui.menu_button("Molecule", |ui| {
+            ui.menu_button(MOLECULE_MENU, |ui| {
                 let circular = self
                     .document
                     .as_ref()
@@ -1576,7 +1608,7 @@ impl App {
                 let can_rotate = circular && sel.is_some();
                 ui.add_enabled_ui(can_rotate, |ui| {
                     if ui
-                        .button("Set origin at selected feature")
+                        .button(SET_ORIGIN_ITEM)
                         .on_hover_text("renumber the plasmid to start at this feature")
                         .clicked()
                     {
@@ -2453,7 +2485,7 @@ impl App {
                     // The cursor marker, then whether this edit is on the path
                     // to the current state or on an abandoned branch.
                     ui.label(
-                        RichText::new(if here { "▶" } else { " " })
+                        RichText::new(if here { HISTORY_HERE } else { " " })
                             .monospace()
                             .color(pal(ui).accent),
                     );
@@ -2637,9 +2669,18 @@ impl App {
         // this one value — see `seqedit::RowLayout`.
         //
         // The gutter is measured from THIS molecule. A constant sized for
-        // "4,641,652" costs a 8,117 bp plasmid 21 pt that come straight out of
-        // the base cells, and those 21 pt decide whether a 60-base row needs a
-        // 509 pt panel or a 488 pt one — which is width the map pane keeps.
+        // "4,641,652" is nine cells against pKoV's five, so it costs an 8,117 bp
+        // plasmid 26.5 pt that come straight out of the base cells — and those
+        // 26.5 pt decide whether a 60-base row needs a 513.0 pt panel or a
+        // 486.5 pt one, which is width the map pane keeps.
+        //
+        // Both figures are MEASURED, by bisecting the real painter in
+        // `the_advance_band_that_keeps_every_per_row_expectation`, which also
+        // prints them. They read "21 pt", "509" and "488" until 2026-07-30, all
+        // three from an algebraic model that put the gutter's 8 pt of air on the
+        // wrong side and came out 4 pt optimistic everywhere. 488 in particular
+        // reads as the knife edge it is not: the default has 13.5 pt of slack
+        // over the threshold, not 12.
         let scrollbar = ui.spacing().scroll.bar_width + 4.0;
         let layout = seqedit::row_layout(
             ui.available_width(),
@@ -4425,6 +4466,19 @@ fn not_copied(skipped: usize) -> String {
     )
 }
 
+/// The History tab's cursor on the current state, set `.monospace()`.
+///
+/// A constant so the test that asks the monospace face whether it HAS this glyph
+/// and the label that draws it cannot name different characters. The same reason
+/// `set_origin_path` became one: the refusal prose and the menu had drifted, and a
+/// list of glyphs written out again in a test is a list that drifts the same way.
+/// U+25B6 is in Hack and in both emoji fonts; Consolas has no such glyph, and
+/// Consolas is in the candidate table the advance band prints.
+pub const HISTORY_HERE: &str = "▶";
+
+/// "There are more coordinates than the four shown", set `.monospace()`.
+pub const MORE_MARK: &str = "…";
+
 fn strand_glyph(s: Strand) -> &'static str {
     match s {
         Strand::Forward => "→",
@@ -4499,7 +4553,7 @@ fn enzyme_row(
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let shown: Vec<String> = positions.iter().take(4).map(|p| fmt_int(*p)).collect();
-            let more = if positions.len() > 4 { "…" } else { "" };
+            let more = if positions.len() > 4 { MORE_MARK } else { "" };
             ui.label(
                 RichText::new(format!("{}{more}", shown.join(", ")))
                     .monospace()
@@ -4561,6 +4615,651 @@ mod tests {
             assert!(!w.is_empty());
             assert!(w.is_ascii(), "{w} needs a font we cannot count on");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // typography: the faces have to be able to draw what we hand them
+    // -----------------------------------------------------------------------
+
+    /// Whether `c` set in `family` at `size` really draws as a tofu box.
+    ///
+    /// **`Fonts::has_glyphs` is not this question and must not be used for it.**
+    /// epaint 0.35 implements it as `resolve_face(c) != replacement_face_key`
+    /// (`font.rs:722`), with its own `TODO` beside it admitting a false negative —
+    /// and the false negative is not an edge case here, it is the whole primary
+    /// face. `CachedFamily::new` picks the replacement face by asking which face in
+    /// the chain first has U+25FB `◻`; for Monospace that is **Hack**, so
+    /// `has_glyphs` answers *false* for every character Hack owns. Measured through
+    /// it: U+2192, U+2190, U+00B7, U+2026 and U+2014 all report "missing" from the
+    /// monospace face that in fact draws all five, while U+26A0 — which Hack really
+    /// does lack — reports present. It is inverted for exactly the family ITEM 2
+    /// changes.
+    ///
+    /// It fails the other way too. In Proportional the replacement face comes out
+    /// NotoEmoji, so `has_glyphs` calls U+26A0 missing when NotoEmoji draws it, and
+    /// U+26A0 is the warning banner's marker. A gate built on it raises false alarms
+    /// and, worse, misses.
+    ///
+    /// So ask the ATLAS instead, through the real layout path. A character no face
+    /// supports is rendered as `replacement_char` — `Font::glyph_info` falls back to
+    /// it explicitly — and the substitute therefore lands on the same rasterised
+    /// glyph in the font texture. Comparing `uv_rect` against `◻`'s own is exact,
+    /// needs no font table parsing, and follows the fallback chain wherever it goes.
+    /// Verified against the four embedded faces' `cmap`s with fontTools: this agrees
+    /// with them on all twelve characters tried, where `has_glyphs` disagrees on six.
+    fn renders_as_tofu(ctx: &egui::Context, family: egui::FontFamily, size: f32, c: char) -> bool {
+        let uv = |s: &str| {
+            let job = egui::text::LayoutJob::simple_singleline(
+                s.to_string(),
+                egui::FontId::new(size, family.clone()),
+                egui::Color32::WHITE,
+            );
+            let g = ctx.fonts_mut(|f| f.layout_job(job));
+            let r = g.rows[0].glyphs[0].uv_rect;
+            // The atlas rect as plain numbers, so this needs no path to `UvRect`
+            // (epaint 0.35 does not re-export it) and reads as what it is.
+            (r.min, r.max, r.offset, r.size)
+        };
+        // U+25FB is `CachedFamily::new`'s `PRIMARY_REPLACEMENT_CHAR`. Nothing in this
+        // app draws it, so a match can only mean substitution.
+        uv(&c.to_string()) == uv("\u{25FB}")
+    }
+
+    #[test]
+    fn the_tofu_oracle_answers_both_ways_before_anything_relies_on_it() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        // A CJK ideograph is in none of the four embedded faces, in either family.
+        for fam in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+            assert!(
+                renders_as_tofu(&ctx, fam.clone(), 11.0, '\u{4E2D}'),
+                "{fam:?}: U+4E2D is in no embedded face and must read as tofu"
+            );
+            assert!(
+                !renders_as_tofu(&ctx, fam.clone(), 11.0, 'A'),
+                "{fam:?}: 'A' reads as tofu, so the oracle is stuck on yes"
+            );
+        }
+        // And the two families genuinely differ, which is the reason the monospace
+        // gate cannot be inferred from the proportional one: U+2192 is in Hack and
+        // in nothing else `default_fonts` embeds, and Hack is not in the
+        // proportional chain.
+        assert!(!renders_as_tofu(
+            &ctx,
+            egui::FontFamily::Monospace,
+            11.0,
+            '\u{2192}'
+        ));
+        assert!(renders_as_tofu(
+            &ctx,
+            egui::FontFamily::Proportional,
+            11.0,
+            '\u{2192}'
+        ));
+    }
+
+    /// The band of monospace advances that leaves `DEF_PANEL`, `MIN_PANEL` and
+    /// every per-row expectation exactly where 0ebaa41 calibrated them.
+    ///
+    /// COMPILE-ONLY at 0ebaa41: nothing here existed. It asserts no new
+    /// behaviour, and that is deliberate — it is the instrument the font swap
+    /// needs and could not have, because "does this face still reach sixty at the
+    /// 500 pt default" was previously answerable only by installing the face and
+    /// looking. Stated as a band, it is answerable from the face's `hmtx`.
+    ///
+    /// The model: `per_row = fit_per_row(P - C - gutter_w(n, 11.0 * ratio),
+    /// 11.5 * ratio)`, where `C` is the chrome, the scrollbar and the gutter's
+    /// own air -- everything with no font in it. `C` is not written down as a
+    /// literal; it is MEASURED from the real painter below and then asserted to
+    /// reproduce all three of
+    /// `the_default_split_reaches_sixty_and_takes_no_more_than_it_needs`'s cases.
+    /// A hard-coded C is a number that rots the first time egui changes a margin;
+    /// a measured one cannot.
+    ///
+    /// What the band buys, concretely: IBM Plex Mono and JetBrains Mono are
+    /// 0.600 em and Cascadia Mono is 0.585938 (measured with fontTools), so all
+    /// three drop in with NO constant moved. Fira Code is 0.615385 and breaks
+    /// `DEF_PANEL - 12`; Iosevka is 0.500 and breaks `DEF_PANEL - 40` in the other
+    /// direction. Whoever picks a face outside the band must move `DEF_PANEL` --
+    /// not edit the expectation, because the "and it is not padded" half of that
+    /// test is what stops the details panel quietly eating the map pane.
+    #[test]
+    fn the_advance_band_that_keeps_every_per_row_expectation() {
+        const LEN: u64 = 8_117; // `seq_app`'s molecule, so a 5-character gutter
+        let per_row = |p: f32, ratio: f32, c: f32| -> u64 {
+            let g = seqedit::gutter_w(LEN, 11.0 * ratio);
+            seqedit::fit_per_row(p - c - g, 11.5 * ratio)
+        };
+
+        // --- measure C, and the face we have, from the real painter -----------
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let hack = ctx.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(11.5), 'A')) / 11.5;
+        // Hack-Regular 3.003 is 1233/2048; if this moves, the numbers in the doc
+        // above are about a different font than the one in the binary.
+        assert!(
+            (hack - 0.602_051).abs() < 1e-4,
+            "the incumbent monospace advance ratio is {hack}, not Hack's 0.602051"
+        );
+
+        // The smallest panel that reaches sixty, from the painter itself.
+        // Bisected rather than stepped: `fit_per_row` is monotonic in the width,
+        // and a 0.5 pt linear sweep cost this test 27 seconds of a suite that
+        // people have to be willing to run.
+        let reaches = |p: f32| -> bool {
+            let ctx = egui::Context::default();
+            let mut app = seq_app();
+            app.layout.panel_w = Some(p);
+            paint(&mut app, &ctx, window());
+            app.edit.per_row() >= 60
+        };
+        assert!(reaches(700.0), "sixty is unreachable below a 700 pt panel");
+        let (mut lo_p, mut hi_p) = (App::MIN_PANEL, 700.0f32);
+        while hi_p - lo_p > 0.25 {
+            let mid = 0.5 * (lo_p + hi_p);
+            if reaches(mid) {
+                hi_p = mid;
+            } else {
+                lo_p = mid;
+            }
+        }
+        let sixty = hi_p;
+        let c = sixty - 60.0 * (11.5 * hack) - seqedit::gutter_w(LEN, 11.0 * hack);
+        // A quarter of a point of quantisation from the 0.5 pt search, no more.
+        assert!(
+            (0.0..64.0).contains(&c),
+            "the font-independent chrome came out {c} pt, which is not a chrome"
+        );
+
+        // The model has to reproduce the painter before it is used to predict.
+        for (panel, want) in [
+            (App::DEF_PANEL, 60u64),
+            (App::DEF_PANEL - 12.0, 60),
+            (App::DEF_PANEL - 40.0, 50),
+        ] {
+            assert_eq!(
+                per_row(panel, hack, c),
+                want,
+                "the model disagrees with the painter at {panel} pt for the face in \
+                 the binary; C = {c}"
+            );
+        }
+
+        // --- the band ---------------------------------------------------------
+        let ok = |ratio: f32| -> bool {
+            per_row(App::DEF_PANEL, ratio, c) == 60
+                && per_row(App::DEF_PANEL - 12.0, ratio, c) == 60
+                && per_row(App::DEF_PANEL - 40.0, ratio, c) == 50
+                && per_row(App::MIN_PANEL, ratio, c) >= 10
+        };
+        const STEP: f32 = 0.000_25;
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        let mut r = 0.40f32;
+        while r <= 0.80 {
+            if ok(r) {
+                lo = lo.min(r);
+                hi = hi.max(r);
+            }
+            r += STEP;
+        }
+        assert!(
+            lo < hi,
+            "no advance ratio satisfies the expectations at all"
+        );
+        // The interval is CLOSED, and saying so is the difference between a face at
+        // the edge being reported inside or outside on no evidence: `lo` and `hi` are
+        // both ratios `ok` returned true for.
+        assert!(ok(lo) && ok(hi), "the endpoints are inside the band");
+        assert!(
+            !ok(lo - STEP) && !ok(hi + STEP),
+            "one step outside either end must fail, or the search did not find an edge"
+        );
+        // Printed, not pinned: the numbers belong in a commit message and in
+        // whatever the next person measures a candidate face against, and pinning
+        // them would make this test fail for the healthy reason that `DEF_PANEL`
+        // moved. Visible under `cargo test -- --nocapture`.
+        //
+        // **CLOSED, and stated to the resolution it was found at.** `lo` is a `min`
+        // and `hi` a `max` over ratios where `ok(r)` is TRUE, so both endpoints
+        // satisfy the expectations — writing it `(lo, hi]` said the opposite about
+        // the low end and excluded a ratio that passes. And the sweep steps by
+        // 0.00025, so six decimals claim about a thousand times the precision the
+        // search has: the true upper edge is somewhere in `[hi, hi + STEP)`. Both
+        // were reproduced verbatim in the report that came with this test and then
+        // reasoned from, which is how a soft boundary becomes a hard number.
+        eprintln!(
+            "advance band: [{lo:.5}, {hi:.5}] em, resolved to +/-{STEP}  |  \
+             sixty at {sixty:.2} pt  |  chrome C = {c:.2} pt  |  \
+             face in the binary = {hack:.6} em"
+        );
+        // Measured with fontTools on this machine, except where marked.
+        for (name, ratio, inside) in [
+            ("Hack 3.003 (the incumbent)", 0.602_051f32, true),
+            ("IBM Plex Mono", 0.600, true),
+            ("JetBrains Mono", 0.600, true),
+            ("Cascadia Mono 2404.023", 0.585_938, true),
+            ("DejaVu Sans Mono", 0.602, true),
+            ("Fira Code 6.002", 0.615_385, false),
+            ("Consolas 7.01", 0.549_805, false),
+            ("Iosevka", 0.500, false),
+        ] {
+            assert_eq!(
+                ok(ratio),
+                inside,
+                "{name} at {ratio} em: the band is [{lo:.5}, {hi:.5}]; \
+                 60/60/50 at {}/{}/{} pt gave {}/{}/{}",
+                App::DEF_PANEL,
+                App::DEF_PANEL - 12.0,
+                App::DEF_PANEL - 40.0,
+                per_row(App::DEF_PANEL, ratio, c),
+                per_row(App::DEF_PANEL - 12.0, ratio, c),
+                per_row(App::DEF_PANEL - 40.0, ratio, c),
+            );
+        }
+    }
+
+    /// PROVEN TO FAIL at 0ebaa41 on both refusals: they contained U+25B8 `▸`.
+    ///
+    /// Both are drawn PROPORTIONALLY — `sequence_tab` sets them with
+    /// `RichText::new(msg).size(11.0)` and no `.monospace()` — and U+25B8 is
+    /// present in Hack and in NOTHING else compiled into this binary. Measured
+    /// with fontTools over the four faces `eframe`'s `default_fonts` embeds:
+    ///
+    ///   U+25B8  Ubuntu-Light MISSING · Hack yes · NotoEmoji MISSING · emoji-icon MISSING
+    ///
+    /// egui's Proportional fallback chain is Ubuntu-Light, NotoEmoji,
+    /// emoji-icon-font — no Hack — so the app drew a tofu box in the middle of a
+    /// sentence explaining a refusal. Exactly the trap `strand_word` was written
+    /// for, one family up, and `strand_glyphs_cover_every_variant` above is its
+    /// sibling.
+    ///
+    /// Asked of the FACE and not of an allow-list of characters, through
+    /// [`renders_as_tofu`], so this keeps holding when the chain changes — which is
+    /// the whole point of asking it in a typography pass that intends to change the
+    /// chain. It used to ask `Fonts::has_glyphs`, which happened to give the right
+    /// answer for these two strings and is not the question; see
+    /// [`renders_as_tofu`] for the six characters it gets wrong.
+    #[test]
+    fn the_caret_refusals_use_only_glyphs_the_proportional_face_has() {
+        use seqedit::SeqEdit;
+        const NOW: f64 = 100.0;
+        let mut before = doc::Document::of_molecule(pl_core::Molecule {
+            seq: b"ACGTACGTACGT".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        });
+        let mut e = SeqEdit::new();
+        e.caret = 0;
+        e.backspace(&mut before, NOW);
+        let at_start = e.notice.clone().expect("a refusal at base 1");
+
+        let mut after = doc::Document::of_molecule(pl_core::Molecule {
+            seq: b"ACGTACGTACGT".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        });
+        let mut e = SeqEdit::new();
+        e.caret = 12;
+        e.delete_forward(&mut after, NOW);
+        let at_end = e.notice.clone().expect("a refusal past the last base");
+
+        let ctx = egui::Context::default();
+        // One frame, so the font set exists.
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        for msg in [&at_start, &at_end] {
+            // The path a user is sent down has to be the one that is there.
+            assert!(
+                msg.contains(&set_origin_path()),
+                "{msg:?} does not name {:?}",
+                set_origin_path()
+            );
+            for c in msg.chars() {
+                assert!(
+                    !renders_as_tofu(&ctx, egui::FontFamily::Proportional, 11.0, c),
+                    "U+{:04X} {c:?} has no glyph in the face that draws this message, so it \
+                     renders as a tofu box: {msg:?}",
+                    c as u32
+                );
+            }
+        }
+    }
+
+    /// The mirror of the refusal test above, for the family a monospace swap
+    /// actually replaces.
+    ///
+    /// COMPILE-ONLY at 0ebaa41 (`HISTORY_HERE` and `MORE_MARK` did not exist), and
+    /// it asserts nothing new about today's binary — Hack has all six glyphs. It is
+    /// here because the gate it completes had a hole exactly where the work was
+    /// pointed: every glyph-coverage assertion in the workspace asked
+    /// `FontId::proportional`, inside
+    /// `the_caret_refusals_use_only_glyphs_the_proportional_face_has` — while
+    /// ITEM 2's subject is the MONOSPACE face, and six non-ASCII characters are set
+    /// in it.
+    ///
+    /// Measured against the four embedded faces' `cmap`s with fontTools, and the
+    /// first two lines are why this is not a formality:
+    ///
+    ///   U+2192 `→`  Hack yes · Ubuntu-Light MISSING · NotoEmoji MISSING · emoji-icon MISSING
+    ///   U+2190 `←`  Hack yes · all three others MISSING
+    ///   U+2194 `↔`  Hack yes · NotoEmoji yes
+    ///   U+25B6 `▶`  Hack yes · both emoji fonts yes · Ubuntu-Light MISSING
+    ///
+    /// The forward and reverse arrows have exactly ONE supplier in the binary and it
+    /// is the face being swapped. They are `strand_glyph`'s two commonest values,
+    /// drawn `.monospace()` in the Features panel's coordinate column, and that
+    /// column is where a reverse feature's direction is stated without colour. Swap
+    /// to a face without them and the panel fills with tofu boxes — which is not
+    /// hypothetical in this codebase: it is the U+25B8 defect the pass just fixed one
+    /// family up, and [`renders_as_tofu`] confirms U+25B8 still reads as tofu in the
+    /// proportional face today.
+    ///
+    /// `strand_glyphs_cover_every_variant` above cannot see this. It asserts the
+    /// strings are non-empty and that the WORD is ASCII, and its own comment says a
+    /// tofu box is a non-empty string.
+    ///
+    /// `HISTORY_HERE` and `MORE_MARK` are constants rather than characters written
+    /// out here for the reason `set_origin_path` is one: a list of glyphs restated
+    /// in a test drifts from the label that draws them, silently, and the drift is
+    /// invisible until someone looks at the running app.
+    #[test]
+    fn the_monospace_face_has_every_glyph_the_app_sets_in_it() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        // Every character the app hands the monospace family, with where from.
+        let mut want: Vec<(String, &str)> = vec![
+            (
+                HISTORY_HERE.to_string(),
+                "the History tab's cursor on the current state",
+            ),
+            (
+                MORE_MARK.to_string(),
+                "enzyme_row's 'more coordinates than shown'",
+            ),
+        ];
+        for s in [
+            Strand::Forward,
+            Strand::Reverse,
+            Strand::Both,
+            Strand::Unoriented,
+        ] {
+            want.push((
+                strand_glyph(s).to_string(),
+                "strand_glyph, the Features panel's coordinate column",
+            ));
+        }
+        // And the printable ASCII the grid, the gutter, the two rulers, the enzyme
+        // names, the sites and `op.id.short()` are all drawn from. `row_text` can
+        // emit any of 0x21..=0x7E, so the whole range and not a hand-picked subset.
+        for b in 0x21u8..=0x7E {
+            want.push(((b as char).to_string(), "printable ASCII, via row_text"));
+        }
+        // The sizes the app really asks for: 9.0 and 9.5 are the map's ruler and the
+        // sequence view's, 11.0 and 11.5 everything else.
+        for size in [9.0f32, 9.5, 11.0, 11.5] {
+            for (s, why) in &want {
+                for c in s.chars() {
+                    assert!(
+                        !renders_as_tofu(&ctx, egui::FontFamily::Monospace, size, c),
+                        "at {size} pt U+{:04X} {c:?} has no glyph in the MONOSPACE face, so \
+                         {why} renders as a tofu box",
+                        c as u32
+                    );
+                }
+            }
+        }
+    }
+
+    /// THE LIGATURE GATE. A row of bases must SHAPE to one glyph per base, all on
+    /// one pitch.
+    ///
+    /// This is the check the pass was asked for and did not have. Its sibling below
+    /// measures `Fonts::glyph_width`, which reads one character's `hmtx` advance
+    /// (`fonts.rs:851` -> `FontFace::advance_width_unscaled` -> skrifa) and never
+    /// shapes anything — so it cannot detect a ligature, and a standalone probe
+    /// confirmed that it PASSES for Fira Code 6.002, the face the advance band's own
+    /// table asserts must be rejected. A candidate at 0.600 em that collapses
+    /// clusters would walk through the whole gate.
+    ///
+    /// The row is painted as ONE shaped run: `row_text` builds all sixty characters
+    /// and `main.rs` draws them in a single `painter.text` call, which goes
+    /// `layout_no_wrap` -> `layout_job` -> `shape_text` -> `shaper.shape(buffer, &[])`
+    /// — an EMPTY user-feature list, so harfrust's defaults govern and `liga`,
+    /// `clig`, `calt`, `rlig`, `rclt` and `kern` are all on. There is no knob to turn
+    /// them off: `TextOptions`, `FontTweak` and `TextFormat` carry no feature list
+    /// (`coords` is variable-font axes, not GSUB), so the only route is a face that
+    /// does not ligate. Verified at source in epaint 0.35. `layout_job` here is the
+    /// same entry point the painter uses, so this asks the shaper the app's own
+    /// question.
+    ///
+    /// Four properties, because a ligature can break the grid three different ways
+    /// and one of them leaves the count intact:
+    ///
+    ///  1. one glyph per character — a shaper that drops a cluster shortens the list;
+    ///  2. each glyph is still the character it came from, in order;
+    ///  3. glyph `k` sits at `x0 + k * advance` — the mapping `seqedit` rests on;
+    ///  4. the whole row is `n * advance` wide — the direct form of "two glyphs
+    ///     collapsed into one advance", which is invisible to 1 and 2 because
+    ///     `emit_continuation_glyphs` appends zero-advance glyphs to keep
+    ///     `glyphs.len() == char_count`.
+    ///
+    /// PASSES at 0ebaa41, and this says so rather than dressing it up: Hack-Regular
+    /// 3.003 cannot shape — one non-zero advance in the whole font, no GPOS, no
+    /// legacy `kern`, no GSUB lookup reachable from the default-on features. Worth
+    /// recording that the brief's premise is measurably too strong for the actual
+    /// candidates: Fira Code's and Cascadia Code's ligatures are advance-PRESERVING,
+    /// and a 60-character row of `--`, `**`, `..`, `->`, `=>`, `<=`, `!=`, `::`,
+    /// `//`, `<>` and `++` drifts at most 0.87 pt in either — the same pixel-snapping
+    /// sawtooth Hack shows. The hole in the gate is real; the danger from today's
+    /// shortlist is smaller than either document claimed.
+    ///
+    /// The fixture is a real `Molecule` through the real `row_text` so the alphabet
+    /// is what the app can actually paint: `row_text` pushes `b as char` for every
+    /// `is_ascii_graphic` byte, which is all 94 printable ASCII, and `?` otherwise.
+    #[test]
+    fn a_sequence_row_shapes_to_one_glyph_per_base_on_one_pitch() {
+        // Ligature-prone pairs that survive `is_ascii_graphic`, padded with bases.
+        let mol = pl_core::Molecule {
+            seq: b"ACGT--ACGT**ACGT..ACGT->ACGT=>ACGT<=ACGT!=ACGT::ACGT//ACGT<>++".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let e = seqedit::SeqEdit::new();
+        let mut row = String::new();
+        e.row_text(&mol, 0, 60, &mut row);
+        assert_eq!(row.chars().count(), 60, "sixty cells: {row:?}");
+        for pair in ["--", "**", "..", "->", "=>", "<=", "!=", "::", "//"] {
+            assert!(
+                row.contains(pair),
+                "{pair:?} did not survive row_text, so this proves nothing about \
+                 ligatures: {row:?}"
+            );
+        }
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        // One device pixel. `epaint` snaps every glyph's x to a whole device pixel
+        // (`text_layout.rs`: `glyph.pos.x = round_to_pixel(glyph.pos.x)`), so a
+        // correct face still shows a bounded sawtooth of about 0.87 pt at this
+        // metric. A collapsed cluster is out by a whole advance, seven times this.
+        let tol = 1.01 / ctx.pixels_per_point();
+
+        // All four properties as one function returning WHICH one broke, so the same
+        // code can be pointed at a row that must pass and a row that must fail.
+        let check = |text: &str, size: f32| -> Result<(), String> {
+            let chars: Vec<char> = text.chars().collect();
+            let advance = ctx.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(size), 'A'));
+            let job = egui::text::LayoutJob::simple_singleline(
+                text.to_string(),
+                egui::FontId::monospace(size),
+                egui::Color32::WHITE,
+            );
+            let g = ctx.fonts_mut(|f| f.layout_job(job));
+            if g.rows.len() != 1 {
+                return Err(format!("the row wrapped into {} rows", g.rows.len()));
+            }
+            let glyphs = &g.rows[0].glyphs;
+            // 1 — one glyph per character. A shaper that drops a cluster shortens
+            // the list, and every column past it names the wrong base.
+            if glyphs.len() != chars.len() {
+                return Err(format!(
+                    "the shaper returned {} glyphs for {} characters",
+                    glyphs.len(),
+                    chars.len()
+                ));
+            }
+            for (k, (gl, c)) in glyphs.iter().zip(&chars).enumerate() {
+                // 2 — and it is still the character it came from, in order.
+                if gl.chr != *c {
+                    return Err(format!(
+                        "glyph {k} carries {:?} where the row has {c:?}",
+                        gl.chr
+                    ));
+                }
+                // 3 — on the grid `seqedit` computes every x from.
+                let want = glyphs[0].pos.x + k as f32 * advance;
+                if (gl.pos.x - want).abs() > tol {
+                    return Err(format!(
+                        "glyph {k} ({c:?}) shaped to x={:.3}, {:.3} pt off the {advance:.4} pt \
+                         grid — {:.2} cells; a click in that column lands on the wrong base",
+                        gl.pos.x,
+                        gl.pos.x - want,
+                        (gl.pos.x - want) / advance
+                    ));
+                }
+            }
+            // 4 — and the row is as wide as its cells. This is the failure the first
+            // three can miss: `emit_continuation_glyphs` appends ZERO-ADVANCE glyphs
+            // to keep `glyphs.len() == char_count`, so a collapsed cluster keeps the
+            // count and the characters and only shortens the row.
+            let want_w = chars.len() as f32 * advance;
+            if (g.size().x - want_w).abs() > tol + advance * 0.5 {
+                return Err(format!(
+                    "the row shaped {:.2} pt wide against {} cells of {advance:.4} = \
+                     {want_w:.2}, a difference of {:.2} cells",
+                    g.size().x,
+                    chars.len(),
+                    (g.size().x - want_w) / advance
+                ));
+            }
+            Ok(())
+        };
+
+        for size in [9.5f32, 11.0, 11.5] {
+            check(&row, size).unwrap_or_else(|e| {
+                panic!("at {size} pt the sequence row does not shape to a grid: {e}")
+            });
+        }
+
+        // THE CHECK CAN FAIL, in the SHIPPED monospace face, on exactly the failure a
+        // ligating face produces. `A` followed by U+0301 COMBINING ACUTE shapes in
+        // Hack to three glyphs whose second and third both sit at x=7.0: the count is
+        // right, the characters are right, the middle cell has no advance, and the row
+        // comes out 13.84 pt where three cells of 6.9236 say 20.77. Measured, not
+        // supposed. That is a cluster collapse in the face the app uses today, which
+        // makes assertions 3 and 4 demonstrably live rather than arguably live.
+        //
+        // `row_text` can never emit it — it substitutes `?` for every byte that is not
+        // `is_ascii_graphic`, and U+0301 is not ASCII — so this is a probe, not a live
+        // defect.
+        let collapsing = "A\u{0301}A";
+        let err = check(collapsing, 11.5)
+            .expect_err("a zero-advance combining mark passed every assertion above");
+        assert!(
+            err.contains("off the") || err.contains("wide against"),
+            "the collapse was caught by the wrong property: {err}"
+        );
+        // And per-character advances stay uniform right through it, which is why the
+        // sibling below cannot stand in for this test: both `A`s are 0.602 em by
+        // `hmtx` while the pair `A` + mark occupies one cell on the page. A shaping
+        // decision is a property of a PAIR and `glyph_width` only ever sees one
+        // character. (U+0301's own `hmtx` advance is 0, so the sibling would catch
+        // *this* probe if a combining mark were in its alphabet — a real ligature is
+        // the harder case, because both members carry a full advance in `hmtx` and the
+        // substitution still puts one glyph where two cells were. That is the case
+        // measured on Fira Code, where nothing in the workspace asks the question.)
+        let a = ctx.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(11.5), 'A'));
+        assert!(a > 0.0, "the advance of a base is not what changed");
+        let job = egui::text::LayoutJob::simple_singleline(
+            collapsing.to_string(),
+            egui::FontId::monospace(11.5),
+            egui::Color32::WHITE,
+        );
+        let g = ctx.fonts_mut(|f| f.layout_job(job));
+        let xs: Vec<f32> = g.rows[0].glyphs.iter().map(|q| q.pos.x).collect();
+        assert_eq!(
+            xs.len(),
+            3,
+            "the count survived the collapse, which is the point: {xs:?}"
+        );
+        assert!(
+            (xs[2] - xs[1]).abs() < 0.01,
+            "the third glyph must sit on top of the second for this to be a collapse: {xs:?}"
+        );
+    }
+
+    /// The sequence grid rests on `x(base) = x0 + col * advance`, so the face it
+    /// is set in must have ONE advance.
+    ///
+    /// PASSES at 0ebaa41 and this says so: Hack-Regular 3.003 has exactly one
+    /// non-zero advance in the whole font (1233/2048 = 0.6020508), no GPOS, no
+    /// legacy `kern`, and no GSUB lookup reachable from the shaper's default-on
+    /// features. The arithmetic holds because the face cannot shape, not because
+    /// anything checked — which is what makes this a prerequisite for changing the
+    /// face and not a formality.
+    ///
+    /// **What this does NOT test is shaping, and it used to claim it did.** It calls
+    /// `Fonts::glyph_width`, which is `FontFace::advance_width_unscaled` — one
+    /// character's `hmtx` entry, out of skrifa, with no shaper anywhere in the path.
+    /// The paragraph that stood here explained how a ligature breaks the column
+    /// mapping and then measured `hmtx`, which cannot see one: a standalone probe
+    /// confirmed this assertion PASSES for Fira Code 6.002, the face the advance
+    /// band's own table asserts must be rejected. The shaping question is asked by
+    /// `a_sequence_row_shapes_to_one_glyph_per_base_on_one_pitch` above, and that is
+    /// the gate a font swap has to clear; this one is the narrower property its
+    /// arithmetic sibling needs — a single advance to multiply by — and it is worth
+    /// having as itself.
+    ///
+    /// THE CHECK CAN FAIL, demonstrated rather than asserted: the same loop over
+    /// `FontFamily::Proportional` fails immediately, because Ubuntu-Light has 325
+    /// distinct advances (measured). That case is exercised below so the
+    /// demonstration ships with the test instead of living in a commit message.
+    #[test]
+    fn the_sequence_grid_has_one_advance_at_every_size_it_is_drawn() {
+        // Every character `row_text` can put in a cell, and not a hand-picked
+        // subset of it. `row_text` pushes `b as char` for every `is_ascii_graphic`
+        // byte — 0x21..=0x7E, ninety-four characters — and `?` for the rest, so a
+        // file whose reader kept a `@` or a `#` paints one. The 46-character
+        // alphabet this used to list left those outside the gate for no reason:
+        // measured, all 94 are uniform in Hack, Cascadia Mono, Cascadia Code and
+        // Fira Code alike, so asking the whole range costs nothing and matches what
+        // the function under test can actually emit.
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        for size in [9.0f32, 9.5, 10.0, 11.0, 11.5] {
+            let id = egui::FontId::monospace(size);
+            let want = ctx.fonts_mut(|f| f.glyph_width(&id, 'A'));
+            for c in (0x21u8..=0x7E).map(char::from) {
+                let got = ctx.fonts_mut(|f| f.glyph_width(&id, c));
+                // Bit-identical, not a tolerance: these come from `hmtx`
+                // integers scaled by one factor, so any difference at all is a
+                // face that cannot carry a column grid.
+                assert_eq!(
+                    got, want,
+                    "at {size} pt {c:?} advances {got} against {want} for 'A'; \
+                     x(base) = x0 + col * advance is not true in this face"
+                );
+            }
+        }
+        // And the same question of a face that fails it, so the assertion above
+        // is known to be able to say no. Ubuntu-Light has 325 distinct advances.
+        let id = egui::FontId::proportional(11.5);
+        let a = ctx.fonts_mut(|f| f.glyph_width(&id, 'i'));
+        let b = ctx.fonts_mut(|f| f.glyph_width(&id, 'W'));
+        assert_ne!(
+            a, b,
+            "the proportional face suddenly has one advance, so the check above \
+             proves nothing about monospace"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -7490,11 +8189,43 @@ mod tests {
         assert_eq!(told.dual, cli.dual);
         assert_eq!(told.multi, cli.multi);
         assert!(told.closes(), "{told:?} does not account for every cutter");
-        // And the counts are enzymes: a folded tick names several, and counting
-        // labels understated pET28a by nine.
-        assert!(
-            told.labelled >= opts.sites.len().saturating_sub(told.hidden),
-            "{told:?} against {} sites asked for",
+        // And the counts are ENZYMES.
+        //
+        // What stood here was a TAUTOLOGY carrying exactly that claim:
+        // `told.labelled >= opts.sites.len().saturating_sub(told.hidden)`, where
+        // `figure_options` sets `told.hidden` from `sites_dropped` and
+        // `sites_dropped` was `opts.sites.len() - sites_named` — so the right-hand
+        // side WAS `told.labelled` and the assertion reduced to `x >= x`. It could
+        // not fail for any molecule, any renderer or any bug, and a check that
+        // cannot fail carrying a comment about the property it does not test is
+        // worse than no check: it is why nobody looked again while the counting
+        // defect it named was live.
+        //
+        // Restated as a conservation law over the enzymes asked for, which CAN
+        // fail — but not here, and the reason is worth stating exactly, because
+        // the obvious one is wrong. It is not that `hostile-names.gb` happens to
+        // hold three unique cutters. It is that `figure_options` builds `sites`
+        // from `filter(is_unique_cutter)` and `positions[0]`, so it can only ever
+        // hand `scene` ONE pair per enzyme: a mention, a label and an enzyme are
+        // the same integer for every molecule this call site will ever see, and
+        // swapping the fixture would not change that. Measured: this assertion
+        // passes at 0ebaa41, where `sites_named` counted mentions.
+        //
+        // So it is a contract, not a detector. It says what `figure_options` owes
+        // its reader and it will fail the day the filter widens — which is
+        // precisely the change `pl export --sites dual` already represents one
+        // layer over, and got wrong. The detector for the counting defect itself
+        // is `pl_draw`'s
+        // `the_disclosure_closes_on_every_sites_filter_not_only_the_one_with_no_folds`
+        // and `bins/pl`'s `the_disclosure_closes_on_a_multi_cutter_in_every_sites_mode`,
+        // both of which fail at 0ebaa41.
+        let enzymes: std::collections::BTreeSet<&str> =
+            opts.sites.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            told.labelled + told.hidden,
+            enzymes.len(),
+            "{told:?} against {} distinct enzymes asked for in {} sites",
+            enzymes.len(),
             opts.sites.len()
         );
     }

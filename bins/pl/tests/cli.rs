@@ -1879,6 +1879,37 @@ fn one_site_plasmid() -> String {
     genbank("pKoVtest", &seq, true)
 }
 
+/// A 1,119 bp circular plasmid with one unique, one dual and one multi cutter.
+///
+/// `--sites` has existed since e087e27 and no test had ever handed it `dual` or
+/// `all` on a molecule with a non-unique cutter, which is why the mention-counting
+/// bug survived a corpus that already contained the guard against it. Verified
+/// with `pl digest`: EXACTLY three cutters — XhoI 1 cut at 996, BamHI 2 at
+/// 746/871, EcoRI 5 at 121/246/371/496/621 — and nothing else in the 58-enzyme
+/// table touches it. `GATTACA` holds no palindromic 6-mer, so the filler
+/// introduces nothing; five copies of the same site is what makes EcoRI a multi
+/// cutter and therefore what makes the arithmetic visible.
+///
+/// 1,119 bp at the default 720 pt canvas drops nothing and shortens nothing, so a
+/// test over this fixture is entirely layout-independent: it fails on the unit and
+/// only on the unit.
+fn multi_cutter_plasmid() -> String {
+    let f = "GATTACA".repeat(17);
+    let mut seq = String::new();
+    for _ in 0..5 {
+        seq.push_str(&f);
+        seq.push_str("GAATTC"); // EcoRI, 5 cuts
+    }
+    for _ in 0..2 {
+        seq.push_str(&f);
+        seq.push_str("GGATCC"); // BamHI, 2 cuts
+    }
+    seq.push_str(&f);
+    seq.push_str("CTCGAG"); // XhoI, 1 cut
+    seq.push_str(&f);
+    genbank("pMULTI", &seq, true)
+}
+
 /// PROVEN TO FAIL at e087e27, on both assertions.
 ///
 /// `pl_draw::scene` fell through to the literal string `"unnamed"` when the
@@ -1960,6 +1991,22 @@ fn the_site_filter_is_stated_and_a_typo_is_refused() {
         !stdout(&none).contains("EcoRI"),
         "--sites none asked for no sites"
     );
+    // Drawing nothing is not licence to say anything. This plasmid has exactly one
+    // UNIQUE cutter, EcoRI at 402, and at 0ebaa41 `--sites none` described it as a
+    // MULTI cutter — `0 of 3 cutters labelled · 0 dual, 3 multi not drawn` — in the
+    // figure and on stderr, because `Sites::of` had no bucket for a single cutter
+    // the filter turned away. It closed, so nothing caught it.
+    //
+    // The three cutters are `pl digest`'s own answer for this sequence and not an
+    // assumption about it: EcoRI once at 402, and BsiWI 199 times and SnaBI 198
+    // times, because `CGTACG` and `TACGTA` both fall out of an `ACGT` repeat. The
+    // comment here used to claim one cutter, and the number it asserted was wrong
+    // in the same direction — a fixture believed rather than measured.
+    assert!(
+        stderr(&none).contains("0 of 3 cutters labelled · 1 single, 0 dual, 2 multi not drawn"),
+        "--sites none misdescribes a lone single cutter: {}",
+        stderr(&none)
+    );
 
     // `dual` admits the single cutters as well: an excision wants a pair of
     // sites and one of them is often the only copy of its enzyme.
@@ -2032,4 +2079,128 @@ fn the_figure_and_the_command_both_say_which_cutters_were_left_out() {
         "{line} does not account for every cutter"
     );
     assert!(labelled >= 1, "{line}: EcoRI cuts once and is on the map");
+}
+
+/// PROVEN TO FAIL at 0ebaa41 by PROCESS EXIT CODE, before any parsing.
+///
+/// `CARGO_BIN_EXE_pl` is the DEBUG binary, so `debug_assert!(d.closes(), ..)` in
+/// `cmd_export` is live under `cargo test`. At 0ebaa41 this fixture aborts:
+///
+///   `--sites dual` -> exit 101, `Disclosure { cutters: 3, labelled: 3, dual: 0,
+///                     multi: 1, hidden: 0, shortened: 0 }`
+///   `--sites all`  -> exit 101, `labelled: 8` against `cutters: 3`
+///
+/// So the guard was coded, correct and already firing; nothing needed building to
+/// catch it. What was missing was a molecule the guard could bite on: the sibling
+/// above runs at the DEFAULT filter on a one-EcoRI plasmid, where a mention, a
+/// label and an enzyme are the same integer.
+///
+/// Four things the sibling does not do, each of which caught a distinct part of
+/// this defect:
+///  * it exercises `--sites dual` and `--sites all`, the two modes whose counts
+///    were wrong;
+///  * it includes `hidden` in the sum, which the sibling drops — a canvas that
+///    dropped labels escaped it entirely;
+///  * it asserts `labelled <= cutters`, which is the "8 of 3" and "71 of 40"
+///    shape a reader notices and no arithmetic identity forbids;
+///  * it exercises `--sites none`, whose BUCKETS were wrong while its sum closed.
+///    That row is why `closes()` alone is not the whole guard: it passed on
+///    `0 of 3 · 1 dual, 2 multi` for a fixture with one single, one dual and one
+///    multi cutter. Pinning the exact sentence is what sees a misclassification,
+///    and pinning it here rather than in `pl-draw` is deliberate — `pl-draw`
+///    cannot depend on `pl-enzymes`, so it has no way to know that XhoI cuts once.
+#[test]
+fn the_disclosure_closes_on_a_multi_cutter_in_every_sites_mode() {
+    let dir = scratch("export-disclosure-multi");
+    write(&dir, "multi.gb", &multi_cutter_plasmid());
+
+    // XhoI is unique, BamHI dual, EcoRI multi — so what each filter admits and
+    // what it must own up to excluding is fully determined by the fixture.
+    for (mode, want) in [
+        (
+            "unique",
+            "1 of 3 cutters labelled · 1 dual, 1 multi not drawn",
+        ),
+        (
+            "dual",
+            "2 of 3 cutters labelled · 0 dual, 1 multi not drawn",
+        ),
+        ("all", "3 of 3 cutters labelled"),
+        // The fourth mode, and the one that was still wrong after the counting
+        // fix. `Sites::of` read `if keep {..} else if n == 2 { dual } else
+        // { multi }`, so under `--sites none` — where nothing is kept — XhoI's
+        // single cut fell into `multi` and this line said `0 of 3 cutters
+        // labelled · 1 dual, 2 multi not drawn`. It CLOSES (0 + 0 + 1 + 2 == 3),
+        // which is why ten plasmids, four widths and `debug_assert!(d.closes())`
+        // all passed over it: the sum was right and the classes were not. On the
+        // user's pKoV the same arm printed `0 of 40 cutters labelled · 12 dual,
+        // 28 multi not drawn` into the SVG and the EPS, telling a reader planning
+        // a digest that a plasmid with 22 unique cutters has none of them.
+        (
+            "none",
+            "0 of 3 cutters labelled · 1 single, 1 dual, 1 multi not drawn",
+        ),
+    ] {
+        let o = run(&dir, &["export", "multi.gb", "--sites", mode, "--stdout"]);
+        // Before the counts: the run has to finish. At 0ebaa41 two of these four
+        // abort here.
+        assert!(
+            o.status.success(),
+            "--sites {mode} did not complete: {}",
+            stderr(&o)
+        );
+        let err = stderr(&o);
+        let line = err
+            .lines()
+            .find(|l| l.contains("cutters labelled"))
+            .unwrap_or_else(|| panic!("--sites {mode} said nothing about cutters: {err}"));
+        assert!(
+            line.ends_with(want),
+            "--sites {mode}\n  said {line:?}\n  want ...{want:?}"
+        );
+
+        // And the arithmetic, parsed back out of the sentence a reader sees —
+        // `hidden` included, which is the clause the sibling throws away.
+        let tail = line.rsplit(':').next().unwrap_or(line);
+        let nums: Vec<u32> = tail
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse().unwrap())
+            .collect();
+        assert!(nums.len() >= 2, "{line}");
+        let (labelled, cutters) = (nums[0], nums[1]);
+        // Every exclusion bucket is read BY NAME and not by position. `shortened`
+        // is deliberately a LABEL count that `closes()` excludes, so "the fifth
+        // number" would fold a label count into an enzyme sum the moment a
+        // narrower canvas said "· 3 shortened" — and position broke outright when
+        // `single` was added, silently reading the new bucket as `dual`.
+        //
+        // Over `tail` and not `line`: the fixture is called `multi.gb`, so
+        // `line.find("multi")` lands in the filename and reads the wrong number.
+        let before = |what: &str| -> u32 {
+            tail.find(what)
+                .and_then(|i| {
+                    tail[..i]
+                        .rsplit(|c: char| !c.is_ascii_digit())
+                        .find(|s| !s.is_empty())?
+                        .parse()
+                        .ok()
+                })
+                .unwrap_or(0)
+        };
+        let hidden = before("would not fit");
+        let single = before("single");
+        let dual = before("dual");
+        let multi = before("multi");
+        assert_eq!(
+            labelled + hidden + single + dual + multi,
+            cutters,
+            "--sites {mode}: {line} does not account for every cutter"
+        );
+        assert!(
+            labelled <= cutters,
+            "--sites {mode}: {line} labels more enzymes than cut the molecule"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

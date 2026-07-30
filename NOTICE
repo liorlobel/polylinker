@@ -10,6 +10,55 @@ Third-party components
 
 No third-party code is vendored into this repository at present.
 
+Fonts embedded in the SHIPPED BINARY
+------------------------------------
+
+About polylinker.exe, not about this repository -- which is why the record was
+missing until the 2026-07-30 typography pass went looking for it. `bins/pl-gui`
+enables eframe's `default_fonts` feature, which pulls `epaint_default_fonts`
+0.35.0; that crate `include_bytes!`es four font files, so every distributed copy
+of the GUI carries 1,414,020 bytes of third-party font data (16.8% of an 8.4 MB
+exe) and its attribution obligations. None of it is checked in here.
+
+Sizes and versions below were read out of the shipped .ttf files' own `name`
+tables, not from a changelog. Licence texts travel with the crate, under
+`epaint_default_fonts-0.35.0/fonts/`.
+
+  Hack                     309,408 bytes   Version 3.003
+    THREE licences at once, and the third is not boilerplate:
+      - the Hack work itself: MIT, (c) 2018 Source Foundry Authors
+      - the DejaVu work it derives from: committed to the public domain
+      - Bitstream Vera Sans Mono: (c) 2003 Bitstream, Inc., BITSTREAM VERA
+        LICENSE, with Reserved Font Names "Bitstream" and "Vera". It requires
+        the copyright AND TRADEMARK notices to be included in all copies of the
+        Font Software typefaces, forbids selling a Font Software typeface by
+        itself, and becomes null and void for modified fonts distributed under
+        the Vera names. Polylinker embeds it unmodified and sells nothing, so
+        what is owed is the notice -- this one.
+    Text: fonts/Hack-Regular.txt   https://github.com/source-foundry/Hack
+
+  Ubuntu Light             361,676 bytes   Version 0.83
+    UBUNTU FONT LICENCE 1.0. Neither OFL nor Apache-2.0, and so NOT on this
+    project's own allow-list for embedded fonts -- recorded as a question for
+    Lior rather than presented as settled. UFL does permit bundling and
+    embedding; it requires that the fonts and any derivative not be released
+    under any other licence.
+    Text: fonts/UFL.txt
+
+  Noto Emoji               418,804 bytes   Version 1.05 uh
+    SIL Open Font License 1.1.   Text: fonts/OFL.txt
+    Load-bearing rather than decorative: U+26A0, the hidden-cut-sites warning
+    marker, is absent from BOTH Hack and Ubuntu Light and is served only from
+    here or from emoji-icon-font. Turning `default_fonts` off would draw the
+    app's safety marker as a tofu box.
+
+  emoji-icon-font          324,132 bytes   Version 1.1
+    MIT.   Text: fonts/emoji-icon-font-mit-license.txt
+
+`pl licences` prints the compiled-in feature-database attribution. It does not
+yet print this font block, and it should, so the obligation travels with the
+binary and not only with the repository.
+
 Test-time only (not distributed, not linked):
 
   Biopython

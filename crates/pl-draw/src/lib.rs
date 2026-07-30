@@ -38,6 +38,7 @@
 //! o'clock, coordinates increasing **clockwise**, 1-based inclusive.
 
 use pl_core::{Molecule, Strand};
+use std::collections::BTreeSet;
 
 pub mod contrast;
 pub mod eps;
@@ -209,16 +210,51 @@ pub struct Report {
     /// `labels_hidden`: there the whole name is one hover away, which is not
     /// true of a printed page.
     pub labels_truncated: Vec<String>,
-    /// How many of [`Options::sites`] ended up named on the figure.
+    /// How many **distinct enzymes** out of [`Options::sites`] ended up named on
+    /// the figure.
     ///
-    /// **Enzymes, not labels.** A folded tick carries several names in one label,
-    /// so `labels_placed` understates what the reader can see and the difference
-    /// is exactly the number a disclosure line gets wrong: on pET28a the map said
-    /// `14 of 31 cutters labelled` when 23 were, and `14 + 7 + 1` visibly failed
-    /// to reach the 31 it claimed. See [`ring::Disclosure`], which will not
-    /// compose a line whose arithmetic does not close.
+    /// **Enzymes, not labels, and not mentions.** A folded tick carries several
+    /// names in one label, so `labels_placed` understates what the reader can
+    /// see and the difference is exactly the number a disclosure line gets
+    /// wrong: on pET28a the map said `14 of 31 cutters labelled` when 23 were,
+    /// and `14 + 7 + 1` visibly failed to reach the 31 it claimed. See
+    /// [`ring::Disclosure`], which will not compose a line whose arithmetic does
+    /// not close.
+    ///
+    /// The correction *for* that understatement then overshot in the other
+    /// direction, and much further. It summed a per-label tally of how many
+    /// enzymes each label names, which counts enzyme MENTIONS: an enzyme cutting
+    /// five times is named in five separate labels and was counted five times.
+    /// On the user's pKoV `--sites all` put `71 of 40 cutters labelled` into an
+    /// exported figure, and at a 300 pt canvas the same arithmetic printed
+    /// `40 of 40 cutters labelled · 31 would not fit` — a sentence whose first
+    /// clause is what a complete map says, on a figure that dropped 31 of them.
+    /// With unique cutters a mention, a label and an enzyme are the same integer,
+    /// which is why the default looked right for as long as it did. Counted here
+    /// by putting the names in a set: nothing downstream can de-duplicate a
+    /// number.
+    ///
+    /// **Named means legible.** An enzyme whose only label was cut to `Ec...` is
+    /// not named on the figure and is not counted here; it falls into
+    /// [`Report::sites_hidden`] instead. `EcoRI 7,5...` does count, because the
+    /// name survived the cut and the coordinate is what went. The distinction
+    /// matters because [`Report::sites_shortened`] is a label-unit number that
+    /// `Disclosure::tiny` drops: without it, a 300 pt figure of a one-site
+    /// plasmid read `1/1` — every cutter labelled — with no enzyme name anywhere
+    /// on the page and nothing disclosing the cut.
     pub sites_named: usize,
-    /// How many of [`Options::sites`] the ring could not fit, by the same count.
+    /// Which of [`Options::sites`]' enzymes appear nowhere on the figure.
+    ///
+    /// A per-**enzyme** question, and the only reason it is a list of names
+    /// rather than a count: [`Report::labels_hidden`] is label texts, so a
+    /// multi-cutter dropped at five of its nine ticks is named five times there
+    /// while being plainly on the map. This is the answer to "which cutter is
+    /// not in this figure", which is what a reader planning a digest asks.
+    ///
+    /// Ordered, because `pl-draw` guarantees byte-identical output for identical
+    /// input and a caller that prints this list is part of that.
+    pub sites_hidden: Vec<String>,
+    /// How many distinct enzymes the ring could not fit: `sites_hidden.len()`.
     pub sites_dropped: usize,
     /// How many site labels were drawn shortened.
     pub sites_shortened: usize,
@@ -475,13 +511,17 @@ struct Label {
     /// ring, because a leader alone points at a place and a tick says a cut
     /// happens there.
     site: bool,
-    /// How many enzymes this one label names — more than one when a tick folded.
+    /// The enzymes this one label names — several when a tick folded.
     ///
-    /// Carried so [`Report::sites_named`] can count enzymes rather than labels.
-    /// A disclosure line built from the label count understates itself by exactly
-    /// this excess and its arithmetic stops closing, which reads as enzymes having
-    /// gone missing.
-    names: usize,
+    /// The identities, and not a tally of them, because [`Report::sites_named`]
+    /// counts ENZYMES and an enzyme cutting five times is named in five separate
+    /// labels. A tally summed over labels counts mentions: it reported 71 enzymes
+    /// on a molecule with 40 cutters, and `Disclosure::closes` then told the
+    /// reader 31 had gone missing. Nothing downstream can de-duplicate a number,
+    /// so the de-duplication has to happen where the names still exist.
+    ///
+    /// Empty for a feature label, which names no enzyme.
+    names: Vec<String>,
 }
 
 /// How wide a label is *assumed* to be when the ring reserves room for it.
@@ -628,7 +668,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
             angle: angle(mid, len),
             weight: 1.0 + (1.0 + span as f64).log10(),
             site: false,
-            names: 1,
+            names: Vec::new(),
         });
         drawn.push(Drawn {
             name: f.name.clone(),
@@ -655,12 +695,54 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
         angle: angle(pos, len),
         weight: SITE_WEIGHT,
         site: true,
-        names: 1,
+        names: vec![name.to_string()],
     };
+    // A **site** label counts wherever it lands; a feature name counts only in a
+    // side column. The asymmetry is the fix for a real defect and it is not
+    // tidiness, so it is worth the paragraph.
+    //
+    // This used to filter every label to `Side::Left | Side::Right`, on the
+    // argument recorded in [`ring::reserve_for`] that a name in the twelve- or
+    // six-o'clock row costs vertical room and not radius. That is true of the row's
+    // own packing and false of the one number a row label is actually cut to:
+    // [`ring::label_room`] is deliberately a single allowance for all four runs,
+    // because [`ring::place_ring`] spills what a row cannot hold into a column, and
+    // on a large ring its binding term is the COLUMN's `pane_half - (tick_r +
+    // gap)`. So a row label was measured against a reserve it was never allowed to
+    // ask for.
+    //
+    // The 806 bp fixture in `bins/pl/tests/cli.rs` is the whole defect in one file.
+    // Its only label is `EcoRI  402` — 49.9% of the molecule, so the six-o'clock
+    // row — hence `widest` came out 0, the reserve collapsed to `LABEL_MARGIN`
+    // alone, the ring grew to a 305 pt radius, and 27 pt of room was left for a
+    // 59 pt name. Every canvas from 300 to 2000 pt exported the same figure: one
+    // enzyme text reading `Ec...` over a note that then had to say "1 would not
+    // fit · 1 shortened" about a plasmid with room to spare. A destroyed enzyme
+    // name is the `coRI 7,530` defect the computed reserve replaced
+    // `LABEL_RESERVE = 132.0` to stop, arriving down the other axis.
+    //
+    // **Why not every label.** Measured: counting feature names too takes X65307's
+    // ring from a 218 pt radius to 135, because `SP6 transcription initiation site`
+    // is 33 characters in the twelve-o'clock row and `reserve_for`'s 30% cap then
+    // binds. It buys five whole feature names and pays with 38% of the radius and
+    // with the disclosure line dropping from `long()` to `short()` on the same
+    // figure — the ring is what bounds the middle. That is a visual redesign, and
+    // it trades a reported loss for an unreported one.
+    //
+    // The two are not the same kind of text, which is what makes the asymmetry
+    // principled rather than convenient. `EcoRI  402` shortened to `Ec...` leaves a
+    // reader planning a digest with no enzyme and no coordinate, on a page that has
+    // no hover; a shortened feature name keeps its whole string in the SVG
+    // `<title>`, in the PDF annotation and in the app's Features tab, and lands in
+    // [`Report::labels_truncated`] where `pl export` prints it. The project already
+    // draws this line in three other places — `SITE_WEIGHT`, `site_room`, and
+    // [`ring::Site::label`]'s refusal to fold a range — for the same reason.
     let widest_of = |labels: &[Label]| -> f64 {
         labels
             .iter()
-            .filter(|l| matches!(ring::side_of(l.angle, row_half), Side::Left | Side::Right))
+            .filter(|l| {
+                l.site || matches!(ring::side_of(l.angle, row_half), Side::Left | Side::Right)
+            })
             .map(|l| label_width(&l.text, opts.font_size))
             .fold(0.0_f64, f64::max)
     };
@@ -705,7 +787,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
                     angle: angle(s.anchor(), len),
                     weight: SITE_WEIGHT,
                     site: true,
-                    names: s.names.len(),
+                    names: s.names.clone(),
                 });
             } else {
                 anchors.extend(
@@ -974,6 +1056,12 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     }
 
     let mut overlay: Vec<Item> = Vec::new();
+    // The enzymes a reader can actually read off this figure. A set, because the
+    // question `Report::sites_named` answers is "how many enzymes", and one
+    // enzyme cutting nine times is named in nine labels. `BTreeSet` rather than a
+    // hash: `sites_hidden` is derived from it and `pl-draw` promises
+    // byte-identical output for identical input.
+    let mut named: BTreeSet<&str> = BTreeSet::new();
     for (i, l) in anchors.iter().enumerate() {
         let Some(p) = placed.placed[i] else { continue };
         let Some(text) = texts[i].clone() else {
@@ -991,7 +1079,24 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
             }
         }
         if l.site {
-            report.sites_named += l.names;
+            // Only the names a reader can still READ. `fit_label` may have cut
+            // this label to `Ec...`, and counting that enzyme as labelled is the
+            // same lie as counting a label that was never drawn: a 244 bp plasmid
+            // with one EcoRI site exported `Ec...` as its only enzyme text under
+            // the note "1 of 1 cutters labelled · 1 shortened", and at 300 pt the
+            // note collapses to `tiny()` — "1/1" — which drops the shortening
+            // clause and leaves a figure claiming every cutter is labelled while
+            // naming none. A partly-cut label still counts, because `EcoRI 7,5...`
+            // does name its enzyme; what does not count is a label the name
+            // itself no longer survives in. The rest fall out through the set
+            // difference below into `sites_hidden`, so `closes()` keeps
+            // describing what a reader can read rather than what was attempted.
+            named.extend(
+                l.names
+                    .iter()
+                    .filter(|n| text.contains(n.as_str()))
+                    .map(String::as_str),
+            );
         }
         // A cut site gets a mark on the ring as well as a leader: a leader
         // alone points at a place, a tick says a cut happens there.
@@ -1036,11 +1141,32 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
         });
         report.labels_placed += 1;
     }
-    // Enzymes the filter admitted and the ring could not fit. Derived by
-    // subtraction from what was *asked for*, so a name lost anywhere between the
-    // fold and the paint is counted — a `sites_dropped` accumulated at each drop
-    // site is a `sites_dropped` that misses the next drop site somebody adds.
-    report.sites_dropped = opts.sites.len().saturating_sub(report.sites_named);
+    // Enzymes the filter admitted and the ring could not fit — a SET DIFFERENCE
+    // against what was asked for, so a name lost anywhere between the fold and
+    // the paint is counted whichever drop site loses it. (A `sites_dropped`
+    // accumulated at each drop site is a `sites_dropped` that misses the next
+    // drop site somebody adds; `named` is built only from labels that were
+    // actually painted, so the property survives.)
+    //
+    // It was `opts.sites.len() - sites_named`, which is not this question. Both
+    // operands were in the wrong unit and they cancelled: `opts.sites` is
+    // (enzyme, position) PAIRS — 71 of them on the user's pKoV under
+    // `--sites all`, against 40 enzymes — and `sites_named` was mentions, so the
+    // difference was a coherent count of dropped OCCURRENCES assigned to a field
+    // documented as enzymes. `71 - 71 = 0` is what let a figure print
+    // "71 of 40 cutters labelled" with no "would not fit" clause beside it to
+    // give the game away. And subtraction is the wrong operation regardless: an
+    // enzyme dropped at eight of its nine ticks is NAMED, not hidden. There is no
+    // saturating anything here now, because a set difference cannot go negative
+    // and `saturating_sub` is exactly what dressed the unit mismatch as a
+    // healthy zero.
+    let admitted: BTreeSet<&str> = opts.sites.iter().map(|(n, _)| n.as_str()).collect();
+    report.sites_named = named.len();
+    report.sites_hidden = admitted
+        .difference(&named)
+        .map(|n| (*n).to_string())
+        .collect();
+    report.sites_dropped = report.sites_hidden.len();
 
     // --- centre ---
     //

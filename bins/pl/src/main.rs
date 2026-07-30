@@ -1529,6 +1529,14 @@ impl Sites {
             };
             if keep {
                 out.extend(r.positions.iter().map(|p| (r.enzyme.name.to_string(), *p)));
+            } else if n == 1 {
+                // A single cutter the filter turned away, which only `--sites
+                // none` produces. Without this arm it fell through to `multi`,
+                // and pKoV exported `0 of 40 cutters labelled · 12 dual, 28
+                // multi not drawn` — 22 of those 28 cut exactly once — while
+                // `closes()` passed, because the sum reached 40 over the wrong
+                // classes. See `ring::Disclosure::single`.
+                d.single += 1;
             } else if n == 2 {
                 d.dual += 1;
             } else {
@@ -1862,6 +1870,31 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
                 }
             );
             eprintln!("     a larger --width/--height fits more of them");
+        }
+        // And which CUTTERS went, which is a different question from which labels
+        // went and the one a reader planning a digest is asking. `labels_hidden`
+        // is label TEXTS: a multi cutter dropped at five of its nine ticks is
+        // named there five times while being plainly on the figure, so it answers
+        // "is DraI on this map?" with "no, five times". `sites_hidden` is the
+        // enzymes the filter admitted that appear nowhere.
+        if !drawn.sites_hidden.is_empty() {
+            eprintln!(
+                "pl: {}: {} cutter(s) are on no label: {}{}",
+                path.display(),
+                drawn.sites_hidden.len(),
+                drawn
+                    .sites_hidden
+                    .iter()
+                    .take(8)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if drawn.sites_hidden.len() > 8 {
+                    ", ..."
+                } else {
+                    ""
+                }
+            );
         }
         // A shortened label is not a hidden one and had no print site at all,
         // so the shortening happened silently in a figure headed for a journal.

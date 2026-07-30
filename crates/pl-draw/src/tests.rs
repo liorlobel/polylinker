@@ -735,6 +735,97 @@ fn pkov_sites() -> Vec<(String, u64)> {
     .collect()
 }
 
+/// pKoV's 12 **dual** cutters, both positions each — 24 pairs, 12 enzymes.
+///
+/// `pl_enzymes::digest_all` on the user's own file, so `--sites dual` in a test
+/// and `--sites dual` on the command line are the same site list. Read as a
+/// literal table because `pl-draw` has no reference to an enzyme anywhere: it is
+/// handed `(name, position)` and treats the name as an opaque identity token,
+/// which is exactly the ignorance a `BTreeSet` of those tokens preserves.
+fn pkov_dual_sites() -> Vec<(String, u64)> {
+    [
+        ("AatII", 5_824u64),
+        ("AatII", 6_306),
+        ("AgeI", 5_181),
+        ("AgeI", 6_272),
+        ("BsmBI", 7_306),
+        ("BsmBI", 7_859),
+        ("BspEI", 5_591),
+        ("BspEI", 7_534),
+        ("BstBI", 7_001),
+        ("BstBI", 7_954),
+        ("Esp3I", 7_306),
+        ("Esp3I", 7_859),
+        ("HpaI", 1_985),
+        ("HpaI", 2_807),
+        ("KpnI", 2_340),
+        ("KpnI", 6_925),
+        ("NcoI", 6_120),
+        ("NcoI", 7_229),
+        ("PvuI", 5_100),
+        ("PvuI", 6_310),
+        ("SacII", 2_320),
+        ("SacII", 6_609),
+        ("StuI", 3_156),
+        ("StuI", 5_605),
+    ]
+    .iter()
+    .map(|(n, p)| (n.to_string(), *p))
+    .collect()
+}
+
+/// pKoV's 6 **multi** cutters, every position — 25 pairs, 6 enzymes.
+///
+/// The fixture the mention-counting bug is only visible on. DraI alone accounts
+/// for nine of these pairs at spacings from 44 to 612 bases, which at every
+/// canvas size is far above the fold threshold (about 2 bases at the default
+/// radius), so it is nine ticks, nine labels and — summed as a tally — nine
+/// enzymes. Two coincidences here are chosen and not incidental: DraI 5,345 sits
+/// exactly on [`pkov_sites`]' PmeI 5,345, and BsmBI/Esp3I in
+/// [`pkov_dual_sites`] are isoschizomers coinciding at both of their positions.
+/// So the concatenated list exercises genuine folds of DIFFERENT enzymes as well
+/// as repeats of ONE, which are the two cases a tally cannot tell apart.
+fn pkov_multi_sites() -> Vec<(String, u64)> {
+    [
+        ("ClaI", 2_701u64),
+        ("ClaI", 3_038),
+        ("ClaI", 4_850),
+        ("DraI", 1_182),
+        ("DraI", 1_226),
+        ("DraI", 1_750),
+        ("DraI", 2_357),
+        ("DraI", 2_969),
+        ("DraI", 5_345),
+        ("DraI", 5_381),
+        ("DraI", 7_275),
+        ("DraI", 7_614),
+        ("MfeI", 591),
+        ("MfeI", 622),
+        ("MfeI", 5_294),
+        ("NruI", 5_102),
+        ("NruI", 5_838),
+        ("NruI", 6_020),
+        ("NruI", 6_686),
+        ("PvuII", 2_994),
+        ("PvuII", 3_138),
+        ("PvuII", 7_634),
+        ("SspI", 236),
+        ("SspI", 3_962),
+        ("SspI", 7_222),
+    ]
+    .iter()
+    .map(|(n, p)| (n.to_string(), *p))
+    .collect()
+}
+
+/// `Sites::of`'s ordering: by position, then by name, so a test's figure is
+/// `pl export`'s figure.
+fn sorted_sites(parts: &[Vec<(String, u64)>]) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = parts.iter().flatten().cloned().collect();
+    out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
 fn pkov() -> Molecule {
     let mut mol = plasmid(8_117, true);
     mol.name.clear();
@@ -926,6 +1017,284 @@ fn a_row_leader_is_bounded_whatever_the_molecule() {
     }
 }
 
+/// PROVEN TO FAIL at 0ebaa41 — measured `sites_named = 5`.
+///
+/// `Report::sites_named` counts enzymes, and `Label::names` was a TALLY of the
+/// enzymes one label names. DraI's five cuts here are 44 to 612 bases apart and
+/// the fold threshold at this radius is about 2 bases, so they are five ticks,
+/// five labels and — summed — five enzymes. On the user's own plasmid that
+/// arithmetic put "71 of 40 cutters labelled" into an exported figure. No
+/// accumulation over labels can return 1; only de-duplicating by identity can.
+#[test]
+fn one_enzyme_cutting_five_times_is_one_enzyme_on_the_map() {
+    let sites: Vec<(String, u64)> = [1_182u64, 1_226, 1_750, 2_357, 2_969]
+        .iter()
+        .map(|p| ("DraI".to_string(), *p))
+        .collect();
+    let (_, r) = scene(
+        &pkov(),
+        Options {
+            sites,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        r.sites_named, 1,
+        "five ticks of one enzyme name one enzyme: {r:?}"
+    );
+    assert_eq!(r.sites_dropped, 0, "{r:?}");
+    assert!(r.sites_hidden.is_empty(), "{:?}", r.sites_hidden);
+}
+
+/// PROVEN TO FAIL at 0ebaa41 in 8 of these 12 cells — every `dual` and every
+/// `all` row, at every width.
+///
+/// `ring::Disclosure::closes` is the guard against the map lying by omission, and
+/// the only data it was ever asserted on was 22 unique cutters at one position
+/// each — where a mention, a label and an enzyme are the same integer and the
+/// guard cannot fail whatever the implementation. That is a check that cannot
+/// fail, and the wrong number in the figure was its symptom.
+///
+/// The `unique` row is kept as the control: it is the row that passes at 0ebaa41,
+/// and the reason the other two are here. Nothing is pinned at 520/400/300 pt
+/// except the invariants, because what fits is a packing question and the
+/// conservation law is not: once `hidden` is `admitted \ named`, `closes()`
+/// reduces to `distinct(admitted) + single + dual + multi == cutters`, which has
+/// no canvas in it. Measured at 0ebaa41, `sites_named + sites_dropped` is 46 in
+/// every `dual` cell and 71 in every `all` cell against the 34 and 40 enzymes
+/// asked for.
+///
+/// The four bucket counts are DERIVED from the three fixture tables and not
+/// written down, so the row cannot drift from the data it describes if the
+/// 58-enzyme set ever gains or loses a pKoV cutter — the previous form pinned
+/// `cutters: 40` and `(12, 6)` by hand, and a literal beside a table is a literal
+/// that goes stale in silence. `none` is here because `pl`'s bucket arithmetic
+/// got that mode wrong while `closes()` passed: this row can only check that a
+/// non-zero `single` is a term of the sum, which it now is. Whether an enzyme
+/// lands in the RIGHT bucket is a question about a digest and belongs where a
+/// digest exists — `bins/pl/tests/cli.rs`, which pins the exact sentence for all
+/// four modes; `pl-draw` cannot depend on `pl-enzymes` and has no way to know
+/// that XhoI cuts once.
+#[test]
+fn the_disclosure_closes_on_every_sites_filter_not_only_the_one_with_no_folds() {
+    let distinct = |s: &[(String, u64)]| -> usize {
+        s.iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<std::collections::BTreeSet<&str>>()
+            .len()
+    };
+    let (n_single, n_dual, n_multi) = (
+        distinct(&pkov_sites()),
+        distinct(&pkov_dual_sites()),
+        distinct(&pkov_multi_sites()),
+    );
+    let cutters = n_single + n_dual + n_multi;
+    let unique = sorted_sites(&[pkov_sites()]);
+    let dual = sorted_sites(&[pkov_sites(), pkov_dual_sites()]);
+    let all = sorted_sites(&[pkov_sites(), pkov_dual_sites(), pkov_multi_sites()]);
+    for (why, sites, s_bucket, d_bucket, m_bucket) in [
+        ("unique", unique, 0, n_dual, n_multi),
+        ("dual", dual, 0, 0, n_multi),
+        ("all", all, 0, 0, 0),
+        ("none", Vec::new(), n_single, n_dual, n_multi),
+    ] {
+        let enzymes: std::collections::BTreeSet<&str> =
+            sites.iter().map(|(n, _)| n.as_str()).collect();
+        for w in [720.0, 520.0, 400.0, 300.0] {
+            let (_, r) = scene(
+                &pkov(),
+                Options {
+                    width: w,
+                    height: w,
+                    sites: sites.clone(),
+                    ..Default::default()
+                },
+            );
+            // pl-draw's own conservation law, in pl-draw's own units and
+            // independent of anything the caller believes about the molecule.
+            assert_eq!(
+                r.sites_named + r.sites_dropped,
+                enzymes.len(),
+                "--sites {why} at {w}: {} named + {} dropped of {} enzymes asked for",
+                r.sites_named,
+                r.sites_dropped,
+                enzymes.len()
+            );
+            assert_eq!(
+                r.sites_dropped,
+                r.sites_hidden.len(),
+                "--sites {why} at {w}"
+            );
+            assert!(
+                r.sites_hidden.iter().all(|n| enzymes.contains(n.as_str())),
+                "--sites {why} at {w}: hidden names something never asked for: {:?}",
+                r.sites_hidden
+            );
+            // And the sentence a reader actually sees.
+            let told = ring::Disclosure {
+                cutters,
+                single: s_bucket,
+                dual: d_bucket,
+                multi: m_bucket,
+                labelled: r.sites_named,
+                hidden: r.sites_dropped,
+                shortened: r.sites_shortened,
+            };
+            assert!(told.closes(), "--sites {why} at {w}: {}", told.long());
+            assert!(
+                told.labelled <= told.cutters,
+                "--sites {why} at {w}: {}",
+                told.long()
+            );
+        }
+    }
+    // The anchor: a 720 pt figure of this plasmid fits every cutter it is given.
+    let (_, r) = scene(
+        &pkov(),
+        Options {
+            sites: sorted_sites(&[pkov_sites(), pkov_dual_sites(), pkov_multi_sites()]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(r.sites_named, cutters, "{r:?}");
+    assert!(r.sites_hidden.is_empty(), "{:?}", r.sites_hidden);
+}
+
+/// Two properties, and the second is what the first one used to conceal.
+///
+/// **`labelled` counts enzymes a reader can READ.** Not "a label was placed for
+/// this enzyme" — the paint loop counted that, and a figure whose only enzyme text
+/// was `Ec...` reported `1 of 1 cutters labelled · 1 shortened`. At 300 pt the note
+/// collapses to `tiny()` — `1/1` — which drops the shortening clause altogether: a
+/// publication figure asserting every cutter is labelled, naming no enzyme anywhere
+/// on it, disclosing nothing. Proven to fail against the tree as handed over, which
+/// measured `sites_named = 1` there.
+///
+/// **And the ring is never sized so that an admitted enzyme CANNOT be read.** This
+/// test used to pin the opposite — `Ec...` at 300, 500, 720 and 1400 pt, on the
+/// argument that being size-invariant made it "not a canvas-too-small case". It was
+/// not a canvas-too-small case; it was a RESERVE case, and the size-invariance was
+/// the evidence. `widest_of` reserved radius only for `Side::Left | Side::Right`,
+/// so a lone six-o'clock label reserved nothing, the ring grew to a 305 pt radius
+/// on a 720 pt pane, and 27 pt of room was left for a 59 pt name — while
+/// [`ring::label_room`] charges a row label the COLUMN's allowance regardless,
+/// because [`ring::place_ring`] may spill it there. So the figure was honest about
+/// a loss it had no reason to take, and a test asserted the loss.
+///
+/// The rows below are now the real boundary, measured rather than assumed: at 200 pt
+/// the pane genuinely cannot hold `EcoRI  121` even with the reserve capped, and the
+/// name does not survive; at 240 the name survives and the coordinate goes; from
+/// 300 pt up the label is whole. All three cases matter — without the 240 pt row the
+/// test would pass equally well if shortening stopped counting anything, and without
+/// the 300 pt row it would pass with the reserve bug back.
+#[test]
+fn an_enzyme_whose_label_was_cut_to_an_ellipsis_is_not_a_labelled_cutter() {
+    let text_items = |sc: &Scene| -> Vec<String> {
+        sc.items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut tiny = plasmid(244, true);
+    tiny.name = "pTiny".into();
+    // Six o'clock on a 244 bp circle: the BOTTOM row, the run whose labels used to
+    // reserve nothing at all.
+    let at = |w: f64, pos: u64| -> (Vec<String>, Report) {
+        let (sc, r) = scene(
+            &tiny,
+            Options {
+                width: w,
+                height: w,
+                sites: vec![("EcoRI".to_string(), pos)],
+                ..Default::default()
+            },
+        );
+        (text_items(&sc), r)
+    };
+
+    // 200 pt: `Eco...` — the name itself did not survive, so no enzyme is named.
+    // This is the assertion the test is called after, and it now sits on a canvas
+    // that really is too small rather than on a reserve that gave up.
+    let (texts, r) = at(200.0, 121);
+    assert!(
+        texts.iter().any(|t| t == "Eco..."),
+        "at 200 pt the fixture no longer reproduces a name-destroying cut: {texts:?}"
+    );
+    assert_eq!(
+        r.sites_named, 0,
+        "`Eco...` names no enzyme, yet {} is claimed: {texts:?}",
+        r.sites_named
+    );
+    assert_eq!(r.sites_hidden, vec!["EcoRI".to_string()]);
+    assert_eq!(r.sites_shortened, 1, "it IS shortened, and said so");
+
+    // 240 pt: `EcoRI` — the coordinate went and the NAME survived, so it counts.
+    // Without this row the whole test would pass just as well if shortening stopped
+    // counting anything at all.
+    let (texts, r) = at(240.0, 121);
+    assert_eq!(
+        texts.iter().filter(|t| *t == "EcoRI").count(),
+        1,
+        "{texts:?}"
+    );
+    assert_eq!(r.sites_named, 1, "{r:?} — {texts:?}");
+    assert!(r.sites_hidden.is_empty(), "{:?}", r.sites_hidden);
+    assert_eq!(r.sites_shortened, 1, "the coordinate was cut: {texts:?}");
+
+    // From 300 pt up the label is WHOLE, in the row exactly as in a column. Four
+    // positions, one per run: twelve o'clock, the right column, six o'clock, the
+    // left column. Before the reserve counted site labels wherever they land, the
+    // two rows drew `Ec...` at every one of these sizes.
+    for w in [300.0, 500.0, 720.0, 1400.0] {
+        for pos in [1u64, 61, 121, 183] {
+            let (texts, r) = at(w, pos);
+            let want = format!("EcoRI  {pos}");
+            assert!(
+                texts.contains(&want),
+                "at {w} pt base {pos}: no {want:?} on the figure, only {texts:?}"
+            );
+            assert_eq!(r.sites_named, 1, "at {w} pt base {pos}: {r:?}");
+            assert!(r.sites_hidden.is_empty(), "at {w} pt base {pos}: {r:?}");
+            assert_eq!(
+                r.sites_shortened, 0,
+                "at {w} pt base {pos} nothing needed shortening: {texts:?}"
+            );
+        }
+    }
+
+    // Control two, the general form: on the real plasmid at every width, every
+    // enzyme the report calls named appears LITERALLY in the figure's text. This
+    // is the property a reader checks, and no count can stand in for it.
+    let all = sorted_sites(&[pkov_sites(), pkov_dual_sites(), pkov_multi_sites()]);
+    for w in [720.0, 520.0, 420.0, 360.0, 300.0] {
+        let (sc, r) = scene(
+            &pkov(),
+            Options {
+                width: w,
+                height: w,
+                sites: all.clone(),
+                ..Default::default()
+            },
+        );
+        let texts = text_items(&sc);
+        let readable = all
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<std::collections::BTreeSet<&str>>()
+            .into_iter()
+            .filter(|n| texts.iter().any(|t| t.contains(n)))
+            .count();
+        assert_eq!(
+            r.sites_named, readable,
+            "at {w} pt the figure claims {} named enzymes and carries {readable}",
+            r.sites_named
+        );
+    }
+}
+
 /// The two-pass note is exact, not approximate.
 ///
 /// `bins/pl` and `bins/pl-gui` both build the disclosure line by rendering once
@@ -945,6 +1314,7 @@ fn the_note_does_not_change_what_it_counts() {
     let (_, first) = scene(&pkov(), base.clone());
     let told = ring::Disclosure {
         cutters: 40,
+        single: 0,
         labelled: first.sites_named,
         dual: 12,
         multi: 6,
@@ -979,6 +1349,7 @@ fn the_note_does_not_change_what_it_counts() {
 fn the_figure_narrows_its_disclosure_by_choosing_a_form_not_by_cutting_one() {
     let told = ring::Disclosure {
         cutters: 40,
+        single: 0,
         labelled: 22,
         dual: 12,
         multi: 6,

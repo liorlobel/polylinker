@@ -62,11 +62,14 @@ pub fn fit_per_row(bases_width: f32, advance: f32) -> u64 {
 /// The coordinate gutter on the left of every row: the row's first base.
 ///
 /// Measured from the molecule, not fixed at the worst case in the corpus. A
-/// constant wide enough for "4,641,652" spends 62 pt on every plasmid that will
-/// never print more than "8,117", and those 21 pt are not free: they come
-/// straight out of the base cells, so a constant gutter pushes the panel width
-/// that first reaches a 60-base row up by the same amount — and that width is
-/// what the map pane gets to keep. See [`App::DEF_PANEL`](crate::App).
+/// constant wide enough for "4,641,652" spends 67.6 pt on every plasmid that
+/// will never print more than "8,117"'s 41.1, and those 26.5 pt are not free:
+/// they come straight out of the base cells, so a constant gutter pushes the
+/// panel width that first reaches a 60-base row up by the same amount — 486.5 pt
+/// to 513.0 — and that width is what the map pane gets to keep. Both measured by
+/// bisecting the painter in
+/// `the_advance_band_that_keeps_every_per_row_expectation`.
+/// See [`App::DEF_PANEL`](crate::App).
 pub fn gutter_w(n: u64, gutter_advance: f32) -> f32 {
     // Digits plus the thousands separators `fmt_int` inserts, because the
     // gutter prints "8,117" and not "8117".
@@ -1627,10 +1630,11 @@ impl SeqEdit {
             };
             self.say(format!(
                 "The caret is at base 1. On a circle the base before it is base {}{}. \
-                 Select it, or use Edit ▸ Set origin, if that is what you meant. This is a \
-                 display decision, not a claim that a circle has ends.",
+                 Select it, or use {}, if that is what you meant. This is a display \
+                 decision, not a claim that a circle has ends.",
                 fmt_int(n),
-                where_it_is
+                where_it_is,
+                crate::set_origin_path()
             ));
         } else {
             self.say("The caret is at the start; there is nothing before base 1.");
@@ -1639,11 +1643,11 @@ impl SeqEdit {
 
     fn at_the_end(&mut self, doc: &Document, n: u64) {
         if doc.molecule().topology.is_circular() && n > 0 {
-            self.say(
-                "The caret is after the last base. On a circle the next base is base 1, at the \
-                 top of this view. Select it, or use Edit ▸ Set origin, if that is what you \
-                 meant.",
-            );
+            self.say(format!(
+                "The caret is after the last base. On a circle the next base is base 1, at \
+                 the top of this view. Select it, or use {}, if that is what you meant.",
+                crate::set_origin_path()
+            ));
         } else {
             self.say("The caret is at the end; there is nothing after the last base.");
         }

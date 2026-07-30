@@ -439,32 +439,80 @@ pub struct Disclosure {
     pub cutters: usize,
     /// Enzymes named somewhere on the map.
     pub labelled: usize,
+    /// Enzymes cutting exactly **once**, excluded by the filter.
+    ///
+    /// The bucket that was missing, and its absence made a third guard-that-
+    /// cannot-fail. `bins/pl`'s `Sites::of` classified an excluded enzyme as
+    /// `n == 2 -> dual, else -> multi`, so under `--sites none` — where nothing
+    /// is kept — every single cutter landed in `multi`. The user's pKoV printed
+    /// `0 of 40 cutters labelled · 12 dual, 28 multi not drawn` into the SVG and
+    /// the EPS on a molecule with 22 unique and 6 multi cutters, and a 244 bp
+    /// plasmid with one EcoRI site was described as having a multi cutter.
+    /// [`Disclosure::closes`] passed on every one of them, because 0 + 0 + 12 +
+    /// 28 does reach 40 — the arithmetic closed over the wrong classes, which is
+    /// exactly the failure mode the conservation law exists to catch and could
+    /// not see without this term.
+    ///
+    /// Zero for `--sites unique`, `dual` and `all`, all three of which keep a
+    /// single cutter, so the wording of the three real modes is unchanged.
+    pub single: usize,
     /// Enzymes cutting exactly twice, excluded by the filter.
     pub dual: usize,
     /// Enzymes cutting more than twice, excluded by the filter.
     pub multi: usize,
     /// Enzymes the filter admitted that the ring then could not fit.
+    ///
+    /// A set difference — the enzymes admitted, less the enzymes named — and not
+    /// admitted-minus-named as counts. An enzyme dropped at eight of its nine
+    /// ticks is named, not hidden, and no arithmetic on occurrence counts can say
+    /// so. See [`crate::Report::sites_hidden`].
     pub hidden: usize,
     /// Labels drawn with their text cut short.
+    ///
+    /// **The one label-unit number in a sentence whose other four are enzymes**,
+    /// deliberately, which is why [`Disclosure::closes`] leaves it out: a reader
+    /// asking "how many names were cut" is asking about the text on the page.
+    /// `long()` and `short()` render it as "12 shortened" / "12 short" and never
+    /// as cutters. It does undercount by the amount a fold implies — one folded
+    /// label cut short shortens two enzyme names and counts 1 — and that is
+    /// stated here rather than left for whoever next audits this struct to
+    /// mistake for the mention-counting bug [`crate::Report::sites_named`] had.
     pub shortened: usize,
 }
 
 impl Disclosure {
-    /// Whether every cutting enzyme is accounted for by exactly one of the four
+    /// Whether every cutting enzyme is accounted for by exactly one of the five
     /// buckets. A line that fails this is worse than no line: it tells the reader
     /// a number of enzymes went missing that did not.
+    ///
+    /// It closing is necessary and not sufficient, and [`Disclosure::single`]'s
+    /// doc records the case that proves it: an excluded single cutter counted as
+    /// `multi` closes the sum and still misdescribes the molecule. The term is
+    /// here so that mistake is now a failure rather than a silence.
     pub fn closes(&self) -> bool {
-        self.labelled + self.hidden + self.dual + self.multi == self.cutters
+        self.labelled + self.hidden + self.single + self.dual + self.multi == self.cutters
     }
 
     /// The full sentence.
     pub fn long(&self) -> String {
         let mut s = format!("{} of {} cutters labelled", self.labelled, self.cutters);
-        if self.dual + self.multi > 0 {
-            s.push_str(&format!(
-                " · {} dual, {} multi not drawn",
-                self.dual, self.multi
-            ));
+        if self.single + self.dual + self.multi > 0 {
+            // `single` is named only when it is non-zero, so `--sites unique`,
+            // `dual` and `all` render byte-for-byte what they always did; the
+            // zero-valued `dual` is still printed beside a non-zero `multi`
+            // because that pair reads as one clause and always has.
+            if self.single > 0 {
+                s.push_str(&format!(" · {} single", self.single));
+                s.push_str(&format!(
+                    ", {} dual, {} multi not drawn",
+                    self.dual, self.multi
+                ));
+            } else {
+                s.push_str(&format!(
+                    " · {} dual, {} multi not drawn",
+                    self.dual, self.multi
+                ));
+            }
         }
         if self.hidden > 0 {
             s.push_str(&format!(" · {} would not fit", self.hidden));
@@ -476,6 +524,13 @@ impl Disclosure {
     }
 
     /// The form for a ring too narrow to hold [`Disclosure::long`].
+    ///
+    /// It names none of the three exclusion classes, [`Disclosure::single`]
+    /// included, and that is safe in the one direction that matters: dropping a
+    /// clause can only make the line say *less*, never claim more, because the
+    /// fraction it keeps is `labelled / cutters` and both sides are unfiltered
+    /// totals. The failure this form must not have is a numerator over its
+    /// denominator, which is what `71/40` was.
     pub fn short(&self) -> String {
         let mut s = format!("{}/{} cutters", self.labelled, self.cutters);
         if self.hidden > 0 {

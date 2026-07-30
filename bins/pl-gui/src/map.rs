@@ -32,6 +32,41 @@ fn label_font() -> FontId {
     FontId::monospace(10.0)
 }
 
+/// `(enzymes a reader can read off the map, enzymes admitted that appear nowhere)`.
+///
+/// `admitted` is `(enzyme, position)` PAIRS as the filter produced them;
+/// `on_labels` is the enzyme names carried by each label that was placed AND
+/// drawn, one slice per label, several when a tick folded.
+///
+/// A function, and not four lines inline in `draw_circular`, because it is the
+/// arithmetic behind a sentence a reader trusts and inline arithmetic inside a
+/// painting routine cannot be asserted. That is not hypothetical here: the same
+/// two numbers in `pl_draw::scene` were a sum of per-label tallies and a
+/// subtraction of counts, both in the wrong unit, and they put "71 of 40 cutters
+/// labelled" into an exported figure while every test in the corpus passed.
+///
+/// **Sets, in both halves.**
+///  * `labelled` is a distinct count, because one enzyme cutting five times is
+///    named in five labels and a sum over labels counts MENTIONS.
+///  * `unnamed` is a set DIFFERENCE and not `admitted.len() - labelled`, because
+///    an enzyme dropped at eight of its nine ticks is named, not hidden, and
+///    "8/9 hidden" is not a state an enzyme can be in.
+///
+/// Both halves are unreachable through this file's own caller today, which draws
+/// only unique cutters — one pair per enzyme, so a mention, a label and an enzyme
+/// are the same integer. That accident is exactly what made the identical bug in
+/// `pl_draw` invisible until `--sites dual` was asked for, and a "show dual
+/// cutters" toggle is the obvious next feature.
+fn cutters_shown(admitted: &[(String, u64)], on_labels: &[&[String]]) -> (usize, usize) {
+    use std::collections::BTreeSet;
+    let named: BTreeSet<&str> = on_labels
+        .iter()
+        .flat_map(|ns| ns.iter().map(String::as_str))
+        .collect();
+    let asked: BTreeSet<&str> = admitted.iter().map(|(n, _)| n.as_str()).collect();
+    (named.len(), asked.difference(&named).count())
+}
+
 /// One drawable feature, resolved to positions on the molecule.
 pub struct Band {
     pub index: usize,
@@ -60,14 +95,28 @@ pub struct Band {
     /// origin and has no gap at all, while `join(1..100, 2600..2686)` has one of
     /// 2,499 bp. Sorted, the two are the same set of coordinates.
     pub joins: Vec<(u64, u64)>,
-    /// `(tip, back)` for the one arrowhead, in the direction the feature reads.
+    /// The one arrowhead: which of [`Band::segs`] carries it.
     ///
-    /// Taken from the terminal part in *biological* order rather than in
-    /// coordinate order: the forward feature 2587..87 ends at base 87, not at
-    /// the end of its highest-numbered part, and reading the head off the sorted
-    /// parts put it at 2,686 pointing counter-clockwise — a forward feature
-    /// drawn as a reverse one.
-    pub head: Option<(u64, u64)>,
+    /// `None` for `Strand::Unoriented` and `Strand::Both`, matching
+    /// `pl_draw::scene`'s `arrow_on = -1`. It used to test only
+    /// `f.strand.is_reverse()`, so an unoriented feature got a FORWARD head: the
+    /// screen painted 9 arrowheads on the user's pKoV where `pl export` painted 6,
+    /// and the yellow `pSC101 ori` at one o'clock claimed a direction the file
+    /// never states. GenBank cannot express these strands and `pl convert` already
+    /// says so out loud for exactly these three features.
+    ///
+    /// An INDEX, and not the `(tip, back)` coordinates it carried. The part is
+    /// chosen in *biological* order — the forward feature 2587..87 ends at base 87,
+    /// not at the end of its highest-numbered part, and reading the head off the
+    /// sorted parts put it at 2,686 pointing counter-clockwise, a forward feature
+    /// drawn as a reverse one. But `segs` is then SORTED, so the head's part is not
+    /// `segs.last()`: for 8100..50 forward on 8117 it is `segs[0]`. Matching by
+    /// coordinates at the paint site works and flips with the strand
+    /// (`(s,e) == (back,tip)` forward, `(tip,back)` reverse), which is precisely
+    /// how a sign gets inverted — and it would fail silently on reverse features,
+    /// which on pKoV are five of nine and all on the inward lanes where the head
+    /// is largest. `bands` knows the sorted position, so it records it.
+    pub head: Option<usize>,
     pub start: u64,
     pub end: u64,
     pub reverse: bool,
@@ -181,13 +230,19 @@ fn bands(mol: &Molecule) -> Vec<Band> {
             let joins: Vec<(u64, u64)> =
                 raw.windows(2).flat_map(|w| split(w[0].1, w[1].0)).collect();
             let reverse = f.strand.is_reverse();
-            let head = if reverse {
-                flow.first().map(|&(s, e)| (s, e))
-            } else {
-                flow.last().map(|&(s, e)| (e, s))
+            // The terminal part in BIOLOGICAL order, then its position in the
+            // SORTED list the painter walks. `Strand::Unoriented`/`Both` get no
+            // head, matching `pl_draw::scene`'s `arrow_on = -1`: a directional
+            // point is a claim, and these strands are the file declining to make
+            // it.
+            let terminal = match f.strand {
+                pl_core::Strand::Forward => flow.last().copied(),
+                pl_core::Strand::Reverse => flow.first().copied(),
+                _ => None,
             };
             let mut segs = flow.clone();
             segs.sort_unstable();
+            let head = terminal.and_then(|t| segs.iter().position(|&s| s == t));
             Band {
                 index: i,
                 segs,
@@ -329,6 +384,37 @@ const LANE_STEP: f32 = 13.0;
 /// sites are one mark. See `pl_draw::ring::bases_per_arc`.
 const TICK_STROKE: f32 = 1.5;
 
+/// An arrowhead's length along the arc, in band widths.
+///
+/// Today's `w * 1.6`, kept: proportional to the band is the right invariant for a
+/// 9 pt screen band, and this pass is about the overlap and not about the size.
+/// Worth recording that it leaves the two renderers unequal — `pl_draw` uses a
+/// fixed 8.0 scene units against an 18-unit band, so the same feature's head
+/// subtends about half as much in the exported figure (2.04 degrees against 4.06
+/// for `Rep101(Ts)` on pKoV). That is a parity gap to close on purpose, not as a
+/// side effect of fixing an overlap.
+const ARROW_LEN: f32 = 1.6;
+
+/// How far the body's end is drawn UNDER the head, in points of arc.
+///
+/// The arrow cannot be one path here: it is concave at the barbs and egui only
+/// fills convex polygons (`Shape::convex_polygon`), so unlike
+/// `pl_draw::arc_segs` — one closed path, one fill — the body stays a stroked
+/// polyline and the head a separate filled triangle. Two antialiased shapes
+/// sharing an edge do not composite to full coverage: each contributes about half
+/// and the result reads as a lighter hairline straight down the feature at the
+/// head's base. Two sub-pixel effects push the same way: `arc_points` samples the
+/// arc as chords, so the body's butt cap is up to 0.75 degrees off radial and
+/// misses the head's radial base edge by about 0.06 pt at the band's outer edge,
+/// and a chord-stroked outer edge dips 0.017 pt inside the true radius mid-step.
+///
+/// Invisible, because the head is radially wider than the body — `w * 0.8` against
+/// `w * 0.5` — and it cannot lengthen the feature, because it points inward, at the
+/// tip, under opaque fill. The geometry assertions therefore read
+/// `body_end <= head_base + seam` and not equality: exact equality would either
+/// fail on float noise or force an implementation that draws a crack.
+const SEAM_PT: f32 = 0.5;
+
 /// Below this many degrees a feature is drawn as a radial mark, not an arc.
 ///
 /// `pl_draw::Options::min_feature_degrees`' default, so the screen and the figure
@@ -408,6 +494,65 @@ fn angle_of(pos: u64, span: u64) -> f32 {
     -std::f32::consts::FRAC_PI_2 + frac * std::f32::consts::TAU
 }
 
+/// Where an arc that ENDS at `pos` closes: one base further on.
+///
+/// `pl_draw::angle_past`, in this file's convention. The two renderers disagreed
+/// about this: `pl_draw::scene` closes a feature arc at `angle_past(b)` and this
+/// file closed it at `angle_of(e)`, so every band on the screen covered one base
+/// fewer than the same band in the exported figure — 0.044 degrees on pKoV, but
+/// 3.6 on a 100 bp molecule.
+///
+/// It is not only a parity point. `angle_of(e) - angle_of(s)` is ZERO for a 1 bp
+/// part, and a part is not covered by the `MIN_FEATURE_DEGREES` gate, which sums
+/// the whole feature's bases: `join(1..1000, 2000..2000)` reached
+/// `draw_arrowhead` with a sweep of 0 and got a needle spike off the `.max(0.002)`
+/// floor — the same three-collinear-vertices hazard that once tessellated a wedge
+/// across half the pane. With this, a part covers the bases it names and the
+/// invariant "the body's extent plus the head's equals the feature's" is literally
+/// true rather than true up to one base.
+///
+/// `pos % span` and not `pos + 1`, for the reason `angle_past` gives: `span` comes
+/// off a LOCUS line and can be `u64::MAX`, where the addition overflows before the
+/// division is reached.
+fn angle_end(pos: u64, span: u64) -> f32 {
+    if span == 0 {
+        return -std::f32::consts::FRAC_PI_2;
+    }
+    let frac = (pos % span) as f32 / span as f32;
+    -std::f32::consts::FRAC_PI_2 + frac * std::f32::consts::TAU
+}
+
+/// How much of a part's arc its arrowhead takes, in radians.
+///
+/// Zero means "no room for a head — draw the part as a plain arc". The single
+/// number that decides both where the body STOPS and where the head's base sits:
+/// they were two expressions in two functions, which is how the body came to be
+/// drawn full length with the head painted on top of its last few degrees. That
+/// is the same class of defect this file's own header names for `LABEL_RESERVE` —
+/// a decision made in one unit and a drawing made in another.
+///
+/// Arc length is `r * theta`, so a head `w * ARROW_LEN` points long at the band's
+/// own radius subtends `w * ARROW_LEN / radius`.
+///
+/// **Clamped to HALF the sweep, and the clamp is last.** Past half, the head's
+/// base lands before the part's own start and the outline crosses itself — the
+/// classic artefact where a short feature renders as a bow tie. It was
+/// `.min(sweep * 0.9).max(0.002)`, and the trailing `max` is the trap: applied
+/// after the clamp it can return a head LONGER than half the arc, reintroducing
+/// the inversion for exactly the smallest inputs, where nobody looks. There is no
+/// floor here; where a head would be sub-pixel the caller draws no head, which is
+/// honest, rather than a floored one, which is a degenerate polygon.
+fn head_angle(sweep: f32, radius: f32, w: f32) -> f32 {
+    // `is_finite` before the comparison, and not `!(sweep > 0.0)`: NaN has to be
+    // rejected explicitly rather than by relying on a negated comparison being
+    // true for it. `min` propagates a NaN's operand silently, and a NaN head
+    // reaches `polar` as a vertex at nowhere.
+    if !sweep.is_finite() || !radius.is_finite() || !w.is_finite() || sweep <= 0.0 {
+        return 0.0;
+    }
+    (w * ARROW_LEN / radius.max(1.0)).min(sweep * 0.5)
+}
+
 fn polar(center: Pos2, radius: f32, angle: f32) -> Pos2 {
     Pos2::new(
         center.x + radius * angle.cos(),
@@ -470,15 +615,27 @@ fn draw_circular(
     // point `place_ring` returns is already a screen position.
     let ring_angle = |pos: u64| (angle_of(pos, span) + std::f32::consts::FRAC_PI_2) as f64;
     let row_half = 30f64.to_radians();
-    let widest_column = |labels: &[(String, u64)]| -> f32 {
+    // Every site label, whatever run it starts in.
+    //
+    // This filtered to `Side::Left | Side::Right` — the same filter, and the same
+    // defect, as `pl_draw::scene`'s `widest_of`, which is what makes fixing only one
+    // of them a screen/figure divergence rather than a fix. The argument for the
+    // filter is that a twelve- or six-o'clock label costs vertical room and not
+    // radius; the reason it is wrong is that `ring::label_room` cuts every label to
+    // ONE allowance whatever its run, because `place_ring` spills what a row cannot
+    // hold into a column, and on a large ring the binding term of that allowance is
+    // the column's. A molecule whose only unique cutter sits near 50% therefore
+    // reserved nothing, and `EcoRI  402` was drawn `Ec...` — a destroyed enzyme
+    // coordinate, at every canvas size, which is exactly what the computed reserve
+    // replaced `LABEL_RESERVE = 132.0` to stop.
+    //
+    // Every entry here is a site label already — `one_each` is built from the unique
+    // cutters and nothing else — so this reserves for enzyme names only, which is
+    // the same rule the exporter applies. Feature names are not in this list and do
+    // not move the radius, in either renderer.
+    let widest_site_label = |labels: &[(String, u64)]| -> f32 {
         labels
             .iter()
-            .filter(|(_, pos)| {
-                matches!(
-                    ring::side_of(ring_angle(*pos), row_half),
-                    Side::Left | Side::Right
-                )
-            })
             .map(|(text, _)| measure(text))
             .fold(0.0_f32, f32::max)
     };
@@ -512,7 +669,7 @@ fn draw_circular(
         .iter()
         .map(|(n, pos)| (format!("{n}  {}", crate::doc::fmt_int(*pos)), *pos))
         .collect();
-    let r = radius_for(widest_column(&one_each));
+    let r = radius_for(widest_site_label(&one_each));
     let outer = r + band_w + fwd_lanes as f32 * lane_step;
     let tick_r = outer + TICK_GAP;
     let geom = RingGeom {
@@ -549,21 +706,32 @@ fn draw_circular(
     // 4,760 appeared nowhere.
     let within = ring::bases_per_arc(TICK_STROKE as f64, tick_r as f64, span);
     let folded = ring::merge_sites(&unique, within);
-    // Name counts alongside the labels, because the line under the caption
+    // The enzyme NAMES alongside each label, because the line under the caption
     // counts ENZYMES and a folded tick names several. Counting labels is
     // invisible until a fold fires and then understates itself: pET28a claimed
     // `14 of 31 cutters labelled` with 23 on the map, and 14 + 7 + 1 did not
     // reach the 31 it had just stated.
+    //
+    // The names and not a per-label tally, which is the shape this carried and
+    // which is only right by accident here. `unique` holds one pair per enzyme,
+    // so summing the tally happens to equal the distinct count — the same
+    // accidental immunity that made `pl export --sites unique` right and
+    // `--sites dual` print "46 of 40". Two things break it, neither
+    // hypothetical: a "show dual cutters" toggle, which `--sites dual` already
+    // does in the CLI; and a molecule large enough that `merge_sites`' `within`
+    // (which scales with the span — thousands of bases on a 4.6 Mb genome) folds
+    // two cuts of ONE enzyme into a single tick, where `s.names.len()` counts it
+    // once per cut. Correct by construction beats correct by input.
     let mut labels: Vec<(String, u64)> = Vec::new();
-    let mut names_in: Vec<usize> = Vec::new();
+    let mut names_in: Vec<Vec<String>> = Vec::new();
     for s in folded {
         if s.names.len() == 1 || measure(&s.label()) <= room {
             labels.push((s.label(), s.anchor()));
-            names_in.push(s.names.len());
+            names_in.push(s.names.clone());
         } else {
             for (n, p) in s.names.iter().zip(&s.positions) {
                 labels.push((format!("{n}  {}", crate::doc::fmt_int(*p)), *p));
-                names_in.push(1);
+                names_in.push(vec![n.clone()]);
             }
         }
     }
@@ -642,22 +810,51 @@ fn draw_circular(
     // draws. Its default is "All cutters", which on this file is 40 enzymes and
     // about 100 ticks — a map nobody can read, arrived at without the user
     // asking for it. The map keeps its own rule, and states it.
-    // Enzymes, never labels. `names_in` is what makes the difference visible.
-    let labelled: usize = (0..labels.len())
-        .filter(|&i| placed.placed[i].is_some() && drawn[i].is_some())
-        .map(|i| names_in[i])
-        .sum();
+    // Enzymes, never labels and never mentions — see `cutters_shown`, which is
+    // where the arithmetic lives so that it can be asserted without a painter.
+    // Only the names a reader can still READ, which is not the same as the labels
+    // that were placed. `shortened_to` drops the coordinate before it reaches for
+    // an ellipsis, so `EcoRI  7,530` becomes `EcoRI` and the enzyme is still
+    // named — but at a small enough `room` it becomes `Ec...`, and counting that
+    // as a labelled cutter says the figure names an enzyme it does not. Same rule
+    // as `pl_draw`'s paint loop, so screen and figure keep agreeing; the names
+    // that fail it fall into `unnamed` through `cutters_shown`'s set difference.
+    let legible: Vec<Vec<String>> = (0..labels.len())
+        .filter(|&i| placed.placed[i].is_some())
+        .filter_map(|i| drawn[i].as_deref().map(|t| (i, t)))
+        .map(|(i, t)| {
+            names_in[i]
+                .iter()
+                .filter(|n| t.contains(n.as_str()))
+                .cloned()
+                .collect()
+        })
+        .collect();
+    let shown: Vec<&[String]> = legible.iter().map(Vec::as_slice).collect();
+    let (labelled, unnamed) = cutters_shown(&unique, &shown);
     let told = ring::Disclosure {
         cutters,
         labelled,
         dual,
         multi,
-        hidden: unique.len().saturating_sub(labelled),
+        hidden: unnamed,
         shortened: (0..labels.len())
             .filter(|&i| placed.placed[i].is_some())
             .filter(|&i| drawn[i].as_deref().is_some_and(|s| s != labels[i].0))
             .count(),
+        // Zero because `unique` is `filter(is_unique_cutter)`: a single cutter is
+        // never turned away here. It is a term the moment that filter widens,
+        // and the assertion below is what will say so.
+        single: 0,
     };
+    // The same guard both export paths have (`bins/pl/src/main.rs` and
+    // `bins/pl-gui/src/main.rs`'s `figure_options`), which this producer did not.
+    // It is correct today only because the unique filter hands it one pair per
+    // enzyme, so a mention, a label and an enzyme are the same integer — which is
+    // precisely the accident that hid the mention-counting bug in `pl-draw` until
+    // `--sites dual` was asked for. `cutters_shown`'s own doc names a "show dual
+    // cutters" toggle as the obvious next feature; this is what catches it.
+    debug_assert!(told.closes(), "{told:?} does not account for every cutter");
     let bp = format!("{} bp", crate::doc::fmt_int(mol.span()));
     let width_of = |s: &str, f: FontId| p.layout_no_wrap(s.to_string(), f, pal.ink).size().x;
 
@@ -828,31 +1025,72 @@ fn draw_circular(
             // already split anything that crosses the origin, so `s <= e` here
             // and `arc_points` never interpolates backwards across the whole
             // ring.
-            for &(s, e) in &b.segs {
-                let pts = arc_points(center, base, angle_of(s, span), angle_of(e, span));
-                if pts.len() >= 2 {
-                    p.add(Shape::line(pts, Stroke::new(w, b.color)));
+            //
+            // The part carrying the arrowhead stops where the head BEGINS. The
+            // body used to be drawn full length and the head painted over its
+            // last few degrees, in the band's own colour, which is why a feature
+            // read as a flat-ended bar with a chevron embossed in it and two
+            // shoulders sticking out — 4.06 degrees of double-painted arc on
+            // pKoV's forward lane 0, 90% of the whole arc for the 103 bp
+            // `cat promoter`. One number decides both ends of the seam, and it is
+            // `head_angle`.
+            for (i, &(s, e)) in b.segs.iter().enumerate() {
+                let a0 = angle_of(s, span);
+                // `angle_end` wraps: a part ending on the LAST base closes at the
+                // origin's own angle, so `a1 == a0` for a whole-molecule feature
+                // and `a1 < a0` for the pre-origin part of a wrapped one. Both
+                // gave a non-positive sweep, which skipped the arc entirely — a
+                // 287 bp part of an origin-crossing feature painted nothing at
+                // all. `pl_draw::arc_segs` normalises the same way and for the
+                // same reason.
+                let mut a1 = angle_end(e, span);
+                if a1 <= a0 {
+                    a1 += std::f32::consts::TAU;
+                }
+                let head = if b.head == Some(i) {
+                    head_angle(a1 - a0, base, w)
+                } else {
+                    0.0
+                };
+                // Under the head, not abutting it: see `SEAM_PT`. Clamped to half
+                // the head so a fully-clamped head cannot be overrun by its own
+                // seam.
+                let seam = (SEAM_PT / base.max(1.0)).min(head * 0.5);
+                let (body0, body1) = if b.reverse {
+                    (a0 + head - seam, a1)
+                } else {
+                    (a0, a1 - head + seam)
+                };
+                // `arc_points` inflates any sweep below 0.004 rad back up to
+                // 0.004 in the direction of travel, so a shortened body whose
+                // remainder falls under that would be silently redrawn PAST the
+                // head's base and the overlap would come back for the smallest
+                // parts. Below the floor the head alone is the feature.
+                if body1 - body0 >= 0.004 {
+                    let pts = arc_points(center, base, body0, body1);
+                    if pts.len() >= 2 {
+                        p.add(Shape::line(pts, Stroke::new(w, b.color)));
+                    }
+                }
+                if head > 0.0 {
+                    let (tip_a, base_a) = if b.reverse {
+                        (a0, a0 + head)
+                    } else {
+                        (a1, a1 - head)
+                    };
+                    draw_arrowhead(p, center, base, tip_a, base_a, barb_half(w), b.color);
                 }
             }
             // Thin connectors show the joins, split the same way.
             for &(s, e) in &b.joins {
-                let hair = arc_points(center, base, angle_of(s, span), angle_of(e, span));
+                let (h0, mut h1) = (angle_of(s, span), angle_end(e, span));
+                if h1 <= h0 {
+                    h1 += std::f32::consts::TAU;
+                }
+                let hair = arc_points(center, base, h0, h1);
                 if hair.len() >= 2 {
                     p.add(Shape::line(hair, Stroke::new(1.0, b.color)));
                 }
-            }
-
-            // One arrowhead, on the terminal part, pointing the way it reads.
-            if let Some((tip_pos, back_pos)) = b.head {
-                draw_arrowhead(
-                    p,
-                    center,
-                    base,
-                    angle_of(tip_pos, span),
-                    angle_of(back_pos, span),
-                    w,
-                    b.color,
-                );
             }
         }
 
@@ -1003,31 +1241,70 @@ fn arc_points(center: Pos2, radius: f32, a0: f32, a1: f32) -> Vec<Pos2> {
         .collect()
 }
 
+/// How far an arrowhead's barb may sit either side of the band's own radius.
+///
+/// **Half the lane pitch, never more, and that bound is the whole point.** The
+/// barbs used to be at `radius ± w * 0.8` with no bound at all, and `w` carries the
+/// emphasis bump, so an emphasised head reached `0.8 * 12 = 9.60` pt out of its
+/// band while the next lane's quiet band begins `LANE_STEP - BAND_W * 0.5 = 8.50`
+/// pt out — measured in the painter with two stacked features, an inner barb at
+/// r=376.60 against an outer band's inner edge at r=375.50: **1.10 pt of one
+/// feature's arrowhead drawn over another feature's rectangle**. That is the user's
+/// sentence — "arrows overlap with the feature rectangles" — surviving the pass
+/// that was supposed to close it, one lane over. Quiet it was clear by 1.30 pt,
+/// which is exactly why it only appeared when the pointer was on the feature.
+///
+/// Half the pitch is chosen over "clear of a quiet neighbour" because the two
+/// neighbouring bands can BOTH be emphasised — `selected` and `hot` are separate
+/// fields and may name adjacent lanes — and an emphasised band reaches
+/// `(BAND_W + 3) * 0.5 = 6.0` pt, so a 7.2 pt barb collides with it too. Giving
+/// each lane its own half of `LANE_STEP` makes the clearance a property of the
+/// geometry rather than of which feature the pointer happens to be over. It is the
+/// same argument `ring::inside_of` makes one radius in, where the ruler is kept off
+/// the bands at their emphasised width so that "hover must not be what decides
+/// whether the ruler is legible".
+///
+/// The cost is honest: an emphasised head keeps only 0.5 pt of shoulder past its
+/// own 6.0 pt shaft, so emphasis is carried by the band's width and by the head's
+/// LENGTH — `head_angle` grows with `w`, 14.4 pt of arc to 19.2 — rather than by a
+/// wider barb. `pl_draw::arc_segs` bounds its own barb the same way, absolutely
+/// (`((ro - ri) * 0.35).min(2.5)`) and not as a fraction of the band, and it has no
+/// lanes to collide with at all.
+fn barb_half(w: f32) -> f32 {
+    (w * 0.8).min(LANE_STEP * 0.5)
+}
+
+/// The arrowhead alone: a tip on the band's own radius and two barbs at
+/// `base_angle`.
+///
+/// **No angle arithmetic, and no radial arithmetic either.** It used to compute its
+/// own head length from `w`, `radius` and the part's sweep while the caller drew the
+/// body from the part's full extent, so the body's end and the head's base were two
+/// expressions in two functions and nothing made them the same number — the body
+/// ran the whole way and the head sat on top of it. The caller now owns the one
+/// number (`head_angle`) and hands in the angle it decided, which is what makes
+/// "the body stops where the head begins" true by construction rather than by
+/// coincidence. Recomputing it here is how the two drift apart again: one guard
+/// differing (`radius.max(1.0)` in one place and not the other, `w` before or after
+/// the emphasis bump) turns the seam into a gap or an overlap that depends on the
+/// lane.
+///
+/// `barb` arrived here for the same reason one step later. It was `w * 0.8` inline,
+/// which no test could reach and which therefore could not be asserted against
+/// `LANE_STEP` — see [`barb_half`] for the 1.10 pt of a neighbouring feature's band
+/// that bought.
 fn draw_arrowhead(
     p: &egui::Painter,
     center: Pos2,
     radius: f32,
     tip_angle: f32,
-    back_angle: f32,
-    w: f32,
+    base_angle: f32,
+    barb: f32,
     color: Color32,
 ) {
-    // Point the head along the direction of travel, shrinking it for very short
-    // features so it never overshoots the feature it belongs to.
-    //
-    // Floored, because `sweep == 0` gave `head == 0`, which put all three
-    // vertices on one ray and handed `Shape::convex_polygon` a degenerate
-    // triangle: a black wedge over half the map pane on pET28a's single-base
-    // `rep_origin`. The caller now draws a mark instead of an arc below
-    // `MIN_FEATURE_DEGREES` and never reaches this, and the floor stays anyway
-    // because a degenerate polygon is a hazard to the next caller too.
-    let sweep = (tip_angle - back_angle).abs().max(0.004);
-    let head = (w * 1.6 / radius.max(1.0)).min(sweep * 0.9).max(0.002);
-    let dir = if tip_angle >= back_angle { 1.0 } else { -1.0 };
-    let base_a = tip_angle - dir * head;
     let tip = polar(center, radius, tip_angle);
-    let a = polar(center, radius + w * 0.8, base_a);
-    let b = polar(center, radius - w * 0.8, base_a);
+    let a = polar(center, radius + barb, base_angle);
+    let b = polar(center, radius - barb, base_angle);
     p.add(Shape::convex_polygon(vec![tip, a, b], color, Stroke::NONE));
 }
 
@@ -1091,10 +1368,27 @@ fn draw_linear(
         let bx1 = x_of(b.end).max(bx0 + 2.0);
         let emphasised = selected == Some(b.index) || hot == Some(b.index);
         let hh = if emphasised { h * 0.65 } else { h * 0.5 };
-        let head = (bx1 - bx0).min(7.0);
+        // Half the width, then 7 pt — the same rule the circular track keeps, and
+        // for the same reason one step down in severity. There is no overlap defect
+        // here (the pentagon subtracts the point from the body by construction), but
+        // `.min(bx1 - bx0)` alone lets a 6 pt feature become 100% arrowhead with two
+        // duplicated vertices, which is a degenerate polygon handed to
+        // `convex_polygon` — the shape that once tessellated a wedge across the
+        // circular pane. One rule for both tracks is also one thing to remember.
+        let head = ((bx1 - bx0) * 0.5).min(7.0);
 
-        // A pentagon rather than a rectangle: the point carries the strand.
-        let pts = if b.reverse {
+        // A pentagon rather than a rectangle: the point carries the strand. An
+        // unoriented feature gets the rectangle, because a point is a directional
+        // claim and `Strand::Unoriented`/`Both` is the file declining to make it —
+        // the same rule as the circular track and as `pl_draw::scene`.
+        let pts = if b.head.is_none() {
+            vec![
+                Pos2::new(bx0, by - hh),
+                Pos2::new(bx1, by - hh),
+                Pos2::new(bx1, by + hh),
+                Pos2::new(bx0, by + hh),
+            ]
+        } else if b.reverse {
             vec![
                 Pos2::new(bx1, by - hh),
                 Pos2::new(bx0 + head, by - hh),
@@ -1166,6 +1460,140 @@ mod tests {
     #[test]
     fn non_overlapping_features_share_one_lane() {
         assert_eq!(lanes(&[(1, 10), (20, 30), (40, 50)]), vec![0, 0, 0]);
+    }
+
+    /// FAILS ONLY TO COMPILE at 0ebaa41 — `cutters_shown` did not exist, and
+    /// saying so plainly matters more than the test does.
+    ///
+    /// The on-map line at 0ebaa41 was arithmetically the same defect as
+    /// `pl_draw::scene`'s (a sum of per-label tallies, and `unique.len()` minus
+    /// it) and could not be made to produce a wrong number, because
+    /// `draw_circular` feeds it `filter(is_unique_cutter)` — one pair per enzyme,
+    /// so mentions, labels and enzymes coincide. Screenshotted on the user's own
+    /// pKoV before the change: "22 of 40 cutters labelled · 12 dual, 6 multi not
+    /// drawn", and 22 + 0 + 12 + 6 = 40 closes. It was right by INPUT.
+    ///
+    /// So there is no failing frame test to offer and none is claimed. What this
+    /// pins is the arithmetic itself, on the input the filter is currently keeping
+    /// away from it: the day someone adds a "show dual cutters" toggle — which
+    /// `pl export --sites dual` already does one layer over, and got wrong — the
+    /// contract is written down and asserted rather than rediscovered.
+    #[test]
+    fn the_map_counts_enzymes_not_the_times_they_are_mentioned() {
+        let pairs = |v: &[(&str, u64)]| -> Vec<(String, u64)> {
+            v.iter().map(|(n, p)| (n.to_string(), *p)).collect()
+        };
+        let one = |n: &str| vec![n.to_string()];
+
+        // One enzyme, five ticks, five labels. A tally sums to 5.
+        let dra = pairs(&[
+            ("DraI", 1_182),
+            ("DraI", 1_226),
+            ("DraI", 1_750),
+            ("DraI", 2_357),
+            ("DraI", 2_969),
+        ]);
+        let five: Vec<Vec<String>> = (0..5).map(|_| one("DraI")).collect();
+        let refs: Vec<&[String]> = five.iter().map(Vec::as_slice).collect();
+        assert_eq!(cutters_shown(&dra, &refs), (1, 0));
+
+        // A fold of two DIFFERENT names is two enzymes in one label — the case a
+        // distinct count must NOT collapse, and the reason `pkov_cutter_names`
+        // could never catch the mention bug.
+        let xs = pairs(&[("XmaI", 6_917), ("SmaI", 6_919)]);
+        let folded = vec!["XmaI".to_string(), "SmaI".to_string()];
+        assert_eq!(cutters_shown(&xs, &[folded.as_slice()]), (2, 0));
+
+        // Dropped at some ticks is NAMED, not hidden: subtraction of counts gives
+        // 5 - 2 = 3 "hidden" for an enzyme that is plainly on the map.
+        let kept: Vec<Vec<String>> = (0..2).map(|_| one("DraI")).collect();
+        let refs: Vec<&[String]> = kept.iter().map(Vec::as_slice).collect();
+        assert_eq!(cutters_shown(&dra, &refs), (1, 0));
+
+        // And an enzyme on no label at all is the one thing `hidden` means.
+        let two = pairs(&[("DraI", 1_182), ("EcoRI", 7_530)]);
+        assert_eq!(cutters_shown(&two, &[one("EcoRI").as_slice()]), (1, 1));
+        assert_eq!(cutters_shown(&two, &[]), (0, 2));
+    }
+
+    /// The screen reserves radius for a site label in a ROW, exactly as the figure
+    /// does.
+    ///
+    /// PROVEN TO FAIL before `widest_site_label` dropped its `Side::Left |
+    /// Side::Right` filter: the on-screen text was `Ec...`, at every window size.
+    /// This is the same defect as `pl_draw::scene`'s and the reason fixing one
+    /// without the other would have been a divergence rather than a fix — the map on
+    /// screen and the figure in the paper would have disagreed about whether this
+    /// plasmid has an EcoRI site anyone can name.
+    ///
+    /// `GATTACA` holds no palindromic 6-mer, so the filler contributes no site of its
+    /// own and the molecule really has one cutter; the site sits at 49.7% of it, which
+    /// is the six-o'clock row.
+    #[test]
+    fn a_site_label_in_a_row_is_drawn_whole_on_screen_too() {
+        let filler = "GATTACA".repeat(17);
+        let seq = format!("{filler}GAATTC{filler}");
+        let mol = Molecule {
+            seq: seq.into_bytes(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        let digest: Vec<Digest> = pl_enzymes::digest_all(&mol)
+            .into_iter()
+            .filter(|d| d.count() > 0)
+            .collect();
+        let unique: Vec<&Digest> = digest.iter().filter(|d| d.is_unique_cutter()).collect();
+        assert_eq!(
+            unique.len(),
+            1,
+            "the fixture must have exactly one unique cutter: {:?}",
+            unique.iter().map(|d| d.enzyme.name).collect::<Vec<_>>()
+        );
+        let cut = unique[0].positions[0];
+        let frac = cut as f64 / mol.span() as f64;
+        assert!(
+            (0.42..0.58).contains(&frac),
+            "the site is at {frac:.3} of the molecule, which is not the six-o'clock row"
+        );
+
+        for (w, h) in [(706.0f32, 756.0f32), (880.0, 560.0), (1296.0, 879.0)] {
+            let ctx = egui::Context::default();
+            let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(w, h));
+            let input = egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            };
+            let mut texts: Vec<String> = Vec::new();
+            for _ in 0..2 {
+                let frame = ctx.run_ui(input.clone(), |ui| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ui, |ui| {
+                            show(ui, &mol, "fixture", &digest, None, None);
+                        });
+                });
+                fn walk(s: &Shape, acc: &mut Vec<String>) {
+                    match s {
+                        Shape::Vec(v) => v.iter().for_each(|s| walk(s, acc)),
+                        Shape::Text(t) => acc.push(t.galley.text().to_string()),
+                        _ => {}
+                    }
+                }
+                texts = Vec::new();
+                for cs in &frame.shapes {
+                    walk(&cs.shape, &mut texts);
+                }
+            }
+            let want = format!("{}  {}", unique[0].enzyme.name, crate::doc::fmt_int(cut));
+            assert!(
+                texts.contains(&want),
+                "{w}x{h}: the map draws no {want:?}; its enzyme text is {:?}",
+                texts
+                    .iter()
+                    .filter(|t| t.contains(unique[0].enzyme.name) || t.contains('…'))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -1389,19 +1817,43 @@ mod tests {
         // Forward 2587..87: the feature ends at base 87, so the head sits there
         // and points clockwise. Read off the sorted parts it sat at 2,686 and
         // pointed counter-clockwise — a forward feature drawn as a reverse one.
+        //
+        // `head` is now an index into the SORTED parts, which is the point of the
+        // change: `segs` for this feature is `[(1, 87), (2_587, 2_686)]`, so the
+        // head's part is `segs[0]` and `segs.last()` would be the wrong one.
         let fwd = &bands(&circle(&[(2_587, 87)], false))[0];
-        let (tip, back) = fwd.head.expect("a terminal part");
-        assert_eq!(tip, 87);
+        let hi = fwd.head.expect("a terminal part");
+        assert_eq!(fwd.segs, vec![(1, 87), (2_587, 2_686)]);
+        assert_eq!(
+            hi, 0,
+            "the head is on the post-origin part, not on segs.last()"
+        );
+        let (s, e) = fwd.segs[hi];
+        assert_eq!(e, 87, "a forward feature's head is at the base it ends on");
         assert!(
-            angle_of(tip, span) > angle_of(back, span),
+            angle_end(e, span) > angle_of(s, span),
             "the head must point the way the feature reads"
         );
 
-        // Reverse 2587..87 reads the other way and ends at base 2,587.
+        // Reverse 2587..87 reads the other way and ends at base 2,587 — the
+        // PRE-origin part, which sorts last.
         let rev = &bands(&circle(&[(2_587, 87)], true))[0];
-        let (rtip, rback) = rev.head.expect("a terminal part");
-        assert_eq!(rtip, 2_587);
-        assert!(angle_of(rtip, span) < angle_of(rback, span));
+        let ri = rev.head.expect("a terminal part");
+        assert_eq!(ri, 1, "a reverse feature's head is on the pre-origin part");
+        assert_eq!(rev.segs[ri].0, 2_587);
+
+        // An unoriented feature makes no directional claim, so it gets no head:
+        // `pl_draw::scene` sets `arrow_on = -1` for it and the screen painted a
+        // forward arrowhead anyway, on three of pKoV's nine features.
+        let mut un = circle(&[(2_400, 2_586)], false);
+        un.features[0].strand = pl_core::Strand::Unoriented;
+        assert!(
+            bands(&un)[0].head.is_none(),
+            "an unoriented feature has no direction to draw"
+        );
+        let mut both = circle(&[(2_400, 2_586)], false);
+        both.features[0].strand = pl_core::Strand::Both;
+        assert!(bands(&both)[0].head.is_none());
 
         // `join(2600..2686, 1..100)` is contiguous across the origin: no gap,
         // so no connector. Sorted, its parts look exactly like the next case.
@@ -1431,5 +1883,792 @@ mod tests {
         let b = &bands(&mol)[0];
         assert!(b.segs.is_empty(), "{:?}", b.segs);
         assert!(b.head.is_none(), "and nothing to point at");
+    }
+
+    // -----------------------------------------------------------------------
+    // the arrowhead, on geometry
+    // -----------------------------------------------------------------------
+    //
+    // Never on a screenshot, and that is not fastidiousness. The head and the body
+    // are the SAME COLOUR, so a full-length body under an opaque triangle and a
+    // correctly notched body are pixel-identical over the whole interior — the only
+    // differences are a sub-pixel seam and the barbs. A before/after pair of
+    // screenshots of this fix looks near-identical and would be read as proof
+    // either way. Quantifying the defect from the picture took a radial-thickness
+    // profile: the pure-#ffff00 pixels of `pSC101 ori` binned by angle came back a
+    // flat 7.9 pt from the head's base to the tip, where a correct render tapers
+    // 14.4 -> 0. The house rule that a check which cannot fail proves nothing
+    // applies to the screenshot; the picture is still worth looking at for the
+    // arrow SHAPE and for the three heads that should have vanished.
+
+    /// One frame of the circular map, and the shapes it painted.
+    fn paint(mol: &Molecule, w: f32, h: f32) -> (Vec<Shape>, Rect) {
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(w, h));
+        let input = egui::RawInput {
+            screen_rect: Some(rect),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        // Two passes: egui's first frame has no galley cache and the map measures
+        // its own labels to decide the radius.
+        for _ in 0..2 {
+            let frame = ctx.run_ui(input.clone(), |ui| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        show(ui, mol, "fixture", &[], None, None);
+                    });
+            });
+            fn walk(s: &Shape, acc: &mut Vec<Shape>) {
+                match s {
+                    Shape::Vec(v) => v.iter().for_each(|s| walk(s, acc)),
+                    other => acc.push(other.clone()),
+                }
+            }
+            out = Vec::new();
+            for cs in &frame.shapes {
+                walk(&cs.shape, &mut out);
+            }
+        }
+        (out, rect)
+    }
+
+    /// Every arrowhead, as its three vertices.
+    ///
+    /// `Shape::convex_polygon` gives a closed `Path` with a filled interior and no
+    /// stroke, which nothing else on the circular map produces: bands are open
+    /// polylines with a 9 pt stroke and no fill, and the ruler and leaders are
+    /// hairlines.
+    fn arrowheads(shapes: &[Shape]) -> Vec<[Pos2; 3]> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                Shape::Path(p)
+                    if p.closed
+                        && p.stroke.width == 0.0
+                        && p.points.len() == 3
+                        && p.fill != Color32::TRANSPARENT =>
+                {
+                    Some([p.points[0], p.points[1], p.points[2]])
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `d`, folded by whole turns into `(-PI, PI]`.
+    ///
+    /// `atan2` returns a FOLDED angle and `angle_of`/`angle_end` return an
+    /// UNFOLDED one in `[-PI/2, 3PI/2)`. Subtracting one from the other is
+    /// meaningless, and it is meaningless silently: the difference comes back a
+    /// plausible number that is a whole turn wrong. Every angle read out of a
+    /// painted shape below goes through this or through [`band_arc`]'s
+    /// accumulation before it meets a number the painter computed.
+    fn wrap(d: f32) -> f32 {
+        let mut d = d % std::f32::consts::TAU;
+        if d > std::f32::consts::PI {
+            d -= std::f32::consts::TAU;
+        }
+        if d <= -std::f32::consts::PI {
+            d += std::f32::consts::TAU;
+        }
+        d
+    }
+
+    /// `a`, shifted by whole turns to lie within half a turn of `near`.
+    fn near(a: f32, near: f32) -> f32 {
+        near + wrap(a - near)
+    }
+
+    /// A band polyline's `(mean radius, first angle, last angle)` about `centre`,
+    /// with the last angle CONTINUOUS from the first rather than folded.
+    ///
+    /// The fold is fatal for exactly the two cases this file has to get right. A
+    /// feature spanning the whole molecule ends one head-length *before* its own
+    /// start once `atan2` has folded both, so `last - first` came back negative
+    /// and "the head laps the band's start" fired on a render that does not lap
+    /// it. And the pre-origin part of a wrapped feature starts at a folded angle
+    /// two turns away from the `angle_of` value naming the same base, so matching
+    /// arcs to parts by nearest start angle picked the same arc twice.
+    ///
+    /// `arc_points` samples at worst about 3 degrees per step, far inside half a
+    /// turn, so accumulating the folded step-to-step deltas recovers the true
+    /// sweep exactly.
+    fn band_arc(pts: &[Pos2], c: Pos2) -> (f32, f32, f32) {
+        let r = pts.iter().map(|p| (*p - c).length()).sum::<f32>() / pts.len() as f32;
+        let ang = |p: &Pos2| (p.y - c.y).atan2(p.x - c.x);
+        let a0 = ang(pts.first().unwrap());
+        let (mut acc, mut prev) = (a0, a0);
+        for p in &pts[1..] {
+            let cur = ang(p);
+            acc += wrap(cur - prev);
+            prev = cur;
+        }
+        (r, a0, acc)
+    }
+
+    /// The sweep `draw_circular` draws a part over, normalised the way it
+    /// normalises it: a part ending on the molecule's last base closes at the
+    /// origin's own angle, which is not greater than where it started.
+    fn part_sweep(s: u64, e: u64, span: u64) -> f32 {
+        let a0 = angle_of(s, span);
+        let mut a1 = angle_end(e, span);
+        if a1 <= a0 {
+            a1 += std::f32::consts::TAU;
+        }
+        a1 - a0
+    }
+
+    /// The band with the longest arc, which is not a join hairline.
+    fn widest_band(shapes: &[Shape], c: Pos2) -> (Vec<Pos2>, f32) {
+        let mut best: Option<(Vec<Pos2>, f32)> = None;
+        for s in shapes {
+            if let Shape::Path(p) = s {
+                if p.stroke.width >= 6.0 && p.points.len() >= 2 {
+                    let (_, a0, a1) = band_arc(&p.points, c);
+                    let span = (a1 - a0).abs();
+                    if best.as_ref().is_none_or(|(_, b)| span > *b) {
+                        best = Some((p.points.clone(), span));
+                    }
+                }
+            }
+        }
+        best.expect("a feature band was painted")
+    }
+
+    /// A single-part forward feature: its body arc and its head, in polar terms.
+    ///
+    /// Returns `(radius, body_start, body_end, head_base, head_tip)`, monotonic
+    /// and continuous — `body_start` is folded, everything after it is carried
+    /// forward from there, so `body_end - body_start` is the arc actually drawn
+    /// even when it is a whole turn. The head's base is placed nearest the body's
+    /// end (they are a seam apart by construction) and the tip a head-length on
+    /// from the base, so a head that straddles twelve o'clock stays ordered.
+    fn one_arrow(mol: &Molecule, w: f32, h: f32) -> (f32, f32, f32, f32, f32) {
+        let (shapes, rect) = paint(mol, w, h);
+        let c = rect.center();
+        let heads = arrowheads(&shapes);
+        assert_eq!(heads.len(), 1, "expected exactly one arrowhead");
+        let (pts, _) = widest_band(&shapes, c);
+        let (radius, a_s, a_e) = band_arc(&pts, c);
+        let ang = |p: &Pos2| (p.y - c.y).atan2(p.x - c.x);
+        // The tip is the vertex on the band's own radius; the barbs are the two at
+        // `radius ± w*0.8` and share one angle.
+        let h3 = heads[0];
+        let tip_i = (0..3)
+            .min_by(|&i, &j| {
+                let d = |k: usize| ((h3[k] - c).length() - radius).abs();
+                d(i).partial_cmp(&d(j)).unwrap()
+            })
+            .unwrap();
+        let barb = (0..3).find(|&i| i != tip_i).unwrap();
+        let a_base = near(ang(&h3[barb]), a_e);
+        let a_tip = a_base + wrap(ang(&h3[tip_i]) - ang(&h3[barb]));
+        (radius, a_s, a_e, a_base, a_tip)
+    }
+
+    fn forward(segs: &[(u64, u64)]) -> Molecule {
+        circle(segs, false)
+    }
+
+    /// A4 — the clamp is half the sweep, and it binds only where it must.
+    ///
+    /// PROVEN TO FAIL at 0ebaa41 on the first case: the clamp there was
+    /// `sweep * 0.9`, so a short feature came back 0.009 and not 0.005. It fails to
+    /// COMPILE as well, because there was no such function to call — the number
+    /// lived inside a painting routine and could not be asserted at all, which is
+    /// the finding and not an inconvenience.
+    #[test]
+    fn the_arrowhead_takes_at_most_half_the_arc_it_sits_on() {
+        // Short: the head takes as much as it may and the shaft keeps the rest.
+        assert_eq!(head_angle(0.01, 89.0, 9.0), 0.005);
+        // Long: the clamp must NOT bind — the full 1.6 * w / r, not the midpoint.
+        assert!((head_angle(1.0, 90.0, 9.0) - 14.4 / 90.0).abs() < 1e-6);
+        // Emphasis reaches it, so the body is shortened by the larger amount.
+        assert!((head_angle(1.0, 90.0, 12.0) - 19.2 / 90.0).abs() < 1e-6);
+        // No room is no head, never a floored one: three collinear vertices handed
+        // to `convex_polygon` is what tessellated a wedge across half the pane.
+        assert_eq!(head_angle(0.0, 200.0, 9.0), 0.0);
+        assert_eq!(head_angle(-1.0, 200.0, 9.0), 0.0);
+        assert_eq!(head_angle(f32::NAN, 200.0, 9.0), 0.0);
+        // And it never exceeds half, at any radius or width.
+        for sweep in [0.001f32, 0.004, 0.01, 0.05, 0.2, 1.0, std::f32::consts::TAU] {
+            for r in [1.0f32, 40.0, 172.0, 203.0, 900.0] {
+                for w in [9.0f32, 12.0] {
+                    let head = head_angle(sweep, r, w);
+                    assert!(
+                        head <= sweep * 0.5 + 1e-7,
+                        "sweep {sweep} r {r} w {w}: head {head} inverts the outline"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A1/A2/A3 — the body stops where the head begins, the two extents sum to the
+    /// feature's span, and they do not overlap.
+    ///
+    /// PROVEN TO FAIL at 0ebaa41: the body was drawn from the part's full extent and
+    /// the head painted over its last `head` radians, so `body_end - head_base` was
+    /// 0.0709 rad against a seam of 0.0025 — off by 28x — and body + head overshot
+    /// the span by the whole head.
+    #[test]
+    fn the_body_stops_where_the_arrowhead_begins() {
+        let span = 2_686u64;
+        for (w, h) in [(706.0f32, 756.0f32), (880.0, 620.0), (1400.0, 950.0)] {
+            let mol = forward(&[(400, 1_400)]);
+            let (r, a_s, a_e, a_base, a_tip) = one_arrow(&mol, w, h);
+            let seam = (SEAM_PT / r.max(1.0)).max(1e-4);
+            let want = head_angle(angle_end(1_400, span) - angle_of(400, span), r, 9.0);
+
+            // The head points at the base the feature ends on.
+            let tip_want = angle_end(1_400, span);
+            assert!(
+                (a_tip - tip_want).abs() < 1e-3,
+                "{w}x{h}: the tip is at {a_tip}, the feature ends at {tip_want}"
+            );
+            // A1: the body does not run past the head's base, and does not stop
+            // short of it either.
+            let over = a_e - a_base;
+            assert!(
+                over <= seam + 1e-6,
+                "{w}x{h}: the body runs {over:.5} rad ({:.2} pt of arc at r={r:.1}) past the \
+                 head's base; the seam allows {seam:.5}",
+                over * r
+            );
+            // A LOWER bound as well as an upper one, so `SEAM_PT` is a constant a
+            // test can fail on. With only the upper bound, setting `seam = 0.0` in
+            // the painter turned NOTHING red across all 241 tests here — zero
+            // overlap satisfies "at most SEAM_PT" perfectly — while `SEAM_PT`'s own
+            // doc claims a concrete visual failure it would bring back: two
+            // antialiased shapes abutting each contribute about half coverage, and
+            // the result reads as a lighter hairline straight down the feature at
+            // the head's base. The tolerance is 1e-4 rad, 0.03 pt of arc at these
+            // radii, against a seam of 0.00163 — a 16x margin, so this fails on the
+            // seam going away and not on float noise.
+            assert!(
+                over >= seam - 1e-4,
+                "{w}x{h}: the body stops {:.3} pt of arc short of the head's base, where \
+                 SEAM_PT asks it to run {SEAM_PT} pt UNDER it; an abutting edge is the \
+                 antialiased hairline that constant exists to hide",
+                -over * r
+            );
+            // A2: the two extents sum to the feature's span.
+            let (body, head) = (a_e - a_s, a_tip - a_base);
+            let feature = angle_end(1_400, span) - angle_of(400, span);
+            assert!(
+                (body + head - feature).abs() < seam + 1e-3,
+                "{w}x{h}: body {body:.5} + head {head:.5} = {:.5}, the feature spans {feature:.5}",
+                body + head
+            );
+            assert!(
+                (head - want).abs() < 1e-3,
+                "{w}x{h}: head {head:.5}, head_angle says {want:.5}"
+            );
+            // A3: as an interval test. The head's base must not precede the
+            // feature's own start — that is the bow tie.
+            assert!(
+                a_base >= a_s - 1e-4,
+                "{w}x{h}: the head's base is before the feature's start: a bow tie"
+            );
+            assert!(a_base <= a_tip, "{w}x{h}: the head points backwards");
+        }
+    }
+
+    /// A5 — a feature shorter than a full arrowhead is half body, half head.
+    ///
+    /// PROVEN TO FAIL at 0ebaa41: the body was the full sweep and the head 90% of
+    /// it, so a 103 bp feature was 90% double-painted. Above
+    /// `MIN_FEATURE_DEGREES` (1.2 deg = 9 bases here) so it is an arc and not a
+    /// mark, and below `2 * ARROW_LEN * w` of arc so the clamp binds.
+    #[test]
+    fn a_feature_shorter_than_its_arrowhead_becomes_a_short_arrow_not_a_bow_tie() {
+        let span = 2_686u64;
+        // 30 bases = 4.02 degrees, and at r ~ 200 the unclamped head wants 4.13.
+        let mol = forward(&[(400, 429)]);
+        let (r, a_s, a_e, a_base, a_tip) = one_arrow(&mol, 706.0, 756.0);
+        let sweep = angle_end(429, span) - angle_of(400, span);
+        assert!(
+            head_angle(sweep, r, 9.0) >= sweep * 0.5 - 1e-6,
+            "at r={r:.1} this feature is not short enough for the clamp to bind; \
+             pick a shorter one"
+        );
+        let (body, head) = (a_e - a_s, a_tip - a_base);
+        let seam = SEAM_PT / r.max(1.0);
+        assert!(
+            (body - head).abs() < 2.0 * seam + 1e-3,
+            "the clamp splits the arc in half: body {body:.5} against head {head:.5}"
+        );
+        assert!(
+            a_base >= a_s - 1e-4,
+            "the head's base is before the start: a bow tie"
+        );
+    }
+
+    /// A6 — an origin-crossing feature: one head, on the right arc, and only that
+    /// arc shortened.
+    ///
+    /// PROVEN TO FAIL at 0ebaa41: one head on the correct part, pointing the right
+    /// way — that was fixed once already — but NEITHER body shortened. The trap the
+    /// fix had to avoid is that `segs` is sorted, so the head's part is `segs[0]`
+    /// here and a `segs.last()` rule would shorten the wrong arc.
+    #[test]
+    fn an_origin_crossing_feature_gets_one_head_and_only_that_arc_is_shortened() {
+        let span = 2_686u64;
+        let mol = forward(&[(2_400, 200)]);
+        let (shapes, rect) = paint(&mol, 706.0, 756.0);
+        let c = rect.center();
+        let heads = arrowheads(&shapes);
+        assert_eq!(heads.len(), 1, "one feature, one arrowhead");
+
+        let bands_seen: Vec<(f32, f32, f32)> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                Shape::Path(p) if p.stroke.width >= 6.0 && p.points.len() >= 2 => {
+                    Some(band_arc(&p.points, c))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bands_seen.len(), 2, "two parts, two arcs");
+        let r = bands_seen[0].0;
+
+        // `ranges` gives [(2400, 2686), (1, 200)]; sorted that is
+        // [(1, 200), (2400, 2686)] and the head is on (1, 200) — segs[0].
+        let head_start = angle_of(1, span);
+        let head_end = angle_end(200, span);
+        let head_span = part_sweep(1, 200, span);
+        let plain_start = angle_of(2_400, span);
+        let plain_span = part_sweep(2_400, 2_686, span);
+        let head = head_angle(head_span, r, 9.0);
+        assert!(head > 0.0);
+
+        let tip = heads[0]
+            .iter()
+            .map(|p| (p.y - c.y).atan2(p.x - c.x))
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        assert!(
+            wrap(tip - head_end).abs() < 1e-2,
+            "the tip is at {tip}, base 200 is at {head_end}; reading the head off \
+             segs.last() would put it at base 2,686"
+        );
+
+        // Match each painted arc to the part it belongs to by START ANGLE, folded —
+        // the pre-origin part starts at 4.04 rad where `atan2` reports -2.24, and
+        // comparing those two unfolded picked the SAME arc for both parts, which
+        // then asserted the head's own (correctly shortened) arc against the plain
+        // part's span and read as a rendering defect.
+        let arc_at = |want: f32| -> (f32, f32) {
+            let (_, a0, a1) = bands_seen
+                .iter()
+                .copied()
+                .min_by(|a, b| {
+                    let d = |x: &(f32, f32, f32)| wrap(x.1 - want).abs();
+                    d(a).partial_cmp(&d(b)).unwrap()
+                })
+                .unwrap();
+            (a0, a1)
+        };
+        let seam = SEAM_PT / r.max(1.0);
+        let (hs, he) = arc_at(head_start);
+        let (ps, pe) = arc_at(plain_start);
+        assert!(
+            wrap(hs - ps).abs() > 0.1,
+            "both parts matched the same arc; the match is not discriminating"
+        );
+        assert!(
+            ((he - hs) - (head_span - head)).abs() < seam + 1e-3,
+            "the head's own arc was not shortened: drew {:.5}, wanted {:.5}",
+            he - hs,
+            head_span - head
+        );
+        assert!(
+            ((pe - ps) - plain_span).abs() < 1e-2,
+            "the PRE-origin arc must not be shortened: drew {:.5}, its part spans {plain_span:.5}",
+            pe - ps
+        );
+    }
+
+    /// A7 — a feature spanning the whole molecule must not lap its own start.
+    ///
+    /// PROVEN TO FAIL at 0ebaa41: the body ran the full turn and the head was
+    /// painted on top of the band's own beginning, for 364.0 degrees of ink on a
+    /// molecule that is 360 round.
+    ///
+    /// The one case where the fold in `atan2` decides the verdict: the tip is at
+    /// twelve o'clock and so is the start, so a folded `head_base` reads as
+    /// *before* the start when it is a whole turn after it. [`band_arc`] and
+    /// [`one_arrow`] carry the turn, which is why this can be an ordinary
+    /// comparison.
+    #[test]
+    fn a_feature_spanning_the_whole_molecule_does_not_lap_its_own_start() {
+        let mol = forward(&[(1, 2_686)]);
+        let (r, a_s, a_e, a_base, a_tip) = one_arrow(&mol, 706.0, 756.0);
+        let seam = SEAM_PT / r.max(1.0);
+        let head = head_angle(part_sweep(1, 2_686, 2_686), r, 9.0);
+        assert!(head > 0.0, "a full turn has room for a head");
+        assert!(
+            a_base > a_s,
+            "the head's base at {a_base} is at or before the band's start at {a_s}"
+        );
+        // Not merely "after the start": the body has to have given up the head's
+        // length, which is what makes the total a turn and not a turn plus a head.
+        assert!(
+            (a_e - a_s - (std::f32::consts::TAU - head)).abs() < seam + 1e-3,
+            "the body drew {:.5} rad; a full turn less the head is {:.5}",
+            a_e - a_s,
+            std::f32::consts::TAU - head
+        );
+        let ink = (a_e - a_s) + (a_tip - a_base);
+        assert!(
+            ink <= std::f32::consts::TAU + seam + 1e-3,
+            "{ink:.5} rad of ink on a molecule that is {:.5} round",
+            std::f32::consts::TAU
+        );
+    }
+
+    /// A9 — a sub-threshold feature stays a mark, with no arrowhead at all.
+    ///
+    /// PASSES at 0ebaa41, and this says so rather than dressing it up: it is a
+    /// regression guard on the branch whose own reason is that a 9 pt stroke over
+    /// coincident points tessellated a translucent wedge across half the pane. A
+    /// change that shortens every body must not reach into it.
+    #[test]
+    fn a_one_base_feature_is_a_mark_with_no_arrowhead() {
+        // 1, 3 and 8 bases of 2,686: 0.134, 0.402 and 1.072 degrees, all under the
+        // 1.2 the gate tests. NINE bases is 1.2062 and is over it — the fixture said
+        // 9 and the test failed on its own arithmetic, not on the renderer. The
+        // boundary is pinned below rather than left as a comment nobody rechecks.
+        for segs in [(2_464u64, 2_464u64), (100, 102), (191, 198)] {
+            let mol = forward(&[segs]);
+            let (shapes, _) = paint(&mol, 706.0, 756.0);
+            let bases = segs.1 - segs.0 + 1;
+            assert!(
+                (bases as f64 / 2_686.0) * 360.0 < MIN_FEATURE_DEGREES as f64,
+                "{segs:?} is {bases} bases, which is NOT below the gate"
+            );
+            assert!(
+                arrowheads(&shapes).is_empty(),
+                "{segs:?} is below MIN_FEATURE_DEGREES and must draw no head"
+            );
+            // A mark is a 1.75 pt line segment, not a 9 pt band.
+            assert!(
+                !shapes.iter().any(
+                    |s| matches!(s, Shape::Path(p) if p.stroke.width >= 6.0 && p.points.len() >= 2)
+                ),
+                "{segs:?} was drawn as a band"
+            );
+        }
+        // And one base over the gate IS an arc with a head, so the three above are
+        // evidence about the gate and not about a threshold that swallowed
+        // everything. Without this the test passes just as well if arrowheads stop
+        // being drawn at all.
+        let (shapes, _) = paint(&forward(&[(191, 199)]), 706.0, 756.0);
+        assert_eq!(
+            arrowheads(&shapes).len(),
+            1,
+            "9 bases is 1.2062 degrees, over the gate, and must still get its head"
+        );
+    }
+
+    /// A8 — the screen and the exported figure agree about which features have a
+    /// direction.
+    ///
+    /// PROVEN TO FAIL at 0ebaa41: **9 against 6** on the user's own pKoV. `bands`
+    /// tested only `f.strand.is_reverse()`, so `pSC101 ori`, `decR` and `decR his`
+    /// — all `Strand::Unoriented` — were given a FORWARD arrowhead on screen while
+    /// `pl_draw::scene` sets `arrow_on = -1` for them and drew none. The screen
+    /// claimed a direction the file does not state, and the printable figure
+    /// disagreed with the screen.
+    ///
+    /// An arrow path in a `Scene` carries four `Seg::Line`s (barb out, tip, barb in,
+    /// and the step to the inner radius); a plain sector carries one. Verified
+    /// independently by counting `L` commands in the exported SVG.
+    #[test]
+    fn the_screen_and_the_figure_agree_on_which_features_have_a_direction() {
+        let mol = pkov_with_strands();
+        let (shapes, _) = paint(&mol, 706.0, 756.0);
+        let on_screen = arrowheads(&shapes).len();
+
+        let (sc, _) = pl_draw::scene(&mol, pl_draw::Options::default());
+        let in_figure = sc
+            .items
+            .iter()
+            .filter(|i| {
+                matches!(i, pl_draw::Item::Path { segs, .. }
+                    if segs.iter().filter(|s| matches!(s, pl_draw::Seg::Line(..))).count() >= 4)
+            })
+            .count();
+        assert_eq!(
+            on_screen, in_figure,
+            "the screen claims {on_screen} directional features, the figure {in_figure}"
+        );
+        assert_eq!(
+            on_screen, 6,
+            "pKoV has 6 oriented features and 3 unoriented"
+        );
+    }
+
+    /// pKoV's nine features with their real strands — three of them unoriented,
+    /// which is what `pl convert` warns about on this file.
+    fn pkov_with_strands() -> Molecule {
+        let mut mol = Molecule {
+            seq: vec![b'A'; 8_117],
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        use pl_core::Strand::{Forward, Reverse, Unoriented};
+        for (name, start, end, strand) in [
+            ("cat promoter", 7_748u64, 7_850u64, Reverse),
+            ("CmR", 7_088, 7_747, Reverse),
+            ("sacB promoter", 3_398, 3_843, Reverse),
+            ("SacB", 1_976, 3_397, Reverse),
+            ("f1 ori", 3_945, 4_399, Reverse),
+            ("pSC101 ori", 363, 585, Unoriented),
+            ("Rep101(Ts)", 633, 1_583, Forward),
+            ("decR", 5_423, 5_878, Unoriented),
+            ("decR his", 5_423, 5_905, Unoriented),
+        ] {
+            let mut f = pl_core::Feature::new(name, "misc_feature");
+            f.strand = strand;
+            f.segments = vec![pl_core::Segment::new(start, end)];
+            mol.features.push(f);
+        }
+        mol
+    }
+
+    /// A10 — emphasis. A hovered feature's head grows and its body must give way by
+    /// the same larger amount.
+    ///
+    /// PROVEN TO FAIL at 0ebaa41, where the overlap grew from 14.4 pt of arc to 19.2
+    /// — the artefact got worse exactly when the user pointed at it. This is the
+    /// assertion that catches a fix hard-coding `9.0` or reading `w` in the wrong
+    /// place.
+    #[test]
+    fn emphasis_lengthens_the_head_and_shortens_the_body_by_the_same_amount() {
+        let span = 2_686u64;
+        let mol = forward(&[(400, 1_400)]);
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(706.0, 756.0));
+        let input = egui::RawInput {
+            screen_rect: Some(rect),
+            ..Default::default()
+        };
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let frame = ctx.run_ui(input.clone(), |ui| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        // `hot`, so `w` becomes BAND_W + 3.
+                        show(ui, &mol, "fixture", &[], None, Some(0));
+                    });
+            });
+            fn walk(s: &Shape, acc: &mut Vec<Shape>) {
+                match s {
+                    Shape::Vec(v) => v.iter().for_each(|s| walk(s, acc)),
+                    other => acc.push(other.clone()),
+                }
+            }
+            shapes = Vec::new();
+            for cs in &frame.shapes {
+                walk(&cs.shape, &mut shapes);
+            }
+        }
+        let c = rect.center();
+        let heads = arrowheads(&shapes);
+        assert_eq!(heads.len(), 1);
+        let (pts, _) = widest_band(&shapes, c);
+        let (r, a_s, a_e) = band_arc(&pts, c);
+        let ang = |p: &Pos2| (p.y - c.y).atan2(p.x - c.x);
+        let a_tip = heads[0].iter().map(ang).fold(f32::MIN, f32::max);
+        let a_base = heads[0].iter().map(ang).fold(f32::MAX, f32::min);
+        let feature = angle_end(1_400, span) - angle_of(400, span);
+        let want = head_angle(feature, r, BAND_W + 3.0);
+        assert!(
+            (want - head_angle(feature, r, BAND_W)).abs() > 1e-3,
+            "the emphasised head must differ from the plain one or this proves nothing"
+        );
+        let seam = SEAM_PT / r.max(1.0);
+        assert!(
+            ((a_tip - a_base) - want).abs() < 1e-3,
+            "emphasised head {:.5}, wanted {want:.5}",
+            a_tip - a_base
+        );
+        assert!(
+            a_e - a_base <= seam,
+            "the emphasised body runs {:.2} pt of arc past the head's base",
+            (a_e - a_base) * r
+        );
+        // And the seam is still THERE under emphasis: see the same pair in
+        // `the_body_stops_where_the_arrowhead_begins`. Bounded-above only, a seam of
+        // zero passes every assertion in this file.
+        assert!(
+            a_e - a_base >= seam - 1e-4,
+            "the emphasised body abuts the head's base instead of running {SEAM_PT} pt under it"
+        );
+        assert!(
+            ((a_e - a_s) + (a_tip - a_base) - feature).abs() < seam + 1e-3,
+            "body + head must still be the feature's span under emphasis"
+        );
+    }
+
+    /// A11 — an arrowhead's barbs stay in their own lane.
+    ///
+    /// PROVEN TO FAIL before `barb_half` existed, in the painter: with two stacked
+    /// features and the pointer on the inner one, its head's outer barb was drawn at
+    /// r=376.60 while the outer lane's band runs from r=375.50 — **1.10 pt of one
+    /// feature's arrowhead over another feature's rectangle**, which is the user's
+    /// own sentence about this map, one lane over from the overlap the pass fixed.
+    /// It fails to COMPILE at 0ebaa41 as well, because the number was `w * 0.8`
+    /// inline inside `draw_arrowhead` and nothing could ask it anything.
+    ///
+    /// Quiet it was clear by 1.30 pt, so this is precisely a defect that appears
+    /// when the user points at a feature and not otherwise — the reason it survived
+    /// every screenshot.
+    ///
+    /// Two forms, and both matter. The arithmetic form fails at `9.60 > 6.50`
+    /// without reading a pixel; the painter form is what says the arithmetic is the
+    /// arithmetic the map actually uses.
+    #[test]
+    fn an_arrowheads_barbs_stay_inside_their_own_lane() {
+        // The arithmetic. Half the pitch, so two adjacent lanes each own their half
+        // and nothing can cross whatever either one's emphasis is doing.
+        for w in [BAND_W, BAND_W + 3.0] {
+            assert!(
+                barb_half(w) <= LANE_STEP * 0.5 + 1e-6,
+                "a barb of {} reaches past the midpoint between two lanes ({})",
+                barb_half(w),
+                LANE_STEP * 0.5
+            );
+            // Clear of a neighbouring band at its own EMPHASISED width, which is the
+            // width `ring::inside_of` reserves against one radius in for the same
+            // reason: hover must not decide whether something else is legible.
+            assert!(
+                barb_half(w) + (BAND_W + 3.0) * 0.5 <= LANE_STEP,
+                "an emphasised neighbour's band starts {} pt out and the barb reaches {}",
+                LANE_STEP - (BAND_W + 3.0) * 0.5,
+                barb_half(w)
+            );
+            // And it is still a head and not a butt end: it has to reach past its own
+            // shaft or there is no shoulder to read a direction from.
+            assert!(
+                barb_half(w) > w * 0.5,
+                "at w={w} the barb {} does not clear the shaft's own {}",
+                barb_half(w),
+                w * 0.5
+            );
+        }
+        // Emphasis must not be free: it lengthens the head even where it can no
+        // longer widen it, or pointing at a feature would change nothing.
+        assert!(
+            head_angle(1.0, 90.0, BAND_W + 3.0) > head_angle(1.0, 90.0, BAND_W),
+            "with the barb clamped, the head's LENGTH is all emphasis has left"
+        );
+
+        // The painter. Two overlapping forward features, so `lanes` puts them in
+        // lanes 0 and 1, with the pointer on the inner one.
+        let mut mol = Molecule {
+            seq: vec![b'A'; 2_686],
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        for (name, s, e) in [("inner", 400u64, 1_400u64), ("outer", 500, 1_500)] {
+            let mut f = pl_core::Feature::new(name, "CDS");
+            f.strand = pl_core::Strand::Forward;
+            f.segments.push(pl_core::Segment::new(s, e));
+            mol.features.push(f);
+        }
+        assert_eq!(
+            bands(&mol).iter().map(|b| b.lane).collect::<Vec<_>>(),
+            vec![0, 1],
+            "the fixture must occupy two lanes or it cannot show a cross-lane overlap"
+        );
+
+        for emphasis in [None, Some(0), Some(1)] {
+            let ctx = egui::Context::default();
+            let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(706.0, 756.0));
+            let input = egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            };
+            let mut shapes = Vec::new();
+            for _ in 0..2 {
+                let frame = ctx.run_ui(input.clone(), |ui| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ui, |ui| {
+                            show(ui, &mol, "fixture", &[], None, emphasis);
+                        });
+                });
+                fn walk(s: &Shape, acc: &mut Vec<Shape>) {
+                    match s {
+                        Shape::Vec(v) => v.iter().for_each(|s| walk(s, acc)),
+                        other => acc.push(other.clone()),
+                    }
+                }
+                shapes = Vec::new();
+                for cs in &frame.shapes {
+                    walk(&cs.shape, &mut shapes);
+                }
+            }
+            let c = rect.center();
+            let heads = arrowheads(&shapes);
+            assert_eq!(
+                heads.len(),
+                2,
+                "emphasis {emphasis:?}: two features, two heads"
+            );
+
+            // Every band's own radius, off the polyline it was painted as.
+            let band_radii: Vec<f32> = shapes
+                .iter()
+                .filter_map(|s| match s {
+                    Shape::Path(p) if p.stroke.width >= 6.0 && p.points.len() >= 2 => {
+                        Some(band_arc(&p.points, c).0)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(band_radii.len(), 2, "emphasis {emphasis:?}: {band_radii:?}");
+
+            for h in &heads {
+                let rs: Vec<f32> = h.iter().map(|p| (*p - c).length()).collect();
+                // The tip sits on the band's own radius; the barbs either side of it.
+                let own = rs
+                    .iter()
+                    .copied()
+                    .min_by(|a, b| {
+                        let d = |x: f32| {
+                            band_radii
+                                .iter()
+                                .map(|r| (x - r).abs())
+                                .fold(f32::MAX, f32::min)
+                        };
+                        d(*a).partial_cmp(&d(*b)).unwrap()
+                    })
+                    .unwrap();
+                for &other in &band_radii {
+                    if (other - own).abs() <= 1.0 {
+                        continue; // its own band
+                    }
+                    // A neighbour's band is `(BAND_W + 3) / 2` either side of its
+                    // radius at the widest it is ever drawn. No vertex of this head
+                    // may be inside that.
+                    for &v in &rs {
+                        assert!(
+                            (v - other).abs() >= (BAND_W + 3.0) * 0.5,
+                            "emphasis {emphasis:?}: a head on the band at r={own:.2} puts a \
+                             vertex at r={v:.2}, which is inside the band at r={other:.2} \
+                             (it runs r={:.2}..{:.2})",
+                            other - (BAND_W + 3.0) * 0.5,
+                            other + (BAND_W + 3.0) * 0.5
+                        );
+                    }
+                }
+            }
+        }
     }
 }
