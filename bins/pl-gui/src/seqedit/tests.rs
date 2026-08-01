@@ -290,7 +290,7 @@ fn backspace_at_the_start_of_a_line_does_nothing_and_says_why() {
     e.caret = 0;
     e.backspace(&mut d, T0);
     assert_eq!(seq_of(&d), "ACGT");
-    assert!(!d.edited(), "a no-op must not enter the history");
+    assert!(!d.has_history(), "a no-op must not enter the history");
     assert!(e
         .notice
         .as_deref()
@@ -691,7 +691,7 @@ fn a_non_iupac_character_is_refused_named_and_never_inserted() {
     e.commit(&mut d);
 
     assert_eq!(seq_of(&d), "ACGT", "nothing was inserted");
-    assert!(!d.edited(), "and no operation was recorded");
+    assert!(!d.has_history(), "and no operation was recorded");
     assert_eq!(e.caret, 2, "the caret did not move");
     let msg = e.notice.as_deref().unwrap();
     assert!(msg.contains('Z'), "the character itself is named: {msg}");
@@ -823,7 +823,7 @@ fn a_paste_needing_consent_changes_nothing_until_it_is_given() {
     e.caret = 2;
     assert!(e.paste(&mut d, "CC-CC"), "the caller must ask");
     assert_eq!(seq_of(&d), "AAAA");
-    assert!(!d.edited());
+    assert!(!d.has_history());
 
     let (report, target) = e.pending_paste.take().unwrap();
     e.insert_paste(&mut d, &report, target.unwrap());
@@ -837,7 +837,7 @@ fn a_paste_that_sanitises_to_nothing_records_no_operation() {
     let mut d = doc("AAAA", false);
     let mut e = SeqEdit::new();
     e.paste(&mut d, "   \n\n  ");
-    assert!(!d.edited());
+    assert!(!d.has_history());
 }
 
 // ---------------------------------------------------------------------------
@@ -1367,7 +1367,7 @@ fn prose_pasted_from_a_document_is_confirmed_rather_than_inserted() {
         e.paste(&mut d, "that was a bad hack"),
         "the caller must ask first"
     );
-    assert!(!d.edited(), "and nothing has gone in yet");
+    assert!(!d.has_history(), "and nothing has gone in yet");
     let (report, _) = e.pending_paste.clone().unwrap();
     assert_eq!(report.ambiguous, 7, "h, w, s, b, d, h, k");
     assert!(
@@ -1718,7 +1718,7 @@ fn backspace_at_base_one_points_down_the_view_and_counts_rows_correctly() {
         e.set_per_row(per_row);
         e.caret = 0;
         e.backspace(&mut d, T0);
-        assert!(!d.edited(), "still a no-op");
+        assert!(!d.has_history(), "still a no-op");
         e.notice.clone().unwrap()
     };
 

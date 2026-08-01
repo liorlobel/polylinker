@@ -132,6 +132,21 @@ pub struct Document {
     pub records_in_file: usize,
     /// Location forms the reader could not represent, reported not dropped.
     pub unrepresentable_locations: Vec<String>,
+    /// The log cursor at which this document was last written to a file, or
+    /// `None` for a document that has never been written at all.
+    ///
+    /// A cursor, never an op count. [`pl_core::oplog::OpLog::path`] shrinks on
+    /// undo and regrows when the next edit forks from the same parent, so
+    /// "circularise, undo, reverse-complement" is back at length 1 holding a
+    /// different molecule — the collision `Autosaved` in `main.rs` already
+    /// documents having shipped once, in the recovery file. Content addressing
+    /// is what makes the cursor an identity: two different edits from one
+    /// parent cannot share it.
+    ///
+    /// The nesting is load-bearing and reads badly: outer `None` = never
+    /// written; `Some(None)` = written, and what was written was the base
+    /// state.
+    pub saved: Option<Option<pl_core::oplog::OpId>>,
 }
 
 impl Document {
@@ -144,6 +159,19 @@ impl Document {
         let (molecule, format, report) =
             pl_fileio::load_with_report(data).map_err(|e| e.to_string())?;
         let digest = start_digest(&molecule);
+        // Set here rather than at each call site so `adopt` cannot forget it —
+        // which matters, because `adopt`'s own docstring exists because "two of
+        // the four places that used to assign it forgot the second half".
+        //
+        // `path.is_some()` means the document was read from that file at the
+        // base of an empty log, so the file holds it: opening a file and
+        // closing it must never prompt. `path.is_none()` covers the three
+        // callers that are genuinely unsaved — the recovery-banner restore
+        // (which drops the path deliberately), a file dropped as bytes with no
+        // path, and `of_molecule` in tests. A restored crash draft sitting at
+        // cursor `None` with zero edits IS unsaved work, and a predicate that
+        // only compared cursors would call it clean and let it be closed.
+        let saved = path.is_some().then_some(None);
         Ok(Document {
             path,
             title,
@@ -153,6 +181,7 @@ impl Document {
             digest,
             records_in_file: report.records,
             unrepresentable_locations: report.unrepresentable_locations,
+            saved,
         })
     }
 
@@ -173,6 +202,7 @@ impl Document {
             container: None,
             records_in_file: 1,
             unrepresentable_locations: Vec::new(),
+            saved: None,
         }
     }
 
@@ -225,9 +255,52 @@ impl Document {
         self.digest = start_digest(self.log.current());
     }
 
-    /// Has anything been edited since the file was opened?
-    pub fn edited(&self) -> bool {
+    /// Has any operation ever been recorded, on any branch?
+    ///
+    /// **Not a dirty flag**, and it must never be used as one. `all_ops`
+    /// deliberately keeps abandoned branches, so this is true forever after the
+    /// first keystroke — after an undo back to the base, and after a save. It
+    /// was `edited()`, its one consumer was the toolbar dot, and it was the
+    /// wrong predicate there: a guard or a marker keyed on it fires when nothing
+    /// has changed, which is exactly how a guard becomes a reflex click. Use
+    /// [`Document::unsaved`] for that question.
+    ///
+    /// `#[cfg(test)]` because after the dot moved to `unsaved()` the only honest
+    /// remaining use is a test asserting that an operation did or did not enter
+    /// the log. Left named for what it measures so it cannot be mistaken again.
+    #[cfg(test)]
+    pub fn has_history(&self) -> bool {
         !self.log.all_ops().is_empty()
+    }
+
+    /// Is anything on screen absent from every file on disk?
+    ///
+    /// The comparison is against the last successful *write*, not the file the
+    /// document was opened from — those coincide until the first save. Undo
+    /// back to the opening state returns `cursor()` to `None`, which equals
+    /// `saved` for a file-backed document, so the guard does not fire; redo
+    /// forward makes it dirty again. Both fall out of the definition and need
+    /// no special case.
+    pub fn unsaved(&self) -> bool {
+        self.saved != Some(self.log.cursor())
+    }
+
+    /// How many operations stand between the last write and the screen.
+    ///
+    /// `None` when the saved cursor is not an ancestor of the current one —
+    /// reachable by saving and then seeking onto another branch — in which case
+    /// the count genuinely does not exist and the caller must say "changes"
+    /// rather than invent a number.
+    pub fn unsaved_ops(&self) -> Option<usize> {
+        self.log.distance_from(self.saved.flatten())
+    }
+
+    /// Record that the state at the cursor is now on disk.
+    ///
+    /// Called only on a successful write. A failed write that marked a document
+    /// clean is a data-loss bug wearing the costume of the fix.
+    pub fn mark_saved(&mut self) {
+        self.saved = Some(self.log.cursor());
     }
 
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -431,6 +504,7 @@ mod tests {
             container: None,
             records_in_file: 1,
             unrepresentable_locations: Vec::new(),
+            saved: None,
         }
     }
 
@@ -441,11 +515,11 @@ mod tests {
         // so a revcomp test on it passes no matter what the code does.
         const SEQ: &str = "AAAACCCCGGGGTTTTAAGG";
         let mut d = doc_of(SEQ, true);
-        assert!(!d.edited());
+        assert!(!d.has_history());
         assert!(!d.log.can_undo());
 
         d.apply(OpKind::ReverseComplement).unwrap();
-        assert!(d.edited());
+        assert!(d.has_history());
         assert!(d.log.can_undo());
         assert_eq!(
             d.molecule().seq,
@@ -475,7 +549,10 @@ mod tests {
         assert!(matches!(err, OpError::NotCircular));
         assert_eq!(d.molecule().seq, before.seq);
         assert_eq!(d.molecule().features, before.features);
-        assert!(!d.edited(), "a refused edit must not enter the history");
+        assert!(
+            !d.has_history(),
+            "a refused edit must not enter the history"
+        );
     }
 
     #[test]

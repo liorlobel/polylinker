@@ -225,6 +225,117 @@ pub fn read_blocks(data: &[u8]) -> Result<Vec<Block>, Error> {
     Ok(blocks)
 }
 
+/// What a block kind holds, named for a reader deciding whether losing it
+/// matters.
+///
+/// The wording is a noun phrase that reads inside "… is not carried", because
+/// every surface that says this — the GUI's lossiness modal, `pl convert --to
+/// dna` — is building that sentence. Kinds 13, 14, 17 and 28 are named as
+/// unresolved rather than guessed at: `docs/DNA-FORMAT.md` §2 records them as
+/// observed-but-unexplained, and inventing a name for them here would put a
+/// claim in the user's dialog that the project's own format notes refuse to
+/// make.
+pub fn block_name(kind: u8) -> &'static str {
+    match kind {
+        block::SEQUENCE => "the sequence",
+        block::CUTSITE_CACHE => "the cut-site cache",
+        block::ENZYME_TABLE => "the enzyme table",
+        block::PRIMERS => "the primers block",
+        block::NOTES => "the notes block",
+        block::HISTORY_TREE => "the cloning history tree",
+        block::EXTRA_PROPS => "additional sequence properties",
+        block::HEADER => "the file header",
+        block::FEATURES => "the features block",
+        block::HISTORY_NODE => "a cloning history node",
+        17 => "trace or alignment data",
+        // Numbered, because three of these appear in one pKoV and a list that
+        // says the same eleven words three times reads as a fault in the report
+        // rather than as three different blocks. `docs/DNA-FORMAT.md` §2 records
+        // them as observed and unexplained, and the type number is the only
+        // handle a reader has for looking one of them up.
+        13 => "an unresolved ancillary block (type 13)",
+        14 => "an unresolved ancillary block (type 14)",
+        28 => "an unresolved ancillary block (type 28)",
+        _ => "an unrecognised block",
+    }
+}
+
+/// One kind of block present in a file that a rewrite will not carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DroppedBlocks {
+    pub kind: u8,
+    /// How many blocks of this kind. A `.dna` carries one block 11 per history
+    /// node, so this is routinely greater than one, and a report that said
+    /// "block 11" once would understate five nodes as one.
+    pub count: usize,
+    /// Their total size on disk, framing included.
+    pub bytes: usize,
+    /// A pure cache, rebuilt by whatever opens the file next. The only class of
+    /// loss here that costs the user nothing.
+    pub derived: bool,
+}
+
+/// What `have` holds that `kept` does not, by block kind, biggest first.
+///
+/// Both arguments are block lists rather than paths so the caller decides what
+/// "kept" means; [`from_molecule`]'s own output, read back with
+/// [`read_blocks`], is the honest answer and is what both callers pass.
+///
+/// Computing this rather than hardcoding "blocks 2, 3 and 7" is the point. The
+/// user's own pKoV also carries five block 11 history nodes, a block 8 and
+/// three ancillary blocks — 22 kB beyond the tree — and the hardcoded sentence
+/// named none of them while reading as exhaustive.
+pub fn dropped_blocks(have: &[Block], kept: &[Block]) -> Vec<DroppedBlocks> {
+    let mut out: Vec<DroppedBlocks> = Vec::new();
+    for b in have {
+        if kept.iter().any(|k| k.kind == b.kind) {
+            continue;
+        }
+        match out.iter_mut().find(|d| d.kind == b.kind) {
+            Some(d) => {
+                d.count += 1;
+                d.bytes += b.size_on_disk();
+            }
+            None => out.push(DroppedBlocks {
+                kind: b.kind,
+                count: 1,
+                bytes: b.size_on_disk(),
+                derived: b.is_derived(),
+            }),
+        }
+    }
+    // Biggest first, with a stable tiebreak on the kind so two runs of one
+    // build cannot print the list in two orders.
+    out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.kind.cmp(&b.kind)));
+    out
+}
+
+/// [`dropped_blocks`] as one clause, or `None` when nothing of that class is
+/// dropped.
+///
+/// Shared so that the GUI's modal and `pl convert --to dna` cannot describe one
+/// write in two ways — which they did: the CLI said nothing at all.
+pub fn dropped_summary(dropped: &[DroppedBlocks]) -> Option<String> {
+    if dropped.is_empty() {
+        return None;
+    }
+    // Rounded to kB, and never to "0 kB": a 41-byte block is small, not absent,
+    // and a size that reads as nothing invites the reader to skip the item.
+    let part = |d: &DroppedBlocks| {
+        let size = if d.bytes < 1024 {
+            format!("{} B", d.bytes)
+        } else {
+            format!("{} kB", (d.bytes as f64 / 1024.0).round() as usize)
+        };
+        if d.count > 1 {
+            format!("{} × {} ({size})", d.count, block_name(d.kind))
+        } else {
+            format!("{} ({size})", block_name(d.kind))
+        }
+    };
+    Some(dropped.iter().map(part).collect::<Vec<_>>().join(", "))
+}
+
 pub fn write_blocks(blocks: &[Block]) -> Vec<u8> {
     let mut out = Vec::with_capacity(blocks.iter().map(Block::size_on_disk).sum());
     for b in blocks {
@@ -2392,5 +2503,95 @@ mod tests {
     fn writing_the_same_molecule_twice_gives_the_same_bytes() {
         let m = mol_with_feature();
         assert_eq!(from_molecule(&m), from_molecule(&m));
+    }
+
+    /// The user's own pKoV, as its block table was walked from the raw bytes:
+    /// 17 blocks, 75,795 B, five of them history nodes.
+    ///
+    /// The GUI's lossiness modal said "the cut-site cache and the enzyme table
+    /// are not written", plus a paragraph about the history TREE, and read as
+    /// exhaustive. Measured against this table the synthesised file also drops
+    /// five block 11 history nodes (21 kB), block 8 (295 B) and blocks 13, 14
+    /// and 28 — 22 kB beyond the tree, none of it a cache, and named on no
+    /// surface of this program.
+    #[test]
+    fn every_block_a_rewrite_drops_is_named_and_only_the_caches_are_rebuildable() {
+        let b = |kind: u8, n: usize| Block {
+            kind,
+            payload: vec![0u8; n],
+        };
+        let have = vec![
+            b(9, 14),
+            b(0, 8_118),
+            b(2, 17_773),
+            b(3, 12_320),
+            b(11, 7_720),
+            b(11, 7_720),
+            b(11, 2_199),
+            b(11, 2_155),
+            b(11, 1_529),
+            b(7, 8_107),
+            b(8, 295),
+            b(10, 3_803),
+            b(5, 3_318),
+            b(6, 202),
+            b(13, 345),
+            b(14, 41),
+            b(28, 51),
+        ];
+        // What `from_molecule` emits for a molecule carrying features, primers
+        // and notes.
+        let kept = vec![b(9, 14), b(0, 8_118), b(10, 3_803), b(5, 3_318), b(6, 202)];
+        let dropped = dropped_blocks(&have, &kept);
+
+        let mut kinds: Vec<u8> = dropped.iter().map(|d| d.kind).collect();
+        let ordered = kinds.clone();
+        kinds.sort_unstable();
+        assert_eq!(
+            kinds,
+            vec![2, 3, 7, 8, 11, 13, 14, 28],
+            "a block that is dropped and not listed is a block nothing can say"
+        );
+        // Biggest first, so the sentence leads with what costs most.
+        let bytes: Vec<usize> = ordered
+            .iter()
+            .map(|k| dropped.iter().find(|d| d.kind == *k).unwrap().bytes)
+            .collect();
+        assert!(
+            bytes.windows(2).all(|w| w[0] >= w[1]),
+            "not ordered by size: {bytes:?}"
+        );
+
+        // ONE ROW OF FIVE, not one row of one: a report that said "a cloning
+        // history node" once would describe 21 kB as 7.
+        let nodes = dropped.iter().find(|d| d.kind == 11).unwrap();
+        assert_eq!(nodes.count, 5);
+        assert_eq!(nodes.bytes, 7_720 + 7_720 + 2_199 + 2_155 + 1_529 + 5 * 5);
+
+        // Only blocks 2 and 3 cost the user nothing. Everything else here is
+        // content this program cannot rebuild from what it holds.
+        let rebuildable: Vec<u8> = dropped
+            .iter()
+            .filter(|d| d.derived)
+            .map(|d| d.kind)
+            .collect();
+        assert_eq!(rebuildable, vec![2, 3]);
+
+        let said = dropped_summary(&dropped).expect("a sentence");
+        assert!(said.contains("5 × a cloning history node"), "{said}");
+        assert!(said.contains("the cloning history tree"), "{said}");
+        assert!(said.contains("additional sequence properties"), "{said}");
+        // A 46-byte block is small, not absent: rounding it to "0 kB" invites
+        // the reader to skip the item.
+        assert!(said.contains("46 B"), "{said}");
+        assert_eq!(dropped_summary(&[]), None);
+    }
+
+    /// The control: a file this writer produced, rewritten, loses nothing.
+    #[test]
+    fn a_rewrite_of_our_own_output_drops_nothing() {
+        let m = mol_with_feature();
+        let ours = read_blocks(&from_molecule(&m)).unwrap();
+        assert!(dropped_blocks(&ours, &ours).is_empty());
     }
 }

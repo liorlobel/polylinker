@@ -49,6 +49,20 @@ pub struct Snapshot {
     /// Edits in the log when this was written. Shown so a user choosing
     /// between two recovery files can tell which is further along.
     pub ops: usize,
+    /// The user was asked about these edits and chose to abandon them.
+    ///
+    /// The module doc above argues there must be no crash flag, because "a flag
+    /// written during a crash is a flag that does not get written". That
+    /// argument survives a flag written on a **clean** exit, and only that: this
+    /// one is written by the unsaved-changes guard's "close without saving"
+    /// path, on the way out, with nothing crashing. The invariant is unchanged
+    /// — presence of the FILE still means work was left behind, and absence of
+    /// this KEY still reads as a crash, which is what an old file written by an
+    /// older build correctly says. Do not delete it as a violation of a rule it
+    /// does not violate: without it a deliberately abandoned draft comes back
+    /// under "A previous session did not close cleanly", which tells a user
+    /// their app crashed when it did not.
+    pub abandoned: bool,
     /// The molecule, as GenBank.
     pub genbank: String,
 }
@@ -79,6 +93,9 @@ pub fn encode(s: &Snapshot) -> String {
     out.push_str(&format!("title: {}\n", escape(&s.title)));
     out.push_str(&format!("saved: {}\n", s.saved_at));
     out.push_str(&format!("ops: {}\n", s.ops));
+    if s.abandoned {
+        out.push_str("exit: unsaved\n");
+    }
     out.push_str(SEPARATOR);
     out.push('\n');
     out.push_str(&s.genbank);
@@ -97,6 +114,7 @@ pub fn decode(text: &str) -> Result<Snapshot, String> {
         return Err(format!("not a recovery file: expected {MAGIC:?} on line 1"));
     }
     let (mut original, mut title, mut saved, mut ops) = (None, String::new(), 0u64, 0usize);
+    let mut abandoned = false;
     let mut body_at = None;
     let mut consumed = MAGIC.len() + 1;
     for line in lines {
@@ -120,6 +138,11 @@ pub fn decode(text: &str) -> Result<Snapshot, String> {
             "title" => title = v,
             "saved" => saved = v.parse().unwrap_or(0),
             "ops" => ops = v.parse().unwrap_or(0),
+            // Unknown keys are ignored here, which is what makes this key
+            // compatible in both directions: an old file read by a new build
+            // reads as a crash, and a new file read by an old build loses only
+            // the label.
+            "exit" => abandoned = v == "unsaved",
             _ => {}
         }
     }
@@ -131,6 +154,7 @@ pub fn decode(text: &str) -> Result<Snapshot, String> {
         title,
         saved_at: saved,
         ops,
+        abandoned,
         genbank: text.get(at..).unwrap_or("").to_string(),
     })
 }
@@ -412,6 +436,7 @@ mod tests {
             title: "pUC19".into(),
             saved_at: 1_785_000_000,
             ops: 7,
+            abandoned: false,
             genbank: "LOCUS       x  10 bp DNA circular SYN\nORIGIN\n        1 acgtacgtac\n//\n"
                 .into(),
         }

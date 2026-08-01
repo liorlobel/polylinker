@@ -71,6 +71,25 @@ impl Palette {
         let a = self.accent;
         Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), 30)
     }
+
+    /// The same wash at half strength, for a row the pointer is merely OVER
+    /// rather than one the user has chosen.
+    ///
+    /// Built from the accent, and that is the whole point of its existing. The
+    /// caller took `selection()` apart and rebuilt it at half alpha —
+    /// `from_rgba_unmultiplied(w.r(), w.g(), w.b(), w.a() / 2)` — which
+    /// premultiplies a colour that is ALREADY premultiplied: `Color32` stores
+    /// premultiplied components, so `.r()` on a 30/255 wash returns about 12%
+    /// of the accent's red, and multiplying that again by 15/255 leaves an
+    /// effective opacity near 0.7%. Measured in the running application, the
+    /// hovered row's background came back byte-identical to its neighbours — so
+    /// the map's hover echo was invisible for a SECOND reason after the frame
+    /// ordering was fixed, and fixing only one of the two would have looked like
+    /// fixing neither.
+    pub fn hover_wash(&self) -> Color32 {
+        let a = self.accent;
+        Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), 15)
+    }
 }
 
 /// Fallbacks by GenBank feature key, for files that carry no colour.
@@ -197,6 +216,52 @@ pub fn apply(visuals: &mut Visuals) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PROVEN TO FAIL against the working tree as handed over, where the hover
+    /// wash was built as
+    /// `Color32::from_rgba_unmultiplied(sel.r(), sel.g(), sel.b(), sel.a() / 2)`.
+    ///
+    /// `Color32` stores PREMULTIPLIED components, so taking a 30/255 wash apart
+    /// and rebuilding it premultiplies it a second time: the effective opacity
+    /// comes out near 0.7% instead of 6%. Measured in the running application,
+    /// the hovered row's background was byte-identical to its neighbours in both
+    /// directions, so the map's hover echo had two independent reasons to be
+    /// invisible and fixing only the frame ordering would have looked like
+    /// fixing nothing.
+    #[test]
+    fn the_hover_wash_actually_changes_the_pixel_it_is_drawn_on() {
+        // What egui does when it composites a premultiplied colour over a
+        // background: `bg * (1 - a) + rgb`.
+        let over = |c: Color32, bg: Color32| -> [i32; 3] {
+            let a = c.a() as f32 / 255.0;
+            [0, 1, 2].map(|i| {
+                let b = [bg.r(), bg.g(), bg.b()][i] as f32;
+                let f = [c.r(), c.g(), c.b()][i] as f32;
+                (b * (1.0 - a) + f).round() as i32
+            })
+        };
+        for dark in [true, false] {
+            let p = Palette::of(dark);
+            let bg = panel_fill(dark);
+            let hover = over(p.hover_wash(), bg);
+            let sel = over(p.selection(), bg);
+            let base = [bg.r() as i32, bg.g() as i32, bg.b() as i32];
+            let far = |a: [i32; 3], b: [i32; 3]| {
+                (a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs()
+            };
+            assert!(
+                far(hover, base) >= 8,
+                "dark={dark}: the hover wash composites to {hover:?} on {base:?} — invisible"
+            );
+            // And it is still clearly the weaker of the two, or hover and
+            // selection stop being distinguishable, which is what the wash order
+            // in the Features list depends on.
+            assert!(
+                far(sel, base) > far(hover, base),
+                "dark={dark}: selection {sel:?} is not stronger than hover {hover:?}"
+            );
+        }
+    }
 
     #[test]
     fn hex_colours_from_files_are_honoured() {

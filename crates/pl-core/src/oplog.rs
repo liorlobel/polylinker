@@ -925,6 +925,29 @@ impl OpLog {
         out
     }
 
+    /// How many operations separate `ancestor` from the cursor, or `None` when
+    /// `ancestor` is not on the path back from it.
+    ///
+    /// A walk, not a subtraction of two [`OpLog::path`] lengths: the log is a
+    /// DAG and two points at the same depth can be on different branches
+    /// holding different molecules. `None` is a real answer and callers must
+    /// render it as "changes" rather than a count — save, then seek onto
+    /// another branch from the History tab, and the number genuinely does not
+    /// exist.
+    pub fn distance_from(&self, ancestor: Option<OpId>) -> Option<usize> {
+        let mut n = 0usize;
+        let mut at = self.cursor;
+        loop {
+            if at == ancestor {
+                return Some(n);
+            }
+            let id = at?;
+            let &i = self.by_id.get(&id)?;
+            at = self.ops[i].parent;
+            n += 1;
+        }
+    }
+
     /// Perform an operation, recording it.
     ///
     /// If the cursor is not at the tip — that is, something was undone — this
@@ -1144,6 +1167,41 @@ mod tests {
         let mut m = mol(seq, false);
         m.declared_len = Some(seq.len() as u64);
         m
+    }
+
+    /// PROVEN TO FAIL at 528dcd9, where `distance_from` did not exist and the
+    /// only thing available was `path().len()`.
+    ///
+    /// The fork is the point. Two positions at the same depth can be on
+    /// different branches holding different molecules, so subtracting two path
+    /// lengths would report 0 here and the caller would render "0 edits that are
+    /// not in any file" about a document that differs from the file. An
+    /// assertion that only ever sees a straight line proves nothing.
+    #[test]
+    fn the_distance_to_a_point_on_another_branch_is_unknowable() {
+        let mut log = OpLog::new(mol("AAAACCCCGGGGTTTT", true));
+        log.apply(OpKind::SetTopology(Topology::Linear), "t")
+            .unwrap();
+        let base = log.cursor();
+        assert_eq!(log.distance_from(None), Some(1), "a straight line counts");
+
+        log.apply(OpKind::ReverseComplement, "t").unwrap();
+        let branch_a = log.cursor();
+        assert_eq!(log.distance_from(base), Some(1));
+        assert_eq!(log.distance_from(None), Some(2));
+
+        // Step back and fork. Both tips are two ops deep and neither is an
+        // ancestor of the other.
+        log.undo().unwrap();
+        log.apply(OpKind::SetTopology(Topology::Circular), "t")
+            .unwrap();
+        assert_eq!(log.path().len(), 2, "the premise: the same depth");
+        assert_eq!(
+            log.distance_from(branch_a),
+            None,
+            "and the other branch is not on the way back from here"
+        );
+        assert_eq!(log.distance_from(base), Some(1), "but its parent is");
     }
 
     #[test]

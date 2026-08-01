@@ -1137,6 +1137,38 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
             Out::Dna => {
                 let (b, rep) = pl_fileio::snapgene::from_molecule_reporting(&mol);
                 unwritable = rep;
+                // What the SOURCE container held that this output does not, from
+                // the same computation the GUI's lossiness modal uses. Without
+                // it the two surfaces of one program described one write in two
+                // ways: the GUI warned about the cloning history and the CLI
+                // printed nothing at all, though `pl convert "pKoV.dna" --to
+                // dna` turns a 17-block 75 kB file into a 4-block 15 kB one.
+                //
+                // Read back from the bytes just written rather than assumed:
+                // "what this writer emits" is a property of the writer, and a
+                // hardcoded list here would go stale the first time it gains a
+                // block.
+                if let (Ok(src), Ok(out)) = (
+                    pl_fileio::snapgene::read_blocks(&data),
+                    pl_fileio::snapgene::read_blocks(&b),
+                ) {
+                    let dropped = pl_fileio::snapgene::dropped_blocks(&src, &out);
+                    let (cache, real): (Vec<_>, Vec<_>) =
+                        dropped.into_iter().partition(|d| d.derived);
+                    if let Some(s) = pl_fileio::snapgene::dropped_summary(&real) {
+                        eprintln!(
+                            "pl: {}: the source holds blocks this writer does not carry, and \
+                             they are not in the output: {s}",
+                            path.display()
+                        );
+                    }
+                    if let Some(s) = pl_fileio::snapgene::dropped_summary(&cache) {
+                        eprintln!(
+                            "pl: {}: not written because SnapGene rebuilds them: {s}",
+                            path.display()
+                        );
+                    }
+                }
                 b
             }
         };

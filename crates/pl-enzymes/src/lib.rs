@@ -145,9 +145,35 @@ impl EnzymeSet {
             EnzymeSet::All => "All cutters",
             EnzymeSet::Unique => "Unique",
             EnzymeSet::UniqueAndDual => "Unique & dual",
-            EnzymeSet::SixPlus => "6+ cutters",
-            EnzymeSet::UniqueSixPlus => "Unique 6+",
+            // "6+ cutters" was wrong in the way that matters. This set means
+            // `specificity() >= 6` — recognition-site LENGTH — while every
+            // heading beside it ("22 unique cutters", "18 cut more than once")
+            // is a cut COUNT, so half of biologists read it as the far end of
+            // the same axis. Renamed here rather than later because this chip
+            // now alters the map as well as the list.
+            //
+            // The "+" is not decoration, and dropping it was a second and
+            // smaller error in the same line: `admits` tests `specificity() >=
+            // 6`, and the table holds four seven-base and seven eight-base
+            // cutters. PmeI is GTTTAAAC, and "6-base sites" says of it something
+            // the set does not.
+            EnzymeSet::SixPlus => "6+ base sites",
+            EnzymeSet::UniqueSixPlus => "Unique 6+ base",
         }
+    }
+
+    /// Whether this set can turn anything away from a given digest.
+    ///
+    /// False means the chip is inert on this molecule — clicking it changes
+    /// neither the list nor the map, and the user gets no feedback that the
+    /// control did nothing. That is the state `SixPlus` and `UniqueSixPlus` are
+    /// permanently in against the built-in table, where every enzyme has a
+    /// 6-base or longer site (asserted by `specificity_counts_only_specified_bases`,
+    /// so a four-cutter makes this start discriminating loudly rather than
+    /// silently). It is a fact about the DATA and not about the code, so the UI
+    /// asks the data rather than special-casing two variants.
+    pub fn discriminates(self, results: &[Digest]) -> bool {
+        results.iter().any(|d| d.count() > 0 && !self.admits(d))
     }
 
     /// Does this set include a given result?
@@ -1141,6 +1167,42 @@ mod tests {
             ENZYMES.iter().all(|e| e.specificity() >= 6 && e.len() == e.specificity()),
             "the table has gained a short or ambiguous cutter; the 6+ set now              discriminates, so check the UI copy and this test together"
         );
+    }
+
+    /// Two of the five chips cannot change anything, on any molecule, against
+    /// the table this program ships — and a UX pass renamed both of them on the
+    /// stated grounds that they now matter more.
+    ///
+    /// The set definitions are older than that pass and the no-op is documented
+    /// and pinned by `specificity_counts_only_specified_bases`. What was missing
+    /// is a way for the UI to ASK, so a user who clicks "6+ base sites" is told
+    /// the control did nothing instead of inferring it from a picture that did
+    /// not move. Asked of the digest, so a table that gains a four-cutter makes
+    /// the chips live with no change at the call site.
+    #[test]
+    fn a_filter_that_can_hide_nothing_can_be_asked() {
+        let mol = mol(
+            "AAAAGAATTCCCCGGATCCTTTTAAGCTTGGGGGAATTCCCCC",
+            Topology::Circular,
+        );
+        let results = digest_all(&mol);
+        assert!(
+            results.iter().filter(|d| d.count() > 0).count() >= 3,
+            "the premise: something must cut"
+        );
+        assert!(
+            EnzymeSet::Unique.discriminates(&results),
+            "this molecule has a multi-cutter, so Unique hides something"
+        );
+        // Every enzyme in the shipped table has a 6-base or longer site, so
+        // these two admit every cutter there is.
+        assert!(!EnzymeSet::SixPlus.discriminates(&results));
+        assert!(!EnzymeSet::All.discriminates(&results));
+        // And the label says "6+", not "6": the set is `specificity() >= 6` and
+        // the table holds seven- and eight-base cutters. PmeI is GTTTAAAC.
+        assert!(EnzymeSet::SixPlus.label().contains("6+"));
+        assert!(EnzymeSet::UniqueSixPlus.label().contains("6+"));
+        assert_eq!(by_name("PmeI").unwrap().specificity(), 8);
     }
 
     #[test]

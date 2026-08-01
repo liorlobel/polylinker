@@ -123,6 +123,17 @@ pub struct Band {
     pub lane: usize,
     pub color: Color32,
     pub name: String,
+    /// Where this feature's label points, in bases.
+    ///
+    /// `pl_draw::mid_base` over the BIOLOGICAL-order parts, taken before
+    /// `segs` is sorted. Not pedantry: `mid_base`'s own doc records that a
+    /// feature at 999..500 on a 1000 bp circle sorts to `[(999,1000),(1,500)]`
+    /// and taking the anchor off the sorted parts pinned it to 359.6 degrees —
+    /// twelve o'clock, the wrong column, with the leader pointing at 2 bases of
+    /// 502.
+    pub anchor: u64,
+    /// How many bases the feature covers, which is what its label is worth.
+    pub span_bp: u64,
 }
 
 /// Pack overlapping intervals into lanes so nothing is drawn on top of anything.
@@ -240,6 +251,22 @@ fn bands(mol: &Molecule) -> Vec<Band> {
                 pl_core::Strand::Reverse => flow.first().copied(),
                 _ => None,
             };
+            // BEFORE the sort. See `Band::anchor`.
+            //
+            // `span_bp` — the FEATURE's own length — and never `span`, which is
+            // the MOLECULE's. `mid_base` walks the parts until it has passed
+            // half of what it was handed, so handing it the molecule length
+            // leaves that condition false for every feature shorter than half
+            // the plasmid and it falls through to `parts.first()`: the START
+            // base. Every feature label on screen pointed at where its feature
+            // begins, while `pl_draw`'s own caller — which sums the part widths
+            // first — put the same label at the middle. Measured: pUC19 AmpR
+            // 57.5 degrees apart, pACYC184 TcR 50.5, pKoV SacB 33.7, and a
+            // feature spanning more than half the plasmid 69.1. One binary, one
+            // input, two maps, which is the divergence this surface exists to
+            // close.
+            let span_bp: u64 = flow.iter().map(|&(a, b)| b.saturating_sub(a) + 1).sum();
+            let anchor = pl_draw::mid_base(&flow, span_bp);
             let mut segs = flow.clone();
             segs.sort_unstable();
             let head = terminal.and_then(|t| segs.iter().position(|&s| s == t));
@@ -254,6 +281,8 @@ fn bands(mol: &Molecule) -> Vec<Band> {
                 lane: lane[i],
                 color: theme::feature_color(f),
                 name: f.name.clone(),
+                anchor,
+                span_bp,
             }
         })
         .collect()
@@ -280,10 +309,31 @@ pub struct MapResponse {
     /// with the whole string a hover away costs nothing, while dropping the
     /// scale annotation cost the map its only statement of size.
     pub caption_full: Option<(Rect, String)>,
+    /// The (enzyme, position) pairs on the tick or label under the pointer.
+    ///
+    /// `map.rs` returns WHAT is under the pointer and `main.rs` composes the
+    /// WORDS: this module has `&[Digest]` but not `DigestState`, so it cannot
+    /// answer the methylation question, and a fourth surface with its own answer
+    /// to that question would widen the split-brain the review documents as
+    /// finding 5.
+    ///
+    /// A folded tick carries one entry per enzyme with its OWN coordinate, never
+    /// `XmaI/SmaI  6,917`. `ring::Site::label` refuses to collapse a range
+    /// because XmaI leaves a 4-nt 5' overhang and SmaI is blunt; a tooltip that
+    /// collapsed it would re-introduce exactly the error that form exists to
+    /// prevent.
+    pub hovered_site: Option<Vec<(String, u64)>>,
+    /// Where the map was painted, so the caller can attach a tooltip to it.
+    pub pane: Rect,
 }
 
 /// Draw the molecule. `selected` highlights one feature; `hot` is the one the
 /// pointer is over elsewhere in the UI.
+// Nine, and each is a different question the map has to be asked: what to draw,
+// what is picked, what is hovered, what is selected, and what a filter lit. The
+// two painters below already carry the same  for the same reason — a
+// struct here would only move the list one line up.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     mol: &Molecule,
@@ -291,6 +341,16 @@ pub fn show(
     digest: &[Digest],
     selected: Option<usize>,
     hot: Option<usize>,
+    sel: Option<pl_core::Segment>,
+    caret: Option<u64>,
+    // Which enzymes the Enzymes tab is showing. Intersected with the map's own
+    // unique-cutter rule, never replacing it — see `unique` in `draw_circular`.
+    set: pl_enzymes::EnzymeSet,
+    // Feature indices the Features filter matched, or `None` when the box is
+    // empty. They go to the FRONT of the label budget, which is the only reach
+    // that filter has into this picture — see `features_tab` for why the map
+    // must never hide a feature because of it.
+    lit: Option<&[usize]>,
 ) -> MapResponse {
     let pal = Palette::of(ui.visuals().dark_mode);
     // Take what is LEFT of the panel, and a painter clipped to it.
@@ -346,20 +406,32 @@ pub fn show(
         clicked: None,
         double_clicked: None,
         caption_full: None,
+        hovered_site: None,
+        pane: rect,
     };
 
     let span = mol.annotation_span().max(1);
     let bands = bands(mol);
     let pointer = response.hover_pos();
 
+    // The selection is in the SCREEN's coordinate space and the map is drawn
+    // from the COMMITTED molecule, which is one typing run behind between
+    // keystrokes by design. A selection made after typing 30 bases can name
+    // coordinates past `annotation_span()`. Do not `settle()` on the paint path
+    // to fix that — it defeats run coalescing, which is the whole reason `Run`
+    // exists — so the arc is DROPPED for the few frames where the two disagree.
+    // The sequence header already prints "· typing" for exactly those frames.
+    let sel = sel.filter(|s| s.start <= span && s.end <= span && s.start >= 1 && s.end >= 1);
+    let caret = caret.filter(|&c| c <= span);
     if mol.topology == Topology::Circular {
         draw_circular(
-            &painter, rect, span, &bands, caption, digest, mol, &pal, selected, hot, pointer,
-            &mut out,
+            &painter, rect, span, &bands, caption, digest, mol, &pal, selected, hot, sel, caret,
+            set, lit, pointer, &mut out,
         );
     } else {
         draw_linear(
-            &painter, rect, span, &bands, digest, mol, &pal, selected, hot, pointer, &mut out,
+            &painter, rect, span, &bands, digest, mol, &pal, selected, hot, sel, caret, pointer,
+            &mut out,
         );
     }
 
@@ -372,6 +444,15 @@ pub fn show(
     if let Some((at, full)) = &out.caption_full {
         ui.interact(*at, ui.id().with("caption"), Sense::hover())
             .on_hover_text(full);
+    }
+    // One line, and the highest-value one in this group: it is the only thing
+    // that says "this ring is not a picture" before the user has clicked
+    // anything. `grep -c CursorIcon map.rs` was 0, and both the capture agent
+    // and one reviewer independently concluded the map was inert while
+    // click-to-select, double-click-to-edit and hover were all wired and
+    // working.
+    if out.hovered.is_some() || out.hovered_site.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     out
 }
@@ -490,6 +571,79 @@ const SEAM_PT: f32 = 0.5;
 /// A mark rather than a floored arc: a 1 bp feature drawn as a 4 pt arc overstates
 /// its extent, and the exporter already chose the mark for exactly that reason.
 const MIN_FEATURE_DEGREES: f32 = 1.2;
+
+/// How much of the label reserve a FEATURE name may claim, in characters.
+///
+/// The site labels set the reserve and the feature names get what is left,
+/// with this as a floor. Three reasons, in the order they matter:
+///
+/// **A shortened cut coordinate is unrecoverable on the page and a shortened
+/// feature name is not.** The whole name is one hover away, one row away in the
+/// Features tab, and in the SVG `<title>` of the export. `pl-draw` draws this
+/// line three times already (`SITE_WEIGHT`, `site_room`, `Site::label`'s
+/// refusal to fold a range); on screen the asymmetry is *stronger*, because the
+/// page has no hover and no list beside it.
+///
+/// **Paying the 30% cap buys almost nothing.** At the cap `room` is about 24
+/// characters. "SP6 transcription initiation site" is 33 and is a real pET/pGEM
+/// feature name — `pl-draw`'s own comment cites it taking X65307's ring from
+/// 218 pt to 135 — so it is still cut; a 137-character MCS name is still cut.
+/// The only names the cap rescues are 25 to 33 characters long, and it pays
+/// 30% of the ring for them. Measured: pKoV with one 30-character name on
+/// `Rep101(Ts)` (mid base 1108 = 49 degrees, the RIGHT column) exports at
+/// r = 135 against 224.6 unnamed. The same name on `pSC101 ori` (mid base 474
+/// = 21 degrees, the TOP ROW) changes nothing at all — so the rule is
+/// angle-dependent, and `Edit > Set origin at selected feature` would resize
+/// the user's map by 40% as a side effect of renumbering.
+///
+/// **The floor is not optional.** Leave feature names out of the maximum
+/// entirely and a molecule with no unique cutters gives `widest_site_label = 0`,
+/// `reserve = outward`, `room = 1`, and every feature label is dropped on a
+/// plasmid with room to spare — the 806 bp `EcoRI 402` defect arriving down the
+/// other axis. Sixteen characters covers "CAP binding site", "F_his colony
+/// PCR", "sacB promoter", "AmpR promoter", "M13 rev".
+///
+/// Measured as `measure(&"M".repeat(16))`, never assumed at 6 pt a character.
+const FEATURE_NAME_CAP_CHARS: usize = 16;
+
+/// The colour swatch drawn before a feature label, in points.
+///
+/// The same channel the Features list uses. On the map the NAME is primary, the
+/// angle secondary and the colour third — which is what answers "identity is
+/// carried by colour alone" properly, rather than by making the colours better.
+const SWATCH: f32 = 9.0;
+const SWATCH_GAP: f32 = 4.0;
+
+/// Roughly how many labels the ring can hold before `place_column` starts
+/// dropping them.
+///
+/// `place_column` drops overflow one label at a time and both `total(&order)`
+/// and the `min_by` inside its loop are O(n), so the drop phase is O(n^2).
+/// Timed with `pl export` at HEAD on a synthetic 200 kb circle: 9 features took
+/// 108 ms and 9,000 took 262 ms, of which the parse is 45 ms — about 155 ms of
+/// layout to drop 8,904 labels. `pl export` pays that once. `draw_circular`
+/// re-lays out EVERY FRAME, with no cache anywhere, so 155 ms per frame is nine
+/// dropped frames at 60 Hz on the exact file the review records as opening in
+/// about a second with "performance is a non-issue".
+///
+/// So the packer's input is bounded here, before `place_ring`, and the
+/// remainder is DISCLOSED in the note. A silent cap is `docs/PLAN.md` item 33
+/// all over again.
+const MAX_FEATURE_LABELS: usize = 80;
+
+/// Where the first line of the disclosure note sits below the ring's centre.
+///
+/// Below "8,117 bp", which is at +11, with enough gap that a 10 pt proportional
+/// line and an 11 pt monospace one do not touch.
+const NOTE_TOP: f32 = 28.0;
+
+/// The step between note lines.
+///
+/// A named constant because two things read it — the painter, and the `centre_h`
+/// that keeps the ruler numbers off the stack. They were one literal written in
+/// one place while there was only ever one line, and a second line is exactly
+/// the change that makes an unnamed literal wrong somewhere else.
+const NOTE_STEP: f32 = 12.0;
 
 /// Everything between the backbone and the first glyph of a side-column label.
 ///
@@ -625,6 +779,10 @@ fn draw_circular(
     pal: &Palette,
     selected: Option<usize>,
     hot: Option<usize>,
+    sel: Option<pl_core::Segment>,
+    caret: Option<u64>,
+    set: pl_enzymes::EnzymeSet,
+    lit: Option<&[usize]>,
     pointer: Option<Pos2>,
     out: &mut MapResponse,
 ) {
@@ -648,12 +806,57 @@ fn draw_circular(
     let outward = outward_of(fwd_lanes);
 
     // What the map labels, and what it is therefore not showing.
+    //
+    // INTERSECTION, not replacement. The Enzymes tab's `EnzymeSet` used to reach
+    // the enzyme list, the inline cut marks and the "N site(s) hidden" line but
+    // not this picture, so narrowing to "Unique 6+" to pick a linearisation site
+    // left the map — and the exported figure — showing something else: one
+    // control with two answers.
+    //
+    // The map's own rule survives as a FLOOR, which is what the comment further
+    // down was defending: `EnzymeSet::All` is the default, and on this file it is
+    // 40 enzymes and about 100 ticks — a map nobody can read, arrived at without
+    // the user asking for it. Worked through all five sets, `All`, `Unique` and
+    // `UniqueDual` intersect to exactly the old picture; only the two 6-base sets
+    // are genuinely narrower, and those the map now follows.
+    //
+    // `digest` stays the WHOLE digest, because `cutters`, `dual` and `multi` are
+    // claims about the molecule and not about the filter. Handing this function
+    // a pre-filtered list would have made the note read "22 of 22 cutters
+    // labelled" and drop every word about what was not drawn.
     let unique: Vec<(String, u64)> = digest
         .iter()
-        .filter(|d| d.is_unique_cutter())
+        .filter(|d| d.is_unique_cutter() && set.admits(d))
         .map(|d| (d.enzyme.name.to_string(), d.positions[0]))
         .collect();
     let cutters = digest.iter().filter(|d| d.count() > 0).count();
+    // A UNIQUE cutter the filter turned away. This term was hardcoded 0 with the
+    // comment "a single cutter is never turned away here — it is a term the
+    // moment that filter widens, and the assertion below is what will say so".
+    // The filter has now narrowed instead, which turns single cutters away for
+    // the first time, and `debug_assert!(told.closes())` would have fired on the
+    // first run under "Unique 6+" had this stayed at zero.
+    let single = digest
+        .iter()
+        .filter(|d| d.count() == 1 && !set.admits(d))
+        .count();
+    // UNFILTERED, both of them, and this is the whole fix.
+    //
+    // The map draws unique cutters and nothing else, so every dual and every
+    // multi cutter is undrawn whatever the enzyme set says — these two numbers
+    // are facts about the MOLECULE, exactly as `figure_options` treats them.
+    //
+    // They were `&& set.admits(d)`, with a third term folding whatever the
+    // filter excluded into `dual` so that `closes()` would still close. It
+    // closed and it lied: on the user's own pKoV — 22 unique, 12 dual, 6 multi —
+    // selecting "Unique" made the caption read "18 dual, 0 multi not drawn"
+    // while the picture did not change by a single pixel, and three of the five
+    // filter settings printed it. For a plasmid biologist choosing a
+    // linearisation site, "0 multi not drawn" reads as "nothing else cuts this
+    // more than twice", which is `docs/PLAN.md` item 33 arriving through the
+    // very sentence written to prevent it. `closes()` still closes because
+    // `single` now carries the only class the filter can actually turn away
+    // from this ring.
     let dual = digest.iter().filter(|d| d.count() == 2).count();
     let multi = digest.iter().filter(|d| d.count() > 2).count();
 
@@ -687,9 +890,40 @@ fn draw_circular(
     // replaced `LABEL_RESERVE = 132.0` to stop.
     //
     // Every entry here is a site label already — `one_each` is built from the unique
-    // cutters and nothing else — so this reserves for enzyme names only, which is
-    // the same rule the exporter applies. Feature names are not in this list and do
-    // not move the radius, in either renderer.
+    // cutters and nothing else.
+    //
+    // THIS USED TO SAY "feature names are not in this list and do not move the
+    // radius, IN EITHER RENDERER", and the second half was false. `pl_draw`'s
+    // `widest_of` charges a feature name whenever `side_of` puts it in a side
+    // column: measured at HEAD with `target/release/pl.exe`, pKoV .dna exports
+    // with a backbone radius of 224.6 and pkov.gb — the same molecule, whose
+    // nine primers arrive as `primer_bind` features with `F_his colony PCR` at
+    // 16 characters — exports at 211.4. One binary, one input, two radii.
+    //
+    // Screen and figure therefore diverge here on purpose, and the reason is
+    // written in `FEATURE_NAME_CAP_CHARS`: the page has no hover and buys the
+    // whole name with radius; the screen has a hover, a list beside it and a
+    // tooltip, and buys a BOUNDED one.
+    //
+    // THAT IS "bounded", NOT "free", and this comment said free. Measured at
+    // 1400x950 with the same central pane in both builds (proved from
+    // `PL_GUI_DEBUG_GEOMETRY`), backbone radius by circle fit, before feature
+    // names against after:
+    //
+    //     pKoV .dna              143.42 -> 136.39 pt   -4.9%
+    //     pkov.gb                117.67 -> 117.79 pt   +0.1%
+    //     pET28a                  68.53 ->  68.53 pt    0.0%  (already floored)
+    //     pACYC184               156.49 -> 155.46 pt   -0.7%
+    //     pUC19                  143.24 -> 131.42 pt   -8.3%  ("CAP binding site")
+    //     9,000 features         248.93 -> 195.70 pt  -21.4%  (no unique cutters)
+    //
+    // The 16-character floor is not optional and the last row is why: with no
+    // unique cutter the site reserve is zero, `room` comes out at 1 pt and every
+    // name is dropped. The cap is what bounds the cost — a 137-character `/label`
+    // costs exactly what a 16-character one costs — and
+    // `feature_names_cost_the_ring_no_more_than_the_cap` measures the loss
+    // against a no-feature-label baseline so this paragraph cannot go stale
+    // again.
     let widest_site_label = |labels: &[(String, u64)]| -> f32 {
         labels
             .iter()
@@ -726,7 +960,101 @@ fn draw_circular(
         .iter()
         .map(|(n, pos)| (format!("{n}  {}", crate::doc::fmt_int(*pos)), *pos))
         .collect();
-    let r = radius_for(widest_site_label(&one_each));
+    // The feature names that will go on the ring, chosen BEFORE anything is
+    // measured or laid out. Widest span first — the same ordering `weight`
+    // encodes, so the budget and the packer agree about what matters — using
+    // `select_nth_unstable_by`, which is O(n), rather than sorting 9,000 every
+    // frame. See `MAX_FEATURE_LABELS`.
+    let mut feature_order: Vec<usize> = (0..bands.len())
+        .filter(|&i| !bands[i].segs.is_empty())
+        .collect();
+    // Filter matches ahead of size. On a 9-feature plasmid the budget never
+    // binds and this changes nothing on the map — which is correct, because
+    // nothing is hidden anywhere.
+    if let Some(lit) = lit {
+        feature_order.sort_by_key(|i| !lit.contains(i));
+    }
+    // Before the cap, so the note can say what the cap held back.
+    let features_total = feature_order.len();
+    if feature_order.len() > MAX_FEATURE_LABELS {
+        // ROUND-ROBIN OVER ANGULAR SECTORS, then span inside each.
+        //
+        // Ranking by span alone has no notion of where a feature is, and when
+        // the budget binds that is the whole problem: on a 200,000 bp molecule
+        // with 9,000 features of identical length the survivors were a
+        // contiguous index block, so the map drew 62 names all taken from
+        // bases 441..1,881 — 0.72% of the plasmid — as one column of 60
+        // near-parallel leaders, and the other 99.3% of the ring carried no
+        // name at all. A map that names one small arc and nothing else is a
+        // worse answer than a map that names nothing, because it reads as a
+        // statement about the molecule.
+        //
+        // `MAX_FEATURE_LABELS` sectors, one pass taking the widest unclaimed
+        // feature from each in turn. Span still decides within a sector and
+        // still decides the leftovers, so on any file where the budget does not
+        // bind — every real plasmid — this changes nothing.
+        let sector_of = |i: usize| -> usize {
+            let a = bands[i].anchor.min(span).saturating_sub(1);
+            ((a as u128 * MAX_FEATURE_LABELS as u128) / span.max(1) as u128) as usize
+        };
+        // Widest first inside each sector, and `sort_unstable_by` rather than
+        // `select_nth`: the selection is O(n log n) once per frame against a
+        // packer that is O(n²) in its drop phase, so this is not the term that
+        // matters, and a partial selection cannot answer "the widest in this
+        // sector".
+        let mut by_sector: Vec<Vec<usize>> = vec![Vec::new(); MAX_FEATURE_LABELS];
+        for &i in &feature_order {
+            by_sector[sector_of(i).min(MAX_FEATURE_LABELS - 1)].push(i);
+        }
+        for s in &mut by_sector {
+            s.sort_unstable_by(|&a, &b| bands[b].span_bp.cmp(&bands[a].span_bp));
+        }
+        // A filter match still outranks everything: `feature_order` was already
+        // sorted matches-first above, and this preserves that by taking matches
+        // in a first sweep before the sectors are consulted at all.
+        let mut chosen: Vec<usize> = Vec::with_capacity(MAX_FEATURE_LABELS);
+        if let Some(lit) = lit {
+            for &i in &feature_order {
+                if chosen.len() == MAX_FEATURE_LABELS {
+                    break;
+                }
+                if lit.contains(&i) {
+                    chosen.push(i);
+                }
+            }
+            for s in &mut by_sector {
+                s.retain(|i| !chosen.contains(i));
+            }
+        }
+        let mut round = 0usize;
+        while chosen.len() < MAX_FEATURE_LABELS {
+            let mut took = false;
+            for s in &by_sector {
+                if let Some(&i) = s.get(round) {
+                    chosen.push(i);
+                    took = true;
+                    if chosen.len() == MAX_FEATURE_LABELS {
+                        break;
+                    }
+                }
+            }
+            if !took {
+                break;
+            }
+            round += 1;
+        }
+        feature_order = chosen;
+    }
+    // The site labels set the reserve; the feature names get what is left, with
+    // a floor. See `FEATURE_NAME_CAP_CHARS` for the whole argument and the
+    // measurements behind it.
+    let feature_cap = measure(&"M".repeat(FEATURE_NAME_CAP_CHARS));
+    let widest_feature = feature_order
+        .iter()
+        .map(|&i| measure(&bands[i].name) + SWATCH + SWATCH_GAP)
+        .fold(0.0_f32, f32::max)
+        .min(feature_cap);
+    let r = radius_for(widest_site_label(&one_each).max(widest_feature));
     let outer = r + band_w + fwd_lanes as f32 * lane_step;
     let tick_r = outer + TICK_GAP;
     let geom = RingGeom {
@@ -781,16 +1109,43 @@ fn draw_circular(
     // once per cut. Correct by construction beats correct by input.
     let mut labels: Vec<(String, u64)> = Vec::new();
     let mut names_in: Vec<Vec<String>> = Vec::new();
+    // Parallel to `names_in`: each named enzyme's OWN cut coordinate, so a
+    // tooltip over a folded tick can print `XmaI 6,917` and `SmaI 6,919` on two
+    // lines rather than collapsing them.
+    let mut site_positions: Vec<Vec<u64>> = Vec::new();
     for s in folded {
         if s.names.len() == 1 || measure(&s.label()) <= room {
             labels.push((s.label(), s.anchor()));
             names_in.push(s.names.clone());
+            site_positions.push(s.positions.clone());
         } else {
             for (n, p) in s.names.iter().zip(&s.positions) {
                 labels.push((format!("{n}  {}", crate::doc::fmt_int(*p)), *p));
                 names_in.push(vec![n.clone()]);
+                site_positions.push(vec![*p]);
             }
         }
+    }
+    // FEATURE NAMES, into the same list, sites first.
+    //
+    // `crates/pl-draw/src/lib.rs:667` has pushed a `Label` per feature since the
+    // exporter was written, so `pl export` writes all nine pKoV feature names
+    // into the SVG while the screen showed none: one binary drawing two
+    // different maps of one file, with the screen the worse of the two. A
+    // plasmid map that does not name its features is a restriction map, and
+    // identity was left to colour alone — pKoV has four duplicate colour pairs.
+    //
+    // `place_ring` is order-independent, but `cutters_shown`, the `Disclosure`
+    // arithmetic and `debug_assert!(told.closes())` all index by position, so
+    // the sites come first and `n_sites` is where they stop. Anything counting
+    // enzymes must stay below it.
+    let n_sites = labels.len();
+    let mut feature_of: Vec<usize> = Vec::new();
+    for &i in &feature_order {
+        labels.push((bands[i].name.clone(), bands[i].anchor));
+        names_in.push(Vec::new());
+        site_positions.push(Vec::new());
+        feature_of.push(i);
     }
 
     // Cut sites, outside everything, in an L-shaped ring.
@@ -809,9 +1164,24 @@ fn draw_circular(
     // Placed here, before anything is painted, because one of the lines written
     // in the middle of the ring reports the outcome — and the middle is what the
     // ruler and the inward lanes have to be kept off.
-    let shortened_to = |text: &str| -> Option<String> {
+    // `is_site` gates the coordinate-dropping branch. A feature name containing
+    // two consecutive spaces would otherwise hit it and be silently truncated at
+    // the wrong place, and rewriting the user's name to avoid that would be
+    // worse than gating.
+    let shortened_to = |text: &str, is_site: bool, room: f32| -> Option<String> {
         if measure(text) <= room {
             return Some(text.to_string());
+        }
+        if !is_site {
+            let mut kept = String::new();
+            for c in text.chars() {
+                let trial = format!("{kept}{c}...");
+                if measure(&trial) > room {
+                    break;
+                }
+                kept.push(c);
+            }
+            return (!kept.is_empty()).then(|| kept + "...");
         }
         // The coordinate goes whole or not at all. `EcoRI  7,5...` reads as a cut
         // position and is not one, and a wrong coordinate on a plasmid map is the
@@ -840,15 +1210,78 @@ fn draw_circular(
     // fix created: on stock pET28a the top row ran off the pane edge mid-glyph at
     // `Hind`, which is a name one letter from reading as a different enzyme, with
     // no ellipsis and nothing in the note about it.
-    let drawn: Vec<Option<String>> = labels.iter().map(|(text, _)| shortened_to(text)).collect();
+    // The swatch's width and its gap come off the room a feature NAME may use,
+    // and go back on to the box's width — decide in one unit, draw in another is
+    // exactly the shape this file's header is about. When the room is too small
+    // to afford both, the swatch goes and the name stays: the name is the thing
+    // being added.
+    let swatch_room = room - SWATCH - SWATCH_GAP;
+    let mut swatched: Vec<bool> = (0..labels.len())
+        .map(|i| i >= n_sites && swatch_room > measure("MMMM"))
+        .collect();
+    let shorten = |i: usize, swatched: &[bool]| -> Option<String> {
+        shortened_to(
+            &labels[i].0,
+            i < n_sites,
+            if swatched[i] { swatch_room } else { room },
+        )
+    };
+    let mut drawn: Vec<Option<String>> = (0..labels.len()).map(|i| shorten(i, &swatched)).collect();
+    // Two features whose names truncate to the SAME string are two identical
+    // labels on one map, and nothing on the picture tells them apart. On stock
+    // pET28a at the pane the long `/label` forces, the map drew "T7 ..." twice —
+    // T7 promoter and T7 terminator, which are at opposite ends of the insert
+    // and are the two a cloner most needs to distinguish — while the exported
+    // SVG kept both names in full. The screen was the worse of the two.
+    //
+    // The swatch is what gives way, not the name. It is nine points and a gap,
+    // about two characters at this face, and two characters is the difference
+    // between "T7 ..." twice and "T7 pr..." beside "T7 te...". Colour is not
+    // being used as the only channel here — losing the swatch loses a
+    // REDUNDANT channel, while keeping it loses the name, which is the one
+    // channel that identifies. Whatever still collides after this is counted
+    // and said in the note rather than left for the reader to discover.
+    let collided = |drawn: &[Option<String>]| -> Vec<usize> {
+        (n_sites..labels.len())
+            .filter(|&i| {
+                drawn[i].is_some()
+                    && (n_sites..labels.len()).any(|j| j != i && drawn[j] == drawn[i])
+            })
+            .collect()
+    };
+    for i in collided(&drawn) {
+        if swatched[i] {
+            swatched[i] = false;
+            drawn[i] = shorten(i, &swatched);
+        }
+    }
+    let alike = collided(&drawn).len();
     let boxes: Vec<RingLabel> = labels
         .iter()
         .zip(&drawn)
-        .map(|((_, pos), text)| RingLabel {
+        .enumerate()
+        .map(|(i, ((_, pos), text))| RingLabel {
             angle: ring_angle(*pos),
-            width: text.as_deref().map_or(0.0, |t| measure(t) as f64),
+            width: text.as_deref().map_or(0.0, |t| measure(t) as f64)
+                + if swatched[i] {
+                    (SWATCH + SWATCH_GAP) as f64
+                } else {
+                    0.0
+                },
             height: line_h as f64,
-            weight: 1.0,
+            // NOT 1.0 for both, and this is load-bearing. `place_column` drops
+            // the LIGHTEST first and `isotonic` resists displacement by weight,
+            // so with equal weights a cut coordinate and a feature name are
+            // interchangeable when a column overflows. `SITE_WEIGHT`'s own doc
+            // records what that cost on pET28a: the 137-character MCS name
+            // "outweighed all nine of the enzyme labels it was describing and
+            // evicted every one of them, so the figure carried a note about a
+            // polylinker and no polylinker."
+            weight: if i < n_sites {
+                pl_draw::SITE_WEIGHT
+            } else {
+                1.0 + (1.0 + bands[feature_of[i - n_sites]].span_bp as f64).log10()
+            },
         })
         .collect();
     let placed = ring::place_ring(&boxes, &geom);
@@ -863,10 +1296,11 @@ fn draw_circular(
     // `pl_enzymes::Visibility` exists so that what a filter hides can never be
     // silent, and this map was hiding 18 enzymes without it.
     //
-    // The Enzymes tab's own `EnzymeSet` is deliberately *not* what the map
-    // draws. Its default is "All cutters", which on this file is 40 enzymes and
-    // about 100 ticks — a map nobody can read, arrived at without the user
-    // asking for it. The map keeps its own rule, and states it.
+    // The Enzymes tab's own `EnzymeSet` is now INTERSECTED with the map's rule
+    // rather than ignored — see `unique` above for the whole argument. The map's
+    // rule survives as a floor, which is what this paragraph was defending: the
+    // set's default is "All cutters", which on this file is 40 enzymes and about
+    // 100 ticks, and the intersection can never be dragged there.
     // Enzymes, never labels and never mentions — see `cutters_shown`, which is
     // where the arithmetic lives so that it can be asserted without a painter.
     // Only the names a reader can still READ, which is not the same as the labels
@@ -876,7 +1310,7 @@ fn draw_circular(
     // as a labelled cutter says the figure names an enzyme it does not. Same rule
     // as `pl_draw`'s paint loop, so screen and figure keep agreeing; the names
     // that fail it fall into `unnamed` through `cutters_shown`'s set difference.
-    let legible: Vec<Vec<String>> = (0..labels.len())
+    let legible: Vec<Vec<String>> = (0..n_sites)
         .filter(|&i| placed.placed[i].is_some())
         .filter_map(|i| drawn[i].as_deref().map(|t| (i, t)))
         .map(|(i, t)| {
@@ -895,14 +1329,15 @@ fn draw_circular(
         dual,
         multi,
         hidden: unnamed,
-        shortened: (0..labels.len())
+        // SITES only. `Disclosure::shortened` is documented as "the one
+        // label-unit number in a sentence whose other four are enzymes", so
+        // feature shortenings must not be folded into it; they get their own
+        // clause below.
+        shortened: (0..n_sites)
             .filter(|&i| placed.placed[i].is_some())
             .filter(|&i| drawn[i].as_deref().is_some_and(|s| s != labels[i].0))
             .count(),
-        // Zero because `unique` is `filter(is_unique_cutter)`: a single cutter is
-        // never turned away here. It is a term the moment that filter widens,
-        // and the assertion below is what will say so.
-        single: 0,
+        single,
     };
     // The same guard both export paths have (`bins/pl/src/main.rs` and
     // `bins/pl-gui/src/main.rs`'s `figure_options`), which this producer did not.
@@ -975,6 +1410,81 @@ fn draw_circular(
                 .into_iter()
                 .find(|f| width_of(f, FontId::proportional(10.0)) <= centre_room)
         });
+    // The features' own clause, appended after the enzyme sentence has chosen
+    // its width tier and only while it still fits. Its own clause and not folded
+    // into `Disclosure`, whose five numbers are all about enzymes: a reader who
+    // sees "7 of 9 names" must be able to tell that from "22 of 40 cutters".
+    //
+    // A dropped name is counted from `placed.placed[i].is_none()`, exactly as a
+    // dropped site is, plus whatever `MAX_FEATURE_LABELS` never offered the
+    // packer at all. A silent cap is `docs/PLAN.md` item 33.
+    let placed_names = (n_sites..labels.len())
+        .filter(|&i| placed.placed[i].is_some() && drawn[i].is_some())
+        .count();
+    let short_names = (n_sites..labels.len())
+        .filter(|&i| placed.placed[i].is_some())
+        .filter(|&i| drawn[i].as_deref().is_some_and(|t| t != labels[i].0))
+        .count();
+    let feature_clause = (features_total > 0).then(|| {
+        let mut c = if placed_names == features_total {
+            format!("{placed_names} names")
+        } else {
+            format!("{placed_names} of {features_total} names")
+        };
+        if short_names > 0 {
+            c.push_str(&format!(", {short_names} short"));
+        }
+        // Names that shortened to the same string even after the swatch was
+        // given up. Said, because a map showing "T7 ..." twice and admitting
+        // nothing is the reader's problem to notice; said as a count rather
+        // than a list, because the list is the Features panel beside it.
+        if alike > 0 {
+            c.push_str(&format!(", {alike} alike"));
+        }
+        c
+    });
+    // TWO LINES when one will not hold both, and neither disclosure gives way.
+    //
+    // This traded one for the other and the trade went the wrong way on exactly
+    // the files that need both: appending the feature clause pushed the enzyme
+    // sentence off its `long()` tier, so a 9,000-feature molecule that printed
+    // "0 of 58 cutters labelled · 1 dual, 57 multi not drawn" before this work
+    // printed "0/58 cutters · 62 of 9000 names" after it. The clause that names
+    // what the map hid was silenced to make room for the clause that names what
+    // the map hid. `pl export` still wrote the long form for the same file, so
+    // the figure said more than the screen.
+    //
+    // The middle of a ring is round: it is short of WIDTH, which is what
+    // `centre_room` bounds, and not short of HEIGHT. A second line costs 12 pt
+    // of a radius that is at least 40, and the ruler is kept off it by
+    // `centre_h` below.
+    let note: Vec<String> = match (note, feature_clause) {
+        (Some(n), Some(c)) => {
+            let fits = |t: &str| width_of(t, FontId::proportional(10.0)) <= centre_room;
+            let both = format!("{n} · {c}");
+            if fits(&both) {
+                vec![both]
+            } else if fits(&n) && fits(&c) {
+                vec![n, c]
+            } else {
+                // Neither fits beside the other and at least one does not fit
+                // alone; fall back through the enzyme tiers with the clause on
+                // its own line, and drop only what genuinely has no width.
+                let terse = [told.long(), told.short(), told.tiny()]
+                    .into_iter()
+                    .find(|f| fits(f));
+                terse.into_iter().chain(fits(&c).then_some(c)).collect()
+            }
+        }
+        // No cutters at all, which is the 806 bp case: the features are then the
+        // only thing the note has to say, and saying nothing is what left the
+        // 4.6 Mb genome's map a bare ruler with no sentence.
+        (None, Some(c)) => (width_of(&c, FontId::proportional(10.0)) <= centre_room)
+            .then_some(c)
+            .into_iter()
+            .collect(),
+        (n, None) => n.into_iter().collect(),
+    };
 
     // The footprint of what was actually drawn, so the ruler and the inward
     // lanes can be kept off it. Twenty mutually overlapping reverse features used
@@ -992,22 +1502,123 @@ fn draw_circular(
         bp_drawn
             .as_deref()
             .map_or(0.0, |t| width_of(t, FontId::monospace(11.0))),
-        note.as_deref()
-            .map_or(0.0, |n| width_of(n, FontId::proportional(10.0))),
+        note.iter()
+            .map(|n| width_of(n, FontId::proportional(10.0)))
+            .fold(0.0_f32, f32::max),
     ]
     .into_iter()
     .fold(0.0_f32, f32::max);
+    // How far BELOW the centre the stack reaches, which `keep_clear_for` does
+    // not model: it takes a width and floors the answer at 22 pt, and 22 was
+    // already less than the single note line's own baseline at +28. That floor
+    // only ever mattered on a middle narrow enough for the width term to lose,
+    // and a second note line moves the bottom to +40 — so the number is computed
+    // rather than left to a constant that a new line silently invalidates.
+    let centre_h = NOTE_TOP + note.len().max(1) as f32 * NOTE_STEP;
     let inside = ring::inside_of(
         r as f64,
         band_w as f64,
         lane_step as f64,
         rev_lanes,
         ruler_h as f64,
-        ring::keep_clear_for(centre_w as f64, widest_number as f64),
+        ring::keep_clear_for(centre_w as f64, widest_number as f64)
+            .max(centre_h as f64 + widest_number.max(0.0) as f64 * 0.5),
     );
 
     // backbone
     p.circle_stroke(center, r, Stroke::new(1.5, pal.line));
+
+    // The sequence selection, on the backbone.
+    //
+    // `map.rs` had zero references to a selection, so the one gesture a cloner
+    // makes most often showed nowhere on the picture they make decisions from.
+    //
+    // It is none of the three things a SELECTED FEATURE is — not the file's
+    // colour, not at a lane radius, not `band_w + 3` wide. It thickens and
+    // recolours the BACKBONE, where nothing else is ever drawn, at exactly `r`
+    // and stroked 3.0: forward lane 0 spans `r+3..r+15` at its emphasised width
+    // and reverse lane 0 spans `r-15..r-3`, so 3 pt is the whole clearance
+    // there is and a wider stroke would touch a lane and read as a feature.
+    //
+    // Painted after the backbone and before the features, so a band is never
+    // obscured by it.
+    let sel_arc = |a: u64, b: u64| {
+        let (a0, mut a1) = (angle_of(a, span), angle_end(b, span));
+        if a1 <= a0 {
+            a1 += std::f32::consts::TAU;
+        }
+        let pts = arc_points(center, r, a0, a1);
+        if pts.len() >= 2 {
+            p.add(Shape::line(pts, Stroke::new(3.0, pal.accent)));
+        }
+    };
+    if let Some(seg) = sel {
+        let whole = seg.start == 1 && seg.end == span;
+        let bases = if seg.start <= seg.end {
+            seg.end - seg.start + 1
+        } else {
+            span - seg.start + 1 + seg.end
+        };
+        // NEVER interpolate from `angle_of(start)` to `angle_of(end)` when
+        // `start > end`: that paints the COMPLEMENT, which is the defect
+        // `Band::segs` records — a 2,499 bp band drawn for a 187 bp feature.
+        // Split with the same function the bands use.
+        if bases as f32 * 360.0 / span as f32 >= MIN_FEATURE_DEGREES {
+            for (a, b) in pl_draw::ranges(seg.start, seg.end, span, true) {
+                sel_arc(a, b);
+            }
+        }
+        // End caps: two radial marks in the tick ring, which is empty apart
+        // from 1 pt site marks and 0.8 pt leaders, so they have 30 pt of length
+        // to be seen in. They are the non-colour channel the house rule
+        // requires: a 20 bp selection on 8,117 bp subtends 0.9 degrees and the
+        // arc alone is a dot.
+        //
+        // The second cap is at `angle_end(end)`, NOT `angle_of(end)`: an arc
+        // that ends at base N closes one base further on, and `angle_of` would
+        // draw the selection one base short at the right-hand end, permanently,
+        // with the readout saying otherwise.
+        //
+        // Suppressed for the whole molecule: `angle_of(1)` and `angle_end(n)`
+        // coincide at the origin, so two caps there would read as a 1 bp
+        // selection — the opposite claim. And the boundary at the origin of a
+        // crossing selection gets no cap either, because nothing happens there.
+        if !whole {
+            for a in [angle_of(seg.start, span), angle_end(seg.end, span)] {
+                p.line_segment(
+                    [polar(center, outer, a), polar(center, tick_r + 4.0, a)],
+                    Stroke::new(2.0, pal.accent),
+                );
+            }
+        }
+    }
+    // The caret. Thinner than a selection cap, which is the distinction; drawn
+    // always, because at caret 0 it lands on the origin, which is where the
+    // caret is, and one rule beats a special case. Without it "go to base N"
+    // with no range is invisible on the map, and on a 4.6 Mb genome it is the
+    // only thing on the map that says where you are.
+    //
+    // It ran `outer -> tick_r`, which is the annulus the cut-site ticks live in,
+    // at a comparable length: measured in the running app a single-base caret
+    // was four accent pixels sitting among twenty-two marks of the same size and
+    // the same place, so "where am I" was drawn as one more cut site. It now
+    // runs past the selection caps to `tick_r + 8`, which makes it the LONGEST
+    // radial mark on the map and the only 1 pt one — thin and long against the
+    // caps' short and thick, and against the ticks' short and thin. Two channels
+    // and neither of them colour.
+    //
+    // It still starts at `outer` and not at the backbone. Running it inward
+    // would cross every forward lane, putting an accent hairline over whatever
+    // colour the file chose for its features — trading a legibility problem for
+    // a contrast one no gate can measure, which is the trade `ring::inside_of`'s
+    // own header rejects for the ruler.
+    if let Some(c) = caret {
+        let a = angle_of(c + 1, span);
+        p.line_segment(
+            [polar(center, outer, a), polar(center, tick_r + 8.0, a)],
+            Stroke::new(1.0, pal.accent),
+        );
+    }
 
     // Ticks every 10% of the molecule, labelled in bp, in a radial band of
     // their own under every inward lane.
@@ -1168,7 +1779,20 @@ fn draw_circular(
         // Hit-testing in polar space: on the band's radius, within any segment.
         if let Some(ptr) = pointer {
             let d = (ptr - center).length();
-            if (d - base).abs() <= band_w * 0.5 + 3.0 {
+            // `band_w * 0.5 + 3.0` is 7.5 pt radial against a `LANE_STEP` of
+            // 13.0, so two adjacent lanes both claimed a pointer inside a 2 pt
+            // annulus — and the loop assigns `out.hovered` without breaking out
+            // of the band loop, so the LAST band in file order silently won.
+            // Clamped to half the lane pitch, which is the largest tolerance
+            // that cannot overlap.
+            //
+            // On WCAG 2.2 SC 2.5.8: a 13 pt lane pitch cannot give a 24 pt
+            // radial target without two lanes overlapping, so this does not
+            // claim conformance by widening. The same feature is reachable at
+            // full size in the Features list, which is the equivalent-control
+            // exception the criterion allows — and that list now highlights
+            // `hot`, so the equivalence is real.
+            if (d - base).abs() <= (BAND_W * 0.5 + 3.0).min(LANE_STEP * 0.5) {
                 let a = (ptr.y - center.y).atan2(ptr.x - center.x);
                 for &(s, e) in &b.segs {
                     // No lo/hi swap: `bands` guarantees `s <= e` on every part,
@@ -1212,17 +1836,23 @@ fn draw_circular(
         }
     }
 
-    // Cut sites: one leader each, ending at its own tick.
+    // Cut sites and feature names, in one ring. A site gets a radial tick on the
+    // backbone and a feature does not: `pl_draw`'s own rule — "a leader alone
+    // points at a place, a tick says a cut happens there" — and it is the second
+    // static channel separating the two kinds of label, after the swatch.
     for (i, (_, pos)) in labels.iter().enumerate() {
         let Some(pl) = placed.placed[i] else { continue };
         let Some(shown) = drawn[i].clone() else {
             continue;
         };
+        let is_site = i < n_sites;
         let a = angle_of(*pos, span);
-        p.line_segment(
-            [polar(center, outer, a), polar(center, tick_r, a)],
-            Stroke::new(1.0, pal.muted),
-        );
+        if is_site {
+            p.line_segment(
+                [polar(center, outer, a), polar(center, tick_r, a)],
+                Stroke::new(1.0, pal.muted),
+            );
+        }
         let at = Pos2::new(pl.at.0 as f32, pl.at.1 as f32);
         let stop = match pl.side {
             Side::Right => Pos2::new(at.x - 4.0, at.y),
@@ -1230,6 +1860,12 @@ fn draw_circular(
             Side::Top => Pos2::new(at.x, at.y + line_h * 0.5),
             Side::Bottom => Pos2::new(at.x, at.y - line_h * 0.5),
         };
+        // Every leader starts at `outer`, a feature's included — NOT at the
+        // feature's own band. Reverse features are drawn inward, and a leader
+        // from an inward band would cross the backbone, the ruler's reserved
+        // band and every forward lane; five of pKoV's nine features are
+        // reverse. The leader points at an ANGLE. Identity is carried by the
+        // swatch and resolved exactly by hover.
         p.add(Shape::line(
             vec![
                 Pos2::new(pl.tip.0 as f32, pl.tip.1 as f32),
@@ -1238,17 +1874,83 @@ fn draw_circular(
             ],
             Stroke::new(0.8, pal.faint),
         ));
-        p.text(
-            at,
-            match pl.side {
-                Side::Right => Align2::LEFT_CENTER,
-                Side::Left => Align2::RIGHT_CENTER,
-                Side::Top | Side::Bottom => Align2::CENTER_CENTER,
-            },
-            shown,
-            label_font(),
-            pal.ink2,
-        );
+        let align = match pl.side {
+            Side::Right => Align2::LEFT_CENTER,
+            Side::Left => Align2::RIGHT_CENTER,
+            Side::Top | Side::Bottom => Align2::CENTER_CENTER,
+        };
+        // Hit-test the LABEL, which is the large comfortable target and where
+        // the pointer naturally goes, and the tick, which is where the eye
+        // goes. A site hit must NOT set `out.hovered`: that field is a feature
+        // index and feeds `self.hot` and the click-to-select path.
+        if let Some(ptr) = pointer {
+            let w = measure(&shown)
+                + if !is_site && swatched[i] {
+                    SWATCH + SWATCH_GAP
+                } else {
+                    0.0
+                };
+            let left = match align {
+                Align2::LEFT_CENTER => at.x,
+                Align2::RIGHT_CENTER => at.x - w,
+                _ => at.x - w * 0.5,
+            };
+            let box_ =
+                Rect::from_min_size(Pos2::new(left, at.y - line_h * 0.5), egui::vec2(w, line_h))
+                    .expand(2.0);
+            let tick = Rect::from_center_size(
+                polar(center, (outer + tick_r) * 0.5, a),
+                egui::vec2(LANE_STEP, LANE_STEP),
+            );
+            if box_.contains(ptr) || (is_site && tick.contains(ptr)) {
+                if is_site {
+                    out.hovered_site = Some(
+                        names_in[i]
+                            .iter()
+                            .cloned()
+                            .zip(site_positions[i].iter().copied())
+                            .collect(),
+                    );
+                } else {
+                    out.hovered = Some(feature_of[i - n_sites]);
+                }
+            }
+        }
+        if !is_site && swatched[i] {
+            // A 9 pt filled square in the feature's own colour, immediately
+            // before the text — the same channel the Features list uses, and
+            // what disambiguates two labels at nearby angles on opposite
+            // strands. pKoV has four duplicate colour pairs, so the NAME is
+            // primary here and the colour is third.
+            let w = measure(&shown) + SWATCH + SWATCH_GAP;
+            let left = match align {
+                Align2::LEFT_CENTER => at.x,
+                Align2::RIGHT_CENTER => at.x - w,
+                _ => at.x - w * 0.5,
+            };
+            let sq = Rect::from_min_size(
+                Pos2::new(left, at.y - SWATCH * 0.5),
+                egui::vec2(SWATCH, SWATCH),
+            );
+            p.rect_filled(sq, 1.0, bands[feature_of[i - n_sites]].color);
+            // The hairline the exporter already gives every band, so a white
+            // feature on a light background is not an invisible square.
+            p.rect_stroke(
+                sq,
+                1.0,
+                Stroke::new(0.6, pal.faint),
+                egui::StrokeKind::Inside,
+            );
+            p.text(
+                Pos2::new(left + SWATCH + SWATCH_GAP, at.y),
+                Align2::LEFT_CENTER,
+                shown,
+                label_font(),
+                pal.ink2,
+            );
+        } else {
+            p.text(at, align, shown, label_font(), pal.ink2);
+        }
     }
 
     // Centre caption. The .dna container carries no molecule name at all, so
@@ -1277,11 +1979,11 @@ fn draw_circular(
             pal.muted,
         );
     }
-    if let Some(note) = note {
+    for (i, line) in note.iter().enumerate() {
         p.text(
-            center + Vec2::new(0.0, 28.0),
+            center + Vec2::new(0.0, NOTE_TOP + i as f32 * NOTE_STEP),
             Align2::CENTER_CENTER,
-            note,
+            line,
             FontId::proportional(10.0),
             pal.muted,
         );
@@ -1394,6 +2096,8 @@ fn draw_linear(
     pal: &Palette,
     selected: Option<usize>,
     hot: Option<usize>,
+    sel: Option<pl_core::Segment>,
+    caret: Option<u64>,
     pointer: Option<Pos2>,
     out: &mut MapResponse,
 ) {
@@ -1408,6 +2112,32 @@ fn draw_linear(
         [Pos2::new(x0, y), Pos2::new(x1, y)],
         Stroke::new(1.5, pal.line),
     );
+
+    // The selection, on the axis. Not forgotten: every FASTA opens linear, and
+    // that is the state a Plasmidsaurus assembly arrives in.
+    //
+    // `Selection::clamped` has already cleared `through_origin` on a linear
+    // molecule, so there is one part and no wrap to split.
+    if let Some(seg) = sel {
+        let (a, b) = (seg.start.min(seg.end), seg.start.max(seg.end));
+        p.line_segment(
+            [Pos2::new(x_of(a), y), Pos2::new(x_of(b) + 1.0, y)],
+            Stroke::new(3.0, pal.accent),
+        );
+        for x in [x_of(a), x_of(b) + 1.0] {
+            p.line_segment(
+                [Pos2::new(x, y - 12.0), Pos2::new(x, y + 12.0)],
+                Stroke::new(2.0, pal.accent),
+            );
+        }
+    }
+    if let Some(c) = caret {
+        let x = x_of(c + 1);
+        p.line_segment(
+            [Pos2::new(x, y - 8.0), Pos2::new(x, y + 8.0)],
+            Stroke::new(1.0, pal.accent),
+        );
+    }
 
     for i in 0..=10 {
         let pos = tick_pos(span, i);
@@ -1528,6 +2258,82 @@ fn draw_linear(
 mod tests {
     use super::*;
 
+    /// PROVEN TO FAIL against the working tree as handed over, on every feature
+    /// of every fixture: `bands` passed the MOLECULE's length where
+    /// `pl_draw::scene` passes the FEATURE's. `mid_base` walks the parts until
+    /// it has passed half of what it was handed, so with the molecule length
+    /// that condition is false for anything shorter than half the plasmid and it
+    /// falls through to `parts.first()` — the START base.
+    ///
+    /// Every feature label on screen therefore pointed at where its feature
+    /// begins while the exported SVG put the same label at the middle: measured,
+    /// pUC19 AmpR 57.5 degrees apart, pACYC184 TcR 50.5, pKoV SacB 33.7, and a
+    /// feature spanning more than half the plasmid 69.1. One binary, one input,
+    /// two maps — which is the divergence this whole direction exists to close,
+    /// arriving through the change that was closing it.
+    ///
+    /// The oracle is `pl_draw`'s own arithmetic, written out here rather than
+    /// called, because the point is that the two renderers agree and a shared
+    /// helper called twice would only prove the helper is deterministic.
+    #[test]
+    fn a_feature_label_is_anchored_where_the_exporter_anchors_it() {
+        // Deliberately not all one size: a fixture whose features are all the
+        // same length and evenly spread cannot see this, which is why the
+        // clipping sweep did not. One feature spans more than half the molecule
+        // (the case where the defect inverts rather than merely shifts) and one
+        // crosses the origin.
+        let mut mol = Molecule {
+            seq: vec![b'A'; 8_117],
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        for (name, segs) in [
+            ("ori", vec![(867u64, 1_455u64)]),
+            ("AmpR", vec![(1_629, 2_486)]),
+            ("most of it", vec![(100, 5_100)]),
+            ("across the origin", vec![(7_900, 200)]),
+            ("two segments", vec![(1_976, 3_310), (3_311, 3_397)]),
+            ("one base", vec![(4_242, 4_242)]),
+        ] {
+            let mut f = pl_core::Feature::new(name, "misc_feature");
+            f.segments = segs
+                .into_iter()
+                .map(|(a, b)| pl_core::Segment::new(a, b))
+                .collect();
+            mol.features.push(f);
+        }
+        let span = mol.annotation_span().max(1);
+        let circular = mol.topology.is_circular();
+        let bands = bands(&mol);
+        let mut moved = 0;
+        for (b, f) in bands.iter().zip(&mol.features) {
+            // What `pl_draw::scene` computes for this feature: the parts, then
+            // the sum of their widths, then the mid base over THAT.
+            let parts: Vec<(u64, u64)> = f
+                .segments
+                .iter()
+                .flat_map(|s| pl_draw::ranges(s.start, s.end, span, circular))
+                .collect();
+            let width: u64 = parts.iter().map(|(a, b)| b - a + 1).sum();
+            let want = pl_draw::mid_base(&parts, width);
+            assert_eq!(
+                b.anchor, want,
+                "{:?}: the screen anchors at {} and the figure at {want}",
+                f.name, b.anchor
+            );
+            if b.anchor != parts.first().map_or(1, |p| p.0) {
+                moved += 1;
+            }
+        }
+        // The middle is not the start for anything with a middle, so a fixture
+        // where they coincide would make every assertion above vacuous.
+        assert!(
+            moved >= 5,
+            "only {moved} of {} anchors differ from their feature's start",
+            bands.len()
+        );
+    }
+
     #[test]
     fn non_overlapping_features_share_one_lane() {
         assert_eq!(lanes(&[(1, 10), (20, 30), (40, 50)]), vec![0, 0, 0]);
@@ -1640,7 +2446,18 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| {
-                            show(ui, &mol, "fixture", &digest, None, None);
+                            show(
+                                ui,
+                                &mol,
+                                "fixture",
+                                &digest,
+                                None,
+                                None,
+                                None,
+                                None,
+                                pl_enzymes::EnzymeSet::All,
+                                None,
+                            );
                         });
                 });
                 fn walk(s: &Shape, acc: &mut Vec<String>) {
@@ -1988,7 +2805,18 @@ mod tests {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| {
-                        show(ui, mol, "fixture", &[], None, None);
+                        show(
+                            ui,
+                            mol,
+                            "fixture",
+                            &[],
+                            None,
+                            None,
+                            None,
+                            None,
+                            pl_enzymes::EnzymeSet::All,
+                            None,
+                        );
                     });
             });
             fn walk(s: &Shape, acc: &mut Vec<Shape>) {
@@ -2534,7 +3362,18 @@ mod tests {
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| {
                         // `hot`, so `w` becomes BAND_W + 3.
-                        show(ui, &mol, "fixture", &[], None, Some(0));
+                        show(
+                            ui,
+                            &mol,
+                            "fixture",
+                            &[],
+                            None,
+                            Some(0),
+                            None,
+                            None,
+                            pl_enzymes::EnzymeSet::All,
+                            None,
+                        );
                     });
             });
             fn walk(s: &Shape, acc: &mut Vec<Shape>) {
@@ -2671,7 +3510,18 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| {
-                            show(ui, &mol, "fixture", &[], None, emphasis);
+                            show(
+                                ui,
+                                &mol,
+                                "fixture",
+                                &[],
+                                None,
+                                emphasis,
+                                None,
+                                None,
+                                pl_enzymes::EnzymeSet::All,
+                                None,
+                            );
                         });
                 });
                 fn walk(s: &Shape, acc: &mut Vec<Shape>) {

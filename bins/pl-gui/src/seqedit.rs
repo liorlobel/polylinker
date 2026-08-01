@@ -1848,9 +1848,16 @@ impl SeqEdit {
     /// autosave that writes `log.current()` while a run is open writes a file
     /// missing the user's last forty keystrokes, and that is the rule whose
     /// absence loses data rather than merely annoying.
-    pub fn commit(&mut self, doc: &mut Document) {
-        let Some(run) = self.run.take() else { return };
-        let Some(op) = run.to_op() else { return };
+    ///
+    /// Returns the operation that landed, or `None` if nothing did — no run, a
+    /// run that is a no-op, or an `apply` the log refused. The caller needs the
+    /// distinction to report the right thing: a refusal already has its own
+    /// message and must not also be announced as a successful edit. Not
+    /// `#[must_use]`, deliberately — some thirty test callers ignore it and
+    /// making each write `let _ =` would say nothing.
+    pub fn commit(&mut self, doc: &mut Document) -> Option<OpKind> {
+        let run = self.run.take()?;
+        let op = run.to_op()?;
         let had = census(doc);
         match doc.apply(op.clone()) {
             Ok(()) => {
@@ -1871,6 +1878,7 @@ impl SeqEdit {
                 if let Some(l) = feature_loss(&had, doc) {
                     self.say(l);
                 }
+                Some(op)
             }
             // Pre-flighted when the run opened, so this is close to
             // unreachable for an insertion — but a long delete can newly
@@ -1886,6 +1894,7 @@ impl SeqEdit {
                     "cannot {}: {e}. Nothing was changed, and what you typed was discarded.",
                     op.describe()
                 ));
+                None
             }
         }
     }

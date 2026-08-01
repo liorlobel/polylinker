@@ -447,7 +447,11 @@ pub fn ranges(start: u64, end: u64, len: u64, circular: bool) -> Vec<(u64, u64)>
 /// half is floored rather than rounded, which keeps a single-part feature's
 /// anchor bit-identical to what this crate has always drawn and leaves the two
 /// renderers at most one base apart at a part boundary.
-fn mid_base(parts: &[(u64, u64)], span: u64) -> u64 {
+/// `pub` so `pl-gui`'s map can anchor a feature label at the same base this
+/// crate does. One implementation, the way `ranges` already is: taking the
+/// anchor off the SORTED parts is what put a 502 bp feature's leader on two
+/// bases of it, and two renderers would rediscover that separately.
+pub fn mid_base(parts: &[(u64, u64)], span: u64) -> u64 {
     let half = span / 2;
     let mut acc = 0u64;
     for &(a, b) in parts {
@@ -499,7 +503,11 @@ const SITE_TICK_STROKE: f64 = 1.25;
 /// It resists *displacement* by the same factor, which is also what you want: a
 /// site label pinned beside its own tick and a feature label pushed a line along
 /// is the right way round.
-const SITE_WEIGHT: f64 = 24.0;
+///
+/// `pub` for the same reason [`mid_base`] is: the on-screen map now packs
+/// feature labels and site labels into one ring, and with equal weights a cut
+/// coordinate and a feature name are interchangeable when a column overflows.
+pub const SITE_WEIGHT: f64 = 24.0;
 
 /// One thing wanting a label on the ring: a feature, or a cut site.
 #[derive(Debug, Clone)]

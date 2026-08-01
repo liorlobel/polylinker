@@ -622,6 +622,238 @@ enum Tab {
     File,
 }
 
+/// What a stale draft is, beyond what its header says.
+#[derive(Default)]
+struct StaleExtra {
+    /// From the LOCUS line of the snapshot body — `genbank::write` emits
+    /// `{n:>11} bp`, so it is one `split_whitespace` away. Rejected: a `bp:`
+    /// header key, which would be a second source of truth for a number the
+    /// body already carries, against this module's ethos that the body is the
+    /// molecule.
+    bp: Option<u64>,
+    /// Seconds since the epoch, from `fs::metadata(original).modified()` — the
+    /// same wall clock `autosave` writes `saved_at` from, so the two are
+    /// comparable at one-second granularity.
+    original_mtime: Option<u64>,
+}
+
+/// The LOCUS line's length, if the body has one.
+fn locus_bp(genbank: &str) -> Option<u64> {
+    let line = genbank.lines().find(|l| l.starts_with("LOCUS"))?;
+    let f: Vec<&str> = line.split_whitespace().collect();
+    let i = f.iter().position(|w| *w == "bp")?;
+    f.get(i.checked_sub(1)?)?.parse().ok()
+}
+
+/// "saved 14 minutes ago · newer than the file on disk", and the three other
+/// forms of the sentence that actually answers the question the banner asks.
+///
+/// Three traps, each of which has its own branch here:
+///
+/// 1. **`saved_at == 0` means "the header would not parse", not 1970.** `decode`
+///    does `v.parse().unwrap_or(0)` and the recovery tests assert "unknown
+///    rather than invented". Rendering it as an age produces "56 years ago" on
+///    the file a user most needs to trust.
+/// 2. **Clocks go backwards** — NTP, dual boot, a VM resuming. Saturating
+///    subtraction, so a draft dated in the future reads "just now".
+/// 3. **No absolute clock time.** The workspace has `civil_from_days` and no
+///    timezone database, so an absolute stamp would be UTC, and a UTC time shown
+///    to a user in Israel without a label is a wrong time three hours out.
+///    Relative ages need no timezone and are what "is it newer" wants anyway.
+///    Do not "improve" this into a date.
+///
+/// `ops` is here for one branch and it is the branch that mattered: a draft
+/// holding no edits is not "newer" than anything, whatever the two mtimes say.
+fn draft_age(
+    saved_at: u64,
+    now: u64,
+    original_mtime: Option<u64>,
+    had_original: bool,
+    ops: usize,
+) -> String {
+    if saved_at == 0 {
+        return "saved at an unknown time".into();
+    }
+    let secs = now.saturating_sub(saved_at);
+    let age = if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{} minute(s) ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{} hour(s) ago", secs / 3600)
+    } else {
+        format!("{} day(s) ago", secs / 86_400)
+    };
+    let against = match (had_original, original_mtime) {
+        (false, _) => " · this draft was never in a file".to_string(),
+        // NO COMPARISON AT ALL when the draft holds no edits, because there is
+        // nothing in it the file does not have. The banner used to advertise a
+        // 0-edit draft of an untouched 8,117 bp `.dna` as "newer than the file
+        // on disk" — true of the two mtimes and false of the two contents — and
+        // acting on it costs the container, the nine typed primers (a draft is
+        // GenBank, so they come back as `primer_bind`) and the methylation
+        // flags. The one line that exists to help the user choose pointed at
+        // the worse copy.
+        (true, _) if ops == 0 => {
+            " · it holds no edits, so the file has everything in it".to_string()
+        }
+        (true, None) => " · the file it came from is no longer there".to_string(),
+        // "written after", not "newer". These are file timestamps and not a
+        // comparison of contents, and "newer" reads as "better" for a draft
+        // that is a GenBank rendering of a richer file.
+        (true, Some(m)) if saved_at > m => {
+            " · written after the file on disk was last saved".to_string()
+        }
+        (true, Some(m)) if saved_at < m => {
+            " · the file on disk is newer — it was saved after this draft".to_string()
+        }
+        (true, Some(_)) => " · the same age as the file on disk".to_string(),
+    };
+    format!("saved {age}{against}")
+}
+
+/// Why the unsaved-changes question is being asked, which is the only sentence
+/// in the dialog that varies with the path that raised it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Losing {
+    Close,
+    Open,
+    Restore,
+}
+
+impl Losing {
+    /// What the discard button will do, in the user's terms.
+    ///
+    /// `one` is whether the sentence before this one described a single thing.
+    /// It exists because the two disagreed: the app took the trouble to write "1
+    /// edit that is not in any file" and then followed it with "Closing
+    /// Polylinker discards **them**", in the one dialog whose whole job is to
+    /// make a user stop and read.
+    fn consequence(self, one: bool) -> &'static str {
+        match (self, one) {
+            (Losing::Close, true) => "Closing Polylinker discards it.",
+            (Losing::Close, false) => "Closing Polylinker discards them.",
+            // "closes it" is about the DOCUMENT, which is singular either way,
+            // so these two do not vary.
+            (Losing::Open, _) => "Opening another file closes it.",
+            (Losing::Restore, _) => "Restoring that draft closes it.",
+        }
+    }
+
+    /// The discard button's label. It carries the consequence, never "OK" or
+    /// "Yes": people click "OK" without reading it and do not click "Discard"
+    /// without reading it, and that is the cheapest and largest single
+    /// mitigation available against a guard becoming a reflex.
+    fn discard_label(self) -> &'static str {
+        match self {
+            Losing::Close => "Close without saving",
+            Losing::Open => "Discard and open",
+            Losing::Restore => "Discard and restore",
+        }
+    }
+}
+
+/// A document parsed and waiting behind the unsaved-changes question.
+struct PendingOpen {
+    doc: Document,
+    status: String,
+    why: Losing,
+    /// The recovery row this came from, removed only when the adoption actually
+    /// happens: removing it and then cancelling makes the draft unreachable.
+    stale_row: Option<usize>,
+}
+
+/// A `.dna` write whose destination is chosen and whose losses are not yet
+/// acknowledged.
+struct PendingDna {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    /// What the writer could not carry, verbatim from
+    /// `snapgene::from_molecule_reporting`.
+    unwritable: Vec<String>,
+    /// Whether a cloning-history tree is about to be replaced with none — the
+    /// SOURCE's, or the DESTINATION's, whichever exists.
+    history: bool,
+    /// Note paths this model has no shape for, as the File tab names them.
+    notes: Vec<String>,
+    /// The chosen path is the file the document was opened from.
+    overwriting_source: bool,
+    /// Blocks the DESTINATION file holds today that these bytes do not, and
+    /// which replacing it therefore destroys.
+    ///
+    /// Its own term, separate from `source_lost`, and the one whose absence was
+    /// the worst defect in this change: the gate was computed from the OPEN
+    /// document's container, so opening a GenBank file and saving it over an
+    /// existing `.dna` took the fast path — no modal, no report — and turned a
+    /// 17-block 75 kB file carrying a cloning history, five history nodes and
+    /// nine typed primers into a 4-block 15 kB one. The only warning anywhere
+    /// was the OS asking whether to replace a file, and the status line named
+    /// the one thing that was NOT lost: the regenerable cache.
+    dest_lost: Vec<pl_fileio::snapgene::DroppedBlocks>,
+    /// Blocks the SOURCE container held that these bytes do not.
+    ///
+    /// Still a term beside `dest_lost`, for Save-As to a NEW path: nothing is
+    /// destroyed there, but the copy being made is a downgrade of the file the
+    /// user has open, and they should learn that before they hand it to a
+    /// student rather than after.
+    source_lost: Vec<pl_fileio::snapgene::DroppedBlocks>,
+    /// Raised by the unsaved-changes guard's save button, so a successful write
+    /// should carry on into the discard rather than stopping.
+    then: Option<Losing>,
+}
+
+impl PendingDna {
+    /// Everything that will be gone and is not a cache, whichever file holds
+    /// it, deduplicated by kind.
+    ///
+    /// The two lists overlap completely when saving a `.dna` over itself and
+    /// not at all when writing a GenBank molecule over someone else's `.dna`,
+    /// so the union is the only honest thing to show and the merge has to be by
+    /// kind rather than by concatenation.
+    fn losing(&self) -> Vec<pl_fileio::snapgene::DroppedBlocks> {
+        let mut out: Vec<pl_fileio::snapgene::DroppedBlocks> = Vec::new();
+        for d in self.dest_lost.iter().chain(self.source_lost.iter()) {
+            if d.derived {
+                continue;
+            }
+            match out.iter_mut().find(|x| x.kind == d.kind) {
+                // The larger of the two, because the destination and the source
+                // can hold different numbers of the same kind and understating
+                // is the direction that matters.
+                Some(x) if x.bytes < d.bytes => *x = *d,
+                Some(_) => {}
+                None => out.push(*d),
+            }
+        }
+        out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.kind.cmp(&b.kind)));
+        out
+    }
+
+    /// The caches, which cost the user nothing and are said separately.
+    fn caches(&self) -> Vec<pl_fileio::snapgene::DroppedBlocks> {
+        let mut out: Vec<pl_fileio::snapgene::DroppedBlocks> = Vec::new();
+        for d in self.dest_lost.iter().chain(self.source_lost.iter()) {
+            if d.derived && !out.iter().any(|x| x.kind == d.kind) {
+                out.push(*d);
+            }
+        }
+        out.sort_by_key(|d| d.kind);
+        out
+    }
+
+    /// Whether anything is at stake beyond a cache.
+    ///
+    /// The gate the modal is keyed on. Blocks 2 and 3 are caches: nobody loses
+    /// work when they are omitted, and announcing them on every save is the
+    /// mechanism by which this dialog stops being read.
+    fn asks(&self) -> bool {
+        !self.unwritable.is_empty()
+            || self.history
+            || !self.notes.is_empty()
+            || !self.losing().is_empty()
+    }
+}
+
 struct App {
     document: Option<Document>,
     /// A file that could not be read. Renders as a full-screen takeover, which
@@ -638,8 +870,27 @@ struct App {
     edit: seqedit::SeqEdit,
     tab: Tab,
     selected: Option<usize>,
-    /// Feature under the pointer, from either the map or the list.
+    /// Feature under the pointer, from either the map or the list, COLLECTED
+    /// this frame.
     hot: Option<usize>,
+    /// What `hot` was at the end of the previous frame, which is what both
+    /// panels paint from.
+    ///
+    /// Two fields, because one cannot work here. egui requires side panels to
+    /// be added before the central panel, so the Features list is painted
+    /// before the map has hit-tested anything: reading and writing a single
+    /// field in panel order meant the map's hover reached the list only after
+    /// `self.hot = None` had wiped it at the top of the next frame, and the
+    /// list's own wash was painted before its rows had been hovered. Measured
+    /// in the running app, every row background was byte-identical hovered and
+    /// unhovered, in both directions — so the whole click-to-select
+    /// interaction read as inert, which is exactly what review finding 6 is
+    /// about.
+    ///
+    /// The one-frame lag is not visible because `App::ui` requests a repaint
+    /// whenever the two disagree; without that request a pointer coming to rest
+    /// could leave the echo undrawn until something else asked for a frame.
+    hot_shown: Option<usize>,
     filter: String,
     status: String,
     /// Which enzymes the panel is showing.
@@ -666,6 +917,51 @@ struct App {
     /// there at startup is by definition an unclean exit.
     recovery: Option<std::path::PathBuf>,
     stale: Vec<(std::path::PathBuf, Result<recover::Snapshot, String>)>,
+    /// What each stale draft is, beyond its header: the length off its LOCUS
+    /// line and the mtime of the file it came from.
+    ///
+    /// Parsed ONCE, here, and not per frame: `MAX_SLOTS` is 64 and one of those
+    /// drafts may be a 4.6 Mb genome. Keyed by the recovery path rather than
+    /// held parallel to `stale`, which is removed from.
+    stale_extra: std::collections::HashMap<std::path::PathBuf, StaleExtra>,
+    /// Whether the banner is showing every draft or only the newest per file.
+    show_old_drafts: bool,
+    /// Which Discard button has been clicked once and is asking to be sure.
+    discard_armed: Option<usize>,
+    /// What the OS title bar currently says, so the command is sent on change
+    /// rather than every frame.
+    title_shown: String,
+    /// A parsed replacement waiting on "what about the document you have
+    /// open?", with the status line it should arrive carrying and which gesture
+    /// asked for it.
+    ///
+    /// Parsed, not a path: asking before the parse means asking about a swap
+    /// that a cancelled dialog or an unreadable file will never perform, and a
+    /// prompt the user answers about nothing is precisely the false positive
+    /// that trains people to click through.
+    ///
+    /// The status travels with the document because `load` builds it up — the
+    /// records-in-file and unrepresentable-locations clauses — *before* the
+    /// adoption, and a cancelled question must not leave the toolbar describing
+    /// a file that is not open.
+    pending_open: Option<PendingOpen>,
+    /// The window has asked to close and the guard held it back.
+    closing: bool,
+    /// Set by the guard when the window may finally go. Read once in `ui`,
+    /// which is the only place with a `Context` to send the command from.
+    close_now: bool,
+    /// The guard is done and the next close request must be let through.
+    ///
+    /// Separate from `closing`, and cleared before `ViewportCommand::Close` is
+    /// sent: egui-winit pushes `ViewportEvent::Close` into the viewport info,
+    /// so the *next* frame sees `close_requested` again, and a still-armed
+    /// latch would cancel its own close and make the window impossible to shut.
+    let_it_go: bool,
+    /// The user answered "close without saving", so `on_exit` must keep the
+    /// recovery draft the dialog just promised them.
+    abandoned_unsaved: bool,
+    /// A `.dna` write waiting on the lossiness question.
+    pending_dna: Option<PendingDna>,
     /// What the recovery file on disk already holds, so an idle window does not
     /// rewrite the same bytes forever.
     autosaved: Option<Autosaved>,
@@ -817,76 +1113,233 @@ impl App {
     /// touches the disk at all.
     const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// Documents left by a session that did not close cleanly.
+    /// Documents left by a session that did not close cleanly, or abandoned on
+    /// purpose.
     ///
-    /// Listed, with age and edit count, and never restored automatically.
-    /// Silently reopening a draft over whatever the user meant to open is the
-    /// failure mode; choosing between two drafts is something they can do and
-    /// this program cannot.
+    /// Listed, with age, length and edit count, and never restored
+    /// automatically. Silently reopening a draft over whatever the user meant to
+    /// open is the failure mode; choosing between two drafts is something they
+    /// can do and this program cannot.
+    ///
+    /// The one decision this exists to support is **"is this draft newer than my
+    /// file?"**, and `saved_at` alone does not answer it — both sides do. The
+    /// banner used to sort by a number it refused to show, so two drafts of one
+    /// plasmid rendered as two textually identical rows.
     fn recovery_banner(&mut self, ui: &mut Ui) {
         if self.stale.is_empty() {
             return;
         }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let mut restore: Option<usize> = None;
         let mut discard: Option<usize> = None;
+        let mut show_all = self.show_old_drafts;
+        // Two groups, and only the ones that exist. Left as one heading, a
+        // deliberately abandoned draft comes back under "did not close cleanly",
+        // which tells a user their app crashed when it did not.
+        let groups: [(&str, bool); 2] = [
+            (
+                "A previous session did not close cleanly",
+                self.stale
+                    .iter()
+                    .any(|(_, s)| s.as_ref().is_ok_and(|s| !s.abandoned) || s.is_err()),
+            ),
+            (
+                "You closed Polylinker with unsaved changes",
+                self.stale
+                    .iter()
+                    .any(|(_, s)| s.as_ref().is_ok_and(|s| s.abandoned)),
+            ),
+        ];
+        // Rows after the first for one (original, title) go behind a single
+        // line. Bounding the DISPLAY, never reaping the files: this module's
+        // whole posture is that guessing which draft matters is how the wrong
+        // one is destroyed.
+        let mut seen: Vec<(Option<std::path::PathBuf>, String)> = Vec::new();
+        let mut hidden = 0usize;
+        let extra = &self.stale_extra;
         egui::Frame::NONE
             .fill(pal(ui).selection())
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
-                ui.label(
-                    RichText::new("A previous session did not close cleanly")
-                        .color(pal(ui).ink)
-                        .strong(),
-                );
-                for (i, (path, snap)) in self.stale.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        match snap {
-                            Ok(s) => {
-                                let from = s
-                                    .original
-                                    .as_ref()
-                                    .map(|p| p.display().to_string())
-                                    .unwrap_or_else(|| "never saved to a file".into());
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} — {} edit(s), from {from}",
-                                        if s.title.is_empty() {
-                                            "untitled"
-                                        } else {
-                                            &s.title
-                                        },
-                                        s.ops
-                                    ))
-                                    .color(pal(ui).ink2),
-                                );
+                for (heading, present) in groups {
+                    if !present {
+                        continue;
+                    }
+                    let abandoned_group = heading.starts_with("You closed");
+                    ui.label(RichText::new(heading).color(pal(ui).ink).strong());
+                    for (i, (path, snap)) in self.stale.iter().enumerate() {
+                        let is_abandoned = snap.as_ref().is_ok_and(|s| s.abandoned);
+                        if is_abandoned != abandoned_group {
+                            continue;
+                        }
+                        if let Ok(s) = snap {
+                            let key = (s.original.clone(), s.title.clone());
+                            if seen.contains(&key) && !show_all {
+                                hidden += 1;
+                                continue;
                             }
-                            // Damaged, and still offered: the body of the file
-                            // is plain GenBank, so the sequence is very likely
-                            // recoverable even when the header is not.
-                            Err(e) => {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} — damaged ({e}), the sequence may still be readable",
-                                        path.display()
-                                    ))
-                                    .color(pal(ui).warn),
-                                );
-                            }
+                            seen.push(key);
                         }
-                        if ui.button("Open").clicked() {
-                            restore = Some(i);
-                        }
-                        if ui.button("Discard").clicked() {
-                            discard = Some(i);
-                        }
-                    });
+                        // BUTTONS FIRST, right-aligned, and the text takes what
+                        // is left. The other way round — a `vertical` of three
+                        // labels followed by two buttons — sizes the text block
+                        // to its widest line, which is the untruncated
+                        // `from <path>`: measured with a 118-character original,
+                        // "Open" was bisected by the panel edge and "Discard" was
+                        // entirely outside it, leaving a draft with no reachable
+                        // action at all. The user's own files sit 160 characters
+                        // deep in OneDrive, so this is the ordinary case.
+                        ui.horizontal(|ui| {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    // Rightmost first in this layout, so Discard
+                                    // is added before Open and the pair still
+                                    // reads "Open  Discard" left to right.
+                                    //
+                                    // Two clicks, not one. This permanently
+                                    // deletes another session's draft, and one
+                                    // unconfirmed click is not enough for that —
+                                    // but it is not this document's work either,
+                                    // so it gets an inline confirmation rather
+                                    // than a modal.
+                                    if self.discard_armed == Some(i) {
+                                        if ui
+                                            .button(
+                                                RichText::new("Discard — this deletes the draft")
+                                                    .color(pal(ui).warn),
+                                            )
+                                            .clicked()
+                                        {
+                                            discard = Some(i);
+                                        }
+                                    } else if ui.button("Discard").clicked() {
+                                        self.discard_armed = Some(i);
+                                    }
+                                    if ui.button("Open").clicked() {
+                                        restore = Some(i);
+                                    }
+                                    // What the buttons left. Read AFTER them, so
+                                    // it is the remainder and not the whole row.
+                                    let room = (ui.available_width() - 8.0).max(0.0);
+                                    match snap {
+                                        Ok(s) => {
+                                            let e = extra.get(path);
+                                            let title = if s.title.is_empty() {
+                                                "untitled"
+                                            } else {
+                                                &s.title
+                                            };
+                                            let bp = e
+                                                .and_then(|e| e.bp)
+                                                .map(|n| format!(", {} bp", fmt_int(n)))
+                                                .unwrap_or_default();
+                                            // Not "1 edit(s)", in the same session
+                                            // in which the modal writes "1 edit".
+                                            let edits = match s.ops {
+                                                1 => "1 edit".to_string(),
+                                                n => format!("{n} edits"),
+                                            };
+                                            ui.vertical(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!("{title} — {edits}{bp}"))
+                                                        .color(pal(ui).ink2),
+                                                );
+                                                ui.label(
+                                                    RichText::new(draft_age(
+                                                        s.saved_at,
+                                                        now,
+                                                        e.and_then(|e| e.original_mtime),
+                                                        s.original.is_some(),
+                                                        s.ops,
+                                                    ))
+                                                    .color(pal(ui).muted)
+                                                    .size(11.0),
+                                                );
+                                                let from = s
+                                                    .original
+                                                    .as_ref()
+                                                    .map(|p| format!("from {}", p.display()))
+                                                    .unwrap_or_else(|| {
+                                                        "never saved to a file".into()
+                                                    });
+                                                // Elided, with the whole path on
+                                                // hover. The path is orientation;
+                                                // the buttons are the only way to
+                                                // act on the draft.
+                                                ui.label(
+                                                    RichText::new(elide_at(ui, &from, room, 11.0))
+                                                        .color(pal(ui).muted)
+                                                        .size(11.0),
+                                                )
+                                                .on_hover_text(&from);
+                                            });
+                                        }
+                                        // Damaged, and still offered: the body of
+                                        // the file is plain GenBank, so the
+                                        // sequence is very likely recoverable even
+                                        // when the header is not.
+                                        Err(e) => {
+                                            let msg = format!(
+                                                "{} — damaged ({e}), the sequence may still be \
+                                                 readable",
+                                                path.display()
+                                            );
+                                            ui.label(
+                                                RichText::new(elide(ui, &msg, room))
+                                                    .color(pal(ui).warn),
+                                            )
+                                            .on_hover_text(&msg);
+                                        }
+                                    }
+                                },
+                            );
+                        });
+                    }
+                }
+                if hidden > 0
+                    && ui
+                        .link(
+                            RichText::new(format!(
+                                "and {hidden} older draft(s) of the same file(s)"
+                            ))
+                            .color(pal(ui).muted)
+                            .size(11.0),
+                        )
+                        .clicked()
+                {
+                    show_all = true;
                 }
                 ui.label(
                     RichText::new("These are copies. Your original files were not modified.")
                         .color(pal(ui).muted)
                         .size(11.0),
                 );
+                // The two sentences the restore path owes the user, and both
+                // cost one muted line. The first is the representation change
+                // that produced the review's refuted R1: a user who is not told
+                // reads nine `primer_bind` features as corruption.
+                ui.label(
+                    RichText::new(
+                        "A draft is a GenBank snapshot. A .dna file's primers come back as \
+                         primer_bind features.",
+                    )
+                    .color(pal(ui).muted)
+                    .size(11.0),
+                );
+                // ...and the second, because `Document::from_bytes` gives an
+                // empty op log, so Undo is greyed out and the "6 edits" the row
+                // just advertised cannot be inspected or reversed.
+                ui.label(
+                    RichText::new("The edits are restored; the undo history is not.")
+                        .color(pal(ui).muted)
+                        .size(11.0),
+                );
             });
+        self.show_old_drafts = show_all;
 
         if let Some(i) = restore {
             let (path, snap) = self.stale[i].clone();
@@ -898,19 +1351,25 @@ impl App {
             };
             let title = snap.as_ref().map(|s| s.title.clone()).unwrap_or_default();
             match Document::from_bytes(body.as_bytes(), title, None) {
+                // Through `take_over`, not `adopt`. Restoring a crash draft over
+                // an edited document is the most bitter possible instance of the
+                // silent-replace defect. The row is removed only when the
+                // adoption actually happens — removing it here and then having
+                // the user cancel would make the draft unreachable.
+                //
+                // The path is deliberately dropped: a recovered document is
+                // unsaved, so Save has to ask where, and cannot overwrite the
+                // original with a draft the user has not looked at.
                 Ok(d) => {
-                    self.adopt(d);
-                    self.status = format!("recovered from {}", path.display());
-                    // The path is deliberately dropped: a recovered document is
-                    // unsaved, so Save has to ask where, and cannot overwrite
-                    // the original with a draft the user has not looked at.
-                    let _ = self.stale.remove(i);
+                    let status = format!("recovered from {}", path.display());
+                    self.take_over(d, status, Losing::Restore, Some(i));
                 }
                 Err(e) => self.error = Some(format!("{}: {e}", path.display())),
             }
         } else if let Some(i) = discard {
             let (path, _) = self.stale.remove(i);
             recover::clear(&path);
+            self.discard_armed = None;
             self.status = format!("discarded {}", path.display());
         }
     }
@@ -920,7 +1379,18 @@ impl App {
     /// Never writes to the file the user opened. An editor that quietly
     /// rewrites the original every few minutes has turned "close without
     /// saving" into a lie.
-    fn autosave(&mut self) {
+    ///
+    /// `forced` is the unsaved-changes guard making its promise true, and it
+    /// skips exactly three things: the throttle, the identity memo and the
+    /// base-cursor guard below. It is a PARAMETER and not a field cleared by
+    /// the caller because clearing `self.autosaved` to force a write also
+    /// destroyed the `same_document` escape hatch the base-cursor guard depends
+    /// on — so the forced write silently did nothing for a document sitting at
+    /// its own base, the `exit: unsaved` flag never reached the file, and the
+    /// next launch greeted a deliberate quit with "A previous session did not
+    /// close cleanly". Two concerns expressed through one field, and the second
+    /// one to arrive won.
+    fn autosave(&mut self, forced: bool) {
         // THE THROTTLE COMES FIRST, and that ordering is the whole of a defect
         // this shipped with.
         //
@@ -943,7 +1413,7 @@ impl App {
         // so a recovery file can never be missing the user's last keystrokes.
         let now = std::time::Instant::now();
         if let Some(last) = self.last_autosave {
-            if now.duration_since(last) < Self::AUTOSAVE_EVERY {
+            if !forced && now.duration_since(last) < Self::AUTOSAVE_EVERY {
                 return;
             }
         }
@@ -962,23 +1432,45 @@ impl App {
         };
         // Already on disk, byte for byte. See [`Autosaved`] for why this is a
         // cursor and not the op count it used to be.
-        if self.autosaved.as_ref() == Some(&here) {
+        //
+        // `forced` overrides it because the memo has no notion of the header:
+        // the guard's final write changes `exit: unsaved`, not the molecule, and
+        // a document last written thirty seconds ago at this same cursor
+        // short-circuited it. Caught in the running application, not by a test —
+        // the draft survived "Close without saving" and the relaunch still said
+        // the session had crashed.
+        if !forced && self.autosaved.as_ref() == Some(&here) {
             return;
         }
-        // An unedited document has nothing to protect: the user's own file
-        // already holds it. Writing one anyway would also let merely *opening*
-        // a second file discard the first one's unsaved draft, which is the
-        // opposite of this function's job.
+        // An unedited document THAT CAME FROM A FILE has nothing to protect:
+        // the user's own file already holds it. Writing one anyway would also
+        // let merely *opening* a second file discard the first one's unsaved
+        // draft, which is the opposite of this function's job.
         //
         // Undoing back to the base of the document already in the recovery file
         // is a different case: that really is the state on screen, so it is
         // written, and the file stops offering a branch the user has stepped
         // off.
+        //
+        // `here.original.is_some()` is the half that was missing, and its
+        // absence lost data. A document restored from the recovery banner (the
+        // restore path drops the path deliberately) and a payload dropped in as
+        // bytes from a browser both sit at the base of an empty log with
+        // nothing on disk behind them — "the user's own file already holds it"
+        // is simply false for them, and this branch refused to write either.
+        // The unsaved-changes guard's forced final autosave walks straight into
+        // it, so the dialog's promise of a kept copy would have been a lie.
+        //
+        // `forced` is the third exemption, and it is the one that was missing.
+        // The guard has just told the user "a crash-recovery copy is kept"; a
+        // document undone back to its own base still has to honour that,
+        // because what the forced write records is not the molecule but the
+        // fact that the exit was deliberate.
         let same_document = self
             .autosaved
             .as_ref()
             .is_some_and(|a| a.same_document(&here));
-        if here.cursor.is_none() && !same_document {
+        if !forced && here.cursor.is_none() && here.original.is_some() && !same_document {
             return;
         }
         let ops = doc.log.path().len();
@@ -993,6 +1485,7 @@ impl App {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             ops,
+            abandoned: self.abandoned_unsaved,
             genbank: pl_fileio::genbank::write(doc.molecule(), &doc.title, today()),
         };
         // The clock is set either way. A failure that left it unset made the
@@ -1026,6 +1519,7 @@ impl App {
             tab: Tab::Features,
             selected: None,
             hot: None,
+            hot_shown: None,
             filter: String::new(),
             status: String::new(),
             enzyme_set: pl_enzymes::EnzymeSet::All,
@@ -1035,6 +1529,16 @@ impl App {
             lib_absent: false,
             recovery: None,
             stale: Vec::new(),
+            stale_extra: std::collections::HashMap::new(),
+            show_old_drafts: false,
+            discard_armed: None,
+            title_shown: String::new(),
+            pending_open: None,
+            closing: false,
+            close_now: false,
+            let_it_go: false,
+            abandoned_unsaved: false,
+            pending_dna: None,
             autosaved: None,
             last_autosave: None,
             dna_owner: None,
@@ -1108,6 +1612,27 @@ impl App {
                     )
                 });
                 app.recovery = path;
+                // Both halves of "is this draft newer than my file?", computed
+                // once. Per frame this would stat up to 64 files and re-parse a
+                // 4.6 Mb LOCUS line on every repaint.
+                for (p, snap) in &app.stale {
+                    let Ok(s) = snap else { continue };
+                    app.stale_extra.insert(
+                        p.clone(),
+                        StaleExtra {
+                            bp: locus_bp(&s.genbank),
+                            original_mtime: s.original.as_ref().and_then(|o| {
+                                std::fs::metadata(o)
+                                    .ok()?
+                                    .modified()
+                                    .ok()?
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .ok()
+                                    .map(|d| d.as_secs())
+                            }),
+                        },
+                    );
+                }
                 if !app.stale.is_empty() {
                     app.status = format!(
                         "{} document(s) from a session that did not close cleanly — see Recover",
@@ -1166,6 +1691,7 @@ impl App {
         self.edit = seqedit::SeqEdit::new();
         self.selected = None;
         self.hot = None;
+        self.hot_shown = None;
         // The design panel belongs to the molecule it was opened on. It used to
         // survive a document swap holding the previous file's title, length,
         // topology, target and report while being redrawn against the new
@@ -1341,27 +1867,76 @@ impl App {
             };
             self.selected = None;
             self.hot = None;
+            self.hot_shown = None;
+        }
+    }
+
+    /// Take on `d`, or park it behind the unsaved-changes question.
+    ///
+    /// The one funnel for a document that REPLACES another. Called with the
+    /// replacement already parsed, so every prompt corresponds to a swap that
+    /// is really going to happen; see [`App::pending_open`].
+    fn take_over(&mut self, d: Document, status: String, why: Losing, stale_row: Option<usize>) {
+        // The guard is a durable path, so the open run closes first — the rule
+        // this codebase already enforces structurally, rather than a second
+        // "or a run is open" disjunct in `unsaved()`.
+        self.settle();
+        if self.document.as_ref().is_some_and(|c| c.unsaved()) {
+            self.pending_open = Some(PendingOpen {
+                doc: d,
+                status,
+                why,
+                stale_row,
+            });
+            return;
+        }
+        if let Some(i) = stale_row {
+            if i < self.stale.len() {
+                let _ = self.stale.remove(i);
+            }
+        }
+        self.adopt(d);
+        self.status = status;
+    }
+
+    /// Let a parked document go without adopting it.
+    ///
+    /// It is holding a live `DigestState::Running`; dropping it without this
+    /// burns a core producing an answer nobody will read, which is the exact
+    /// waste `doc.rs`'s cancellation was written to stop.
+    fn drop_pending_open(&mut self) {
+        if let Some(p) = self.pending_open.take() {
+            p.doc.digest.cancel();
         }
     }
 
     fn load(&mut self, path: PathBuf) {
+        self.load_as(path, Losing::Open)
+    }
+
+    fn load_as(&mut self, path: PathBuf, why: Losing) {
         match Document::open(&path) {
             Ok(d) => {
-                self.status = describe(d.molecule(), d.format);
+                // Built into a LOCAL and handed to `take_over`, not assigned to
+                // `self.status` on the way past: the whole string has to travel
+                // with a parked document, or a cancelled unsaved-changes
+                // question leaves the toolbar describing a file that is not
+                // open.
+                let mut status = describe(d.molecule(), d.format);
                 // Say so when the file held more than we are showing. A viewer
                 // that stays silent is indistinguishable from a file with
                 // fewer records in it — which is how 1,879 features went
                 // missing from a 124-record file without anyone noticing.
                 if d.records_in_file > 1 {
-                    self.status = format!(
+                    status = format!(
                         "{}  —  showing record 1 of {} in this file",
-                        self.status, d.records_in_file
+                        status, d.records_in_file
                     );
                 }
                 if !d.unrepresentable_locations.is_empty() {
-                    self.status = format!(
+                    status = format!(
                         "{}  —  {} location(s) skipped as unrepresentable",
-                        self.status,
+                        status,
                         d.unrepresentable_locations.len()
                     );
                 }
@@ -1375,9 +1950,9 @@ impl App {
                 // but a bad file should be *reported*, not merely survived.
                 let problems = d.molecule().validate();
                 if !problems.is_empty() {
-                    self.status = format!(
+                    status = format!(
                         "{}  —  {} coordinate problem{} in this file: {}",
-                        self.status,
+                        status,
                         problems.len(),
                         if problems.len() == 1 { "" } else { "s" },
                         problems
@@ -1390,11 +1965,23 @@ impl App {
                 }
                 // A caret from the previous document names bases this one does
                 // not have.
-                self.adopt(d);
+                self.take_over(d, status, why, None);
             }
+            // A FAILED load must leave the open document alone.
+            //
+            // This arm used to assign `self.document = None`, so choosing a
+            // `.ab1`, a folder-that-is-a-file or anything unparseable destroyed
+            // an edited document and replaced the screen with the takeover —
+            // the user lost their work AND got nothing, because there was no
+            // new document to have traded it for. `error` is documented above
+            // as "right for 'there is no document' and wrong for anything
+            // else", and this was the branch that violated its own rule.
             Err(e) => {
+                if self.document.is_some() {
+                    self.notice = Some(e);
+                    return;
+                }
                 self.error = Some(e);
-                self.document = None;
                 self.status.clear();
                 // Deliberate, and announced. `design_panel` took the panel out
                 // of `self` before it checked for a document, so a failed load
@@ -1429,6 +2016,9 @@ impl App {
 
     fn export(&mut self, as_fasta: bool) {
         self.settle();
+        // Assigned by the FASTA arm below; GenBank is always faithful enough to
+        // count as a save.
+        let mut faithful = true;
         let Some(d) = &self.document else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let (ext, filter) = if as_fasta {
@@ -1462,6 +2052,11 @@ impl App {
             if m.topology.is_circular() {
                 lost.push("the topology (it will reopen as linear)".into());
             }
+            // The same list decides whether this write CLEARS the dirty state,
+            // below. Reused rather than recomputed: `export` already knows, per
+            // format, exactly what that format cannot carry, and a second
+            // notion of fidelity is how two answers to one question appear.
+            faithful = lost.is_empty();
             if lost.is_empty() {
                 String::new()
             } else {
@@ -1485,8 +2080,166 @@ impl App {
             }
         };
         match std::fs::write(&path, text) {
-            Ok(()) => self.wrote(&path, &note),
+            Ok(()) => {
+                // GenBank's own note ("N features written as forward") is a
+                // strand-EXPRESSIBILITY nuance, not lost work, so GenBank
+                // always clears the dirty state. FASTA clears it only when its
+                // loss list is empty — no features and linear — because a FASTA
+                // that drops nine features has not saved the user's work, and
+                // marking it clean would make the dot and the guard lie in the
+                // one case they exist for.
+                if faithful {
+                    if let Some(d) = &mut self.document {
+                        d.mark_saved();
+                    }
+                }
+                self.wrote(&path, &note);
+                if !faithful {
+                    self.status = format!("{} — the document is still unsaved", self.status);
+                }
+            }
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// Write the molecule as a SnapGene `.dna`.
+    ///
+    /// `snapgene::from_molecule_reporting` has existed, tested, since the writer
+    /// landed, and its only caller outside tests was `pl convert --to dna`: a
+    /// user who opens `.dna` all day and wants to hand a `.dna` back to a
+    /// student had no route out of this program that was not lossy.
+    ///
+    /// Always `from_molecule_reporting`, never `snapgene::write(container, …)`.
+    /// `write` re-emits the blocks the file was READ from, which is byte-exact
+    /// and wrong for anything the user has edited: it would write the original
+    /// sequence back out under the impression of having saved.
+    ///
+    /// Order is picker, then the losses, then the bytes — see
+    /// [`App::dna_lossiness_modal`] for why the question cannot be asked before
+    /// a destination exists.
+    fn save_dna(&mut self, then: Option<Losing>) {
+        self.settle();
+        let Some(d) = &self.document else { return };
+        // `file_stem`, not `locus_name`: `locus_name` replaces every character
+        // outside [A-Za-z0-9_.-] and truncates to the sixteen columns a GenBank
+        // LOCUS name gets, because overrunning columns 13-28 shifts every field
+        // after it. `.dna` has no such field, and `pKoV with His decR.dna` must
+        // not save as `pKoV_with_His_de.dna`.
+        let stem = d
+            .path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| pl_fileio::genbank::locus_name(&d.title));
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{stem}.dna"))
+            .add_filter("SnapGene", &["dna"])
+            .save_file()
+        else {
+            return;
+        };
+        let Some(pending) = self.plan_dna(path, then) else {
+            return;
+        };
+        // `from_molecule_reporting`'s own docstring says the report "is empty
+        // for every molecule that came from a real file", and a GenBank-sourced
+        // molecule written to a path that holds nothing loses nothing — so that
+        // case still saves in one click, which is the common one and must stay
+        // cheap. See `PendingDna::asks` for the rest of the gate.
+        if pending.asks() {
+            self.pending_dna = Some(pending);
+        } else {
+            self.write_dna(pending);
+        }
+    }
+
+    /// Everything `save_dna` decides once a destination exists.
+    ///
+    /// Split from the picker so a test can drive it: `rfd::FileDialog` opens a
+    /// native window, so the whole of this — including the blocker it exists to
+    /// fix, a GenBank molecule about to replace somebody's `.dna` — was
+    /// unreachable from the suite.
+    fn plan_dna(&self, path: PathBuf, then: Option<Losing>) -> Option<PendingDna> {
+        let d = self.document.as_ref()?;
+        let (bytes, unwritable) = pl_fileio::snapgene::from_molecule_reporting(d.molecule());
+        let overwriting_source = d.path.as_deref().is_some_and(|o| same_file(o, &path));
+        // The modal's claims are the File tab's claims, out of the same fields
+        // on the same container. Two surfaces disagreeing about one file is the
+        // defect the review's finding 3 is about.
+        let (mut history, notes) = match &d.container {
+            Some(c) => (c.history_present, c.unrepresentable_notes.clone()),
+            None => (false, Vec::new()),
+        };
+        // What these bytes actually contain, read back from themselves. "What
+        // the writer emits" is a property of the writer, and a hardcoded list
+        // here goes stale the first time it gains a block.
+        let ours = pl_fileio::snapgene::read_blocks(&bytes).unwrap_or_default();
+        let source_lost = d
+            .container
+            .as_ref()
+            .map(|c| pl_fileio::snapgene::dropped_blocks(&c.blocks, &ours))
+            .unwrap_or_default();
+        // THE DESTINATION, which nothing here used to look at.
+        //
+        // The question this modal exists to answer is "what does writing here
+        // cost", and until the destination is read the program cannot answer it
+        // for the case that costs the most: a GenBank molecule written over
+        // somebody's `.dna`. The source's container says nothing about that
+        // file. Read on the save path only — never on a paint — and a
+        // destination that does not exist, cannot be read or is not a `.dna`
+        // costs nothing beyond a failed parse.
+        let dest_lost = match std::fs::read(&path) {
+            Ok(raw) => match pl_fileio::snapgene::parse(&raw) {
+                Ok(dest) => {
+                    // The destination's history counts as much as the source's:
+                    // this write replaces it with none either way.
+                    history |= dest.history_present;
+                    pl_fileio::snapgene::dropped_blocks(&dest.blocks, &ours)
+                }
+                Err(_) => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+        Some(PendingDna {
+            path,
+            bytes,
+            unwritable,
+            history,
+            notes,
+            overwriting_source,
+            dest_lost,
+            source_lost,
+            then,
+        })
+    }
+
+    /// The bytes, and the bookkeeping that must only happen on `Ok`.
+    fn write_dna(&mut self, p: PendingDna) {
+        match std::fs::write(&p.path, &p.bytes) {
+            Ok(()) => {
+                if let Some(d) = &mut self.document {
+                    d.mark_saved();
+                }
+                // The cache omission still gets said, once, through the channel
+                // that already puts the consequence leftmost.
+                self.wrote(
+                    &p.path,
+                    "the cut-site cache is not written; SnapGene rebuilds it",
+                );
+                // Raised by the unsaved-changes guard's Save button. Only a save
+                // that actually cleared `unsaved()` may proceed to the discard —
+                // a guard that closed the window after a failed write would have
+                // done the exact damage it was added to prevent.
+                if let Some(why) = p.then {
+                    if self.document.as_ref().is_none_or(|d| !d.unsaved()) {
+                        // Preserved: the bytes are on disk. No recovery draft is
+                        // kept and the next launch says nothing, because nothing
+                        // happened here that a user needs warning about.
+                        self.resolve_guard(why, true);
+                    }
+                }
+            }
+            Err(e) => self.error = Some(format!("{}: {e}", p.path.display())),
         }
     }
 
@@ -1528,14 +2281,19 @@ impl App {
     /// Unique cutters only, which is the same rule the on-screen map applies,
     /// so the figure is the picture the user was looking at when they exported
     /// it.
-    fn figure_options(d: &doc::Document) -> pl_draw::Options {
+    fn figure_options(d: &doc::Document, set: pl_enzymes::EnzymeSet) -> pl_draw::Options {
         let mut opts = pl_draw::Options {
             title: Some(pl_fileio::caption_of(&d.title).to_string()),
+            // The SAME intersection the on-screen map takes. Without it the
+            // picture you export is not the picture you filtered, which is
+            // exactly the complaint: narrow to "Unique 6+" to find a
+            // linearisation site and the figure comes out with every unique
+            // cutter on it.
             sites: d
                 .digest
                 .results()
                 .iter()
-                .filter(|x| x.is_unique_cutter())
+                .filter(|x| x.is_unique_cutter() && set.admits(x))
                 .map(|x| (x.enzyme.name.to_string(), x.positions[0]))
                 .collect(),
             ..Default::default()
@@ -1554,19 +2312,7 @@ impl App {
         // geometry or the packing, so the first pass's counts describe the
         // second pass's picture. `the_note_does_not_change_what_it_counts` holds
         // that rather than trusting it.
-        let results = d.digest.results();
-        let cutting = |f: &dyn Fn(usize) -> bool| results.iter().filter(|x| f(x.count())).count();
-        let mut told = pl_draw::ring::Disclosure {
-            cutters: cutting(&|n| n > 0),
-            dual: cutting(&|n| n == 2),
-            multi: cutting(&|n| n > 2),
-            // Zero because the filter above is `is_unique_cutter`, which never
-            // turns a single cutter away. `pl`'s `Sites::of` needs the term
-            // because `--sites none` turns away all of them; if this filter ever
-            // widens, `closes()` below fails rather than misdescribing a class.
-            single: 0,
-            ..Default::default()
-        };
+        let mut told = Self::figure_disclosure(d.digest.results(), set);
         let (_, first) = pl_draw::scene(d.molecule(), opts.clone());
         told.labelled = first.sites_named;
         told.hidden = first.sites_dropped;
@@ -1574,6 +2320,42 @@ impl App {
         debug_assert!(told.closes(), "{told:?} does not account for every cutter");
         opts.note = (told.cutters > 0).then_some(told);
         opts
+    }
+
+    /// The exported figure's five buckets, before the ring has been laid out.
+    ///
+    /// Its own function so a test can drive it over an enzyme table this project
+    /// does not ship. The bug it replaces was invisible for exactly that reason:
+    /// `single` was hardcoded 0 under a comment saying the site filter "never
+    /// turns a single cutter away", which stopped being true when the filter was
+    /// intersected with the user's enzyme set, and stayed harmless only because
+    /// every enzyme in the built-in table has a 6-base or longer site. One
+    /// four-cutter in that table and `debug_assert!` fires in a test build — and
+    /// is COMPILED OUT of the release binary, so the exported SVG, PDF and EPS
+    /// would carry a note whose numbers do not add up, to a reader with no
+    /// Enzymes tab to check it against.
+    fn figure_disclosure(
+        results: &[pl_enzymes::Digest],
+        set: pl_enzymes::EnzymeSet,
+    ) -> pl_draw::ring::Disclosure {
+        let cutting = |f: &dyn Fn(usize) -> bool| results.iter().filter(|x| f(x.count())).count();
+        pl_draw::ring::Disclosure {
+            cutters: cutting(&|n| n > 0),
+            // Unfiltered, and deliberately: the figure draws unique cutters
+            // only, so EVERY dual and EVERY multi cutter is undrawn whatever the
+            // enzyme set says, and these two numbers are facts about the
+            // molecule rather than about the filter. `map.rs` says the same
+            // thing the same way, so the screen and the figure cannot diverge.
+            dual: cutting(&|n| n == 2),
+            multi: cutting(&|n| n > 2),
+            // A UNIQUE cutter the filter turned away, which is the only class
+            // the intersection can subtract from this ring.
+            single: results
+                .iter()
+                .filter(|x| x.count() == 1 && !set.admits(x))
+                .count(),
+            ..Default::default()
+        }
     }
 
     /// Write the map as PDF.
@@ -1595,7 +2377,9 @@ impl App {
         else {
             return;
         };
-        let (bytes, drawn, font) = pl_draw::circular_pdf(d.molecule(), Self::figure_options(d));
+        let set = self.enzyme_set;
+        let (bytes, drawn, font) =
+            pl_draw::circular_pdf(d.molecule(), Self::figure_options(d, set));
 
         let mut note = Self::figure_note(&drawn);
         if !font.unencodable.is_empty() {
@@ -1679,12 +2463,454 @@ impl App {
         else {
             return;
         };
-        let (svg, drawn) = pl_draw::circular_svg(d.molecule(), Self::figure_options(d));
+        let set = self.enzyme_set;
+        let (svg, drawn) = pl_draw::circular_svg(d.molecule(), Self::figure_options(d, set));
 
         match std::fs::write(&path, svg) {
             Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
         }
+    }
+
+    /// A question is on screen about the document, and nothing may change the
+    /// document until it is answered.
+    ///
+    /// One predicate for all four, because they all fail the same way and it
+    /// failed silently for three of them: `egui::Modal` dims the screen and
+    /// blocks widget interaction, but `global_shortcuts` and `sequence_keys`
+    /// both read raw events off `ctx.input` before a single widget is built, so
+    /// no amount of modality reaches them. Only the paste consent was listed,
+    /// and the two guards added since — the unsaved-changes question and the
+    /// `.dna` lossiness question — left Ctrl+Z, Ctrl+S, Ctrl+O, Ctrl+V and every
+    /// printable key live underneath a dialog whose own text is a count of the
+    /// thing they change.
+    ///
+    /// `pending_open` and `closing` are both here: the first is a parked
+    /// document waiting to be adopted, the second the latched window close, and
+    /// either one means the modal is up.
+    fn asking(&self) -> bool {
+        self.edit.pending_paste.is_some()
+            || self.pending_dna.is_some()
+            || self.pending_open.is_some()
+            || self.closing
+    }
+
+    /// The window close, held back until the user has been asked.
+    ///
+    /// Established from the pinned versions, not assumed. `App::on_exit`'s own
+    /// doc says to check `close_requested()` and answer with
+    /// `ViewportCommand::CancelClose`. `ViewportInfo::close_requested` is
+    /// `events.contains(&ViewportEvent::Close)` and events are per-frame — the
+    /// flag is true for exactly ONE frame, so it is observed once and latched;
+    /// do not expect to see it again while the modal is up. eframe decides in
+    /// `epi_integration`: on the root viewport, if `close_requested` was set on
+    /// this frame's input and this frame's OUTPUT does not contain
+    /// `CancelClose`, the app exits. So the command must be sent in the same
+    /// frame the flag is read, which is why this runs from `ui` and not from
+    /// `on_exit`.
+    ///
+    /// Its own method so a test can drive it with a plain `egui::Context`:
+    /// `App::ui` takes an `eframe::Frame`, which a test has no way to build.
+    fn close_request(&mut self, ctx: &egui::Context) {
+        if self.close_now {
+            // `let_it_go` is already set, so the `Close` event this raises does
+            // not re-arm the guard on the next frame. That trap is what makes a
+            // window impossible to shut: egui-winit pushes `ViewportEvent::Close`
+            // into the viewport info, so the next frame sees `close_requested`
+            // again, and a still-armed latch cancels its own close forever.
+            self.close_now = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if ctx.input(|i| i.viewport().close_requested()) && !self.let_it_go {
+            self.settle();
+            if self.document.as_ref().is_some_and(|d| d.unsaved()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.closing = true;
+            }
+        }
+    }
+
+    /// The state on screen is not in any file, and something is about to
+    /// replace or close it.
+    ///
+    /// `egui::Modal`, matching the one modal this app already has (the paste
+    /// consent) and for the reason recorded there: a plain `Window` is not
+    /// modal in egui, `Button` registers focus interest without taking focus,
+    /// and the document behind stays fully live — so the caret could be moved
+    /// between the question and the answer.
+    fn unsaved_modal(&mut self, ctx: &egui::Context) {
+        let why = if self.pending_open.is_some() {
+            self.pending_open
+                .as_ref()
+                .map(|p| p.why)
+                .unwrap_or(Losing::Open)
+        } else if self.closing {
+            Losing::Close
+        } else {
+            return;
+        };
+        // One question per gesture. The `.dna` lossiness modal is raised BY this
+        // one's save button; stacking the two would ask twice about a single
+        // click, so this one stands down while that one is up.
+        //
+        // The PASTE consent is the same argument arriving from the other side:
+        // a close requested while it is open latches `closing` invisibly, and
+        // this modal then painted underneath it. Two questions about two
+        // different things, one hidden behind the other, and the hidden one is
+        // the one that decides whether a document survives.
+        if self.pending_dna.is_some() || self.edit.pending_paste.is_some() {
+            return;
+        }
+        // The predicate, re-read every frame, not the latch that raised it.
+        //
+        // Ctrl+Z is live underneath this dialog by design (the shortcut guard
+        // stands the document down only for the paste question), and undoing
+        // back to the opening state genuinely clears `unsaved()`. The guard
+        // stayed up anyway, changed its own sentence to "has not been saved to
+        // a file", and the obvious answer — "Close without saving" — then left a
+        // 0-edit recovery draft of an untouched file and a false "did not close
+        // cleanly" on the next launch. A guard is a function of the state; when
+        // the state stops being at risk the gesture the user asked for should
+        // simply happen.
+        if self.document.as_ref().is_none_or(|d| !d.unsaved()) {
+            self.resolve_guard(why, true);
+            return;
+        }
+        let Some(d) = &self.document else { return };
+        let title = pl_fileio::caption_of(&d.title).to_string();
+        // "0 edits that are not in any file" is absurd and would be the first
+        // thing a user sees after a crash recovery, so the never-written case
+        // gets its own sentence rather than a count of nothing.
+        let stake = match d.unsaved_ops() {
+            Some(0) => format!("{title} has not been saved to a file."),
+            Some(1) => format!("{title} has 1 edit that is not in any file."),
+            Some(n) => format!("{title} has {n} edits that are not in any file."),
+            // Reachable by saving and then seeking onto another branch from the
+            // History tab: the distance genuinely does not exist.
+            None => format!("{title} has changes that are not in any file."),
+        };
+        // Whether the sentence above named one thing, so the sentence below can
+        // agree with it.
+        let one = matches!(d.unsaved_ops(), Some(0) | Some(1));
+        let save_label = if d.format == pl_fileio::Format::SnapGene {
+            "Save as .dna…"
+        } else {
+            // A FASTA-sourced document maps to GenBank on purpose: FASTA cannot
+            // hold what is on screen, and offering it here would defeat the
+            // guard by letting the user answer it with a lossy write.
+            "Save as GenBank…"
+        };
+        let armed = self.recovery.is_some();
+        let mut cancel = false;
+        let mut discard = false;
+        let mut save = false;
+        egui::Modal::new(egui::Id::new("pl-unsaved-changes")).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.heading("Unsaved changes");
+            ui.add_space(6.0);
+            ui.label(RichText::new(stake));
+            ui.label(RichText::new(why.consequence(one)));
+            ui.add_space(6.0);
+            if armed {
+                ui.label(
+                    RichText::new(
+                        "A crash-recovery copy is kept. Polylinker will offer it the next time \
+                         it starts.",
+                    )
+                    .color(pal(ui).muted)
+                    .size(11.0),
+                );
+            } else {
+                // Every slot was taken, the status already says autosave is off,
+                // and this dialog must not now promise a copy that will not
+                // exist.
+                ui.label(
+                    RichText::new(
+                        "Autosave is off for this window, so these edits are not written \
+                         anywhere.",
+                    )
+                    .color(pal(ui).warn)
+                    .size(11.0),
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                // Cancel first, because that is what the paste dialog does and
+                // because Escape maps to it. NO button is the default and
+                // nothing is bound to Enter: an Enter reflex carried out of the
+                // sequence editor must not be able to discard a document.
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                if ui.button(why.discard_label()).clicked() {
+                    discard = true;
+                }
+                if ui.button(save_label).clicked() {
+                    save = true;
+                }
+            });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if cancel {
+            self.drop_pending_open();
+            self.closing = false;
+            self.status = "nothing was closed".into();
+        } else if discard {
+            self.resolve_guard(why, false);
+        } else if save {
+            if save_label == "Save as .dna…" {
+                self.save_dna(Some(why));
+            } else {
+                self.export(false);
+                // The hole every guard of this shape has: a cancelled picker, a
+                // full disk or a permission error all leave the document dirty,
+                // and a guard that proceeded anyway would have done the exact
+                // damage it exists to prevent. Only a write that actually
+                // cleared `unsaved()` goes on to the discard.
+                if self.document.as_ref().is_none_or(|d| !d.unsaved()) {
+                    self.resolve_guard(why, true);
+                }
+            }
+        }
+    }
+
+    /// The question has been answered, and the gesture may proceed.
+    ///
+    /// `preserved` is whether the work reached a file. It decides one thing and
+    /// it matters more than its size suggests: `abandoned_unsaved` used to be
+    /// set on BOTH answers, so a user who clicked "Save as GenBank…", watched
+    /// the file appear on disk and let the app exit was greeted on every
+    /// subsequent launch by "You closed Polylinker with unsaved changes" —
+    /// naming work that was saved. Crying wolf on the one answer the guard
+    /// exists to encourage is worse than not asking at all.
+    fn resolve_guard(&mut self, why: Losing, preserved: bool) {
+        match why {
+            Losing::Close => {
+                // The promise the dialog just made, made true — for the discard
+                // answer only. A save needs no recovery draft: the work is in
+                // the user's own file, `on_exit` clears the recovery slot as it
+                // does after any other clean exit, and leaving a draft behind
+                // would make the next launch contradict what just happened.
+                if self.recovery.is_some() && !preserved {
+                    self.abandoned_unsaved = true;
+                    self.autosave(true);
+                }
+                self.closing = false;
+                // Cleared BEFORE the command is sent. egui-winit pushes a
+                // `Close` viewport event, so the next frame sees
+                // `close_requested` again, and a still-armed latch would cancel
+                // its own close and make the window impossible to shut.
+                self.let_it_go = true;
+                self.close_now = true;
+            }
+            Losing::Open | Losing::Restore => {
+                let Some(p) = self.pending_open.take() else {
+                    return;
+                };
+                if let Some(i) = p.stale_row {
+                    if i < self.stale.len() {
+                        let _ = self.stale.remove(i);
+                    }
+                }
+                self.adopt(p.doc);
+                self.status = p.status;
+            }
+        }
+    }
+
+    /// What a synthesised `.dna` will not carry, said before it is written.
+    ///
+    /// Picker first, then this, then the bytes. The other ordering — modal, then
+    /// picker — was rejected because the most consequential sentence here is
+    /// about a SPECIFIC destination ("this is the file you opened, and its
+    /// cloning history will be replaced by none") and that sentence cannot be
+    /// written before a path exists. The OS's own overwrite prompt fires inside
+    /// the picker; this modal is then the last gate before bytes hit disk, and
+    /// `Cancel` writes nothing whatever the OS already asked.
+    fn dna_lossiness_modal(&mut self, ctx: &egui::Context) {
+        if self.pending_dna.is_none() {
+            return;
+        }
+        let mut go = false;
+        let mut cancel = false;
+        // Cloned out so the closure does not borrow `self`.
+        let p = self.pending_dna.as_ref().map(|p| {
+            (
+                p.path.clone(),
+                p.unwritable.clone(),
+                p.history,
+                p.notes.clone(),
+                p.overwriting_source,
+                // Whether the destination is a `.dna` this write replaces, which
+                // is a different sentence from "this copy is a downgrade".
+                !p.dest_lost.is_empty(),
+                pl_fileio::snapgene::dropped_summary(&p.losing()),
+                pl_fileio::snapgene::dropped_summary(&p.caches()),
+            )
+        });
+        let Some((path, unwritable, history, notes, overwriting, replacing, losing, caches)) = p
+        else {
+            return;
+        };
+        egui::Modal::new(egui::Id::new("pl-dna-lossiness")).show(ctx, |ui| {
+            ui.set_max_width(560.0);
+            ui.heading("Write SnapGene .dna");
+            ui.add_space(6.0);
+            // The WHOLE path, elided to the modal's own width, with the full
+            // string on hover — not `file_name()`. This dialog's argument for
+            // running after the picker is that its sentences are about a
+            // SPECIFIC destination, and `pKoV.dna` does not distinguish
+            // `~/Downloads/pKoV.dna` from `~/Lab/archive/pKoV.dna`. The user's
+            // own files sit 160 characters deep in OneDrive, where the basename
+            // is the least informative part of the path.
+            let full = path.display().to_string();
+            let shown = elide(ui, &full, ui.available_width() - 12.0);
+            if overwriting {
+                ui.label(RichText::new(format!("{shown} — this is the file you opened.")).strong())
+                    .on_hover_text(&full);
+            } else {
+                ui.label(RichText::new(shown)).on_hover_text(&full);
+            }
+            ui.add_space(6.0);
+            if replacing {
+                // The sentence that was missing entirely, and its absence is
+                // what let a GenBank molecule replace a 17-block `.dna` in
+                // silence. It comes FIRST because it is the only one about
+                // destroying something rather than about not copying it.
+                ui.label(
+                    RichText::new("A SnapGene file is already here, and this replaces it.")
+                        .strong()
+                        .color(pal(ui).warn),
+                );
+                ui.add_space(6.0);
+            }
+            if history {
+                // Paraphrasing `from_molecule`'s own docstring, which is where
+                // the refusal is argued. "Would be a fabrication" is the reason
+                // and it survives into the UI on purpose.
+                ui.label(RichText::new(
+                    "The cloning history tree in this file is not carried. Polylinker keeps its \
+                     own history and will not invent a SnapGene provenance node claiming a \
+                     provenance this file does not have — that would be a fabrication. Writing \
+                     here replaces that history with none.",
+                ));
+                ui.add_space(6.0);
+            }
+            if !unwritable.is_empty() {
+                // The CLI's noun phrase, verbatim, same cap at three and same
+                // "; " join: a user who has seen `pl convert --to dna` print
+                // this line should recognise this one.
+                ui.label(RichText::new(format!(
+                    "{} item(s) the .dna writer could not carry: {}",
+                    unwritable.len(),
+                    unwritable
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )));
+                ui.add_space(6.0);
+            }
+            if !notes.is_empty() {
+                // The FILE TAB's wording for this fact, not the CLI's. It is the
+                // same fact in the GUI's voice, and two different sentences for
+                // one fact in one application is worse than either.
+                ui.label(RichText::new(format!(
+                    "{} part(s) of this file's notes block cannot be held by this model and are \
+                     not shown: {}",
+                    notes.len(),
+                    notes.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+                )));
+                ui.add_space(6.0);
+            }
+            // DERIVED from the blocks that are actually there, not a hardcoded
+            // sentence. The old one named blocks 2, 3 and 7 and read as
+            // exhaustive; measured on the user's own pKoV the synthesised file
+            // also drops five block 11 history nodes (21 kB), block 8 (295 B)
+            // and blocks 13/14/28 — 22 kB beyond the tree, none of it a cache
+            // and none of it mentioned anywhere in the program.
+            if let Some(s) = &losing {
+                ui.label(RichText::new(format!(
+                    "Not carried, and not rebuildable: {s}."
+                )));
+                ui.add_space(6.0);
+            }
+            ui.label(
+                RichText::new(match &caches {
+                    Some(s) => format!(
+                        "The sequence, features, primers and notes are written. Not written \
+                         because SnapGene rebuilds them: {s}."
+                    ),
+                    // No source and no destination container, so there is no
+                    // cache to lose — the claim would be about a file that does
+                    // not exist.
+                    None => "The sequence, features, primers and notes are written.".to_string(),
+                })
+                .color(pal(ui).muted)
+                .size(11.0),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                // The verb names the consequence when there is one. "Write
+                // .dna" beside "a SnapGene file is already here" is the button
+                // label doing none of the work the sentence above it just did.
+                if ui
+                    .button(if replacing {
+                        "Replace the file"
+                    } else {
+                        "Write .dna"
+                    })
+                    .clicked()
+                {
+                    go = true;
+                }
+            });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if cancel {
+            self.pending_dna = None;
+            self.status = "nothing was written".into();
+        } else if go {
+            if let Some(p) = self.pending_dna.take() {
+                self.write_dna(p);
+            }
+        }
+    }
+}
+
+/// Are these two paths the same file?
+///
+/// Copied deliberately from `bins/pl/src/main.rs`'s `same_file` rather than
+/// shared: `bins/pl-gui` cannot depend on `bins/pl`, and it cannot move into
+/// `crates/` because `recover.rs` records that `pl-scan` is meant to be the
+/// only crate doing I/O — and this canonicalises, which is I/O. The duplication
+/// is therefore deliberate and findable rather than discovered.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    let real = |p: &std::path::Path| -> Option<PathBuf> {
+        match std::fs::canonicalize(p) {
+            Ok(c) => Some(c),
+            // The destination may not exist yet, in which case the parent
+            // directory is what can be resolved.
+            Err(_) => {
+                let dir = std::fs::canonicalize(p.parent().filter(|d| !d.as_os_str().is_empty())?)
+                    .ok()?;
+                Some(dir.join(p.file_name()?))
+            }
+        }
+    };
+    match (real(a), real(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
     }
 }
 
@@ -1718,8 +2944,15 @@ impl eframe::App for App {
         // run discarded here is gone from the log *and* from the file that
         // exists to survive exactly this.
         self.settle();
+        // The absence of this file is what says the exit was clean. A user who
+        // answered "close without saving" DID exit cleanly — and their work is
+        // in here, and the dialog said so in as many words. Deleting it would
+        // make that a lie, which is the one thing this whole guard exists to
+        // stop.
         if let Some(p) = &self.recovery {
-            recover::clear(p);
+            if !self.abandoned_unsaved {
+                recover::clear(p);
+            }
         }
         // Once, here, and not on drag-release or per frame — that would be a
         // synchronous file write inside a paint loop. If the app crashes the
@@ -1730,6 +2963,27 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // The OS title bar, which carried the literal "Polylinker" in every
+        // capture in the review — no filename, no dirty marker, and several
+        // instances all titled the same. Set from the same predicate the dot and
+        // the guard read, so the three cannot disagree.
+        {
+            let want = match &self.document {
+                Some(d) => format!(
+                    "{}{} — Polylinker",
+                    pl_fileio::caption_of(&d.title),
+                    if d.unsaved() { " •" } else { "" }
+                ),
+                None => "Polylinker".to_string(),
+            };
+            if self.title_shown != want {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(want.clone()));
+                self.title_shown = want;
+            }
+        }
+
+        self.close_request(&ctx);
 
         // Close the open typing run before anything else in this frame can
         // observe the document.
@@ -1772,7 +3026,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(left.max(0.0)));
         }
 
-        self.autosave();
+        self.autosave(false);
 
         if debug_geometry() {
             eprintln!(
@@ -1802,10 +3056,17 @@ impl eframe::App for App {
                 match Document::from_bytes(bytes, f.name.clone(), None) {
                     Ok(d) => {
                         let what = describe(d.molecule(), d.format);
-                        self.adopt(d);
-                        self.status = what;
+                        self.take_over(d, what, Losing::Open, None);
                     }
-                    Err(e) => self.error = Some(e),
+                    // Same rule as `load`'s Err arm: an unreadable payload is
+                    // not a reason to destroy the document that IS open.
+                    Err(e) => {
+                        if self.document.is_some() {
+                            self.notice = Some(e);
+                        } else {
+                            self.error = Some(e);
+                        }
+                    }
                 }
             }
         }
@@ -1844,13 +3105,31 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
 
-        self.hot = None;
+        // Last frame's answer becomes what both panels PAINT from; this
+        // frame's is collected into `self.hot` and becomes next frame's. See
+        // `App::hot_shown` for why one field could not do this.
+        self.hot_shown = std::mem::take(&mut self.hot);
         self.top_bar(ui);
         self.side_panel(ui);
         self.central(ui);
         self.paste_dialog(&ctx);
         self.design_panel(&ctx);
         self.feature_editor(&ctx);
+        // After the panels, so the question paints over the document it is
+        // about. Lossiness first: it is raised BY the unsaved-changes modal's
+        // save button, and `unsaved_modal` stands down while it is up so the
+        // two are never stacked.
+        self.dna_lossiness_modal(&ctx);
+        self.unsaved_modal(&ctx);
+        // The hover echo is one frame behind by construction, so ask for that
+        // frame. Without it a pointer that comes to rest on a band can leave
+        // the Features row unwashed until something unrelated requests a
+        // repaint — which is the same invisible-hover symptom, arrived at from
+        // the other direction. Only when the two disagree, so an idle window
+        // still touches nothing.
+        if self.hot != self.hot_shown {
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -1929,7 +3208,7 @@ impl App {
     ///   is still looking at. Undo stays reachable from the toolbar, which
     ///   closes nothing and surprises nobody.
     fn global_shortcuts(&self, ctx: &egui::Context) -> Shortcuts {
-        let asking = self.edit.pending_paste.is_some();
+        let asking = self.asking();
         let typing = ctx.memory(|m| m.focused()).is_some();
         // The feature editor is guarded for exactly the design panel's reason,
         // and a sharper one: it holds an INDEX. An undo underneath it can shift
@@ -2028,6 +3307,23 @@ impl App {
                 let has = self.document.is_some();
                 ui.add_enabled_ui(has, |ui| {
                     menu_with_caret(ui, "Save", |ui| {
+                        // First, above GenBank: the list runs in descending
+                        // fidelity and for a user who opens `.dna` all day this
+                        // is the top of it. The hover matches FASTA's register
+                        // below — what it keeps, then what it does not — and the
+                        // ellipsis is the documented signal that this reaches a
+                        // file dialog.
+                        if ui
+                            .button("SnapGene .dna…")
+                            .on_hover_text(
+                                "features, primers and notes; not the cut-site cache or the \
+                                 cloning history",
+                            )
+                            .clicked()
+                        {
+                            self.save_dna(None);
+                            ui.close();
+                        }
                         if ui.button("GenBank…").clicked() {
                             self.export(false);
                             ui.close();
@@ -2042,7 +3338,12 @@ impl App {
                         }
                     })
                     .response
-                    .on_hover_text("Ctrl+S — save the molecule");
+                    // Was "Ctrl+S — save the molecule", which was unambiguous
+                    // with two items and is not with three. Ctrl+S deliberately
+                    // still means GenBank: silently repointing a shortcut at a
+                    // different format is its own defect. The ambiguity is
+                    // created by adding `.dna`, so it is answered here.
+                    .on_hover_text("Ctrl+S saves GenBank");
                 });
 
                 ui.separator();
@@ -2102,11 +3403,19 @@ impl App {
                     }
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                         if let Some(d) = &self.document {
-                            // A dot rather than the usual asterisk-in-the-title:
-                            // the point is that edits exist and are undoable,
+                            // A dot rather than the usual asterisk-in-the-title.
+                            //
+                            // It used to mean "edits exist and are undoable,
                             // not that a file is dirty — nothing here writes
-                            // over the original.
-                            let marker = if d.edited() { " •" } else { "" };
+                            // over the original", and that comment stopped
+                            // being true the moment Save appeared in this very
+                            // menu. `edited()` is `!all_ops().is_empty()`, which
+                            // is true forever after the first keystroke: after
+                            // an undo back to the base, and after a save. The
+                            // dot now means what a dot means, and the
+                            // unsaved-changes guard reads the same predicate, so
+                            // the dot and the dialog cannot disagree.
+                            let marker = if d.unsaved() { " •" } else { "" };
                             // What gives under pressure, and in which order:
                             // the FILENAME, because the whole path is one hover
                             // away; never the state string, which is short,
@@ -2364,12 +3673,38 @@ impl App {
         // Only a genuine commit failure is promoted to the strip above the map.
         // The Sequence tab's own transient line — "'Z' is not a nucleotide" —
         // belongs under the sequence and must survive the next click.
+        //
+        // That sentence was in this comment before `commit` returned anything,
+        // and the code could not honour it: `commit` writes into `edit.notice`
+        // on SUCCESS too, via `feature_loss`, and the old `match
+        // self.edit.notice` promoted that to `self.notice` as if it were a
+        // failure. So typing over a feature already reported above the map,
+        // contrary to the stated rule. With the returned `OpKind` the code
+        // finally does what the comment says: a feature destroyed by typing
+        // reports under the sequence only, and the status simultaneously names
+        // the run, so both channels carry something and neither is silent.
         let held = self.edit.notice.take();
-        self.edit.commit(d);
-        match self.edit.notice.clone() {
-            Some(failed) => self.notice = Some(failed),
-            None => self.edit.notice = held,
+        let applied = self.edit.commit(d);
+        match (applied, self.edit.notice.clone()) {
+            // Landed. The status has to be assigned HERE and not only in
+            // `edit()`, or typing, Backspace and Delete — the three edits that
+            // actually change bases — leave the bar naming whatever discrete
+            // action came before. After Ctrl+A then Delete the toolbar read
+            // "add feature UX probe feature — Ctrl+Z to undo" beside a molecule
+            // that no longer had any bases in it.
+            (Some(kind), _) => {
+                self.status = format!("{} — Ctrl+Z to undo", kind.describe());
+            }
+            // Refused. THIS is the "genuine commit failure" the comment above
+            // has always claimed to be selecting for, and could not.
+            (None, Some(failed)) => self.notice = Some(failed),
+            (None, None) => self.edit.notice = held,
         }
+        // Deliberately NOT clearing `self.notice` on success, which is where
+        // this differs from `edit()`. `settle()` runs on paths `edit()` never
+        // does — before an undo, before a save, on focus loss — and wiping a
+        // notice the user has not read yet would be a regression this code does
+        // not currently have.
     }
 
     /// Run an edit and report a refusal instead of dropping it.
@@ -2593,15 +3928,31 @@ impl App {
                 });
                 ui.separator();
 
-                if self.document.is_none() {
-                    ui.add_space(20.0);
-                    ui.label(RichText::new("Nothing open.").color(pal(ui).muted));
-                    return;
-                }
-
+                // The guard is INSIDE the dispatch, and that is the whole
+                // fix. It used to sit above it and returned "Nothing open."
+                // before the match ran, so it swallowed `Tab::Library` with the
+                // other five — while the tab strip is drawn above it, so the
+                // user could select the tab and be told the one thing it does
+                // not need.
                 match self.tab {
-                    Tab::Features => self.features_tab(ui),
+                    // The one tab whose whole state is its own — `self.scan`,
+                    // `self.lib_mode`, `self.lib_query`, `self.lib_absent` —
+                    // and which needs no molecule to answer its question. It is
+                    // also the only cross-file search in the app, and there is
+                    // no in-document search at all, so it is the only sequence
+                    // search that exists. "Where did I put that plasmid?" is
+                    // the first thing asked, and it was asked in exactly the
+                    // state where the feature that answers it refused.
                     Tab::Library => self.library_tab(ui),
+                    // After the named arm and before the rest. The compiler
+                    // will say so if a seventh tab is added, which is the
+                    // property worth having: the five below all open with
+                    // `expect("checked by caller")`.
+                    _ if self.document.is_none() => {
+                        ui.add_space(20.0);
+                        ui.label(RichText::new("Nothing open.").color(pal(ui).muted));
+                    }
+                    Tab::Features => self.features_tab(ui),
                     Tab::Enzymes => self.enzymes_tab(ui),
                     Tab::Sequence => self.sequence_tab(ui),
                     Tab::History => self.history_tab(ui),
@@ -2917,11 +4268,58 @@ impl App {
                 }
             });
         });
+        let needle = self.filter.to_lowercase();
+        // Matched here so the count beside the box and the rows below cannot
+        // disagree, and matched on QUALIFIER VALUES as well as name and kind,
+        // which is how features are actually named in GenBank: a filter that
+        // cannot find `/product="chloramphenicol acetyltransferase"` is a filter
+        // a user stops trusting, and an untrusted filter is one that gets left
+        // with stale text in it.
+        let matches = |f: &pl_core::Feature| -> bool {
+            needle.is_empty()
+                || f.name.to_lowercase().contains(&needle)
+                || f.kind.to_lowercase().contains(&needle)
+                || f.qualifiers.iter().any(|q| {
+                    q.1.as_deref()
+                        .is_some_and(|v| v.to_lowercase().contains(&needle))
+                })
+        };
+        let (n_match, n_all) = {
+            let m = self
+                .document
+                .as_ref()
+                .expect("checked by caller")
+                .molecule();
+            (
+                m.features.iter().filter(|f| matches(f)).count(),
+                m.features.len(),
+            )
+        };
         ui.horizontal(|ui| {
             ui.label("filter");
             ui.text_edit_singleline(&mut self.filter);
+            if !needle.is_empty() {
+                // The count doubles as the clear affordance. A control with no
+                // state indicator must not have destructive reach, and this one
+                // had neither a count nor a way back.
+                if ui
+                    .button(format!("{n_match} of {n_all} match  x"))
+                    .on_hover_text("clear the filter")
+                    .clicked()
+                {
+                    self.filter.clear();
+                }
+            }
         });
-        let needle = self.filter.to_lowercase();
+        // The map does NOT follow this filter, and that is deliberate. A list is
+        // a picture of a QUERY and narrowing it to matches is what a filter box
+        // means everywhere; a map is a picture of a MOLECULE, and dropping parts
+        // of it is a different claim — one a stale "pro" left in this box would
+        // make silently, on the surface that gets exported. What the filter does
+        // reach is the label BUDGET: a matching feature is labelled first when
+        // the budget binds. Hovering a filtered row still lights its band on the
+        // map, which is what actually answers "where is the thing I searched
+        // for", and it does not require the map to lie.
         let selected = self.selected;
 
         let mut hot = None;
@@ -2937,10 +4335,7 @@ impl App {
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, f) in doc.molecule().features.iter().enumerate() {
-                if !needle.is_empty()
-                    && !f.name.to_lowercase().contains(&needle)
-                    && !f.kind.to_lowercase().contains(&needle)
-                {
+                if !matches(f) {
                     continue;
                 }
                 let resp = ui
@@ -2993,6 +4388,21 @@ impl App {
                     .response
                     .interact(Sense::click());
 
+                // `hot` first, so a row that is both reads as SELECTED. The
+                // two are distinguishable by consequence as well as by wash:
+                // `selected` drives the enabled state of Edit…/Duplicate/Remove
+                // above, and `hot` drives nothing.
+                //
+                // Without this the map's hover was invisible everywhere — the
+                // map widened the band, and nothing in the list moved — so the
+                // whole click-to-select interaction read as inert.
+                if self.hot_shown == Some(i) {
+                    ui.painter().rect_filled(
+                        resp.rect.expand2(egui::vec2(4.0, 2.0)),
+                        egui::CornerRadius::same(3),
+                        pal(ui).hover_wash(),
+                    );
+                }
                 if selected == Some(i) {
                     ui.painter().rect_filled(
                         resp.rect.expand2(egui::vec2(4.0, 2.0)),
@@ -3113,7 +4523,23 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Show").color(pal(ui).muted).size(12.0));
             for s in pl_enzymes::EnzymeSet::ALL {
-                if ui.selectable_label(set == s, s.label()).clicked() {
+                let resp = ui.selectable_label(set == s, s.label());
+                // A chip that cannot change anything says so, rather than
+                // leaving the user to click it and infer from a picture that
+                // did not move. Two of the five are permanently in this state
+                // against the built-in table — every enzyme in it has a 6-base
+                // or longer site — and this change renamed both of them without
+                // noticing they are inert. Asked of the DIGEST, so a table that
+                // gains a four-cutter makes them live with no code change here.
+                let resp = if s != pl_enzymes::EnzymeSet::All && !s.discriminates(results) {
+                    resp.on_hover_text(
+                        "Every enzyme that cuts this molecule is in this set, so this changes \
+                         nothing here.",
+                    )
+                } else {
+                    resp
+                };
+                if resp.clicked() {
                     self.enzyme_set = s;
                 }
             }
@@ -4692,7 +6118,14 @@ impl App {
         // stays fully live underneath a dialog asking about it: arrow keys move
         // the caret, Backspace deletes, and a second Ctrl+V silently replaces
         // the question.
-        if self.edit.pending_paste.is_some() {
+        //
+        // The unsaved-changes guard and the `.dna` lossiness question need the
+        // same stand-down and did not have it. `egui::Modal` blocks widget
+        // interaction, not raw `ctx.input` reads, so with the close guard on
+        // screen eight typed bases took the molecule from 8,120 to 8,128 bp and
+        // the dialog's own sentence from "1 edit" to "3 edits" while it was
+        // being read. The state answered about must be the state acted on.
+        if self.asking() {
             return;
         }
         // Same reason, same rule. `egui::Window` is not modal and `Button`
@@ -4943,10 +6376,59 @@ impl App {
     fn central(&mut self, ui: &mut Ui) {
         let error = self.error.clone();
         let selected = self.selected;
-        let hot = self.hot;
+        let hot = self.hot_shown;
         let mut hovered_out = None;
         let mut clicked_out = None;
         let mut opened_out = None;
+        let mut site_out: Option<Vec<(String, u64)>> = None;
+        let mut pane_out: Option<egui::Rect> = None;
+        // Straight from `selection_segment`, never re-derived from
+        // `self.edit.sel` at the call site: that function is already the app's
+        // single source of truth for which of the two arcs on a circle is meant.
+        // It applies `Selection::canonical`, reads `through_origin` rather than
+        // inferring it from the ordering, and does the caret-gap-to-1-based
+        // conversion whose off-by-one is documented there. The app ships a
+        // "take the other arc" button precisely because it refuses to guess.
+        let sel_seg = self.selection_segment();
+        let caret_at = self.document.as_ref().map(|_| self.edit.caret);
+        // ONE control, one answer. `self.enzyme_set` reached the Enzymes list,
+        // the inline cut marks and the "N site(s) hidden" line, and the map was
+        // called unfiltered — so narrowing to "Unique 6+" to pick a
+        // linearisation site left the map, and the exported figure, showing
+        // something else.
+        //
+        // INTERSECTION, not replacement, and the difference is the whole
+        // reconciliation. `map.rs` argues, correctly, that its own rule must
+        // survive as a floor: the Enzymes tab defaults to "All cutters", which
+        // on pKoV is 40 enzymes and about 100 ticks — a map nobody can read,
+        // arrived at without the user asking for it. Worked through all five
+        // sets, `All`, `Unique` and `UniqueDual` intersect with the unique
+        // filter to exactly today's picture; only `SixPlus` and `UniqueSixPlus`
+        // are genuinely narrower, and those the map now follows.
+        // The Features filter's ONE reach into the map: which names get the
+        // label budget first. Never which features are drawn.
+        let lit: Option<Vec<usize>> = (!self.filter.is_empty())
+            .then(|| {
+                let needle = self.filter.to_lowercase();
+                self.document.as_ref().map(|d| {
+                    d.molecule()
+                        .features
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, f)| {
+                            f.name.to_lowercase().contains(&needle)
+                                || f.kind.to_lowercase().contains(&needle)
+                                || f.qualifiers.iter().any(|q| {
+                                    q.1.as_deref()
+                                        .is_some_and(|v| v.to_lowercase().contains(&needle))
+                                })
+                        })
+                        .map(|(i, _)| i)
+                        .collect()
+                })
+            })
+            .flatten();
+        let enzyme_set = self.enzyme_set;
 
         // Asked here, outside the paint closure, and answered from a memo.
         // Which application owns the extension is *read*, never changed —
@@ -5059,17 +6541,92 @@ impl App {
                     ui.clip_rect()
                 );
             }
-            let r = map::show(ui, d.molecule(), caption, d.digest.results(), selected, hot);
+            let r = map::show(
+                ui,
+                d.molecule(),
+                caption,
+                d.digest.results(),
+                selected,
+                hot,
+                sel_seg,
+                caret_at,
+                enzyme_set,
+                lit.as_deref(),
+            );
             hovered_out = r.hovered;
             clicked_out = r.clicked;
             opened_out = r.double_clicked;
+            site_out = r.hovered_site;
+            pane_out = Some(r.pane);
         });
 
         if dismiss {
             self.notice = None;
         }
-        if hovered_out.is_some() {
-            self.hot = hovered_out;
+        // ONE assignment, after both panels have run, rather than two guarded
+        // ones. `or` says the arbitration rule out loud, and it is safe and
+        // order-independent because the side panel and the central panel are
+        // disjoint rects and the pointer is in at most one of them. What it
+        // accumulates is read by BOTH panels on the next frame — see
+        // `App::hot_shown`.
+        self.hot = hovered_out.or(self.hot);
+        // The tooltip. `map.rs` returns WHAT is under the pointer; the words are
+        // composed here, because this is the only place that has `DigestState`
+        // and can therefore answer the methylation question with the SAME
+        // `verdict` the Enzymes tab prints. A fourth surface with its own answer
+        // to that question would widen the split-brain the review calls
+        // finding 5.
+        if let (Some(pane), Some(d)) = (pane_out, self.document.as_ref()) {
+            let tip = if let Some(sites) = &site_out {
+                let mut lines: Vec<String> = Vec::new();
+                for (name, pos) in sites {
+                    // One line per enzyme carrying its OWN coordinate, never
+                    // `XmaI/SmaI  6,917`: XmaI leaves a 4-base 5' overhang and
+                    // SmaI is blunt, and `ring::Site::label` refuses to collapse
+                    // the range for exactly that reason.
+                    let mut l = format!("{name}  {}", fmt_int(*pos));
+                    if let Some(e) = pl_enzymes::by_name(name) {
+                        l.push_str(&format!("\n{}", e.site));
+                    }
+                    if let Some(i) = d
+                        .digest
+                        .results()
+                        .iter()
+                        .position(|x| x.enzyme.name == name.as_str())
+                    {
+                        // The SAME tag the Enzymes tab prints, from the same
+                        // field. `verdict` exists because recomputing it cost 58
+                        // full-molecule scans per frame.
+                        if let Some(b) = d.digest.verdict(i) {
+                            l.push_str(&format!(" · {} {}", b.methylase.name(), b.effect.as_str()));
+                        }
+                    }
+                    lines.push(l);
+                }
+                Some(lines.join("\n"))
+            } else {
+                hovered_out
+                    .and_then(|i| d.molecule().features.get(i))
+                    .map(|f| feature_tip(f, d.molecule()))
+            };
+            if let Some(text) = tip {
+                // AT THE POINTER, not on the pane.
+                //
+                // `Response::on_hover_text` anchors the tooltip to the widget's
+                // rect, and this widget is the whole map. Measured in the
+                // running app, three hovers at three points on three different
+                // bands put the tooltip in the same place every time — the
+                // bottom-right corner of the window, on top of the Features
+                // list, up to 560 px from the cursor and outside the map pane
+                // entirely. A tooltip that does not sit beside the thing it
+                // describes is not an affordance for that thing.
+                //
+                // `pane` still has to be interacted with: without a hovered
+                // response the map has no cursor icon and no hover state at
+                // all.
+                ui.interact(pane, ui.id().with("map-tip"), Sense::hover())
+                    .on_hover_text_at_pointer(text);
+            }
         }
         if let Some(i) = clicked_out {
             self.selected = if self.selected == Some(i) {
@@ -5488,6 +7045,49 @@ fn strand_glyph(s: Strand) -> &'static str {
 /// screen reader, in a monochrome screenshot and to someone who does not read
 /// arrows as direction. Keeping this because a font swap happened to fix the
 /// symptom would be reasoning from the defect instead of from the requirement.
+/// The feature under the pointer, in the words the rest of the app uses.
+///
+/// Coordinates from `f.extent(span, circular)` — the SAME call the Features list
+/// makes — so the two surfaces cannot print different coordinates for one
+/// origin-crossing feature. Strand as the WORD and not the glyph alone:
+/// `featedit.rs` builds every strand option as glyph AND word for a documented
+/// reason, and pKoV has three `Unoriented` features whose "no strand" must be
+/// printed rather than guessed at.
+///
+/// Line 3 is what makes the tab jump on click explicable rather than an
+/// unexplained tab switch.
+fn feature_tip(f: &pl_core::Feature, mol: &pl_core::Molecule) -> String {
+    let span = mol.span();
+    let circular = mol.topology.is_circular();
+    let (fs, fe) = f.extent(span, circular).unwrap_or((f.start(), f.end()));
+    let bp = if fs <= fe {
+        fe - fs + 1
+    } else {
+        span - fs + 1 + fe
+    };
+    let mut second = format!(
+        "{} · {}..{} · {} bp",
+        f.kind,
+        fmt_int(fs),
+        fmt_int(fe),
+        fmt_int(bp)
+    );
+    // The one place `(3n)` costs nothing, which is what review finding 12 is
+    // really asking for: whether a CDS is a multiple of three is how an in-frame
+    // fusion or a His-tag insertion is checked.
+    if f.kind == "CDS" && bp % 3 == 0 {
+        second.push_str(&format!(" ({} aa)", fmt_int(bp / 3)));
+    }
+    if f.segments.len() > 1 {
+        second.push_str(&format!(" · {} segments", f.segments.len()));
+    }
+    second.push_str(&format!(" · {}", strand_word(f.strand)));
+    format!(
+        "{}\n{second}\nclick to select · double-click to edit",
+        f.name
+    )
+}
+
 fn strand_word(s: Strand) -> &'static str {
     match s {
         Strand::Forward => "forward",
@@ -7581,7 +9181,7 @@ mod tests {
         const SEQ: &str = "AAAACCCCGGGGTTTTAAGG";
         let (mut app, path) = app_with_recovery("fork");
         app.document = Some(edited_doc("x.fa", SEQ));
-        app.autosave();
+        app.autosave(false);
         assert_eq!(
             autosaved(&path).0.topology,
             pl_core::Topology::Circular,
@@ -7595,7 +9195,7 @@ mod tests {
         // The thirty-second throttle is a separate question. Clear it so this
         // is about identity and nothing else.
         app.last_autosave = None;
-        app.autosave();
+        app.autosave(false);
 
         let (mol, _) = autosaved(&path);
         assert_eq!(
@@ -7615,12 +9215,12 @@ mod tests {
         // molecule under A's title, and B's work was never written at all.
         let (mut app, path) = app_with_recovery("swap");
         app.document = Some(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
-        app.autosave();
+        app.autosave(false);
         assert_eq!(autosaved(&path).1, "a.fa", "the premise");
 
         app.document = Some(edited_doc("b.fa", "GGGGGGGGTTTTTTTTAACC"));
         app.last_autosave = None;
-        app.autosave();
+        app.autosave(false);
 
         let (mol, title) = autosaved(&path);
         assert_eq!(title, "b.fa", "the recovery file follows the open document");
@@ -7636,12 +9236,12 @@ mod tests {
         // frame. Nothing changed, so nothing may be written.
         let (mut app, path) = app_with_recovery("idle");
         app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
-        app.autosave();
+        app.autosave(false);
         assert!(path.exists());
         std::fs::remove_file(&path).unwrap();
         app.last_autosave = None;
         for _ in 0..100 {
-            app.autosave();
+            app.autosave(false);
         }
         assert!(!path.exists(), "an unchanged document was rewritten");
     }
@@ -7653,12 +9253,18 @@ mod tests {
         // unsaved edits, however stale the identity check thinks they are.
         let (mut app, path) = app_with_recovery("browse");
         app.document = Some(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
-        app.autosave();
+        app.autosave(false);
 
-        app.document = Some(Document::from_bytes(b">b\nTTTTTTTT\n", "b.fa".into(), None).unwrap());
+        // `Some(path)`, and the path is what the case is about: "only looked
+        // at" means read FROM a file. A pathless document is unsaved by
+        // definition and now IS autosaved — see
+        // `a_restored_draft_with_no_path_is_autosaved`.
+        app.document = Some(
+            Document::from_bytes(b">b\nTTTTTTTT\n", "b.fa".into(), Some("b.fa".into())).unwrap(),
+        );
         app.last_autosave = None;
         for _ in 0..10 {
-            app.autosave();
+            app.autosave(false);
         }
         assert_eq!(autosaved(&path).1, "a.fa", "the draft was thrown away");
     }
@@ -7671,12 +9277,12 @@ mod tests {
         const SEQ: &str = "AAAACCCCGGGGTTTTAAGG";
         let (mut app, path) = app_with_recovery("rewound");
         app.document = Some(edited_doc("x.fa", SEQ));
-        app.autosave();
+        app.autosave(false);
         assert_eq!(autosaved(&path).0.topology, pl_core::Topology::Circular);
 
         app.document.as_mut().unwrap().undo().unwrap();
         app.last_autosave = None;
-        app.autosave();
+        app.autosave(false);
         assert_eq!(autosaved(&path).0.topology, pl_core::Topology::Linear);
     }
 
@@ -7686,12 +9292,1021 @@ mod tests {
         // recovery file that exists is this program's only record of an
         // unclean exit.
         let (mut app, path) = app_with_recovery("unedited");
-        app.document =
-            Some(Document::from_bytes(b">x\nAAAACCCCGGGG\n", "x.fa".into(), None).unwrap());
+        app.document = Some(
+            Document::from_bytes(b">x\nAAAACCCCGGGG\n", "x.fa".into(), Some("x.fa".into()))
+                .unwrap(),
+        );
         for _ in 0..10 {
-            app.autosave();
+            app.autosave(false);
         }
         assert!(!path.exists(), "nothing had been edited");
+    }
+
+    // -----------------------------------------------------------------------
+    // The map's disclosure, under a filter that is not `All`
+    // -----------------------------------------------------------------------
+
+    /// A digest shaped like the user's own pKoV: 40 cutters, of which 22 cut
+    /// once, 12 cut twice and 6 cut more than twice.
+    ///
+    /// `pkov_cutters` gives every enzyme ONE position, so under it `dual` and
+    /// `multi` are both zero and no assertion about either can fail. That, plus
+    /// four call sites all passing `EnzymeSet::All`, is why the disclosure
+    /// regression below survived 1,336 tests.
+    fn pkov_mixed_digest() -> Vec<pl_enzymes::Digest> {
+        let mut out: Vec<pl_enzymes::Digest> = pkov_cutters();
+        assert_eq!(out.len(), 22, "the unique half");
+        let taken: Vec<&str> = out.iter().map(|d| d.enzyme.name).collect();
+        let rest: Vec<&'static pl_enzymes::Enzyme> = pl_enzymes::ENZYMES
+            .iter()
+            .filter(|e| !taken.contains(&e.name))
+            .collect();
+        assert!(rest.len() >= 18, "the table has only {} spare", rest.len());
+        for (i, e) in rest.into_iter().take(18).enumerate() {
+            let n = if i < 12 { 2 } else { 3 };
+            out.push(pl_enzymes::Digest {
+                enzyme: e,
+                positions: (0..n).map(|k| 100 + 137 * (i as u64) + 40 * k).collect(),
+            });
+        }
+        out
+    }
+
+    /// PROVEN TO FAIL against the working tree as handed over: two features
+    /// whose names truncate to the same string drew two identical labels with
+    /// nothing on the picture to tell them apart. On stock pET28a at the pane
+    /// its long `/label` forces, the map drew "T7 ..." twice — T7 promoter and
+    /// T7 terminator, which sit at opposite ends of the insert and are the two a
+    /// cloner most needs to distinguish — while the exported SVG kept both names
+    /// in full. The screen was the worse of the two.
+    ///
+    /// The names here differ only at character 45, so the swatch's two
+    /// characters cannot separate them and the second half of the rule is what
+    /// is exercised: whatever still collides is COUNTED, in the note, rather
+    /// than left for the reader to notice.
+    #[test]
+    fn two_features_never_quietly_draw_the_same_label() {
+        let cutters = pkov_cutters();
+        for file in ["pET28a", "pUC19"] {
+            let mut mol = plasmid(file);
+            mol.features[4].name = "T7 transcription regulatory element, initiation".into();
+            mol.features[5].name = "T7 transcription regulatory element, termination".into();
+            // The two panes where the note still has room for the clause. At
+            // 440 pt and below it falls to `tiny()`, which names nothing at all,
+            // and that is a width-tier question and not this one.
+            for (w, h) in [(706.0f32, 756.0f32), (560.0, 900.0)] {
+                let (shapes, _) = paint_map(&mol, file, &cutters, w, h);
+                let drawn: Vec<String> = texts_in(&shapes, 10.0, egui::FontFamily::Monospace)
+                    .into_iter()
+                    .map(|(t, _)| t)
+                    .filter(|t| t.starts_with("T7 trans"))
+                    .collect();
+                assert_eq!(
+                    drawn.len(),
+                    2,
+                    "{file} {w}x{h}: the premise — both names must reach the ring: {drawn:?}"
+                );
+                let note = texts_in(&shapes, 10.0, egui::FontFamily::Proportional)
+                    .into_iter()
+                    .map(|(t, _)| t)
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                if drawn[0] == drawn[1] {
+                    assert!(
+                        note.contains("2 alike"),
+                        "{file} {w}x{h}: {drawn:?} are one string and the map says nothing: \
+                         {note:?}"
+                    );
+                } else {
+                    assert!(
+                        !note.contains("alike"),
+                        "{file} {w}x{h}: {drawn:?} differ and the note claims otherwise: {note:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// PROVEN TO FAIL against the working tree as handed over, on `Unique`,
+    /// `Unique & dual` and `Unique 6+ base`: `map::show` folded every
+    /// filter-excluded enzyme into `dual` so that `Disclosure::closes()` would
+    /// still close, and it closed while lying. On the user's own pKoV — 22
+    /// unique, 12 dual, 6 multi — the note read "18 dual, 0 multi not drawn"
+    /// while the picture did not change by a single pixel.
+    ///
+    /// "0 multi not drawn" reads to a plasmid biologist as "nothing else cuts
+    /// this more than twice", which is the class of hidden-cut misinformation
+    /// `docs/PLAN.md` item 33 is written about, arriving through the very
+    /// sentence that exists to prevent it.
+    #[test]
+    fn the_map_note_reports_the_molecules_own_cutter_classes_under_every_filter() {
+        let mol = pkov();
+        let digest = pkov_mixed_digest();
+        assert_eq!(digest.iter().filter(|d| d.count() > 0).count(), 40);
+        assert_eq!(digest.iter().filter(|d| d.count() == 2).count(), 12);
+        assert_eq!(digest.iter().filter(|d| d.count() > 2).count(), 6);
+
+        for set in pl_enzymes::EnzymeSet::ALL {
+            let (shapes, _) = paint_map_with(&mol, "pKoV", &digest, 1100.0, 900.0, None, set);
+            let note: String = texts_in(&shapes, 10.0, egui::FontFamily::Proportional)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>()
+                .join(" / ");
+            assert!(
+                note.contains("12 dual, 6 multi not drawn"),
+                "{:?}: the note must state the molecule's own classes, not the filter's \
+                 leftovers: {note:?}",
+                set.label()
+            );
+        }
+    }
+
+    /// PROVEN TO FAIL against the working tree as handed over: appending the
+    /// feature clause pushed the enzyme sentence off its `long()` tier, so a
+    /// dense molecule that printed "0 of 58 cutters labelled · 1 dual, 57 multi
+    /// not drawn" before this work printed "0/58 cutters · 62 of 9000 names"
+    /// after it. The clause naming what the map hid was silenced to make room
+    /// for the clause naming what the map hid.
+    #[test]
+    fn a_dense_molecule_keeps_both_disclosures() {
+        let mut mol = pkov();
+        // More features than the label budget, so the feature clause is
+        // non-trivial and the trade is forced.
+        mol.features.clear();
+        let span = mol.seq.len() as u64;
+        for i in 0..300u64 {
+            let mut f = pl_core::Feature::new(format!("feature {i}"), "misc_feature");
+            let start = 1 + (span - 200) * i / 300;
+            f.segments = vec![pl_core::Segment::new(start, start + 150)];
+            mol.features.push(f);
+        }
+        // 780x770 is the pane where the trade is forced and only there: the
+        // enzyme sentence's long form fits alone, the feature clause fits alone,
+        // and the two do not fit side by side. On a wider pane both fit on one
+        // line and the old code was right by accident; on the shipped 706x756
+        // the long form does not fit at all and the tiers decide, which is a
+        // different question. Measured, then chosen.
+        let (shapes, _) = paint_map(&mol, "dense", &pkov_mixed_digest(), 780.0, 770.0);
+        let note: Vec<String> = texts_in(&shapes, 10.0, egui::FontFamily::Proportional)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        let all = note.join(" / ");
+        assert!(
+            all.contains("dual") && all.contains("multi"),
+            "the enzyme disclosure lost the clause naming what it hid: {note:?}"
+        );
+        assert!(
+            all.contains("names"),
+            "the feature disclosure is missing: {note:?}"
+        );
+        assert!(
+            note.len() <= 2,
+            "the note may take a second line and no more: {note:?}"
+        );
+    }
+
+    /// PROVEN TO FAIL against the working tree as handed over: the budget ranked
+    /// by span alone with no notion of where a feature is, so on a molecule
+    /// whose features are all one length and in coordinate order the survivors
+    /// were a contiguous index block. The map drew 62 names from 0.72% of a
+    /// 200 kb molecule as one column of near-parallel leaders and left the other
+    /// 99.3% of the ring unnamed, which reads as a statement about the molecule
+    /// and is not one.
+    #[test]
+    fn the_label_budget_spreads_round_the_ring() {
+        let mut mol = pkov();
+        mol.features.clear();
+        let span = mol.seq.len() as u64;
+        let n = 3_000u64;
+        for i in 0..n {
+            // Every span identical, in coordinate order: the degenerate input.
+            let mut f = pl_core::Feature::new(format!("f{i:04}"), "misc_feature");
+            let start = 1 + (span - 20) * i / n;
+            f.segments = vec![pl_core::Segment::new(start, start + 12)];
+            mol.features.push(f);
+        }
+        let (shapes, _) = paint_map(&mol, "many", &[], 1100.0, 900.0);
+        let drawn: Vec<u64> = texts_in(&shapes, 10.0, egui::FontFamily::Monospace)
+            .into_iter()
+            .filter_map(|(t, _)| {
+                t.strip_prefix('f')
+                    .filter(|d| d.len() == 4)
+                    .and_then(|d| d.parse::<u64>().ok())
+            })
+            .collect();
+        assert!(
+            drawn.len() >= 20,
+            "the premise: names must reach the ring at all ({} drawn)",
+            drawn.len()
+        );
+        assert!(
+            drawn.len() < n as usize,
+            "the premise: the budget must actually bind"
+        );
+        // Indices run with the coordinate, so an index bucket IS an angular
+        // sector. Min-to-max is NOT the measure — one stray survivor on the far
+        // side makes a contiguous block look like a spread — so this counts how
+        // many eighths of the ring carry a name at all.
+        let mut sectors = [false; 8];
+        for i in &drawn {
+            sectors[(i * 8 / n).min(7) as usize] = true;
+        }
+        let hit = sectors.iter().filter(|x| **x).count();
+        assert!(
+            hit >= 6,
+            "the {} chosen names occupy {hit} of 8 sectors: {drawn:?}",
+            drawn.len()
+        );
+    }
+
+    /// What naming the features costs the ring, measured against a baseline
+    /// where the names are one character each, on all five plasmids.
+    ///
+    /// `map.rs` said this cost was zero — "the screen … keeps the radius" — and
+    /// it is not: measured on the user's own pKoV it is 4.9%, and on pUC19,
+    /// whose "CAP binding site" is exactly the 16-character cap, 8.3%.
+    /// `a_long_feature_name_does_not_shrink_the_ring` cannot see any of it,
+    /// because both of its measurements are taken from molecules that already
+    /// carry feature names: it compares 33 characters against 12 and never
+    /// against none.
+    ///
+    /// The bound is what the cap buys. Past 16 characters more name is free, so
+    /// the whole feature contribution to the reserve is bounded however the file
+    /// is annotated — which is the property that makes the trade acceptable, and
+    /// the one worth pinning.
+    #[test]
+    fn feature_names_cost_the_ring_no_more_than_the_cap() {
+        let cutters = pkov_cutters();
+        for file in ["pKoV .dna", "pkov.gb", "pET28a", "pACYC184", "pUC19"] {
+            let mol = if file == "pKoV .dna" {
+                pkov()
+            } else {
+                plasmid(file)
+            };
+            // Same features, same lanes, same everything except the widths the
+            // reserve is computed from.
+            let mut tiny = mol.clone();
+            for f in &mut tiny.features {
+                f.name = "x".into();
+            }
+            for (w, h) in [(706.0f32, 756.0f32), (880.0, 620.0), (560.0, 900.0)] {
+                let r_of =
+                    |m: &pl_core::Molecule| backbone(&paint_map(m, file, &cutters, w, h).0).1;
+                let (base, named) = (r_of(&tiny), r_of(&mol));
+                assert!(
+                    named >= base * 0.85,
+                    "{file} {w}x{h}: naming the features took the ring from {base} to {named}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // .dna out: the DESTINATION, not only the source
+    // -----------------------------------------------------------------------
+
+    /// PROVEN TO FAIL against the working tree as handed over, and it is the
+    /// worst defect that tree had: the lossiness gate was computed from the OPEN
+    /// document's container, so a GenBank molecule saved over an existing `.dna`
+    /// took the fast path. Driven live, that turned a 17-block 75,795 B file
+    /// carrying a cloning history tree, five history nodes and nine typed
+    /// primers into a 4-block 14,928 B one, with no modal, and a status line
+    /// naming the one thing that was NOT lost — the regenerable cache.
+    #[test]
+    fn writing_over_someone_elses_dna_says_what_it_destroys() {
+        let dir = std::env::temp_dir().join(format!("pl-gui-dest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim.dna");
+
+        // A destination shaped like a real SnapGene file: a valid container
+        // carrying the blocks a rewrite cannot carry.
+        let mut rich =
+            pl_fileio::snapgene::read_blocks(&pl_fileio::snapgene::from_molecule(&pkov())).unwrap();
+        for (kind, n) in [
+            (7u8, 8_107usize),
+            (11, 7_720),
+            (11, 2_199),
+            (8, 295),
+            (13, 345),
+        ] {
+            rich.push(pl_fileio::snapgene::Block {
+                kind,
+                payload: vec![b'x'; n],
+            });
+        }
+        std::fs::write(&victim, pl_fileio::snapgene::write_blocks(&rich)).unwrap();
+
+        // And a document that came from GenBank, so its own container is None
+        // and its own report is empty: the case that took the fast path.
+        let mut app = App::blank();
+        let gb = pl_fileio::genbank::write(&pkov(), "plain", today());
+        app.document = Some(Document::from_bytes(gb.as_bytes(), "plain.gb".into(), None).unwrap());
+        assert!(
+            app.document.as_ref().unwrap().container.is_none(),
+            "the premise: nothing about the source says a .dna is at risk"
+        );
+
+        let pending = app.plan_dna(victim.clone(), None).expect("a plan");
+        assert!(
+            pending.asks(),
+            "replacing a .dna holding a cloning history must raise the question"
+        );
+        let losing = pending.losing();
+        let kinds: Vec<u8> = losing.iter().map(|d| d.kind).collect();
+        for k in [7u8, 11, 8, 13] {
+            assert!(
+                kinds.contains(&k),
+                "block {k} is destroyed and unnamed: {kinds:?}"
+            );
+        }
+        assert!(
+            pending.history,
+            "the destination's cloning history is replaced with none, and must be said"
+        );
+        let said = pl_fileio::snapgene::dropped_summary(&losing).unwrap();
+        assert!(
+            said.contains("cloning history tree") && said.contains("2 × a cloning history node"),
+            "the sentence must count the nodes: {said:?}"
+        );
+        // And nothing here may be described as rebuildable.
+        assert!(losing.iter().all(|d| !d.derived), "{losing:?}");
+
+        let _ = std::fs::remove_file(&victim);
+    }
+
+    /// The control, and the one that must stay cheap: a molecule with nothing
+    /// behind it, written where there is nothing, asks nothing.
+    #[test]
+    fn an_ordinary_dna_save_to_an_empty_path_asks_nothing() {
+        let dir = std::env::temp_dir().join(format!("pl-gui-dest2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fresh = dir.join("fresh.dna");
+        let _ = std::fs::remove_file(&fresh);
+
+        let mut app = App::blank();
+        let gb = pl_fileio::genbank::write(&pkov(), "plain", today());
+        app.document = Some(Document::from_bytes(gb.as_bytes(), "plain.gb".into(), None).unwrap());
+        let pending = app.plan_dna(fresh, None).expect("a plan");
+        assert!(!pending.asks(), "{:?}", pending.losing());
+    }
+
+    // -----------------------------------------------------------------------
+    // The guard: what it does with an answer, and what it stops meanwhile
+    // -----------------------------------------------------------------------
+
+    /// PROVEN TO FAIL against the working tree as handed over: `resolve_guard`
+    /// set `abandoned_unsaved` on BOTH answers, so a user who clicked "Save as
+    /// GenBank…", watched the file appear on disk and let the app exit was
+    /// greeted on every subsequent launch by "You closed Polylinker with unsaved
+    /// changes", naming work that is saved. Crying wolf on the one answer the
+    /// guard exists to encourage is worse than not asking at all.
+    #[test]
+    fn answering_the_guard_by_saving_leaves_no_abandoned_draft() {
+        let (mut app, recovery) = app_with_recovery("saved-answer");
+        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.closing = true;
+        app.resolve_guard(Losing::Close, true);
+        assert!(
+            !app.abandoned_unsaved,
+            "a saved document was recorded as abandoned"
+        );
+        assert!(
+            !recovery.exists(),
+            "a recovery draft was kept for work that is in a file"
+        );
+        assert!(app.close_now, "and the window still closes");
+    }
+
+    /// PROVEN TO FAIL against the working tree as handed over: the guard latched
+    /// `closing` and never re-read the predicate, so undoing back to the opening
+    /// state under the dialog left it up — changing its own sentence to "has not
+    /// been saved to a file" — and answering it left a 0-edit recovery draft of
+    /// an untouched file plus a false "did not close cleanly" on the next launch.
+    #[test]
+    fn the_guard_stands_down_when_the_document_stops_being_at_risk() {
+        let ctx = test_ctx();
+        let (mut app, recovery) = app_with_recovery("undone");
+        // FROM A FILE, not `edited_doc`: a document that has never been written
+        // anywhere is unsaved at its own base and correctly stays so, which is a
+        // different case and not this one.
+        let file = temp_file("undone", "fa", PLASMID_A);
+        app.load(file.clone());
+        app.document
+            .as_mut()
+            .unwrap()
+            .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        assert!(app.document.as_ref().unwrap().unsaved(), "the premise");
+        app.closing = true;
+        // The user undoes back to the base while the question is on screen.
+        app.document.as_mut().unwrap().undo().unwrap();
+        assert!(
+            !app.document.as_ref().unwrap().unsaved(),
+            "the premise: undoing to the opening state is clean"
+        );
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let c = ui.ctx().clone();
+            app.unsaved_modal(&c);
+        });
+        assert!(!app.closing, "the question answered itself");
+        assert!(app.close_now, "and the close the user asked for happened");
+        assert!(
+            !app.abandoned_unsaved && !recovery.exists(),
+            "nothing was at risk, so nothing may be recorded as abandoned"
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// PROVEN TO FAIL against the working tree as handed over: `global_shortcuts`
+    /// stood the document down only for the paste question, so Ctrl+Z, Ctrl+S,
+    /// Ctrl+O and every printable key stayed live underneath the unsaved-changes
+    /// guard and the `.dna` lossiness modal. Driven live, eight bases typed with
+    /// the close guard on screen took the molecule from 8,120 to 8,128 bp and
+    /// the dialog's own sentence from "1 edit" to "3 edits" while it was being
+    /// read.
+    ///
+    /// `egui::Modal` blocks widget interaction; it does not block raw
+    /// `ctx.input` reads, and both key handlers run before a widget exists.
+    #[test]
+    fn no_shortcut_reaches_the_document_while_a_question_is_on_screen() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        assert!(!app.asking(), "the control");
+        let press = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+            modifiers: egui::Modifiers::COMMAND,
+            ..Default::default()
+        };
+        // Every gesture that raises a question about the document, and the
+        // control beside it.
+        let dna = || PendingDna {
+            path: PathBuf::from("x.dna"),
+            bytes: Vec::new(),
+            unwritable: Vec::new(),
+            history: false,
+            notes: Vec::new(),
+            overwriting_source: false,
+            dest_lost: Vec::new(),
+            source_lost: Vec::new(),
+            then: None,
+        };
+        let mut fired: Vec<(&str, bool)> = Vec::new();
+        let _ = ctx.run_ui(press, |ui| {
+            let c = ui.ctx().clone();
+            fired.push(("nothing asked", app.global_shortcuts(&c).undo));
+            app.closing = true;
+            fired.push(("the close guard", app.global_shortcuts(&c).undo));
+            app.closing = false;
+            app.pending_dna = Some(dna());
+            fired.push(("the .dna question", app.global_shortcuts(&c).undo));
+            app.pending_dna = None;
+        });
+        assert_eq!(
+            fired,
+            vec![
+                ("nothing asked", true),
+                ("the close guard", false),
+                ("the .dna question", false),
+            ],
+            "a shortcut reached the document from under a question"
+        );
+    }
+
+    /// PROVEN TO FAIL against the working tree as handed over: `resolve_guard`
+    /// forced the final autosave by clearing `self.autosaved`, which also
+    /// destroyed the `same_document` escape hatch the base-cursor guard reads —
+    /// so for a document sitting at its own base the forced write returned
+    /// before writing anything, the `exit: unsaved` flag never reached the file,
+    /// and the next launch greeted a deliberate quit with "A previous session
+    /// did not close cleanly".
+    #[test]
+    fn the_forced_final_autosave_writes_even_at_the_base_of_the_log() {
+        let (mut app, path) = app_with_recovery("forced-base");
+        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.autosave(false);
+        assert!(path.exists(), "the premise");
+        app.document.as_mut().unwrap().undo().unwrap();
+        assert!(
+            app.document.as_ref().unwrap().log.cursor().is_none(),
+            "the premise: the cursor is at the base"
+        );
+        app.resolve_guard(Losing::Close, false);
+        let snap = recover::decode(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            snap.abandoned,
+            "the deliberate quit did not reach the file, so the next launch calls it a crash"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The recovery banner's one decision-support line must not point at the
+    /// worse copy.
+    ///
+    /// PROVEN TO FAIL against the working tree as handed over: a 0-edit draft of
+    /// an untouched `.dna` was advertised as "newer than the file on disk" —
+    /// true of the two mtimes, false of the two contents — and taking it costs
+    /// the container, the typed primers and the methylation flags.
+    #[test]
+    fn a_draft_holding_no_edits_is_not_advertised_as_newer() {
+        let zero = draft_age(2_000, 2_000, Some(1_000), true, 0);
+        assert!(
+            !zero.contains("newer"),
+            "a 0-edit draft was called newer: {zero:?}"
+        );
+        assert!(zero.contains("holds no edits"), "{zero:?}");
+        // With edits in it the comparison is still made, in the file's own terms
+        // rather than in a word that reads as "better".
+        let some = draft_age(2_000, 2_000, Some(1_000), true, 3);
+        assert!(some.contains("written after the file"), "{some:?}");
+        assert!(!some.contains("newer than"), "{some:?}");
+        // The other direction is unchanged.
+        assert!(draft_age(1_000, 2_000, Some(3_000), true, 3).contains("on disk is newer"));
+    }
+
+    /// The dialog must agree with itself about number. It did not: "1 edit that
+    /// is not in any file." was followed by "Closing Polylinker discards them."
+    #[test]
+    fn the_guards_two_sentences_agree_about_number() {
+        assert!(Losing::Close.consequence(true).contains("discards it."));
+        assert!(Losing::Close.consequence(false).contains("discards them."));
+    }
+
+    /// PROVEN TO FAIL against the working tree as handed over: `figure_options`
+    /// hardcoded `single: 0` under a comment saying the site filter "never turns
+    /// a single cutter away", which stopped being true when this work
+    /// intersected that filter with the user's enzyme set. It stayed harmless
+    /// only because every enzyme in the shipped table has a 6-base or longer
+    /// site — and `debug_assert!` is compiled OUT of the release binary, so the
+    /// exported SVG, PDF and EPS would carry a note whose numbers do not add up.
+    #[test]
+    fn the_exported_figures_note_accounts_for_what_the_filter_turned_away() {
+        // A four-base cutter the shipped table does not have, so the 6+ sets
+        // genuinely discriminate. The whole defect is invisible without one.
+        const SHORT: pl_enzymes::Enzyme = pl_enzymes::Enzyme {
+            name: "AluI",
+            site: "AGCT",
+            fst5: 2,
+            ovhg: 0,
+        };
+        let mut results = pkov_mixed_digest();
+        results.push(pl_enzymes::Digest {
+            enzyme: &SHORT,
+            positions: vec![4_242],
+        });
+        let told = App::figure_disclosure(&results, pl_enzymes::EnzymeSet::UniqueSixPlus);
+        assert_eq!(
+            told.single, 1,
+            "the four-base unique cutter the filter turned away is in no bucket"
+        );
+        assert_eq!(told.dual, 12, "a fact about the molecule, not the filter");
+        assert_eq!(told.multi, 6);
+        // `labelled` is filled by the layout pass; the ring names all 22 that
+        // survive the filter, and with that the five buckets have to close.
+        let mut told = told;
+        told.labelled = 22;
+        assert!(told.closes(), "{told:?} does not account for every cutter");
+    }
+
+    // -----------------------------------------------------------------------
+    // The document lifecycle: dirty state, the guard, and .dna out
+    // -----------------------------------------------------------------------
+
+    /// A file on disk holding `text`, cleaned up by the caller.
+    fn temp_file(tag: &str, ext: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pl-gui-lc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let p = dir.join(format!("{tag}.{ext}"));
+        std::fs::write(&p, text).expect("a writable temp file");
+        p
+    }
+
+    const PLASMID_A: &str = ">a\nAAAACCCCGGGGTTTTAAGGCCTTAAAACCCCGGGGTTTT\n";
+    const PLASMID_B: &str = ">b\nTTTTGGGGCCCCAAAATTGGCCAATTTTGGGGCCCCAAAA\n";
+
+    /// An app with `PLASMID_A` open, read from a real file so it starts clean.
+    fn app_with_a(tag: &str) -> (App, PathBuf) {
+        let path = temp_file(tag, "fa", PLASMID_A);
+        let mut app = App::blank();
+        app.load(path.clone());
+        assert!(app.document.is_some(), "the premise: {tag} opened");
+        (app, path)
+    }
+
+    /// PROVEN TO FAIL at 528dcd9, where `Document` had no notion of a write at
+    /// all and the only predicate — `edited()` — was
+    /// `!log.all_ops().is_empty()`: true forever after the first keystroke,
+    /// including after an undo back to the base. A guard on that fires when
+    /// nothing has changed, which is exactly how a guard becomes a reflex click.
+    #[test]
+    fn undoing_back_to_the_opening_state_is_not_unsaved() {
+        let (mut app, path) = app_with_a("undo-clean");
+        let d = app.document.as_mut().unwrap();
+        assert!(!d.unsaved(), "a file just opened is on disk, by definition");
+
+        d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        assert!(d.unsaved(), "and an edit is not");
+        assert_eq!(d.unsaved_ops(), Some(1));
+
+        d.undo().unwrap();
+        assert!(
+            !d.unsaved(),
+            "back at the base the file holds what is on screen"
+        );
+        assert_eq!(d.unsaved_ops(), Some(0));
+
+        d.redo().unwrap();
+        assert!(d.unsaved(), "and forward again it does not");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// PROVEN TO FAIL at 528dcd9: no close guard existed anywhere —
+    /// `grep -rn "close_requested"` over `bins/` and `crates/` returned nothing
+    /// — so eframe closed on the title-bar X with no prompt and `on_exit` then
+    /// deleted the autosaved draft as well.
+    #[test]
+    fn closing_with_unsaved_changes_holds_the_window_and_closing_without_does_not() {
+        let ctx = test_ctx();
+        let close = || egui::RawInput {
+            viewports: std::iter::once((
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: vec![egui::ViewportEvent::Close],
+                    ..Default::default()
+                },
+            ))
+            .collect(),
+            ..Default::default()
+        };
+
+        // Clean: no question, and nothing held back.
+        let (mut app, path) = app_with_a("close-clean");
+        let _ = ctx.run_ui(close(), |_| {});
+        app.close_request(&ctx);
+        assert!(!app.closing, "an unedited document must not prompt");
+
+        // Dirty: held.
+        app.document
+            .as_mut()
+            .unwrap()
+            .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        let _ = ctx.run_ui(close(), |_| {});
+        app.close_request(&ctx);
+        assert!(app.closing, "an edited document must prompt");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// PROVEN TO FAIL at 528dcd9, which had neither latch. The trap is that
+    /// egui-winit pushes `ViewportEvent::Close` into the viewport info when the
+    /// command is sent, so the NEXT frame sees `close_requested` again — and a
+    /// guard still armed on that frame cancels its own close and the window can
+    /// never be shut.
+    #[test]
+    fn answering_close_without_saving_actually_closes() {
+        let ctx = test_ctx();
+        let (mut app, path) = app_with_a("close-go");
+        app.document
+            .as_mut()
+            .unwrap()
+            .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        app.closing = true;
+        app.resolve_guard(Losing::Close, false);
+        assert!(!app.closing, "the question is answered");
+        assert!(app.close_now, "and the window is asked to go");
+
+        // The frame that sends `Close`, and the frame after it, in which the
+        // event comes back round.
+        app.close_request(&ctx);
+        let echo = egui::RawInput {
+            viewports: std::iter::once((
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: vec![egui::ViewportEvent::Close],
+                    ..Default::default()
+                },
+            ))
+            .collect(),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(echo, |_| {});
+        app.close_request(&ctx);
+        assert!(
+            !app.closing,
+            "the guard must not cancel the close it just asked for"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// PROVEN TO FAIL at 528dcd9: `on_exit` called `recover::clear` on every
+    /// exit, so answering "close without saving" destroyed the copy the dialog
+    /// had just promised.
+    #[test]
+    fn abandoning_unsaved_work_keeps_the_recovery_draft() {
+        let (mut app, recovery) = app_with_recovery("abandoned");
+        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.resolve_guard(Losing::Close, false);
+        assert!(
+            recovery.exists(),
+            "the forced final autosave must have written it"
+        );
+        eframe::App::on_exit(&mut app, None);
+        assert!(
+            recovery.exists(),
+            "and the clean exit must not have deleted it"
+        );
+        // ...and the next launch must not call this a crash.
+        let text = std::fs::read_to_string(&recovery).unwrap();
+        let snap = recover::decode(&text).expect("a readable header");
+        assert!(snap.abandoned, "the exit was deliberate and says so");
+        let _ = std::fs::remove_file(&recovery);
+    }
+
+    /// PROVEN TO FAIL against this change's own first draft, which cleared
+    /// `last_autosave` and not `autosaved`.
+    ///
+    /// `autosave` returns early when the recovery file already holds this
+    /// (original, title, cursor), and that memo knows nothing about the exit
+    /// flag — so a document autosaved on its ordinary thirty-second clock and
+    /// then deliberately abandoned wrote nothing further, and the header kept
+    /// saying the session crashed. Caught in the running application, which is
+    /// why it is pinned here.
+    #[test]
+    fn the_abandoned_flag_survives_an_already_current_recovery_file() {
+        let (mut app, path) = app_with_recovery("flag");
+        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        // The ordinary periodic write, which leaves the memo current.
+        app.autosave(false);
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !recover::decode(&first).unwrap().abandoned,
+            "the premise: an ordinary autosave is not an abandonment"
+        );
+
+        app.resolve_guard(Losing::Close, false);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            recover::decode(&after).unwrap().abandoned,
+            "the deliberate quit must reach the file, or the next launch calls it a crash"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// PROVEN TO FAIL at 528dcd9: `load`'s Ok arm called `adopt` directly, with
+    /// no dirty check anywhere on the path, so opening a second file over an
+    /// edited one destroyed it silently.
+    #[test]
+    fn opening_a_second_file_over_an_edited_one_asks_first() {
+        let (mut app, a) = app_with_a("swap-a");
+        app.document
+            .as_mut()
+            .unwrap()
+            .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        let b = temp_file("swap-b", "fa", PLASMID_B);
+
+        app.load(b.clone());
+        assert!(app.pending_open.is_some(), "the swap is parked");
+        assert_eq!(
+            app.document.as_ref().unwrap().title,
+            "swap-a.fa",
+            "and the edited document is still the one on screen"
+        );
+        // The status must still describe what is open, not the parked file.
+        assert!(
+            !app.status.contains("swap-b"),
+            "the toolbar must not describe a file that is not open: {:?}",
+            app.status
+        );
+
+        app.resolve_guard(Losing::Open, false);
+        assert_eq!(app.document.as_ref().unwrap().title, "swap-b.fa");
+        assert!(app.pending_open.is_none());
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    /// The other half: cancelling must put nothing at risk, and must leave the
+    /// recovery row it came from reachable.
+    #[test]
+    fn cancelling_the_question_keeps_the_document_and_the_row() {
+        let (mut app, a) = app_with_a("cancel-a");
+        app.document
+            .as_mut()
+            .unwrap()
+            .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        let b = temp_file("cancel-b", "fa", PLASMID_B);
+        app.load(b.clone());
+        app.drop_pending_open();
+        assert!(app.pending_open.is_none());
+        assert_eq!(app.document.as_ref().unwrap().title, "cancel-a.fa");
+        assert!(app.document.as_ref().unwrap().unsaved(), "still dirty");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    /// PROVEN TO FAIL at 528dcd9: `wrote()` set a transient status and nothing
+    /// else, so there was no record anywhere that a save had happened. A guard
+    /// keyed on the old predicate would have fired immediately after the user
+    /// did exactly what it asked — the fastest possible way to teach someone the
+    /// dialog is noise.
+    #[test]
+    fn a_faithful_save_clears_the_dirty_state_and_a_lossy_one_does_not() {
+        // GenBank, on a molecule with features: faithful.
+        let mut d = Document::from_bytes(
+            b">x\nAAAACCCCGGGGTTTTAAGGCCTT\n",
+            "x.fa".into(),
+            Some("x.fa".into()),
+        )
+        .unwrap();
+        d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        assert!(d.unsaved());
+        d.mark_saved();
+        assert!(!d.unsaved(), "the state at the cursor is on disk");
+        d.apply(pl_core::OpKind::SetFeature {
+            index: None,
+            feature: Box::new({
+                let mut f = pl_core::Feature::new("probe", "misc_feature");
+                f.segments = vec![pl_core::Segment::new(2, 6)];
+                f
+            }),
+        })
+        .unwrap();
+        assert!(d.unsaved(), "and an edit after the save is not");
+        d.undo().unwrap();
+        assert!(
+            !d.unsaved(),
+            "undoing back to the saved point is clean again"
+        );
+    }
+
+    /// PROVEN TO FAIL at 528dcd9: the Save menu offered GenBank and FASTA only.
+    /// `snapgene::from_molecule` existed, tested, with no GUI entry point at
+    /// all, so a user who opens `.dna` all day could not write one back.
+    #[test]
+    fn a_molecule_written_as_dna_reloads_with_its_features_primers_and_notes() {
+        let mut mol = pkov();
+        mol.notes
+            .push(pl_core::Note::new("Description", "a round trip"));
+        mol.primers.push(pl_core::Primer {
+            name: "F_his colony PCR".into(),
+            seq: "ACGTACGTACGTACGTAC".into(),
+            description: String::new(),
+            sites: vec![pl_core::BindingSite {
+                start: 100,
+                end: 117,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+        });
+
+        let (bytes, unwritable) = pl_fileio::snapgene::from_molecule_reporting(&mol);
+        assert!(
+            unwritable.is_empty(),
+            "nothing here is unrepresentable: {unwritable:?}"
+        );
+        let back = pl_fileio::snapgene::parse(&bytes).expect("a readable .dna");
+        assert_eq!(
+            back.molecule
+                .features
+                .iter()
+                .map(|f| f.name.clone())
+                .collect::<Vec<_>>(),
+            mol.features
+                .iter()
+                .map(|f| f.name.clone())
+                .collect::<Vec<_>>(),
+            "every feature name survived"
+        );
+        assert_eq!(back.molecule.primers.len(), 1, "and the primer");
+        assert_eq!(back.molecule.primers[0].name, "F_his colony PCR");
+        assert!(
+            back.molecule
+                .notes
+                .iter()
+                .any(|n| n.value == "a round trip"),
+            "and the notes"
+        );
+        assert_eq!(back.molecule.seq, mol.seq);
+        assert_eq!(back.molecule.topology, mol.topology);
+
+        // Blocks 2, 3 and 7 are the three the writer will not synthesise, and
+        // the user must be told rather than discover it later.
+        let kinds: Vec<u8> = back.blocks.iter().map(|b| b.kind).collect();
+        for (block, what) in [(2u8, "cut positions"), (3, "enzyme table"), (7, "history")] {
+            assert!(
+                !kinds.contains(&block),
+                "block {block} ({what}) must not be synthesised"
+            );
+        }
+        assert!(!back.history_present, "and no history is claimed");
+    }
+
+    /// The .dna lossiness modal fires when, and only when, there is something to
+    /// say. Blocks 2 and 3 are caches and announcing them every time is how the
+    /// dialog stops being read.
+    #[test]
+    fn the_dna_question_is_asked_only_when_something_is_really_lost() {
+        // A molecule that came from no .dna at all: nothing to say.
+        let mol = pkov();
+        let (_, unwritable) = pl_fileio::snapgene::from_molecule_reporting(&mol);
+        let quiet = unwritable.is_empty();
+        assert!(quiet, "an ordinary molecule saves in one click");
+
+        // A binding site starting before base 1 has no 0-based `location` form,
+        // which is the case the writer's own report exists for.
+        let mut noisy = pkov();
+        // Start 0 is before base 1, which has no 0-based `location` form at
+        // all — the case `from_molecule_reporting`'s own docstring exists for.
+        noisy.primers.push(pl_core::Primer {
+            name: "overhang".into(),
+            seq: "ACGTACGTACGT".into(),
+            description: String::new(),
+            sites: vec![pl_core::BindingSite {
+                start: 0,
+                end: 12,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+        });
+        let (_, report) = pl_fileio::snapgene::from_molecule_reporting(&noisy);
+        assert!(
+            !report.is_empty(),
+            "a location the format cannot hold must be named"
+        );
+    }
+
+    /// PROVEN TO FAIL at 528dcd9: `settle()` committed a typing run and never
+    /// assigned `self.status`, so after Ctrl+A then Delete the toolbar still
+    /// read "add feature UX probe feature — Ctrl+Z to undo" beside a molecule
+    /// with no bases left in it.
+    #[test]
+    fn the_status_after_a_typing_run_names_the_typing_run() {
+        let mut app = App::blank();
+        app.document = Some(
+            Document::from_bytes(
+                b">x\nAAAACCCCGGGGTTTTAAGG\n",
+                "x.fa".into(),
+                Some("x.fa".into()),
+            )
+            .unwrap(),
+        );
+        // A discrete edit first, so the bar has something else in it to be
+        // wrong about — the shape of the photographed defect.
+        app.edit(pl_core::OpKind::SetTopology(pl_core::Topology::Circular));
+        assert!(
+            app.status.contains("make circular"),
+            "the premise: {}",
+            app.status
+        );
+
+        app.edit.caret = 4;
+        let d = app.document.as_mut().unwrap();
+        app.edit.type_text(d, "gg", 0.0);
+        app.settle();
+        assert!(
+            app.status.starts_with("insert 2 bp at 5"),
+            "the status must name the run that just landed, not the edit before \
+             it: {:?}",
+            app.status
+        );
+        assert!(app.status.contains("Ctrl+Z to undo"));
+    }
+
+    /// PROVEN TO FAIL at 528dcd9: `autosave`'s early return read
+    /// `here.cursor.is_none()` as "the user's own file already holds it", and
+    /// that premise is false for every document with no path. A draft restored
+    /// from the recovery banner (the restore path drops the path deliberately)
+    /// and a payload dropped in from a browser both sit at the base of an empty
+    /// log with nothing on disk behind them — and this branch refused to write
+    /// either of them. The unsaved-changes guard's forced final autosave walks
+    /// straight into it, so the dialog's promise of a kept copy would have been
+    /// a lie.
+    #[test]
+    fn a_restored_draft_with_no_path_is_autosaved() {
+        let (mut app, path) = app_with_recovery("restored");
+        app.document =
+            Some(Document::from_bytes(b">r\nAAAACCCCGGGG\n", "r.fa".into(), None).unwrap());
+        assert!(
+            app.document.as_ref().unwrap().unsaved(),
+            "the premise: nothing on disk holds this"
+        );
+        app.autosave(false);
+        assert!(
+            path.exists(),
+            "a document with no file behind it must be written"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -7812,7 +10427,7 @@ mod tests {
         if idle {
             app.settle();
         }
-        app.autosave();
+        app.autosave(false);
         if let (Some(t), Some(d)) = (typed, app.document.as_mut()) {
             app.edit.type_text(d, t, now);
         }
@@ -7871,7 +10486,7 @@ mod tests {
 
         // The autosave falls due.
         app.last_autosave = None;
-        app.autosave();
+        app.autosave(false);
 
         let (mol, _) = autosaved(&path);
         assert_eq!(
@@ -8302,8 +10917,16 @@ mod tests {
             })
             .collect();
         let mut app = App::blank();
+        // `Some(path)` so the document counts as saved: these tests are about
+        // the design panel, not about the unsaved-changes guard, and a pathless
+        // fixture would be parked by `take_over` before `adopt` ever ran.
         app.document = Some(
-            Document::from_bytes(format!(">a\n{seq}\n").as_bytes(), "a.fa".into(), None).unwrap(),
+            Document::from_bytes(
+                format!(">a\n{seq}\n").as_bytes(),
+                "a.fa".into(),
+                Some("a.fa".into()),
+            )
+            .unwrap(),
         );
         app.edit.sel = Some(seqedit::Selection {
             anchor: 300,
@@ -8403,11 +11026,22 @@ mod tests {
         assert!(app.status.contains("Ctrl+Z twice"), "{}", app.status);
     }
 
-    /// PROVEN TO FAIL at dfd6ac9: `load`'s error arm left `self.design` alone,
-    /// and `design_panel` then dropped the panel — constraints, report and all
-    /// — on its own early return, in the same frame, with nothing said.
+    /// PROVEN TO FAIL at 528dcd9: `load`'s error arm assigned
+    /// `self.document = None`, so choosing a `.ab1`, a folder-that-is-a-file or
+    /// anything unparseable destroyed the open document and replaced the whole
+    /// screen with the "could not read that file" takeover. The user lost their
+    /// work AND got nothing, because there was no new document to have traded
+    /// it for.
+    ///
+    /// This test used to assert the opposite — that the failed load closed the
+    /// design panel — which was the right answer while the document was being
+    /// destroyed underneath it. With the document left alone the panel is still
+    /// describing the molecule that is still open, so closing it would now be
+    /// the defect. The original silent-drop it was written for is unreachable:
+    /// `design_panel`'s early return needs `self.document` to be `None`, and
+    /// nothing on this path sets it.
     #[test]
-    fn a_failed_load_closes_the_design_panel_and_says_so() {
+    fn a_failed_load_leaves_the_open_document_and_its_panel_alone() {
         let mut app = app_designing();
         let seq = app.document.as_ref().unwrap().molecule().seq.clone();
         design_frame(&mut app);
@@ -8418,14 +11052,15 @@ mod tests {
         app.load(bad.clone());
         let _ = std::fs::remove_file(&bad);
 
-        assert!(app.error.is_some(), "the premise: the load failed");
-        assert!(app.design.is_none(), "the panel is gone");
+        assert!(app.document.is_some(), "the document survived");
+        assert!(app.error.is_none(), "and the screen was not taken over");
+        assert!(app.design.is_some(), "so the panel is still valid");
         assert!(
             app.notice
                 .as_deref()
                 .unwrap_or_default()
-                .contains("design panel"),
-            "and it was said: {:?}",
+                .contains("unrecognised format"),
+            "and the failure was reported: {:?}",
             app.notice
         );
     }
@@ -10614,6 +13249,36 @@ mod tests {
         w: f32,
         h: f32,
     ) -> (Vec<egui::Shape>, egui::Rect) {
+        paint_map_sel(mol, caption, digest, w, h, None)
+    }
+
+    /// The same, with a sequence selection on it.
+    fn paint_map_sel(
+        mol: &pl_core::Molecule,
+        caption: &str,
+        digest: &[pl_enzymes::Digest],
+        w: f32,
+        h: f32,
+        sel: Option<pl_core::Segment>,
+    ) -> (Vec<egui::Shape>, egui::Rect) {
+        paint_map_with(mol, caption, digest, w, h, sel, pl_enzymes::EnzymeSet::All)
+    }
+
+    /// The same again, under a stated enzyme filter.
+    ///
+    /// Every map test used to pass `EnzymeSet::All` — the one value for which a
+    /// filter bug cannot manifest — so `debug_assert!(told.closes())` was
+    /// satisfied by construction and a disclosure that misdescribed three of the
+    /// five settings passed 1,336 tests. A check that cannot fail proves nothing.
+    fn paint_map_with(
+        mol: &pl_core::Molecule,
+        caption: &str,
+        digest: &[pl_enzymes::Digest],
+        w: f32,
+        h: f32,
+        sel: Option<pl_core::Segment>,
+        set: pl_enzymes::EnzymeSet,
+    ) -> (Vec<egui::Shape>, egui::Rect) {
         let ctx = test_ctx();
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
         let input = egui::RawInput {
@@ -10626,7 +13291,18 @@ mod tests {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| {
-                        map::show(ui, mol, caption, digest, None, None);
+                        map::show(
+                            ui,
+                            mol,
+                            caption,
+                            digest,
+                            None,
+                            None,
+                            sel.clone(),
+                            None,
+                            set,
+                            None,
+                        );
                     });
             });
             shapes = flat_shapes(&out.shapes);
@@ -10780,7 +13456,18 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| {
-                            map::show(ui, &mol, "pET28a", &pkov_cutters(), None, None);
+                            map::show(
+                                ui,
+                                &mol,
+                                "pET28a",
+                                &pkov_cutters(),
+                                None,
+                                None,
+                                None,
+                                None,
+                                pl_enzymes::EnzymeSet::All,
+                                None,
+                            );
                         });
                 });
                 clipped = out.shapes;
@@ -10816,7 +13503,18 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| {
-                            map::show(ui, &mol, "pET28a", &pkov_cutters(), None, None);
+                            map::show(
+                                ui,
+                                &mol,
+                                "pET28a",
+                                &pkov_cutters(),
+                                None,
+                                None,
+                                None,
+                                None,
+                                pl_enzymes::EnzymeSet::All,
+                                None,
+                            );
                         });
                 })
                 .shapes,
@@ -10872,7 +13570,18 @@ mod tests {
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| {
                         ui.allocate_space(egui::vec2(ui.available_width(), banner_h));
-                        map::show(ui, &mol, "pKoV with His decR", &cutters, None, None);
+                        map::show(
+                            ui,
+                            &mol,
+                            "pKoV with His decR",
+                            &cutters,
+                            None,
+                            None,
+                            None,
+                            None,
+                            pl_enzymes::EnzymeSet::All,
+                            None,
+                        );
                     });
             });
             shapes = flat_shapes(&out.shapes);
@@ -10953,18 +13662,55 @@ mod tests {
         ] {
             let (shapes, pane) = paint_map(&mol, "pKoV with His decR", &cutters, w, h);
             let (centre, r) = backbone(&shapes);
-            let labels = texts_in(&shapes, 10.0, egui::FontFamily::Monospace);
+            let all = texts_in(&shapes, 10.0, egui::FontFamily::Monospace);
+            // A feature label is a feature NAME, whole or with an ellipsis; a
+            // site label carries a coordinate. Since feature names joined this
+            // ring, assertions 1 and 2 below cover them for free — which is the
+            // point of extending this test rather than writing a second harness
+            // — but 3 and 4 are about enzymes and must not be handed a name.
+            let feature_names: Vec<&str> = mol.features.iter().map(|f| f.name.as_str()).collect();
+            let is_feature = |t: &str| {
+                let stem = t.strip_suffix("...").unwrap_or(t);
+                feature_names
+                    .iter()
+                    .any(|n| *n == t || (t.ends_with("...") && n.starts_with(stem)))
+            };
+            let labels: Vec<(String, egui::Rect)> = all
+                .iter()
+                .filter(|(t, _)| !is_feature(t))
+                .cloned()
+                .collect();
             assert!(
                 labels.len() >= 15,
                 "{w}x{h}: only {} labels on a plasmid with 22 unique cutters",
                 labels.len()
             );
 
+            // 0. Every feature is named. `pl export` has written all nine of
+            //    these into the SVG since the exporter was built, while the
+            //    screen drew none of them.
+            for f in &mol.features {
+                assert!(
+                    all.iter().any(|(t, _)| {
+                        let stem = t.strip_suffix("...").unwrap_or(t);
+                        *t == f.name || (t.ends_with("...") && f.name.starts_with(stem))
+                    }),
+                    "{w}x{h}: the feature {:?} is nowhere on the map",
+                    f.name
+                );
+            }
+
             // 1. Whole, and inside the pane. This is the one that fails at
             //    e087e27.
-            for (text, rect) in &labels {
+            //
+            //    "Whole" is asked of SITE labels only: a shortened cut
+            //    coordinate is unrecoverable on the page, and a shortened
+            //    feature name is one hover and one list row away, which is the
+            //    asymmetry `FEATURE_NAME_CAP_CHARS` is built on. Staying inside
+            //    the pane is asked of everything.
+            for (text, rect) in &all {
                 assert!(
-                    !text.ends_with("..."),
+                    is_feature(text) || !text.ends_with("..."),
                     "{w}x{h}: {text:?} did not fit the room reserved for it"
                 );
                 assert!(
@@ -10976,14 +13722,15 @@ mod tests {
                 );
             }
 
-            // 2. No two overlap.
-            for i in 0..labels.len() {
-                for j in i + 1..labels.len() {
-                    let hit = labels[i].1.intersects(labels[j].1);
+            // 2. No two overlap — feature names included, which is what says
+            //    the new entries went through the same packer.
+            for i in 0..all.len() {
+                for j in i + 1..all.len() {
+                    let hit = all[i].1.intersects(all[j].1);
                     assert!(
                         !hit,
                         "{w}x{h}: {:?} at {:?} overlaps {:?} at {:?}",
-                        labels[i].0, labels[i].1, labels[j].0, labels[j].1
+                        all[i].0, all[i].1, all[j].0, all[j].1
                     );
                 }
             }
@@ -11157,6 +13904,312 @@ mod tests {
         }
     }
 
+    /// The four other plasmids the clipping sweep is run against.
+    ///
+    /// **They are not in the repo and never were** — the 0ebaa41 measurement
+    /// that found 23/23 labels clipped on pET28a was taken with a standalone
+    /// program against files on the author's machine. So these are built from
+    /// `pkov()`'s backbone with each plasmid's REAL feature names and lengths
+    /// substituted, which is what the layout is actually a function of: the
+    /// packer never sees a base, only a name, an angle and a width. Written
+    /// down rather than glossed, because "the five-plasmid check" reads as a
+    /// claim about five files.
+    ///
+    /// pET28a's 137-character MCS `/label` is the case that matters. It is the
+    /// name `SITE_WEIGHT` was introduced for and the one that drives
+    /// `FEATURE_NAME_CAP_CHARS`.
+    fn plasmid(name: &str) -> pl_core::Molecule {
+        let mut mol = pkov();
+        let names: Vec<&str> = match name {
+            // The same molecule as `pkov()` read through GenBank: the nine
+            // SnapGene primers arrive as `primer_bind` features, and the
+            // longest of those names is 16 characters.
+            "pkov.gb" => vec![
+                "cat promoter",
+                "CmR",
+                "sacB promoter",
+                "SacB",
+                "f1 ori",
+                "pSC101 ori",
+                "Rep101(Ts)",
+                "decR",
+                "decR his",
+                "F_his colony PCR",
+                "R_his colony PCR",
+                "F1ori-F",
+                "F1ori-R",
+                "CAT-R",
+                "decR-F",
+                "decR-R",
+                "sacB-F",
+                "sacB-R",
+            ],
+            "pET28a" => vec![
+                "f1 ori",
+                "KanR",
+                "ori",
+                "lacI",
+                "T7 promoter",
+                "lac operator",
+                "RBS",
+                "6xHis",
+                "T7 tag",
+                "thrombin site",
+                "T7 terminator",
+                "rop",
+                "Multiple Cloning Site (MCS); contains unique sites for NcoI, NdeI, NheI, BamHI, \
+                 EcoRI, SacI, SalI, HindIII, NotI, EagI and XhoI",
+            ],
+            "pACYC184" => vec!["CmR", "TcR", "p15A ori", "CmR promoter"],
+            "pUC19" => vec![
+                "CAP binding site",
+                "lac promoter",
+                "lac operator",
+                "lacZ-alpha",
+                "MCS",
+                "AmpR",
+                "AmpR promoter",
+                "ori",
+                "M13 rev",
+                "M13 fwd",
+            ],
+            other => panic!("no fixture for {other}"),
+        };
+        mol.features.clear();
+        let span = mol.seq.len() as u64;
+        for (i, n) in names.iter().enumerate() {
+            let mut f = pl_core::Feature::new(*n, "misc_feature");
+            // Spread them right round the ring, so every one of the four runs
+            // and both side columns are exercised.
+            let start = 1 + (span - 400) * i as u64 / names.len().max(1) as u64;
+            f.segments = vec![pl_core::Segment::new(start, start + 300)];
+            f.strand = if i % 2 == 0 {
+                Strand::Forward
+            } else {
+                Strand::Reverse
+            };
+            mol.features.push(f);
+        }
+        mol
+    }
+
+    /// PROVEN TO FAIL at 528dcd9 on assertion 0: the map's label list was built
+    /// from cut sites alone, so on every one of these the count of feature names
+    /// on screen was ZERO while `pl export` wrote all of them into the SVG.
+    ///
+    /// This is the sweep 0ebaa41 is remembered for, re-run because adding
+    /// feature names changes what "the widest label" means and the reserve is
+    /// computed from it. 0ebaa41 found 23/23 labels clipped on pET28a before its
+    /// fix; nothing here may put one back.
+    #[test]
+    fn no_label_is_clipped_on_any_of_the_five_plasmids() {
+        let cutters = pkov_cutters();
+        for file in ["pKoV .dna", "pkov.gb", "pET28a", "pACYC184", "pUC19"] {
+            let mol = if file == "pKoV .dna" {
+                pkov()
+            } else {
+                plasmid(file)
+            };
+            for (w, h) in [(706.0f32, 756.0f32), (880.0, 620.0), (560.0, 900.0)] {
+                let (shapes, pane) = paint_map(&mol, file, &cutters, w, h);
+                let all = texts_in(&shapes, 10.0, egui::FontFamily::Monospace);
+                let names: Vec<&str> = mol.features.iter().map(|f| f.name.as_str()).collect();
+                let is_feature = |t: &str| {
+                    let stem = t.strip_suffix("...").unwrap_or(t);
+                    names
+                        .iter()
+                        .any(|n| *n == t || (t.ends_with("...") && n.starts_with(stem)))
+                };
+                // 0. Some feature name reached the ring at all.
+                assert!(
+                    all.iter().any(|(t, _)| is_feature(t)),
+                    "{file} {w}x{h}: not one feature name on the map"
+                );
+                for (text, rect) in &all {
+                    // 1. Inside the pane, whole glyphs, nothing over the edge.
+                    assert!(
+                        rect.left() >= pane.left() - 0.5
+                            && rect.right() <= pane.right() + 0.5
+                            && rect.top() >= pane.top() - 0.5
+                            && rect.bottom() <= pane.bottom() + 0.5,
+                        "{file} {w}x{h}: {text:?} at {rect:?} is outside the {pane:?} pane"
+                    );
+                    // 2. A CUT COORDINATE is never shortened. This is the
+                    //    0ebaa41 defect itself.
+                    assert!(
+                        is_feature(text) || !text.ends_with("..."),
+                        "{file} {w}x{h}: the site label {text:?} was clipped"
+                    );
+                }
+                // 3. And nothing overlaps anything.
+                for i in 0..all.len() {
+                    for j in i + 1..all.len() {
+                        assert!(
+                            !all[i].1.intersects(all[j].1),
+                            "{file} {w}x{h}: {:?} overlaps {:?}",
+                            all[i].0,
+                            all[j].0
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// PROVEN TO FAIL against the naive implementation — feature names charged
+    /// to the reserve at full width, which is what `pl_draw` does — and that is
+    /// the only kind of test worth writing here.
+    ///
+    /// Measured with `target/release/pl.exe` at HEAD: pKoV exports at r = 224.6,
+    /// and the same molecule with a 30-character name on `Rep101(Ts)` (mid base
+    /// 1108 = 49 degrees, the RIGHT column) exports at r = 135 — 40% of the ring
+    /// gone. The same name on `pSC101 ori` (21 degrees, the TOP row) changes
+    /// nothing, so the rule is angle-dependent and therefore ROTATION-dependent:
+    /// "Set origin at selected feature" would resize the user's map by 40% as a
+    /// side effect of renumbering, which nothing the user did asked for.
+    ///
+    /// Three things degrade silently when r falls, which is why this is pinned
+    /// rather than left to judgement: `bases_per_arc` moves, so the map's claim
+    /// about which cuts share a tick changes; `centre_room` shrinks, so the
+    /// disclosure drops from `long()` to `short()` and stops naming what was
+    /// hidden; and `inside_of`'s `lanes_kept` falls, so inward feature bands
+    /// overprint each other — a feature name silently hiding feature bands being
+    /// the worst possible outcome of a change whose purpose is to name features.
+    #[test]
+    fn a_long_feature_name_does_not_shrink_the_ring() {
+        let cutters = pkov_cutters();
+        let base = pkov();
+        let mut long = pkov();
+        // 33 characters, and a real pET/pGEM feature name.
+        long.features[6].name = "SP6 transcription initiation site".into();
+        assert_eq!(long.features[6].name.len(), 33);
+        let mut huge = pkov();
+        huge.features[6].name = "M".repeat(137);
+        for (w, h) in [
+            (706.0f32, 756.0f32),
+            (880.0, 620.0),
+            (560.0, 900.0),
+            (400.0, 420.0),
+        ] {
+            let r_of = |m: &pl_core::Molecule| backbone(&paint_map(m, "pKoV", &cutters, w, h).0).1;
+            let (ra, rb, rc) = (r_of(&base), r_of(&long), r_of(&huge));
+            // PAST THE CAP, MORE CHARACTERS ARE FREE. This is the assertion the
+            // naive implementation fails: charged at full width, 137 characters
+            // takes the ring to the 30% floor while 33 does not, so `rb != rc`.
+            assert!(
+                (rb - rc).abs() < 0.5,
+                "{w}x{h}: 137 characters cost more than 33 ({rb} against {rc}) — the cap is                  not binding"
+            );
+            // AND THE CAP IS SMALL. The whole feature contribution is bounded by
+            // `FEATURE_NAME_CAP_CHARS` plus the swatch, so a 33-character name
+            // can never do what it does to the exporter: measured with
+            // `target/release/pl.exe`, the same substitution on `Rep101(Ts)`
+            // takes pKoV's exported ring from 224.6 to 135, which is 40% of it.
+            assert!(
+                ra - rb < 14.0 && rb > ra * 0.9,
+                "{w}x{h}: a 33-character feature name took the ring from {ra} to {rb}"
+            );
+        }
+    }
+
+    /// PROVEN TO FAIL at 528dcd9: `map.rs` had zero references to a selection,
+    /// so the commonest gesture a cloner makes showed nowhere on the picture
+    /// they make decisions from.
+    ///
+    /// The origin-crossing case is the one worth asserting. Interpolating from
+    /// `angle_of(start)` to `angle_of(end)` when `start > end` paints the
+    /// COMPLEMENT — the defect `Band::segs` records, a 2,499 bp band drawn for a
+    /// 187 bp feature — so 7,900..200 must cover 418 bases of arc and not 7,699.
+    #[test]
+    fn a_sequence_selection_is_drawn_on_the_map_including_across_the_origin() {
+        let mol = pkov();
+        let cutters = pkov_cutters();
+        let plain = paint_map(&mol, "pKoV", &cutters, 706.0, 756.0).0;
+        let n_plain = plain.len();
+
+        // A small ordinary selection: something more is drawn.
+        let (some, _) = paint_map_sel(
+            &mol,
+            "pKoV",
+            &cutters,
+            706.0,
+            756.0,
+            Some(pl_core::Segment::new(1_000, 2_000)),
+        );
+        assert!(some.len() > n_plain, "nothing was drawn for the selection");
+
+        // 7,900..200 on an 8,117 bp circle is 418 bases: 8,117 - 7,900 + 1 + 200.
+        let (cross, _) = paint_map_sel(
+            &mol,
+            "pKoV",
+            &cutters,
+            706.0,
+            756.0,
+            Some(pl_core::Segment::new(7_900, 200)),
+        );
+        let (centre, r) = backbone(&cross);
+        // The arc is the widest stroke sitting on the backbone radius.
+        let arc_len = |shapes: &[egui::Shape]| -> f32 {
+            shapes
+                .iter()
+                .filter_map(|sh| match sh {
+                    egui::Shape::Path(p) if (p.stroke.width - 3.0).abs() < 0.01 => Some(
+                        p.points
+                            .windows(2)
+                            .map(|w| (w[1] - w[0]).length())
+                            .sum::<f32>(),
+                    ),
+                    _ => None,
+                })
+                .sum()
+        };
+        let drawn = arc_len(&cross);
+        let want = 418.0 / 8_117.0 * std::f32::consts::TAU * r;
+        assert!(
+            (drawn - want).abs() < want * 0.15,
+            "an origin-crossing selection of 418 bases drew {drawn:.1} pt of arc where {want:.1} \
+             was wanted (the complement would be {:.1})",
+            (8_117.0 - 418.0) / 8_117.0 * std::f32::consts::TAU * r
+        );
+        assert!(centre.x > 0.0, "the backbone was found");
+    }
+
+    /// PROVEN TO FAIL at 528dcd9: the "Nothing open." guard sat above the tab
+    /// dispatch and swallowed `Tab::Library` with the other five, while the tab
+    /// strip is drawn above the guard — so the user could select the one surface
+    /// that needs no molecule and be told there was nothing open.
+    ///
+    /// The Library is the only cross-file search in the app and there is no
+    /// in-document search at all, so it is the only sequence search that exists.
+    #[test]
+    fn the_library_tab_opens_with_no_document() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        app.tab = Tab::Library;
+        assert!(app.document.is_none(), "the premise");
+        let mut said = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(window(), |ui| {
+                app.side_panel(ui);
+            });
+            said = flat_shapes(&out.shapes)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
+        assert!(
+            !said.iter().any(|t| t.contains("Nothing open")),
+            "the Library tab must not be gated on a document: {said:?}"
+        );
+        assert!(
+            said.iter().any(|t| t.contains("folder")),
+            "and it must show its own empty state: {said:?}"
+        );
+    }
+
     /// A label too wide for its column loses its coordinate whole.
     ///
     /// COMPILE-AND-RUN at e087e27 and it PASSES there, for the wrong reason:
@@ -11184,10 +14237,18 @@ mod tests {
                 let body = text.strip_suffix("...").unwrap_or(&text);
                 // Whatever is drawn must be a prefix of some label's NAME —
                 // never of the coordinate, and never a merged group cut in half.
-                let ok = full.iter().any(|f| {
-                    let name = f.rsplit_once("  ").map_or(f.as_str(), |(n, _)| n);
-                    name.starts_with(body) && !body.is_empty()
-                });
+                //
+                // A FEATURE name is also a name, and a shortened one is fine
+                // here for the reason `FEATURE_NAME_CAP_CHARS` gives: the whole
+                // string is one hover and one list row away, while a shortened
+                // coordinate is unrecoverable on the page. `c...` in this
+                // assertion's own error message was `cat promoter`, not half of
+                // a number.
+                let names = full
+                    .iter()
+                    .map(|f| f.rsplit_once("  ").map_or(f.as_str(), |(n, _)| n))
+                    .chain(mol.features.iter().map(|f| f.name.as_str()));
+                let ok = names.into_iter().any(|n| n.starts_with(body)) && !body.is_empty();
                 assert!(
                     ok,
                     "{w}x{h}: {text:?} is not a name, it is part of a number"
@@ -11467,7 +14528,7 @@ mod tests {
             "the digest worker did not finish"
         );
 
-        let opts = App::figure_options(d);
+        let opts = App::figure_options(d, pl_enzymes::EnzymeSet::All);
         let told = opts.note.expect("the figure carries the disclosure");
 
         // What `bins/pl` computes, from the shipped table rather than from the
