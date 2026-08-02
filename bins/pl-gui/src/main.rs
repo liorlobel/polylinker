@@ -17475,11 +17475,29 @@ mod tests {
 
         // A tripwire for the build belonging on a worker thread, not a benchmark:
         // it must stay within a small multiple of the clone every edit already
-        // pays for. The 5x carries headroom over the ~2-3x intrinsic ratio seen
-        // across CI arches, so it fails on an order-of-magnitude regression rather
-        // than on runner variance.
+        // pays for.
+        //
+        // 15x, RAISED FROM 5x ON MEASUREMENT. The 5 was chosen for "the ~2-3x
+        // intrinsic ratio seen across CI arches" and that figure was simply
+        // wrong. Three consecutive CI runs failed here on commits that changed
+        // nothing near this code:
+        //
+        //     b2d4a44   11.35 ms / 1.66 ms  = 6.8x
+        //     e0ff80c   32.14 ms / 5.86 ms  = 5.5x
+        //     fe89c5c   24.36 ms / 3.94 ms  = 6.2x
+        //
+        // The absolute times move by 3x with runner load; the RATIO does not. It
+        // sits near 6, so a bound of 5 fails a correct build most of the time —
+        // and a tripwire that fires half the time is worse than none, because it
+        // trains its reader to stop looking. It did: three red runs went by
+        // unnoticed in one session because CI had stopped meaning anything.
+        //
+        // 15x keeps what the test is actually for. It exists to catch the build
+        // becoming an order of magnitude dearer than the clone — the point at
+        // which it belongs on a worker — not to pin a constant factor, and it
+        // now has better than 2x headroom over the worst honest measurement.
         assert!(
-            build < clone * 5,
+            build < clone * 15,
             "index build {build:?} against the molecule clone {clone:?} that \
              every edit already pays for"
         );
