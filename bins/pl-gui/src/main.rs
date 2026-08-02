@@ -10,6 +10,7 @@
 
 mod aa;
 mod annot;
+mod bench;
 mod clone;
 mod design;
 mod doc;
@@ -909,7 +910,6 @@ impl PendingDna {
 }
 
 struct App {
-    document: Option<Document>,
     /// A file that could not be read. Renders as a full-screen takeover, which
     /// is right for "there is no document" and wrong for anything else.
     error: Option<String>,
@@ -1038,6 +1038,8 @@ struct App {
     design: Option<design::Panel>,
     /// The cut-and-religate panel, when it is open.
     clone_panel: Option<clone::Panel>,
+    /// What is open. Holds at most one document today; see [`bench::Bench`].
+    bench: bench::Bench,
 
     /// The Feature editor, if it is open.
     ///
@@ -1534,14 +1536,14 @@ impl App {
                 return;
             }
         }
-        if self.document.is_none() || self.recovery.is_none() {
+        if self.document().is_none() || self.recovery.is_none() {
             return;
         }
         // Design B's rule 6, and the one whose absence loses data: an autosave
         // that wrote `log.current()` while a typing run was open would write a
         // recovery file missing the user's last forty keystrokes.
         self.settle();
-        let Some(doc) = &self.document else { return };
+        let Some(doc) = self.document() else { return };
         let here = Autosaved {
             original: doc.path.clone(),
             title: doc.title.clone(),
@@ -1629,7 +1631,7 @@ impl App {
     /// a window on the screen.
     fn blank() -> Self {
         App {
-            document: None,
+            bench: bench::Bench::default(),
             error: None,
             notice: None,
             edit: seqedit::SeqEdit::new(),
@@ -1873,7 +1875,7 @@ impl App {
     /// is what keeps `autosave` from forcing the very first typing run closed
     /// on the frame after it opens.
     fn adopt(&mut self, d: Document) {
-        self.document = Some(d);
+        self.bench.set(d);
         // The annotation index's other half of its identity. Two documents can
         // sit at the same cursor — every one of them starts at `None` — so
         // without this the second file opened is drawn with the first file's
@@ -1888,8 +1890,7 @@ impl App {
         // Read from the file, not carried over: the modal `/transl_table`
         // across this document's CDS features, or the global default.
         self.doc_code = self
-            .document
-            .as_ref()
+            .document()
             .and_then(|d| aa::modal_table(d.molecule()))
             .or_else(|| pl_core::translate::table(self.layout.code))
             .unwrap_or(pl_core::translate::TABLE11);
@@ -1998,7 +1999,7 @@ impl App {
     /// other arc" button rather than guess. This is the same expression
     /// `design::Panel::open` uses, for the same reason.
     fn selection_segment(&self) -> Option<pl_core::Segment> {
-        let d = self.document.as_ref()?;
+        let d = self.document()?;
         let mol = d.molecule();
         let n = mol.len();
         let circular = mol.topology.is_circular();
@@ -2022,7 +2023,8 @@ impl App {
     /// bases are visible is a feature in the wrong place.
     fn open_feature_editor(&mut self, index: Option<usize>) {
         self.settle();
-        let Some(d) = self.document.as_ref() else {
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else {
             return;
         };
         let mol = d.molecule();
@@ -2099,8 +2101,7 @@ impl App {
     /// highlighted on the map, under someone else's name.
     fn remove_feature(&mut self, i: usize) {
         let name = self
-            .document
-            .as_ref()
+            .document()
             .and_then(|d| d.molecule().features.get(i))
             .map(|f| f.name.clone())
             .unwrap_or_default();
@@ -2126,7 +2127,7 @@ impl App {
         // this codebase already enforces structurally, rather than a second
         // "or a run is open" disjunct in `unsaved()`.
         self.settle();
-        if self.document.as_ref().is_some_and(|c| c.unsaved()) {
+        if self.document().is_some_and(|c| c.unsaved()) {
             self.pending_open = Some(PendingOpen {
                 doc: d,
                 status,
@@ -2283,7 +2284,7 @@ impl App {
     /// and wrong for anything else", and the arm that violated that is what
     /// used to lose a user's work.
     fn load_failed(&mut self, e: String) {
-        if self.document.is_some() {
+        if self.document().is_some() {
             self.notice = Some(e);
             return;
         }
@@ -2308,7 +2309,7 @@ impl App {
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| "read".into());
         let mut r = reads::Read::new(name.clone(), Some(path), trace);
-        if let Some(d) = &self.document {
+        if let Some(d) = self.document() {
             r.compare(&d.molecule().seq, d.molecule().topology.is_circular());
         }
         self.status = format!("{name} · {} bases", r.trace.sequence.len());
@@ -2334,7 +2335,7 @@ impl App {
     fn refresh_reads(&mut self) -> (bool, bool) {
         let key = (
             self.doc_generation,
-            self.document.as_ref().map_or(0, |d| d.seq_version),
+            self.document().map_or(0, |d| d.seq_version),
         );
         let mut changed = false;
         if key != self.reads_for {
@@ -2360,7 +2361,7 @@ impl App {
     /// the defect `Document::apply`'s unconditional re-digest exists to
     /// prevent.
     fn rearm_reads(&mut self) {
-        let target = self.document.as_ref().map(|d| {
+        let target = self.document().map(|d| {
             (
                 d.molecule().seq.clone(),
                 d.molecule().topology.is_circular(),
@@ -2403,7 +2404,8 @@ impl App {
         // Assigned by the FASTA arm below; GenBank is always faithful enough to
         // count as a save.
         let mut faithful = true;
-        let Some(d) = &self.document else { return };
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let (ext, filter) = if as_fasta {
             ("fa", "FASTA")
@@ -2473,7 +2475,7 @@ impl App {
                 // marking it clean would make the dot and the guard lie in the
                 // one case they exist for.
                 if faithful {
-                    if let Some(d) = &mut self.document {
+                    if let Some(d) = self.bench.get_mut() {
                         d.mark_saved();
                     }
                 }
@@ -2503,7 +2505,8 @@ impl App {
     /// a destination exists.
     fn save_dna(&mut self, then: Option<Losing>) {
         self.settle();
-        let Some(d) = &self.document else { return };
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else { return };
         // `file_stem`, not `locus_name`: `locus_name` replaces every character
         // outside [A-Za-z0-9_.-] and truncates to the sixteen columns a GenBank
         // LOCUS name gets, because overrunning columns 13-28 shifts every field
@@ -2544,7 +2547,7 @@ impl App {
     /// fix, a GenBank molecule about to replace somebody's `.dna` — was
     /// unreachable from the suite.
     fn plan_dna(&self, path: PathBuf, then: Option<Losing>) -> Option<PendingDna> {
-        let d = self.document.as_ref()?;
+        let d = self.document()?;
         let (bytes, unwritable) = pl_fileio::snapgene::from_molecule_reporting(d.molecule());
         let overwriting_source = d.path.as_deref().is_some_and(|o| same_file(o, &path));
         // The modal's claims are the File tab's claims, out of the same fields
@@ -2601,7 +2604,7 @@ impl App {
     fn write_dna(&mut self, p: PendingDna) {
         match std::fs::write(&p.path, &p.bytes) {
             Ok(()) => {
-                if let Some(d) = &mut self.document {
+                if let Some(d) = self.bench.get_mut() {
                     d.mark_saved();
                 }
                 // The cache omission still gets said, once, through the channel
@@ -2615,7 +2618,7 @@ impl App {
                 // a guard that closed the window after a failed write would have
                 // done the exact damage it was added to prevent.
                 if let Some(why) = p.then {
-                    if self.document.as_ref().is_none_or(|d| !d.unsaved()) {
+                    if self.document().is_none_or(|d| !d.unsaved()) {
                         // Preserved: the bytes are on disk. No recovery draft is
                         // kept and the next launch says nothing, because nothing
                         // happened here that a user needs warning about.
@@ -2752,7 +2755,8 @@ impl App {
         // The map is drawn from `log.current()`, so an open run would be
         // missing from it.
         self.settle();
-        let Some(d) = &self.document else { return };
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let Some(path) = rfd::FileDialog::new()
             .set_file_name(format!("{stem}.pdf"))
@@ -2838,7 +2842,8 @@ impl App {
     /// `--sites unique`, which is its default.
     fn export_svg(&mut self) {
         self.settle();
-        let Some(d) = &self.document else { return };
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let Some(path) = rfd::FileDialog::new()
             .set_file_name(format!("{stem}.svg"))
@@ -2900,7 +2905,8 @@ impl App {
             self.gel_cache = Some((key, built));
             return;
         }
-        let Some(d) = &self.document else {
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else {
             self.gel_cache = Some((key, built));
             return;
         };
@@ -2978,7 +2984,8 @@ impl App {
     /// which formats exist.
     fn export_map_eps(&mut self) {
         self.settle();
-        let Some(d) = &self.document else { return };
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let Some(path) = rfd::FileDialog::new()
             .set_file_name(format!("{stem}.eps"))
@@ -3046,7 +3053,7 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if ctx.input(|i| i.viewport().close_requested()) && !self.let_it_go {
             self.settle();
-            if self.document.as_ref().is_some_and(|d| d.unsaved()) {
+            if self.document().is_some_and(|d| d.unsaved()) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.closing = true;
             }
@@ -3095,11 +3102,12 @@ impl App {
         // cleanly" on the next launch. A guard is a function of the state; when
         // the state stops being at risk the gesture the user asked for should
         // simply happen.
-        if self.document.as_ref().is_none_or(|d| !d.unsaved()) {
+        if self.document().is_none_or(|d| !d.unsaved()) {
             self.resolve_guard(why, true);
             return;
         }
-        let Some(d) = &self.document else { return };
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else { return };
         let title = pl_fileio::caption_of(&d.title).to_string();
         // "0 edits that are not in any file" is absurd and would be the first
         // thing a user sees after a crash recovery, so the never-written case
@@ -3192,7 +3200,7 @@ impl App {
                 // and a guard that proceeded anyway would have done the exact
                 // damage it exists to prevent. Only a write that actually
                 // cleared `unsaved()` goes on to the discard.
-                if self.document.as_ref().is_none_or(|d| !d.unsaved()) {
+                if self.document().is_none_or(|d| !d.unsaved()) {
                     self.resolve_guard(why, true);
                 }
             }
@@ -3498,7 +3506,7 @@ impl eframe::App for App {
         // instances all titled the same. Set from the same predicate the dot and
         // the guard read, so the three cannot disagree.
         {
-            let want = match &self.document {
+            let want = match self.document() {
                 Some(d) => format!(
                     "{}{} — Polylinker",
                     pl_fileio::caption_of(&d.title),
@@ -3590,7 +3598,7 @@ impl eframe::App for App {
                     // Same rule as `load`'s Err arm: an unreadable payload is
                     // not a reason to destroy the document that IS open.
                     Err(e) => {
-                        if self.document.is_some() {
+                        if self.document().is_some() {
                             self.notice = Some(e);
                         } else {
                             self.error = Some(e);
@@ -3610,14 +3618,14 @@ impl eframe::App for App {
         if keys.redo {
             self.do_redo();
         }
-        if keys.save && self.document.is_some() {
+        if keys.save && self.document().is_some() {
             self.export(false);
         }
 
         // The digest worker cannot wake the UI, so poll it and keep repainting
         // while it runs.
         let mut running = false;
-        if let Some(d) = &mut self.document {
+        if let Some(d) = self.bench.get_mut() {
             if d.digest.poll() {
                 ctx.request_repaint();
             }
@@ -3871,7 +3879,7 @@ impl App {
                 if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
                     self.pick_file();
                 }
-                let has = self.document.is_some();
+                let has = self.document().is_some();
                 ui.add_enabled_ui(has, |ui| {
                     menu_with_caret(ui, "Save", |ui| {
                         // First, above GenBank: the list runs in descending
@@ -3983,14 +3991,14 @@ impl App {
                 // were not competing for the space, they were both taking it.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     egui::global_theme_preference_switch(ui);
-                    if let Some(d) = &self.document {
+                    if let Some(d) = self.document() {
                         if d.digest.is_running() {
                             ui.add(egui::Spinner::new().size(13.0));
                             ui.label(RichText::new("digesting").color(pal(ui).muted).size(12.0));
                         }
                     }
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        if let Some(d) = &self.document {
+                        if let Some(d) = self.document() {
                             // A dot rather than the usual asterisk-in-the-title.
                             //
                             // It used to mean "edits exist and are undoable,
@@ -4088,7 +4096,7 @@ impl App {
     /// The menu's own name and the origin item's are [`MOLECULE_MENU`] and
     /// [`SET_ORIGIN_ITEM`], not literals — see those.
     fn edit_group(&mut self, ui: &mut Ui) {
-        let (can_undo, can_redo) = match &self.document {
+        let (can_undo, can_redo) = match self.document() {
             Some(d) => (d.log.can_undo(), d.log.can_redo()),
             None => (false, false),
         };
@@ -4130,7 +4138,7 @@ impl App {
         // 880 pt minimum with slack.
         ui.separator();
 
-        let has = self.document.is_some();
+        let has = self.document().is_some();
         ui.add_enabled_ui(has, |ui| {
             // "Edit" was wrong three times over, which is why it read as
             // ambiguous next to Undo and Redo.
@@ -4156,8 +4164,7 @@ impl App {
             // or "File": those are tab names.
             menu_with_caret(ui, MOLECULE_MENU, |ui| {
                 let circular = self
-                    .document
-                    .as_ref()
+                    .document()
                     .is_some_and(|d| d.molecule().topology.is_circular());
                 let label = if circular {
                     "Make linear"
@@ -4192,7 +4199,7 @@ impl App {
                         .on_hover_text("renumber the plasmid to start at this feature")
                         .clicked()
                     {
-                        if let (Some(d), Some(i)) = (&self.document, sel) {
+                        if let (Some(d), Some(i)) = (self.document(), sel) {
                             let m = d.molecule();
                             if let Some(f) = m.features.get(i) {
                                 // `Feature::start` is the MINIMUM of the segment
@@ -4269,7 +4276,9 @@ impl App {
     /// The one place a pending run becomes an operation. Every path that reads
     /// the document for a durable purpose goes through here first.
     fn settle(&mut self) {
-        let Some(d) = &mut self.document else { return };
+        let Some(d) = self.bench.get_mut() else {
+            return;
+        };
         if self.edit.run().is_none() {
             return;
         }
@@ -4318,7 +4327,7 @@ impl App {
     /// took undoes the user's previous, unrelated edit as well.
     fn edit(&mut self, kind: pl_core::OpKind) -> bool {
         self.settle();
-        let Some(d) = &mut self.document else {
+        let Some(d) = self.bench.get_mut() else {
             return false;
         };
         let what = kind.describe();
@@ -4376,10 +4385,9 @@ impl App {
         // plausible plasmid whose every coordinate has moved — worse than an
         // incomplete undo, because there is nothing on screen to say so.
         let pair = self
-            .document
-            .as_ref()
+            .document()
             .and_then(|d| self.edit.undo_over_pair(d.log.cursor()));
-        if let Some(d) = &mut self.document {
+        if let Some(d) = self.bench.get_mut() {
             let done = match pair {
                 Some(before) => d
                     .seek(before)
@@ -4400,7 +4408,7 @@ impl App {
 
     fn do_redo(&mut self) {
         self.settle();
-        if let Some(d) = &mut self.document {
+        if let Some(d) = self.bench.get_mut() {
             match d.redo() {
                 Ok(()) => {
                     self.status = "redone".into();
@@ -4561,7 +4569,7 @@ impl App {
                     // will say so if another tab is added, which is the
                     // property worth having: the five below all open with
                     // `expect("checked by caller")`.
-                    _ if self.document.is_none() => {
+                    _ if self.document().is_none() => {
                         ui.add_space(20.0);
                         ui.label(RichText::new("Nothing open.").color(pal(ui).muted));
                     }
@@ -4898,11 +4906,7 @@ impl App {
                 })
         };
         let (n_match, n_all) = {
-            let m = self
-                .document
-                .as_ref()
-                .expect("checked by caller")
-                .molecule();
+            let m = self.document().expect("checked by caller").molecule();
             (
                 m.features.iter().filter(|f| matches(f)).count(),
                 m.features.len(),
@@ -4940,7 +4944,7 @@ impl App {
         let mut open_row = None;
         let mut dup_row = None;
         let mut rm_row = None;
-        let doc = self.document.as_ref().expect("checked by caller");
+        let doc = self.document().expect("checked by caller");
         // Read once: `extent` needs the molecule the feature belongs to, and
         // borrowing it inside the row closure would fight the iterator.
         let span = doc.molecule().span();
@@ -5148,8 +5152,7 @@ impl App {
     /// come along, and none of them has a control here to be forgotten at.
     fn duplicate_feature(&mut self, i: usize) {
         let Some(mut f) = self
-            .document
-            .as_ref()
+            .document()
             .and_then(|d| d.molecule().features.get(i))
             .cloned()
         else {
@@ -5157,8 +5160,7 @@ impl App {
         };
         f.name = format!("{} copy", f.name);
         let last = self
-            .document
-            .as_ref()
+            .document()
             .map(|d| d.molecule().features.len())
             .unwrap_or(0);
         if self.edit(pl_core::OpKind::SetFeature {
@@ -5170,7 +5172,12 @@ impl App {
     }
 
     fn enzymes_tab(&mut self, ui: &mut Ui) {
-        let d = self.document.as_ref().expect("checked by caller");
+        // self.bench.get(), not self.document(): the accessor borrows ALL of
+        // self for as long as d lives, and this function goes on to write
+        // self.enzyme_set from a closure. Through the field the borrow is
+        // disjoint, which is what the old self.document() gave for free
+        // and is the one real cost of putting the document behind a method.
+        let d = self.bench.get().expect("checked by caller");
         ui.add_space(4.0);
 
         match &d.digest {
@@ -5450,7 +5457,7 @@ impl App {
         });
         ui.separator();
 
-        let ref_len = self.document.as_ref().map(|d| d.molecule().len());
+        let ref_len = self.document().map(|d| d.molecule().len());
         let trace_seq = self.reads[self.read_shown].trace.sequence.clone();
         let window = self.read_window;
         let r = &self.reads[self.read_shown];
@@ -5660,7 +5667,7 @@ impl App {
     ///
     /// This is a VIEW change. It selects a base; it does not alter one.
     fn jump_to_base(&mut self, at: u64) {
-        let Some(d) = self.document.as_mut() else {
+        let Some(d) = self.bench.get_mut() else {
             return;
         };
         let n = d.molecule().len();
@@ -5693,7 +5700,8 @@ impl App {
     ///   abandoned branch is still there and still reachable, which is the
     ///   afternoon's work every other editor silently throws away.
     fn history_tab(&mut self, ui: &mut Ui) {
-        let Some(d) = &self.document else { return };
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else { return };
         let ops = d.log.all_ops();
 
         ui.add_space(6.0);
@@ -5781,13 +5789,13 @@ impl App {
     /// because a lazy rebuild inside the closure would need interior
     /// mutability this file does not otherwise use.
     fn refresh_annotations(&mut self) {
-        let want = match &self.document {
+        let want = match self.document() {
             Some(d) => (self.doc_generation, d.log.cursor()),
             None => return,
         };
         if self.annot.version != want {
             let (ix, tr) = {
-                let d = self.document.as_ref().expect("checked above");
+                let d = self.document().expect("checked above");
                 (
                     annot::AnnotIndex::build(d.molecule(), want),
                     // Once per document version, beside the index and on the
@@ -5805,7 +5813,7 @@ impl App {
         }
 
         let done = matches!(
-            self.document.as_ref().expect("checked above").digest,
+            self.document().expect("checked above").digest,
             DigestState::Done(_)
         );
         let key = (want, self.enzyme_set, done);
@@ -5813,7 +5821,7 @@ impl App {
             return;
         }
         let cuts = {
-            let d = self.document.as_ref().expect("checked above");
+            let d = self.document().expect("checked above");
             let mut cuts = Vec::new();
             if done {
                 for (i, dg) in d.digest.results().iter().enumerate() {
@@ -5860,7 +5868,7 @@ impl App {
     fn refresh_orfs(&mut self) {
         let want = self.layout.orf_track;
         let (code, min_aa) = (self.doc_code.id, self.layout.orf_min_aa);
-        let Some(d) = self.document.as_mut() else {
+        let Some(d) = self.bench.get_mut() else {
             return;
         };
         if !want {
@@ -5908,12 +5916,7 @@ impl App {
         use seqedit::Selection;
 
         let now = ui.input(|i| i.time);
-        let gate = seqedit::Editability::of(
-            self.document
-                .as_ref()
-                .expect("checked by caller")
-                .molecule(),
-        );
+        let gate = seqedit::Editability::of(self.document().expect("checked by caller").molecule());
 
         ui.add_space(4.0);
         if !gate.is_editable() {
@@ -5957,9 +5960,7 @@ impl App {
             )
         });
 
-        let n = self
-            .edit
-            .effective_len(self.document.as_ref().unwrap().molecule());
+        let n = self.edit.effective_len(self.document().unwrap().molecule());
 
         // The row width is measured, not assumed: sixty cells plus the gutter
         // is wider than the panel was until this run, and a base that is off
@@ -6041,8 +6042,7 @@ impl App {
         // it, and the header says what is now hidden. That makes the misleading
         // case impossible by construction rather than by care.
         let ds = self
-            .document
-            .as_ref()
+            .document()
             .expect("checked by caller")
             .molecule()
             .double_stranded;
@@ -6176,7 +6176,12 @@ impl App {
 
         {
             {
-                let d = self.document.as_ref().expect("checked by caller");
+                // self.bench.get(), not self.document(): the accessor borrows ALL of
+                // self for as long as d lives, and this function goes on to write
+                // self.enzyme_set from a closure. Through the field the borrow is
+                // disjoint, which is what the old self.document() gave for free
+                // and is the one real cost of putting the document behind a method.
+                let d = self.bench.get().expect("checked by caller");
                 let mol = d.molecule();
                 let edit = &self.edit;
                 let ix = &self.annot;
@@ -7423,7 +7428,7 @@ impl App {
         // first. Assigning a selection behind a run's back put the typed bases
         // ten positions from the highlight, and its own docstring says so.
         if let Some((lo, hi, res)) = codon_click {
-            let d = self.document.as_mut().expect("checked by caller");
+            let d = self.bench.get_mut().expect("checked by caller");
             self.edit.set_selection(
                 d,
                 Selection {
@@ -7463,14 +7468,14 @@ impl App {
             self.edit.dragging = true;
         }
         if let Some((to, shift)) = click {
-            let d = self.document.as_mut().expect("checked by caller");
+            let d = self.bench.get_mut().expect("checked by caller");
             self.edit.place(d, to, shift);
             if !shift {
                 self.edit.dragging = true;
             }
         }
         if let Some(to) = drag_to {
-            let d = self.document.as_mut().expect("checked by caller");
+            let d = self.bench.get_mut().expect("checked by caller");
             let circular = d.molecule().topology.is_circular();
             let anchor = self.edit.sel.map_or(self.edit.caret, |s| s.anchor);
             let n_committed = d.molecule().len();
@@ -7525,7 +7530,12 @@ impl App {
     /// cut.
     fn sequence_readout(&mut self, ui: &mut Ui) {
         let (mol_line, other_arc, has_sel) = {
-            let d = self.document.as_ref().expect("checked by caller");
+            // self.bench.get(), not self.document(): the accessor borrows ALL of
+            // self for as long as d lives, and this function goes on to write
+            // self.enzyme_set from a closure. Through the field the borrow is
+            // disjoint, which is what the old self.document() gave for free
+            // and is the one real cost of putting the document behind a method.
+            let d = self.bench.get().expect("checked by caller");
             let mol = d.molecule();
             let n_c = mol.len();
             let circular = mol.topology.is_circular();
@@ -7770,7 +7780,12 @@ impl App {
                 t.bad_codon_starts.clone(),
             )
         };
-        let d = self.document.as_ref().expect("checked by caller");
+        // self.bench.get(), not self.document(): the accessor borrows ALL of
+        // self for as long as d lives, and this function goes on to write
+        // self.enzyme_set from a closure. Through the field the borrow is
+        // disjoint, which is what the old self.document() gave for free
+        // and is the one real cost of putting the document behind a method.
+        let d = self.bench.get().expect("checked by caller");
         let ds = d.molecule().double_stranded;
         let complement = self.layout.complement.unwrap_or(ds != Some(false));
         let orf_state = match &d.orfs {
@@ -8032,7 +8047,12 @@ impl App {
         has_cuts: bool,
         typing: bool,
     ) {
-        let d = self.document.as_ref().expect("checked by caller");
+        // self.bench.get(), not self.document(): the accessor borrows ALL of
+        // self for as long as d lives, and this function goes on to write
+        // self.enzyme_set from a closure. Through the field the borrow is
+        // disjoint, which is what the old self.document() gave for free
+        // and is the one real cost of putting the document behind a method.
+        let d = self.bench.get().expect("checked by caller");
         let scanning = d.digest.is_running();
         let unavailable = match &d.digest {
             DigestState::Unavailable(why) => Some(why.clone()),
@@ -8117,7 +8137,7 @@ impl App {
     }
 
     fn do_copy(&mut self) -> Option<String> {
-        let d = self.document.as_ref()?;
+        let d = self.document()?;
         match self.edit.copy(d.molecule()) {
             Some((s, skipped)) => {
                 self.edit.say(format!(
@@ -8143,7 +8163,7 @@ impl App {
     /// It is NOT on Ctrl+Shift+C, and that is the whole point: see the
     /// `Event::Copy` arm for why that chord silently fired on plain Ctrl+C.
     fn do_copy_rc(&mut self) -> Option<String> {
-        let d = self.document.as_ref()?;
+        let d = self.document()?;
         match self.edit.copy_revcomp(d.molecule()) {
             Some((s, skipped)) => {
                 self.edit.say(format!(
@@ -8170,7 +8190,7 @@ impl App {
     /// "cut 4 bases". A cut that destroyed a feature lost that sentence the
     /// same way, and the identical delete by Backspace reported both.
     fn do_cut(&mut self, now: f64) -> Option<String> {
-        let d = self.document.as_mut()?;
+        let d = self.bench.get_mut()?;
         let Some((s, skipped)) = self.edit.copy(d.molecule()) else {
             self.edit.say("Nothing is selected.");
             return None;
@@ -8203,7 +8223,8 @@ impl App {
     /// nothing, rather than inventing a span. A linear scan is fine even at
     /// MG1655's ~9,000 features: it happens on a click, not per frame.
     fn select_feature_under(&mut self, caret: u64) {
-        let Some(d) = &self.document else { return };
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else { return };
         let base = caret.max(1);
         let mut best: Option<(u64, usize, u64, u64)> = None;
         for (i, f) in d.molecule().features.iter().enumerate() {
@@ -8247,7 +8268,7 @@ impl App {
                 through_origin: end < start && circular,
             };
             let head = end.min(n);
-            let d = self.document.as_mut().expect("checked at the top");
+            let d = self.bench.get_mut().expect("checked at the top");
             self.edit.set_selection(d, sel, head);
             self.selected = Some(i);
         }
@@ -8299,7 +8320,7 @@ impl App {
         let per_page = self.edit.visible_rows.max(1) * per_row;
 
         for ev in events {
-            let Some(d) = self.document.as_mut() else {
+            let Some(d) = self.bench.get_mut() else {
                 return;
             };
             let n = d.molecule().len();
@@ -8402,7 +8423,12 @@ impl App {
     }
 
     fn file_tab(&mut self, ui: &mut Ui) {
-        let d = self.document.as_ref().expect("checked by caller");
+        // self.bench.get(), not self.document(): the accessor borrows ALL of
+        // self for as long as d lives, and this function goes on to write
+        // self.enzyme_set from a closure. Through the field the borrow is
+        // disjoint, which is what the old self.document() gave for free
+        // and is the one real cost of putting the document behind a method.
+        let d = self.bench.get().expect("checked by caller");
         let m = d.molecule();
         ui.add_space(6.0);
 
@@ -8569,7 +8595,8 @@ impl App {
     /// gel changes between two frames in which nothing changed, so the key
     /// below is the complete list of what a picture depends on.
     fn gel_ready(&mut self) -> Result<(), String> {
-        let Some(d) = self.document.as_ref() else {
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else {
             self.gel_cache = None;
             return Err("no molecule is open".into());
         };
@@ -8598,7 +8625,7 @@ impl App {
         if self.gel_cache.as_ref().is_some_and(|(k, _)| *k == key) {
             return Ok(());
         }
-        let d = self.document.as_ref().expect("checked above");
+        let d = self.document().expect("checked above");
         let built = self.gel.build(
             d.molecule(),
             d.digest.results(),
@@ -8627,7 +8654,7 @@ impl App {
         // conversion whose off-by-one is documented there. The app ships a
         // "take the other arc" button precisely because it refuses to guess.
         let sel_seg = self.selection_segment();
-        let caret_at = self.document.as_ref().map(|_| self.edit.caret);
+        let caret_at = self.document().map(|_| self.edit.caret);
         // ONE control, one answer. `self.enzyme_set` reached the Enzymes list,
         // the inline cut marks and the "N site(s) hidden" line, and the map was
         // called unfiltered — so narrowing to "Unique 6+" to pick a
@@ -8647,7 +8674,7 @@ impl App {
         let lit: Option<Vec<usize>> = (!self.filter.is_empty())
             .then(|| {
                 let needle = self.filter.to_lowercase();
-                self.document.as_ref().map(|d| {
+                self.document().map(|d| {
                     d.molecule()
                         .features
                         .iter()
@@ -8673,7 +8700,7 @@ impl App {
         // fighting over double-click — but reading it live inside the closure
         // spawned a `cmd /C assoc .dna` child process on every repaint and
         // blocked the UI thread on it until cmd.exe exited.
-        let association = if self.error.is_none() && self.document.is_none() {
+        let association = if self.error.is_none() && self.document().is_none() {
             association_note(self.dna_owner())
         } else {
             String::new()
@@ -8754,7 +8781,8 @@ impl App {
                 });
                 return;
             }
-            let Some(d) = &self.document else {
+            // Field, not accessor: self.gel is written below. See nzymes_tab.
+            let Some(d) = self.bench.get() else {
                 ui.centered_and_justified(|ui| {
                     ui.label(
                         RichText::new(format!(
@@ -8883,7 +8911,7 @@ impl App {
         // `verdict` the Enzymes tab prints. A fourth surface with its own answer
         // to that question would widen the split-brain the review calls
         // finding 5.
-        if let (Some(pane), Some(d)) = (pane_out, self.document.as_ref()) {
+        if let (Some(pane), Some(d)) = (pane_out, self.document()) {
             let tip = if let Some(sites) = &site_out {
                 let mut lines: Vec<String> = Vec::new();
                 for (name, pos) in sites {
@@ -8969,7 +8997,8 @@ impl App {
     /// are visible would return primers for a sequence that is not on screen.
     fn open_design(&mut self) {
         self.settle();
-        let Some(d) = self.document.as_ref() else {
+        // Field, not accessor: self.gel is written below. See nzymes_tab.
+        let Some(d) = self.bench.get() else {
             return;
         };
         let Some(sel) = self.edit.sel else { return };
@@ -8993,6 +9022,17 @@ impl App {
         }
     }
 
+    /// The document on screen.
+    ///
+    /// Named `document()` rather than `active()` so the 88 call sites this
+    /// replaced read as they did — `self.document()` where they said
+    /// `self.document()`. Renaming them as well would have been churn on
+    /// top of a container swap, and this stage is worth being reviewable as a
+    /// no-behaviour-change diff.
+    fn document(&self) -> Option<&Document> {
+        self.bench.get()
+    }
+
     /// Draw the cut-and-religate panel and adopt a product if one was asked for.
     ///
     /// The product becomes a document THROUGH THE FILE PATH — serialised to
@@ -9011,7 +9051,7 @@ impl App {
         // Checked before the take, for the reason `design_panel` documents: a
         // panel that outlives its document is the state that writes one file's
         // answer into another.
-        if self.document.is_none() {
+        if self.document().is_none() {
             self.clone_panel = None;
             return;
         }
@@ -9019,12 +9059,7 @@ impl App {
             return;
         };
         let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
-        let mol = self
-            .document
-            .as_ref()
-            .expect("checked above")
-            .molecule()
-            .clone();
+        let mol = self.document().expect("checked above").molecule().clone();
         let keep = clone::show(ctx, &mut panel, &mol, dark);
 
         if let Some(i) = panel.wanted.take() {
@@ -9078,7 +9113,7 @@ impl App {
         // deliberately and says so, which leaves this branch unreachable in
         // practice; it stays because a panel that outlives its document is
         // exactly the state that writes one file's primers into another.
-        if self.document.is_none() {
+        if self.document().is_none() {
             self.close_design(
                 "the design panel was closed: the document it described is no longer open",
             );
@@ -9089,7 +9124,8 @@ impl App {
         };
         let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
         let (seq, at) = {
-            let Some(d) = self.document.as_ref() else {
+            // Field, not accessor: self.gel is written below. See nzymes_tab.
+            let Some(d) = self.bench.get() else {
                 self.design = Some(panel);
                 return;
             };
@@ -9166,7 +9202,7 @@ impl App {
     /// panel that outlives its document is exactly the state that writes one
     /// file's coordinates into another.
     fn feature_editor(&mut self, ctx: &egui::Context) {
-        if self.document.is_none() {
+        if self.document().is_none() {
             self.close_feature_editor(
                 "the feature editor was closed: the document it described is no longer open",
             );
@@ -9181,7 +9217,7 @@ impl App {
             .map(|s| (s.start, s.end, s.end < s.start));
         // Where the document stands THIS frame. The panel compares it against
         // where it stood on open, and refuses to commit through a moved index.
-        panel.doc_at = self.document.as_ref().and_then(|d| d.log.cursor());
+        panel.doc_at = self.document().and_then(|d| d.log.cursor());
         let mut keep = featedit::show(ctx, &mut panel, sel, dark);
 
         // After the frame: `App::edit` needs `&mut self`, which the draw closure
@@ -9231,8 +9267,7 @@ impl App {
                         // feature is the last one. Selecting it is what puts it
                         // under the highlight the user is already looking at.
                         let last = self
-                            .document
-                            .as_ref()
+                            .document()
                             .map(|d| d.molecule().features.len())
                             .unwrap_or(0);
                         self.selected = last.checked_sub(1);
@@ -9270,7 +9305,7 @@ impl App {
         let Some((report, target)) = self.edit.pending_paste.clone() else {
             return;
         };
-        let n = self.document.as_ref().map_or(0, |d| d.molecule().len());
+        let n = self.document().map_or(0, |d| d.molecule().len());
         let added = report.bases.len() as u64;
         let mut go = false;
         let mut cancel = false;
@@ -9330,7 +9365,7 @@ impl App {
             self.edit.say("Paste cancelled. Nothing was changed.");
         } else if go {
             self.edit.pending_paste = None;
-            if let Some(d) = &mut self.document {
+            if let Some(d) = self.bench.get_mut() {
                 let target = target.unwrap_or_else(|| self.edit.target(d));
                 self.edit.insert_paste(d, &report, target);
             }
@@ -9552,7 +9587,7 @@ impl GelKey {
         let c = app.gel.conditions;
         GelKey {
             doc: app.doc_generation,
-            seq: app.document.as_ref().map_or(0, |d| d.seq_version),
+            seq: app.document().map_or(0, |d| d.seq_version),
             picked: app.gel.picked.iter().cloned().collect(),
             arrangement: app.gel.arrangement,
             ladder: app.gel.ladder,
@@ -12055,7 +12090,7 @@ mod tests {
         // Recover banner showed a matching op count, so it looked right.
         const SEQ: &str = "AAAACCCCGGGGTTTTAAGG";
         let (mut app, path) = app_with_recovery("fork");
-        app.document = Some(edited_doc("x.fa", SEQ));
+        app.bench.set(edited_doc("x.fa", SEQ));
         app.autosave(false);
         assert_eq!(
             autosaved(&path).0.topology,
@@ -12063,7 +12098,7 @@ mod tests {
             "the premise: the first edit was written"
         );
 
-        let d = app.document.as_mut().unwrap();
+        let d = app.bench.get_mut().unwrap();
         d.undo().unwrap();
         d.apply(pl_core::OpKind::ReverseComplement).unwrap();
         assert_eq!(d.log.path().len(), 1, "the collision this test is about");
@@ -12089,11 +12124,11 @@ mod tests {
         // A once and then B once left the single recovery file holding A's
         // molecule under A's title, and B's work was never written at all.
         let (mut app, path) = app_with_recovery("swap");
-        app.document = Some(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.set(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
         app.autosave(false);
         assert_eq!(autosaved(&path).1, "a.fa", "the premise");
 
-        app.document = Some(edited_doc("b.fa", "GGGGGGGGTTTTTTTTAACC"));
+        app.bench.set(edited_doc("b.fa", "GGGGGGGGTTTTTTTTAACC"));
         app.last_autosave = None;
         app.autosave(false);
 
@@ -12110,7 +12145,7 @@ mod tests {
         // The control, and the reason the gate exists: `autosave` runs on every
         // frame. Nothing changed, so nothing may be written.
         let (mut app, path) = app_with_recovery("idle");
-        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.set(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
         app.autosave(false);
         assert!(path.exists());
         std::fs::remove_file(&path).unwrap();
@@ -12127,14 +12162,14 @@ mod tests {
         // file that has only been *looked at* must not overwrite somebody's
         // unsaved edits, however stale the identity check thinks they are.
         let (mut app, path) = app_with_recovery("browse");
-        app.document = Some(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.set(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
         app.autosave(false);
 
         // `Some(path)`, and the path is what the case is about: "only looked
         // at" means read FROM a file. A pathless document is unsaved by
         // definition and now IS autosaved — see
         // `a_restored_draft_with_no_path_is_autosaved`.
-        app.document = Some(
+        app.bench.set(
             Document::from_bytes(b">b\nTTTTTTTT\n", "b.fa".into(), Some("b.fa".into())).unwrap(),
         );
         app.last_autosave = None;
@@ -12151,11 +12186,11 @@ mod tests {
         // file must stop offering the branch the user has just stepped off.
         const SEQ: &str = "AAAACCCCGGGGTTTTAAGG";
         let (mut app, path) = app_with_recovery("rewound");
-        app.document = Some(edited_doc("x.fa", SEQ));
+        app.bench.set(edited_doc("x.fa", SEQ));
         app.autosave(false);
         assert_eq!(autosaved(&path).0.topology, pl_core::Topology::Circular);
 
-        app.document.as_mut().unwrap().undo().unwrap();
+        app.bench.get_mut().unwrap().undo().unwrap();
         app.last_autosave = None;
         app.autosave(false);
         assert_eq!(autosaved(&path).0.topology, pl_core::Topology::Linear);
@@ -12167,7 +12202,7 @@ mod tests {
         // recovery file that exists is this program's only record of an
         // unclean exit.
         let (mut app, path) = app_with_recovery("unedited");
-        app.document = Some(
+        app.bench.set(
             Document::from_bytes(b">x\nAAAACCCCGGGG\n", "x.fa".into(), Some("x.fa".into()))
                 .unwrap(),
         );
@@ -12477,9 +12512,10 @@ mod tests {
         // and its own report is empty: the case that took the fast path.
         let mut app = App::blank();
         let gb = pl_fileio::genbank::write(&pkov(), "plain", today());
-        app.document = Some(Document::from_bytes(gb.as_bytes(), "plain.gb".into(), None).unwrap());
+        app.bench
+            .set(Document::from_bytes(gb.as_bytes(), "plain.gb".into(), None).unwrap());
         assert!(
-            app.document.as_ref().unwrap().container.is_none(),
+            app.document().unwrap().container.is_none(),
             "the premise: nothing about the source says a .dna is at risk"
         );
 
@@ -12522,7 +12558,8 @@ mod tests {
 
         let mut app = App::blank();
         let gb = pl_fileio::genbank::write(&pkov(), "plain", today());
-        app.document = Some(Document::from_bytes(gb.as_bytes(), "plain.gb".into(), None).unwrap());
+        app.bench
+            .set(Document::from_bytes(gb.as_bytes(), "plain.gb".into(), None).unwrap());
         let pending = app.plan_dna(fresh, None).expect("a plan");
         assert!(!pending.asks(), "{:?}", pending.losing());
     }
@@ -12540,7 +12577,7 @@ mod tests {
     #[test]
     fn answering_the_guard_by_saving_leaves_no_abandoned_draft() {
         let (mut app, recovery) = app_with_recovery("saved-answer");
-        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.set(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
         app.closing = true;
         app.resolve_guard(Losing::Close, true);
         assert!(
@@ -12568,17 +12605,17 @@ mod tests {
         // different case and not this one.
         let file = temp_file("undone", "fa", PLASMID_A);
         app.load(file.clone());
-        app.document
-            .as_mut()
+        app.bench
+            .get_mut()
             .unwrap()
             .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
             .unwrap();
-        assert!(app.document.as_ref().unwrap().unsaved(), "the premise");
+        assert!(app.document().unwrap().unsaved(), "the premise");
         app.closing = true;
         // The user undoes back to the base while the question is on screen.
-        app.document.as_mut().unwrap().undo().unwrap();
+        app.bench.get_mut().unwrap().undo().unwrap();
         assert!(
-            !app.document.as_ref().unwrap().unsaved(),
+            !app.document().unwrap().unsaved(),
             "the premise: undoing to the opening state is clean"
         );
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -12619,7 +12656,7 @@ mod tests {
     fn ctrl_c_copies_the_selection_even_with_shift_still_held() {
         let seq = "CTAAGCCTTTGGGGCCCC";
         let mut app = App::blank();
-        app.document = Some(
+        app.bench.set(
             Document::from_bytes(format!(">x\n{seq}\n").as_bytes(), "x.fa".into(), None).unwrap(),
         );
         app.tab = Tab::Sequence;
@@ -12718,7 +12755,7 @@ mod tests {
         ]);
         // The flag never became a file: nothing in the notice mentions it, and
         // the good molecule is open.
-        assert!(app.document.is_some(), "{:?}", app.error);
+        assert!(app.document().is_some(), "{:?}", app.error);
         assert!(app.error.is_none(), "the screen was not taken over");
         let notice = app.notice.clone().unwrap_or_default();
         assert!(!notice.contains("--help"), "{notice}");
@@ -12741,7 +12778,7 @@ mod tests {
         // `--` ends the flags, so a file really called `-x` can still be named.
         let mut app = App::blank();
         app.open_argv([OsString::from("--"), OsString::from(&good)]);
-        assert!(app.document.is_some());
+        assert!(app.document().is_some());
         assert!(app.notice.is_none(), "{:?}", app.notice);
 
         // And ONE failure reads as itself rather than as a list of one.
@@ -12817,12 +12854,12 @@ mod tests {
     #[test]
     fn the_forced_final_autosave_writes_even_at_the_base_of_the_log() {
         let (mut app, path) = app_with_recovery("forced-base");
-        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.set(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
         app.autosave(false);
         assert!(path.exists(), "the premise");
-        app.document.as_mut().unwrap().undo().unwrap();
+        app.bench.get_mut().unwrap().undo().unwrap();
         assert!(
-            app.document.as_ref().unwrap().log.cursor().is_none(),
+            app.document().unwrap().log.cursor().is_none(),
             "the premise: the cursor is at the base"
         );
         app.resolve_guard(Losing::Close, false);
@@ -12923,7 +12960,7 @@ mod tests {
         let path = temp_file(tag, "fa", PLASMID_A);
         let mut app = App::blank();
         app.load(path.clone());
-        assert!(app.document.is_some(), "the premise: {tag} opened");
+        assert!(app.document().is_some(), "the premise: {tag} opened");
         (app, path)
     }
 
@@ -12935,7 +12972,7 @@ mod tests {
     #[test]
     fn undoing_back_to_the_opening_state_is_not_unsaved() {
         let (mut app, path) = app_with_a("undo-clean");
-        let d = app.document.as_mut().unwrap();
+        let d = app.bench.get_mut().unwrap();
         assert!(!d.unsaved(), "a file just opened is on disk, by definition");
 
         d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
@@ -12981,8 +13018,8 @@ mod tests {
         assert!(!app.closing, "an unedited document must not prompt");
 
         // Dirty: held.
-        app.document
-            .as_mut()
+        app.bench
+            .get_mut()
             .unwrap()
             .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
             .unwrap();
@@ -13001,8 +13038,8 @@ mod tests {
     fn answering_close_without_saving_actually_closes() {
         let ctx = test_ctx();
         let (mut app, path) = app_with_a("close-go");
-        app.document
-            .as_mut()
+        app.bench
+            .get_mut()
             .unwrap()
             .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
             .unwrap();
@@ -13040,7 +13077,7 @@ mod tests {
     #[test]
     fn abandoning_unsaved_work_keeps_the_recovery_draft() {
         let (mut app, recovery) = app_with_recovery("abandoned");
-        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.set(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
         app.resolve_guard(Losing::Close, false);
         assert!(
             recovery.exists(),
@@ -13070,7 +13107,7 @@ mod tests {
     #[test]
     fn the_abandoned_flag_survives_an_already_current_recovery_file() {
         let (mut app, path) = app_with_recovery("flag");
-        app.document = Some(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.set(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
         // The ordinary periodic write, which leaves the memo current.
         app.autosave(false);
         let first = std::fs::read_to_string(&path).unwrap();
@@ -13094,8 +13131,8 @@ mod tests {
     #[test]
     fn opening_a_second_file_over_an_edited_one_asks_first() {
         let (mut app, a) = app_with_a("swap-a");
-        app.document
-            .as_mut()
+        app.bench
+            .get_mut()
             .unwrap()
             .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
             .unwrap();
@@ -13104,7 +13141,7 @@ mod tests {
         app.load(b.clone());
         assert!(app.pending_open.is_some(), "the swap is parked");
         assert_eq!(
-            app.document.as_ref().unwrap().title,
+            app.document().unwrap().title,
             "swap-a.fa",
             "and the edited document is still the one on screen"
         );
@@ -13116,7 +13153,7 @@ mod tests {
         );
 
         app.resolve_guard(Losing::Open, false);
-        assert_eq!(app.document.as_ref().unwrap().title, "swap-b.fa");
+        assert_eq!(app.document().unwrap().title, "swap-b.fa");
         assert!(app.pending_open.is_none());
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
@@ -13127,8 +13164,8 @@ mod tests {
     #[test]
     fn cancelling_the_question_keeps_the_document_and_the_row() {
         let (mut app, a) = app_with_a("cancel-a");
-        app.document
-            .as_mut()
+        app.bench
+            .get_mut()
             .unwrap()
             .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
             .unwrap();
@@ -13136,8 +13173,8 @@ mod tests {
         app.load(b.clone());
         app.drop_pending_open();
         assert!(app.pending_open.is_none());
-        assert_eq!(app.document.as_ref().unwrap().title, "cancel-a.fa");
-        assert!(app.document.as_ref().unwrap().unsaved(), "still dirty");
+        assert_eq!(app.document().unwrap().title, "cancel-a.fa");
+        assert!(app.document().unwrap().unsaved(), "still dirty");
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
     }
@@ -13281,7 +13318,7 @@ mod tests {
     #[test]
     fn the_status_after_a_typing_run_names_the_typing_run() {
         let mut app = App::blank();
-        app.document = Some(
+        app.bench.set(
             Document::from_bytes(
                 b">x\nAAAACCCCGGGGTTTTAAGG\n",
                 "x.fa".into(),
@@ -13299,7 +13336,7 @@ mod tests {
         );
 
         app.edit.caret = 4;
-        let d = app.document.as_mut().unwrap();
+        let d = app.bench.get_mut().unwrap();
         app.edit.type_text(d, "gg", 0.0);
         app.settle();
         assert!(
@@ -13323,10 +13360,10 @@ mod tests {
     #[test]
     fn a_restored_draft_with_no_path_is_autosaved() {
         let (mut app, path) = app_with_recovery("restored");
-        app.document =
-            Some(Document::from_bytes(b">r\nAAAACCCCGGGG\n", "r.fa".into(), None).unwrap());
+        app.bench
+            .set(Document::from_bytes(b">r\nAAAACCCCGGGG\n", "r.fa".into(), None).unwrap());
         assert!(
-            app.document.as_ref().unwrap().unsaved(),
+            app.document().unwrap().unsaved(),
             "the premise: nothing on disk holds this"
         );
         app.autosave(false);
@@ -13455,7 +13492,7 @@ mod tests {
             app.settle();
         }
         app.autosave(false);
-        if let (Some(t), Some(d)) = (typed, app.document.as_mut()) {
+        if let (Some(t), Some(d)) = (typed, app.bench.get_mut()) {
             app.edit.type_text(d, t, now);
         }
     }
@@ -13481,7 +13518,7 @@ mod tests {
             frame(&mut app, Some("a"), t);
             t += 0.05; // well inside Run::IDLE_SECONDS
         }
-        let d = app.document.as_ref().unwrap();
+        let d = app.document().unwrap();
         assert_eq!(
             d.log.path().len(),
             0,
@@ -13492,11 +13529,11 @@ mod tests {
         // And when the typing stops, the run closes on its own and becomes
         // exactly one operation — one Ctrl+Z for the lot.
         frame(&mut app, None, t + seqedit::Run::IDLE_SECONDS);
-        let d = app.document.as_ref().unwrap();
+        let d = app.document().unwrap();
         assert_eq!(d.log.path().len(), 1);
         assert_eq!(d.molecule().len(), 16 + 40);
         app.do_undo();
-        assert_eq!(app.document.as_ref().unwrap().molecule().len(), 16);
+        assert_eq!(app.document().unwrap().molecule().len(), 16);
     }
 
     #[test]
@@ -13506,7 +13543,7 @@ mod tests {
         // keystrokes. Moving the throttle above the settle must not cost this.
         let (mut app, path) = app_with_recovery("midrun");
         app.adopt(Document::from_bytes(b">x\nAAAACCCCGGGGTTTT\n", "x.fa".into(), None).unwrap());
-        let d = app.document.as_mut().unwrap();
+        let d = app.bench.get_mut().unwrap();
         app.edit.caret = 16;
         app.edit.type_text(d, "gggg", 500.0);
         assert!(app.edit.run().is_some(), "the premise: a run is open");
@@ -13557,7 +13594,7 @@ mod tests {
         // renumbered ... Ctrl+Z twice" and the next line replaced it with
         // "cut 4 bases". The identical delete by Backspace reported both.
         let mut app = App::blank();
-        app.document = Some(circle_with("ABCDEFGHIJKL", "inner", 5, 8));
+        app.bench.set(circle_with("ABCDEFGHIJKL", "inner", 5, 8));
         app.edit.sel = Some(seqedit::Selection {
             anchor: 10,
             head: 2,
@@ -13566,10 +13603,7 @@ mod tests {
 
         let clip = app.do_cut(500.0).expect("four bases on the clipboard");
         assert_eq!(clip, "KLAB", "read across the origin, in reading order");
-        assert_eq!(
-            app.document.as_ref().unwrap().molecule().seq,
-            b"CDEFGHIJ".to_vec()
-        );
+        assert_eq!(app.document().unwrap().molecule().seq, b"CDEFGHIJ".to_vec());
         let said = app.edit.notice.clone().unwrap_or_default();
         assert!(said.contains("cut 4 bases"), "said {said:?}");
         assert!(said.contains("renumbered"), "said {said:?}");
@@ -13578,7 +13612,8 @@ mod tests {
     #[test]
     fn cutting_a_whole_feature_away_still_names_it() {
         let mut app = App::blank();
-        app.document = Some(circle_with("AAAACCCCGGGGTTTTAAGG", "AmpR", 5, 8));
+        app.bench
+            .set(circle_with("AAAACCCCGGGGTTTTAAGG", "AmpR", 5, 8));
         app.edit.sel = Some(seqedit::Selection {
             anchor: 4,
             head: 8,
@@ -13586,13 +13621,7 @@ mod tests {
         });
 
         app.do_cut(500.0).expect("four bases");
-        assert!(app
-            .document
-            .as_ref()
-            .unwrap()
-            .molecule()
-            .features
-            .is_empty());
+        assert!(app.document().unwrap().molecule().features.is_empty());
         let said = app.edit.notice.clone().unwrap_or_default();
         assert!(said.contains("cut 4 bases"), "said {said:?}");
         assert!(said.contains("AmpR"), "said {said:?}");
@@ -13601,10 +13630,11 @@ mod tests {
     #[test]
     fn a_cut_with_nothing_selected_removes_nothing_and_says_so() {
         let mut app = App::blank();
-        app.document = Some(circle_with("AAAACCCCGGGGTTTTAAGG", "f", 1, 4));
+        app.bench
+            .set(circle_with("AAAACCCCGGGGTTTTAAGG", "f", 1, 4));
         app.edit.caret = 5;
         assert_eq!(app.do_cut(500.0), None);
-        assert_eq!(app.document.as_ref().unwrap().molecule().len(), 20);
+        assert_eq!(app.document().unwrap().molecule().len(), 20);
         assert!(app.edit.notice.as_deref().unwrap().contains("Nothing"));
     }
 
@@ -13621,19 +13651,19 @@ mod tests {
         // sitting at 6..10 instead of 4..8. That is not a partial undo anyone
         // can recognise; it is a plausible plasmid that is wrong.
         let mut app = App::blank();
-        app.document = Some(circle_with("ABCDEFGHIJKL", "inner", 5, 8));
+        app.bench.set(circle_with("ABCDEFGHIJKL", "inner", 5, 8));
         app.edit.sel = Some(seqedit::Selection {
             anchor: 10,
             head: 2,
             through_origin: true,
         });
         app.do_cut(500.0).unwrap();
-        let d = app.document.as_ref().unwrap();
+        let d = app.document().unwrap();
         assert_eq!(d.log.path().len(), 2, "the premise: two operations");
         assert_eq!(d.molecule().seq, b"CDEFGHIJ".to_vec());
 
         app.do_undo();
-        let d = app.document.as_ref().unwrap();
+        let d = app.document().unwrap();
         assert_eq!(
             d.molecule().seq,
             b"ABCDEFGHIJKL".to_vec(),
@@ -13644,7 +13674,7 @@ mod tests {
 
         // And forward again, both halves together.
         app.do_redo();
-        let d = app.document.as_ref().unwrap();
+        let d = app.document().unwrap();
         assert_eq!(d.molecule().seq, b"CDEFGHIJ".to_vec());
     }
 
@@ -13671,7 +13701,7 @@ mod tests {
         mol.features.push(f);
 
         let mut app = App::blank();
-        app.document = Some(Document::of_molecule(mol));
+        app.bench.set(Document::of_molecule(mol));
         app.select_feature_under(2);
 
         let s = app.edit.sel.expect("the feature under the pointer");
@@ -13692,8 +13722,8 @@ mod tests {
         // document as a highlight of its tail — and Backspace deletes what is
         // highlighted.
         let mut app = App::blank();
-        app.document =
-            Some(Document::from_bytes(b">a\nAAAACCCCGGGGTTTT\n", "a.fa".into(), None).unwrap());
+        app.bench
+            .set(Document::from_bytes(b">a\nAAAACCCCGGGGTTTT\n", "a.fa".into(), None).unwrap());
         app.edit.caret = 16;
         app.edit.sel = Some(seqedit::Selection {
             anchor: 8,
@@ -13920,8 +13950,8 @@ mod tests {
     #[test]
     fn a_shortcut_typed_into_a_focused_text_box_does_not_reach_the_document() {
         let mut app = App::blank();
-        app.document =
-            Some(Document::from_bytes(b">a\nAAAACCCCGGGGTTTT\n", "a.fa".into(), None).unwrap());
+        app.bench
+            .set(Document::from_bytes(b">a\nAAAACCCCGGGGTTTT\n", "a.fa".into(), None).unwrap());
 
         // The control: nothing focused, so the shortcuts are the app's.
         assert!(shortcuts_with(&app, egui::Key::Z, None).undo);
@@ -14018,8 +14048,8 @@ mod tests {
     #[test]
     fn a_focused_button_does_not_disable_the_application_shortcuts() {
         let mut app = App::blank();
-        app.document =
-            Some(Document::from_bytes(b">a\nAAAACCCCGGGGTTTT\n", "a.fa".into(), None).unwrap());
+        app.bench
+            .set(Document::from_bytes(b">a\nAAAACCCCGGGGTTTT\n", "a.fa".into(), None).unwrap());
 
         // One Tab: the button. The two booleans are the control — something
         // holds focus, and it is not a text box — so "undo still fires" cannot
@@ -14061,7 +14091,7 @@ mod tests {
         // `Some(path)` so the document counts as saved: these tests are about
         // the design panel, not about the unsaved-changes guard, and a pathless
         // fixture would be parked by `take_over` before `adopt` ever ran.
-        app.document = Some(
+        app.bench.set(
             Document::from_bytes(
                 format!(">a\n{seq}\n").as_bytes(),
                 "a.fa".into(),
@@ -14116,7 +14146,7 @@ mod tests {
     fn a_report_computed_before_an_edit_cannot_be_added_after_it() {
         let mut app = app_designing();
         design_frame(&mut app);
-        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        let seq = app.document().unwrap().molecule().seq.clone();
         app.design.as_mut().unwrap().run(&seq);
         assert!(
             matches!(app.design.as_ref().unwrap().result, Some(Ok(_))),
@@ -14125,18 +14155,12 @@ mod tests {
 
         // The toolbar stayed live behind a non-modal window.
         app.edit(pl_core::OpKind::ReverseComplement);
-        assert!(app
-            .document
-            .as_ref()
-            .unwrap()
-            .molecule()
-            .features
-            .is_empty());
+        assert!(app.document().unwrap().molecule().features.is_empty());
 
         app.design.as_mut().unwrap().add_request = Some(0);
         design_frame(&mut app);
         assert!(
-            app.document
+            app.document()
                 .as_ref()
                 .unwrap()
                 .molecule()
@@ -14155,12 +14179,12 @@ mod tests {
 
         // Pressing Design again makes it addable, against the molecule as it
         // now stands.
-        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        let seq = app.document().unwrap().molecule().seq.clone();
         app.design.as_mut().unwrap().run(&seq);
         app.design.as_mut().unwrap().add_request = Some(0);
         design_frame(&mut app);
         assert_eq!(
-            app.document.as_ref().unwrap().molecule().features.len(),
+            app.document().unwrap().molecule().features.len(),
             2,
             "and a current report still adds two features"
         );
@@ -14184,7 +14208,7 @@ mod tests {
     #[test]
     fn a_failed_load_leaves_the_open_document_and_its_panel_alone() {
         let mut app = app_designing();
-        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        let seq = app.document().unwrap().molecule().seq.clone();
         design_frame(&mut app);
         app.design.as_mut().unwrap().run(&seq);
 
@@ -14193,7 +14217,7 @@ mod tests {
         app.load(bad.clone());
         let _ = std::fs::remove_file(&bad);
 
-        assert!(app.document.is_some(), "the document survived");
+        assert!(app.document().is_some(), "the document survived");
         assert!(app.error.is_none(), "and the screen was not taken over");
         assert!(app.design.is_some(), "so the panel is still valid");
         assert!(
@@ -14243,7 +14267,7 @@ mod tests {
             let mut app = seq_app();
             // One applied operation, so `unsaved()` is true and the guard would
             // fire if anything on this path reached it.
-            let d = app.document.as_mut().expect("a document");
+            let d = app.bench.get_mut().expect("a document");
             d.apply(pl_core::OpKind::InsertAt {
                 at: 1,
                 seq: "AAAA".to_string(),
@@ -14259,7 +14283,7 @@ mod tests {
             app.load(path.clone());
             let _ = std::fs::remove_file(&path);
 
-            let d = app.document.as_ref().unwrap_or_else(|| {
+            let d = app.document().unwrap_or_else(|| {
                 panic!("{what}: the document was destroyed");
             });
             assert_eq!(d.log.cursor(), cursor, "{what}: the history moved");
@@ -14305,7 +14329,7 @@ mod tests {
     fn a_trace_opens_with_no_molecule_and_claims_nothing_about_one() {
         let ctx = test_ctx();
         let mut app = App::blank();
-        assert!(app.document.is_none());
+        assert!(app.document().is_none());
 
         let path = std::env::temp_dir().join(format!("pl-gui-lonely-{}.ab1", std::process::id()));
         std::fs::write(
@@ -14317,7 +14341,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(app.reads.len(), 1);
-        assert!(app.document.is_none(), "no document was invented");
+        assert!(app.document().is_none(), "no document was invented");
         // `error` renders as a full-screen takeover and is documented as right
         // for "there is no document" and wrong for anything else. A trace that
         // loaded fine is not an error.
@@ -14365,7 +14389,7 @@ mod tests {
         let ctx = test_ctx();
         let mut app = seq_app();
         let path = std::env::temp_dir().join(format!("pl-gui-stale-{}.ab1", std::process::id()));
-        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        let seq = app.document().unwrap().molecule().seq.clone();
         // A read that really is from this molecule, so there is a report to go
         // stale in the first place.
         let read: Vec<u8> = seq.iter().copied().take(120).collect();
@@ -14387,7 +14411,7 @@ mod tests {
         let covered = before.covered;
 
         // Now move every base the read covers, by inserting in front of them.
-        let d = app.document.as_mut().expect("a document");
+        let d = app.bench.get_mut().expect("a document");
         d.apply(pl_core::OpKind::InsertAt {
             at: 1,
             seq: "GGGGGGGGGG".to_string(),
@@ -14424,7 +14448,7 @@ mod tests {
     #[test]
     fn opening_another_file_closes_the_design_panel_rather_than_reusing_it() {
         let mut app = app_designing();
-        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        let seq = app.document().unwrap().molecule().seq.clone();
         design_frame(&mut app);
         app.design.as_mut().unwrap().run(&seq);
 
@@ -14440,7 +14464,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert!(
-            app.document.is_some(),
+            app.document().is_some(),
             "the premise: the second file opened"
         );
         assert!(app.design.is_none(), "the panel is gone");
@@ -14516,7 +14540,7 @@ mod tests {
             })
             .collect();
         let mut app = App::blank();
-        app.document = Some(
+        app.bench.set(
             Document::from_bytes(format!(">p\n{seq}\n").as_bytes(), "p.fa".into(), None).unwrap(),
         );
         assert!(app.edit(pl_core::OpKind::SetTopology(pl_core::Topology::Circular)));
@@ -14563,7 +14587,7 @@ mod tests {
         feature_frame(&mut app);
 
         assert!(app.feature_edit.is_none(), "the window closed on success");
-        let mol = app.document.as_ref().unwrap().molecule();
+        let mol = app.document().unwrap().molecule();
         assert_eq!(mol.features.len(), 2);
         let f = mol.features.last().unwrap();
         assert_eq!(f.name, "myPromoter");
@@ -14579,7 +14603,7 @@ mod tests {
         // ONE operation, so ONE undo.
         app.do_undo();
         assert_eq!(
-            app.document.as_ref().unwrap().molecule().features.len(),
+            app.document().unwrap().molecule().features.len(),
             1,
             "one undo removes it"
         );
@@ -14634,7 +14658,7 @@ mod tests {
     #[test]
     fn renaming_through_the_editor_keeps_every_qualifier_colour_and_segment() {
         let mut app = app_with_feature();
-        let before = app.document.as_ref().unwrap().molecule().features[0].clone();
+        let before = app.document().unwrap().molecule().features[0].clone();
 
         app.open_feature_editor(Some(0));
         let p = app.feature_edit.as_mut().expect("the editor opened");
@@ -14642,7 +14666,7 @@ mod tests {
         p.save = true;
         feature_frame(&mut app);
 
-        let after = &app.document.as_ref().unwrap().molecule().features[0];
+        let after = &app.document().unwrap().molecule().features[0];
         assert_eq!(after.name, "levansucrase");
         assert_eq!(after.segments.len(), 2, "still two segments");
         for (i, (a, b)) in after.segments.iter().zip(&before.segments).enumerate() {
@@ -14662,13 +14686,10 @@ mod tests {
         assert_eq!(after.strand, before.strand);
 
         // One operation, one undo, and the History line names the feature.
-        let last = app.document.as_ref().unwrap().log.path().len();
+        let last = app.document().unwrap().log.path().len();
         assert_eq!(last, 3, "SetTopology, SetFeature, and this one");
         app.do_undo();
-        assert_eq!(
-            app.document.as_ref().unwrap().molecule().features[0].name,
-            "SacB"
-        );
+        assert_eq!(app.document().unwrap().molecule().features[0].name, "SacB");
     }
 
     /// PROVEN TO FAIL at 04afbb6: no feature editor.
@@ -14704,7 +14725,7 @@ mod tests {
         p.save = true;
         feature_frame(&mut app);
 
-        let mol = app.document.as_ref().unwrap().molecule().clone();
+        let mol = app.document().unwrap().molecule().clone();
         assert_eq!(mol.features.len(), 2, "the premise: it landed");
 
         // .dna
@@ -14762,7 +14783,7 @@ mod tests {
         p.save = true;
         feature_frame(&mut app);
 
-        let mol = app.document.as_ref().unwrap().molecule();
+        let mol = app.document().unwrap().molecule();
         let f = mol.features.iter().find(|f| f.name == "across").unwrap();
         assert_eq!((f.segments[0].start, f.segments[0].end), (380, 40));
         assert_eq!(f.extent(400, true), Some((380, 40)));
@@ -14822,12 +14843,12 @@ mod tests {
     #[test]
     fn a_save_that_changes_nothing_records_no_operation() {
         let mut app = app_with_feature();
-        let before = app.document.as_ref().unwrap().log.all_ops().len();
+        let before = app.document().unwrap().log.all_ops().len();
         app.open_feature_editor(Some(0));
         app.feature_edit.as_mut().unwrap().save = true;
         feature_frame(&mut app);
         assert_eq!(
-            app.document.as_ref().unwrap().log.all_ops().len(),
+            app.document().unwrap().log.all_ops().len(),
             before,
             "nothing was recorded"
         );
@@ -14847,17 +14868,17 @@ mod tests {
         // coordinates and the feature vanishes on the next open, with exit 0.
         // `validate()` has nothing to say about it, so only the form can.
         let mut app = app_with_feature();
-        let ops = app.document.as_ref().unwrap().log.all_ops().len();
+        let ops = app.document().unwrap().log.all_ops().len();
         app.open_feature_editor(Some(0));
         app.feature_edit.as_mut().unwrap().kind = "signal peptide".into();
         app.feature_edit.as_mut().unwrap().save = true;
         feature_frame(&mut app);
         assert_eq!(
-            app.document.as_ref().unwrap().molecule().features[0].kind,
+            app.document().unwrap().molecule().features[0].kind,
             "CDS",
             "nothing landed"
         );
-        assert_eq!(app.document.as_ref().unwrap().log.all_ops().len(), ops);
+        assert_eq!(app.document().unwrap().log.all_ops().len(), ops);
         assert!(
             app.feature_edit.is_some(),
             "and the window stayed open, with every box as the user left it"
@@ -14893,12 +14914,12 @@ mod tests {
         app.feature_edit.as_mut().unwrap().segments[0].end = 9_000;
         app.feature_edit.as_mut().unwrap().save = true;
         feature_frame(&mut app);
-        let mol = app.document.as_ref().unwrap().molecule();
+        let mol = app.document().unwrap().molecule();
         assert_eq!(
             mol.features[0].segments[0].end, 200,
             "nothing landed: the feature is still the one the document had"
         );
-        assert_eq!(app.document.as_ref().unwrap().log.all_ops().len(), ops);
+        assert_eq!(app.document().unwrap().log.all_ops().len(), ops);
         let notice = app
             .feature_edit
             .as_ref()
@@ -15079,11 +15100,11 @@ mod tests {
         let mut app = App::blank();
         app.adopt(Document::from_bytes(&gb, "odd.gb".into(), None).unwrap());
 
-        let before = app.document.as_ref().unwrap().molecule().features.clone();
+        let before = app.document().unwrap().molecule().features.clone();
         // NON-VACUITY: this test is worthless on a molecule whose features all
         // fit. `odd.gb` is in the tree precisely because they do not.
         assert!(
-            app.document
+            app.document()
                 .as_ref()
                 .unwrap()
                 .molecule()
@@ -15117,18 +15138,18 @@ mod tests {
         // The rename a user would actually do, all the way through: refused,
         // because the coordinate the file carries is still on screen and still
         // wrong. Nothing is committed and nothing is truncated.
-        let ops = app.document.as_ref().unwrap().log.all_ops().len();
+        let ops = app.document().unwrap().log.all_ops().len();
         app.open_feature_editor(Some(1));
         feature_frame(&mut app);
         app.feature_edit.as_mut().unwrap().name = "spacer2".into();
         app.feature_edit.as_mut().unwrap().save = true;
         feature_frame(&mut app);
         assert_eq!(
-            app.document.as_ref().unwrap().molecule().features,
+            app.document().unwrap().molecule().features,
             before,
             "nothing landed"
         );
-        assert_eq!(app.document.as_ref().unwrap().log.all_ops().len(), ops);
+        assert_eq!(app.document().unwrap().log.all_ops().len(), ops);
         let notice = app
             .feature_edit
             .as_ref()
@@ -15156,7 +15177,7 @@ mod tests {
         let mut app = App::blank();
         app.adopt(Document::from_bytes(gb.as_bytes(), "x.gb".into(), None).unwrap());
         assert_eq!(
-            app.document.as_ref().unwrap().molecule().features[0].segments[0].color,
+            app.document().unwrap().molecule().features[0].segments[0].color,
             Some("cyan".into()),
             "the premise: the reader keeps it verbatim"
         );
@@ -15179,7 +15200,7 @@ mod tests {
             p.save = true;
         }
         feature_frame(&mut app);
-        let f = &app.document.as_ref().unwrap().molecule().features[0];
+        let f = &app.document().unwrap().molecule().features[0];
         assert_eq!(f.name, "bla", "the rename landed");
         assert_eq!(
             f.segments[0].color,
@@ -15201,13 +15222,7 @@ mod tests {
         app.feature_edit.as_mut().unwrap().delete = true;
         feature_frame(&mut app);
 
-        assert!(app
-            .document
-            .as_ref()
-            .unwrap()
-            .molecule()
-            .features
-            .is_empty());
+        assert!(app.document().unwrap().molecule().features.is_empty());
         assert!(
             app.status.contains("SacB"),
             "the line the user reads names the feature: {}",
@@ -15245,7 +15260,7 @@ mod tests {
         app.feature_edit.as_mut().unwrap().save = true;
         feature_frame(&mut app);
         assert_eq!(
-            app.document.as_ref().unwrap().molecule().features[0].name,
+            app.document().unwrap().molecule().features[0].name,
             "AmpR",
             "the feature that moved into index 1's old place was not overwritten"
         );
@@ -15266,7 +15281,7 @@ mod tests {
     fn duplicating_a_feature_copies_everything_the_model_holds() {
         let mut app = app_with_feature();
         app.duplicate_feature(0);
-        let mol = app.document.as_ref().unwrap().molecule();
+        let mol = app.document().unwrap().molecule();
         assert_eq!(mol.features.len(), 2);
         let (a, b) = (&mol.features[0], &mol.features[1]);
         assert_eq!(b.name, "SacB copy");
@@ -15524,7 +15539,7 @@ mod tests {
         fn panel_texts(name: &str) -> Vec<(egui::Pos2, String, f32)> {
             let mut app = seq_app();
             app.tab = Tab::Features;
-            let d = app.document.as_mut().expect("a document");
+            let d = app.bench.get_mut().expect("a document");
             let mut f = pl_core::Feature::new(name, "CDS");
             f.strand = pl_core::Strand::Forward;
             f.segments.push(pl_core::Segment::new(400, 1_400));
@@ -15713,7 +15728,7 @@ mod tests {
     #[test]
     fn opening_a_religated_product_cannot_silently_discard_an_edited_document() {
         let mut app = seq_app();
-        let d = app.document.as_mut().expect("a document");
+        let d = app.bench.get_mut().expect("a document");
         d.apply(pl_core::OpKind::InsertAt {
             at: 1,
             seq: "AAAA".to_string(),
@@ -15730,7 +15745,7 @@ mod tests {
         // back to `adopt`, the version below goes red and the direct one did
         // not.
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
-        let seq_mol = app.document.as_ref().expect("open").molecule().clone();
+        let seq_mol = app.document().expect("open").molecule().clone();
         let mut panel = clone::Panel::new(&picked);
         panel.plan = Some(clone::plan(&seq_mol, &picked, true));
         panel.stale = false;
@@ -15752,7 +15767,7 @@ mod tests {
             app.pending_open.is_some(),
             "the construct was adopted without asking"
         );
-        let d = app.document.as_ref().expect("still open");
+        let d = app.document().expect("still open");
         assert_eq!(d.molecule().seq, before, "the edited molecule changed");
         assert_eq!(d.log.cursor(), cursor, "the edit history moved");
         assert!(d.unsaved(), "the edit stopped counting as unsaved work");
@@ -15779,7 +15794,7 @@ mod tests {
     fn a_document_swap_closes_the_religation_panel_it_invalidates() {
         let mut app = seq_app();
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
-        let first = app.document.as_ref().expect("open").molecule().clone();
+        let first = app.document().expect("open").molecule().clone();
         let mut panel = clone::Panel::new(&picked);
         panel.plan = Some(clone::plan(&first, &picked, true));
         panel.stale = false;
@@ -16006,15 +16021,15 @@ mod tests {
             // the defect: a test whose green depended on the bug.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
             loop {
-                app.document.as_mut().unwrap().poll_orfs();
-                if app.document.as_ref().unwrap().orfs.done().is_some() {
+                app.bench.get_mut().unwrap().poll_orfs();
+                if app.document().unwrap().orfs.done().is_some() {
                     break;
                 }
                 assert!(std::time::Instant::now() < deadline, "the ORF worker hung");
                 std::thread::yield_now();
             }
             let total = t.elapsed().as_secs_f64() * 1000.0;
-            let d = app.document.as_ref().unwrap();
+            let d = app.document().unwrap();
             let o = d.orfs.done().expect("finished");
             eprintln!(
                 "PERF ORFs {label} {} bp: spawn {spawned:.3} ms on the UI thread,                  {total:.1} ms wall to the answer, {} ORFs at table {} >={} aa;                  a frame while it ran took {during:.3} ms",
@@ -16075,7 +16090,7 @@ mod tests {
         eprintln!(
             "PERF plasmid 8,117 bp / {} features: tracks off {off:.3} ms/frame, \
              on {on:.3} ms/frame, marginal {:.3} ms; row_h {:.2} -> {:.2}",
-            app.document.as_ref().unwrap().molecule().features.len(),
+            app.document().unwrap().molecule().features.len(),
             on - off,
             32.88,
             g.row_h
@@ -16117,7 +16132,7 @@ mod tests {
         big.layout.aa_track = aa::TrackMode::File;
         big.layout.complement = Some(true);
         let b = frame_ms(&mut big, &ctx, 30);
-        let feats = big.document.as_ref().unwrap().molecule().features.len();
+        let feats = big.document().unwrap().molecule().features.len();
         eprintln!(
             "PERF genome 4,641,652 bp / {feats} features: tracks off {b_off:.3} ms/frame, \n             on {b:.3} ms/frame; the plasmid with tracks on is {a:.3} ms/frame, ratio {:.2}x",
             b / a.max(1e-6)
@@ -16307,7 +16322,7 @@ mod tests {
             ch as char
         );
         // The three bases under it are the codon `pl_core` translates.
-        let mol = app.document.as_ref().unwrap().molecule();
+        let mol = app.document().unwrap().molecule();
         let codon = &mol.seq[57..60];
         let want = pl_core::translate::table(11).unwrap().codon(codon);
         assert_eq!(ch, want, "the letter is what pl_core::translate says");
@@ -16620,7 +16635,7 @@ mod tests {
         let g = app.seq_grid.expect("painted");
         let ts = texts(&out);
 
-        let mol = app.document.as_ref().unwrap().molecule();
+        let mol = app.document().unwrap().molecule();
         let top: String = String::from_utf8(mol.seq[0..60].to_vec()).unwrap();
         let bottom: String = mol.seq[0..60]
             .iter()
@@ -16694,19 +16709,19 @@ mod tests {
         // Frame 1 is what asks the question.
         paint(&mut app, &ctx, window());
         assert!(
-            app.document.as_ref().unwrap().orfs.is_running(),
+            app.document().unwrap().orfs.is_running(),
             "the premise: one frame does not finish this scan"
         );
-        assert_eq!(app.document.as_ref().unwrap().orf_spawns, 1);
+        assert_eq!(app.document().unwrap().orf_spawns, 1);
 
         // Every frame after it, in the production order, until the answer lands.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut frames = 0usize;
-        while app.document.as_ref().unwrap().orfs.is_running() {
+        while app.document().unwrap().orfs.is_running() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the scan never finished under repeated painting — {} worker(s) spawned",
-                app.document.as_ref().unwrap().orf_spawns
+                app.document().unwrap().orf_spawns
             );
             paint(&mut app, &ctx, window());
             frames += 1;
@@ -16715,7 +16730,7 @@ mod tests {
             frames >= 2,
             "the premise: more than one further frame was painted while it ran"
         );
-        let d = app.document.as_ref().unwrap();
+        let d = app.document().unwrap();
         assert_eq!(
             d.orf_spawns, 1,
             "one question, asked once, across {frames} frames"
@@ -16737,17 +16752,17 @@ mod tests {
         app.layout.orf_track = true;
         app.doc_code = pl_core::translate::TABLE11;
         paint(&mut app, &ctx, window());
-        assert_eq!(app.document.as_ref().unwrap().orf_spawns, 1);
+        assert_eq!(app.document().unwrap().orf_spawns, 1);
         // The same question again changes nothing, however many frames.
         for _ in 0..8 {
             paint(&mut app, &ctx, window());
         }
-        assert_eq!(app.document.as_ref().unwrap().orf_spawns, 1);
+        assert_eq!(app.document().unwrap().orf_spawns, 1);
         // A different one is a different question.
         app.doc_code = pl_core::translate::table(1).expect("table 1");
         paint(&mut app, &ctx, window());
         assert_eq!(
-            app.document.as_ref().unwrap().orf_spawns,
+            app.document().unwrap().orf_spawns,
             2,
             "table 1 is not the answer table 11 gave"
         );
@@ -16773,14 +16788,14 @@ mod tests {
         // transition, which anything else that polls can consume first.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            app.document.as_mut().unwrap().poll_orfs();
-            if app.document.as_ref().unwrap().orfs.done().is_some() {
+            app.bench.get_mut().unwrap().poll_orfs();
+            if app.document().unwrap().orfs.done().is_some() {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "the ORF worker hung");
             std::thread::yield_now();
         }
-        let d = app.document.as_ref().unwrap();
+        let d = app.document().unwrap();
         let got = d.orfs.done().expect("a finished scan");
         let want = pl_core::orf::find_orfs(
             &d.molecule().seq,
@@ -16836,7 +16851,7 @@ mod tests {
         // And clearing it takes the track away again, through the same
         // `OpKind::SetFeature` every other feature edit goes through — so it
         // undoes, which `oplog.rs` already hashes `translated` for.
-        let mut f = app.document.as_ref().unwrap().molecule().features[0].clone();
+        let mut f = app.document().unwrap().molecule().features[0].clone();
         f.segments[0].translated = false;
         assert!(app.edit(pl_core::OpKind::SetFeature {
             index: Some(0),
@@ -16856,13 +16871,13 @@ mod tests {
     fn showing_a_translation_does_not_edit_the_document() {
         let ctx = test_ctx();
         let mut app = aa_app(false, aa::TrackMode::Selection);
-        let before = app.document.as_ref().unwrap().log.cursor();
-        let saved = app.document.as_ref().unwrap().unsaved();
+        let before = app.document().unwrap().log.cursor();
+        let saved = app.document().unwrap().unsaved();
         app.layout.orf_track = true;
         for _ in 0..3 {
             paint(&mut app, &ctx, window());
         }
-        let d = app.document.as_ref().unwrap();
+        let d = app.document().unwrap();
         assert_eq!(d.log.cursor(), before, "no operation was recorded");
         assert_eq!(d.unsaved(), saved, "and the document is no dirtier");
     }
@@ -17171,7 +17186,7 @@ mod tests {
 
         app.adopt(Document::from_bytes(gb("second", 200).as_bytes(), "b.gb".into(), None).unwrap());
         assert_eq!(
-            app.document.as_ref().unwrap().log.cursor(),
+            app.document().unwrap().log.cursor(),
             None,
             "the collision this test is about: both documents are at cursor None"
         );
@@ -17708,7 +17723,7 @@ mod tests {
     fn digested(app: &mut App) {
         let t = std::time::Instant::now();
         loop {
-            let d = app.document.as_mut().expect("a document");
+            let d = app.bench.get_mut().expect("a document");
             if matches!(d.digest, DigestState::Done(_)) {
                 return;
             }
@@ -17815,8 +17830,8 @@ mod tests {
             .scene
             .items
             .as_ptr();
-        app.document
-            .as_mut()
+        app.bench
+            .get_mut()
             .expect("a document")
             .apply(pl_core::OpKind::InsertAt {
                 at: 1,
@@ -17864,8 +17879,8 @@ mod tests {
         );
 
         // Any edit restarts the digest, and nothing polls it here.
-        app.document
-            .as_mut()
+        app.bench
+            .get_mut()
             .expect("a document")
             .apply(pl_core::OpKind::InsertAt {
                 at: 101,
@@ -17873,7 +17888,7 @@ mod tests {
             })
             .expect("a legal insert");
         assert!(
-            app.document.as_ref().unwrap().digest.is_running(),
+            app.document().unwrap().digest.is_running(),
             "the premise: the scan restarted"
         );
         paint(&mut app, &ctx, window());
@@ -19014,7 +19029,7 @@ mod tests {
         let ctx = test_ctx();
         let mut app = App::blank();
         app.tab = Tab::Library;
-        assert!(app.document.is_none(), "the premise");
+        assert!(app.document().is_none(), "the premise");
         let mut said = Vec::new();
         for _ in 0..2 {
             let out = ctx.run_ui(window(), |ui| {
@@ -19343,14 +19358,14 @@ mod tests {
         // real one rather than faking it: the whole question is whether what the
         // app has agrees with what the table says, so substituting the table here
         // would be asking the table twice.
-        let doc = app.document.as_mut().unwrap();
+        let doc = app.bench.get_mut().unwrap();
         for _ in 0..2_000 {
             if doc.digest.poll() && !doc.digest.is_running() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let d = app.document.as_ref().unwrap();
+        let d = app.document().unwrap();
         assert!(
             !d.digest.results().is_empty(),
             "the digest worker did not finish"
