@@ -1247,23 +1247,46 @@ impl App {
         let mut restore: Option<usize> = None;
         let mut discard: Option<usize> = None;
         let mut show_all = self.show_old_drafts;
-        // Two groups, and only the ones that exist. Left as one heading, a
+        // Three groups, and only the ones that exist. Left as one heading, a
         // deliberately abandoned draft comes back under "did not close cleanly",
         // which tells a user their app crashed when it did not.
-        let groups: [(&str, bool); 2] = [
-            (
-                "A previous session did not close cleanly",
-                self.stale
-                    .iter()
-                    .any(|(_, s)| s.as_ref().is_ok_and(|s| !s.abandoned) || s.is_err()),
-            ),
-            (
-                "You closed Polylinker with unsaved changes",
-                self.stale
-                    .iter()
-                    .any(|(_, s)| s.as_ref().is_ok_and(|s| s.abandoned)),
-            ),
+        //
+        // GROUP 0 IS THE ONE THAT WAS MISSING. `stale` returns every `*.recover`
+        // that is not this process's and never asks whether the process that
+        // owns it is still running — there is no lock file and no PID probe
+        // anywhere in this module. So a second window listed the FIRST window's
+        // live drafts as a crashed session, and its Discard permanently deleted
+        // the running session's only crash copy while that user was still
+        // typing into it. See `recover::maybe_live` for why freshness rather
+        // than a PID probe.
+        let group_of = |s: &Result<recover::Snapshot, String>| match s {
+            Ok(s) if recover::maybe_live(s.saved_at, now) => 0,
+            Ok(s) if s.abandoned => 2,
+            // A damaged header lands here: nothing readable said it was
+            // abandoned, and nothing readable said it was fresh either.
+            _ => 1,
+        };
+        let groups = [
+            "Another Polylinker window may still be using these",
+            "A previous session did not close cleanly",
+            "You closed Polylinker with unsaved changes",
         ];
+        // A group that ages out needs a frame on which to age out. Same lesson
+        // as the autosave wake-up eleven hundred lines below: eframe waits for
+        // an event rather than spinning, so on an idle app no frame comes and
+        // the disabled Discard stays disabled until the user happens to move
+        // the mouse — "not yet" quietly becoming "never".
+        if let Some(secs) = self
+            .stale
+            .iter()
+            .filter(|(_, s)| group_of(s) == 0)
+            .filter_map(|(_, s)| s.as_ref().ok())
+            .map(|s| recover::LIVE_WINDOW_SECS.saturating_sub(now.saturating_sub(s.saved_at)) + 1)
+            .min()
+        {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(secs));
+        }
         // Rows after the first for one (original, title) go behind a single
         // line. Bounding the DISPLAY, never reaping the files: this module's
         // whole posture is that guessing which draft matters is how the wrong
@@ -1275,15 +1298,26 @@ impl App {
             .fill(pal(ui).selection())
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
-                for (heading, present) in groups {
-                    if !present {
+                for (g, heading) in groups.into_iter().enumerate() {
+                    if !self.stale.iter().any(|(_, s)| group_of(s) == g) {
                         continue;
                     }
-                    let abandoned_group = heading.starts_with("You closed");
                     ui.label(RichText::new(heading).color(pal(ui).ink).strong());
+                    // Said in the panel, not only on hover: a disabled button
+                    // with its reason behind a hover is a disabled button with
+                    // no reason for anyone who does not hover it.
+                    if g == 0 {
+                        ui.label(
+                            RichText::new(
+                                "Written moments ago. You can open a copy; discarding is \
+                                 unavailable until that window closes.",
+                            )
+                            .color(pal(ui).muted)
+                            .size(11.0),
+                        );
+                    }
                     for (i, (path, snap)) in self.stale.iter().enumerate() {
-                        let is_abandoned = snap.as_ref().is_ok_and(|s| s.abandoned);
-                        if is_abandoned != abandoned_group {
+                        if group_of(snap) != g {
                             continue;
                         }
                         if let Ok(s) = snap {
@@ -1317,7 +1351,24 @@ impl App {
                                     // but it is not this document's work either,
                                     // so it gets an inline confirmation rather
                                     // than a modal.
-                                    if self.discard_armed == Some(i) {
+                                    //
+                                    // ...and in the live group, not at all.
+                                    // The work at risk belongs to the other
+                                    // window, whose user is not the person
+                                    // reading this banner and cannot be asked.
+                                    // Disabled rather than hidden, so the row
+                                    // still says what it is, and Open still
+                                    // works: reading another session's draft is
+                                    // safe, deleting it is not.
+                                    if g == 0 {
+                                        ui.add_enabled(false, egui::Button::new("Discard"))
+                                            .on_disabled_hover_text(
+                                                "Another Polylinker window wrote this in the \
+                                                 last minute or two and is probably still \
+                                                 using it. Close that window and this becomes \
+                                                 available.",
+                                            );
+                                    } else if self.discard_armed == Some(i) {
                                         if ui
                                             .button(
                                                 RichText::new("Discard — this deletes the draft")
@@ -13125,6 +13176,114 @@ mod tests {
         assert!(!some.contains("newer than"), "{some:?}");
         // The other direction is unchanged.
         assert!(draft_age(1_000, 2_000, Some(3_000), true, 3).contains("on disk is newer"));
+    }
+
+    /// A second window must not be able to delete the first window's LIVE draft.
+    ///
+    /// PROVEN TO FAIL against the working tree as handed over: `stale` returns
+    /// every `*.recover` that is not this process's and never asks whether the
+    /// process that owns it is running — there is no lock file and no PID probe
+    /// anywhere in the module. So a draft written seconds ago by a window that
+    /// is still open was listed under "A previous session did not close cleanly"
+    /// and its Discard permanently removed it. Two clicks in the second window
+    /// destroyed the first window's only crash copy while its user was typing
+    /// into the document it holds.
+    ///
+    /// **Driven through the banner, and both halves clicked.** Asserting only
+    /// that the live draft survives would pass against a click that missed the
+    /// button entirely, so the crashed draft in the same list is clicked the
+    /// same way, at coordinates found the same way, and must be gone. One file
+    /// survives and one does not, from the same gesture — that is the whole
+    /// claim, and neither half can be true by accident.
+    #[test]
+    fn a_draft_another_window_is_still_writing_cannot_be_discarded() {
+        let ctx = test_ctx();
+        let dir = std::env::temp_dir().join(format!("pl-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap();
+        let write = |name: &str, saved_at: u64| {
+            let p = dir.join(format!("{name}.recover"));
+            let s = recover::Snapshot {
+                original: None,
+                title: name.into(),
+                saved_at,
+                ops: 3,
+                abandoned: false,
+                genbank: "LOCUS x 4 bp DNA linear UNK\nORIGIN\n 1 acgt\n//\n".into(),
+            };
+            std::fs::write(&p, recover::encode(&s)).unwrap();
+            p
+        };
+        // One draft written a moment ago — the running window's — and one from a
+        // session that really did die, an hour back. `stale` sorts newest first,
+        // so the live one is row 0 either way and the coordinates below name the
+        // same row before and after the fix.
+        let live = write("still-typing", now.saturating_sub(5));
+        let dead = write("really-crashed", now.saturating_sub(3_600));
+        let mut app = App::blank();
+        app.stale = recover::stale(&dir);
+        assert_eq!(
+            app.stale.len(),
+            2,
+            "the premise: two drafts to choose between"
+        );
+
+        let frame = |app: &mut App, input: egui::RawInput| {
+            ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| app.recovery_banner(ui));
+            })
+        };
+        // The nth Discard button's centre, measured off the galley actually
+        // painted rather than computed from a layout this test does not own.
+        let spot = |out: &egui::FullOutput, n: usize| -> egui::Pos2 {
+            let hits: Vec<egui::Pos2> = flat_shapes(&out.shapes)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) if t.galley.text().starts_with("Discard") => {
+                        Some(egui::Rect::from_min_size(t.pos, t.galley.size()).center())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                hits.len() > n,
+                "only {} Discard button(s) drawn",
+                hits.len()
+            );
+            hits[n]
+        };
+        // Two clicks, which is everything the banner offers: one to arm, one to
+        // confirm. The armed label is wider and this layout is right-aligned, so
+        // it grows leftwards and the same point stays inside it.
+        let two_clicks = |app: &mut App, at: egui::Pos2| {
+            for _ in 0..2 {
+                frame(app, pointer_to(at));
+                frame(app, pointer_button(at, true));
+                frame(app, pointer_button(at, false));
+            }
+        };
+
+        let out = frame(&mut app, window());
+        two_clicks(&mut app, spot(&out, 0));
+        assert!(
+            live.exists(),
+            "a second window deleted the draft a running window is still writing"
+        );
+
+        // ...and the same gesture on the row below it, so the one above cannot
+        // have survived by missing.
+        let out = frame(&mut app, window());
+        two_clicks(&mut app, spot(&out, 1));
+        assert!(
+            !dead.exists(),
+            "the click never reached a Discard button, so the assertion above proves nothing"
+        );
+
+        let _ = std::fs::remove_file(&live);
+        let _ = std::fs::remove_file(&dead);
     }
 
     /// The dialog must agree with itself about number. It did not: "1 edit that

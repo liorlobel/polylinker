@@ -350,6 +350,33 @@ pub fn clear(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// How recently a draft must have been written to be treated as maybe-live.
+///
+/// Three times `AUTOSAVE_EVERY`. A running window with unsaved work rewrites
+/// its draft every thirty seconds, so anything inside ninety belongs to a
+/// session that is very probably still going; anything older belongs to one
+/// that stopped.
+pub const LIVE_WINDOW_SECS: u64 = 90;
+
+/// Might this draft belong to a Polylinker that is still running?
+///
+/// `stale` returns every `*.recover` that is not this process's, and NOTHING
+/// checks whether the process named in the filename is alive — there is no lock
+/// file and no PID probe anywhere in this module. So a second window lists the
+/// first window's live drafts under "A previous session did not close cleanly",
+/// and its Discard button permanently deletes the running session's only crash
+/// copy while the user is still typing into it.
+///
+/// This is a heuristic and is deliberately not dressed up as anything else. A
+/// PID probe would be exact and needs a platform crate in a binary whose whole
+/// posture is that it has almost none; freshness needs nothing, cannot say a
+/// live session is dead (the writer's own thirty-second cadence guarantees
+/// that), and errs by occasionally calling a very recent crash "maybe live" —
+/// which costs the user one deferred Discard and no data at all.
+pub fn maybe_live(saved_at: u64, now: u64) -> bool {
+    saved_at != 0 && now.saturating_sub(saved_at) <= LIVE_WINDOW_SECS
+}
+
 /// Recovery files left by processes other than this one.
 ///
 /// Returned with what could be read from each, newest first. A file whose
@@ -505,6 +532,32 @@ mod tests {
         let headless = text.replacen(MAGIC, "corrupted", 1);
         assert!(decode(&headless).is_err());
         assert_eq!(salvage(&headless), Some(snap().genbank.as_str()));
+    }
+
+    /// The freshness heuristic has one direction it is not allowed to get
+    /// wrong, and that direction is the whole reason it exists.
+    #[test]
+    fn a_draft_written_within_one_autosave_period_is_never_called_dead() {
+        // A running window rewrites its draft every 30 s, so any age a live
+        // session can present must come back true — including the moment it
+        // was written and the moment before the next write is due.
+        for age in [0, 1, 29, 30, 31, 59, 60, LIVE_WINDOW_SECS] {
+            assert!(
+                maybe_live(1_000_000 - age, 1_000_000),
+                "a draft {age} s old was treated as a dead session's"
+            );
+        }
+        // Past the window it ages out, so the Discard the banner withheld
+        // becomes available rather than being withheld for good.
+        assert!(!maybe_live(1_000_000 - LIVE_WINDOW_SECS - 1, 1_000_000));
+        assert!(!maybe_live(1_000_000 - 86_400, 1_000_000));
+        // A header that would not parse leaves `saved_at` at 0 — "unknown", not
+        // "the epoch". Read as an age that is a live claim only if the clock is
+        // also 0, which it is not on any machine this runs on.
+        assert!(!maybe_live(0, 1_000_000), "unknown is not a claim of life");
+        // And a clock that went backwards — a draft stamped in the future by a
+        // dual-boot or a corrected NTP step — is live, not negative.
+        assert!(maybe_live(1_000_060, 1_000_000), "no underflow");
     }
 
     #[test]
