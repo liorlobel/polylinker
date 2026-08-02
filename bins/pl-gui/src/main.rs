@@ -4908,7 +4908,28 @@ impl App {
                                 egui::CornerRadius::same(2),
                                 theme::feature_color(f),
                             );
-                            ui.label(RichText::new(&f.name).strong().size(12.5));
+                            // THE NAME IS ALLOCATED LAST AND TRUNCATES.
+                            //
+                            // It used to be a bare `ui.label` here, before the
+                            // right-hand group, and a bare label asks for the
+                            // width of its whole string. One 150-character
+                            // `/label` therefore set the width of the entire
+                            // side panel, and docs/UX-REVIEW-2026-07-31.md
+                            // finding 7 recorded what that did: the tab strip
+                            // read `ce  History  File` with Features, Library
+                            // and Enzymes off the LEFT edge, the
+                            // New…/Edit…/Duplicate/Remove row was gone, the
+                            // coordinates were off the right edge of the
+                            // window, and the splitter — measured at x=763 —
+                            // did not move for drags to either 200 or 1200. A
+                            // name is data from a file; it must not be able to
+                            // lay out the application.
+                            //
+                            // Order is the fix. The right-to-left group is
+                            // allocated first so the coordinates and strand
+                            // keep their width, and the name gets what is left
+                            // and truncates into it. Reversing these two lines
+                            // restores the defect.
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(
                                     RichText::new(strand_glyph(f.strand))
@@ -4931,11 +4952,49 @@ impl App {
                                         .monospace()
                                         .size(11.0),
                                 );
+                                // What is left, read the way names are read.
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    let r = ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&f.name).strong().size(12.5),
+                                        )
+                                        .truncate(),
+                                    );
+                                    // A tooltip ONLY when the row cannot show
+                                    // the whole name: one that repeats what is
+                                    // already legible is noise on every row of
+                                    // a list a user scrolls. Measured rather
+                                    // than guessed from a character count,
+                                    // because whether it fits depends on the
+                                    // glyphs and the splitter, not the length.
+                                    // Colour does not affect text metrics.
+                                    let wanted = ui
+                                        .painter()
+                                        .layout_no_wrap(
+                                            f.name.clone(),
+                                            egui::FontId::proportional(12.5),
+                                            egui::Color32::WHITE,
+                                        )
+                                        .rect
+                                        .width();
+                                    if wanted > r.rect.width() + 0.5 {
+                                        r.on_hover_text(&f.name);
+                                    }
+                                });
                             });
                         });
                         ui.horizontal(|ui| {
                             ui.add_space(17.0);
-                            ui.label(RichText::new(&f.kind).color(pal(ui).muted).size(11.0));
+                            // Same rule, same reason: `kind` is free text in
+                            // both formats — the feature editor has a
+                            // free-text Type box — so it can be as long as a
+                            // name and would set the panel width the same way.
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&f.kind).color(pal(ui).muted).size(11.0),
+                                )
+                                .truncate(),
+                            );
                             if f.segments.len() > 1 {
                                 ui.label(
                                     RichText::new(format!("{} segments", f.segments.len()))
@@ -15192,6 +15251,122 @@ mod tests {
     }
 
     /// A plasmid the size of the user's, open on the Sequence tab.
+    /// PROVEN TO FAIL at a79a276: the name was a bare `ui.label` allocated
+    /// before the coordinates, and a bare label asks for the width of its whole
+    /// string. docs/UX-REVIEW-2026-07-31.md finding 7 measured what one
+    /// 150-character `/label` then did to the pane that carries every other
+    /// view: the tab strip read `ce  History  File`, the button row was gone,
+    /// the coordinates were off the right edge of the window, and the splitter
+    /// would not move.
+    ///
+    /// Asserted against a SHORT-NAMED control rather than against fixed
+    /// numbers, so it measures the name's influence on the layout rather than
+    /// the layout — which is what must be zero, and what no absolute bound
+    /// would pin down.
+    #[test]
+    fn a_long_feature_name_cannot_lay_out_the_panel() {
+        // Position, text and DRAWN WIDTH. The width is the point: `galley.text()`
+        // returns the original string whether or not it was truncated, because
+        // truncation is a property of the galley's size, so text alone cannot
+        // tell a cut-down name from a full one.
+        fn panel_texts(name: &str) -> Vec<(egui::Pos2, String, f32)> {
+            let mut app = seq_app();
+            app.tab = Tab::Features;
+            let d = app.document.as_mut().expect("a document");
+            let mut f = pl_core::Feature::new(name, "CDS");
+            f.strand = pl_core::Strand::Forward;
+            f.segments.push(pl_core::Segment::new(400, 1_400));
+            d.apply(pl_core::OpKind::SetFeature {
+                index: None,
+                feature: Box::new(f),
+            })
+            .expect("adding a feature");
+            let ctx = test_ctx();
+            let win = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 840.0),
+                )),
+                ..Default::default()
+            };
+            // Twice: the panel's width is restored from the previous pass.
+            let mut out = Vec::new();
+            for _ in 0..2 {
+                let full = ctx.run_ui(win.clone(), |ui| app.side_panel(ui));
+                out = full
+                    .shapes
+                    .iter()
+                    .filter_map(|cs| match &cs.shape {
+                        egui::Shape::Text(t) => {
+                            Some((t.pos, t.galley.text().to_string(), t.galley.size().x))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+            }
+            out
+        }
+
+        let long = "a".repeat(150);
+        let short = panel_texts("araC");
+        let wide = panel_texts(&long);
+
+        // The tab strip is the review's own symptom. Every tab must be drawn,
+        // and drawn at the same place as with a short name.
+        for tab in ["Features", "Library", "Enzymes", "Sequence", "History"] {
+            let at = |v: &[(egui::Pos2, String, f32)]| {
+                v.iter().find(|(_, t, _)| t == tab).map(|(p, _, _)| *p)
+            };
+            let a = at(&short).unwrap_or_else(|| panic!("{tab} is missing from the control"));
+            let b = at(&wide)
+                .unwrap_or_else(|| panic!("a 150-character name pushed {tab} off the panel"));
+            assert!(
+                (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5,
+                "a 150-character name moved the {tab} tab from {a:?} to {b:?}"
+            );
+        }
+
+        // The coordinates a cloner reads off the row survive it.
+        // The review's second symptom, on the same mechanism: "the whole
+        // New… / Edit… / Duplicate / Remove row is gone".
+        for b in ["New…", "Edit…", "Duplicate", "Remove"] {
+            assert!(
+                wide.iter()
+                    .any(|(p, t, _)| t == b && (0.0..1_280.0).contains(&p.x)),
+                "a 150-character name took the {b} button off the panel"
+            );
+        }
+
+        // Position only, not position plus width: the coordinates sit in a
+        // right-to-left group, where the galley's own size is not the extent it
+        // is drawn into, and the control shows it — `400..1,400` is laid out at
+        // x=1257 with a 66 pt galley inside a 1,280 pt window. Where it STARTS
+        // is the thing the defect moves, from inside the pane to past the edge
+        // of the screen.
+        let coords = |v: &[(egui::Pos2, String, f32)]| {
+            v.iter()
+                .any(|(p, t, _)| t == "400..1,400" && (0.0..1_280.0).contains(&p.x))
+        };
+        assert!(coords(&short), "the control has no coordinates to lose");
+        assert!(
+            coords(&wide),
+            "a 150-character name pushed the coordinates out of the window"
+        );
+
+        // And the name is laid out into the room it has, not at its own width.
+        let (at, w) = wide
+            .iter()
+            .find(|(_, t, _)| *t == long)
+            .map(|(p, _, w)| (*p, *w))
+            .expect("the name is not drawn at all");
+        assert!(
+            at.x + w <= 1_280.5,
+            "the name is laid out {w:.0} pt wide and runs to x={:.0} in a 1,280 pt \
+             window, so one /label still sets the width of the pane",
+            at.x + w
+        );
+    }
+
     fn seq_app() -> App {
         let mut s = 0x2545_F491_4F6C_DD1Du64;
         let seq: String = (0..8_117)
