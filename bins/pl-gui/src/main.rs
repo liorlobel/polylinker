@@ -1501,6 +1501,23 @@ impl App {
     /// next launch greeted a deliberate quit with "A previous session did not
     /// close cleanly". Two concerns expressed through one field, and the second
     /// one to arrive won.
+    /// How long until an autosave is owed, or `None` when nothing is at risk.
+    ///
+    /// A function rather than three lines in `ui`, because `ui` needs an
+    /// `eframe::Frame` and cannot be driven from a test — and an untestable
+    /// scheduling decision is how the missing wake-up got here in the first
+    /// place. `Some(ZERO)` means "now": the caller still asks
+    /// `request_repaint_after`, which treats zero as the next frame.
+    fn autosave_due_in(&self) -> Option<std::time::Duration> {
+        if !self.bench.any_unsaved() {
+            return None;
+        }
+        Some(match self.last_autosave {
+            Some(t) => Self::AUTOSAVE_EVERY.saturating_sub(t.elapsed()),
+            None => std::time::Duration::ZERO,
+        })
+    }
+
     fn autosave(&mut self, forced: bool) {
         // THE THROTTLE COMES FIRST, and that ordering is the whole of a defect
         // this shipped with.
@@ -3572,6 +3589,30 @@ impl eframe::App for App {
         }
 
         self.autosave(false);
+
+        // A THROTTLE WITH NOTHING TO WAKE IT NEVER FIRES.
+        //
+        // `autosave` declines when fewer than `AUTOSAVE_EVERY` seconds have
+        // passed, and then nothing schedules the frame on which it would be due.
+        // eframe waits for an event, so on an idle app there is no next frame:
+        //
+        //     14:00:00  an autosave lands
+        //     14:00:17  a 1,240 bp deletion — one frame runs, autosave declines
+        //     14:00:18  the user goes to lunch
+        //     14:20:00  the machine loses power
+        //
+        // The deletion was never written anywhere. The throttle is right — a
+        // write per keystroke is what it exists to prevent — but "the next frame
+        // will come along" was an assumption, and the ONE case it fails is the
+        // idle app, which is exactly the case a crash-recovery file is for.
+        //
+        // Same shape as the run-idle wake-up twelve lines above, which had to
+        // learn this first: "a timeout with nothing to wake it never fires on an
+        // idle app". Asked only while something is at risk, so a clean bench
+        // still sleeps.
+        if let Some(due) = self.autosave_due_in() {
+            ctx.request_repaint_after(due);
+        }
 
         if debug_geometry() {
             eprintln!(
@@ -13728,6 +13769,53 @@ mod tests {
         if let (Some(t), Some(d)) = (typed, app.bench.get_mut()) {
             app.edit.type_text(d, t, now);
         }
+    }
+
+    /// PROVEN TO FAIL at 4ca407b: nothing scheduled the frame on which an
+    /// autosave would become due, so on an idle app it never became due.
+    ///
+    /// `autosave` declines inside `AUTOSAVE_EVERY`, and eframe waits for an
+    /// event rather than spinning:
+    ///
+    ///     14:00:00  an autosave lands
+    ///     14:00:17  a 1,240 bp deletion — one frame runs, autosave declines
+    ///     14:00:18  the user goes to lunch
+    ///     14:20:00  the machine loses power
+    ///
+    /// The deletion was in no file anywhere. The throttle is right; "another
+    /// frame will come along" was the assumption, and the one case it fails is
+    /// the idle app — which is the exact case a crash-recovery file exists for.
+    #[test]
+    fn an_idle_app_with_unsaved_work_still_schedules_its_next_autosave() {
+        let (mut app, _path) = app_with_recovery("wake");
+        // Nothing open: nothing at risk, and the app is allowed to sleep.
+        assert_eq!(app.autosave_due_in(), None, "an empty bench must not wake");
+
+        app.adopt(Document::from_bytes(b">x\nAAAACCCCGGGGTTTT\n", "x.fa".into(), None).unwrap());
+        // Opened from bytes with no path, so it counts as unsaved work at once.
+        assert!(app.document().unwrap().unsaved());
+        let due = app
+            .autosave_due_in()
+            .expect("unsaved work must schedule a wake-up");
+        assert!(
+            due <= App::AUTOSAVE_EVERY,
+            "the wake-up is further away than the throttle itself: {due:?}"
+        );
+
+        // `adopt` starts the clock, so the wake is in the future rather than
+        // immediate — the point is that one is asked for AT ALL.
+        app.last_autosave = Some(std::time::Instant::now());
+        let due = app.autosave_due_in().expect("still at risk");
+        assert!(due > std::time::Duration::ZERO && due <= App::AUTOSAVE_EVERY);
+
+        // And a bench with nothing at risk sleeps again.
+        app.bench.get_mut().unwrap().mark_saved();
+        assert!(!app.bench.any_unsaved());
+        assert_eq!(
+            app.autosave_due_in(),
+            None,
+            "a saved bench must not hold the CPU awake every thirty seconds"
+        );
     }
 
     #[test]
