@@ -4,3 +4,11 @@
 # write LF, and the drift check would fail on every fresh clone for a reason
 # that has nothing to do with the renderers.
 crates/pl-draw/tests/agreement.json -text
+
+# The font-licence texts are embedded with `include_bytes!`, and both their byte
+# length and sha256 are asserted by `the_vendored_faces_are_the_files_notice_records`
+# and disclosed in NOTICE for a recipient to verify. With core.autocrlf on — the
+# Windows default — checkout rewrites them as CRLF, so every length and hash is
+# wrong on Windows for a reason that has nothing to do with the fonts. Pin them to
+# LF like the fixture above.
+bins/pl-gui/fonts/*.txt -text
