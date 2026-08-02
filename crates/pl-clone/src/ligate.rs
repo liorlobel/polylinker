@@ -65,6 +65,19 @@ pub struct Options {
     /// product is usually an intermediate or a dead end, and listing every
     /// partial join alongside the real answer buries it.
     pub linear: bool,
+    /// How many fragment PICKS [`subclone`] will try before refusing.
+    ///
+    /// The choice of one fragment per digest multiplies: two digests of twelve
+    /// and eighteen fragments is 216 combinations, and each of those runs a full
+    /// `n!·2ⁿ` ligation search inside it. `max_fragments` bounds the inner
+    /// search and says nothing about the outer one, so this is a second wall for
+    /// a second dimension rather than a duplicate of the first.
+    ///
+    /// Four thousand and ninety-six. A real subcloning is two or three digests
+    /// of a handful of fragments each; anything past this is a user who has
+    /// ticked every enzyme in the table, and refusing with the number in the
+    /// message is more use to them than a frozen window.
+    pub max_combinations: usize,
 }
 
 impl Default for Options {
@@ -73,6 +86,7 @@ impl Default for Options {
             max_fragments: 8,
             blunt: false,
             linear: false,
+            max_combinations: 4096,
         }
     }
 }
@@ -87,6 +101,24 @@ pub enum LigateError {
     /// A circle cannot be a starting fragment: it has no ends to ligate.
     CircularInput {
         index: usize,
+    },
+    /// A [`subclone`] digest with nothing in it.
+    ///
+    /// Named rather than answered with an empty result. "One fragment from each
+    /// digest" cannot be done when one digest has none, and a silent `Ok(vec![])`
+    /// reads as "your vector and insert do not fit together" — which sends the
+    /// user to choose different enzymes for a problem that is in the OTHER
+    /// molecule, where they did not look.
+    EmptyPool {
+        pool: usize,
+    },
+    CircularPoolInput {
+        pool: usize,
+        index: usize,
+    },
+    TooManyCombinations {
+        given: usize,
+        max: usize,
     },
 }
 
@@ -104,6 +136,20 @@ impl std::fmt::Display for LigateError {
             LigateError::CircularInput { index } => write!(
                 f,
                 "fragment {index} is circular, so it has no ends to ligate; cut it first"
+            ),
+            LigateError::EmptyPool { pool } => write!(
+                f,
+                "digest {pool} produced no fragments, so there is nothing to take from it"
+            ),
+            LigateError::CircularPoolInput { pool, index } => write!(
+                f,
+                "fragment {index} of digest {pool} is circular, so it has no ends to ligate; \
+                 cut it first"
+            ),
+            LigateError::TooManyCombinations { given, max } => write!(
+                f,
+                "{given} ways to pick one fragment from each digest is more than this search \
+                 will try (max {max}); cut with fewer enzymes"
             ),
         }
     }
@@ -371,6 +417,123 @@ pub fn ligate(fragments: &[Dseq], opts: &Options) -> Result<Vec<Product>, Ligate
     Ok(s.out)
 }
 
+/// One construct, and every way of picking fragments that builds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Construct {
+    /// The molecule, and how the chosen fragments were arranged.
+    ///
+    /// `product.order[k].0` IS A POOL INDEX, not a fragment index, and that is
+    /// not a coincidence to be documented away: exactly one fragment is taken
+    /// from each digest, so the slice handed to [`ligate`] is one fragment per
+    /// pool in pool order, and `order` indexes it. Which fragment came from that
+    /// pool is in [`Construct::routes`].
+    pub product: Product,
+    /// Each entry is one fragment index per pool, in pool order.
+    ///
+    /// More than one when different picks build the same molecule — two halves
+    /// of a palindromic digest, say. Reported rather than collapsed to whichever
+    /// the loop met first, because "these two choices give you the same plasmid"
+    /// is the answer, and picking one arbitrarily would present a coincidence as
+    /// a fact about the vector.
+    pub routes: Vec<Vec<usize>>,
+}
+
+/// Every construct that uses exactly one fragment from each digest.
+///
+/// THIS IS SUBCLONING. Cut the vector, cut the insert, take one piece of each,
+/// ligate. [`ligate`] cannot answer it and should not: every fragment must be
+/// used there, deliberately, because a ligation that quietly dropped one would
+/// be answering "what can I make from SOME of this" — and the fragment left out
+/// is usually the insert. The choice is made HERE instead, one combination at a
+/// time, and each combination goes through `ligate` unchanged.
+///
+/// Results are grouped by [`Product::identity`], so a molecule reachable by two
+/// different picks is one construct with two routes rather than two answers.
+///
+/// A combination that cannot be sealed simply contributes nothing. That is not
+/// an error and is the ordinary case: most pairs of fragments from two digests
+/// have no compatible ends, which is exactly what makes the ones that do worth
+/// reporting.
+pub fn subclone(pools: &[Vec<Dseq>], opts: &Options) -> Result<Vec<Construct>, LigateError> {
+    if pools.is_empty() {
+        return Err(LigateError::NotEnoughFragments);
+    }
+    if pools.len() > opts.max_fragments {
+        return Err(LigateError::TooManyFragments {
+            given: pools.len(),
+            max: opts.max_fragments,
+        });
+    }
+    // Checked HERE and not left to `ligate` to hit combination by combination.
+    // An empty or circular pool makes every one of the combinations below fail
+    // identically, so discovering it inside the loop would report it as "no
+    // construct is possible" — a sentence about the enzymes, when the fault is
+    // that one of the molecules was never cut.
+    for (i, p) in pools.iter().enumerate() {
+        if p.is_empty() {
+            return Err(LigateError::EmptyPool { pool: i });
+        }
+        if let Some(j) = p.iter().position(|f| f.circular) {
+            return Err(LigateError::CircularPoolInput { pool: i, index: j });
+        }
+    }
+    // `checked_mul`, because the product of a few pool sizes overflows `usize`
+    // long before it becomes slow, and a wrapped count would pass the very
+    // guard it is being computed for.
+    let combos = pools
+        .iter()
+        .try_fold(1usize, |a, p| a.checked_mul(p.len()))
+        .unwrap_or(usize::MAX);
+    if combos > opts.max_combinations {
+        return Err(LigateError::TooManyCombinations {
+            given: combos,
+            max: opts.max_combinations,
+        });
+    }
+
+    let mut out: Vec<Construct> = Vec::new();
+    let mut index: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut pick = vec![0usize; pools.len()];
+    loop {
+        let frags: Vec<Dseq> = pools
+            .iter()
+            .zip(&pick)
+            .map(|(p, &i)| p[i].clone())
+            .collect();
+        // `?` and not a swallowed error. Every cause `ligate` can refuse for is
+        // ruled out above, so one arriving here is a disagreement between the
+        // two functions' preconditions and must be heard rather than absorbed
+        // once per combination.
+        for p in ligate(&frags, opts)? {
+            let id = p.identity();
+            match index.get(&id) {
+                Some(&k) => out[k].routes.push(pick.clone()),
+                None => {
+                    index.insert(id, out.len());
+                    out.push(Construct {
+                        product: p,
+                        routes: vec![pick.clone()],
+                    });
+                }
+            }
+        }
+        // The odometer. Last pool turns fastest, so the routes come out in
+        // pool-major order and two runs over the same input agree.
+        let mut k = pools.len();
+        loop {
+            if k == 0 {
+                return Ok(out);
+            }
+            k -= 1;
+            pick[k] += 1;
+            if pick[k] < pools[k].len() {
+                break;
+            }
+            pick[k] = 0;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +591,172 @@ mod tests {
             "the end changed shape when flipped"
         );
         assert_eq!(g.left_end(), a.right_end());
+    }
+
+    /// THE OPERATION THIS WHOLE CRATE IS FOR, and which nothing could execute
+    /// until now: cut a vector, cut an insert, put the insert in the vector.
+    ///
+    /// PROVEN TO FAIL against 8c41d59 — `subclone` does not exist there, and the
+    /// reason it had to is not an omission but a deliberate contract. `ligate`
+    /// uses EVERY fragment, so handing it all four pieces of the two digests
+    /// asks for a four-piece construct and never returns the two-piece one the
+    /// user wants. Ligating just the two chosen pieces requires choosing them,
+    /// and the choosing is the missing operation.
+    ///
+    /// The construct is checked BY SEQUENCE against one built by hand from the
+    /// two halves, not by length and not by fragment count. A wrong arrangement
+    /// — insert flipped, vector flipped, the two overhangs swapped — has exactly
+    /// the same length as the right one, so length is the measurement that
+    /// cannot fail.
+    #[test]
+    fn an_insert_cut_from_one_plasmid_goes_into_a_vector_cut_from_another() {
+        // EcoRI is G^AATTC and BamHI is G^GATCC, so each fragment below carries
+        // one AATT overhang and one GATC overhang and can only anneal the one
+        // way round. That is what makes a directional subcloning directional.
+        let vector = Dseq::new(
+            "GAATTCTTTTTTTTTTTTTTTTTTTTGGATCCAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            true,
+        );
+        let donor = Dseq::new(
+            "GAATTCCCCCCCCCCCCCCCCCCGGATCCGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG",
+            true,
+        );
+        let cutters = [enz("EcoRI"), enz("BamHI")];
+        let vfrags = crate::digest(&vector, cutters);
+        let dfrags = crate::digest(&donor, cutters);
+        assert_eq!(
+            (vfrags.len(), dfrags.len()),
+            (2, 2),
+            "the premise: two cuts in each circle give two pieces each"
+        );
+
+        let out =
+            subclone(&[vfrags.clone(), dfrags.clone()], &Options::default()).expect("a subcloning");
+        // Every fragment here has one AATT end and one GATC end, so all four
+        // pairings close. That is the honest answer and the panel's job is to
+        // show which is which — not this function's to guess.
+        assert_eq!(out.len(), 4, "one construct per pairing");
+
+        // THE ONE THE USER WANTED, identified the way a person would: the
+        // vector's backbone plus the donor's insert.
+        let backbone = vfrags
+            .iter()
+            .max_by_key(|f| f.len())
+            .expect("a longest vector fragment");
+        let insert = dfrags
+            .iter()
+            .min_by_key(|f| f.len())
+            .expect("a shortest donor fragment");
+        let want = looped(
+            &join(backbone, insert, &Options::default()).expect("the ends seal"),
+            &Options::default(),
+        )
+        .expect("and the circle closes");
+        let want_id = crate::assembly::Product {
+            seq: want.clone(),
+            order: vec![],
+            junctions: vec![],
+        }
+        .identity();
+        let got = out
+            .iter()
+            .find(|c| c.product.identity() == want_id)
+            .expect("the vector-plus-insert construct is not among the answers");
+        assert!(got.product.seq.circular);
+        // MINUS EIGHT, and the eight is the point rather than a fudge. A sticky
+        // fragment's `len()` counts its overhang bases, and each of the two
+        // junctions here is one four-base overhang carried on one strand of each
+        // piece — present in both counts before the join and once after. A
+        // construct that came out at `backbone + insert` would have written each
+        // overhang twice, which is eight duplicated bases inside a plasmid.
+        assert_eq!(
+            got.product.seq.len(),
+            backbone.len() + insert.len() - 8,
+            "the construct is not the two chosen pieces annealed at their overhangs"
+        );
+        // And it says WHICH pieces, which is the whole point of `routes`: a
+        // construct nobody can trace back to a band on a gel cannot be built.
+        let route = &got.routes[0];
+        assert_eq!(route.len(), 2, "one fragment chosen from each digest");
+        assert_eq!(
+            vfrags[route[0]].len(),
+            backbone.len(),
+            "the route names the wrong vector fragment"
+        );
+        assert_eq!(
+            dfrags[route[1]].len(),
+            insert.len(),
+            "the route names the wrong donor fragment"
+        );
+        // `order` indexes POOLS, not fragments, and a reader who assumes
+        // otherwise gets a plausible wrong answer rather than an error.
+        let mut pools: Vec<usize> = got.product.order.iter().map(|(i, _)| *i).collect();
+        pools.sort_unstable();
+        assert_eq!(pools, vec![0, 1], "each pool contributed exactly once");
+    }
+
+    /// A vector and an insert cut with enzymes that leave incompatible ends
+    /// give nothing, and that is a result rather than an error.
+    ///
+    /// The other half of the test above, and it is not decoration: a `subclone`
+    /// that returned every pairing regardless of the ends would pass the whole
+    /// of the previous test — four constructs, one of them the wanted one — and
+    /// be wrong about the only thing a ligation depends on.
+    #[test]
+    fn ends_that_cannot_be_sealed_produce_no_construct_rather_than_an_error() {
+        // PstI leaves a 3' TGCA overhang; EcoRI leaves 5' AATT. Neither anneals
+        // to the other, and neither anneals to itself here because each circle
+        // is cut once and its two ends are the pair that just came apart.
+        let vector = Dseq::new("GAATTCTTTTTTTTTTTTTTTTTTTTTTTTAAAACCCCGGGG", true);
+        let donor = Dseq::new("CTGCAGCCCCCCCCCCCCCCCCCCCCCCCCAAAATTTTGGGG", true);
+        let vfrags = crate::digest(&vector, [enz("EcoRI")]);
+        let dfrags = crate::digest(&donor, [enz("PstI")]);
+        assert_eq!((vfrags.len(), dfrags.len()), (1, 1), "the premise");
+        let out = subclone(&[vfrags, dfrags], &Options::default()).expect("not an error");
+        assert!(
+            out.is_empty(),
+            "an AATT overhang was sealed to a TGCA one, which no ligase does"
+        );
+    }
+
+    /// The refusals, each named, because every one of them is a different thing
+    /// for the user to do about it.
+    #[test]
+    fn a_subcloning_that_cannot_be_attempted_says_which_molecule_is_at_fault() {
+        let opts = Options::default();
+        let frag = try_cut(
+            &Dseq::new("AAAAGGATCCTTTTGCGCGCATATATCCCGGG", true),
+            enz("BamHI"),
+        )
+        .expect("cuts");
+        assert_eq!(subclone(&[], &opts), Err(LigateError::NotEnoughFragments));
+        // An empty digest must NOT come back as "these do not fit together":
+        // that sentence sends the user to change enzymes on the molecule they
+        // are looking at, when the fault is in the one they are not.
+        assert_eq!(
+            subclone(&[frag.clone(), Vec::new()], &opts),
+            Err(LigateError::EmptyPool { pool: 1 })
+        );
+        // A circle has no ends. Reported per pool, so the message can name the
+        // molecule that was never cut.
+        assert_eq!(
+            subclone(
+                &[frag.clone(), vec![Dseq::new("ACGTACGTACGT", true)]],
+                &opts
+            ),
+            Err(LigateError::CircularPoolInput { pool: 1, index: 0 })
+        );
+        // And the second wall, for the second dimension. `max_fragments` bounds
+        // the search inside one combination and says nothing about how many
+        // combinations there are.
+        let wide = vec![frag[0].clone(); 100];
+        assert_eq!(
+            subclone(&[wide.clone(), wide], &opts),
+            Err(LigateError::TooManyCombinations {
+                given: 10_000,
+                max: opts.max_combinations
+            })
+        );
     }
 
     /// docs/PLAN.md §6's stated validation criterion, which until now nothing

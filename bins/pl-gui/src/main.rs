@@ -9786,11 +9786,29 @@ impl App {
         };
         let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
         let mol = self.document().expect("checked above").molecule().clone();
-        let keep = clone::show(ctx, &mut panel, &mol, dark);
+        // The rest of the bench, resolved fresh. Cloned rather than borrowed
+        // because `show` takes `&mut self.clone_panel`'s contents and the bench
+        // is behind the same `&mut self`; a plasmid is a few hundred kilobytes
+        // at most and this runs once per frame the panel is open.
+        let others: Vec<(usize, String, pl_core::Molecule)> = self
+            .bench
+            .each()
+            .enumerate()
+            .filter(|(i, _)| *i != self.bench.active())
+            .map(|(i, t)| (i, t.doc.title.clone(), t.doc.molecule().clone()))
+            .collect();
+        let refs: Vec<(usize, String, &pl_core::Molecule)> =
+            others.iter().map(|(i, n, m)| (*i, n.clone(), m)).collect();
+        let keep = clone::show(ctx, &mut panel, &mol, &refs, dark);
 
         if let Some(i) = panel.wanted.take() {
             if let Some(p) = panel.plan.as_ref().and_then(|pl| pl.prods.get(i)) {
-                let title = format!("{} product", mol.name);
+                // The construct's OWN name, which `build` composed from every
+                // parent that contributed. `format!("{} product", mol.name)`
+                // named a two-plasmid construct after the vector alone, and a
+                // file called "pUC19 product" that is half pET28a is one
+                // somebody will later mistake for a religation of pUC19.
+                let title = p.mol.name.clone();
                 let (bytes, _unwritable) =
                     pl_fileio::genbank::write_reporting(&p.mol, &title, today());
                 match Document::from_bytes(bytes.as_bytes(), title, None) {
@@ -17266,7 +17284,7 @@ mod tests {
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
         let seq_mol = app.document().expect("open").molecule().clone();
         let mut panel = clone::Panel::new(&picked);
-        panel.plan = Some(clone::plan(&seq_mol, &picked, true));
+        panel.plan = Some(clone::plan(&seq_mol, None, &picked, true));
         panel.stale = false;
         assert!(
             panel.plan.as_ref().is_some_and(|p| !p.prods.is_empty()),
@@ -17329,7 +17347,7 @@ mod tests {
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
         let first = app.document().expect("open").molecule().clone();
         let mut panel = clone::Panel::new(&picked);
-        panel.plan = Some(clone::plan(&first, &picked, true));
+        panel.plan = Some(clone::plan(&first, None, &picked, true));
         panel.stale = false;
         app.clone_panel = Some(panel);
         assert!(app.clone_panel.is_some(), "the fixture needs a panel open");
@@ -17385,7 +17403,7 @@ mod tests {
         m.features.push(f);
 
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
-        let plan = clone::plan(&m, &picked, false);
+        let plan = clone::plan(&m, None, &picked, false);
         assert_eq!(plan.prods.len(), 1, "{:?}", plan.note);
         let p = &plan.prods[0];
 
