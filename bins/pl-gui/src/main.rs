@@ -1048,9 +1048,15 @@ struct App {
     ///
     /// A closed tab keeps its document AND its undo history, which is what lets
     /// Close Tab be unguarded: nothing is destroyed, so nothing has to be asked
-    /// about. Bounded, because an unbounded one is a memory leak shaped like a
-    /// feature — a user who closes fifty tabs in a session is not going to
-    /// reopen the first.
+    /// about. Bounded by [`App::REOPENABLE`], because an unbounded one is a
+    /// memory leak shaped like a feature — a user who closes fifty tabs in a
+    /// session is not going to reopen the first.
+    ///
+    /// THE SENTENCE ABOVE WAS FALSE UNTIL THE BOUND EXISTED. It was written when
+    /// this field was added and described an intention; `close_tab` only ever
+    /// pushed. A doc comment that states an invariant the code does not hold is
+    /// worse than none, because the next reader — and the commit that introduced
+    /// per-tab recovery slots was one — reasons from it.
     closed: Vec<bench::Tab>,
 
     /// The Feature editor, if it is open.
@@ -1247,6 +1253,15 @@ impl App {
     /// also skipped entirely when nothing has changed, so an idle window never
     /// touches the disk at all.
     const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// How many closed tabs Ctrl+Shift+T can reach back through.
+    ///
+    /// Sixteen. The number is a guess and the bound is not: a closed tab holds a
+    /// whole `Document`, sequence and undo log included, so an unbounded stack
+    /// is megabytes per close that nothing ever frees. Sixteen is far past what
+    /// anybody undoes by hand and far short of what a day of opening files
+    /// would accumulate.
+    const REOPENABLE: usize = 16;
 
     /// Documents left by a session that did not close cleanly, or abandoned on
     /// purpose.
@@ -9623,9 +9638,8 @@ impl App {
             //
             // A recovery file answers "what was open when this stopped?", and a
             // closed tab was not open. Keeping it would also make the slot
-            // unreusable for as long as the reopen stack held the tab — the
-            // stack is unbounded, so sixty-four opens and closes would exhaust
-            // autosave for the whole session.
+            // unreusable for as long as the reopen stack held the tab, and there
+            // are sixty-four slots.
             //
             // This is not a regression on the reopen stack: Ctrl+Shift+T reads
             // memory and never read this file, and before per-tab slots the next
@@ -9636,6 +9650,15 @@ impl App {
             }
             t.autosaved = None;
             self.closed.push(t);
+            // The bound the field's doc has always claimed and never had. A tab
+            // holds a whole `Document` — sequence, features and the entire undo
+            // log — so on the user's own 4.6 Mb genome each one is megabytes that
+            // nothing will ever free. `remove(0)` rather than a ring buffer
+            // because the order is the interface: Ctrl+Shift+T pops the end, so
+            // what has to go is the front.
+            while self.closed.len() > Self::REOPENABLE {
+                self.closed.remove(0);
+            }
             // The panels belonged to a molecule that is no longer on screen.
             self.close_design("the design panel was closed: its tab was closed");
             self.close_feature_editor("the feature editor was closed: its tab was closed");
@@ -13048,6 +13071,45 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reopen stack's doc claimed a bound the code did not have.
+    ///
+    /// PROVEN TO FAIL against 0881cac: `close_tab` only ever pushed, so a
+    /// session that opens and closes files accumulates a whole `Document` per
+    /// close — sequence, features and the entire undo log — that nothing will
+    /// ever free. On the 4.6 Mb genome this project tests against, twenty closes
+    /// is ninety megabytes of tabs nobody can see.
+    ///
+    /// The comment is the point as much as the leak is. It has said "Bounded,
+    /// because an unbounded one is a memory leak shaped like a feature" since
+    /// the field was added, and the commit that introduced per-tab recovery
+    /// slots reasoned from the opposite — correctly, as it turned out, which is
+    /// the only reason it did not ship a slot leak too.
+    #[test]
+    fn the_reopen_stack_stops_growing_where_its_own_doc_says_it_does() {
+        let mut app = App::blank();
+        for i in 0..(App::REOPENABLE + 6) {
+            app.bench
+                .set(edited_doc(&format!("t{i}.fa"), "AAAACCCCGGGGTTTT"));
+            app.close_tab(0);
+        }
+        assert_eq!(
+            app.closed.len(),
+            App::REOPENABLE,
+            "the reopen stack grew without limit, which is what its doc says it does not do"
+        );
+        // The END is what Ctrl+Shift+T pops, so the bound must drop the OLDEST.
+        // A cap that trimmed the wrong end would keep the count honest and make
+        // the feature useless: every reopen would hand back the same stale tab.
+        assert_eq!(
+            app.closed
+                .last()
+                .map(|t| t.doc.title.clone())
+                .unwrap_or_default(),
+            format!("t{}.fa", App::REOPENABLE + 5),
+            "the most recently closed tab is not the one Ctrl+Shift+T would reopen"
+        );
     }
 
     /// Closing a tab gives its slot back, and takes its draft with it.
