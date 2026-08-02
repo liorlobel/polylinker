@@ -1928,6 +1928,23 @@ impl App {
         // says which file it came from once the title bar has changed, so it is
         // closed rather than relabelled.
         self.close_design("the design panel was closed: it was designed against the previous file");
+        // THE SAME RULE, AND 28e9d91 DID NOT FOLLOW IT. The cut-and-religate
+        // panel holds a plan built from one molecule's bases: its fragments,
+        // its ends, the parent intervals each fragment was traced back to, and
+        // the finished constructs. `adopt` did not touch it, so it survived a
+        // document swap showing plasmid A's digest while B was on screen — and
+        // "Open" then built A's construct, from a file no longer open, labelled
+        // with A's name, as though it had come from the plasmid in front of you.
+        //
+        // A wrong construct is the worst thing this program can produce, so the
+        // panel is closed rather than relabelled: a religation plan costs
+        // milliseconds to recompute and nothing in it says which molecule it
+        // came from once the title bar has changed.
+        if self.clone_panel.take().is_some() {
+            self.notice = Some(
+                "the cut-and-religate panel was closed: its digest was of the previous file".into(),
+            );
+        }
         // And for the same reason: the editor holds an INDEX into the previous
         // file's feature list plus a clone of the feature at it. Left open
         // across a document swap, one press of Save writes file A's feature over
@@ -15747,6 +15764,50 @@ mod tests {
             "Discard and open the construct"
         );
         assert!(Losing::Product.consequence(true).contains("construct"));
+    }
+
+    /// PROVEN TO FAIL at 28e9d91: `adopt` closed the design panel and the
+    /// feature editor because each holds something belonging to the molecule it
+    /// was opened on, and did not close the cut-and-religate panel, which holds
+    /// a whole digest of one.
+    ///
+    /// Left open across a swap it showed plasmid A's fragments while B was on
+    /// screen, and "Open" built A's construct under A's name — a construct from
+    /// a file that is no longer open, presented as if it came from the one in
+    /// front of you. That is the failure mode this program can least afford.
+    #[test]
+    fn a_document_swap_closes_the_religation_panel_it_invalidates() {
+        let mut app = seq_app();
+        let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
+        let first = app.document.as_ref().expect("open").molecule().clone();
+        let mut panel = clone::Panel::new(&picked);
+        panel.plan = Some(clone::plan(&first, &picked, true));
+        panel.stale = false;
+        app.clone_panel = Some(panel);
+        assert!(app.clone_panel.is_some(), "the fixture needs a panel open");
+
+        // A different molecule takes over.
+        let other = pl_core::Molecule {
+            name: "somethingElse".into(),
+            seq: b"ACGTACGTACGTACGTACGTACGT".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let title = "other".to_string();
+        let (bytes, _) = pl_fileio::genbank::write_reporting(&other, &title, today());
+        app.adopt(Document::from_bytes(bytes.as_bytes(), title, None).expect("re-read"));
+
+        assert!(
+            app.clone_panel.is_none(),
+            "the panel outlived the molecule it digested, so Open would build the wrong construct"
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("previous file")),
+            "closing it silently is the same surprise as leaving it open: {:?}",
+            app.notice
+        );
     }
 
     /// The whole path a user walks: digest, religate, open the product.
