@@ -62,7 +62,12 @@ pub struct Iv {
     pub lo: u64,
     /// 0-based, exclusive.
     pub hi: u64,
-    /// Index into `Molecule::features`.
+    /// Which ITEM this piece belongs to.
+    ///
+    /// An index into `Molecule::features` for the feature index, and into
+    /// `doc::Orfs::orfs` for the ORF index. Named for what it is rather than
+    /// for one of its two meanings, because indexing the wrong array would
+    /// label every ORF with a feature's name and nothing would error.
     pub feat: u32,
     /// Index into that feature's `segments` of the FIRST segment in the run.
     pub seg: u16,
@@ -227,19 +232,79 @@ impl Default for AnnotIndex {
     }
 }
 
+/// One item's contribution to an index, before splitting and colouring.
+///
+/// The shape [`AnnotIndex::of_spans`] takes, so anything with coordinates can
+/// use this module's interval tree without being a `Molecule::features` entry —
+/// which is what the ORF strip needs. Spans belonging to one item must be
+/// consecutive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// 1-based inclusive, the model's convention. `end < start` is an origin
+    /// crossing on a circular molecule and is split here, once, exactly as a
+    /// feature segment is.
+    pub start: u64,
+    pub end: u64,
+    pub item: u32,
+    pub sub: u16,
+    /// Pin this item's lane rather than colouring it greedily.
+    ///
+    /// Greedy is right for features — it is what stops one hopping lanes while
+    /// the user scrolls — and WRONG IN KIND for reading frames: a reader
+    /// expects frame +2 to stay on the +2 line, and greedy will move it.
+    /// Measured over a 19,552-ORF index, greedy also gives `depth = 6`, so
+    /// three of the six frames would be folded into a `+N` badge over the whole
+    /// molecule.
+    pub lane: Option<u8>,
+}
+
 impl AnnotIndex {
     /// Flatten, split, sort, colour, augment. Once per document version.
     pub fn build(mol: &Molecule, version: Version) -> Self {
-        let n = mol.len();
-        let circular = mol.topology.is_circular();
+        let mut spans: Vec<Span> = Vec::new();
+        for (fi, f) in mol.features.iter().enumerate() {
+            for (si, s) in f.segments.iter().enumerate() {
+                spans.push(Span {
+                    start: s.start,
+                    end: s.end,
+                    item: fi as u32,
+                    sub: si as u16,
+                    lane: None,
+                });
+            }
+        }
+        Self::of_spans(
+            &spans,
+            mol.len(),
+            mol.topology.is_circular(),
+            MAX_LANES,
+            version,
+        )
+    }
+
+    /// The index over any set of spans.
+    ///
+    /// Extracted from [`build`](Self::build) rather than duplicated, so the ORF
+    /// strip gets the origin split, the union of touching pieces, the terminus
+    /// flags and the augmented tree that are already proven against a naive
+    /// oracle over 409 features — instead of a second structure that would have
+    /// to be proven again.
+    pub fn of_spans(spans: &[Span], n: u64, circular: bool, cap: u8, version: Version) -> Self {
         let mut ivs: Vec<Iv> = Vec::new();
         let mut dropped = 0u32;
+        let mut pinned = false;
 
         let mut pieces: Vec<Piece> = Vec::new();
-        for (fi, f) in mol.features.iter().enumerate() {
+        let mut i = 0usize;
+        while i < spans.len() {
+            let fi = spans[i].item;
+            let lane_hint = spans[i].lane;
+            pinned |= lane_hint.is_some();
             pieces.clear();
-            for (si, s) in f.segments.iter().enumerate() {
-                let si = si as u16;
+            while i < spans.len() && spans[i].item == fi {
+                let s = spans[i];
+                i += 1;
+                let si = s.sub;
                 // The SnapGene reader parses `<Segment range="0-4"/>` with a
                 // bare `parse()` and carries the zero through rather than
                 // guessing, so `start` really can be 0 here.
@@ -297,9 +362,9 @@ impl AnnotIndex {
                 ivs.push(Iv {
                     lo: p.lo,
                     hi: p.hi,
-                    feat: fi as u32,
+                    feat: fi,
                     seg: p.seg,
-                    lane: 0,
+                    lane: lane_hint.unwrap_or(0),
                     starts: p.real_lo,
                     ends: p.real_hi,
                     feat_lo: p.real_lo && feat_lo_x == Some(p.lo),
@@ -323,26 +388,38 @@ impl AnnotIndex {
         // while scrolling, and a screenshot would show one assignment and look
         // perfect. Processing left-to-right, the number of lanes greedy uses is
         // the maximum overlap depth exactly.
-        let mut lane_max_hi: Vec<u64> = Vec::new();
-        for iv in &mut ivs {
-            let lane = lane_max_hi
-                .iter()
-                .position(|&end| end <= iv.lo)
-                .unwrap_or(lane_max_hi.len());
-            if lane == lane_max_hi.len() {
-                lane_max_hi.push(iv.hi);
-            } else {
-                lane_max_hi[lane] = lane_max_hi[lane].max(iv.hi);
+        //
+        // Skipped entirely when the caller pinned the lanes, because for a
+        // reading frame the lane is not a free choice: the +2 frame belongs on
+        // the +2 line and greedy would move it.
+        let depth = if pinned {
+            ivs.iter()
+                .map(|iv| iv.lane)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1)
+        } else {
+            let mut lane_max_hi: Vec<u64> = Vec::new();
+            for iv in &mut ivs {
+                let lane = lane_max_hi
+                    .iter()
+                    .position(|&end| end <= iv.lo)
+                    .unwrap_or(lane_max_hi.len());
+                if lane == lane_max_hi.len() {
+                    lane_max_hi.push(iv.hi);
+                } else {
+                    lane_max_hi[lane] = lane_max_hi[lane].max(iv.hi);
+                }
+                iv.lane = lane.min(254) as u8;
             }
-            iv.lane = lane.min(254) as u8;
-        }
-        let depth = lane_max_hi.len().min(255) as u8;
+            lane_max_hi.len().min(255) as u8
+        };
 
         let mut max_hi = vec![0u64; ivs.len()];
         augment(&ivs, &mut max_hi, 0, ivs.len());
 
         AnnotIndex {
-            lanes: depth.min(MAX_LANES),
+            lanes: depth.min(cap),
             depth,
             dropped,
             ivs,

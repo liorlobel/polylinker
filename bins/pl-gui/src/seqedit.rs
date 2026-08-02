@@ -202,6 +202,158 @@ impl RowLayout {
     }
 }
 
+/// Which horizontal band of a row a pixel is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strip {
+    /// Enzyme names, cut chevrons and site brackets.
+    Enzymes,
+    /// The tens ruler.
+    Ticks,
+    /// A residue lane. `reverse` says which strand it reads.
+    Aa { lane: u8, reverse: bool },
+    /// The top strand's letters, 5' -> 3'.
+    Bases,
+    /// The bottom strand's letters, 3' <- 5'. A read-only mirror in the top
+    /// strand's coordinates.
+    Complement,
+    /// The open-reading-frame strip.
+    Orfs,
+    /// Feature ribbons.
+    Lanes,
+}
+
+/// Every VERTICAL number the sequence grid uses, in one place.
+///
+/// The y-axis twin of [`RowLayout`], and it exists for the same reason. The
+/// strip offsets used to be computed inline in the painter -- `y_tick = y +
+/// enz_h; y_text = y_tick + TICK_H; y_lane = y_text + text_h` -- and the
+/// hit-test knew only the row, never the strip, so any y inside the band became
+/// a caret on the letters. With one strip under the letters that was merely
+/// generous. With an amino-acid lane above them, a complement row below them
+/// and a reverse lane below that, a click meant for a residue silently moves
+/// the caret sixty bases away, and the drift between the painter's four inline
+/// formulas and the hit-test's none is invisible in a screenshot.
+///
+/// So this is the only producer of a y offset and [`RowStrips::strip_at`] the
+/// only consumer, and `every_point_of_a_row_lands_in_the_strip_that_was_drawn_there`
+/// asserts they agree over every tenth of a point of the whole band.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RowStrips {
+    /// Height of the enzyme strip, or 0 when this document reserves none.
+    pub enz_h: f32,
+    pub tick_h: f32,
+    /// One row of monospace letters. Shared by the bases, the complement and
+    /// every residue lane, because a residue must be a character in a
+    /// `per_row`-length string laid out at the base font -- see the painter.
+    pub text_h: f32,
+    pub lane_pitch: f32,
+    /// Feature ribbon lanes.
+    pub lanes: u8,
+    /// Residue lanes above the top strand.
+    pub aa_fwd: u8,
+    /// Residue lanes below the complement row.
+    pub aa_rev: u8,
+    pub complement: bool,
+    /// Height of the ORF strip, or 0 when this document reserves none.
+    pub orf_h: f32,
+}
+
+impl RowStrips {
+    /// The one pitch `show_rows`, the y -> row hit-test and the painter share.
+    ///
+    /// Reserved per DOCUMENT: every term here is a property of the document and
+    /// the settings, never of whether THIS row happens to carry a CDS. A row
+    /// that grew because it had a translation on it would break `show_rows`'
+    /// arithmetic mapping from a scroll offset to a row index, and the
+    /// scrollbar would stop agreeing with the content.
+    pub fn row_h(&self) -> f32 {
+        self.enz_h
+            + self.tick_h
+            + self.text_h * (1.0 + self.aa_fwd as f32 + self.aa_rev as f32 + self.n_comp())
+            + self.orf_h
+            + self.lanes as f32 * self.lane_pitch
+    }
+
+    fn n_comp(&self) -> f32 {
+        if self.complement {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    pub fn y_tick(&self) -> f32 {
+        self.enz_h
+    }
+
+    /// Top of forward residue lane `k`. Lane 0 is furthest from the strand, so
+    /// a translation added later never pushes an existing one off its row.
+    pub fn y_aa_fwd(&self, k: u8) -> f32 {
+        self.y_tick() + self.tick_h + k as f32 * self.text_h
+    }
+
+    /// Top of the top strand's letters.
+    pub fn y_text(&self) -> f32 {
+        self.y_aa_fwd(self.aa_fwd)
+    }
+
+    /// Top of the complement row. Only meaningful when `complement` is set.
+    pub fn y_comp(&self) -> f32 {
+        self.y_text() + self.text_h
+    }
+
+    /// Top of reverse residue lane `k`, directly under the strand it reads.
+    pub fn y_aa_rev(&self, k: u8) -> f32 {
+        self.y_comp() + self.n_comp() * self.text_h + k as f32 * self.text_h
+    }
+
+    pub fn y_orf(&self) -> f32 {
+        self.y_aa_rev(self.aa_rev)
+    }
+
+    pub fn y_lane(&self) -> f32 {
+        self.y_orf() + self.orf_h
+    }
+
+    /// Which strip `dy` -- measured from the top of the row -- falls in.
+    ///
+    /// The hit-test's only question. `Bases` and `Complement` both mean "place
+    /// the caret", because the two strands share one coordinate space; an
+    /// `Aa` lane means "select the codon".
+    pub fn strip_at(&self, dy: f32) -> Strip {
+        if dy < self.enz_h {
+            return Strip::Enzymes;
+        }
+        if dy < self.y_aa_fwd(0) {
+            return Strip::Ticks;
+        }
+        if dy < self.y_text() {
+            let k = ((dy - self.y_aa_fwd(0)) / self.text_h.max(1.0)).floor() as u8;
+            return Strip::Aa {
+                lane: k.min(self.aa_fwd.saturating_sub(1)),
+                reverse: false,
+            };
+        }
+        if dy < self.y_comp() {
+            return Strip::Bases;
+        }
+        if self.complement && dy < self.y_aa_rev(0) {
+            return Strip::Complement;
+        }
+        if dy < self.y_orf() {
+            let k = ((dy - self.y_aa_rev(0)) / self.text_h.max(1.0)).floor() as u8;
+            return Strip::Aa {
+                lane: k.min(self.aa_rev.saturating_sub(1)),
+                reverse: true,
+            };
+        }
+        if dy < self.y_lane() {
+            return Strip::Orfs;
+        }
+        Strip::Lanes
+    }
+}
+
 /// The row `base` lands on at this row width.
 ///
 /// The scroll is restored through this rather than kept in pixels because
@@ -1196,8 +1348,34 @@ impl SeqEdit {
         }
     }
 
+    /// The BOTTOM strand of `range`, in the top strand's own coordinates.
+    ///
+    /// Column `c` here is the Watson-Crick partner of column `c` in
+    /// [`row_text`](Self::row_text) -- no reverse, no `reverse_complement`. That
+    /// is the physical duplex, and it is what keeps one coordinate space for
+    /// both strands: a click on the bottom row places the caret on the same
+    /// base, so `Selection`, `through_origin` and every operation derivation are
+    /// untouched by the second strand existing.
+    ///
+    /// `pl_core::iupac::complement` preserves case, so the lowercase tail a
+    /// primer design leaves behind is still legible on the strand it anneals
+    /// to. The same one-byte-in-one-cell-out rule as `row_text`, for the same
+    /// reason: a lossy render drifts the column from the base offset.
+    pub fn row_complement(&self, mol: &Molecule, from: u64, to: u64, out: &mut String) {
+        out.clear();
+        for i in from..to {
+            let b = pl_core::iupac::complement(self.byte_at(mol, i));
+            out.push(if b.is_ascii_graphic() { b as char } else { '?' });
+        }
+    }
+
     /// The effective byte at gap-left index `i`, committed sequence plus run.
-    fn byte_at(&self, mol: &Molecule, i: u64) -> u8 {
+    ///
+    /// `pub(crate)` for the amino-acid track. It reads its codons through here
+    /// and not off `Molecule::seq` for the reason `row_text` does: this is the
+    /// function that produces the LETTERS, so a codon and the letters directly
+    /// above it cannot disagree while the user is typing.
+    pub(crate) fn byte_at(&self, mol: &Molecule, i: u64) -> u8 {
         let Some(r) = &self.run else {
             return mol.seq.get(i as usize).copied().unwrap_or(b' ');
         };

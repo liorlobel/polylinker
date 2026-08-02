@@ -162,10 +162,40 @@ impl Default for Params {
 /// Results are ordered by `(start, strand, frame)`, so two runs over the same
 /// molecule agree byte for byte.
 pub fn find_orfs(seq: &[u8], code: Code, circular: bool, p: &Params) -> Vec<Orf> {
+    find_orfs_until(seq, code, circular, p, &|| false)
+        .expect("a scan that is never asked to stop always finishes")
+}
+
+/// [`find_orfs`], abandonable.
+///
+/// `stop` is polled once every 4,096 codons and the scan returns `None` the
+/// first time it answers true. That granularity is measured rather than
+/// guessed: a six-frame scan of the 4.64 Mb `NC_000913.3` is about 400 ms over
+/// roughly 9.3 million codon evaluations, so 4,096 codons is about 0.2 ms of
+/// work and the check itself is one branch in four thousand.
+///
+/// It exists because a GUI restarts this scan on every edit. Dropping the
+/// worker's channel does not stop the worker — its `send` fails, but only after
+/// it has finished the whole genome — and `bins/pl-gui/src/doc.rs` records what
+/// that cost the enzyme digest: 30 workers spawned, 16 live at once, 29 of them
+/// producing an answer nobody could still read, and 2.2 s of CPU still draining
+/// after the last keystroke.
+///
+/// `&dyn Fn() -> bool` and not an `AtomicBool`, so this crate keeps its promise
+/// of depending on nothing at all — including nothing from `std::sync`.
+pub fn find_orfs_until(
+    seq: &[u8],
+    code: Code,
+    circular: bool,
+    p: &Params,
+    stop: &dyn Fn() -> bool,
+) -> Option<Vec<Orf>> {
+    /// Codons between two polls of `stop`.
+    const POLL: usize = 4_096;
     let n = seq.len();
     let mut out = Vec::new();
     if n < 3 {
-        return out;
+        return Some(out);
     }
 
     let rc = crate::iupac::reverse_complement(seq);
@@ -192,6 +222,14 @@ pub fn find_orfs(seq: &[u8], code: Code, circular: bool, p: &Params) -> Vec<Orf>
             let sync = if circular {
                 let mut at = None;
                 for j in 0..per_turn {
+                    // Polled here as well as in the main loop: on a circle
+                    // whose only stop sits just before the origin, this
+                    // synchronisation walks a whole turn before the main loop
+                    // runs once, and a scan that ignored `stop` for that long
+                    // would still be burning a core after the document changed.
+                    if j % POLL == 0 && stop() {
+                        return None;
+                    }
                     let i = frame as usize + 3 * j;
                     if code.is_stop(&[s[i % n], s[(i + 1) % n], s[(i + 2) % n]]) {
                         at = Some(i);
@@ -216,6 +254,9 @@ pub fn find_orfs(seq: &[u8], code: Code, circular: bool, p: &Params) -> Vec<Orf>
                                 // coded on. See `Params::nested`.
             let mut open: Vec<(usize, [u8; 3])> = Vec::new();
             loop {
+                if k % POLL == 0 && stop() {
+                    return None;
+                }
                 if circular {
                     // Exactly one turn. Starting just past a stop, the last
                     // codon of that turn *is* that stop again, so anything
@@ -305,7 +346,7 @@ pub fn find_orfs(seq: &[u8], code: Code, circular: bool, p: &Params) -> Vec<Orf>
     }
     out.sort_by_key(|o| (o.start, o.strand as u8, o.frame, o.end));
     out.dedup();
-    out
+    Some(out)
 }
 
 /// Reading frames with no stop codon anywhere on a circular molecule.
@@ -715,6 +756,23 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(find_orfs(seq.as_bytes(), TABLE11, true, &p(10)), first);
         }
+    }
+
+    #[test]
+    fn a_scan_that_is_asked_to_stop_stops_and_says_so() {
+        let seq = format!("{}{}", gene("ATG", 40, "TAA"), gene("GTG", 35, "TGA"));
+        // Never asked: the same answer `find_orfs` gives, byte for byte.
+        assert_eq!(
+            find_orfs_until(seq.as_bytes(), TABLE11, true, &p(10), &|| false),
+            Some(find_orfs(seq.as_bytes(), TABLE11, true, &p(10)))
+        );
+        // Asked immediately: no answer at all, rather than a partial one
+        // presented as complete. A truncated ORF list drawn over a molecule is
+        // indistinguishable from a molecule with fewer genes in it.
+        assert_eq!(
+            find_orfs_until(seq.as_bytes(), TABLE11, true, &p(10), &|| true),
+            None
+        );
     }
 
     /// The property that must hold for every reported ORF: the coordinates plus

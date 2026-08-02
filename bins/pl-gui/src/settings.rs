@@ -25,10 +25,45 @@ use std::path::PathBuf;
 const HEADER: &str = "polylinker-layout 1";
 
 /// What a window remembers.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+///
+/// The sequence view's track switches live here and not in the document. They
+/// are VIEW preferences: one per user, never per file, never in the `.dna` or
+/// the `.gb`, and never an `OpKind`. A track is a view, so choosing to look at
+/// one must not make a document dirty.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
     pub panel_w: Option<f32>,
+    pub aa_track: crate::aa::TrackMode,
+    pub complement: Option<bool>,
+    pub orf_track: bool,
+    /// NCBI `transl_table` id. 11, for the reason `bins/pl/src/main.rs` already
+    /// writes down: this is a plasmid tool and its molecules are read in
+    /// bacteria.
+    pub code: u8,
+    pub orf_min_aa: usize,
 }
+
+impl Default for Layout {
+    fn default() -> Self {
+        Layout {
+            panel_w: None,
+            aa_track: crate::aa::TrackMode::default(),
+            // `None` means "follow the molecule": on when the file says double
+            // stranded or does not say, off when it says single.
+            complement: None,
+            orf_track: false,
+            code: 11,
+            orf_min_aa: 30,
+        }
+    }
+}
+
+/// The shortest and longest ORF threshold a file may name.
+///
+/// The same treatment `panel_width` gets and for the same reason: the file is
+/// hand-editable, and a `code: 99` that reached `find_orfs` would be a panic or
+/// a silently wrong protein.
+const MIN_AA: std::ops::RangeInclusive<usize> = 1..=100_000;
 
 /// The widest and narrowest a stored width may be before it is disbelieved.
 ///
@@ -65,13 +100,48 @@ pub fn parse(text: &str) -> Layout {
         let Some((k, v)) = line.split_once(':') else {
             continue;
         };
-        if k.trim() == "panel_width" {
-            // `is_finite` is the point of the parse, not a formality: see SANE.
-            if let Ok(w) = v.trim().parse::<f32>() {
-                if w.is_finite() && SANE.contains(&w) {
-                    out.panel_w = Some(w);
+        let v = v.trim();
+        // Unknown keys are skipped, which is why the header stays at 1: bumping
+        // it would make an older binary discard a newer file wholesale, where
+        // adding keys costs nothing in either direction.
+        match k.trim() {
+            "panel_width" => {
+                // `is_finite` is the point of the parse, not a formality: see
+                // SANE.
+                if let Ok(w) = v.parse::<f32>() {
+                    if w.is_finite() && SANE.contains(&w) {
+                        out.panel_w = Some(w);
+                    }
                 }
             }
+            "aa_track" => {
+                if let Some(m) = crate::aa::TrackMode::from_key(v) {
+                    out.aa_track = m;
+                }
+            }
+            "complement" => {
+                out.complement = match v {
+                    "0" => Some(false),
+                    "1" => Some(true),
+                    _ => None,
+                }
+            }
+            "orf_track" => out.orf_track = v == "1",
+            "code" => {
+                // Through `translate::table`, so a hand-edited `code: 99` is
+                // disbelieved here rather than reaching `find_orfs`.
+                if let Some(c) = v.parse::<u8>().ok().and_then(pl_core::translate::table) {
+                    out.code = c.id;
+                }
+            }
+            "orf_min_aa" => {
+                if let Ok(m) = v.parse::<usize>() {
+                    if MIN_AA.contains(&m) {
+                        out.orf_min_aa = m;
+                    }
+                }
+            }
+            _ => {}
         }
     }
     out
@@ -83,6 +153,13 @@ pub fn render(l: Layout) -> String {
     if let Some(w) = l.panel_w {
         s.push_str(&format!("panel_width: {:.0}\n", w));
     }
+    s.push_str(&format!("aa_track: {}\n", l.aa_track.key()));
+    if let Some(c) = l.complement {
+        s.push_str(&format!("complement: {}\n", u8::from(c)));
+    }
+    s.push_str(&format!("orf_track: {}\n", u8::from(l.orf_track)));
+    s.push_str(&format!("code: {}\n", l.code));
+    s.push_str(&format!("orf_min_aa: {}\n", l.orf_min_aa));
     s
 }
 
@@ -105,8 +182,54 @@ mod tests {
     fn a_width_round_trips() {
         let l = Layout {
             panel_w: Some(560.0),
+            ..Default::default()
         };
         assert_eq!(parse(&render(l)), l);
+    }
+
+    #[test]
+    fn the_track_switches_round_trip() {
+        let l = Layout {
+            panel_w: Some(560.0),
+            aa_track: crate::aa::TrackMode::Selection,
+            complement: Some(false),
+            orf_track: true,
+            code: 4,
+            orf_min_aa: 12,
+        };
+        assert_eq!(parse(&render(l)), l);
+    }
+
+    #[test]
+    fn nothing_a_file_can_hold_reaches_find_orfs_as_a_table_that_does_not_exist() {
+        // The same treatment `panel_width` gets. A `code: 99` is not a table,
+        // and `translate::table(99)` is `None`; reaching `find_orfs` with one
+        // would be a panic or a silently wrong protein, and the second is
+        // worse.
+        for bad in [
+            "polylinker-layout 1\ncode: 99\n",
+            "polylinker-layout 1\ncode: 0\n",
+            "polylinker-layout 1\ncode: 300\n",
+            "polylinker-layout 1\ncode: -1\n",
+            "polylinker-layout 1\ncode: banana\n",
+            "polylinker-layout 1\ncode:\n",
+            "polylinker-layout 1\norf_min_aa: 0\n",
+            "polylinker-layout 1\norf_min_aa: -5\n",
+            "polylinker-layout 1\norf_min_aa: 99999999999999999999\n",
+            "polylinker-layout 1\naa_track: sideways\n",
+        ] {
+            let l = parse(bad);
+            assert!(
+                pl_core::translate::table(l.code).is_some(),
+                "{bad:?} produced code {}",
+                l.code
+            );
+            assert!(
+                MIN_AA.contains(&l.orf_min_aa),
+                "{bad:?} produced min_aa {}",
+                l.orf_min_aa
+            );
+        }
     }
 
     #[test]

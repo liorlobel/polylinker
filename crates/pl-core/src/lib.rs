@@ -92,6 +92,12 @@ pub struct Segment {
     pub start: u64,
     pub end: u64,
     pub color: Option<String>,
+    /// Does this segment carry a protein reading?
+    ///
+    /// SnapGene's per-segment `translated` bit, and the only per-segment
+    /// spelling of the question anywhere in the model. GenBank has no way to
+    /// say it, so a `.gb` save loses it and a reader has to fall back on
+    /// `Feature::kind == "CDS"`.
     pub translated: bool,
     pub kind: String,
 }

@@ -1765,6 +1765,96 @@ fn backspace_at_base_one_points_down_the_view_and_counts_rows_correctly() {
 /// painter putting column 59 five whole cells right of where `x_col` reads it.
 /// A test at column 0 passes under that mutation and under every other wrong
 /// formula, which is why the assertions are at the far end of the row.
+/// The y-axis twin of the column round trip, and PROVEN TO FAIL against
+/// cc36cf7 by not existing there: `RowStrips` is new, and at cc36cf7 the four
+/// strip offsets are computed inline in the painter while the hit-test knows
+/// only the row.
+///
+/// Its real proof is the same mutation shape: adding a strip to `row_h` without
+/// adding it to the offset chain, or reordering the chain without reordering
+/// `strip_at`, makes the walk below land in the wrong strip somewhere in the
+/// middle of the band while both ends still agree. So the walk covers every
+/// tenth of a point of the whole row rather than sampling the boundaries.
+#[test]
+fn every_point_of_a_row_lands_in_the_strip_that_was_drawn_there() {
+    let s = RowStrips {
+        enz_h: 12.0,
+        tick_h: 3.0,
+        text_h: 14.94,
+        lane_pitch: 5.0,
+        lanes: 2,
+        aa_fwd: 1,
+        aa_rev: 1,
+        complement: true,
+        orf_h: 18.0,
+    };
+    // The measured pKoV row with everything on: 12 + 3 + 4 x 14.94 + 18 + 10.
+    assert!((s.row_h() - 102.76).abs() < 0.01, "{}", s.row_h());
+
+    // The offsets are strictly increasing and the last one plus its strip is
+    // the row. A chain that drifts leaves a gap or an overlap, and either one
+    // is a band of pixels the hit-test attributes to the wrong thing.
+    let bounds = [
+        (0.0, Strip::Enzymes),
+        (s.y_tick(), Strip::Ticks),
+        (
+            s.y_aa_fwd(0),
+            Strip::Aa {
+                lane: 0,
+                reverse: false,
+            },
+        ),
+        (s.y_text(), Strip::Bases),
+        (s.y_comp(), Strip::Complement),
+        (
+            s.y_aa_rev(0),
+            Strip::Aa {
+                lane: 0,
+                reverse: true,
+            },
+        ),
+        (s.y_orf(), Strip::Orfs),
+        (s.y_lane(), Strip::Lanes),
+    ];
+    for w in bounds.windows(2) {
+        assert!(w[1].0 > w[0].0, "{:?} then {:?}", w[0], w[1]);
+    }
+    assert!(
+        (s.y_lane() + s.lanes as f32 * s.lane_pitch - s.row_h()).abs() < 0.01,
+        "the strips account for the whole row"
+    );
+
+    // Every tenth of a point, against the boundary table above.
+    let mut dy = 0.0f32;
+    while dy < s.row_h() {
+        let want = bounds
+            .iter()
+            .rev()
+            .find(|(at, _)| dy >= *at)
+            .expect("0.0 is in the table")
+            .1;
+        assert_eq!(s.strip_at(dy), want, "dy {dy}");
+        dy += 0.1;
+    }
+
+    // A document that reserves nothing is the row it was before this change:
+    // no residue lane, no complement, no ORF strip, and `strip_at` never
+    // answers with a strip that is not there.
+    let bare = RowStrips {
+        aa_fwd: 0,
+        aa_rev: 0,
+        complement: false,
+        orf_h: 0.0,
+        ..s
+    };
+    assert!((bare.row_h() - (12.0 + 3.0 + 14.94 + 10.0)).abs() < 0.01);
+    let mut dy = bare.y_text();
+    while dy < bare.y_lane() {
+        assert_eq!(bare.strip_at(dy), Strip::Bases, "dy {dy}");
+        dy += 0.1;
+    }
+}
+
 #[test]
 fn every_column_round_trips_including_the_last_gap_of_a_full_row() {
     // The real measured advance, and a panel wide enough for sixty cells.

@@ -112,6 +112,96 @@ impl DigestState {
     }
 }
 
+/// Everything one ORF worker produces about a molecule.
+pub struct Orfs {
+    pub orfs: Vec<pl_core::orf::Orf>,
+    /// The same interval structure the feature ribbons use, over the ORF spans,
+    /// with the lane PINNED to the frame.
+    ///
+    /// Built on the worker: 19,552 spans is about 1.1 ms of tree building, and
+    /// that is not work a frame should discover it has to do. `Iv::feat` here
+    /// indexes `orfs`, not `Molecule::features`.
+    pub index: crate::annot::AnnotIndex,
+    /// ORFs that lap the molecule and so cannot be drawn as an interval.
+    ///
+    /// On a circle whose length is not a multiple of three the three frames are
+    /// one cycle of `n` codons, so one turn walks `3n` bases and an ORF can be
+    /// longer than the molecule it sits on. A `[lo, hi)` interval cannot say
+    /// that: it would hold one lap, draw one lap, and look entirely normal.
+    /// Counted and named instead. Every molecule in this project's vocabulary
+    /// is in that case — pKoV 8,117 (n%3=2), pUC19 2,686 (1), pBR322 4,361 (2),
+    /// NC_000913.3 4,641,652 (1) — and it is reachable on a small GC-rich
+    /// circle, which is exactly a codon-optimised gene block in pUC19.
+    pub lapping: usize,
+    /// Frames with no stop codon anywhere on a circle. `pl_core::orf` reports
+    /// them separately because such a frame translates for ever and so has no
+    /// ORF at all — and without saying so, an empty strip and a stop-free frame
+    /// look identical.
+    pub stopless: Vec<(pl_core::Strand, u8)>,
+    pub code: u8,
+    pub min_aa: usize,
+}
+
+/// The ORF scan, on the same shape as [`DigestState`] and deliberately not on a
+/// second one.
+///
+/// Measured on the 4,641,652 bp `NC_000913.3`: a six-frame scan at
+/// `min_aa = 30` is 300-420 ms against 1,322-1,712 ms for the 58-enzyme digest
+/// on the same machine. ORFs are about 30% of a scan this application already
+/// runs on a worker, on the same trigger; there is no argument for a different
+/// mechanism.
+///
+/// `Off` is the one state the digest does not have, and it is the important
+/// one: the ORF strip is off by default, so a user who never turns it on never
+/// spawns a thread and never pays a millisecond.
+pub enum OrfState {
+    /// Never asked for. Costs nothing.
+    Off,
+    Running {
+        rx: Receiver<Orfs>,
+        /// Set when a later edit supersedes this scan. See
+        /// [`pl_core::orf::find_orfs_until`] for why dropping the receiver is
+        /// not enough.
+        cancel: Arc<AtomicBool>,
+    },
+    Done(Orfs),
+    /// No bases to scan, with the reason — the digest's own three refusals.
+    Unavailable(String),
+}
+
+impl OrfState {
+    pub fn done(&self) -> Option<&Orfs> {
+        match self {
+            OrfState::Done(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn is_running(&self) -> bool {
+        matches!(self, OrfState::Running { .. })
+    }
+    pub fn is_off(&self) -> bool {
+        matches!(self, OrfState::Off)
+    }
+    pub fn cancel(&self) {
+        if let OrfState::Running { cancel, .. } = self {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+    /// Collect the worker's result if it has finished. Returns true if the
+    /// state changed, so the caller knows to repaint.
+    pub fn poll(&mut self) -> bool {
+        let done = match self {
+            OrfState::Running { rx, .. } => rx.try_recv().ok(),
+            _ => None,
+        };
+        if let Some(v) = done {
+            *self = OrfState::Done(v);
+            return true;
+        }
+        false
+    }
+}
+
 pub struct Document {
     pub path: Option<PathBuf>,
     pub title: String,
@@ -127,6 +217,35 @@ pub struct Document {
     /// Present only for `.dna`, so the container can be described.
     pub container: Option<snapgene::Document>,
     pub digest: DigestState,
+    /// The open-reading-frame scan, if anyone has asked for one.
+    pub orfs: OrfState,
+    /// Bumped whenever the BASES or the topology may have moved, and left alone
+    /// when only the annotations did.
+    ///
+    /// The ORF cache is keyed on this and not on the log cursor. `apply`,
+    /// `undo`, `redo` and `seek` all restart the digest unconditionally, so
+    /// adding a feature to the 4.6 Mb genome already throws away a 1,322 ms
+    /// enzyme scan for a change that cannot move a cut site; hanging a 400 ms
+    /// ORF scan off the same trigger would make that 1.7 s of waste per feature
+    /// edit. Three of the nine `OpKind`s cannot touch a base or the topology
+    /// and the match below is exhaustive, so a tenth is a compile error rather
+    /// than a silently stale strip.
+    pub seq_version: u64,
+    /// The `(table, min_aa)` the current or last ORF scan was asked for.
+    ///
+    /// Kept here because `OrfState::Running` does not carry them and an edit
+    /// mid-scan has to restart the same question, not the default one.
+    orf_params: (u8, usize),
+    /// How many ORF workers this document has started.
+    ///
+    /// Test-only, and it exists because the defect it pins is invisible to every
+    /// other observable: a scan cancelled and respawned on every frame looks
+    /// exactly like a scan that is merely slow, right up until it never
+    /// finishes. Only a spawn count can say "one question, asked once" rather
+    /// than "an answer eventually arrived". Per document and not a process-wide
+    /// static, because the suite runs its tests in parallel in one process.
+    #[cfg(test)]
+    pub orf_spawns: usize,
     /// Records the file held. Only the first is shown, and a viewer that does
     /// not say so is indistinguishable from a file with fewer records in it.
     pub records_in_file: usize,
@@ -179,6 +298,11 @@ impl Document {
             format,
             container,
             digest,
+            orfs: OrfState::Off,
+            seq_version: 0,
+            orf_params: (11, 30),
+            #[cfg(test)]
+            orf_spawns: 0,
             records_in_file: report.records,
             unrepresentable_locations: report.unrepresentable_locations,
             saved,
@@ -197,6 +321,10 @@ impl Document {
             path: None,
             title: "test".into(),
             digest: start_digest(&mol),
+            orfs: OrfState::Off,
+            seq_version: 0,
+            orf_params: (11, 30),
+            orf_spawns: 0,
             log: OpLog::new(mol),
             format: Format::GenBank,
             container: None,
@@ -220,20 +348,24 @@ impl Document {
     /// sequence and a stale enzyme list after an edit is a wrong answer
     /// presented as a current one.
     pub fn apply(&mut self, kind: OpKind) -> Result<(), OpError> {
+        let moved = moves_bases(&kind);
         self.log.apply(kind, "you")?;
-        self.restart_digest();
+        self.restart_scans(moved);
         Ok(())
     }
 
     pub fn undo(&mut self) -> Result<(), OpError> {
         self.log.undo()?;
-        self.restart_digest();
+        // Conservatively: a step through the history can land anywhere, and an
+        // ORF list that survived an undo of a deletion would name coordinates
+        // that no longer exist.
+        self.restart_scans(true);
         Ok(())
     }
 
     pub fn redo(&mut self) -> Result<(), OpError> {
         self.log.redo()?;
-        self.restart_digest();
+        self.restart_scans(true);
         Ok(())
     }
 
@@ -245,14 +377,75 @@ impl Document {
     /// — a state the user never asked for and never saw.
     pub fn seek(&mut self, to: Option<pl_core::oplog::OpId>) -> Result<(), OpError> {
         self.log.seek(to)?;
-        self.restart_digest();
+        self.restart_scans(true);
         Ok(())
     }
 
     /// Start a fresh digest, and tell the previous one to give up.
-    fn restart_digest(&mut self) {
+    ///
+    /// The ORF scan restarts only when the bases or the topology may have
+    /// moved, and only if anyone had asked for one — `OrfState::Off` stays off.
+    fn restart_scans(&mut self, bases_moved: bool) {
         self.digest.cancel();
         self.digest = start_digest(self.log.current());
+        if bases_moved {
+            self.seq_version = self.seq_version.wrapping_add(1);
+            if !self.orfs.is_off() {
+                let (code, min_aa) = self.orf_params;
+                self.orfs.cancel();
+                self.orfs = spawn_orfs(self.log.current(), code, min_aa);
+                #[cfg(test)]
+                {
+                    self.orf_spawns += 1;
+                }
+            }
+        }
+    }
+
+    /// Ask for an ORF scan of the current molecule, cancelling any running one.
+    ///
+    /// Idempotent against the question IN FLIGHT, not merely against a finished
+    /// one, and the word *finished* was the whole defect. `main.rs`'s
+    /// `refresh_orfs` calls this at the top of the Sequence tab on EVERY frame,
+    /// and a running scan asks for a repaint every 80 ms; a version that only
+    /// early-returned on `Done` therefore cancelled and respawned the worker on
+    /// every frame, so any molecule whose scan outlives one repaint tick never
+    /// finished at all. Measured on a 4,641,652 bp genome whose scan is 425 ms:
+    /// the header read "ORFs: scanning…" at 15 s, 20 s and 60 s, one core stayed
+    /// pinned at 110% whether or not the window had focus (22,031 ms of CPU over
+    /// 20 s), the working set climbed 232 -> 470 MB, and the answer — the same
+    /// 66,527 ORFs `pl orfs` prints — appeared the instant the user switched to
+    /// another tab so that this function stopped being called. The tick beats
+    /// the scan above about 0.87 Mb at rest and far below that while the pointer
+    /// is moving, when the effective interval is the display frame.
+    ///
+    /// `orf_params` and not the finished scan's own fields, because `Running`
+    /// does not carry them and `Running` is exactly the state that was missing.
+    /// `Unavailable` is covered too: it is an answer, and respawning a worker to
+    /// be told again that there are no bases is the same loop with a cheaper
+    /// body.
+    pub fn start_orfs(&mut self, code: u8, min_aa: usize) {
+        if !self.orfs.is_off() && self.orf_params == (code, min_aa) {
+            return;
+        }
+        self.orf_params = (code, min_aa);
+        self.orfs.cancel();
+        self.orfs = spawn_orfs(self.log.current(), code, min_aa);
+        #[cfg(test)]
+        {
+            self.orf_spawns += 1;
+        }
+    }
+
+    /// Collect a finished ORF scan. See [`OrfState::poll`].
+    pub fn poll_orfs(&mut self) -> bool {
+        self.orfs.poll()
+    }
+
+    /// Stop scanning and forget the answer. The strip is off; nothing to hold.
+    pub fn stop_orfs(&mut self) {
+        self.orfs.cancel();
+        self.orfs = OrfState::Off;
     }
 
     /// Has any operation ever been recorded, on any branch?
@@ -320,6 +513,119 @@ impl Document {
     pub fn visibility(&self, set: pl_enzymes::EnzymeSet) -> pl_enzymes::Visibility {
         pl_enzymes::Visibility::of(self.digest.results(), set)
     }
+}
+
+/// Could this operation move a base or change the topology?
+///
+/// Exhaustive on purpose — no `_` arm — so a new `OpKind` cannot quietly join
+/// the "annotations only" side. Rotate renumbers every coordinate and
+/// SetTopology decides whether a reading frame wraps, so both are on the
+/// sequence side even though neither adds or removes a base.
+fn moves_bases(kind: &OpKind) -> bool {
+    match kind {
+        OpKind::InsertAt { .. }
+        | OpKind::DeleteRange { .. }
+        | OpKind::ReplaceRange { .. }
+        | OpKind::SetTopology(_)
+        | OpKind::Rotate { .. }
+        | OpKind::ReverseComplement => true,
+        OpKind::SetFeature { .. } | OpKind::RemoveFeature { .. } | OpKind::SetMethylation(_) => {
+            false
+        }
+    }
+}
+
+/// `start_digest`'s shape, with the enzyme loop replaced by one ORF scan.
+///
+/// Every structural choice here is copied rather than reinvented: the same
+/// `mol.seq.clone()` (about a millisecond at 4.6 Mb, against the 400 ms scan it
+/// feeds), the same `channel()`, the same `Arc<AtomicBool>`, the same named
+/// thread, and the same "send failing means the document was replaced; that is
+/// fine".
+fn spawn_orfs(mol: &Molecule, code_id: u8, min_aa: usize) -> OrfState {
+    if mol.seq.is_empty() {
+        return OrfState::Unavailable(if mol.sequence_absent() {
+            "this file declares a length but carries no bases".into()
+        } else if mol.is_annotation_track() {
+            "this is an annotation track; it has no sequence".into()
+        } else {
+            "no sequence".into()
+        });
+    }
+    // Disbelieved here as well as in `settings.rs`, because this is the last
+    // place before `find_orfs` and a table that does not exist has no
+    // defensible fallback further in.
+    let code = pl_core::translate::table(code_id).unwrap_or(pl_core::translate::TABLE11);
+    let seq = mol.seq.clone();
+    let circular = mol.topology.is_circular();
+    let params = pl_core::orf::Params {
+        min_aa,
+        // Deliberately not exposed. Measured at 200 kb: 3,214 ORFs by default
+        // against 11,087 nested, and 618,782 at 4.64 Mb — a strip nobody can
+        // read and 24.8 MB to hold it.
+        nested: false,
+        ..Default::default()
+    };
+    let (tx, rx) = channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancel);
+    std::thread::Builder::new()
+        .name("orfs".into())
+        .spawn(move || {
+            let Some(orfs) = pl_core::orf::find_orfs_until(&seq, code, circular, &params, &|| {
+                flag.load(Ordering::Relaxed)
+            }) else {
+                // Superseded. Sending a partial list would draw a molecule with
+                // fewer genes on it than it has, which is indistinguishable
+                // from the truth.
+                return;
+            };
+            let stopless = pl_core::orf::stopless_frames(&seq, code, circular);
+            let mut spans: Vec<crate::annot::Span> = Vec::with_capacity(orfs.len());
+            let mut lapping = 0usize;
+            for (i, o) in orfs.iter().enumerate() {
+                if o.laps > 0 {
+                    lapping += 1;
+                    continue;
+                }
+                spans.push(crate::annot::Span {
+                    start: o.start,
+                    end: o.end,
+                    item: i as u32,
+                    sub: 0,
+                    // Frame, never greedy. 0..2 are the forward frames and
+                    // 3..5 the reverse ones, so a strip row means one thing
+                    // over the whole molecule.
+                    lane: Some(if o.strand.is_reverse() {
+                        3 + o.frame.min(2)
+                    } else {
+                        o.frame.min(2)
+                    }),
+                });
+            }
+            // Grouped by item, which `of_spans` requires; one span each, so
+            // enumerating in order already satisfies it.
+            let index = crate::annot::AnnotIndex::of_spans(
+                &spans,
+                seq.len() as u64,
+                circular,
+                6,
+                // The ORF index is keyed by the document's `seq_version` in
+                // `Document`, not by this field, which exists for the feature
+                // index's identity check. Nothing compares it.
+                (0, None),
+            );
+            let _ = tx.send(Orfs {
+                orfs,
+                index,
+                lapping,
+                stopless,
+                code: code.id,
+                min_aa,
+            });
+        })
+        .expect("spawn orf worker");
+    OrfState::Running { rx, cancel }
 }
 
 fn start_digest(mol: &Molecule) -> DigestState {
@@ -499,6 +805,10 @@ mod tests {
             path: None,
             title: "test".into(),
             digest: start_digest(&mol),
+            orfs: OrfState::Off,
+            seq_version: 0,
+            orf_params: (11, 30),
+            orf_spawns: 0,
             log: OpLog::new(mol),
             format: Format::GenBank,
             container: None,

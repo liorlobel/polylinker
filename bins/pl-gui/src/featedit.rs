@@ -22,10 +22,11 @@
 //!   as an ordinary protein-coding gene with a full-length ORF a cloner will
 //!   trust. That is why [`QualRow`] carries a `has_value` **flag** and not an
 //!   empty string: a text box has one empty state and the model has two.
-//! - **per-segment colour and the `translated` flag.** Nothing in this program
-//!   reads `Segment::translated` — SnapGene reads it, to decide whether to draw
-//!   the amino-acid track under that segment — which is exactly why an author
-//!   rebuilding a `Feature` from form fields forgets it.
+//! - **per-segment colour and the `translated` flag.** `Segment::translated`
+//!   decides whether the Sequence tab draws the amino-acid track under that
+//!   segment — `bins/pl-gui/src/aa.rs` is its reader, and until that module
+//!   existed nothing in this program read the bit at all — which is exactly
+//!   why an author rebuilding a `Feature` from form fields forgets it.
 //! - **`Segment::kind`**, the `.dna` `<Segment type=>`. One distinct value in
 //!   the whole local corpus, so it gets no control; it is carried verbatim.
 //! - **segment order**, which is load-bearing three times over: `Feature::extent`
@@ -1349,9 +1350,7 @@ fn segments(ui: &mut Ui, panel: &mut Panel, sel: Option<(u64, u64, bool)>, pal: 
                         .color(pal.muted),
                 );
                 ui.checkbox(&mut r.translated, "aa").on_hover_text(
-                    "SnapGene draws the amino-acid track under a translated segment. Nothing \
-                         in this program reads it. It is round-tripped through .dna; GenBank has \
-                         no way to record it and a .gb save loses it.",
+                    "Draws the amino-acid track under this segment in the Sequence tab \n                         (Show > from file), whatever the feature's kind — the feature \n                         needs a strand, because a reading has a direction. It is \n                         round-tripped through .dna; GenBank has no way to record it and \n                         a .gb save loses it silently.",
                 );
                 if panel.color == ColorMode::PerSegment {
                     // `add_sized`, NOT `desired_width` — the same trap, in the

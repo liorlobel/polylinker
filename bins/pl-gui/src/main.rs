@@ -8,6 +8,7 @@
 // in debug builds so panics and eprintln stay visible while developing.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod aa;
 mod annot;
 mod design;
 mod doc;
@@ -1048,6 +1049,23 @@ struct App {
     /// inside the grid and shown by the readout, which is laid out *before* the
     /// grid — so it is one frame old, and egui repaints on pointer motion.
     seq_hover: Option<String>,
+    /// This document's translations: which features are read, in which frame,
+    /// and how many residue lanes they need. Rebuilt with `annot`, on the same
+    /// key, for the same reason.
+    tr: aa::Translations,
+    /// The document's default genetic code, read from the file on open.
+    ///
+    /// View state, not molecule state. Reading a `/transl_table` is not
+    /// editing: choosing a table must not enter the append-only log and must
+    /// not make the document dirty, so this lives here beside the index and
+    /// never in `Molecule`.
+    doc_code: pl_core::translate::Code,
+    /// Whether this document's rows reserve the ORF strip.
+    ///
+    /// `enz_strip`'s rule exactly: what the last COMPLETED scan of this
+    /// document said, held across the next one, so the row pitch never depends
+    /// on a worker's phase.
+    orf_strip: bool,
     /// Whether this document's sequence rows reserve the enzyme strip.
     ///
     /// What the last COMPLETED digest of this document found, and deliberately
@@ -1069,6 +1087,13 @@ struct GridGeom {
     row_h: f32,
     first_row: u64,
     per_row: u64,
+    /// Where every strip inside a row sits, so a test can put a pointer on a
+    /// NAMED band rather than on `row_h * 0.5` and hope.
+    ///
+    /// The same argument the rest of this struct is here for: baking
+    /// `row_h * 0.5` into a test stops testing the thing it names the moment a
+    /// strip is added above the letters — quietly, and while still passing.
+    strips: seqedit::RowStrips,
 }
 
 /// Which document the recovery file holds, and exactly where in its history.
@@ -1556,6 +1581,9 @@ impl App {
             seq_readout: None,
             seq_hover: None,
             enz_strip: false,
+            tr: aa::Translations::default(),
+            doc_code: pl_core::translate::TABLE11,
+            orf_strip: false,
         }
     }
 
@@ -1686,6 +1714,16 @@ impl App {
         // is needed, so the answer held across the previous file's re-digests
         // does not carry over.
         self.enz_strip = false;
+        self.orf_strip = false;
+        self.tr = aa::Translations::default();
+        // Read from the file, not carried over: the modal `/transl_table`
+        // across this document's CDS features, or the global default.
+        self.doc_code = self
+            .document
+            .as_ref()
+            .and_then(|d| aa::modal_table(d.molecule()))
+            .or_else(|| pl_core::translate::table(self.layout.code))
+            .unwrap_or(pl_core::translate::TABLE11);
         self.error = None;
         self.notice = None;
         self.edit = seqedit::SeqEdit::new();
@@ -3092,7 +3130,13 @@ impl eframe::App for App {
             if d.digest.poll() {
                 ctx.request_repaint();
             }
-            running = d.digest.is_running();
+            // Same contract, same worker shape. Polled here as well as in the
+            // Sequence tab so a scan started on one tab lands even if the user
+            // has walked away to another.
+            if d.orfs.poll() {
+                ctx.request_repaint();
+            }
+            running = d.digest.is_running() || d.orfs.is_running();
         }
         // The folder scan is the same shape and the same contract.
         if let Some(s) = &mut self.scan {
@@ -4784,11 +4828,21 @@ impl App {
             None => return,
         };
         if self.annot.version != want {
-            let ix = {
+            let (ix, tr) = {
                 let d = self.document.as_ref().expect("checked above");
-                annot::AnnotIndex::build(d.molecule(), want)
+                (
+                    annot::AnnotIndex::build(d.molecule(), want),
+                    // Once per document version, beside the index and on the
+                    // same key. A `TranslationPath` is a handful of ranges;
+                    // measured against `AnnotIndex::build`'s 0.60 ms over
+                    // 9,001 features on the 4.6 Mb genome, this is noise.
+                    // Materialising the residues instead would be 1.3 million
+                    // entries for MG1655, thrown away by one keystroke.
+                    aa::Translations::build(d.molecule(), self.doc_code),
+                )
             };
             self.annot = ix;
+            self.tr = tr;
             self.cuts_for = None;
         }
 
@@ -4836,6 +4890,39 @@ impl App {
             self.enz_strip = self.annot.cut_count() > 0;
         }
         self.cuts_for = Some(key);
+    }
+
+    /// Start, stop or leave the ORF scan alone, and reserve its strip from the
+    /// last COMPLETED answer.
+    ///
+    /// Called at the top of the Sequence tab, outside every paint closure, for
+    /// the same reason `refresh_annotations` is: the row height depends on the
+    /// reservation, and a lazy update inside the closure would need interior
+    /// mutability this file does not otherwise use.
+    fn refresh_orfs(&mut self) {
+        let want = self.layout.orf_track;
+        let (code, min_aa) = (self.doc_code.id, self.layout.orf_min_aa);
+        let Some(d) = self.document.as_mut() else {
+            return;
+        };
+        if !want {
+            if !d.orfs.is_off() {
+                d.stop_orfs();
+                // The strip goes with the answer. Keeping it reserved would
+                // spend a row of height on a channel that is switched off.
+                self.orf_strip = false;
+            }
+            return;
+        }
+        d.start_orfs(code, min_aa);
+        d.poll_orfs();
+        // Only a FINISHED scan may change the reservation — `enz_strip`'s rule,
+        // and skipping it is what produced the 43.41 -> 31.41 -> 43.41 pitch
+        // recorded above: a 28% reflow twice per keystroke, each one
+        // re-anchoring the whole view.
+        if let Some(o) = d.orfs.done() {
+            self.orf_strip = !o.orfs.is_empty() || !o.stopless.is_empty();
+        }
     }
 
     /// The editing surface.
@@ -4886,6 +4973,9 @@ impl App {
         // Before any geometry: the row height depends on how many lanes this
         // document needs, and that comes out of the build.
         self.refresh_annotations();
+        // And on whether the last completed ORF scan of this document found
+        // anything. Same rule, same place, outside every paint closure.
+        self.refresh_orfs();
 
         // ONE pitch, derived from the font the row is actually painted in, and
         // used by `show_rows`, by the y -> row hit-test and by the painter.
@@ -4964,10 +5054,91 @@ impl App {
         const TICK_H: f32 = 3.0;
         const LANE_PITCH: f32 = 5.0;
         const RIBBON_H: f32 = 4.0;
+        /// One bar per reading frame, three per strand.
+        const ORF_LANE_H: f32 = 3.0;
         let has_cuts = self.enz_strip;
         let enz_h = if has_cuts { ENZ_H } else { 0.0 };
         let lanes = self.annot.lanes;
-        let row_h = enz_h + TICK_H + text_h + lanes as f32 * LANE_PITCH;
+
+        // Every strip in this row is a property of the DOCUMENT and of the
+        // settings — never of whether THIS row carries a CDS, an ORF or a cut.
+        // `show_rows` maps a scroll offset to a row index by dividing, so a row
+        // that grew because it happened to hold something would put the
+        // scrollbar out of step with the content and land a click on the wrong
+        // row. The consequence worth stating: a document with nothing
+        // translated reserves ZERO — a FASTA, an annotation track and a plasmid
+        // carrying only promoters and origins all pay nothing at all.
+        //
+        // Measured on pKoV at the default 1280x840 window and 500 pt panel:
+        // 39.94 pt with no track (15 rows, 900 bases visible) against 84.76 pt
+        // with one forward lane, the complement row and one reverse lane
+        // (7 rows, 420 bases). That 53% is what the toggle is for, and it is
+        // why nothing here is on by default except the file's own translations.
+        //
+        // THE BOTTOM STRAND IS PART OF THIS CHANGE, not deferred. Two of pKoV's
+        // three translated CDSs are on it, and a reverse translation painted
+        // under a top-strand-only view reads C-terminus to N-terminus left to
+        // right with nothing on screen saying so. So the reverse residue lanes
+        // are GATED on the complement row: turn the strand off and they go with
+        // it, and the header says what is now hidden. That makes the misleading
+        // case impossible by construction rather than by care.
+        let ds = self
+            .document
+            .as_ref()
+            .expect("checked by caller")
+            .molecule()
+            .double_stranded;
+        // `None` is a real third state and every reader except SnapGene
+        // produces it. Drawn double, because a plasmid GenBank is
+        // double-stranded in fact — and the header says which was assumed.
+        let complement = self.layout.complement.unwrap_or(ds != Some(false));
+        let aa_on = self.layout.aa_track.is_on();
+        // Reserved as soon as the selection mode is on, for the whole document
+        // — not when a selection appears. Otherwise making a selection changes
+        // the row pitch in the middle of the drag that is making it.
+        //
+        // AND IT IS A LANE OF ITS OWN, always. The first version of this
+        // arithmetic got that wrong in the one way that draws letters belonging
+        // to no protein: it reserved `min(fwd_lanes + sel_lane, MAX_AA_LANES)`
+        // and put the selection at `min(fwd_lanes, MAX_AA_LANES - 1)`, so a
+        // document already using both lanes on a strand — two overlapping
+        // same-strand CDSs, which is a vector plus a tagged variant, or any
+        // stretch of MG1655 — reserved 2 and drew the selection in lane 1, where
+        // a file translation already was. Both were painted at the same y and
+        // interleaved a column apart: `M K RA GV CA M* KN RA ...`, where the
+        // `M*` a reader sees is one protein's methionine beside another's stop.
+        // The `+N` badge never fired, because 1 < 2.
+        //
+        // `Translations::{fwd_lanes,rev_lanes}` is ALREADY capped at
+        // `MAX_AA_LANES`, so it is both the number of file lanes drawn and the
+        // first free lane index on that strand. Using it as the selection's lane
+        // makes the collision impossible by construction, rather than by a
+        // second cap that has to agree with the first.
+        let sel_lane = u8::from(self.layout.aa_track == aa::TrackMode::Selection);
+        let strips = seqedit::RowStrips {
+            enz_h,
+            tick_h: TICK_H,
+            text_h,
+            lane_pitch: LANE_PITCH,
+            lanes,
+            aa_fwd: if aa_on {
+                self.tr.fwd_lanes + sel_lane
+            } else {
+                0
+            },
+            aa_rev: if aa_on && complement {
+                self.tr.rev_lanes + sel_lane
+            } else {
+                0
+            },
+            complement,
+            orf_h: if self.orf_strip && self.layout.orf_track {
+                6.0 * ORF_LANE_H
+            } else {
+                0.0
+            },
+        };
+        let row_h = strips.row_h();
 
         // A pending run is not in the log, so the digest describes the
         // COMMITTED sequence. A typed base can create or destroy a site, so a
@@ -4976,7 +5147,7 @@ impl App {
         let typing = self.edit.run().is_some();
         let show_cuts = !typing && self.annot.cut_count() > 0;
 
-        self.sequence_header(ui, n, rows, has_cuts, typing);
+        self.sequence_header(ui, n, rows, per_row, has_cuts, typing);
         self.sequence_keys(ui, now);
 
         // The scroll follows a BASE across a reflow, not a pixel.
@@ -5018,6 +5189,8 @@ impl App {
         self.seq_row_h = row_h;
 
         let mut click: Option<(u64, bool)> = None;
+        // A codon picked off a residue lane: `(lo, hi, the residue)`.
+        let mut codon_click: Option<(u64, u64, aa::Residue)> = None;
         let mut drag_to: Option<u64> = None;
         let mut released = false;
         let mut double: Option<u64> = None;
@@ -5056,6 +5229,72 @@ impl App {
                 let caret = edit.caret.min(n);
                 let run = edit.run().map(|r| r.span());
                 let mut line = String::with_capacity(per_row as usize);
+                let tr = &self.tr;
+                let orfs = d.orfs.done();
+                // Every base the track reads comes through the same accessor
+                // that produces the LETTERS, so a codon and the letters
+                // directly above it cannot disagree while somebody is typing.
+                let read = |i: u64| edit.byte_at(mol, i);
+
+                // The ad-hoc translation of the selection: a VIEW of the bases
+                // the user pointed at, with no `OpKind` behind it and nothing
+                // written to the molecule. It is the front door for "is my His
+                // tag in frame?" on a feature the file never marked translated,
+                // which is exactly what pKoV's `decR his` is.
+                //
+                // The strand is the one the drag went in. A selection dragged
+                // right to left asks for the reverse reading, which is the only
+                // gesture available that carries the fact — and it is only
+                // OFFERED when the complement row is on, so a reverse
+                // translation never appears without the strand it reads.
+                //
+                // XOR THE WRAP BIT, and this line read `s.head < s.anchor` alone
+                // until a reviewer dragged through the origin. For an ordinary
+                // selection the caret ordering IS the direction of travel; for a
+                // wrapping one it is inverted, because the arc is
+                // `[hi, n) ∪ [0, lo)` and travelling FORWARD across the origin
+                // therefore ends at a caret BELOW the one it started from —
+                // which is exactly the state the drag handler builds (`wrapped`
+                // requires `to < anchor`). So every left-to-right wrap-drag was
+                // read as reverse: on a 120 bp circle the arc 116..13 spells
+                // MKRGC* on the strand the pointer ran along, and the track drew
+                // LATAFH in the reverse lane. With the complement row off the
+                // same gesture drew nothing at all and said nothing.
+                let sel_path = (self.layout.aa_track == aa::TrackMode::Selection)
+                    .then_some(edit.sel)
+                    .flatten()
+                    .filter(|s| !s.is_empty(mol.len()))
+                    .and_then(|s| {
+                        let reverse = (s.head < s.anchor) != s.through_origin;
+                        if reverse && !complement {
+                            return None;
+                        }
+                        let c = s.canonical(mol.len(), mol.topology.is_circular());
+                        // One arc, or two when it crosses the origin —
+                        // `Selection` already says which, and the path takes
+                        // both pieces in reading order.
+                        let mut parts = if c.through_origin {
+                            vec![(c.hi(), n), (0, c.lo())]
+                        } else {
+                            vec![(c.lo(), c.hi())]
+                        };
+                        if reverse {
+                            parts.reverse();
+                        }
+                        Some(aa::Path {
+                            feat: aa::SELECTION,
+                            name: "selection".into(),
+                            reverse,
+                            code: self.doc_code,
+                            parts,
+                            skip: 0,
+                            // The first free lane on this strand, never one a
+                            // file translation owns. See the reservation above.
+                            lane: if reverse { tr.rev_lanes } else { tr.fwd_lanes },
+                            from_flag: false,
+                            bad_codon_start: None,
+                        })
+                    });
 
                 if debug_geometry() {
                     eprintln!(
@@ -5143,6 +5382,7 @@ impl App {
                         row_h,
                         first_row: first,
                         per_row,
+                        strips,
                     });
                     let painter = ui.painter_at(rect);
                     if debug_geometry() {
@@ -5169,6 +5409,28 @@ impl App {
                             g.first_row,
                             layout.right_gutter,
                             g.x0 + layout.band_w()
+                        );
+                        // The strips too, because a screenshot cannot settle
+                        // which band a y is in either — and the y offsets are
+                        // exactly what a click on a residue now depends on.
+                        eprintln!(
+                            "seqstrips: enz={:.2} tick={:.2} text={:.2} aa_fwd={} aa_rev={}                              complement={} orf={:.2} lanes={} row_h={:.2}                              y_tick={:.2} y_aa_fwd0={:.2} y_text={:.2} y_comp={:.2}                              y_aa_rev0={:.2} y_orf={:.2} y_lane={:.2}",
+                            g.strips.enz_h,
+                            g.strips.tick_h,
+                            g.strips.text_h,
+                            g.strips.aa_fwd,
+                            g.strips.aa_rev,
+                            g.strips.complement,
+                            g.strips.orf_h,
+                            g.strips.lanes,
+                            g.strips.row_h(),
+                            g.strips.y_tick(),
+                            g.strips.y_aa_fwd(0),
+                            g.strips.y_text(),
+                            g.strips.y_comp(),
+                            g.strips.y_aa_rev(0),
+                            g.strips.y_orf(),
+                            g.strips.y_lane(),
                         );
                     }
 
@@ -5200,15 +5462,88 @@ impl App {
                         let col = layout.x_col(pos.x - x0);
                         (row_at(pos) * per_row + col).min(n)
                     };
+                    // Which BAND of the row the pointer is in. One consumer of
+                    // the y offsets, as `x_col` is the one consumer of an x.
+                    let strip_at = |pos: egui::Pos2| -> seqedit::Strip {
+                        let dy = (pos.y - rect.top()) - (row_at(pos) - first) as f32 * row_h;
+                        strips.strip_at(dy.clamp(0.0, row_h - 0.01))
+                    };
+                    // Is this path's lane one this document actually draws?
+                    //
+                    // ONE rule, shared by the painter and the hit-test, because
+                    // the two disagreeing is how a click reports a residue the
+                    // user cannot see. A file translation is drawn only below
+                    // the strand's file-lane count; the ad-hoc selection sits AT
+                    // that count and is always drawn, which is what reserves it
+                    // a lane of its own.
+                    let drawn = |p: &aa::Path| -> bool {
+                        let file_lanes = if p.reverse { tr.rev_lanes } else { tr.fwd_lanes };
+                        let strip = if p.reverse { strips.aa_rev } else { strips.aa_fwd };
+                        if p.feat == aa::SELECTION {
+                            p.lane < strip
+                        } else {
+                            p.lane < file_lanes.min(strip)
+                        }
+                    };
+                    // The codon under a pointer on a residue lane.
+                    //
+                    // `x_base`, the FLOOR question, and not `x_col`'s round:
+                    // the user is pointing AT a residue, not at a gap between
+                    // two. Sharing one mapping between the two was wrong over
+                    // the right half of every cell and this view already paid
+                    // for it once.
+                    //
+                    // Returns the base the pointer is ON as well as the residue:
+                    // a codon that straddles a join or the origin is not three
+                    // adjacent cells, and the caller has to know WHICH of its
+                    // three the user pointed at before it can select anything.
+                    let codon_at =
+                        |pos: egui::Pos2, lane: u8, reverse: bool| -> Option<(aa::Residue, u64)> {
+                            let col = layout.x_base(pos.x - x0)?;
+                            let at = row_at(pos) * per_row + col;
+                            if at >= n {
+                                return None;
+                            }
+                            tr.paths()
+                                .iter()
+                                .chain(sel_path.iter())
+                                // `drawn` and not merely the lane number: a file
+                                // translation past the cap keeps its real lane,
+                                // which can equal the selection's, and finding
+                                // it first would report a residue that is not on
+                                // screen and select its codon.
+                                .filter(|p| p.reverse == reverse && p.lane == lane && drawn(p))
+                                .find_map(|p| {
+                                    let ep = p.effective(run);
+                                    let k = ep.residue_covering(at)?;
+                                    let r = (k < ep.aa_len()).then(|| ep.residue(k, &read))??;
+                                    Some((r, at))
+                                })
+                        };
+
+                    // Allocated once per frame and cleared per row, so a
+                    // forty-row viewport does not allocate forty vectors.
+                    let mut aa_paths: Vec<&aa::Path> = Vec::new();
+                    let mut residues: Vec<aa::Residue> = Vec::new();
+                    let mut aa_buf: Vec<u8> = Vec::new();
+                    let mut orf_scratch: Vec<annot::Iv> = Vec::new();
 
                     for r in range.clone() {
                         let r = r as u64;
                         let start = r * per_row;
                         let end = (start + per_row).min(n);
                         let y = rect.top() + (r - first) as f32 * row_h;
-                        let y_tick = y + enz_h;
-                        let y_text = y_tick + TICK_H;
-                        let y_lane = y_text + text_h;
+                        // ONE producer of a y offset, exactly as `cx` is the
+                        // one producer of an x. These four used to be computed
+                        // inline here and nowhere else, so the hit-test knew
+                        // only the row and mapped any y in the band onto the
+                        // letters — which with a residue lane above them and a
+                        // complement row below is a click that silently moves
+                        // the caret sixty bases.
+                        let y_tick = y + strips.y_tick();
+                        let y_text = y + strips.y_text();
+                        let y_comp = y + strips.y_comp();
+                        let y_lane = y + strips.y_lane();
 
                         // -- selection: one rectangle per row per contiguous
                         // range, clipped against this row. Nothing iterates the
@@ -5519,6 +5854,284 @@ impl App {
                             p.ink,
                         );
 
+                        // -- the bottom strand, in the top strand's own
+                        // coordinates ----------------------------------------
+                        //
+                        // NO reverse and NO reverse_complement: column c of
+                        // this row is the Watson-Crick partner of column c
+                        // above it, which is the physical duplex and keeps one
+                        // coordinate space for both strands. `iupac::complement`
+                        // preserves case, so the lowercase/uppercase signal an
+                        // eye scans for survives on both strands.
+                        //
+                        // A read-only mirror. No caret of its own, no selection
+                        // of its own, no enzyme marks and no ribbons: a click on
+                        // it places the caret on the same base. `Selection`,
+                        // `through_origin`, `hit` and every op derivation are
+                        // untouched.
+                        if strips.complement {
+                            edit.row_complement(mol, start, end, &mut line);
+                            painter.text(
+                                egui::pos2(cx(0), y_comp),
+                                egui::Align2::LEFT_TOP,
+                                &line,
+                                font.clone(),
+                                p.ink,
+                            );
+                        }
+
+                        // -- residues ----------------------------------------
+                        if aa_on {
+                            // The lane's own baseline, on every row of a
+                            // document that reserves the lane at all. An empty
+                            // reserved strip is never blank: it says "this lane
+                            // exists here and has nothing in it", which is true
+                            // and is what a reader needs — an empty aa lane
+                            // means no annotated protein reads through these
+                            // bases. Measured on pKoV, 82 of 136 rows are in
+                            // exactly that state. `muted` and not `faint`
+                            // because it is the only palette role clearing 3:1
+                            // against both panels.
+                            let bl = egui::Stroke::new(1.0, p.muted);
+                            for k in 0..strips.aa_fwd {
+                                let yb = y + strips.y_aa_fwd(k) + text_h - 1.0;
+                                painter.hline(cx(0)..=cx(per_row), yb, bl);
+                            }
+                            for k in 0..strips.aa_rev {
+                                let yb = y + strips.y_aa_rev(k) + text_h - 1.0;
+                                painter.hline(cx(0)..=cx(per_row), yb, bl);
+                            }
+
+                            aa_paths.clear();
+                            for iv in scratch.iter() {
+                                // No second interval query: the ribbons already
+                                // asked which features touch this row, and
+                                // every translated feature is one of them.
+                                if let Some(path) = tr.for_feature(iv.feat) {
+                                    if !aa_paths.iter().any(|q: &&aa::Path| q.feat == path.feat) {
+                                        aa_paths.push(path);
+                                    }
+                                }
+                            }
+                            if let Some(sp) = &sel_path {
+                                aa_paths.push(sp);
+                            }
+
+                            for path in aa_paths.iter() {
+                                if !drawn(path) {
+                                    // Past the cap. Counted into the row's
+                                    // orange `+N`, which already means "N
+                                    // things on this row I could not show you"
+                                    // — so the badge and the lanes cannot
+                                    // contradict each other on one row. The
+                                    // SAME predicate the hit-test uses, so a
+                                    // click can never report a residue that was
+                                    // counted here instead of drawn.
+                                    hidden += 1;
+                                    continue;
+                                }
+                                let ep = path.effective(run);
+                                let y0 = y + if ep.reverse {
+                                    strips.y_aa_rev(ep.lane)
+                                } else {
+                                    strips.y_aa_fwd(ep.lane)
+                                };
+                                residues.clear();
+                                ep.residues_in_row(start, end, &read, &mut residues);
+                                if residues.is_empty() {
+                                    continue;
+                                }
+
+                                // ONE `painter.text` for the ordinary residues,
+                                // at `cx(0)`, in the SAME `FontId` as the bases.
+                                // Because `layout.advance` is that font's glyph
+                                // width, a residue placed at column c occupies
+                                // exactly `[cx(c), cx(c+1))` and its codon's
+                                // three cells are `[cx(c-1), cx(c+2))`,
+                                // symmetric about it BY CONSTRUCTION. There is
+                                // no second x anywhere in this track and no
+                                // centring arithmetic: measuring the glyph's
+                                // galley and centring on it would be a second
+                                // producer of an x, which is exactly the drift
+                                // `RowLayout`'s doc comment records.
+                                aa_buf.clear();
+                                aa_buf.resize(per_row as usize, b' ');
+                                for res in residues.iter() {
+                                    let col = (res.mid() - start) as usize;
+                                    if res.mark == aa::Mark::Plain {
+                                        aa_buf[col] = res.aa;
+                                    }
+                                }
+                                painter.text(
+                                    egui::pos2(cx(0), y0),
+                                    egui::Align2::LEFT_TOP,
+                                    // ASCII by construction: `Code::codon`
+                                    // returns an amino-acid letter, `*` or `X`.
+                                    String::from_utf8_lossy(&aa_buf),
+                                    font.clone(),
+                                    p.ink2,
+                                );
+
+                                for res in residues.iter() {
+                                    let col = res.mid() - start;
+                                    let (x0c, x1c) = (cx(col), cx(col + 1));
+                                    // Codon boundaries, inside the aa strip and
+                                    // not at `y_tick`, so they cannot be
+                                    // confused with the tens ruler. At the
+                                    // default 60 bases per row every codon
+                                    // column is identical on every row and the
+                                    // track reads as columns; at 50 the phase
+                                    // walks by two a row and the residues form
+                                    // a diagonal. The drawing stays right
+                                    // either way — the header says so when it
+                                    // is not.
+                                    let (lo, hi) = res.span();
+                                    if res.contiguous && lo >= start {
+                                        painter.vline(
+                                            cx(lo - start),
+                                            y0..=(y0 + 2.0),
+                                            egui::Stroke::new(1.0, p.muted),
+                                        );
+                                    }
+                                    if !res.contiguous {
+                                        // The three cells under this glyph are
+                                        // NOT its three bases: it spans a join
+                                        // or the origin. Unmarked, a reader
+                                        // takes the cells for the codon and
+                                        // reads a triplet that is not there.
+                                        let ty = y0 + 1.0;
+                                        let ts = egui::Stroke::new(1.0, p.accent);
+                                        if lo + 1 < res.mid() || lo > res.mid() {
+                                            painter.hline(cx(0)..=x0c, ty, ts);
+                                        }
+                                        if hi > res.mid() + 2 || hi <= res.mid() {
+                                            painter.hline(x1c..=cx(per_row), ty, ts);
+                                        }
+                                    }
+                                    if res.mark == aa::Mark::Plain {
+                                        continue;
+                                    }
+                                    // Colour is never the only channel, so each
+                                    // of these carries a shape as well.
+                                    let colour = match res.mark {
+                                        aa::Mark::StopInside => p.warn,
+                                        _ => p.ink2,
+                                    };
+                                    let ub = y0 + text_h - 2.0;
+                                    match res.mark {
+                                        aa::Mark::StopInside => {
+                                            // Loud on purpose. An internal stop
+                                            // means the annotation is wrong or
+                                            // an insert is out of frame, and a
+                                            // reader who has to notice one red
+                                            // asterisk among 470 residues will
+                                            // not. Also counted in the header.
+                                            painter.rect_filled(
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(x0c, ub),
+                                                    egui::pos2(x1c, ub + 2.0),
+                                                ),
+                                                0.0,
+                                                p.warn,
+                                            );
+                                        }
+                                        aa::Mark::StopEnd | aa::Mark::AmbiguousStop => {
+                                            let m = (x0c + x1c) * 0.5;
+                                            painter.rect_filled(
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(m - 1.5, ub),
+                                                    egui::pos2(m + 1.5, ub + 2.0),
+                                                ),
+                                                0.0,
+                                                p.muted,
+                                            );
+                                        }
+                                        aa::Mark::Initiator | aa::Mark::Ambiguous => {
+                                            // A dotted rule, because the LETTER
+                                            // is not what the codon spells:
+                                            // `M` for a GTG initiator, `X` for
+                                            // a codon that could be two things.
+                                            let st = egui::Stroke::new(1.0, p.muted);
+                                            let w = (x1c - x0c) / 5.0;
+                                            for k in 0..3 {
+                                                let a = x0c + w * (k as f32 * 2.0);
+                                                painter.hline(a..=(a + w), ub + 1.0, st);
+                                            }
+                                        }
+                                        aa::Mark::Plain => {}
+                                    }
+                                    painter.text(
+                                        egui::pos2(x0c, y0),
+                                        egui::Align2::LEFT_TOP,
+                                        (res.aa as char).to_string(),
+                                        font.clone(),
+                                        colour,
+                                    );
+                                }
+                            }
+                        }
+
+                        // -- open reading frames, one bar per frame ----------
+                        //
+                        // A DIFFERENT GRAMMAR from the residues, deliberately:
+                        // outline bars, never letters, in their own strip. A
+                        // plasmid's CDSs are what somebody asserted; its ORFs
+                        // are what the sequence permits, and drawn in the same
+                        // channel the ORF's start reads as a correction of the
+                        // annotation. Measured on pKoV: 3 annotated CDSs
+                        // against 103 ORFs, and the scan puts CmR's start 63
+                        // bases upstream of the annotation. Somebody orders a
+                        // primer.
+                        if strips.orf_h > 0.0 && !typing {
+                            if let Some(o) = orfs {
+                                orf_scratch.clear();
+                                o.index.query(start, end, &mut orf_scratch);
+                                for iv in orf_scratch.iter() {
+                                    let a = iv.lo.max(start);
+                                    let b = iv.hi.min(end);
+                                    if b <= a {
+                                        continue;
+                                    }
+                                    let yl = y + strips.y_orf() + iv.lane as f32 * ORF_LANE_H;
+                                    let rr = egui::Rect::from_min_max(
+                                        egui::pos2(cx(a - start), yl),
+                                        egui::pos2(cx(b - start), yl + ORF_LANE_H - 1.0),
+                                    );
+                                    painter.rect_stroke(
+                                        rr,
+                                        0.0,
+                                        egui::Stroke::new(1.0, p.ink2),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    // The ribbon grammar, reused exactly: a
+                                    // solid cap on the 3' terminus.
+                                    let rev = o
+                                        .orfs
+                                        .get(iv.feat as usize)
+                                        .is_some_and(|orf| orf.strand.is_reverse());
+                                    let cap_w = 3.0f32.min(rr.width());
+                                    let tip = if rev {
+                                        (iv.feat_lo && iv.lo >= start)
+                                            .then(|| (rr.left(), rr.left() + cap_w))
+                                    } else {
+                                        (iv.feat_hi && iv.hi <= end)
+                                            .then(|| (rr.right(), rr.right() - cap_w))
+                                    };
+                                    if let Some((tx, bx)) = tip {
+                                        painter.add(egui::Shape::convex_polygon(
+                                            vec![
+                                                egui::pos2(tx, rr.center().y),
+                                                egui::pos2(bx, rr.top()),
+                                                egui::pos2(bx, rr.bottom()),
+                                            ],
+                                            p.ink2,
+                                            egui::Stroke::NONE,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+
                         // -- what this row holds, in words, in the surplus
                         // width the splitter buys. The name is the primary
                         // channel and the swatch the secondary one; colour is
@@ -5573,6 +6186,23 @@ impl App {
                         }
 
                         if hidden > 0 {
+                            // KNOWN DEFECT, PRE-EXISTING, NOT FIXED HERE: this
+                            // overprints the row's own coordinate, because
+                            // `gutter_w` sizes the left gutter to exactly the
+                            // widest coordinate plus 8 pt of air and the badge
+                            // is drawn inside that. pKoV row 5,581 reads
+                            // "51,581". It reproduces with every track off, so
+                            // it is not this change's — but this change does
+                            // FEED the badge (a translation past the lane cap
+                            // is counted into it), so the collision is commoner
+                            // than it was. Left alone deliberately: every
+                            // candidate home is occupied — the right gutter
+                            // holds the row's end coordinate, the names column
+                            // is packed to `rect.right() - 2.0`, and the ribbon
+                            // band is 5 pt per lane against a 9.5 pt glyph — so
+                            // the honest fix is a gutter that reserves room for
+                            // it, which changes `per_row` and belongs in its own
+                            // change with its own measurement.
                             painter.text(
                                 egui::pos2(rect.left() + 2.0, y_text),
                                 egui::Align2::LEFT_TOP,
@@ -5599,10 +6229,66 @@ impl App {
                     }
 
                     if let Some(pos) = resp.interact_pointer_pos() {
+                        // A click on a residue lane selects that residue's
+                        // codon; a click on either STRAND places the caret. The
+                        // two strands share one coordinate space, so the bottom
+                        // row is the top row's coordinates and nothing about
+                        // the caret changes.
+                        let aa_hit = match strip_at(pos) {
+                            seqedit::Strip::Aa { lane, reverse } => codon_at(pos, lane, reverse),
+                            _ => None,
+                        };
                         if resp.drag_started() || resp.clicked() {
-                            click = Some((hit(pos), ui.input(|i| i.modifiers.shift)));
+                            match &aa_hit {
+                                // A codon that straddles a join or the origin
+                                // is not one arc and `Selection` holds one arc,
+                                // so the ARC THE POINTER IS ON is selected and
+                                // the readout says where the rest is. Inventing
+                                // a selection shape the model cannot hold would
+                                // be worse.
+                                //
+                                // `run_containing` and not `span()`, and the
+                                // difference is not cosmetic: `span()` is the
+                                // OUTER BOUND, so on a 22 bp circle a codon at
+                                // coordinates 20, 21, 0 spans (0, 22) and
+                                // clicking it selected all 22 bases; a
+                                // `join(101..150, 501..551)` seam codon selected
+                                // 353, under a sentence that read "353 of 3
+                                // bases selected". One Backspace away from
+                                // losing everything between the arcs, from a
+                                // click meant to select three bases.
+                                // `codon_at` found this residue BY the base under
+                                // the pointer, so the run is always there; the
+                                // fallback places the caret, which is what a
+                                // click on a lane with nothing in it does.
+                                Some((res, at)) => match res.run_containing(*at) {
+                                    Some((lo, hi)) => codon_click = Some((lo, hi, *res)),
+                                    None => {
+                                        click =
+                                            Some((hit(pos), ui.input(|i| i.modifiers.shift)));
+                                    }
+                                },
+                                None => {
+                                    click = Some((hit(pos), ui.input(|i| i.modifiers.shift)));
+                                }
+                            }
                         } else if resp.dragged() {
-                            drag_to = Some(hit(pos));
+                            // Dragging along a residue lane extends by whole
+                            // codons, which is how a domain gets selected.
+                            drag_to = Some(match &aa_hit {
+                                Some((res, at)) => match res.run_containing(*at) {
+                                    Some((lo, hi)) => {
+                                        let anchor = edit.sel.map_or(edit.caret, |s| s.anchor);
+                                        if hi <= anchor {
+                                            lo
+                                        } else {
+                                            hi
+                                        }
+                                    }
+                                    None => hit(pos),
+                                },
+                                None => hit(pos),
+                            });
                             // The only scroll machinery this feature owes: a
                             // drag that leaves the viewport has to keep going,
                             // or an origin-crossing selection cannot be made by
@@ -5652,6 +6338,86 @@ impl App {
                                     f.kind,
                                     strand_word(f.strand)
                                 ));
+                                // The length, and whether it is a multiple of
+                                // three. That is how an in-frame fusion or a
+                                // His-tag insertion is checked, and neither
+                                // number was available anywhere in this
+                                // application.
+                                if let Some(bp) = feature_bp(f, mol) {
+                                    s.push_str(&if bp % 3 == 0 {
+                                        format!(" {} bp (3n, {} aa)", fmt_int(bp), fmt_int(bp / 3))
+                                    } else {
+                                        format!(" {} bp — NOT a multiple of 3", fmt_int(bp))
+                                    });
+                                }
+                            }
+                        }
+                        // The residue over this base, in the SAME line as
+                        // everything else on it. This application has one
+                        // status channel and exactly one `on_hover_text`
+                        // window, in `map.rs`; a per-residue tooltip would be a
+                        // second surface to keep in step.
+                        if aa_on {
+                            for path in tr.paths().iter().chain(sel_path.iter()) {
+                                let ep = path.effective(run);
+                                let Some(k) = ep.residue_covering(at) else {
+                                    continue;
+                                };
+                                if k >= ep.aa_len() {
+                                    continue;
+                                }
+                                let Some(res) = ep.residue(k, &read) else {
+                                    continue;
+                                };
+                                s.push_str(&format!(
+                                    " · {} {} of {} · codon {} · table {}",
+                                    res.aa as char,
+                                    fmt_int(k as u64 + 1),
+                                    fmt_int(ep.aa_len() as u64),
+                                    String::from_utf8_lossy(&res.codon),
+                                    ep.code.id
+                                ));
+                                // The mark's own sentence. The glyph cannot
+                                // separate an ambiguous mixture from a byte
+                                // that is not a nucleotide code at all, and
+                                // only this line can.
+                                s.push_str(match res.mark {
+                                    aa::Mark::Plain => "",
+                                    aa::Mark::StopEnd => " · the terminal stop",
+                                    aa::Mark::StopInside => {
+                                        " · AN INTERNAL STOP: the annotation is wrong, or \
+                                         something upstream is out of frame"
+                                    }
+                                    aa::Mark::AmbiguousStop => {
+                                        " · both a stop and a residue in this table; which \
+                                         one depends on context this program does not have"
+                                    }
+                                    aa::Mark::Initiator => {
+                                        " · read as Met because this table initiates here — \
+                                         the codon is not ATG"
+                                    }
+                                    aa::Mark::Ambiguous => {
+                                        " · the codon resolves to more than one residue, or \
+                                         holds a byte that is not a nucleotide code"
+                                    }
+                                });
+                                if !res.contiguous {
+                                    s.push_str(&format!(
+                                        " · spans the join or the origin: {} | {} | {}",
+                                        fmt_int(res.coords[0] + 1),
+                                        fmt_int(res.coords[1] + 1),
+                                        fmt_int(res.coords[2] + 1)
+                                    ));
+                                }
+                                if ep.ragged() > 0 && k + 1 == ep.aa_len() {
+                                    // A reading that simply stops one or two
+                                    // cells early looks like a rendering bug and
+                                    // reads like a shorter protein.
+                                    s.push_str(&format!(
+                                        " · last codon incomplete, {} base(s)",
+                                        ep.ragged()
+                                    ));
+                                }
                             }
                         }
                         if show_cuts {
@@ -5693,6 +6459,51 @@ impl App {
         self.seq_hover = hover_out;
 
         // -- apply the pointer, now that the borrows are done --------------
+        //
+        // Through `set_selection`, which is the ONE way anything outside
+        // `seqedit` may set `sel` and `caret`, and which commits the open run
+        // first. Assigning a selection behind a run's back put the typed bases
+        // ten positions from the highlight, and its own docstring says so.
+        if let Some((lo, hi, res)) = codon_click {
+            let d = self.document.as_mut().expect("checked by caller");
+            self.edit.set_selection(
+                d,
+                Selection {
+                    anchor: lo,
+                    head: hi,
+                    through_origin: false,
+                },
+                hi,
+            );
+            // `hi - lo` is now the length of the ARC that was selected — 1 or 2
+            // of the codon's three — and the other coordinates are named so the
+            // reader can find the rest. It used to be the outer bound's width,
+            // which on a `join(101..150, 501..551)` printed the sentence
+            // "353 of 3 bases selected" over a 353-base selection.
+            let where_ = if res.contiguous {
+                String::new()
+            } else {
+                let rest: Vec<String> = res
+                    .coords
+                    .iter()
+                    .filter(|c| !(lo..hi).contains(c))
+                    .map(|c| fmt_int(c + 1))
+                    .collect();
+                format!(
+                    " — spans the join or the origin; {} of 3 bases selected, the rest at {}",
+                    hi - lo,
+                    rest.join(" and ")
+                )
+            };
+            self.edit.say(format!(
+                "residue {} · {} · codon {}{}",
+                fmt_int(res.k as u64 + 1),
+                res.aa as char,
+                String::from_utf8_lossy(&res.codon),
+                where_
+            ));
+            self.edit.dragging = true;
+        }
         if let Some((to, shift)) = click {
             let d = self.document.as_mut().expect("checked by caller");
             self.edit.place(d, to, shift);
@@ -5909,7 +6720,308 @@ impl App {
         }
     }
 
-    fn sequence_header(&mut self, ui: &mut Ui, n: u64, rows: usize, has_cuts: bool, typing: bool) {
+    /// The `Show` row for the sequence view's tracks, plus everything the
+    /// tracks have to disclose.
+    ///
+    /// One control, one answer, in the place the header already says what the
+    /// row is -- copying the enzyme filter's idiom verbatim, including the
+    /// hover text on a chip that cannot change anything.
+    ///
+    /// These are VIEW preferences. Nothing here calls `Document::apply`, enters
+    /// the log or makes the document dirty. The one place this feature ever
+    /// writes to a molecule is the feature editor's `aa` checkbox, which goes
+    /// through `OpKind::SetFeature` like every other feature edit.
+    fn sequence_tracks_row(&mut self, ui: &mut Ui, per_row: u64) {
+        let (
+            tr_empty,
+            rev,
+            over,
+            unoriented,
+            dropped,
+            own_tables,
+            stops,
+            capped,
+            scanned,
+            readings,
+            bad_cs,
+        ) = {
+            let t = &self.tr;
+            (
+                t.is_empty(),
+                t.rev_lanes,
+                t.over_cap,
+                t.unoriented.clone(),
+                t.dropped.clone(),
+                t.own_tables.clone(),
+                t.internal_stops.clone(),
+                t.stops_capped,
+                t.readings_scanned,
+                t.paths().len(),
+                t.bad_codon_starts.clone(),
+            )
+        };
+        let d = self.document.as_ref().expect("checked by caller");
+        let ds = d.molecule().double_stranded;
+        let complement = self.layout.complement.unwrap_or(ds != Some(false));
+        let orf_state = match &d.orfs {
+            doc::OrfState::Off => None,
+            doc::OrfState::Running { .. } => Some(Err("scanning...".to_string())),
+            doc::OrfState::Unavailable(why) => Some(Err(why.clone())),
+            doc::OrfState::Done(o) => Some(Ok((
+                o.orfs.len(),
+                o.lapping,
+                o.stopless.len(),
+                o.code,
+                o.min_aa,
+            ))),
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Show").color(pal(ui).muted).size(12.0));
+            for m in [
+                aa::TrackMode::Off,
+                aa::TrackMode::File,
+                aa::TrackMode::Selection,
+            ] {
+                let resp = ui.selectable_label(self.layout.aa_track == m, m.label());
+                // A chip that cannot change anything says so, rather than
+                // leaving the user to click it and infer from a picture that
+                // did not move.
+                let resp = if m == aa::TrackMode::File && tr_empty {
+                    resp.on_hover_text(
+                        "Nothing in this document is marked translated and nothing in it is a \
+                         CDS, so this changes nothing here. Set a strand and tick `aa` in the \
+                         feature editor, or use `+ selection`.",
+                    )
+                } else {
+                    resp
+                };
+                if resp.clicked() {
+                    self.layout.aa_track = m;
+                }
+            }
+            if ui
+                .selectable_label(complement, "complement")
+                .on_hover_text(
+                    "The bottom strand, in the top strand's coordinates. Reverse-strand \
+                     translations are drawn only when it is on: a reverse reading under a \
+                     top-strand-only view runs C-terminus to N-terminus left to right.",
+                )
+                .clicked()
+            {
+                self.layout.complement = Some(!complement);
+            }
+            if ui
+                .selectable_label(self.layout.orf_track, "ORFs")
+                .on_hover_text(
+                    "Every stretch the SEQUENCE permits, in its own strip and its own grammar. \
+                     Not the same claim as an annotated CDS.",
+                )
+                .clicked()
+            {
+                self.layout.orf_track = !self.layout.orf_track;
+            }
+            // An explicit height, because this application has already shipped
+            // the other version once: `featedit.rs`'s Type dropdown takes
+            // egui's default popup height, shows 8 of 17, and egui's scrollbar
+            // fades at rest so it reads as a complete list. Twenty-seven tables
+            // would do the same thing, harder.
+            let mut code = self.doc_code;
+            egui::ComboBox::from_id_salt("pl-seq-code")
+                .height(320.0)
+                .selected_text(format!("table {}", code.id))
+                .show_ui(ui, |ui| {
+                    for c in pl_core::translate::all_tables() {
+                        ui.selectable_value(&mut code, c, format!("{} - {}", c.id, c.name()));
+                    }
+                });
+            if code != self.doc_code {
+                self.doc_code = code;
+                self.layout.code = code.id;
+                // The translations are keyed on the document version, which has
+                // not moved, so the rebuild has to be asked for.
+                self.annot.version = (u64::MAX, None);
+            }
+        });
+
+        // -- what the tracks have to disclose ----------------------------
+        let mut say: Vec<String> = Vec::new();
+        if self.layout.aa_track.is_on() {
+            say.push(format!(
+                "translated with table {} ({})",
+                self.doc_code.id,
+                self.doc_code.name()
+            ));
+            if !own_tables.is_empty() {
+                // The sentence above names the DOCUMENT default, and a feature
+                // carrying `/transl_table` is not translated with it. Unsaid,
+                // the header could name a table no residue used: all three of
+                // pKoV's CDSs carry `/transl_table=1`, so switching the combo to
+                // table 4 for a mycoplasma insert changed the sentence and not
+                // one letter — leaving a terminal TGA drawn `*`, which reads as
+                // an internal stop in a code that was never applied.
+                //
+                // Phrased as a COUNT of the readings, so "3 of 3" says plainly
+                // that the number above reached nothing, and it stays true when
+                // the default and the overrides happen to be the same table.
+                let which: Vec<String> = own_tables
+                    .iter()
+                    .map(|&(id, _)| match pl_core::translate::table(id) {
+                        Some(c) => format!("table {id} ({})", c.name()),
+                        // Unreachable: `feature_code` only records a number
+                        // `translate::table` already resolved.
+                        None => format!("table {id}"),
+                    })
+                    .collect();
+                let k: usize = own_tables.iter().map(|&(_, k)| k).sum();
+                say.push(format!(
+                    "{k} of {readings} reading(s) carry their own /transl_table and use it \
+                     instead: {}",
+                    which.join(", ")
+                ));
+            }
+            if per_row % 3 != 0 {
+                // The drawing stays right -- the middle-base rule is computed
+                // per row from absolute coordinates -- but the codon columns
+                // walk by `per_row % 3` a row and the residues form a diagonal.
+                // Disclosed rather than fixed by snapping `per_row` to 30,
+                // which would cost 40% of the bases on screen at this width.
+                say.push(format!(
+                    "codon columns line up only at 60 or 30 bases per row; this row is {per_row}"
+                ));
+            }
+            if !complement && rev > 0 {
+                say.push(format!(
+                    "{rev} reverse-strand translation lane(s) hidden -- turn on the complement \
+                     strand"
+                ));
+            }
+            if over > 0 {
+                say.push(format!(
+                    "{over} translation(s) past the {} lanes per strand, counted in the row's +N",
+                    aa::MAX_AA_LANES
+                ));
+            }
+            if !unoriented.is_empty() {
+                // Reached by something that ASKED for a reading and has no
+                // direction to read it in: a CDS, or a segment ticked `aa`, with
+                // no strand. NOT by pKoV's `decR his`, whatever the comment that
+                // used to stand here said — that is an unflagged `misc_feature`,
+                // so it never asked, and this sentence has never appeared on the
+                // file it was written for.
+                say.push(format!(
+                    "no track for {}: no strand is recorded, so there is no reading direction -- \
+                     set one in the feature editor, or select the bases and use `+ selection`",
+                    unoriented.join(", ")
+                ));
+            }
+            if !dropped.is_empty() {
+                // A reading with no bases in it. Said, because a CDS missing
+                // from the track looks exactly like a molecule that never had
+                // one.
+                say.push(format!(
+                    "no track for {}: the segment runs backwards round an origin this molecule \
+                     does not have, because it is linear",
+                    dropped.join(", ")
+                ));
+            }
+            for b in &bad_cs {
+                say.push(b.clone());
+            }
+        }
+        if complement {
+            let assumed = if ds.is_none() {
+                " -- strands are not recorded in this file; drawn double"
+            } else {
+                ""
+            };
+            say.push(format!(
+                "double-stranded: the lower row is the complement, read 3'->5' left to right; \
+                 no overhangs are drawn and Ctrl+C still copies the top strand{assumed}"
+            ));
+        }
+        if let Some(st) = orf_state {
+            // Suppressed during a typing run, exactly as the cut marks are and
+            // for the same reason: the scan describes the COMMITTED sequence,
+            // and a typed base can create or destroy a start or a stop, so an
+            // ORF remapped into effective coordinates is not merely displaced —
+            // it can be an ORF that no longer exists, drawn confidently. An
+            // empty strip and a suppressed one are otherwise indistinguishable.
+            if self.edit.run().is_some() {
+                say.push("ORFs hidden while typing".into());
+            }
+            say.push(match st {
+                Err(why) => format!("ORFs: {why}"),
+                Ok((count, lapping, stopless, code, min_aa)) => {
+                    let mut s = format!(
+                        "{} ORF(s) - table {code} - >={min_aa} aa - starts required",
+                        fmt_int(count as u64)
+                    );
+                    if lapping > 0 {
+                        // A `[lo, hi)` interval cannot hold more than one lap,
+                        // so drawing one would show a fraction of the ORF and
+                        // look entirely normal.
+                        s.push_str(&format!(
+                            " - {lapping} ORF(s) run more than once round this circle and cannot \
+                             be drawn as a span"
+                        ));
+                    }
+                    if stopless > 0 {
+                        s.push_str(&format!(
+                            " - {stopless} frame(s) meet no stop codon anywhere on this circle, \
+                             so they have no reportable ORF"
+                        ));
+                    }
+                    s
+                }
+            });
+        }
+        if !say.is_empty() {
+            ui.label(
+                RichText::new(say.join(" \u{b7} "))
+                    .color(pal(ui).muted)
+                    .size(11.0),
+            );
+        }
+        if !stops.is_empty() {
+            let mut loud = format!("{} internal stop codon(s): ", fmt_int(stops.len() as u64));
+            loud.push_str(
+                &stops
+                    .iter()
+                    .take(4)
+                    .map(|(name, at)| format!("{name} at {}", fmt_int(*at)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            if stops.len() > 4 {
+                loud.push_str(&format!(" and {} more", stops.len() - 4));
+            }
+            if capped {
+                // What was NOT examined, not only what was. On a genome the
+                // budget is spent inside the first few hundred of thousands of
+                // readings, so "counted over the first 100,000 residues" alone
+                // reads like a footnote on a whole-document count — and a
+                // frameshift past that point raises nothing at all.
+                loud.push_str(&format!(
+                    " (counted over the first {} residues; {} of {} reading(s) were not examined)",
+                    fmt_int(aa::STOP_SCAN_CAP as u64),
+                    fmt_int(readings.saturating_sub(scanned) as u64),
+                    fmt_int(readings as u64)
+                ));
+            }
+            ui.label(RichText::new(loud).color(pal(ui).warn).size(11.0));
+        }
+    }
+
+    fn sequence_header(
+        &mut self,
+        ui: &mut Ui,
+        n: u64,
+        rows: usize,
+        per_row: u64,
+        has_cuts: bool,
+        typing: bool,
+    ) {
         let d = self.document.as_ref().expect("checked by caller");
         let scanning = d.digest.is_running();
         let unavailable = match &d.digest {
@@ -5966,6 +7078,7 @@ impl App {
                 ui.label(RichText::new(enz).color(pal(ui).muted).size(11.0));
             }
         });
+        self.sequence_tracks_row(ui, per_row);
         // The lane cap and the segments whose coordinates named nothing, said
         // once here as well as counted per row. Three lanes drawn where five
         // features overlap looks exactly like a file with three features, and
@@ -7075,8 +8188,19 @@ fn feature_tip(f: &pl_core::Feature, mol: &pl_core::Molecule) -> String {
     // The one place `(3n)` costs nothing, which is what review finding 12 is
     // really asking for: whether a CDS is a multiple of three is how an in-frame
     // fusion or a His-tag insertion is checked.
-    if f.kind == "CDS" && bp % 3 == 0 {
-        second.push_str(&format!(" ({} aa)", fmt_int(bp / 3)));
+    //
+    // From `feature_bp` and NOT from `bp` above, which is the extent and covers
+    // the intron of a spliced CDS. The sequence view's hover line now prints
+    // the same number, and two surfaces of one application must not give two
+    // answers to "how long is this protein".
+    if f.kind == "CDS" {
+        if let Some(coding) = feature_bp(f, mol) {
+            second.push_str(&if coding % 3 == 0 {
+                format!(" ({} aa)", fmt_int(coding / 3))
+            } else {
+                format!(" · {} coding bp — NOT a multiple of 3", fmt_int(coding))
+            });
+        }
     }
     if f.segments.len() > 1 {
         second.push_str(&format!(" · {} segments", f.segments.len()));
@@ -7086,6 +8210,33 @@ fn feature_tip(f: &pl_core::Feature, mol: &pl_core::Molecule) -> String {
         "{}\n{second}\nclick to select · double-click to edit",
         f.name
     )
+}
+
+/// How many bases a feature really covers, or `None` if it names none.
+///
+/// The sum of its segment lengths, with an origin-crossing segment counted the
+/// way `Molecule::subseq` reads one. NOT `extent`, which is an outer bound and
+/// covers the intron of a spliced CDS.
+///
+/// For a CDS the two facts that matter are this number and whether it is a
+/// multiple of three -- that is how an in-frame fusion or a His-tag insertion
+/// is checked, and it is exactly what this file is. Neither was available
+/// anywhere in the application.
+fn feature_bp(f: &pl_core::Feature, mol: &pl_core::Molecule) -> Option<u64> {
+    let n = mol.len();
+    let circular = mol.topology.is_circular();
+    let mut total = 0u64;
+    for s in &f.segments {
+        if s.end < s.start {
+            if !circular || s.start > n {
+                continue;
+            }
+            total += n - (s.start - 1) + s.end.min(n);
+        } else {
+            total += s.end.min(n).saturating_sub(s.start.saturating_sub(1));
+        }
+    }
+    (total > 0).then_some(total)
 }
 
 fn strand_word(s: Strand) -> &'static str {
@@ -12169,6 +13320,990 @@ mod tests {
         app.adopt(d);
         app.tab = Tab::Sequence;
         app
+    }
+
+    // -----------------------------------------------------------------------
+    // the amino-acid track
+    // -----------------------------------------------------------------------
+
+    /// A molecule of `n` bases with a CDS every `every` bases, alternating
+    /// strands, opened on the Sequence tab.
+    fn perf_app(n: usize, every: usize) -> App {
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        let mut seq = String::with_capacity(n + 8);
+        for _ in 0..n {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            seq.push(b"ACGT"[(s >> 33) as usize & 3] as char);
+        }
+        let mut d =
+            Document::from_bytes(format!(">p\n{seq}\n").as_bytes(), "p.fa".into(), None).unwrap();
+        d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        // Straight into the log's molecule rather than one `SetFeature` each:
+        // 4,600 operations would measure `OpLog::apply`, which is not what this
+        // is about.
+        let mut mol = d.molecule().clone();
+        let mut at = 1u64;
+        let mut i = 0;
+        while at + every as u64 <= n as u64 {
+            let mut f = pl_core::Feature::new(format!("g{i}"), "CDS");
+            f.strand = if i % 2 == 0 {
+                Strand::Forward
+            } else {
+                Strand::Reverse
+            };
+            f.segments
+                .push(pl_core::Segment::new(at, at + every as u64 - 30));
+            mol.features.push(f);
+            at += every as u64;
+            i += 1;
+        }
+        let mut d2 = Document::of_molecule(mol);
+        d2.digest.cancel();
+        std::mem::swap(&mut d, &mut d2);
+        let mut app = App::blank();
+        app.adopt(d);
+        app.tab = Tab::Sequence;
+        app
+    }
+
+    /// The mean wall time of one painted frame, over `n` frames, scrolling.
+    ///
+    /// SCROLLING, not resting, and the difference is the whole measurement: at
+    /// rest every row's galley is in egui's cache and the frame costs almost
+    /// nothing, while a scrolling view lays out a screenful of new text every
+    /// frame. A number taken at rest would say this feature is free and would
+    /// be measuring the cache.
+    fn frame_ms(app: &mut App, ctx: &egui::Context, n: usize) -> f64 {
+        // The pointer has to be over the grid or egui delivers the wheel
+        // somewhere else and the view never moves.
+        let over = {
+            for _ in 0..3 {
+                paint(app, ctx, window());
+            }
+            let g = app.seq_grid.expect("painted");
+            egui::pos2(g.x0 + 10.0, g.top + g.row_h * 2.0)
+        };
+        let first_before = app.seq_grid.expect("painted").first_row;
+        let input = |k: usize| -> egui::RawInput {
+            let mut i = window();
+            i.events.push(egui::Event::PointerMoved(over));
+            i.events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -240.0 - (k % 3) as f32),
+                modifiers: egui::Modifiers::default(),
+                phase: egui::TouchPhase::Move,
+            });
+            i
+        };
+        let t = std::time::Instant::now();
+        for k in 0..n {
+            paint(app, ctx, input(k));
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        let first_after = app.seq_grid.expect("painted").first_row;
+        assert!(
+            first_after > first_before + 10,
+            "the premise: the view actually scrolled ({first_before} -> {first_after})"
+        );
+        ms
+    }
+
+    /// MEASURED wall time for the ORF scan, at both ends of the corpus, and it
+    /// can fail: the scan must not be on the UI thread, and the assertion is
+    /// that the FRAME the user gets while it runs is not the scan.
+    ///
+    /// Run with `--nocapture` for the numbers. The comparison that decides the
+    /// design is the enzyme digest, which this application already runs on a
+    /// worker on exactly the same trigger: measured on this machine, ORFs over
+    /// a 4.6 Mb molecule are a fraction of that scan, so there is no argument
+    /// for a different mechanism.
+    #[test]
+    fn the_orf_scan_is_off_the_ui_thread_at_both_ends_of_the_corpus() {
+        let ctx = test_ctx();
+        for (n, label) in [(8_117usize, "plasmid"), (4_641_652, "genome")] {
+            let mut app = perf_app(n, 900);
+            app.layout.orf_track = true;
+            let t = std::time::Instant::now();
+            app.refresh_orfs();
+            let spawned = t.elapsed().as_secs_f64() * 1000.0;
+            // A frame WHILE it runs. This is the number that matters: a scan
+            // done synchronously would show up here in full.
+            let f = std::time::Instant::now();
+            paint(&mut app, &ctx, window());
+            let during = f.elapsed().as_secs_f64() * 1000.0;
+
+            // Wait for the ANSWER, not for a state change this loop happens to
+            // observe itself. `poll_orfs` returns true only for the transition,
+            // and the `paint` above also polls — so on the plasmid, whose scan
+            // is shorter than one cold frame, that frame collects the result and
+            // this loop would spin to its deadline over a scan that finished
+            // before it started. It only ever passed because the code under test
+            // cancelled and respawned the worker on that very frame, which is
+            // the defect: a test whose green depended on the bug.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            loop {
+                app.document.as_mut().unwrap().poll_orfs();
+                if app.document.as_ref().unwrap().orfs.done().is_some() {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "the ORF worker hung");
+                std::thread::yield_now();
+            }
+            let total = t.elapsed().as_secs_f64() * 1000.0;
+            let d = app.document.as_ref().unwrap();
+            let o = d.orfs.done().expect("finished");
+            eprintln!(
+                "PERF ORFs {label} {} bp: spawn {spawned:.3} ms on the UI thread,                  {total:.1} ms wall to the answer, {} ORFs at table {} >={} aa;                  a frame while it ran took {during:.3} ms",
+                fmt_int(n as u64),
+                fmt_int(o.orfs.len() as u64),
+                o.code,
+                o.min_aa
+            );
+            // RATIOS, not absolutes, because this test has to mean the same
+            // thing in a debug build as in a release one: an unoptimised
+            // profile moves every number here together, and an absolute
+            // millisecond ceiling would fail for the profile rather than for
+            // the defect. The claim is "the scan is not on the UI thread", and
+            // that is a ratio.
+            assert!(
+                spawned * 20.0 < total,
+                "{label}: asking for the scan cost {spawned:.3} ms against {total:.1} ms of scan"
+            );
+            if n > 1_000_000 {
+                // Only where the scan is long enough for the comparison to say
+                // anything. At plasmid scale the whole scan is shorter than one
+                // cold frame, which is itself the answer.
+                assert!(
+                    during * 4.0 < total,
+                    "{label}: a frame during the scan cost {during:.3} ms of its {total:.1} ms"
+                );
+            }
+        }
+    }
+
+    /// MEASURED, and it can fail: the marginal cost of the whole track — one
+    /// residue lane per strand, the complement row and the ORF strip — is
+    /// asserted to stay under a millisecond a frame at plasmid scale.
+    ///
+    /// It is not a microbenchmark for its own sake. The design of this feature
+    /// rests on the claim that COMPUTE IS NOT THE CONSTRAINT and vertical space
+    /// is, and a claim like that decays silently: the obvious wrong
+    /// implementations (a `translate()` allocation per row, a per-row
+    /// `reverse_complement`, a `layout_no_wrap` per residue) are all still
+    /// correct on screen and all several times this cost.
+    ///
+    /// Run with `--nocapture` for the numbers.
+    #[test]
+    fn the_track_costs_a_fraction_of_a_frame_at_plasmid_scale() {
+        let ctx = test_ctx();
+        let mut app = perf_app(8_117, 900);
+        app.layout.aa_track = aa::TrackMode::Off;
+        app.layout.complement = Some(false);
+        app.layout.orf_track = false;
+        let off = frame_ms(&mut app, &ctx, 40);
+
+        app.layout.aa_track = aa::TrackMode::File;
+        app.layout.complement = Some(true);
+        let on = frame_ms(&mut app, &ctx, 40);
+        let g = app.seq_grid.expect("painted");
+        assert!(g.strips.aa_fwd > 0 && g.strips.aa_rev > 0, "the premise");
+
+        eprintln!(
+            "PERF plasmid 8,117 bp / {} features: tracks off {off:.3} ms/frame, \
+             on {on:.3} ms/frame, marginal {:.3} ms; row_h {:.2} -> {:.2}",
+            app.document.as_ref().unwrap().molecule().features.len(),
+            on - off,
+            32.88,
+            g.row_h
+        );
+        // A RATIO, so this means the same thing in a debug build as in a
+        // release one. It still catches every shape the design rejected: a
+        // `translate()` allocation per row is about 4x, a per-row
+        // `reverse_complement` about 10x, and a `layout_no_wrap` per residue
+        // about 30x.
+        assert!(
+            on < off * 2.5,
+            "the track took the frame from {off:.3} ms to {on:.3} ms"
+        );
+    }
+
+    /// The virtualisation promise, MEASURED with the track on: the sequence
+    /// view costs the same on a 4.6 Mb genome as on an 8 kb plasmid, because
+    /// only the visible rows are built and a residue's coordinates come out of
+    /// a path rather than out of a materialised protein.
+    ///
+    /// It can fail, and the failure it is aimed at is real: materialising the
+    /// residues would be about 1.3 million entries for a genome this size, and
+    /// scanning every path per row instead of reading the row's own interval
+    /// query would be 4,600 extent tests times forty rows every frame.
+    ///
+    /// Run with `--nocapture` for the numbers.
+    #[test]
+    fn the_track_costs_the_same_on_a_genome_as_on_a_plasmid() {
+        let ctx = test_ctx();
+        let mut small = perf_app(8_117, 900);
+        small.layout.aa_track = aa::TrackMode::File;
+        small.layout.complement = Some(true);
+        let a = frame_ms(&mut small, &ctx, 30);
+
+        let mut big = perf_app(4_641_652, 1_000);
+        big.layout.aa_track = aa::TrackMode::Off;
+        big.layout.complement = Some(false);
+        let b_off = frame_ms(&mut big, &ctx, 30);
+        big.layout.aa_track = aa::TrackMode::File;
+        big.layout.complement = Some(true);
+        let b = frame_ms(&mut big, &ctx, 30);
+        let feats = big.document.as_ref().unwrap().molecule().features.len();
+        eprintln!(
+            "PERF genome 4,641,652 bp / {feats} features: tracks off {b_off:.3} ms/frame, \n             on {b:.3} ms/frame; the plasmid with tracks on is {a:.3} ms/frame, ratio {:.2}x",
+            b / a.max(1e-6)
+        );
+        assert!(feats > 4_000, "the premise: a genome's worth of CDSs");
+        assert!(
+            b < a * 5.0,
+            "the genome cost {b:.3} ms a frame against the plasmid's {a:.3}"
+        );
+        let _ = b_off;
+    }
+
+    /// A plasmid whose first 300 bases are one forward CDS, open on Sequence
+    /// with the track and the complement strand on.
+    ///
+    /// 300 rather than the whole molecule so there are rows with a translation
+    /// on them and rows without, which is the whole of the row-pitch question.
+    fn aa_app(reverse: bool, mode: aa::TrackMode) -> App {
+        let mut app = seq_app();
+        let mut f = pl_core::Feature::new("gene", "CDS");
+        f.strand = if reverse {
+            Strand::Reverse
+        } else {
+            Strand::Forward
+        };
+        f.segments.push(pl_core::Segment::new(1, 300));
+        assert!(app.edit(pl_core::OpKind::SetFeature {
+            index: None,
+            feature: Box::new(f),
+        }));
+        app.layout.aa_track = mode;
+        app.layout.complement = Some(true);
+        app
+    }
+
+    /// Every `Shape::Text` drawn, as `(pos, text)`.
+    fn texts(out: &egui::FullOutput) -> Vec<(egui::Pos2, String)> {
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some((t.pos, t.galley.text().to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// PROVEN TO FAIL against cc36cf7: there is no amino-acid track there at
+    /// all, so no row of residues is ever drawn and this finds nothing. It is a
+    /// behavioural failure, not a compile-only one — `aa::TrackMode` does not
+    /// exist at cc36cf7 either, so the fixture would also have to be written
+    /// differently to build.
+    ///
+    /// What it really asserts is the ONE rule that keeps the track honest: the
+    /// residue lane is a `per_row`-length string painted at `cx(0)`, in the same
+    /// `FontId` as the bases, so a residue at column `c` occupies exactly
+    /// `[cx(c), cx(c+1))` and its codon's three cells are `[cx(c-1), cx(c+2))`,
+    /// symmetric about it BY CONSTRUCTION. There is no second producer of an x.
+    ///
+    /// Asserted at the LAST codon of the row, column 58, where an error is
+    /// largest: any formula that inserts a gap, centres on a measured galley,
+    /// or uses a smaller aa font is right at column 1 and wrong by whole cells
+    /// at column 58.
+    ///
+    /// AND IT IS MEASURED OFF THE GALLEY, not recomputed from `g.x0` and
+    /// `g.advance`. The first version of this test read only the two galleys'
+    /// ANCHORS — both painted at `cx(0)`, so both trivially `g.x0` — and then
+    /// asserted relations among numbers it had just derived from `g.advance`
+    /// itself: `assert!((glyph_x - (codon_lo + g.advance)).abs() < 1e-3)` is
+    /// `|0| < 1e-3`, true for any painter whatsoever. A reviewer built the exact
+    /// mutation the paragraph above names — `FontId::monospace(font.size * 0.85)`
+    /// for the residue lane only — and the whole suite stayed green while the
+    /// row's last residue drifted to cell 48.8, ten cells left of its codon,
+    /// with the boundary ticks visibly detached from the letters. Glyph
+    /// positions come from the laid-out text, so they move when the face does.
+    #[test]
+    fn a_residue_sits_over_exactly_its_own_three_bases_at_the_last_codon_of_a_row() {
+        let ctx = test_ctx();
+        let mut app = aa_app(false, aa::TrackMode::File);
+        let out = paint_out(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("the grid was painted");
+        assert_eq!(g.per_row, 60, "the premise: a full-width row");
+        assert_eq!(g.strips.aa_fwd, 1, "the premise: one forward residue lane");
+
+        // The absolute x of character `i` of a painted string, off the galley
+        // egui actually laid out. THE MEASUREMENT: a smaller face, a different
+        // family or any inserted gap changes these and changes nothing the
+        // arithmetic above can see.
+        let glyph_x = |t: &str, i: usize| -> f32 {
+            let s = out
+                .shapes
+                .iter()
+                .find_map(|cs| match &cs.shape {
+                    egui::Shape::Text(sh) if sh.galley.text() == t => Some(sh),
+                    _ => None,
+                })
+                .expect("the string was painted");
+            let row = s.galley.rows.first().expect("a single-line galley");
+            s.pos.x + row.pos.x + row.row.glyphs[i].pos.x
+        };
+
+        let ts = texts(&out);
+        // Row 0's bases, and row 0's residues. The CDS begins at coordinate 0,
+        // so residue k covers 3k, 3k+1, 3k+2 and its MIDDLE base is 3k+1: the
+        // letters land at columns 1, 4, ..., 58.
+        let bases = ts
+            .iter()
+            .find(|(pos, t)| t.len() == 60 && !t.contains(' ') && pos.y > g.top)
+            .expect("row 0's bases");
+        let aa_row = ts
+            .iter()
+            .find(|(_, t)| {
+                t.len() == 60
+                    && t.starts_with(' ')
+                    && t.chars().enumerate().all(|(i, c)| {
+                        if i % 3 == 1 {
+                            c.is_ascii_uppercase() || c == '*'
+                        } else {
+                            c == ' '
+                        }
+                    })
+            })
+            .expect("row 0's residues");
+
+        // One x, shared. Not "close to": the same number, because both come
+        // out of `RowLayout::col_x(0)`.
+        assert_eq!(
+            aa_row.0.x, bases.0.x,
+            "the residue lane and the bases start at the same column 0"
+        );
+        assert_eq!(aa_row.0.x, g.x0);
+        // Above the strand it reads, and above the complement below that.
+        assert!(aa_row.0.y < bases.0.y, "forward residues sit above");
+
+        // THE MEASUREMENT, at the last codon of the row. The residue's glyph
+        // sits at column 58; its codon's three cells are 57, 58, 59.
+        //
+        // Every number below is read off a laid-out galley. The residue glyph
+        // and the BASE glyph at the same column must be the same x — not close,
+        // the same — because both are character 58 of a `per_row`-length string
+        // laid out in one `FontId` at one anchor. A residue lane in a smaller
+        // face has an identical anchor and an identical string and fails here by
+        // whole cells.
+        let res_58 = glyph_x(&aa_row.1, 58);
+        let base_58 = glyph_x(&bases.1, 58);
+        assert!(
+            (res_58 - base_58).abs() < 1e-3,
+            "residue 19's glyph is at {res_58} and its middle base's at {base_58}"
+        );
+        // And that x is the one `RowLayout::col_x` promises, so the codon ticks
+        // and the marks — which ARE drawn from `cx` — cannot drift from the
+        // letters they belong to.
+        //
+        // One PIXEL of tolerance and not 1e-3, because epaint snaps a laid-out
+        // glyph to the pixel grid on purpose (`PlacedRow::pos` is "rounded to
+        // the closest pixel in order to produce crisp text"). At the default
+        // 1 px/pt of the test context that is at most 1.0 here, against the
+        // 6.9 pt cell it has to stay inside and the ~60 pt a wrong font face
+        // moves it.
+        let px = 1.0;
+        assert!(
+            (res_58 - (g.x0 + 58.0 * g.advance)).abs() <= px,
+            "residue 19's glyph is at {res_58}, not cx(58) = {}",
+            g.x0 + 58.0 * g.advance
+        );
+        // The cell pitch is the base font's advance over the whole row, so the
+        // error cannot be zero at column 0 and grow along it.
+        let res_1 = glyph_x(&aa_row.1, 1);
+        assert!(
+            ((res_58 - res_1) - 57.0 * g.advance).abs() <= px,
+            "the residue lane's own pitch is {} per cell, not {}",
+            (res_58 - res_1) / 57.0,
+            g.advance
+        );
+        // The GLYPH is inside the band. Not its codon: a reading whose middle
+        // bases land at column 59 has that codon's third base on the NEXT row,
+        // which is exactly what the middle-base rule is for, so asserting the
+        // codon fits would teach a rule the code does not keep.
+        assert!(
+            res_58 + g.advance <= g.x0 + g.per_row as f32 * g.advance + px,
+            "the last residue is inside the band"
+        );
+        // And the 59th character of the lane really is a residue.
+        let ch = aa_row.1.as_bytes()[58];
+        assert!(
+            ch.is_ascii_uppercase() || ch == b'*',
+            "column 58 holds residue 19, not {:?}",
+            ch as char
+        );
+        // The three bases under it are the codon `pl_core` translates.
+        let mol = app.document.as_ref().unwrap().molecule();
+        let codon = &mol.seq[57..60];
+        let want = pl_core::translate::table(11).unwrap().codon(codon);
+        assert_eq!(ch, want, "the letter is what pl_core::translate says");
+    }
+
+    /// PROVEN TO FAIL against cc36cf7: `RowStrips` does not exist there, so
+    /// this is a COMPILE-ONLY failure at that commit — said plainly, because a
+    /// test that cannot build proves less than one that runs and fails.
+    ///
+    /// What it exercises is the hazard the whole design turns on. `show_rows`
+    /// maps a scroll offset to a row index by dividing, so every row must be
+    /// the same height. Here rows 0-4 carry a CDS and rows 5 on do not, and the
+    /// gutter coordinates — which are drawn from the same `y_text` the letters
+    /// use — must sit on an exact arithmetic progression of `row_h`.
+    #[test]
+    fn the_row_pitch_is_the_same_on_a_row_with_a_translation_and_one_without() {
+        let ctx = test_ctx();
+        let mut app = aa_app(false, aa::TrackMode::File);
+        let out = paint_out(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        assert!(g.strips.aa_fwd > 0, "the premise: the lane is reserved");
+
+        // The row coordinates, in row order: "1", "61", "121", ...
+        let ts = texts(&out);
+        let mut ys: Vec<(u64, f32)> = Vec::new();
+        for row in 0..8u64 {
+            let want = fmt_int(row * 60 + 1);
+            let (pos, _) = ts
+                .iter()
+                .find(|(_, t)| *t == want)
+                .unwrap_or_else(|| panic!("row {row}'s gutter coordinate {want}"));
+            ys.push((row, pos.y));
+        }
+        // Rows 0-4 hold the CDS (bases 0..300); rows 5+ hold none of it.
+        for w in ys.windows(2) {
+            let step = w[1].1 - w[0].1;
+            assert!(
+                (step - g.row_h).abs() < 0.01,
+                "rows {} -> {} stepped {step}, not {}",
+                w[0].0,
+                w[1].0,
+                g.row_h
+            );
+        }
+
+        // And uniformity is not enough on its own: the DRAWING has to sit where
+        // `RowStrips` says it does, or the painter and the hit-test have drifted
+        // apart inside a row while the pitch between rows still looks perfect.
+        // The gutter coordinate is drawn at `y_text`, the strand it labels.
+        for (row, y) in &ys {
+            let want = g.top + (row - g.first_row) as f32 * g.row_h + g.strips.y_text();
+            assert!(
+                (y - want).abs() < 0.01,
+                "row {row}'s letters were drawn at {y}, and the hit-test reads {want}"
+            );
+        }
+        // The bottom strand is exactly one line of letters below the top one,
+        // and the forward residue lane exactly one above.
+        let base_row = ys[0].1;
+        assert!((g.strips.y_comp() - g.strips.y_text() - g.strips.text_h).abs() < 0.01);
+        assert!((g.strips.y_text() - g.strips.y_aa_fwd(0) - g.strips.text_h).abs() < 0.01);
+        let _ = base_row;
+    }
+
+    /// PROVEN TO FAIL against cc36cf7 for the same compile-only reason
+    /// (`RowStrips`, `GridGeom::strips`), and behaviourally against the obvious
+    /// wrong implementation of this change: with a residue lane above the
+    /// letters and a complement row below them, a hit-test that knows only the
+    /// row maps any y in the band onto the letters, so a click meant for a
+    /// residue moves the caret — and one meant for the caret at the last column
+    /// of a row lands wherever the extra height put it.
+    #[test]
+    fn the_caret_still_lands_on_the_last_column_of_a_row_with_the_tracks_on() {
+        let ctx = test_ctx();
+        let mut app = aa_app(false, aa::TrackMode::File);
+        paint(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        assert_eq!(g.per_row, 60);
+        assert!(
+            g.strips.aa_fwd > 0 && g.strips.complement,
+            "the premise: the row is taller than the letters"
+        );
+
+        let row = 2u64;
+        let col = 59u64;
+        // A NAMED band — the middle of the top strand's own letters — not
+        // `row_h * 0.5`, which with these strips is the complement row.
+        let y = g.top
+            + (row - g.first_row) as f32 * g.row_h
+            + g.strips.y_text()
+            + g.strips.text_h * 0.5;
+        let at = egui::pos2(g.x0 + (col as f32 + 0.2) * g.advance, y);
+        paint(&mut app, &ctx, pointer_to(at));
+        paint(&mut app, &ctx, pointer_button(at, true));
+        paint(&mut app, &ctx, pointer_button(at, false));
+        assert_eq!(app.edit.caret, row * 60 + col);
+
+        // And the COMPLEMENT row is the same coordinate space: a click on it
+        // places the caret on the same base, because the bottom strand is a
+        // read-only mirror and not a second coordinate system.
+        let y = g.top
+            + (row - g.first_row) as f32 * g.row_h
+            + g.strips.y_comp()
+            + g.strips.text_h * 0.5;
+        let at = egui::pos2(g.x0 + (col as f32 + 0.2) * g.advance, y);
+        paint(&mut app, &ctx, pointer_to(at));
+        paint(&mut app, &ctx, pointer_button(at, true));
+        paint(&mut app, &ctx, pointer_button(at, false));
+        assert_eq!(
+            app.edit.caret,
+            row * 60 + col,
+            "a click on the bottom strand names the same base"
+        );
+    }
+
+    /// PROVEN TO FAIL against cc36cf7: compile-only there (no `aa` module), and
+    /// behaviourally against any version that routes an aa-lane click through
+    /// `hit`, which would move the caret instead of selecting the codon.
+    #[test]
+    fn a_click_on_a_residue_selects_its_three_bases() {
+        let ctx = test_ctx();
+        let mut app = aa_app(false, aa::TrackMode::File);
+        paint(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+
+        // Residue 19 of row 0: coordinates 57, 58, 59, glyph at column 58.
+        let y = g.top + g.strips.y_aa_fwd(0) + g.strips.text_h * 0.5;
+        let at = egui::pos2(g.x0 + 58.4 * g.advance, y);
+        paint(&mut app, &ctx, pointer_to(at));
+        paint(&mut app, &ctx, pointer_button(at, true));
+        paint(&mut app, &ctx, pointer_button(at, false));
+        let s = app
+            .edit
+            .sel
+            .expect("a click on a residue selects its codon");
+        assert_eq!((s.lo(), s.hi()), (57, 60), "the codon, not the base");
+        let notice = app.edit.notice.clone().unwrap_or_default();
+        assert!(notice.contains("residue 20"), "{notice}");
+    }
+
+    /// PROVEN TO FAIL before the fix, and the failure is the one with no honest
+    /// reading: with both forward lanes already spoken for, the ad-hoc selection
+    /// was painted into lane 1, on top of a file translation, and the two
+    /// proteins came out interleaved a column apart — `M K RA GV CA M* KN ...`,
+    /// where the `M*` is one protein's methionine beside another's stop. Nothing
+    /// was counted in the row's `+N`, because the selection's lane index was
+    /// clamped to `MAX_AA_LANES - 1` and the reservation to `MAX_AA_LANES`, so
+    /// `1 < 2` and the over-cap escape never fired.
+    ///
+    /// Restoring either clamp turns this red. The invariant is asserted
+    /// directly, on the drawing: no two residue strings share a y.
+    #[test]
+    fn the_selection_translation_never_shares_a_lane_with_a_file_translation() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        // Two overlapping forward CDSs, which is what makes the strand need
+        // both lanes — a vector plus a tagged variant, or any stretch of
+        // MG1655. pKoV does not hit it; that is why nothing caught this.
+        for (name, lo, hi) in [("cdsA", 1u64, 300u64), ("cdsB", 150, 420)] {
+            let mut f = pl_core::Feature::new(name, "CDS");
+            f.strand = Strand::Forward;
+            f.segments.push(pl_core::Segment::new(lo, hi));
+            assert!(app.edit(pl_core::OpKind::SetFeature {
+                index: None,
+                feature: Box::new(f),
+            }));
+        }
+        app.layout.aa_track = aa::TrackMode::Selection;
+        app.layout.complement = Some(true);
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 190,
+            head: 232,
+            through_origin: false,
+        });
+        app.edit.caret = 232;
+
+        let out = paint_out(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        assert_eq!(app.tr.fwd_lanes, 2, "the premise: both file lanes are used");
+        assert_eq!(
+            g.strips.aa_fwd, 3,
+            "the selection is reserved a lane of its own, above the two"
+        );
+
+        // Every residue lane string drawn on the row holding the selection.
+        // Row 3 is bases 180..240, where cdsB, cdsA and the selection all reach.
+        let row_top = g.top + 3.0 * g.row_h;
+        let mut ys: Vec<i32> = texts(&out)
+            .iter()
+            .filter(|(pos, t)| {
+                pos.y >= row_top - 0.5
+                    && pos.y < row_top + g.row_h
+                    && t.len() == 60
+                    && t.contains(' ')
+                    && t.chars().any(|c| c.is_ascii_uppercase())
+            })
+            .map(|(pos, _)| (pos.y * 100.0).round() as i32)
+            .collect();
+        assert!(
+            ys.len() >= 3,
+            "the premise: three readings reach this row, not {}",
+            ys.len()
+        );
+        let before = ys.len();
+        ys.sort_unstable();
+        ys.dedup();
+        assert_eq!(
+            ys.len(),
+            before,
+            "two residue strings were painted at the same y: {before} strings, {} lanes",
+            ys.len()
+        );
+    }
+
+    /// PROVEN TO FAIL before the fix: `reverse` came from the caret ordering
+    /// alone, and for a wrapping selection the caret ordering is INVERTED —
+    /// travelling forward across the origin ends at a caret below the one it
+    /// started from, which is exactly the state the drag handler builds. So
+    /// every left-to-right wrap-drag was read as reverse. Reverting to
+    /// `s.head < s.anchor` turns this red.
+    ///
+    /// The arc here spells `ATGAAACGCGGTTGCTAA` on the top strand — MKRGC* —
+    /// and its reverse complement is LATAFH, which is what the app drew.
+    #[test]
+    fn a_forward_drag_through_the_origin_translates_the_strand_it_ran_along() {
+        let ctx = test_ctx();
+        let mut app = {
+            // 120 bp circle whose last 5 and first 13 bases are the reading.
+            let mut seq = vec![b'C'; 120];
+            let arc = b"ATGAAACGCGGTTGCTAA";
+            seq[115..120].copy_from_slice(&arc[..5]);
+            seq[0..13].copy_from_slice(&arc[5..]);
+            let fa = format!(">c\n{}\n", String::from_utf8(seq).unwrap());
+            let mut d = Document::from_bytes(fa.as_bytes(), "c.fa".into(), None).unwrap();
+            d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+                .unwrap();
+            let mut app = App::blank();
+            app.adopt(d);
+            app.tab = Tab::Sequence;
+            app
+        };
+        app.layout.aa_track = aa::TrackMode::Selection;
+        app.layout.complement = Some(true);
+        // The state a forward wrap-drag leaves: anchor HIGH, head LOW, wrapped.
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 115,
+            head: 13,
+            through_origin: true,
+        });
+        app.edit.caret = 13;
+
+        let out = paint_out(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        let ts = texts(&out);
+
+        // Row 0's residues. Read forward, the arc is MKRGC*: M and K sit over
+        // bases 116 and 119 on row 1, and row 0 carries R, G, C and the stop,
+        // with their middle bases at 2, 5, 8 and 11. Read BACKWARDS — which is
+        // what the caret ordering alone said — the same arc is LATAFH and row 0
+        // would carry `A T A L` instead, in the lane below the complement.
+        let row0 = ts
+            .iter()
+            .find(|(pos, t)| {
+                pos.y > g.top
+                    && pos.y < g.top + g.row_h
+                    && t.len() == 60
+                    && t.contains(' ')
+                    && t.chars().any(|c| c.is_ascii_uppercase() || c == '*')
+            })
+            .expect("row 0's residues");
+        let letters: String = row0.1.chars().filter(|c| *c != ' ').collect();
+        assert_eq!(
+            letters, "RGC",
+            "the forward reading, not its reverse complement LATAFH"
+        );
+        // The terminal stop is painted as its own glyph — a mark is not a plain
+        // residue and does not go in the shared string — so it is checked
+        // separately, on the same line.
+        assert!(
+            ts.iter()
+                .any(|(pos, t)| t == "*" && (pos.y - row0.0.y).abs() < 0.5),
+            "the reading's terminal stop, on the same lane"
+        );
+        // And ABOVE the top strand, which is where a forward reading goes. Both
+        // strands keep a lane RESERVED while `+ selection` is on — the row pitch
+        // must not change when a drag reverses direction mid-gesture — so the
+        // reservation cannot answer this question and the drawing has to.
+        let top = ts
+            .iter()
+            .find(|(pos, t)| {
+                pos.y > g.top && pos.y < g.top + g.row_h && t.len() == 60 && !t.contains(' ')
+            })
+            .expect("row 0's top strand");
+        assert!(
+            row0.0.y < top.0.y,
+            "the residues are at {} and the strand they read at {}",
+            row0.0.y,
+            top.0.y
+        );
+    }
+
+    /// PROVEN TO FAIL against cc36cf7: no complement strand exists there at
+    /// all — `seqedit.rs` has no bottom-strand rendering, and the UX review of
+    /// 2026-07-31 corrected the survey that said it did.
+    #[test]
+    fn the_bottom_strand_is_the_complement_of_the_top_in_the_same_columns() {
+        let ctx = test_ctx();
+        let mut app = aa_app(false, aa::TrackMode::File);
+        let out = paint_out(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        let ts = texts(&out);
+
+        let mol = app.document.as_ref().unwrap().molecule();
+        let top: String = String::from_utf8(mol.seq[0..60].to_vec()).unwrap();
+        let bottom: String = mol.seq[0..60]
+            .iter()
+            .map(|&b| pl_core::iupac::complement(b) as char)
+            .collect();
+        let t = ts
+            .iter()
+            .find(|(_, t)| *t == top)
+            .expect("row 0's top strand");
+        let b = ts
+            .iter()
+            .find(|(_, t)| *t == bottom)
+            .expect("row 0's bottom strand");
+        // NOT reversed: column c of the bottom row is the Watson-Crick partner
+        // of column c above it, which is the physical duplex and is what keeps
+        // one coordinate space for both strands.
+        assert_eq!(b.0.x, t.0.x, "same columns");
+        assert!(b.0.y > t.0.y, "under it");
+        assert!((b.0.y - t.0.y - g.strips.text_h).abs() < 0.01);
+    }
+
+    /// PROVEN TO FAIL against cc36cf7: compile-only (no `RowStrips`). It pins
+    /// the gate that makes the misleading case impossible by construction —
+    /// turning the complement strand off takes the reverse residue lanes with
+    /// it, so a reverse translation is never drawn under a top-strand-only
+    /// view, where it would read C-terminus to N-terminus left to right.
+    #[test]
+    fn a_reverse_translation_is_never_drawn_without_the_strand_it_reads() {
+        let ctx = test_ctx();
+        let mut app = aa_app(true, aa::TrackMode::File);
+        paint(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        assert_eq!(g.strips.aa_rev, 1, "the premise: a reverse translation");
+        assert_eq!(g.strips.aa_fwd, 0);
+
+        app.layout.complement = Some(false);
+        paint(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("painted");
+        assert_eq!(g.strips.aa_rev, 0, "the lane went with the strand");
+        assert!(!g.strips.complement);
+    }
+
+    /// PROVEN TO FAIL against the code as it stood before this fix, on the
+    /// running application and not only in principle: with the ORF strip on, the
+    /// 4.6 Mb genome read "ORFs: scanning…" at 15 s, 20 s and 60 s, pinned a
+    /// core at 110% focused or not, climbed 232 -> 470 MB, and produced its
+    /// answer the moment the user left the Sequence tab.
+    ///
+    /// It exists because the two ORF tests that shipped with the feature CANNOT
+    /// catch that, and the reason is worth stating: both call `refresh_orfs()`
+    /// exactly ONCE and then poll to completion, which is the one calling
+    /// pattern the application never uses. `sequence_tab` calls it at the top of
+    /// EVERY frame, and while a scan is running `update` asks for a frame every
+    /// 80 ms — so the question is not "does a worker finish" but "does painting
+    /// let it". 1,389 green tests said nothing about it.
+    ///
+    /// So this drives the real loop: paint frames in the production order and
+    /// count the workers. `orf_spawns` and not merely `Done`, because on a fast
+    /// molecule the old code could still converge by luck between two frames,
+    /// and a test that passes by luck is the thing being fixed.
+    #[test]
+    fn painting_the_tab_every_frame_asks_for_one_orf_scan_and_lets_it_finish() {
+        let ctx = test_ctx();
+        // Big enough that the scan outlives a frame by a wide margin — the
+        // regime the defect lives in. Below about 0.87 Mb at rest the old code
+        // converged anyway, which is exactly why an 8 kb fixture proved nothing.
+        let mut app = perf_app(400_000, 3_000);
+        app.layout.orf_track = true;
+        app.doc_code = pl_core::translate::TABLE11;
+
+        // Frame 1 is what asks the question.
+        paint(&mut app, &ctx, window());
+        assert!(
+            app.document.as_ref().unwrap().orfs.is_running(),
+            "the premise: one frame does not finish this scan"
+        );
+        assert_eq!(app.document.as_ref().unwrap().orf_spawns, 1);
+
+        // Every frame after it, in the production order, until the answer lands.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut frames = 0usize;
+        while app.document.as_ref().unwrap().orfs.is_running() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the scan never finished under repeated painting — {} worker(s) spawned",
+                app.document.as_ref().unwrap().orf_spawns
+            );
+            paint(&mut app, &ctx, window());
+            frames += 1;
+        }
+        assert!(
+            frames >= 2,
+            "the premise: more than one further frame was painted while it ran"
+        );
+        let d = app.document.as_ref().unwrap();
+        assert_eq!(
+            d.orf_spawns, 1,
+            "one question, asked once, across {frames} frames"
+        );
+        let got = d.orfs.done().expect("the scan finished");
+        assert_eq!(got.code, 11);
+        assert!(!got.orfs.is_empty(), "and it is a real answer");
+        // And the strip the row height is reserved from now exists, which is
+        // what the user was waiting for.
+        assert!(app.orf_strip);
+    }
+
+    /// Changing the table really does re-ask, so the idempotence above is
+    /// idempotence and not a scan that can never be replaced.
+    #[test]
+    fn changing_the_table_asks_the_orf_scan_again() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        app.layout.orf_track = true;
+        app.doc_code = pl_core::translate::TABLE11;
+        paint(&mut app, &ctx, window());
+        assert_eq!(app.document.as_ref().unwrap().orf_spawns, 1);
+        // The same question again changes nothing, however many frames.
+        for _ in 0..8 {
+            paint(&mut app, &ctx, window());
+        }
+        assert_eq!(app.document.as_ref().unwrap().orf_spawns, 1);
+        // A different one is a different question.
+        app.doc_code = pl_core::translate::table(1).expect("table 1");
+        paint(&mut app, &ctx, window());
+        assert_eq!(
+            app.document.as_ref().unwrap().orf_spawns,
+            2,
+            "table 1 is not the answer table 11 gave"
+        );
+    }
+
+    /// PROVEN TO FAIL against cc36cf7: `Document::start_orfs` does not exist
+    /// there, so this is compile-only at that commit.
+    ///
+    /// What it asserts is that the GUI asks `pl_core::orf` the same question
+    /// `pl orfs` asks it. The CLI's defaults are table 11 — chosen in
+    /// `bins/pl/src/main.rs` because "this is a plasmid tool, and its molecules
+    /// are read in bacteria" — and `Params::default()`, which is `min_aa: 30`,
+    /// `require_start`, `include_incomplete`, `nested: false`. A GUI that
+    /// silently turned on `nested` would report 3.5x as many ORFs as the CLI
+    /// over the same molecule and both numbers would look plausible.
+    #[test]
+    fn the_orf_strip_finds_what_pl_orfs_finds_on_the_same_molecule_and_table() {
+        let mut app = seq_app();
+        app.layout.orf_track = true;
+        app.doc_code = pl_core::translate::TABLE11;
+        app.refresh_orfs();
+        // The worker is a thread; wait for the ANSWER rather than for the
+        // transition, which anything else that polls can consume first.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.document.as_mut().unwrap().poll_orfs();
+            if app.document.as_ref().unwrap().orfs.done().is_some() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the ORF worker hung");
+            std::thread::yield_now();
+        }
+        let d = app.document.as_ref().unwrap();
+        let got = d.orfs.done().expect("a finished scan");
+        let want = pl_core::orf::find_orfs(
+            &d.molecule().seq,
+            pl_core::translate::TABLE11,
+            d.molecule().topology.is_circular(),
+            &pl_core::orf::Params::default(),
+        );
+        assert!(!want.is_empty(), "the premise: this molecule has ORFs");
+        assert_eq!(got.orfs, want, "the same call the CLI makes");
+        assert_eq!(got.code, 11);
+        assert_eq!(got.min_aa, 30);
+        // And every one that can be drawn is in the index, in its own frame's
+        // lane. `laps > 0` cannot be an interval and is counted instead.
+        let mut in_index = Vec::new();
+        got.index.query(0, d.molecule().len(), &mut in_index);
+        let drawable = want.iter().filter(|o| o.laps == 0).count();
+        let distinct: std::collections::BTreeSet<u32> = in_index.iter().map(|iv| iv.feat).collect();
+        assert_eq!(distinct.len(), drawable);
+        assert_eq!(got.lapping, want.len() - drawable);
+        for iv in &in_index {
+            let o = &want[iv.feat as usize];
+            let want_lane = if o.strand.is_reverse() {
+                3 + o.frame
+            } else {
+                o.frame
+            };
+            assert_eq!(iv.lane, want_lane, "frame {} on its own line", o.frame);
+        }
+    }
+
+    /// PROVEN TO FAIL against cc36cf7: compile-only (`aa::Translations` does not
+    /// exist). This is the one that gives `Segment::translated` its meaning —
+    /// the bit has been parsed by the `.dna` reader, offered by the feature
+    /// editor and read by NOTHING in this program until now, and the checkbox's
+    /// own hover text said so.
+    #[test]
+    fn the_translated_flag_turns_a_misc_feature_into_a_track() {
+        let mut app = seq_app();
+        let mut f = pl_core::Feature::new("decR his", "misc_feature");
+        f.strand = Strand::Forward;
+        let mut s = pl_core::Segment::new(1, 300);
+        s.translated = true;
+        f.segments.push(s);
+        assert!(app.edit(pl_core::OpKind::SetFeature {
+            index: None,
+            feature: Box::new(f),
+        }));
+        app.refresh_annotations();
+        assert_eq!(app.tr.paths().len(), 1, "the flag alone produced a reading");
+        assert!(app.tr.paths()[0].from_flag);
+        assert_eq!(app.tr.fwd_lanes, 1);
+
+        // And clearing it takes the track away again, through the same
+        // `OpKind::SetFeature` every other feature edit goes through — so it
+        // undoes, which `oplog.rs` already hashes `translated` for.
+        let mut f = app.document.as_ref().unwrap().molecule().features[0].clone();
+        f.segments[0].translated = false;
+        assert!(app.edit(pl_core::OpKind::SetFeature {
+            index: Some(0),
+            feature: Box::new(f),
+        }));
+        app.refresh_annotations();
+        assert!(app.tr.is_empty(), "a misc_feature is not a CDS");
+        app.do_undo();
+        app.refresh_annotations();
+        assert_eq!(app.tr.paths().len(), 1, "and the undo brings it back");
+    }
+
+    /// PROVEN TO FAIL against cc36cf7: compile-only. A track is a VIEW, and
+    /// this is the check that it stays one — switching every track on and
+    /// painting must leave the log exactly where it was.
+    #[test]
+    fn showing_a_translation_does_not_edit_the_document() {
+        let ctx = test_ctx();
+        let mut app = aa_app(false, aa::TrackMode::Selection);
+        let before = app.document.as_ref().unwrap().log.cursor();
+        let saved = app.document.as_ref().unwrap().unsaved();
+        app.layout.orf_track = true;
+        for _ in 0..3 {
+            paint(&mut app, &ctx, window());
+        }
+        let d = app.document.as_ref().unwrap();
+        assert_eq!(d.log.cursor(), before, "no operation was recorded");
+        assert_eq!(d.unsaved(), saved, "and the document is no dirtier");
     }
 
     /// PROVEN TO FAIL at bd96e5b, behaviourally, on the very first assertion:

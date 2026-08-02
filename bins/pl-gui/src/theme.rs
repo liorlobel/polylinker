@@ -365,6 +365,22 @@ mod tests {
                 if dark { "dark" } else { "light" },
                 contrast(p.muted, bg)
             );
+            // `warn` became a small-TEXT role with the amino-acid track: an
+            // internal stop is drawn as a `*` glyph in it at 11.5 pt, and the
+            // header's internal-stop sentence at 11. The same argument as
+            // `muted` above, and until this line it had no check at all — the
+            // light value is #b0553f at 4.81:1, which passes with 0.31 of
+            // margin, i.e. one palette tweak from failing silently. Colour is
+            // not the only channel for the mark (it also carries a filled
+            // under-bar, and the glyph is `*` rather than a letter); that is
+            // why it is distinguishable, not why it is readable.
+            assert!(
+                contrast(p.warn, bg) >= 4.5,
+                "warn on {} bg: {:.2}:1 — the sequence view's internal-stop glyph is 11.5 pt \
+                 and the header sentence that counts them 11",
+                if dark { "dark" } else { "light" },
+                contrast(p.warn, bg)
+            );
             // The backbone must be visible without competing with features.
             assert!(
                 contrast(p.line, bg) >= 2.0,
