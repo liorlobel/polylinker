@@ -3716,7 +3716,29 @@ impl App {
     ///   closes nothing and surprises nobody.
     fn global_shortcuts(&self, ctx: &egui::Context) -> Shortcuts {
         let asking = self.asking();
-        let typing = ctx.memory(|m| m.focused()).is_some();
+        // "A TEXT BOX HAS THE KEYS", not "something has focus".
+        //
+        // This was `ctx.memory(|m| m.focused()).is_some()`, and elsewhere in
+        // this file the reasoning is written out as "`Button` never takes
+        // keyboard focus". That is false in egui 0.35: `Button` is built with
+        // `.sense(Sense::click())` and `Sense::click()` is `CLICK | FOCUSABLE`,
+        // so every button in the toolbar is in the tab order. One Tab, and
+        // Ctrl+Z, Ctrl+Y, Ctrl+O and Ctrl+S were dead for the rest of the
+        // session with nothing on screen to say why. The map was a shorter path
+        // to the same place — see `Sense::CLICK` there.
+        //
+        // `text_edit_focused` is not a synonym for the old call: it asks
+        // whether the focused id has `TextEditState` behind it, so a focused
+        // *button* answers no and a focused text box answers yes. That is the
+        // distinction the guard always meant to draw, and note that
+        // `egui_wants_keyboard_input()` is NOT it — that function is literally
+        // `m.focused().is_some()`, the predicate being replaced.
+        //
+        // The stand-down for real text boxes stays exactly as it was:
+        // `a_shortcut_typed_into_a_focused_text_box_does_not_reach_the_document`
+        // is the reason it exists, and Ctrl+Z in the Features filter must still
+        // undo the typo rather than the molecule.
+        let typing = ctx.text_edit_focused();
         // The feature editor is guarded for exactly the design panel's reason,
         // and a sharper one: it holds an INDEX. An undo underneath it can shift
         // every index (`RemoveFeature`) or drop a feature outright (the
@@ -13544,15 +13566,40 @@ mod tests {
         }
     }
 
-    /// What `global_shortcuts` decides, with `focused` optionally holding focus.
+    /// What `global_shortcuts` decides, with a REAL text box optionally holding
+    /// focus. `focused` names the box for the failure message only.
+    ///
+    /// It has to be a real one. This helper used to fake it with
+    /// `ctx.memory_mut(|m| m.request_focus(egui::Id::new(name)))`, and a bare
+    /// id has no widget behind it — no `TextEditState`, nothing to say what
+    /// kind of thing holds the focus. That is why it could not distinguish a
+    /// text box from a button, and so could not have caught the defect that
+    /// `a_focused_button_does_not_disable_the_application_shortcuts` covers.
+    ///
+    /// `global_shortcuts` is called BEFORE the box is built, which is the order
+    /// `update` uses and the order that matters: a focused `TextEdit` handles
+    /// Ctrl+Z itself and consumes the event, so building first would leave this
+    /// asserting that the event was eaten rather than that the guard held.
     fn shortcuts_with(app: &App, key: egui::Key, focused: Option<&str>) -> Shortcuts {
-        let ctx = test_ctx();
-        ctx.begin_pass(ctrl(key));
-        if let Some(name) = focused {
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new(name)));
+        fn build(ui: &mut Ui, id: Option<egui::Id>, text: &mut String) {
+            if let Some(id) = id {
+                ui.add(egui::TextEdit::singleline(text).id(id));
+            }
         }
-        let out = app.global_shortcuts(&ctx);
-        let _ = ctx.end_pass();
+        let ctx = test_ctx();
+        let mut text = String::new();
+        let id = focused.map(egui::Id::new);
+        // One pass to build the box, so the id has `TextEditState` behind it,
+        // and only then focus it.
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| build(ui, id, &mut text));
+        if let Some(id) = id {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+        let mut out = Shortcuts::default();
+        let _ = ctx.run_ui(ctrl(key), |ui| {
+            out = app.global_shortcuts(ui.ctx());
+            build(ui, id, &mut text);
+        });
         out
     }
 
@@ -13600,6 +13647,95 @@ mod tests {
                 "Ctrl+S opened a Save dialog out of {who}"
             );
         }
+    }
+
+    /// A raw input carrying one unmodified `key` press.
+    fn plain(key: egui::Key) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Tab through a REAL `Button` and a REAL `TextEdit` with REAL Tab presses,
+    /// then press Ctrl+`key` and report what `global_shortcuts` decided —
+    /// together with where the focus actually went.
+    ///
+    /// The pair is reported so the assertions cannot pass vacuously. `undo`
+    /// being true proves nothing if the Tab landed nowhere, which is exactly
+    /// how `shortcuts_with` above is blind here: it fakes focus with
+    /// `request_focus(Id::new("features filter"))`, and a bare id has no widget
+    /// behind it, so nothing in that helper can tell a text box from a button.
+    /// It could not have caught this defect and cannot verify this fix.
+    fn shortcuts_after_tabbing(app: &App, key: egui::Key, tabs: usize) -> (Shortcuts, bool, bool) {
+        fn build(ui: &mut Ui, text: &mut String) {
+            let _ = ui.button("a toolbar button");
+            let _ = ui.text_edit_singleline(text);
+        }
+        let ctx = test_ctx();
+        let mut text = String::new();
+        // One pass to register the widgets, then one pass per Tab: egui moves
+        // focus in creation order, so the first lands on the button.
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| build(ui, &mut text));
+        for _ in 0..tabs {
+            let _ = ctx.run_ui(plain(egui::Key::Tab), |ui| build(ui, &mut text));
+        }
+        // Before the widgets, as `update` does: see `shortcuts_with`.
+        let mut out = Shortcuts::default();
+        let _ = ctx.run_ui(ctrl(key), |ui| {
+            out = app.global_shortcuts(ui.ctx());
+            build(ui, &mut text);
+        });
+        (
+            out,
+            ctx.memory(|m| m.focused()).is_some(),
+            ctx.text_edit_focused(),
+        )
+    }
+
+    /// PROVEN TO FAIL at 694c4b3: the guard read `m.focused().is_some()`, and
+    /// the comment justifying it said "`Button` never takes keyboard focus".
+    /// egui 0.35 builds `Button` with `.sense(Sense::click())`, which is
+    /// `CLICK | FOCUSABLE`, so one Tab into the toolbar killed Ctrl+Z, Ctrl+Y,
+    /// Ctrl+O and Ctrl+S for the rest of the session, silently.
+    #[test]
+    fn a_focused_button_does_not_disable_the_application_shortcuts() {
+        let mut app = App::blank();
+        app.document =
+            Some(Document::from_bytes(b">a\nAAAACCCCGGGGTTTT\n", "a.fa".into(), None).unwrap());
+
+        // One Tab: the button. The two booleans are the control — something
+        // holds focus, and it is not a text box — so "undo still fires" cannot
+        // be true merely because the Tab went nowhere.
+        for (key, got) in [
+            (egui::Key::Z, "undo"),
+            (egui::Key::Y, "redo"),
+            (egui::Key::O, "open"),
+            (egui::Key::S, "save"),
+        ] {
+            let (k, focused, text) = shortcuts_after_tabbing(&app, key, 1);
+            assert!(focused, "the Tab focused nothing, so {got} proves nothing");
+            assert!(!text, "the Tab landed on a text box, not the button");
+            let fired = match key {
+                egui::Key::Z => k.undo,
+                egui::Key::Y => k.redo,
+                egui::Key::O => k.open,
+                _ => k.save,
+            };
+            assert!(fired, "a focused button swallowed {got}");
+        }
+
+        // Two Tabs: the text box, where the stand-down is the whole point. The
+        // same helper, so the two outcomes are compared on one mechanism.
+        let (k, focused, text) = shortcuts_after_tabbing(&app, egui::Key::Z, 2);
+        assert!(focused && text, "the second Tab did not reach the text box");
+        assert!(!k.undo, "Ctrl+Z in a text box reached the document");
     }
 
     /// A 900 bp document with a selection, and the design panel open on it.

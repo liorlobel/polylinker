@@ -399,7 +399,29 @@ pub fn show(
             ),
         )
     };
-    let response = ui.allocate_rect(rect, Sense::click());
+    // `Sense::CLICK`, not `Sense::click()`. They differ by one bit: the method
+    // is `CLICK | FOCUSABLE`, so the ring joined the tab order — and it has no
+    // keyboard behaviour to spend that focus on. `response` below is read only
+    // for `hover_pos`, `clicked` and `double_clicked`; there is no key handling
+    // here at all.
+    //
+    // While it holds the focus, `sequence_keys` stands down — that guard is
+    // still "anything is focused", deliberately, because a focused widget that
+    // wants Space or Enter should not have those keys diverted into the
+    // molecule. So Tab landing here left the sequence view refusing every
+    // printable key with nothing on screen to say why. (It cost the
+    // accelerators too, until `global_shortcuts` was narrowed to
+    // `text_edit_focused`.)
+    //
+    // Not a click bug: egui has no focus-on-click for ordinary widgets, only
+    // `TextEdit` and `DragValue` call `request_focus` when clicked, so clicking
+    // the ring never took the keyboard. Tab was the only way in, which is what
+    // `tabbing_does_not_land_on_the_map` presses.
+    //
+    // A map you could drive from the keyboard would deserve a place in the tab
+    // order. That would be a real improvement and it is not this change; until
+    // then it does not take focus it cannot use.
+    let response = ui.allocate_rect(rect, Sense::CLICK);
     let painter = ui.painter_at(rect);
     let mut out = MapResponse {
         hovered: None,
@@ -3003,6 +3025,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// PROVEN TO FAIL at f7ad1c6: the ring was allocated with `Sense::click()`,
+    /// which is `CLICK | FOCUSABLE`, so Tab landed on a widget with no keyboard
+    /// behaviour — and `sequence_keys` stands down for anything focused, so the
+    /// sequence view then refused every printable key with nothing saying why.
+    ///
+    /// Asserted on egui's own focus state rather than on the constant, so it
+    /// fails if the sense is widened again by any route.
+    #[test]
+    fn tabbing_does_not_land_on_the_map() {
+        let mol = forward(&[(400, 1_400)]);
+        let ctx = crate::test_ctx();
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 700.0));
+        let base = egui::RawInput {
+            screen_rect: Some(rect),
+            ..Default::default()
+        };
+        let render = |input: egui::RawInput| {
+            let _ = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        show(
+                            ui,
+                            &mol,
+                            "fixture",
+                            &[],
+                            None,
+                            None,
+                            None,
+                            None,
+                            pl_enzymes::EnzymeSet::All,
+                            None,
+                        );
+                    });
+            });
+        };
+        // Lay it out, then Tab. Tab is the whole mechanism: egui has no
+        // focus-on-click for ordinary widgets — only `TextEdit` and
+        // `DragValue` call `request_focus` when clicked — so a click on the
+        // ring never took the keyboard, and the tab order is the only way in.
+        render(base.clone());
+        render(egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            ..base.clone()
+        });
+        assert!(
+            ctx.memory(|m| m.focused()).is_none(),
+            "Tab landed on the map, which has no keyboard behaviour of its own \
+             and whose focus silently stops the sequence view accepting keys"
+        );
     }
 
     /// A1/A2/A3 — the body stops where the head begins, the two extents sum to the
