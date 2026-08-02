@@ -632,6 +632,12 @@ fn rows<'a>(
                         columns.len()
                     ),
                 });
+                // Discard the whole file, not just this line: with the header
+                // wrong the column positions are unknown, so every data row below
+                // would be read against the wrong columns. `parse_signoff`'s
+                // documented "a bad header discards the file" downgrade — nothing
+                // signed rather than something mis-parsed — depends on this.
+                return Vec::new();
             }
             continue;
         }
@@ -1325,22 +1331,7 @@ impl Db {
         // passed them, counted them, and reported the result green. The NO_GO
         // list was author discipline, and discipline is not a control.
         for p in &self.provenance {
-            let ok = match p.source_db.as_str() {
-                "polylinker" => p.licence == "own-work",
-                "amrfinderplus" | "ena" | "genbank" => p.licence == "INSDC-free",
-                "uniprot" => p.licence == "CC-BY-4.0",
-                "rfam" => p.licence == "CC0-1.0",
-                // Deposited PDB archive data, served through the RCSB API. The
-                // wwPDB usage policy puts "data files contained in the PDB
-                // archive" under CC0 1.0, and `legal/wwpdb-usage-policies.html`
-                // holds that page under a sha256. RCSB's *own* website content
-                // is separately CC BY 4.0, which is why only the deposited
-                // one-letter sequence is read out of it and never the
-                // annotation layer.
-                "wwpdb" => p.licence == "CC0-1.0",
-                "insdc-ft" => p.licence == "unresolved-see-SOURCING-Risk-4",
-                _ => false,
-            };
+            let ok = Self::provenance_cleared(&p.source_db, &p.licence);
             if !ok {
                 out.push(LoadError {
                     file: "provenance.tsv",
@@ -1438,12 +1429,47 @@ impl Db {
         m
     }
 
-    /// The subset a release may ship: everything a human has signed off.
+    /// Whether a provenance row's (source, licence) pair is cleared for use as
+    /// data by features/SOURCING.md §1. The single source of truth for the taint
+    /// gate — `audit` reports a violation of it and `reviewed` refuses to ship
+    /// one — so the rule cannot drift between the two.
+    fn provenance_cleared(source_db: &str, licence: &str) -> bool {
+        match source_db {
+            "polylinker" => licence == "own-work",
+            "amrfinderplus" | "ena" | "genbank" => licence == "INSDC-free",
+            "uniprot" => licence == "CC-BY-4.0",
+            "rfam" => licence == "CC0-1.0",
+            // Deposited PDB archive data, served through the RCSB API. The wwPDB
+            // usage policy puts "data files contained in the PDB archive" under
+            // CC0 1.0, and `legal/wwpdb-usage-policies.html` holds that page under
+            // a sha256. RCSB's *own* website content is separately CC BY 4.0,
+            // which is why only the deposited one-letter sequence is read out of
+            // it and never the annotation layer.
+            "wwpdb" => licence == "CC0-1.0",
+            "insdc-ft" => licence == "unresolved-see-SOURCING-Risk-4",
+            _ => false,
+        }
+    }
+
+    /// The subset a release may ship: every record a human has signed off *and*
+    /// whose provenance clears the licence/taint gate. `review_status` alone is
+    /// not enough — the taint audit only *reports* an uncleared source, it never
+    /// downgrades the row — so without the second filter a signed-but-tainted
+    /// record would ship, the exact "discipline is not a control" gap `audit`
+    /// exists to close.
     pub fn reviewed(&self) -> Db {
+        let tainted: std::collections::BTreeSet<&str> = self
+            .provenance
+            .iter()
+            .filter(|p| !Self::provenance_cleared(&p.source_db, &p.licence))
+            .map(|p| p.record_id.as_str())
+            .collect();
         let records: Vec<Record> = self
             .records
             .iter()
-            .filter(|r| r.review_status >= ReviewStatus::Reviewed)
+            .filter(|r| {
+                r.review_status >= ReviewStatus::Reviewed && !tainted.contains(r.id.as_str())
+            })
             .cloned()
             .collect();
         let keep: std::collections::BTreeSet<&str> =

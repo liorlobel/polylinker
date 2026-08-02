@@ -78,7 +78,18 @@ fn error_json(msg: &str) -> String {
 /// Allocate `len` bytes for the caller to write into. Free it with [`pl_free`].
 #[no_mangle]
 pub extern "C" fn pl_alloc(len: usize) -> *mut u8 {
-    let mut v: Vec<u8> = Vec::with_capacity(len);
+    // Reject a length the slice/allocator precondition forbids (`> isize::MAX`),
+    // and return null on allocation failure instead of trapping: `with_capacity`
+    // routes OOM through `handle_alloc_error` → a wasm `unreachable`, but the ABI
+    // otherwise expects a null the caller can check. `try_reserve_exact` keeps
+    // capacity == len, so `pl_free`'s `from_raw_parts(ptr, 0, len)` still matches.
+    if len > isize::MAX as usize {
+        return std::ptr::null_mut();
+    }
+    let mut v: Vec<u8> = Vec::new();
+    if v.try_reserve_exact(len).is_err() {
+        return std::ptr::null_mut();
+    }
     let ptr = v.as_mut_ptr();
     std::mem::forget(v);
     ptr
@@ -127,6 +138,12 @@ pub extern "C" fn pl_abi_version() -> u32 {
 pub unsafe extern "C" fn pl_open(ptr: *const u8, len: usize) -> i32 {
     if ptr.is_null() {
         set_out(error_json("null pointer"));
+        return 1;
+    }
+    // `from_raw_parts` is instant UB for `len > isize::MAX`; on wasm32 a
+    // 32-bit `len` can name that range, so a hand-forged len is refused here.
+    if len > isize::MAX as usize {
+        set_out(error_json("length exceeds isize::MAX"));
         return 1;
     }
     let data = std::slice::from_raw_parts(ptr, len);
@@ -619,7 +636,9 @@ pub unsafe extern "C" fn pl_locus_name(ptr: *const u8, len: usize) -> i32 {
 }
 
 unsafe fn read_str(ptr: *const u8, len: usize) -> String {
-    if ptr.is_null() || len == 0 {
+    // `from_raw_parts` is instant UB for `len > isize::MAX`; treat a forged
+    // over-range len as empty rather than construct an invalid slice.
+    if ptr.is_null() || len == 0 || len > isize::MAX as usize {
         return String::new();
     }
     String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned()

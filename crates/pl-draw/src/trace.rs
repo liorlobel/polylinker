@@ -152,6 +152,12 @@ impl View<'_> {
             ),
             _ => (0, self.peaks.len().saturating_sub(1)),
         };
+        // A reversed window (`--bases 21..20`) must not underflow the `b1 - b0`
+        // widths below; treat it as the range it names. Audit #14 guarded the
+        // `air` subtraction against this, but the `bases_drawn = b1 - b0 + 1` at
+        // the tail was left, so a narrow reversed range still panicked in debug
+        // and wrapped to 0 in release.
+        let (b0, b1) = (b0.min(b1), b0.max(b1));
         let (s0, s1) = if self.peaks.is_empty() {
             (0usize, chan_len - 1)
         } else {
@@ -489,6 +495,31 @@ mod tests {
             early.scale_max
         );
         assert_eq!(early.bases_drawn, 4);
+    }
+
+    #[test]
+    fn a_reversed_base_window_does_not_underflow_and_names_the_range() {
+        // `--bases 21..20` (a typo, or an off-by-one) must not panic. Audit #14
+        // guarded the `air` subtraction against a reversed window but left
+        // `bases_drawn = b1 - b0 + 1`, which for a narrow reversed range on a
+        // trace with enough peaks underflowed in debug and wrapped to 0 in
+        // release. It is now normalised to the range it names.
+        let seq: Vec<u8> = b"ACGT".iter().cycle().take(24).copied().collect();
+        let (ch, peaks) = synth(&seq, *b"GATC");
+        let v = view(&ch, &peaks, &seq, &[], *b"GATC");
+        let (_, rev) = v.to_scene(&Options {
+            bases: Some((21, 20)),
+            ..Default::default()
+        });
+        let (_, fwd) = v.to_scene(&Options {
+            bases: Some((20, 21)),
+            ..Default::default()
+        });
+        assert_eq!(
+            rev.bases_drawn, fwd.bases_drawn,
+            "reversed == the range it names"
+        );
+        assert_eq!(rev.bases_drawn, 2);
     }
 
     #[test]

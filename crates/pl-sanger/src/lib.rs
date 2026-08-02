@@ -264,12 +264,21 @@ pub fn compare_reporting(
         }
     };
 
-    // Quality belongs to the read as sequenced, so reversing the read reverses
-    // it too. Forgetting this puts every confidence flag at the wrong end.
-    let qual: Vec<u8> = if reversed {
-        quality.iter().rev().copied().collect()
-    } else {
-        quality.to_vec()
+    // Quality belongs to the read as sequenced. For a reversed placement, read
+    // position `qi` in the aligned (reverse-complemented) read is position
+    // `m - 1 - qi` in the original read, so index the original quality there
+    // rather than reversing the whole buffer. Reversing only lines up when
+    // `quality.len() == m`; a short quality vector — a damaged `.ab1` whose PBAS2
+    // and PCON2 tags differ in length, which `pl-abif` reads independently and
+    // never forces equal — would otherwise pin every flag to the wrong end and
+    // shift them all by `m - quality.len()`. Out of range gives `None`
+    // (`Unknown`), the same graceful fall the forward path already takes.
+    let quality_at = |qi: usize| -> Option<u8> {
+        if reversed {
+            m.checked_sub(1 + qi).and_then(|i| quality.get(i)).copied()
+        } else {
+            quality.get(qi).copied()
+        }
     };
 
     let wrapped = circular && alignment.ref_end > n;
@@ -277,7 +286,7 @@ pub fn compare_reporting(
     let mut ri = alignment.ref_start; // 0-based reference cursor
     let mut qi = 0usize; // 0-based cursor in the aligned read
     for op in &alignment.ops {
-        let q = qual.get(qi).copied();
+        let q = quality_at(qi);
         let conf = match q {
             None => Confidence::Unknown,
             Some(v) if v >= p.min_quality => Confidence::High,

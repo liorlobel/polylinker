@@ -101,15 +101,20 @@ impl Dseq {
     pub fn left_end(&self) -> End {
         match self.ovhg.cmp(&0) {
             std::cmp::Ordering::Equal => End::Blunt,
-            // watson protrudes: a 5' overhang on the top strand
+            // watson protrudes: a 5' overhang on the top strand. The index is
+            // clamped so a malformed hand-built `Dseq` whose `|ovhg|` exceeds the
+            // strand length returns the bases that exist rather than panicking on
+            // a `usize` underflow — `left_overhang` already bounds the same way,
+            // and every internal producer keeps `|ovhg| <= strand`.
             std::cmp::Ordering::Less => End::Overhang {
                 five_prime: true,
-                bases: self.watson[..(-self.ovhg) as usize].to_string(),
+                bases: self.watson[..((-self.ovhg) as usize).min(self.watson.len())].to_string(),
             },
             // crick protrudes on the left, which is crick's 3' side
             std::cmp::Ordering::Greater => End::Overhang {
                 five_prime: false,
-                bases: self.crick[self.crick.len() - self.ovhg as usize..].to_string(),
+                bases: self.crick[self.crick.len().saturating_sub(self.ovhg as usize)..]
+                    .to_string(),
             },
         }
     }
@@ -127,15 +132,17 @@ impl Dseq {
         let d = w + self.ovhg - c;
         match d.cmp(&0) {
             std::cmp::Ordering::Equal => End::Blunt,
-            // watson runs past crick on the right: a 3' overhang on top
+            // watson runs past crick on the right: a 3' overhang on top. Indices
+            // clamped like `left_end`, so a malformed `Dseq` returns the bases
+            // that exist rather than panicking; a no-op for any well-formed one.
             std::cmp::Ordering::Greater => End::Overhang {
                 five_prime: false,
-                bases: self.watson[(w - d) as usize..].to_string(),
+                bases: self.watson[((w - d).max(0) as usize).min(self.watson.len())..].to_string(),
             },
             // crick runs past: a 5' overhang on the bottom strand
             std::cmp::Ordering::Less => End::Overhang {
                 five_prime: true,
-                bases: self.crick[..(-d) as usize].to_string(),
+                bases: self.crick[..((-d) as usize).min(self.crick.len())].to_string(),
             },
         }
     }
@@ -150,7 +157,9 @@ impl Dseq {
 
         // crick protruding past watson on the left is crick's 3' end.
         if self.ovhg > 0 {
-            let head = &self.crick[self.crick.len() - self.ovhg as usize..];
+            // Clamped like `left_end`: a malformed `Dseq` with `ovhg` past the
+            // crick length must not underflow this index.
+            let head = &self.crick[self.crick.len().saturating_sub(self.ovhg as usize)..];
             out.push_str(&rc(head));
         }
         out.push_str(&self.watson);

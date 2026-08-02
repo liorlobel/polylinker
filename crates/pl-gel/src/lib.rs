@@ -220,7 +220,20 @@ impl Gel {
 
     /// A gel from the agarose percentage alone. Approximate — see the module
     /// docs and [`Simulation::caveat`].
-    pub fn modelled(conditions: Conditions) -> Gel {
+    pub fn modelled(mut conditions: Conditions) -> Gel {
+        // This constructor is infallible and public, so it must not panic on a
+        // caller that skipped validation. A non-finite or non-positive agarose
+        // percentage has no resolving range — `resolving_range` returns (0, 0),
+        // whose log10 is -inf and cannot form a curve — so fall back to a
+        // standard 1% gel; keep `run_mm` finite for the same reason. The shipped
+        // CLI filters agarose to 0.3..=4.0, so this only catches a hand-built
+        // value that reached the public constructor directly.
+        if !(conditions.agarose_percent.is_finite() && conditions.agarose_percent > 0.0) {
+            conditions.agarose_percent = 1.0;
+        }
+        if !conditions.run_mm.is_finite() {
+            conditions.run_mm = 0.0;
+        }
         let (lo, hi) = resolving_range(conditions.agarose_percent);
         // Linear in log10(length) between the ends of the resolving range: the
         // largest resolvable fragment just clear of the well, the smallest just
@@ -435,6 +448,32 @@ mod tests {
 
     fn gel() -> Gel {
         Gel::modelled(Conditions::default())
+    }
+
+    #[test]
+    fn a_non_finite_or_zero_agarose_does_not_panic_the_model() {
+        // `Gel::modelled` is infallible and public; a caller that skipped
+        // validation and passed NaN/inf/0 agarose used to reach `resolving_range`
+        // returning (0, 0), whose log10 is -inf, and panic in `Monotone::new`. It
+        // now falls back to a usable standard gel instead of aborting.
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            let g = Gel::modelled(Conditions {
+                agarose_percent: bad,
+                ..Default::default()
+            });
+            assert!(matches!(g.calibration(), Calibration::Model));
+            let (lo, hi) = g.range();
+            assert!(
+                lo > 0 && hi >= lo,
+                "bad agarose {bad} gave range {lo}..{hi}"
+            );
+        }
+        // A non-finite run distance is likewise absorbed rather than propagated
+        // into the curve.
+        let _ = Gel::modelled(Conditions {
+            run_mm: f64::NAN,
+            ..Default::default()
+        });
     }
 
     #[test]

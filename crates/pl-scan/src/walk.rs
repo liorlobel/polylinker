@@ -112,9 +112,26 @@ pub struct WalkReport {
 pub fn walk(root: &Path, opts: &WalkOptions) -> (Vec<Found>, WalkReport) {
     let mut out = Vec::new();
     let mut report = WalkReport::default();
-    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    // Each directory carries the canonical identities of the directories on the
+    // descent path that reached it. Under --follow-links this breaks symlink
+    // cycles: a link whose target canonicalizes to a directory already on the
+    // path — a `link -> .`, a link to an ancestor, or a pair of links pointing
+    // through each other — is skipped rather than re-entered, which `max_depth`
+    // alone only bounds after re-walking the whole sub-tree ~32× under new `rel`
+    // paths. A link to a *sibling* is not on the path, so it is still followed
+    // and indexed under its own name. The canonicalize cost (one stat per
+    // directory) is paid only when links are followed; a plain walk cannot cycle
+    // and carries no chain.
+    let root_chain = if opts.follow_links {
+        std::fs::canonicalize(root)
+            .map(|c| vec![c])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let mut stack: Vec<(PathBuf, usize, Vec<PathBuf>)> = vec![(root.to_path_buf(), 0, root_chain)];
 
-    while let Some((dir, depth)) = stack.pop() {
+    while let Some((dir, depth, chain)) = stack.pop() {
         if depth > opts.max_depth {
             let why = format!("deeper than --max-depth {}", opts.max_depth);
             report.errors.push((dir.display().to_string(), why.clone()));
@@ -246,7 +263,33 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> (Vec<Found>, WalkReport) {
                 if opts.skip_dirs.contains(&name) {
                     continue;
                 }
-                stack.push((path, depth + 1));
+                if opts.follow_links {
+                    // Enter each real directory once per descent path. A link
+                    // whose target is already on this path is a cycle and is
+                    // skipped — complete, not partial, since the target's files
+                    // are reached by their real path — while a link to a sibling
+                    // is not on the path and is followed and indexed under its own
+                    // name.
+                    match std::fs::canonicalize(&path) {
+                        Ok(real) => {
+                            if chain.contains(&real) {
+                                report.links_skipped += 1;
+                                continue;
+                            }
+                            let mut child = chain.clone();
+                            child.push(real);
+                            stack.push((path, depth + 1, child));
+                        }
+                        Err(e) => {
+                            report
+                                .errors
+                                .push((path.display().to_string(), e.to_string()));
+                            report.incomplete = Some(format!("{}: {e}", path.display()));
+                        }
+                    }
+                } else {
+                    stack.push((path, depth + 1, Vec::new()));
+                }
                 continue;
             }
             if !meta.is_file() {
@@ -544,6 +587,32 @@ mod tests {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.links_skipped, 0, "nothing was skipped");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_symlink_cycle_is_entered_once_not_re_walked_to_max_depth() {
+        // `link -> .` (or a link to an ancestor) makes `--follow-links` unbounded
+        // if `max_depth` is the only guard: the tree is re-walked ~32× under new
+        // `rel` paths. The per-descent-path identity check enters the cycle once
+        // and skips it, so a file is not multiplied and the walk stays complete.
+        let root = tmp("cycle");
+        write(&root, "a.gb", "x");
+        link_dir(&crate::abs(&root, "."), &crate::abs(&root, "loop"));
+        let opts = WalkOptions {
+            follow_links: true,
+            ..Default::default()
+        };
+        let (found, report) = walk(&root, &opts);
+        let a = found.iter().filter(|f| f.rel.ends_with("a.gb")).count();
+        assert_eq!(
+            a,
+            1,
+            "the self-link re-walked the tree: {} rows",
+            found.len()
+        );
+        assert!(report.links_skipped >= 1, "the cycle was not skipped");
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
         let _ = std::fs::remove_dir_all(&root);
     }
 

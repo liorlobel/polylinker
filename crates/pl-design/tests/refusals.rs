@@ -633,6 +633,34 @@ fn a_seed_longer_than_the_shortest_primer_is_refused_and_does_not_panic() {
     assert!(design(&template, false, Region::new(1_000, 1_600), &unchecked).is_ok());
 }
 
+/// `oligo::evaluate` reads a terminal pentamer, so a sub-5-base `--len` has no
+/// pentamer to slice and underflowed the `len - 5` index. The shipped --len
+/// floor is 8; `design` refuses a hand-built Constraints below five up front,
+/// before any candidate is enumerated, rather than panicking downstream.
+#[test]
+fn a_primer_shorter_than_the_terminal_pentamer_is_refused_and_does_not_panic() {
+    let template = seq(3_000, 7);
+    let c = Constraints {
+        len_min: 4,
+        ..Default::default()
+    };
+    let err = design(&template, false, Region::new(1_000, 1_600), &c)
+        .expect_err("a primer shorter than five bases cannot be evaluated");
+    assert!(err.to_string().contains("pentamer"), "{err}");
+
+    // The control: at five and above it is not refused as too short.
+    let ok = Constraints {
+        len_min: 5,
+        ..c.clone()
+    };
+    if let Err(e) = design(&template, false, Region::new(1_000, 1_600), &ok) {
+        assert!(
+            !e.to_string().contains("pentamer"),
+            "len_min 5 wrongly refused: {e}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The qualifier on a screened dG has to be one the real structure satisfies
 // ---------------------------------------------------------------------------

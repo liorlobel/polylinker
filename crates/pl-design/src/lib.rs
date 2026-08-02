@@ -267,6 +267,16 @@ pub enum DesignError {
     /// reading as an answer: passing the candidate claims a uniqueness nothing
     /// checked, and failing it blames the molecule for a setting.
     SeedLongerThanPrimer { off_seed: usize, len_min: usize },
+
+    /// The shortest primer `--len` allows is below five bases.
+    ///
+    /// A primer's 3'-stability and GC-clamp criteria read a terminal pentamer
+    /// (`oligo::evaluate`), so a candidate shorter than five bases has no
+    /// pentamer to slice and the evaluation underflows the `len - 5` index. The
+    /// shipped `--len` floor is 8, so this only catches a hand-built
+    /// `Constraints`; refused here for the same reason as the seed relation —
+    /// an unscannable primer has no safe reading as an answer.
+    PrimerTooShort { len_min: usize },
 }
 
 impl std::fmt::Display for DesignError {
@@ -410,6 +420,12 @@ impl std::fmt::Display for DesignError {
                  raise the shortest --len to at least {off_seed}. --no-specificity skips the \
                  scan outright, and the report says so."
             ),
+            DesignError::PrimerTooShort { len_min } => write!(
+                f,
+                "the shortest primer --len allows is {len_min}, below the five bases the \
+                 3'-stability and GC-clamp checks read as a terminal pentamer. Raise the \
+                 shortest --len to at least 5 (the shipped floor is 8)."
+            ),
         }
     }
 }
@@ -461,6 +477,13 @@ pub fn design(
             bp: n,
             len_min: c.len_min,
         });
+    }
+    // The 3'-stability and GC-clamp checks read a terminal pentamer, so a primer
+    // shorter than five bases has none to read and `oligo::evaluate` underflows
+    // the `len - 5` slice. The shipped --len floor is 8; this catches a
+    // hand-built `Constraints` that set it lower, before any candidate is built.
+    if c.len_min < 5 {
+        return Err(DesignError::PrimerTooShort { len_min: c.len_min });
     }
     // The one relation between two flags that nothing else checks. Both are
     // range-validated on their own -- `--off-seed` against 8..32, `--len`

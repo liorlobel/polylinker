@@ -550,6 +550,12 @@ fn parse_location(loc: &str) -> (Vec<Segment>, Strand, Vec<String>) {
             } else {
                 unparsable.push(raw.to_string());
             }
+        } else {
+            // All-digit but past `u64::MAX` (a hostile 20-digit coordinate).
+            // `numeric()` accepted it as a number, so without this branch the
+            // segment would neither parse nor be reported — vanishing silently,
+            // the one outcome this function's contract exists to prevent.
+            unparsable.push(raw.to_string());
         }
     }
 
@@ -677,6 +683,14 @@ fn location_parts(start: u64, end: u64, span: u64) -> Option<Vec<String>> {
             // Crosses the origin: two ranges, in reading order.
             return Some(vec![format!("{start}..{span}"), format!("1..{end}")]);
         }
+        return None;
+    }
+    if span > 0 && end > span {
+        // The feature runs past the last base of the molecule. GenBank has no
+        // faithful form for that — a `{start}..{end}` under a shorter LOCUS line
+        // is a location longer than the sequence it sits over, which Biopython
+        // will "fix" or mis-extract — so report it through `unwritable` rather
+        // than write it, the same guard the primer writer already applies.
         return None;
     }
     Some(vec![format!("{start}..{end}")])

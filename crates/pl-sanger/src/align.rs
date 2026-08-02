@@ -397,6 +397,16 @@ pub fn locate(read: &[u8], reference: &[u8], k: usize, slack: usize) -> Option<(
     if read.len() < k || reference.len() < k {
         return None;
     }
+    // A reference too large to seed here is also too large for the caller's
+    // bounded traceback to align (`semiglobal_within`'s budget refuses it before
+    // allocating), so return None and let that path refuse it by name rather than
+    // build a multi-gigabyte k-mer index and abort in the allocator at chromosome
+    // scale — the "process vanishes with no report" outcome the traceback budget
+    // set out to remove, just relocated to the seeding step that runs first.
+    const MAX_SEED_REFERENCE: usize = 4 << 20;
+    if reference.len() > MAX_SEED_REFERENCE {
+        return None;
+    }
     let mut index: HashMap<&[u8], Vec<usize>> = HashMap::new();
     for j in 0..=reference.len() - k {
         index.entry(&reference[j..j + k]).or_default().push(j);
