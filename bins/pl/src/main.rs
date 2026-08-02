@@ -3293,6 +3293,9 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
             is_ladder: true,
         }];
         let mut uncut = true;
+        // The lanes whose tube holds an intact circle, named so the notes below
+        // and the SVG's own caption can say why they are blank.
+        let mut intact_circles: Vec<String> = Vec::new();
         for spec in &lane_specs {
             let mut positions = Vec::new();
             for name in spec {
@@ -3304,9 +3307,23 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
                 }
                 positions.extend(cuts);
             }
-            let frags = pl_enzymes::fragments_from_cuts(&positions, mol.len(), mol.topology);
+            positions.sort_unstable();
+            positions.dedup();
+            // THE APP AND THE TERMINAL MUST DRAW THE SAME TUBE. `pl gel
+            // demo-construct.gb --lane PacI` printed `34.1 mm 3180` and drew a
+            // band for an enzyme with no site in that plasmid, because
+            // `fragments_from_cuts(&[], len, Circular)` returns one fragment of
+            // the contour length. The GUI had the rule and this did not; it now
+            // lives in `pl_gel` so every caller inherits it.
+            let label = spec.join("+");
+            let frags = if pl_gel::uncut_circle(positions.len(), mol.topology.is_circular()) {
+                intact_circles.push(label.clone());
+                Vec::new()
+            } else {
+                pl_enzymes::fragments_from_cuts(&positions, mol.len(), mol.topology)
+            };
             lanes.push(pl_gel::render::Lane {
-                label: spec.join("+"),
+                label,
                 sim: gel.run(&frags),
                 is_ladder: false,
             });
@@ -3359,12 +3376,27 @@ fn cmd_gel(args: &[String]) -> Result<(), String> {
         if uncut {
             println!("\n  none of these enzymes cuts this molecule");
         }
-        println!("\n  {}", lanes[1].sim.caveat());
+        // The caveat, then whatever else qualifies this picture. Both go into
+        // the SVG below as one note, so a file that leaves this machine carries
+        // the same qualifications the terminal printed.
+        let mut note = lanes[1].sim.caveat();
+        for label in &intact_circles {
+            note.push(' ');
+            note.push_str(&pl_gel::uncut_circle_note(label));
+        }
+        println!("\n  {note}");
 
         if let Some(out) = a.get("svg") {
+            // The caveat goes INTO the file, not only onto stdout. A modelled
+            // gel that leaves this machine with nothing saying it is modelled
+            // is a picture somebody will size an unknown band off, and there
+            // is no terminal beside it to check against.
             let scene = pl_gel::render::to_scene(
                 &lanes,
-                &pl_gel::render::Options::default(),
+                &pl_gel::render::Options {
+                    note: Some(note.clone()),
+                    ..Default::default()
+                },
                 &title_of(path),
             );
             let desired = if a.files.len() > 1 {

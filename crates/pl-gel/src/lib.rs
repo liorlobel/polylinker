@@ -183,6 +183,57 @@ impl Group {
     pub fn is_merged(&self) -> bool {
         self.sizes.len() > 1
     }
+
+    /// What to write on this band: `2000`, or `2000/2100`, or — when the group
+    /// is too big to name member by member — its span and its count.
+    ///
+    /// See [`MAX_LISTED`]. Every caller that draws or reports a band uses this,
+    /// so the picture, the GUI's disclosure strip and the tooltip cannot
+    /// disagree about what a band is called.
+    pub fn label(&self) -> String {
+        name_sizes(&self.sizes, "/")
+    }
+}
+
+/// How many fragment sizes a label names before it counts them instead.
+///
+/// A merged band on a genome digest holds 1,769 fragments, and joining every
+/// one of them produced an 8,780-character text item. `render::layout` reserves
+/// half of a band label's width at BOTH margins and the whole of it in every
+/// inter-lane gap, so `pl gel NC_000913.3.gb --cut BbsI --svg` emitted
+/// `viewBox="0 0 80731.06 442"` — and a seven-lane gel of the same genome came
+/// to 280,947 pt. A picture 3,900 inches wide is past every PDF viewer's page
+/// limit, and in the application, which floors its fit scale so captions stay
+/// legible, every lane was painted thousands of screens right of a dark field
+/// that simply looked EMPTY.
+///
+/// Four, because `2000/2100/2150/2200` is still a label somebody reads, and
+/// because the span and the count say more about 1,769 co-migrating fragments
+/// than any four of their sizes would. The full list is not lost: `pl gel`
+/// prints every size in its table, which is a place a long list can be read.
+pub const MAX_LISTED: usize = 4;
+
+/// A list of fragment sizes, named in full or counted.
+///
+/// `sep` is `"/"` for a band label and `", "` for a caption, matching the two
+/// conventions already in the picture. ASCII only: every string that has ever
+/// reached a gel `Scene` is ASCII, and the PDF back end writes WinAnsi.
+pub fn name_sizes(sizes: &[u64], sep: &str) -> String {
+    if sizes.len() <= MAX_LISTED {
+        return sizes
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(sep);
+    }
+    let lo = sizes.iter().min().copied().unwrap_or(0);
+    let hi = sizes.iter().max().copied().unwrap_or(0);
+    // A degenerate span is a real case — a tandem repeat digests to hundreds of
+    // one length — and `650-650 (1767 fragments)` reads as an arithmetic slip.
+    if lo == hi {
+        return format!("{lo} ({} fragments)", sizes.len());
+    }
+    format!("{lo}-{hi} ({} fragments)", sizes.len())
 }
 
 /// A gel with a calibration curve.
@@ -398,6 +449,37 @@ impl Simulation {
         }
         s
     }
+}
+
+/// Does this lane's tube hold an INTACT circle, which this model cannot place?
+///
+/// Keyed on the deduplicated CUT POSITIONS and never on the fragment list, and
+/// that is the whole point: `fragments_from_cuts(&[], len, Circular)` returns
+/// one fragment of the full contour length, so a lane for an enzyme that does
+/// not cut the plasmid draws a band at the contour length. The tube contains
+/// SUPERCOILED circular DNA, which does not run there at all — supercoiled
+/// plasmid runs well ahead of the same plasmid linearised and nicked open
+/// circle runs behind — and nothing here models topology.
+///
+/// `pl gel demo-construct.gb --lane PacI` printed `34.1 mm 3180` for an enzyme
+/// with no site in that plasmid. It lives in this crate rather than in one of
+/// the callers because it is a property of the simulation: the GUI had the rule
+/// and `pl gel` did not, so the two surfaces drew different pictures of the
+/// same tube.
+///
+/// Zero cuts on a LINEAR molecule is a different answer and gets its band —
+/// that really is the uncut input at its own length — and a circle cut ONCE
+/// also yields one full-length fragment, correctly, because it is linearised.
+pub fn uncut_circle(distinct_cuts: usize, circular: bool) -> bool {
+    distinct_cuts == 0 && circular
+}
+
+/// What must be said about a lane [`uncut_circle`] refuses to draw.
+pub fn uncut_circle_note(lane: &str) -> String {
+    format!(
+        "{lane} does not cut this molecule — no band is drawn. An uncut plasmid is \
+         supercoiled and does not run at its contour length; supercoiling is not modelled."
+    )
 }
 
 /// The resolving range at an arbitrary agarose percentage.

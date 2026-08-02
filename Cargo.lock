@@ -2353,13 +2353,18 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui-phosphor",
+ "pl-abif",
  "pl-core",
  "pl-design",
+ "pl-doc",
  "pl-draw",
  "pl-enzymes",
  "pl-fileio",
+ "pl-gel",
  "pl-index",
+ "pl-sanger",
  "pl-scan",
+ "pl-thermo",
  "rfd",
 ]
 

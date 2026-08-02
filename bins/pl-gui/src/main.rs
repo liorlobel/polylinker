@@ -13,9 +13,12 @@ mod annot;
 mod design;
 mod doc;
 mod featedit;
+mod gel;
 mod library;
 mod map;
+mod reads;
 mod recover;
+mod scene;
 mod seqedit;
 mod settings;
 /// The ligature guard reads the vendored faces at test time and nothing at run
@@ -613,12 +616,50 @@ fn main() -> eframe::Result {
     )
 }
 
+/// A vector format a figure can leave in.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Fmt {
+    Svg,
+    Pdf,
+    Eps,
+}
+
+impl Fmt {
+    fn ext(self) -> &'static str {
+        match self {
+            Fmt::Svg => "svg",
+            Fmt::Pdf => "pdf",
+            Fmt::Eps => "eps",
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Fmt::Svg => "SVG",
+            Fmt::Pdf => "PDF",
+            Fmt::Eps => "EPS",
+        }
+    }
+}
+
+/// Which picture the central pane is showing.
+///
+/// A second VIEW of the open document, not a second document and not a tab.
+/// The gel's lane set is an enzyme choice made in the Enzymes tab, so the
+/// picker and the picture have to be on screen together; a seventh tab would
+/// make ticking an enzyme and seeing the result mutually exclusive.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum CentralView {
+    Map,
+    Gel,
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Features,
     Library,
     Enzymes,
     Sequence,
+    Reads,
     History,
     File,
 }
@@ -1066,6 +1107,43 @@ struct App {
     /// document said, held across the next one, so the row pitch never depends
     /// on a worker's phase.
     orf_strip: bool,
+    /// Which picture the central pane is showing.
+    ///
+    /// NOT persisted, deliberately, though `settings::Layout` persists other
+    /// view preferences and doing so would be consistent. The map is what a
+    /// double-clicked `.dna` should show; a gel is a QUESTION YOU ASK, not a
+    /// state to live in, and launching into a gel of a file whose digest has
+    /// not run yet is a worse first frame than the map. The gel's CONDITIONS
+    /// are worth remembering; which picture is up is not.
+    central_view: CentralView,
+    /// Chromatograms held against whatever document is open.
+    ///
+    /// ON `App`, NOT ON `Document`, and that is the load-bearing choice. Reads
+    /// must survive the arrival AND the replacement of a document, because "I
+    /// opened the wrong plasmid, let me open the right one" is the commonest
+    /// correction in this workflow and must not cost the user their files.
+    /// What does not survive is the REPORT: a `Report` names a reference, so
+    /// `adopt` discards every one and re-arms.
+    reads: Vec<reads::Read>,
+    /// Which read the Reads tab is showing.
+    read_shown: usize,
+    /// Which window of that read's bases the chromatogram is drawn over.
+    read_window: usize,
+    /// The `(doc_generation, seq_version)` every held report was computed
+    /// against.
+    ///
+    /// A report is a property of the FILE AND the molecule, and the molecule is
+    /// being edited underneath it. Repainting a perfect trace beside a
+    /// discrepancy list computed three edits ago is a confident wrong answer —
+    /// precisely the defect `Document::apply`'s unconditional re-digest exists
+    /// to prevent. `seq_version` alone is not enough: it starts at 0 in every
+    /// document, so opening plasmid A, editing it, then opening B compares
+    /// equal and the reports carry over.
+    reads_for: (u64, u64),
+    /// The virtual gel's conditions and lane set. Reset by `adopt`.
+    gel: gel::View,
+    /// The last built gel and everything it was built from. See [`App::gel_ready`].
+    gel_cache: Option<(GelKey, gel::Built)>,
     /// Whether this document's sequence rows reserve the enzyme strip.
     ///
     /// What the last COMPLETED digest of this document found, and deliberately
@@ -1580,6 +1658,13 @@ impl App {
             seq_grid: None,
             seq_readout: None,
             seq_hover: None,
+            central_view: CentralView::Map,
+            reads: Vec::new(),
+            read_shown: 0,
+            read_window: 0,
+            reads_for: (0, 0),
+            gel: gel::View::default(),
+            gel_cache: None,
             enz_strip: false,
             tr: aa::Translations::default(),
             doc_code: pl_core::translate::TABLE11,
@@ -1679,12 +1764,81 @@ impl App {
             // off than one who knows they are not.
             Err(e) => app.status = format!("autosave is off: {e}"),
         }
-        // Opening a file named on the command line makes the app usable as a
-        // file association and from a terminal.
-        if let Some(arg) = std::env::args_os().nth(1) {
-            app.load(PathBuf::from(arg));
-        }
+        app.open_argv(std::env::args_os().skip(1));
         app
+    }
+
+    /// Open whatever the command line named.
+    ///
+    /// This makes the app usable as a file association and from a terminal, and
+    /// it takes EVERY argument rather than only the first: `polylinker
+    /// plasmid.gb A01.ab1 A02.ab1` is the whole sequencing workflow in one
+    /// line, and `load_as` already sorts molecules from chromatograms by
+    /// CONTENT, so the order on the line does not have to be learned. Naming
+    /// two molecules is the one ambiguous case and it resolves the way the rest
+    /// of the app does: the last adopted wins, exactly as opening a second file
+    /// from the dialog does.
+    ///
+    /// Flags are SKIPPED rather than opened. Every argument being a path meant
+    /// `polylinker --help` tried to open a file called `--help` and, on a fresh
+    /// launch, presented it as an unreadable file — a confusing answer to a
+    /// typo and a worse one to a flag this binary gains later. `--` ends the
+    /// flags, as everywhere else.
+    ///
+    /// And the failures are COLLECTED. `load_failed` assigns `self.notice`, so
+    /// opening three files of which two are unreadable reported only the last
+    /// one — and before this loop existed that was unreachable, because only
+    /// `argv[1]` was ever opened.
+    ///
+    /// Takes an iterator rather than reading `std::env` itself so that both
+    /// rules can be asserted: a rule about argument handling that can only be
+    /// exercised by launching a process does not get exercised.
+    fn open_argv<I: IntoIterator<Item = std::ffi::OsString>>(&mut self, args: I) {
+        let mut flags_over = false;
+        let mut failed: Vec<String> = Vec::new();
+        let mut ignored: Vec<String> = Vec::new();
+        for arg in args {
+            let s = arg.to_string_lossy().to_string();
+            if !flags_over && s == "--" {
+                flags_over = true;
+                continue;
+            }
+            if !flags_over && s.starts_with('-') && s.len() > 1 {
+                ignored.push(s);
+                continue;
+            }
+            self.notice = None;
+            self.load(PathBuf::from(arg));
+            if let Some(why) = self.notice.take().or_else(|| self.error.clone()) {
+                failed.push(why);
+            }
+        }
+        // AFTER the loop, and APPENDED. Said inside the loop it was overwritten
+        // the moment the next argument opened successfully and set the status
+        // to the molecule's own description — so `polylinker --help file.gb`
+        // silently swallowed the flag. Appending keeps both facts: what is open,
+        // and what was not acted on.
+        if !ignored.is_empty() {
+            let note = format!(
+                "ignored {}: this application takes file names, not flags",
+                ignored.join(", ")
+            );
+            self.status = if self.status.is_empty() {
+                note
+            } else {
+                format!("{}  —  {note}", self.status)
+            };
+        }
+        match failed.len() {
+            0 => {}
+            1 => self.notice = Some(failed.remove(0)),
+            n => {
+                self.notice = Some(format!(
+                    "{n} file(s) could not be opened: {}",
+                    failed.join(" | ")
+                ))
+            }
+        }
     }
 
     /// Take on a document, from wherever it came.
@@ -1726,6 +1880,27 @@ impl App {
             .unwrap_or(pl_core::translate::TABLE11);
         self.error = None;
         self.notice = None;
+        // A lane set names enzymes that cut THIS molecule, and its seeded
+        // default was chosen from this molecule's digest. Carried over it would
+        // draw the previous file's diagnostic digest as if it were this one's.
+        //
+        // Reset HERE, in `adopt`, and nowhere on the failure path: cc36cf7 made
+        // a failed load leave the open document intact, and clearing the lane
+        // set when an open was merely *attempted* would be a small regression
+        // of the same contract. Conditions the user chose survive, because they
+        // are about the gel and not about the molecule.
+        self.gel = gel::View {
+            conditions: self.gel.conditions,
+            ladder: self.gel.ladder,
+            inverted: self.gel.inverted,
+            ..Default::default()
+        };
+        // And the map is what a newly opened file shows. See `central_view`.
+        self.central_view = CentralView::Map;
+        // The reads themselves SURVIVE — "I opened the wrong plasmid" must not
+        // cost the user their files — but every report is discarded and re-run,
+        // because a report names a reference.
+        self.rearm_reads();
         self.edit = seqedit::SeqEdit::new();
         self.selected = None;
         self.hot = None;
@@ -1952,7 +2127,50 @@ impl App {
         self.load_as(path, Losing::Open)
     }
 
+    /// One Open, one dispatcher, one answer.
+    ///
+    /// Decided on CONTENT, never on the extension — `pl-fileio`'s own rule, and
+    /// it is not theoretical: 20 of 394 files named `.ab1` on a real lab drive
+    /// are SCF or ZTR.
+    ///
+    /// # This cannot regress cc36cf7
+    ///
+    /// The trace branch returns BEFORE `Document::open` is reached and contains
+    /// no assignment to `self.document`, no `self.status.clear()`, no
+    /// `close_design` and no `close_feature_editor`. Its own failure arm uses
+    /// the identical rule cc36cf7 established below — a notice when a document
+    /// is open, the takeover only when there is none — so nothing about a
+    /// chromatogram can destroy an open document, because a chromatogram never
+    /// enters the document path at all.
+    ///
+    /// It also must NOT reach `take_over`. Opening a read does not close a
+    /// document, so the unsaved-changes question must never fire for one:
+    /// asking "you have unsaved changes — discard and open?" when a user drops
+    /// a chromatogram onto their plasmid is precisely the false positive
+    /// cc36cf7's redefinition of `unsaved()` exists to eliminate, and it is how
+    /// a guard becomes a reflex click.
     fn load_as(&mut self, path: PathBuf, why: Losing) {
+        // A read error is deliberately ignored here and left to
+        // `Document::open` below, so an unreadable file gives the one sentence
+        // it has always given rather than two different ones depending on which
+        // reader got to it first.
+        if let Ok(data) = std::fs::read(&path) {
+            match pl_fileio::detect(&data) {
+                Some(pl_fileio::Format::Abif) => return self.take_read(path, &data),
+                // Named rather than refused as "unreadable": a reader that says
+                // "parse error" sends the user looking for a corrupt file; one
+                // that says "this is ZTR" sends them to the right tool.
+                Some(f @ (pl_fileio::Format::Scf | pl_fileio::Format::Ztr)) => {
+                    return self.load_failed(format!(
+                        "{}: this is {}, not a molecule and not ABIF. Convert it to \
+                         .ab1 to look at the trace.",
+                        path.display(),
+                        f.name()
+                    ));
+                }
+                _ => {}
+            }
+        }
         match Document::open(&path) {
             Ok(d) => {
                 // Built into a LOCAL and handed to `take_over`, not assigned to
@@ -2014,38 +2232,134 @@ impl App {
             // new document to have traded it for. `error` is documented above
             // as "right for 'there is no document' and wrong for anything
             // else", and this was the branch that violated its own rule.
-            Err(e) => {
-                if self.document.is_some() {
-                    self.notice = Some(e);
-                    return;
+            //
+            // Through `load_failed`, which is where that rule now lives — the
+            // function's own doc claimed it kept the trace path and the
+            // molecule path from drifting, and the molecule path was not
+            // calling it. The path is NAMED here for the same reason it is
+            // there: the command line can now report several failures at once,
+            // and "unrecognised format" without a file name in a list of two
+            // says nothing about which.
+            Err(e) => self.load_failed(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// A load that produced nothing, reported without destroying what is open.
+    ///
+    /// cc36cf7's rule, in one place so the trace path and the molecule path
+    /// cannot drift: `error` is documented as "right for 'there is no document'
+    /// and wrong for anything else", and the arm that violated that is what
+    /// used to lose a user's work.
+    fn load_failed(&mut self, e: String) {
+        if self.document.is_some() {
+            self.notice = Some(e);
+            return;
+        }
+        self.error = Some(e);
+        self.status.clear();
+        self.close_design(
+            "the design panel was closed: the document it described is no longer open",
+        );
+        self.close_feature_editor(
+            "the feature editor was closed: the document it described is no longer open",
+        );
+    }
+
+    /// Take on a chromatogram. NEVER touches `self.document`.
+    fn take_read(&mut self, path: PathBuf, data: &[u8]) {
+        let trace = match pl_abif::parse(data) {
+            Ok(t) => t,
+            Err(e) => return self.load_failed(format!("{}: {e}", path.display())),
+        };
+        let name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "read".into());
+        let mut r = reads::Read::new(name.clone(), Some(path), trace);
+        if let Some(d) = &self.document {
+            r.compare(&d.molecule().seq, d.molecule().topology.is_circular());
+        }
+        self.status = format!("{name} · {} bases", r.trace.sequence.len());
+        self.reads.push(r);
+        self.read_shown = self.reads.len() - 1;
+        self.tab = Tab::Reads;
+    }
+
+    /// Keep the held reads' answers current, and collect the ones that have
+    /// arrived. Returns `(something changed, something is still running)`.
+    ///
+    /// AN EDIT MOVES BASES, so every report about them is now about a sequence
+    /// that no longer exists. The chromatogram is a property of the file and
+    /// never changes; the report is a property of the file AND the molecule,
+    /// which the user is editing underneath it. A panel that repaints a perfect
+    /// trace beside a discrepancy list computed three edits ago is showing a
+    /// confident wrong answer — the defect `Document::apply`'s unconditional
+    /// re-digest exists to prevent.
+    ///
+    /// Keyed on `(doc_generation, seq_version)` for the reason `annot` is:
+    /// `seq_version` alone starts at 0 in every document, so opening plasmid A,
+    /// editing it and then opening B compares equal and the reports carry over.
+    fn refresh_reads(&mut self) -> (bool, bool) {
+        let key = (
+            self.doc_generation,
+            self.document.as_ref().map_or(0, |d| d.seq_version),
+        );
+        let mut changed = false;
+        if key != self.reads_for {
+            self.reads_for = key;
+            if !self.reads.is_empty() {
+                self.rearm_reads();
+                changed = true;
+            }
+        }
+        let mut running = false;
+        for r in &mut self.reads {
+            changed |= r.poll();
+            running |= matches!(r.state, reads::CompareState::Running { .. });
+        }
+        (changed, running)
+    }
+
+    /// Compare every held read against whatever is open now.
+    ///
+    /// A `Report` names a reference, so nothing is carried across a document
+    /// swap: a panel that repaints a perfect trace beside a discrepancy list
+    /// computed against another plasmid is a confident wrong answer, which is
+    /// the defect `Document::apply`'s unconditional re-digest exists to
+    /// prevent.
+    fn rearm_reads(&mut self) {
+        let target = self.document.as_ref().map(|d| {
+            (
+                d.molecule().seq.clone(),
+                d.molecule().topology.is_circular(),
+            )
+        });
+        for r in &mut self.reads {
+            match &target {
+                Some((seq, circular)) => r.compare(seq, *circular),
+                None => {
+                    r.cancel();
+                    r.state = reads::CompareState::NoReference;
                 }
-                self.error = Some(e);
-                self.status.clear();
-                // Deliberate, and announced. `design_panel` took the panel out
-                // of `self` before it checked for a document, so a failed load
-                // dropped the panel, its constraints and its report on the
-                // floor in the same frame with nothing said. Putting the panel
-                // *back* would be worse — it would then reattach to whatever
-                // opens next.
-                self.close_design(
-                    "the design panel was closed: the document it described is no longer open",
-                );
-                self.close_feature_editor(
-                    "the feature editor was closed: the document it described is no longer open",
-                );
             }
         }
     }
 
     fn pick_file(&mut self) {
         let picked = rfd::FileDialog::new()
+            // `.ab1` was in none of the four filters, so a user literally could
+            // not select a chromatogram through this dialog. This is the door
+            // that did not exist.
             .add_filter(
-                "Sequence files",
-                &["dna", "gb", "gbk", "genbank", "fa", "fasta", "seq", "ape"],
+                "Everything Polylinker opens",
+                &[
+                    "dna", "gb", "gbk", "genbank", "fa", "fasta", "seq", "ape", "ab1",
+                ],
             )
             .add_filter("SnapGene", &["dna"])
             .add_filter("GenBank", &["gb", "gbk", "genbank"])
             .add_filter("FASTA", &["fa", "fasta", "fna"])
+            .add_filter("Sanger trace", &["ab1"])
             .pick_file();
         if let Some(p) = picked {
             self.load(p);
@@ -2505,6 +2819,146 @@ impl App {
         let (svg, drawn) = pl_draw::circular_svg(d.molecule(), Self::figure_options(d, set));
 
         match std::fs::write(&path, svg) {
+            Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
+            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// Write the gel as SVG, PDF or EPS.
+    ///
+    /// THE SAME `Scene` THE PANE IS PAINTING, not one rebuilt for export. That
+    /// is the whole benefit of the Scene→egui path: rebuilding it here would
+    /// reintroduce exactly the drift `figure_options` was written to remove
+    /// from the map, where the screen and the file shared only their range
+    /// arithmetic and a label fix on one left the other untouched.
+    fn export_gel(&mut self, fmt: Fmt) {
+        // The lanes come from the digest of `log.current()`, so an open typing
+        // run would be missing from them.
+        self.settle();
+        let inverted = self.gel.inverted;
+        // The reason comes from `gel_ready`, which is where the condition is,
+        // rather than being guessed here as "the digest has not finished" —
+        // which was false for three of the four ways there can be no picture.
+        if let Err(why) = self.gel_ready() {
+            self.notice = Some(format!("there is no gel to export: {why}"));
+            return;
+        }
+        // Taken and put back, for the same reason `central` does: the `Scene`
+        // is the expensive thing the cache exists to keep.
+        let Some((key, built)) = self.gel_cache.take() else {
+            return;
+        };
+        // A PAGE BOX A VIEWER WILL REFUSE IS NOT AN EXPORT. `pdf::to_pdf`
+        // writes `/MediaBox` straight from the scene with no bound, and a gel
+        // whose labels ran away came to 280,947 pt — 3,900 inches, against
+        // Acrobat's documented 14,400-unit limit. `pl_gel::MAX_LISTED` is the
+        // fix for the cause; this is the guard, because a file that opens as
+        // "damaged" tells the user nothing about why.
+        const PAGE_LIMIT: f64 = 14_400.0;
+        if matches!(fmt, Fmt::Pdf | Fmt::Eps)
+            && (built.scene.width > PAGE_LIMIT || built.scene.height > PAGE_LIMIT)
+        {
+            self.notice = Some(format!(
+                "this gel is {:.0} x {:.0} pt, past the {PAGE_LIMIT:.0} pt page limit \
+                 {} readers enforce. Export it as SVG, which has no page, or narrow the gel.",
+                built.scene.width,
+                built.scene.height,
+                fmt.name()
+            ));
+            self.gel_cache = Some((key, built));
+            return;
+        }
+        let Some(d) = &self.document else {
+            self.gel_cache = Some((key, built));
+            return;
+        };
+        // `-gel` is not decoration. The CLI carries a whole `claim_output`
+        // mechanism because two inputs sharing a file stem must not silently
+        // overwrite each other, and a map and a gel of one plasmid share a stem.
+        let stem = format!("{}-gel", pl_fileio::genbank::locus_name(&d.title));
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{stem}.{}", fmt.ext()))
+            .add_filter(fmt.name(), &[fmt.ext()])
+            .save_file()
+        else {
+            self.gel_cache = Some((key, built));
+            return;
+        };
+        let bytes = match fmt {
+            Fmt::Svg => pl_draw::svg_of(&built.scene).into_bytes(),
+            Fmt::Pdf => pl_draw::pdf::to_pdf(&built.scene).0,
+            Fmt::Eps => pl_draw::eps::to_eps(&built.scene, 1.0).0.into_bytes(),
+        };
+
+        let mut note = Vec::new();
+        if built.hidden.0 > 0 {
+            note.push(format!(
+                "{} fragment(s) hide in {} band(s)",
+                built.hidden.0, built.hidden.1
+            ));
+        }
+        if built.unplaced > 0 {
+            note.push(format!(
+                "{} fragment(s) named rather than drawn",
+                built.unplaced
+            ));
+        }
+        if !built.suspended.is_empty() {
+            note.push(format!(
+                "{} lane(s) suspended by the enzyme filter: {}",
+                built.suspended.len(),
+                built.suspended.join(", ")
+            ));
+        }
+        // AND THE AUDIT'S LIMIT IS STATED, not quietly enjoyed. `audit` matches
+        // `Item::Path { stroke: Some(_) }` only, so fill-only paths — which is
+        // every band, every well and the background — are skipped entirely. It
+        // covers the TEXT and not the INK, and reporting a pass it did not earn
+        // is exactly UX review finding 8.
+        let bg = pl_gel::render::Options {
+            inverted,
+            ..Default::default()
+        };
+        let bad = pl_draw::contrast::audit(&built.scene, bg.background(), 1.0);
+        if !bad.is_empty() {
+            note.push(format!(
+                "{} label(s) below WCAG AA on this field: {}",
+                bad.len(),
+                bad.iter()
+                    .take(3)
+                    .map(|f| format!("{} at {:.1}:1", f.what, f.ratio))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        self.gel_cache = Some((key, built));
+        match std::fs::write(&path, bytes) {
+            Ok(()) => self.wrote(&path, &note.join("  —  ")),
+            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// Write the map as EPS.
+    ///
+    /// The same `Scene` as the SVG and the PDF. `pl_draw::eps::to_eps` has
+    /// shipped and been tested since the publication-export work and the GUI
+    /// simply never called it, so the app and the command line disagreed about
+    /// which formats exist.
+    fn export_map_eps(&mut self) {
+        self.settle();
+        let Some(d) = &self.document else { return };
+        let stem = pl_fileio::genbank::locus_name(&d.title);
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{stem}.eps"))
+            .add_filter("EPS", &["eps"])
+            .save_file()
+        else {
+            return;
+        };
+        let set = self.enzyme_set;
+        let (sc, drawn) = pl_draw::scene(d.molecule(), Self::figure_options(d, set));
+        let (eps, _) = pl_draw::eps::to_eps(&sc, 1.0);
+        match std::fs::write(&path, eps) {
             Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
         }
@@ -3145,6 +3599,15 @@ impl eframe::App for App {
             }
             running |= s.is_running();
         }
+        // And so is every read's comparison. Polled here rather than in the
+        // Reads tab so an answer lands whichever tab the user has walked away
+        // to — otherwise a comparison started on one tab appears to hang until
+        // you go back and look at it.
+        let (changed, comparing) = self.refresh_reads();
+        if changed {
+            ctx.request_repaint();
+        }
+        running |= comparing;
         if running {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
@@ -3402,26 +3865,47 @@ impl App {
                     // pixel-for-pixel the screen — `pl-draw` puts every feature
                     // on one ring and carries strand in the arrowhead, where the
                     // map stacks lanes inside and outside the backbone.
-                    menu_with_caret(ui, "Export map", |ui| {
-                        if ui
-                            .button("SVG…")
-                            .on_hover_text("Vector map, for a figure")
-                            .clicked()
-                        {
-                            self.export_svg();
-                            ui.close();
-                        }
-                        if ui
-                            .button("PDF…")
-                            .on_hover_text("The same map, for a manuscript")
-                            .clicked()
-                        {
-                            self.export_pdf();
-                            ui.close();
+                    //
+                    // "Export figure", not "Export map", because there are two
+                    // pictures now and the menu title cannot name both. THE
+                    // SUBJECT IS IN THE LEAF — "Map as SVG…" / "Gel as SVG…" —
+                    // for the reason this toolbar already argues about its
+                    // other labels: a lexical distinction survives a monochrome
+                    // screenshot, a screen reader and a narrow window, and
+                    // "Export map" with a gel on screen would simply be false.
+                    // A fourth top-level button was measured and rejected: the
+                    // row was 467 pt against an 880 pt `min_inner_size` before
+                    // the formats were collapsed into menus, and reopening that
+                    // for ~60 pt is not a trade worth making.
+                    let showing_gel = self.central_view == CentralView::Gel;
+                    let subject = if showing_gel { "Gel" } else { "Map" };
+                    menu_with_caret(ui, "Export figure", |ui| {
+                        for (fmt, why) in [
+                            (Fmt::Svg, "Vector, for a figure"),
+                            (Fmt::Pdf, "The same picture, for a manuscript"),
+                            (Fmt::Eps, "For a journal that asks for EPS"),
+                        ] {
+                            if ui
+                                .button(format!("{subject} as {}…", fmt.name()))
+                                .on_hover_text(why)
+                                .clicked()
+                            {
+                                match (showing_gel, fmt) {
+                                    (true, f) => self.export_gel(f),
+                                    (false, Fmt::Svg) => self.export_svg(),
+                                    (false, Fmt::Pdf) => self.export_pdf(),
+                                    (false, Fmt::Eps) => self.export_map_eps(),
+                                }
+                                ui.close();
+                            }
                         }
                     })
                     .response
-                    .on_hover_text("the plasmid map as a picture");
+                    .on_hover_text(if showing_gel {
+                        "the gel on screen as a picture"
+                    } else {
+                        "the plasmid map as a picture"
+                    });
                 });
 
                 ui.separator();
@@ -3962,6 +4446,7 @@ impl App {
                         (Tab::Library, "Library"),
                         (Tab::Enzymes, "Enzymes"),
                         (Tab::Sequence, "Sequence"),
+                        (Tab::Reads, "Reads"),
                         (Tab::History, "History"),
                         (Tab::File, "File"),
                     ] {
@@ -3988,8 +4473,17 @@ impl App {
                     // the first thing asked, and it was asked in exactly the
                     // state where the feature that answers it refused.
                     Tab::Library => self.library_tab(ui),
-                    // After the named arm and before the rest. The compiler
-                    // will say so if a seventh tab is added, which is the
+                    // The second tab that answers with no molecule open, and
+                    // for a different reason: `pl trace file.ab1` already
+                    // answers "let me look at my trace" with no reference at
+                    // all, and the GUI refusing what the CLI does would be a
+                    // fifth instance of the gap this whole direction exists to
+                    // close. What it must NOT do is pretend: with no reference
+                    // there is no pair, and every number in a comparison is a
+                    // number about a pair.
+                    Tab::Reads => self.reads_tab(ui),
+                    // After the named arms and before the rest. The compiler
+                    // will say so if another tab is added, which is the
                     // property worth having: the five below all open with
                     // `expect("checked by caller")`.
                     _ if self.document.is_none() => {
@@ -4645,6 +5139,13 @@ impl App {
             .enumerate()
             .filter(|(_, x)| set.admits(x))
             .collect();
+        // The gel's lane set, read as a snapshot and written back after the
+        // list has been laid out. Collected rather than mutated in place
+        // because the closure below is already borrowing the document the
+        // digest came from, and because a tick must not change the list it is
+        // being drawn into halfway down.
+        let picked = self.gel.picked.clone();
+        let mut toggles: Vec<(String, bool)> = Vec::new();
         let uniq: Vec<_> = shown.iter().filter(|(_, x)| x.is_unique_cutter()).collect();
         let multi: Vec<_> = shown
             .iter()
@@ -4656,6 +5157,8 @@ impl App {
                 ui.label(RichText::new(format!("{} unique cutters", uniq.len())).strong());
                 ui.add_space(2.0);
                 for (i, e) in &uniq {
+                    let mut on = picked.contains(e.enzyme.name);
+                    let was = on;
                     enzyme_row(
                         ui,
                         e.enzyme.name,
@@ -4664,7 +5167,11 @@ impl App {
                         true,
                         verdict(*i),
                         poor_single_site_note(e.enzyme.name, e.count()),
+                        &mut on,
                     );
+                    if on != was {
+                        toggles.push((e.enzyme.name.to_string(), on));
+                    }
                 }
                 ui.add_space(10.0);
             }
@@ -4675,6 +5182,8 @@ impl App {
                 );
                 ui.add_space(2.0);
                 for (i, e) in &multi {
+                    let mut on = picked.contains(e.enzyme.name);
+                    let was = on;
                     enzyme_row(
                         ui,
                         e.enzyme.name,
@@ -4683,7 +5192,11 @@ impl App {
                         false,
                         verdict(*i),
                         poor_single_site_note(e.enzyme.name, e.count()),
+                        &mut on,
                     );
+                    if on != was {
+                        toggles.push((e.enzyme.name.to_string(), on));
+                    }
                 }
                 ui.add_space(10.0);
             }
@@ -4719,6 +5232,299 @@ impl App {
                 .italics(),
             );
         });
+        for (name, on) in toggles {
+            if on {
+                self.gel.picked.insert(name);
+            } else {
+                self.gel.picked.remove(&name);
+            }
+            // The user has said what they want in the gel, so the seeded
+            // default must not come back and overwrite it — and the strip must
+            // stop calling the lane set a suggestion, because from here on it
+            // is not one.
+            self.gel.seeded = true;
+            self.gel.seed_note = None;
+        }
+    }
+
+    /// The chromatograms, and what they say about the open construct.
+    ///
+    /// Opens with no molecule and SAYS WHAT IT CANNOT ANSWER. Everything that
+    /// is a property of the FILE alone is shown — the trace, the calls, the
+    /// Mott-trimmed region, the header facts `pl trace` prints — and in place
+    /// of the comparison one sentence and no ornament. No identity number, no
+    /// coverage figure, no tick, no colour that reads as a verdict: every
+    /// number in a comparison is a number about a PAIR, and there is no pair.
+    fn reads_tab(&mut self, ui: &mut Ui) {
+        if self.reads.is_empty() {
+            ui.add_space(20.0);
+            ui.label(
+                RichText::new(
+                    "No reads. Open a .ab1 — the Open button, or drop one on the window — \
+                     and it will be compared to whatever construct is open.",
+                )
+                .color(pal(ui).muted),
+            );
+            return;
+        }
+        self.read_shown = self.read_shown.min(self.reads.len() - 1);
+        let mut jump: Option<u64> = None;
+        let mut close: Option<usize> = None;
+
+        ui.horizontal_wrapped(|ui| {
+            for (i, r) in self.reads.iter().enumerate() {
+                let resp = ui.selectable_label(self.read_shown == i, &r.name);
+                // Where it came from, on the hover: two reads of one construct
+                // are routinely named `A01.ab1` and `A02.ab1` in different
+                // folders, and the name alone does not say which is which.
+                let resp = match &r.path {
+                    Some(p) => resp.on_hover_text(p.display().to_string()),
+                    None => resp.on_hover_text("dropped on the window; no path"),
+                };
+                if resp.clicked() {
+                    self.read_shown = i;
+                    // AND BACK TO THE START OF IT. The page index belongs to
+                    // the read being shown, not to the panel: paging into a
+                    // 900-base read and then clicking a 60-base one put
+                    // `first = min(window * per_view, n-1) + 1` at the very
+                    // last base, so the panel opened on "bases 60..60 of 60"
+                    // with one peak and a ▶ button that looked stuck.
+                    self.read_window = 0;
+                }
+            }
+            if ui.button("Close read").clicked() {
+                close = Some(self.read_shown);
+            }
+        });
+        ui.separator();
+
+        let ref_len = self.document.as_ref().map(|d| d.molecule().len());
+        let trace_seq = self.reads[self.read_shown].trace.sequence.clone();
+        let window = self.read_window;
+        let r = &self.reads[self.read_shown];
+
+        // THE VERDICT LINE, which always carries coverage. Never a bare
+        // identity percentage, and the panel renders NO single-glyph verdict
+        // for the construct as a whole: 100% identity over 200 aligned columns
+        // on a 5,386 bp plasmid says nothing about the other 5,186 bases.
+        ui.label(RichText::new(r.verdict(ref_len.unwrap_or(0))).size(12.0));
+        ui.add_space(4.0);
+        for line in r.header() {
+            ui.label(RichText::new(line).size(11.0).color(pal(ui).muted));
+        }
+        if matches!(r.state, reads::CompareState::Done(_)) {
+            ui.label(
+                RichText::new(r.which_sequence())
+                    .size(11.0)
+                    .color(pal(ui).muted),
+            );
+        }
+        // In READ coordinates, which is why every discrepancy row now carries
+        // its read position too: the rows are in reference coordinates and
+        // nothing else on screen connects the two numbering systems.
+        let reliable = r.reliable();
+        if let Some((a, b)) = reliable {
+            ui.label(
+                RichText::new(format!(
+                    "the basecaller stands behind bases {a}..{b} of this read; nothing \
+                     outside it is discarded, because on a read that came back strange the \
+                     ragged ends are often the part worth looking at"
+                ))
+                .size(11.0)
+                .color(pal(ui).muted),
+            );
+        }
+        ui.add_space(6.0);
+
+        // THE CHROMATOGRAM, from `pl_draw::trace::View::to_scene` and painted
+        // by the same Scene→egui path the gel uses. Not a second renderer: that
+        // one holds four correctness properties a re-implementation gets wrong
+        // in exactly the documented ways — colour by `FWO_` and never by array
+        // position, x in SAMPLES so compressions stay compressed, decimation by
+        // bucket MAXIMUM so a stride cannot drop a base, and Y scaled per drawn
+        // window with the maximum reported.
+        let width = ui.available_width().max(120.0);
+        // `to_scene` has no legibility rule of its own — it emits one text item
+        // per called base at its own x — and 900 bases across 1,200 pt is a
+        // smear, which reads as "the sequence is there" while a collided letter
+        // reads as a missing base. So the CALLER never asks for a window wider
+        // than legible letters allow. That gap belongs here and not in the
+        // crate.
+        let n_bases = trace_seq.len();
+        let per_view = ((width / 14.0) as usize).clamp(8, 60);
+        let first = (window * per_view).min(n_bases.saturating_sub(1)) + 1;
+        let last = (first + per_view - 1).min(n_bases.max(1));
+        let (scene, rep) = pl_draw::trace::View {
+            channels: [
+                &r.trace.channels[0],
+                &r.trace.channels[1],
+                &r.trace.channels[2],
+                &r.trace.channels[3],
+            ],
+            base_order: r.trace.base_order,
+            peaks: &r.trace.peaks,
+            sequence: &r.trace.sequence,
+            quality: &r.trace.quality,
+            title: &r.name,
+        }
+        .to_scene(&pl_draw::trace::Options {
+            bases: Some((first, last)),
+            width: width as f64,
+            height: 200.0,
+            // Okabe–Ito, CHOSEN FOR THE FIELD IT IS PAINTED ON. `to_scene`
+            // emits no background rectangle, so these colours land straight on
+            // the app's panel — and `Palette::Accessible` puts G at #000000,
+            // which is 1.20:1 on the dark panel: the G trace and every G letter
+            // under it were invisible, so the picture had three channels and
+            // the "letters are the second channel" promise failed in exactly
+            // the same place the first one did.
+            //
+            // `Palette::Classic` is not offered at all: it puts A in green and
+            // T in red, the one pair a red–green colour-blind reader cannot
+            // separate, and A/T confusion is not a small error.
+            palette: trace_palette(ui.visuals().dark_mode),
+            quality_bars: true,
+            max_points: width as usize,
+        });
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(width, scene.height as f32), egui::Sense::hover());
+        scene::paint(ui.painter(), &scene, rect.min, 1.0);
+
+        let mut step: i64 = 0;
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("◀").clicked() {
+                step = -1;
+            }
+            if ui.button("▶").clicked() && last < n_bases {
+                step = 1;
+            }
+            ui.label(
+                RichText::new(format!("bases {first}..{last} of {n_bases}"))
+                    .size(11.0)
+                    .color(pal(ui).muted),
+            );
+        });
+        // PERMANENT FURNITURE, NOT A HOVER, and this is the most damaging thing
+        // the panel could get wrong. `to_scene` scales the plot to the maximum
+        // sample INSIDE THE DRAWN WINDOW, for a good reason it documents — a
+        // single tall peak elsewhere would flatten everything here into a line.
+        // Zoom into the sixty bases after a read has died and pure baseline
+        // noise is stretched to fill the plot: four ragged traces at full
+        // height, evenly spaced, with confident letters underneath, which is
+        // the same picture a good region gives. A number that changes as you
+        // pan is a number people learn to read.
+        let overall = r
+            .trace
+            .channels
+            .iter()
+            .flat_map(|c| c.iter().copied())
+            .max()
+            .unwrap_or(0);
+        ui.label(
+            RichText::new(format!(
+                "peak height in this window: {}; up to {overall} elsewhere in this read",
+                rep.scale_max
+            ))
+            .size(11.0)
+            .color(pal(ui).muted),
+        );
+        if overall > 0 && (rep.scale_max as f64) < 0.2 * overall as f64 {
+            // IN WORDS, not a tint: a tint on a chromatogram competes with the
+            // four channel colours, and colour is never the only channel here.
+            ui.label(
+                RichText::new(
+                    "these peaks are a small fraction of this read's own maximum — the plot \
+                     is stretched to fill the frame, so this may be baseline noise",
+                )
+                .size(11.0)
+                .color(pal(ui).warn),
+            );
+        }
+        for note in &rep.notes {
+            ui.label(RichText::new(note).size(11.0).color(pal(ui).muted));
+        }
+        ui.separator();
+
+        // THE DIFFERENCES. A claim about the CONSTRUCT, so the rows name
+        // reference coordinates; evidenced by the TRACE, so double-clicking one
+        // puts the caret on that base in the Sequence tab — where the aa track
+        // above it says whether it changes a residue.
+        if let reads::CompareState::Done(report) = &r.state {
+            if report.discrepancies.is_empty() {
+                ui.label(
+                    RichText::new("no differences at all over the aligned columns")
+                        .size(11.5)
+                        .color(pal(ui).muted),
+                );
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("read-diffs")
+                .show(ui, |ui| {
+                    for d in &report.discrepancies {
+                        let (pos, change, q, kind, conf) = reads::row(d);
+                        let note = reads::read_base_note(report, d, &trace_seq, reliable);
+                        let resp = ui
+                            .selectable_label(
+                                false,
+                                RichText::new(format!("{pos:>12}  {change}{note}  {q:>4}  {kind}"))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(match d.confidence {
+                                        pl_sanger::Confidence::Low => pal(ui).muted,
+                                        _ => pal(ui).ink,
+                                    }),
+                            )
+                            // The WORD is always available; the colour above is
+                            // a second channel and never the only one.
+                            .on_hover_text(conf);
+                        if resp.double_clicked() {
+                            jump = Some(d.ref_pos);
+                        }
+                    }
+                });
+        }
+
+        if step < 0 {
+            self.read_window = self.read_window.saturating_sub(1);
+        } else if step > 0 {
+            self.read_window += 1;
+        }
+        if let Some(i) = close {
+            self.reads[i].cancel();
+            self.reads.remove(i);
+            self.read_shown = self.read_shown.min(self.reads.len().saturating_sub(1));
+            self.read_window = 0;
+        }
+        if let Some(at) = jump {
+            self.jump_to_base(at);
+        }
+    }
+
+    /// Put the caret on a reference base and show it.
+    ///
+    /// Through `SeqEdit::set_selection`, which is the ONE sanctioned path from
+    /// outside `seqedit`: it commits any open typing run first, and assigning
+    /// `sel` behind a run's back is a documented past defect.
+    ///
+    /// This is a VIEW change. It selects a base; it does not alter one.
+    fn jump_to_base(&mut self, at: u64) {
+        let Some(d) = self.document.as_mut() else {
+            return;
+        };
+        let n = d.molecule().len();
+        if at == 0 || at > n {
+            return;
+        }
+        self.edit.set_selection(
+            d,
+            seqedit::Selection {
+                anchor: at - 1,
+                head: at,
+                through_origin: false,
+            },
+            at,
+        );
+        self.tab = Tab::Sequence;
     }
 
     /// Every edit, in order, with the point you are standing at.
@@ -6594,6 +7400,7 @@ impl App {
         let mut flip = false;
         let mut design = false;
         let mut annotate = false;
+        let mut copy_rc = false;
 
         let readout =
             egui::Panel::bottom(egui::Id::new("seq-readout"))
@@ -6650,6 +7457,30 @@ impl App {
                             } else if a.clicked() {
                                 annotate = true;
                             }
+                            // A reverse complement is a thing to put on the
+                            // clipboard, not a thing to print on a status
+                            // line. Not gated on `can_design`: it changes
+                            // nothing about the document, so it is safe with
+                            // a panel open, unlike the two buttons above.
+                            let rc = ui.add_enabled(
+                                has_sel,
+                                egui::Button::new(RichText::new("Copy rev-comp").size(11.0)),
+                            );
+                            if !has_sel {
+                                rc.on_hover_text("Select the bases first.");
+                            } else {
+                                if rc
+                                    .on_hover_text(
+                                        "Ctrl+Shift+R — the reverse complement of the selection, \
+                                         case preserved. Not Ctrl+Shift+C: that chord cannot be \
+                                         told apart from Ctrl+C with Shift still held, which is \
+                                         where Shift+arrow selection leaves your hand.",
+                                    )
+                                    .clicked()
+                                {
+                                    copy_rc = true;
+                                }
+                            }
                             // The explicit way to flip a bit that Shift+click cannot infer,
                             // because a click has no direction of travel. Both lengths are
                             // on screen so the choice is visible, and there is no
@@ -6677,12 +7508,34 @@ impl App {
                             }
                         },
                     );
-                    ui.label(
-                        RichText::new(mol_line)
+                    let line = ui.label(
+                        RichText::new(mol_line.clone())
                             .monospace()
                             .size(11.5)
                             .color(pal(ui).ink2),
                     );
+                    // The conditions behind the number, and — when the readout
+                    // declined to give one — why. Composed in `seqedit` so the
+                    // sentence and the rule that produced it live together.
+                    if let Some(h) = seqedit::tm_hover(&mol_line) {
+                        line.on_hover_text(h);
+                    }
+                    // AND THE CONDITIONS ARE DISPLAYED, not only hovered. A Tm
+                    // computed under conditions other than the ones shown is
+                    // worse than no Tm, and `pl tm` prints the model above every
+                    // number it gives; here the same string was attached to a
+                    // plain `Label`, which egui does not make focusable — so it
+                    // was unreachable from the keyboard, invisible to a screen
+                    // reader, and advertised by nothing. `design.rs` already
+                    // writes this same `describe()` into a GenBank note rather
+                    // than a tooltip, for the same reason.
+                    if seqedit::tm_shown(&mol_line) {
+                        ui.label(
+                            RichText::new(seqedit::tm_method().describe())
+                                .size(10.0)
+                                .color(pal(ui).muted),
+                        );
+                    }
                     // Always drawn, even when there is nothing under the pointer, so
                     // the region's height does not flicker as the pointer moves.
                     ui.label(
@@ -6717,6 +7570,11 @@ impl App {
         }
         if annotate {
             self.open_feature_editor(None);
+        }
+        if copy_rc {
+            if let Some(s) = self.do_copy_rc() {
+                ui.ctx().copy_text(s);
+            }
         }
     }
 
@@ -7124,6 +7982,32 @@ impl App {
         }
     }
 
+    /// Ctrl+Shift+R, and the button beside the readout.
+    ///
+    /// Says "reverse complement" in the notice rather than "copied", because
+    /// the clipboard now holds bases that are nowhere in the file in that
+    /// order, and a user who meant plain Copy has to be able to tell.
+    ///
+    /// It is NOT on Ctrl+Shift+C, and that is the whole point: see the
+    /// `Event::Copy` arm for why that chord silently fired on plain Ctrl+C.
+    fn do_copy_rc(&mut self) -> Option<String> {
+        let d = self.document.as_ref()?;
+        match self.edit.copy_revcomp(d.molecule()) {
+            Some((s, skipped)) => {
+                self.edit.say(format!(
+                    "copied the reverse complement of {} bases{}",
+                    fmt_int(s.len() as u64),
+                    not_copied(skipped)
+                ));
+                Some(s)
+            }
+            None => {
+                self.edit.say("Nothing is selected.");
+                None
+            }
+        }
+    }
+
     /// Ctrl+X.
     ///
     /// The delete speaks first, and what it has to say outranks the count. This
@@ -7275,6 +8159,21 @@ impl App {
                 egui::Event::Paste(t) => {
                     let _needs_consent = self.edit.paste(d, &t);
                 }
+                // COPY IS COPY. It used to read `modifiers.shift` off the frame
+                // and hand back the REVERSE COMPLEMENT when shift was down,
+                // because egui-winit's `is_copy_command` is `modifiers.command
+                // && key == C` — it pushes `Copy` and RETURNS, so Ctrl+Shift+C
+                // never produces a `Key::C` event and the frame's modifiers
+                // were the only signal available.
+                //
+                // That signal cannot tell the two intents apart, and the app's
+                // own selection idiom is Shift+arrow (see `Key::ArrowRight`
+                // below). Select with Shift+Right, then Ctrl+C without letting
+                // go of shift — the ordinary keyboard path — and the clipboard
+                // silently got the other strand: plausible DNA, wrong bases,
+                // with a small orange line at the foot of the panel as the only
+                // warning. The reverse complement now has a chord of its own,
+                // which egui-winit does not swallow.
                 egui::Event::Copy => {
                     if let Some(s) = self.do_copy() {
                         ui.ctx().copy_text(s);
@@ -7301,6 +8200,18 @@ impl App {
                                 through_origin: false,
                             };
                             self.edit.set_selection(d, all, n);
+                        }
+                        // R, not C, and deliberately. Ctrl+Shift+C cannot be
+                        // told apart from Ctrl+C with shift still held — see
+                        // `Event::Copy` above — and Shift is exactly the key a
+                        // user is holding when they have just selected with
+                        // Shift+arrow. Ctrl+Shift+R reaches this match arm
+                        // intact, and a plain Ctrl+R is bound to nothing, so
+                        // neither half of the chord misfires.
+                        egui::Key::R if cmd && shift => {
+                            if let Some(s) = self.do_copy_rc() {
+                                ui.ctx().copy_text(s);
+                            }
                         }
                         egui::Key::Backspace if !cmd => {
                             self.edit.backspace(d, now);
@@ -7486,6 +8397,67 @@ impl App {
         }
     }
 
+    /// Make sure [`App::gel_cache`] holds this document's gel, seeded on first
+    /// sight, and say why if it cannot.
+    ///
+    /// `Err` carries the sentence to show where the lanes would be. It is
+    /// returned rather than left for the caller to reconstruct from
+    /// `DigestState`, because the caller then had to write an arm for `Done`
+    /// that this function could never produce — a branch whose string nobody
+    /// could ever see, sitting exactly where the empty gel needed one.
+    ///
+    /// # It is a MEMO, and the comment it replaces was wrong
+    ///
+    /// This used to be rebuilt on every repaint, defended by "it is also cheap
+    /// — a few hundred `Monotone::at` calls on fragment lengths already in
+    /// hand — so there is nothing to cache and nothing to go stale". On a 4.6 Mb
+    /// genome a frame ran `Gel::run` over ~14,000 fragments across seven lanes
+    /// and formatted kilobytes of disclosure, and twelve mouse-moves over the
+    /// pane cost 4.8x what the same twelve cost over the map. Nothing about a
+    /// gel changes between two frames in which nothing changed, so the key
+    /// below is the complete list of what a picture depends on.
+    fn gel_ready(&mut self) -> Result<(), String> {
+        let Some(d) = self.document.as_ref() else {
+            self.gel_cache = None;
+            return Err("no molecule is open".into());
+        };
+        match &d.digest {
+            doc::DigestState::Running { .. } => {
+                self.gel_cache = None;
+                return Err("scanning for restriction sites…".into());
+            }
+            doc::DigestState::Unavailable(why) => {
+                let why = why.clone();
+                self.gel_cache = None;
+                return Err(why);
+            }
+            doc::DigestState::Done(_) => {}
+        }
+        let results = d.digest.results();
+        // The same table the Enzymes tab reads, so a row and a lane cannot give
+        // opposite answers about one enzyme.
+        let verdicts: Vec<Option<pl_enzymes::methylation::SiteEffect>> =
+            (0..results.len()).map(|i| d.digest.verdict(i)).collect();
+        if !self.gel.seeded {
+            self.gel
+                .seed(d.molecule(), results, &verdicts, self.enzyme_set);
+        }
+        let key = GelKey::of(self, &verdicts);
+        if self.gel_cache.as_ref().is_some_and(|(k, _)| *k == key) {
+            return Ok(());
+        }
+        let d = self.document.as_ref().expect("checked above");
+        let built = self.gel.build(
+            d.molecule(),
+            d.digest.results(),
+            &verdicts,
+            self.enzyme_set,
+            &d.title,
+        );
+        self.gel_cache = Some((key, built));
+        Ok(())
+    }
+
     fn central(&mut self, ui: &mut Ui) {
         let error = self.error.clone();
         let selected = self.selected;
@@ -7557,6 +8529,25 @@ impl App {
 
         let notice = self.notice.clone();
         let mut dismiss = false;
+
+        // BUILT BEFORE THE PANEL, not inside it. The gel needs `&self.document`
+        // and `&mut self.gel` at once, and the paint closure already holds a
+        // borrow of `self`; computing the picture here and letting the closure
+        // only draw it keeps both honest. It is also memoised — see
+        // `gel_ready` — so on all but the frame after a change this is a key
+        // comparison and nothing else.
+        let gel_state = (self.central_view == CentralView::Gel).then(|| self.gel_ready());
+        // MOVED OUT rather than cloned, and put back after the closure. Cloning
+        // it would undo the memo: a genome gel's `Scene` is thousands of items,
+        // and copying them once a frame is the cost the cache exists to remove.
+        let built = self.gel_cache.take();
+        let view_was = self.central_view;
+        let mut view_next = view_was;
+        // The controls write into a COPY and are applied after the closure, for
+        // the same borrow reason.
+        let mut gel_next = GelControls::of(&self.gel);
+        let mut methods = false;
+        let mut show_all = false;
 
         egui::CentralPanel::default().show(ui, |ui| {
             self.recovery_banner(ui);
@@ -7654,6 +8645,41 @@ impl App {
                     ui.clip_rect()
                 );
             }
+            // The switch, and the gel's conditions beside it when the gel is
+            // up. It costs the map about 24 pt of vertical extent — roughly 3%
+            // of its diameter at the default window — which is the price, and
+            // stating it is better than letting somebody discover it. No new
+            // geometry code is needed: `map::show` derives its rect from
+            // `available_rect_before_wrap()` after whatever was laid out above
+            // it, which is exactly how the recovery banner is accommodated.
+            ui.horizontal_wrapped(|ui| {
+                for (v, name) in [(CentralView::Map, "Map"), (CentralView::Gel, "Gel")] {
+                    if ui.selectable_label(view_was == v, name).clicked() {
+                        view_next = v;
+                    }
+                }
+                if view_was == CentralView::Gel {
+                    gel_controls(ui, &mut gel_next);
+                }
+            });
+            if view_was == CentralView::Gel {
+                // Mirrors the Enzymes tab exactly: the lanes ARE the digest, so
+                // a gel cannot say more than the digest does — and the sentence
+                // for each way it can say nothing comes from `gel_ready`, next
+                // to the condition that produced it.
+                match (&gel_state, &built) {
+                    (Some(Ok(())), Some((_, b))) => {
+                        gel_pane(ui, b, &mut methods, &mut show_all);
+                    }
+                    (Some(Err(why)), _) => {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(RichText::new(why).color(pal(ui).muted));
+                        });
+                    }
+                    _ => {}
+                }
+                return;
+            }
             let r = map::show(
                 ui,
                 d.molecule(),
@@ -7673,8 +8699,24 @@ impl App {
             pane_out = Some(r.pane);
         });
 
+        // Back where it came from, so the next frame is a key comparison.
+        self.gel_cache = built;
         if dismiss {
             self.notice = None;
+        }
+        self.central_view = view_next;
+        gel_next.apply(&mut self.gel);
+        if show_all {
+            self.enzyme_set = pl_enzymes::EnzymeSet::All;
+        }
+        if methods {
+            // The citable paragraph `pl-doc` already ships, reachable until now
+            // only by typing `pl methods gel` in a terminal.
+            let text = pl_doc::topic("gel")
+                .map(pl_doc::methods)
+                .unwrap_or_default();
+            ui.ctx().copy_text(text);
+            self.status = "the gel methods paragraph is on the clipboard".into();
         }
         // ONE assignment, after both panels have run, rather than two guarded
         // ones. `or` says the arbitration rule out loud, and it is safe and
@@ -8248,13 +9290,295 @@ fn strand_word(s: Strand) -> &'static str {
     }
 }
 
-/// One enzyme, with whatever qualifies the answer.
+/// Everything a built gel depends on. Anything not named here cannot change
+/// the picture, and anything that changes here rebuilds it.
+///
+/// The `f64` conditions are keyed by their BITS. The controls are range-limited
+/// so no NaN can reach them, but a key comparing `f64` with `==` would rebuild
+/// forever if one ever did, and `-0.0 == 0.0` would suppress a rebuild that a
+/// hand-edited settings file could ask for.
+#[derive(Clone, PartialEq, Eq)]
+struct GelKey {
+    doc: u64,
+    seq: u64,
+    picked: Vec<String>,
+    arrangement: gel::Arrangement,
+    ladder: &'static str,
+    agarose: u64,
+    run_mm: u64,
+    band_mm: u64,
+    inverted: bool,
+    set: pl_enzymes::EnzymeSet,
+    /// The methylation verdicts, which change what a lane may claim.
+    blocked: Vec<Option<pl_enzymes::methylation::SiteEffect>>,
+    /// The seeder's own disclosure line. It only ever changes in the same
+    /// breath as `picked`, so it is here for completeness rather than because
+    /// it is reachable on its own — and a key that is complete for a reason
+    /// nobody has to remember is the kind that stays complete.
+    seed_note: Option<String>,
+}
+
+impl GelKey {
+    fn of(app: &App, verdicts: &[Option<pl_enzymes::methylation::SiteEffect>]) -> GelKey {
+        let c = app.gel.conditions;
+        GelKey {
+            doc: app.doc_generation,
+            seq: app.document.as_ref().map_or(0, |d| d.seq_version),
+            picked: app.gel.picked.iter().cloned().collect(),
+            arrangement: app.gel.arrangement,
+            ladder: app.gel.ladder,
+            agarose: c.agarose_percent.to_bits(),
+            run_mm: c.run_mm.to_bits(),
+            band_mm: c.band_mm.to_bits(),
+            inverted: app.gel.inverted,
+            set: app.enzyme_set,
+            blocked: verdicts.to_vec(),
+            seed_note: app.gel.seed_note.clone(),
+        }
+    }
+}
+
+/// The gel's conditions, copied out of [`gel::View`] so the controls can be
+/// drawn inside a closure that is already borrowing `self`.
+#[derive(Clone, Copy, PartialEq)]
+struct GelControls {
+    arrangement: gel::Arrangement,
+    ladder: &'static str,
+    conditions: pl_gel::Conditions,
+    inverted: bool,
+}
+
+impl GelControls {
+    fn of(v: &gel::View) -> Self {
+        GelControls {
+            arrangement: v.arrangement,
+            ladder: v.ladder,
+            conditions: v.conditions,
+            inverted: v.inverted,
+        }
+    }
+    fn apply(self, v: &mut gel::View) {
+        v.arrangement = self.arrangement;
+        v.ladder = self.ladder;
+        v.conditions = self.conditions;
+        v.inverted = self.inverted;
+    }
+}
+
+/// The gel's conditions. NOT its enzymes: those are ticked in the Enzymes tab,
+/// which is the app's one enzyme control, and a second picker here would be a
+/// second source of truth for the same question.
+fn gel_controls(ui: &mut Ui, g: &mut GelControls) {
+    ui.separator();
+    for a in gel::Arrangement::ALL {
+        if ui
+            .selectable_label(g.arrangement == a, a.label())
+            .on_hover_text(a.hover())
+            .clicked()
+        {
+            g.arrangement = a;
+        }
+    }
+    ui.separator();
+    egui::ComboBox::from_id_salt("gel-ladder")
+        .selected_text(g.ladder)
+        .width(88.0)
+        .show_ui(ui, |ui| {
+            for l in pl_gel::LADDERS {
+                ui.selectable_value(&mut g.ladder, l.name, l.name);
+            }
+        });
+    ui.add(
+        egui::DragValue::new(&mut g.conditions.agarose_percent)
+            .speed(0.05)
+            .range(0.3..=4.0)
+            .suffix("% agarose"),
+    );
+    ui.add(
+        egui::DragValue::new(&mut g.conditions.band_mm)
+            .speed(0.1)
+            .range(0.1..=20.0)
+            .suffix(" mm band"),
+    )
+    // The CLI's own usage line for this number, because it is the dominant
+    // uncertainty in the model and hiding it would be dishonest.
+    .on_hover_text("This is what decides whether two fragments resolve.");
+    if ui
+        .selectable_label(g.inverted, "dark field")
+        .on_hover_text("A stained gel as it photographs. The picture is still flat rectangles.")
+        .clicked()
+    {
+        g.inverted = !g.inverted;
+    }
+}
+
+/// The picture, and the strip beneath it that makes the picture citable.
+///
+/// The strip is ALWAYS present, not conditional on there being something to
+/// warn about: a disclosure that is sometimes suppressed teaches the user that
+/// its absence means "nothing to know". It also sits OUTSIDE the dark field,
+/// because a bare dark rectangle with bands on it *is* a photograph, and a
+/// photograph is evidence.
+fn gel_pane(ui: &mut Ui, built: &gel::Built, methods: &mut bool, show_all: &mut bool) {
+    // NAMES THE STATE AND THE CURE, like every other empty state in the app.
+    // A lone ladder beside nothing reads as "this molecule has no sites", which
+    // is the exact misreading the waiting state is written to avoid.
+    if built.empty {
+        ui.label(
+            RichText::new(
+                "Nothing is running on this gel — tick an enzyme on the Enzymes tab. \
+                 The ladder below is the ruler, not a result.",
+            )
+            .size(12.0)
+            .color(pal(ui).ink2),
+        );
+        ui.add_space(4.0);
+    }
+    let strip_h = (ui.available_height() * 0.34).clamp(96.0, 220.0);
+    let pane = ui.available_rect_before_wrap();
+    let picture = egui::Rect::from_min_size(
+        pane.min,
+        egui::vec2(pane.width(), (pane.height() - strip_h).max(40.0)),
+    );
+    // A FLOOR as well as a cap, and the floor is the load-bearing half. The
+    // unplaced-fragment caption is 8.5 pt in scene units; below 0.85 it drops
+    // under 7.2 pt, and a fragment the gel could not place stops being
+    // readable — which is the whole point of drawing it. Rather than shrink
+    // further the picture scrolls, because a picture that silently becomes
+    // unreadable is worse than one that admits it needs more room.
+    let raw = scene::fit_scale(&built.scene, picture.size() - egui::vec2(16.0, 16.0));
+    let scale = raw.clamp(0.85, 2.0);
+    let w = built.scene.width as f32 * scale;
+    let h = built.scene.height as f32 * scale;
+    // AND THE FLOOR SAYS SO WHEN IT BITES, in the direction it bit. It was
+    // never asked what happens when scrolling cannot reach the lanes: a genome
+    // gel came to 280,947 pt, the clamp held it at 0.85, and a 238,805 px
+    // canvas in a 950 px pane put the first lane 4,283 px in with a sub-pixel
+    // scrollbar thumb — a picture that is off-screen looked exactly like a
+    // picture that is empty. The labels are capped now
+    // (`pl_gel::MAX_LISTED`) so the extreme case is gone, and the ordinary one
+    // is the recovery banner taking the room: naming the axis matters, because
+    // "scroll right" on a picture that is too TALL is advice that does nothing.
+    let lanes = built
+        .scene
+        .items
+        .iter()
+        .filter(|i| matches!(i, pl_draw::Item::Path { title: Some(t), .. } if t.ends_with(" well")))
+        .count();
+    if raw < 0.85 {
+        let over_x = w > picture.width() - 16.0;
+        let over_y = h > picture.height() - 8.0;
+        let way = match (over_x, over_y) {
+            (true, true) => "scroll around it",
+            (true, false) => "scroll right",
+            _ => "scroll down",
+        };
+        ui.label(
+            RichText::new(format!(
+                "The whole gel does not fit here at a readable size: {way}, or export it. \
+                 {lanes} lane{}, {:.0} x {:.0} pt.",
+                if lanes == 1 { "" } else { "s" },
+                built.scene.width,
+                built.scene.height
+            ))
+            .size(11.0)
+            .color(pal(ui).warn),
+        );
+    }
+
+    let mut skipped = 0usize;
+    // BOTH AXES. It used to scroll horizontally only, so a picture taller than
+    // the pane — which is what the recovery banner makes of an ordinary
+    // seven-lane gel — was CLIPPED at the bottom, taking the disclosure strip
+    // with it. A clipped picture and a scrolled one look the same until you
+    // reach for the scrollbar that is not there.
+    egui::ScrollArea::both()
+        .id_salt("gel-scroll")
+        .max_height(picture.height())
+        .show(ui, |ui| {
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(w + 16.0, h + 8.0), egui::Sense::hover());
+            let origin = egui::pos2(
+                rect.min.x + (rect.width() - w).max(0.0) / 2.0,
+                rect.min.y + 4.0,
+            );
+            let painted = scene::paint(ui.painter(), &built.scene, origin, scale);
+            skipped = painted.skipped;
+            if let Some(p) = resp.hover_pos() {
+                if let Some(t) = painted.hover(p) {
+                    let t = t.to_string();
+                    resp.on_hover_text_at_pointer(t);
+                }
+            }
+        });
+
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .id_salt("gel-disclosure")
+        .max_height(strip_h)
+        .show(ui, |ui| {
+            for (i, line) in built.disclosure.iter().enumerate() {
+                ui.label(
+                    RichText::new(line)
+                        .size(11.0)
+                        // The calibration statement first and in the reading
+                        // colour; the rest is supporting detail.
+                        .color(if i == 0 { pal(ui).ink2 } else { pal(ui).muted }),
+                );
+            }
+            // A DROPPED ITEM IS A HOLE, AND A SILENT HOLE IS THE BAD KIND.
+            // `scene::paint` refuses a colour it cannot parse rather than
+            // drawing it black — correctly, because black on a dark gel is
+            // invisible — but until now the refusal reached nobody and the pane
+            // simply looked emptier.
+            if skipped > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "{skipped} item(s) in this picture carry a colour the painter could \
+                         not read and were not drawn. The exported file still has them; this \
+                         is a bug in the application, not in your data."
+                    ))
+                    .size(11.0)
+                    .color(pal(ui).warn),
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button("Methods…")
+                    .on_hover_text(
+                        "The citable paragraph: the model, the conditions actually used, \
+                         and what it is not a basis for.",
+                    )
+                    .clicked()
+                {
+                    *methods = true;
+                }
+                if !built.suspended.is_empty() && ui.button("Show all").clicked() {
+                    *show_all = true;
+                }
+            });
+        });
+}
+
+/// One enzyme, with whatever qualifies the answer — and the ONE place an
+/// enzyme is chosen for the gel.
 ///
 /// `blocked` is the methylation verdict: `docs/PLAN.md` §7.1 requires such
 /// sites be "struck through, not hidden". A site that will not cut is still a
 /// site — it exists in the sequence, appears on everyone else's map, and cuts
 /// the moment the plasmid goes through a dam- strain. Hiding it produces a map
 /// that disagrees with every other tool for reasons the user cannot see.
+///
+/// `in_gel` is the whole gel picker. There is deliberately no second enzyme
+/// control in the gel view: `App::enzyme_set` governs which enzymes can be
+/// ticked, ticking governs which lane an enzyme is in, and the two answers
+/// cannot disagree because there is only one of each. The map's own comment
+/// ("ONE control, one answer") records what it cost the last time this project
+/// had two. The two paragraphs belong on the same function for a reason the
+/// review found the hard way: ticking a struck-through enzyme put its digest
+/// on the gel as fact, one row giving two opposite answers. `gel::View` now
+/// reads the same verdict this row draws.
+#[allow(clippy::too_many_arguments)]
 fn enzyme_row(
     ui: &mut Ui,
     name: &str,
@@ -8263,8 +9587,11 @@ fn enzyme_row(
     unique: bool,
     blocked: Option<pl_enzymes::methylation::SiteEffect>,
     poor_single_site: Option<&'static str>,
+    in_gel: &mut bool,
 ) {
     ui.horizontal(|ui| {
+        ui.add(egui::Checkbox::without_text(in_gel))
+            .on_hover_text("Run this enzyme on the gel.");
         let mut label = RichText::new(format!("{name:<9}"))
             .monospace()
             .size(11.5)
@@ -8306,6 +9633,20 @@ fn enzyme_row(
     });
 }
 
+/// The chromatogram palette for the field it will be painted on.
+///
+/// A named function rather than an `if` at the call site so the choice and the
+/// background can be asserted against each other:
+/// `the_chromatogram_is_legible_on_the_panel_it_is_painted_on` pairs this with
+/// [`theme::panel_fill`], which is the only place the two facts meet.
+fn trace_palette(dark: bool) -> pl_draw::trace::Palette {
+    if dark {
+        pl_draw::trace::Palette::AccessibleDark
+    } else {
+        pl_draw::trace::Palette::Accessible
+    }
+}
+
 /// Enzymes that cleave poorly when the molecule has only one site.
 ///
 /// Two of our fifty, verified against NEB and REBASE rather than taken from
@@ -8339,6 +9680,56 @@ mod tests {
         assert!((1..=31).contains(&d), "{d}");
         assert!(m < 12, "{m}");
         assert!(y >= 2026, "{y}");
+    }
+
+    /// PROVEN TO FAIL before `Palette::AccessibleDark`: the app opens in the
+    /// dark theme and painted the G channel at `#000000` on `#161a1d`.
+    ///
+    /// 1.20:1. Not "hard to read" — the trace and the base letters under it
+    /// were both invisible, so a four-channel chromatogram genuinely had three,
+    /// and the panel's own comment that "the letters under the peaks are the
+    /// second channel and are never turned off" failed in exactly the place the
+    /// first channel did. `pl_draw::trace::to_scene` emits no background
+    /// rectangle, so the caller's panel IS the field, and this is the only
+    /// place in the codebase where the palette and that panel are both known.
+    #[test]
+    fn the_chromatogram_is_legible_on_the_panel_it_is_painted_on() {
+        use pl_draw::contrast::{parse_hex, ratio};
+        for dark in [true, false] {
+            let p = trace_palette(dark);
+            let bg = theme::panel_fill(dark);
+            let bg = (bg.r(), bg.g(), bg.b());
+            for base in b"ACGT" {
+                let c = parse_hex(p.color(*base)).expect("a palette colour parses");
+                // 3:1 is the graphical-object threshold this project applies to
+                // Okabe-Ito — `pl_draw::contrast`'s own test names the three
+                // members that fail it on white and settles on that standard.
+                assert!(
+                    ratio(c, bg) >= 3.0,
+                    "{p:?} {} on the {} panel: {:.2}:1",
+                    *base as char,
+                    if dark { "dark" } else { "light" },
+                    ratio(c, bg)
+                );
+            }
+            for at_least in [true, false] {
+                let c = parse_hex(p.quality(at_least)).expect("a palette colour parses");
+                assert!(
+                    ratio(c, bg) >= 3.0,
+                    "{p:?} quality bar on the {} panel: {:.2}:1",
+                    if dark { "dark" } else { "light" },
+                    ratio(c, bg)
+                );
+            }
+        }
+        // THE CONTROL, so this cannot pass by asserting nothing: the palette
+        // the app no longer uses on a dark panel is the one that fails there.
+        let bg = theme::panel_fill(true);
+        let g = parse_hex(pl_draw::trace::Palette::Accessible.color(b'G')).expect("hex");
+        assert!(
+            ratio(g, (bg.r(), bg.g(), bg.b())) < 1.5,
+            "the old palette's G was invisible, and that is why this test exists"
+        );
     }
 
     #[test]
@@ -10880,6 +12271,158 @@ mod tests {
     ///
     /// `egui::Modal` blocks widget interaction; it does not block raw
     /// `ctx.input` reads, and both key handlers run before a widget exists.
+    /// PROVEN TO FAIL against the shipped handler: plain Ctrl+C copied the
+    /// REVERSE COMPLEMENT whenever Shift was still down.
+    ///
+    /// `egui::Event::Copy` carries no modifiers, so the handler read
+    /// `modifiers.shift` off the frame — and egui-winit's `is_copy_command` is
+    /// `modifiers.command && key == C`, which fires for Ctrl+Shift+C too and
+    /// then RETURNS, so no `Key::C` event exists to tell the two apart. Shift
+    /// is exactly where this app's own selection idiom leaves the user's hand:
+    /// `Key::ArrowRight` with `shift` is how you select. Select with
+    /// Shift+Right, press Ctrl+C without letting go, and the clipboard silently
+    /// held the other strand — plausible DNA, wrong bases.
+    #[test]
+    fn ctrl_c_copies_the_selection_even_with_shift_still_held() {
+        let seq = "CTAAGCCTTTGGGGCCCC";
+        let mut app = App::blank();
+        app.document = Some(
+            Document::from_bytes(format!(">x\n{seq}\n").as_bytes(), "x.fa".into(), None).unwrap(),
+        );
+        app.tab = Tab::Sequence;
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 0,
+            head: 10,
+            through_origin: false,
+        });
+        let want: String = seq[..10].to_string();
+        let rc = pl_core::reverse_complement(want.as_bytes());
+        let rc = String::from_utf8(rc).expect("ASCII");
+        assert_ne!(want, rc, "the fixture must be able to tell them apart");
+
+        // The gesture, exactly as winit delivers it: `Event::Copy`, with the
+        // frame's modifiers still carrying Shift from the selection.
+        let shifted = egui::Modifiers {
+            shift: true,
+            command: true,
+            ctrl: true,
+            ..Default::default()
+        };
+        let copied = |app: &mut App, modifiers: egui::Modifiers, events: Vec<egui::Event>| {
+            let ctx = test_ctx();
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    modifiers,
+                    ..Default::default()
+                },
+                |ui| app.sequence_keys(ui, 1.0),
+            );
+            out.platform_output
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    egui::OutputCommand::CopyText(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            copied(&mut app, shifted, vec![egui::Event::Copy]),
+            want,
+            "Ctrl+C with Shift held gave the other strand"
+        );
+        // And with Shift released, which used to be the only safe way to copy.
+        assert_eq!(
+            copied(&mut app, egui::Modifiers::COMMAND, vec![egui::Event::Copy]),
+            want
+        );
+
+        // The reverse complement still has a way in — Ctrl+Shift+R, which
+        // egui-winit does not swallow, so it arrives as a real key event.
+        let r = vec![egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: shifted,
+        }];
+        assert_eq!(copied(&mut app, shifted, r), rc);
+        // ...and the chord's other half does nothing on its own.
+        let plain_r = vec![egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }];
+        assert_eq!(
+            copied(&mut app, egui::Modifiers::COMMAND, plain_r),
+            String::new()
+        );
+    }
+
+    /// PROVEN TO FAIL against the loop this replaces, on both halves.
+    ///
+    /// It opened every argument as a path, so `polylinker --help` presented a
+    /// file called `--help` as unreadable; and `load_failed` assigns
+    /// `self.notice`, so three arguments of which two fail reported only the
+    /// last. Neither was reachable before this work, because only `argv[1]` was
+    /// ever opened — which is exactly why the new loop has to answer for them.
+    #[test]
+    fn the_command_line_skips_flags_and_reports_every_file_that_failed() {
+        use std::ffi::OsString;
+        let good = temp_file("argv-good", "fa", PLASMID_A);
+        let bad1 = temp_file("argv-bad1", "txt", "this is not a sequence file at all");
+        let bad2 = temp_file("argv-bad2", "gb", "neither is this");
+
+        let mut app = App::blank();
+        app.open_argv([
+            OsString::from("--help"),
+            OsString::from(&good),
+            OsString::from(&bad1),
+            OsString::from(&bad2),
+        ]);
+        // The flag never became a file: nothing in the notice mentions it, and
+        // the good molecule is open.
+        assert!(app.document.is_some(), "{:?}", app.error);
+        assert!(app.error.is_none(), "the screen was not taken over");
+        let notice = app.notice.clone().unwrap_or_default();
+        assert!(!notice.contains("--help"), "{notice}");
+        assert!(
+            app.status.contains("takes file names, not flags"),
+            "{}",
+            app.status
+        );
+
+        // BOTH failures, not just the last, and each names its own file.
+        assert!(
+            notice.starts_with("2 file(s) could not be opened"),
+            "{notice}"
+        );
+        for f in [&bad1, &bad2] {
+            let name = f.file_name().expect("a name").to_string_lossy().to_string();
+            assert!(notice.contains(&name), "{name} is missing from {notice}");
+        }
+
+        // `--` ends the flags, so a file really called `-x` can still be named.
+        let mut app = App::blank();
+        app.open_argv([OsString::from("--"), OsString::from(&good)]);
+        assert!(app.document.is_some());
+        assert!(app.notice.is_none(), "{:?}", app.notice);
+
+        // And ONE failure reads as itself rather than as a list of one.
+        let mut app = App::blank();
+        app.open_argv([OsString::from(&bad1)]);
+        let said = app.error.clone().unwrap_or_default();
+        assert!(!said.contains("1 file(s)"), "{said}");
+        assert!(said.contains("unrecognised format"), "{said}");
+
+        for f in [good, bad1, bad2] {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
     #[test]
     fn no_shortcut_reaches_the_document_while_a_question_is_on_screen() {
         let ctx = test_ctx();
@@ -12213,6 +13756,219 @@ mod tests {
                 .contains("unrecognised format"),
             "and the failure was reported: {:?}",
             app.notice
+        );
+    }
+
+    /// PROVEN TO FAIL at 78a46f2: `load_as` there called `Document::open`
+    /// unconditionally, so a `.ab1` reached the molecule readers, came back
+    /// `unrecognised format`, and the only outcome available was the error arm.
+    /// A chromatogram could not be opened at all, and this test asserts the
+    /// three cases together because they are one contract.
+    ///
+    /// The contract is cc36cf7's and it must not be regressed: whatever a load
+    /// does, an open EDITED document survives it — same op cursor, same bases —
+    /// and the unsaved-changes question is never raised, because opening a read
+    /// does not close a document. Asking "discard and open?" when a user drops
+    /// a chromatogram onto their plasmid is exactly the false positive that
+    /// trains people to click through the guard.
+    #[test]
+    fn loading_a_trace_never_touches_the_open_document() {
+        // A minimal ABIF, an SCF wearing `.ab1`, and the 68-byte truncated
+        // fixture the indexer already ships.
+        let good = reads::tests::ab1(b"ACGTACGTACGTACGTACGT", &[40u8; 20]);
+        let scf = {
+            let mut v = b".scf".to_vec();
+            v.extend_from_slice(&[0u8; 64]);
+            v
+        };
+        let truncated = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/library-fixture/trace.ab1"
+        ))
+        .expect("the fixture");
+
+        for (i, (what, bytes)) in [
+            ("a parseable trace", good),
+            ("an SCF named .ab1", scf),
+            ("a truncated .ab1", truncated),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut app = seq_app();
+            // One applied operation, so `unsaved()` is true and the guard would
+            // fire if anything on this path reached it.
+            let d = app.document.as_mut().expect("a document");
+            d.apply(pl_core::OpKind::InsertAt {
+                at: 1,
+                seq: "AAAA".to_string(),
+            })
+            .expect("an ordinary insert");
+            let cursor = d.log.cursor();
+            let seq = d.molecule().seq.clone();
+            assert!(d.unsaved(), "the fixture depends on there being an edit");
+
+            let path =
+                std::env::temp_dir().join(format!("pl-gui-trace-{}-{i}.ab1", std::process::id()));
+            std::fs::write(&path, &bytes).unwrap();
+            app.load(path.clone());
+            let _ = std::fs::remove_file(&path);
+
+            let d = app.document.as_ref().unwrap_or_else(|| {
+                panic!("{what}: the document was destroyed");
+            });
+            assert_eq!(d.log.cursor(), cursor, "{what}: the history moved");
+            assert_eq!(d.molecule().seq, seq, "{what}: the bases changed");
+            assert!(app.error.is_none(), "{what}: the screen was taken over");
+            assert!(
+                app.pending_open.is_none(),
+                "{what}: the unsaved-changes question was raised for a read"
+            );
+            if i == 0 {
+                assert_eq!(app.reads.len(), 1, "{what}: the read was not kept");
+                assert!(app.tab == Tab::Reads, "{what}: the Reads tab did not open");
+                // No molecule was compared against here, but one IS open, so
+                // the comparison is armed rather than left saying "no
+                // reference".
+                assert!(
+                    !matches!(app.reads[0].state, reads::CompareState::NoReference),
+                    "{what}: a read taken while a document is open must be compared to it"
+                );
+            } else {
+                assert!(app.reads.is_empty(), "{what}: a damaged file became a read");
+                assert!(
+                    app.notice.is_some(),
+                    "{what}: the failure was not reported at all"
+                );
+                // And it names the format rather than saying "parse error",
+                // which is what sends the user to the right tool.
+                if i == 1 {
+                    let n = app.notice.clone().unwrap_or_default();
+                    assert!(n.contains("SCF"), "{what}: {n}");
+                }
+            }
+        }
+    }
+
+    /// PROVEN TO FAIL at 78a46f2 for the same reason as the test above: there
+    /// is no `reads` field to survive anything.
+    ///
+    /// With NO molecule open a trace still opens, and every number that would
+    /// be about a pair is absent — because there is no pair. Then opening a
+    /// molecule compares what is already held.
+    #[test]
+    fn a_trace_opens_with_no_molecule_and_claims_nothing_about_one() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        assert!(app.document.is_none());
+
+        let path = std::env::temp_dir().join(format!("pl-gui-lonely-{}.ab1", std::process::id()));
+        std::fs::write(
+            &path,
+            reads::tests::ab1(b"ACGTACGTACGTACGTACGTACGT", &[40u8; 24]),
+        )
+        .unwrap();
+        app.load(path.clone());
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(app.reads.len(), 1);
+        assert!(app.document.is_none(), "no document was invented");
+        // `error` renders as a full-screen takeover and is documented as right
+        // for "there is no document" and wrong for anything else. A trace that
+        // loaded fine is not an error.
+        assert!(app.error.is_none());
+        let r = &app.reads[0];
+        assert!(matches!(r.state, reads::CompareState::NoReference));
+        let v = r.verdict(0);
+        assert!(v.contains("No construct is open"), "{v}");
+        // NOT ONE NUMBER ABOUT A PAIR.
+        assert!(!v.contains('%'), "{v}");
+        assert!(!v.contains("identity"), "{v}");
+        assert!(!v.contains("covers"), "{v}");
+        // But the facts about the FILE are all there.
+        let h = r.header().join(" | ");
+        assert!(h.contains("24 bases"), "{h}");
+        assert!(r.reliable().is_some(), "the Mott window needs no reference");
+
+        // And the panel paints in that state rather than refusing.
+        app.tab = Tab::Reads;
+        let _ = paint_out(&mut app, &ctx, window());
+
+        // Now a molecule arrives and the held read is compared to it.
+        let mol = std::env::temp_dir().join(format!("pl-gui-late-{}.fa", std::process::id()));
+        std::fs::write(&mol, ">x\nACGTACGTACGTACGTACGTACGTTTTTTTTTTTTT\n").unwrap();
+        app.load(mol.clone());
+        let _ = std::fs::remove_file(&mol);
+        assert_eq!(
+            app.reads.len(),
+            1,
+            "the read survived the document arriving"
+        );
+        assert!(
+            !matches!(app.reads[0].state, reads::CompareState::NoReference),
+            "it was not re-armed against the document that arrived"
+        );
+    }
+
+    /// PROVEN TO FAIL against the MUTATION of dropping `seq_version` from
+    /// `App::reads_for`: a report computed before an edit stays on screen
+    /// beside a chromatogram that never changes, and reads as current.
+    ///
+    /// It is compile-only against 78a46f2, where there are no reads at all.
+    #[test]
+    fn an_edit_re_arms_every_read_rather_than_leaving_a_stale_report() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        let path = std::env::temp_dir().join(format!("pl-gui-stale-{}.ab1", std::process::id()));
+        let seq = app.document.as_ref().unwrap().molecule().seq.clone();
+        // A read that really is from this molecule, so there is a report to go
+        // stale in the first place.
+        let read: Vec<u8> = seq.iter().copied().take(120).collect();
+        std::fs::write(&path, reads::tests::ab1(&read, &[45u8; 120])).unwrap();
+        app.load(path.clone());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(app.reads.len(), 1);
+        for _ in 0..400 {
+            app.refresh_reads();
+            let _ = paint_out(&mut app, &ctx, window());
+            if matches!(app.reads[0].state, reads::CompareState::Done(_)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let reads::CompareState::Done(before) = &app.reads[0].state else {
+            panic!("the first comparison never finished: {:?}", app.reads_for);
+        };
+        let covered = before.covered;
+
+        // Now move every base the read covers, by inserting in front of them.
+        let d = app.document.as_mut().expect("a document");
+        d.apply(pl_core::OpKind::InsertAt {
+            at: 1,
+            seq: "GGGGGGGGGG".to_string(),
+        })
+        .expect("an ordinary insert");
+        // The moment the sequence moved, the old report must be gone — either
+        // re-running or already replaced, and never the one computed before.
+        app.refresh_reads();
+        assert!(
+            !matches!(app.reads[0].state, reads::CompareState::Done(_)),
+            "the report survived an edit that moved every base it describes"
+        );
+        for _ in 0..400 {
+            app.refresh_reads();
+            if matches!(app.reads[0].state, reads::CompareState::Done(_)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let reads::CompareState::Done(after) = &app.reads[0].state else {
+            panic!("the re-comparison never finished");
+        };
+        assert_eq!(
+            after.covered,
+            (covered.0 + 10, covered.1 + 10),
+            "the report still describes where the bases used to be"
         );
     }
 
@@ -15158,6 +16914,123 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    /// The gel is built when something changes, and NOT once a frame.
+    ///
+    /// PROVEN TO FAIL against the code this replaces, which called
+    /// `self.gel.build(...)` unconditionally from `central` on every repaint,
+    /// defended by a comment saying "there is nothing to cache and nothing to
+    /// go stale". On a 4.6 Mb genome that frame ran `Gel::run` over ~14,000
+    /// fragments across seven lanes and formatted kilobytes of prose, and
+    /// twelve mouse-moves over the pane cost 4.8x the same twelve over the map.
+    ///
+    /// Identity, not equality: two equal pictures built twice is exactly the
+    /// waste being measured, so this asks whether the SAME `Vec` came back.
+    #[test]
+    fn the_gel_is_rebuilt_only_when_something_it_depends_on_changes() {
+        let mut app = App::blank();
+        app.load(PathBuf::from("../../prototype/demo-construct.gb"));
+        digested(&mut app);
+
+        app.gel_ready().expect("a finished digest builds");
+        let first = app
+            .gel_cache
+            .as_ref()
+            .expect("cached")
+            .1
+            .scene
+            .items
+            .as_ptr();
+        for _ in 0..5 {
+            app.gel_ready().expect("still fine");
+            assert_eq!(
+                app.gel_cache
+                    .as_ref()
+                    .expect("cached")
+                    .1
+                    .scene
+                    .items
+                    .as_ptr(),
+                first,
+                "the gel was rebuilt with nothing changed"
+            );
+        }
+
+        // ...and every control that CAN change the picture does rebuild it.
+        // A key that missed one of these would serve a stale gel, which is the
+        // failure a memo trades for the one above.
+        type Change = (&'static str, fn(&mut App));
+        let changes: Vec<Change> = vec![
+            ("agarose", |a| a.gel.conditions.agarose_percent = 2.0),
+            ("band width", |a| a.gel.conditions.band_mm = 4.0),
+            ("run length", |a| a.gel.conditions.run_mm = 120.0),
+            ("ladder", |a| a.gel.ladder = "100bp"),
+            ("dark field", |a| a.gel.inverted = !a.gel.inverted),
+            ("arrangement", |a| {
+                a.gel.arrangement = gel::Arrangement::Together
+            }),
+            ("a tick", |a| {
+                a.gel.picked.insert("EcoRI".into());
+            }),
+            ("the enzyme filter", |a| {
+                a.enzyme_set = pl_enzymes::EnzymeSet::Unique
+            }),
+        ];
+        for (what, change) in changes {
+            let before = app
+                .gel_cache
+                .as_ref()
+                .expect("cached")
+                .1
+                .scene
+                .items
+                .as_ptr();
+            change(&mut app);
+            app.gel_ready().expect("still fine");
+            let after = app
+                .gel_cache
+                .as_ref()
+                .expect("cached")
+                .1
+                .scene
+                .items
+                .as_ptr();
+            assert_ne!(before, after, "changing the {what} did not rebuild the gel");
+        }
+
+        // And an EDIT, which is the one that matters: a gel of a sequence that
+        // has since changed is the stale-answer defect `Document::apply`'s
+        // unconditional re-digest exists to prevent.
+        let before = app
+            .gel_cache
+            .as_ref()
+            .expect("cached")
+            .1
+            .scene
+            .items
+            .as_ptr();
+        app.document
+            .as_mut()
+            .expect("a document")
+            .apply(pl_core::OpKind::InsertAt {
+                at: 1,
+                seq: "GAATTCGAATTC".into(),
+            })
+            .expect("an insert applies");
+        digested(&mut app);
+        app.gel_ready().expect("still fine");
+        assert_ne!(
+            before,
+            app.gel_cache
+                .as_ref()
+                .expect("cached")
+                .1
+                .scene
+                .items
+                .as_ptr(),
+            "an edit left the old gel on screen"
+        );
     }
 
     /// The row pitch is a property of the DOCUMENT, not of a background

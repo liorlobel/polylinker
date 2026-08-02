@@ -33,14 +33,31 @@
 use crate::scene::{Anchor, Item, Scene, Seg};
 
 /// Which colours to draw the four bases in.
+///
+/// A palette is chosen for a BACKGROUND, and [`Palette::AccessibleDark`] exists
+/// because that is easy to forget. `to_scene` emits no background rectangle, so
+/// whatever draws the scene puts these colours straight onto its own field —
+/// and Okabe–Ito's black is a white-page colour. On the application's dark
+/// panel (`#161a1d`) it measures **1.20:1**: the G trace and every G letter
+/// under it were invisible, so a four-channel chromatogram could not be read
+/// at all, by anyone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Palette {
     /// A green, C blue, G black, T red — what every other trace viewer uses.
     #[default]
     Classic,
-    /// Okabe–Ito, which stays distinguishable to red–green colour-blind
-    /// readers. A bluish green, C blue, G black, T vermillion.
+    /// Okabe–Ito on a LIGHT field, which stays distinguishable to red–green
+    /// colour-blind readers. A bluish green, C blue, G black, T vermillion.
     Accessible,
+    /// The same set re-pointed for a DARK field: G takes the light neutral that
+    /// black plays the role of on paper, and C moves from Okabe–Ito's blue to
+    /// its sky blue, which is the member of the set that survives there.
+    ///
+    /// All four clear 4.5:1 on `#161a1d` — 5.12, 7.59, 14.38 and 4.53 — so the
+    /// base letters, which are TEXT, are legible and not merely visible. No
+    /// colour outside the Okabe–Ito set is introduced except the neutral, which
+    /// is not a hue.
+    AccessibleDark,
 }
 
 impl Palette {
@@ -55,7 +72,29 @@ impl Palette {
             (Palette::Accessible, b'C') => "#0072b2",
             (Palette::Accessible, b'G') => "#000000",
             (Palette::Accessible, b'T') => "#d55e00",
+            (Palette::AccessibleDark, b'A') => "#009e73",
+            (Palette::AccessibleDark, b'C') => "#56b4e9",
+            (Palette::AccessibleDark, b'G') => "#e6e9ee",
+            (Palette::AccessibleDark, b'T') => "#d55e00",
             _ => "#808080",
+        }
+    }
+
+    /// The quality bar's fill: `(at or above Q20, below)`.
+    ///
+    /// Per palette for the same reason the base colours are. The light-field
+    /// pair used to be hard-coded `#b8c4d0` / `#e6a0a0`, which are 9.87:1 and
+    /// 8.25:1 on a dark panel and **1.71:1 and 2.05:1** on a light one — under
+    /// the 3:1 a graphical object needs, so on a white page the bars this
+    /// crate's own test counts were barely there. Quality is also carried by
+    /// bar HEIGHT, so colour is never the only channel; that does not excuse a
+    /// bar nobody can see.
+    pub fn quality(&self, at_least_q20: bool) -> &'static str {
+        match (self, at_least_q20) {
+            (Palette::AccessibleDark, true) => "#b8c4d0",
+            (Palette::AccessibleDark, false) => "#e6a0a0",
+            (_, true) => "#5d6774",
+            (_, false) => "#a94f00",
         }
     }
 }
@@ -233,9 +272,11 @@ impl View<'_> {
                         Seg::Line(xs(pk) - half, top + QUAL - 6.0),
                         Seg::Close,
                     ],
-                    // Below Q20 in grey: the same threshold the rest of the
-                    // project uses to decide what a difference is worth.
-                    fill: Some(if q >= 20 { "#b8c4d0" } else { "#e6a0a0" }.into()),
+                    // Below Q20 in its own colour: the same threshold the rest
+                    // of the project uses to decide what a difference is worth.
+                    // From the palette, because a bar is drawn on the same
+                    // field the traces are — see `Palette::quality`.
+                    fill: Some(o.palette.quality(q >= 20).into()),
                     stroke: None,
                     stroke_width: 0.0,
                     title: Some(format!("base {} Q{q}", b + 1)),
@@ -514,17 +555,106 @@ mod tests {
         let (ch, peaks) = synth(seq, *b"GATC");
         let qual: Vec<u8> = vec![50, 50, 50, 5, 5, 50, 50, 50];
         let v = view(&ch, &peaks, seq, &qual, *b"GATC");
-        let (sc, _) = v.to_scene(&Options::default());
-        let bars: Vec<String> = sc
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                Item::Path { fill: Some(f), .. } => Some(f.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(bars.len(), 8);
-        assert_eq!(bars.iter().filter(|f| f.as_str() == "#e6a0a0").count(), 2);
+        // Every palette, because the pair is now the palette's — see
+        // `Palette::quality` — and a bar that is invisible on the field it is
+        // drawn on is not a mark.
+        for palette in [
+            Palette::Classic,
+            Palette::Accessible,
+            Palette::AccessibleDark,
+        ] {
+            let (sc, _) = v.to_scene(&Options {
+                palette,
+                ..Default::default()
+            });
+            let bars: Vec<String> = sc
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Path { fill: Some(f), .. } => Some(f.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(bars.len(), 8, "{palette:?}");
+            let low = palette.quality(false);
+            assert_ne!(low, palette.quality(true), "{palette:?}");
+            assert_eq!(
+                bars.iter().filter(|f| f.as_str() == low).count(),
+                2,
+                "{palette:?}"
+            );
+        }
+    }
+
+    /// A palette is chosen for a BACKGROUND, and this is the assertion that
+    /// says which.
+    ///
+    /// PROVEN TO FAIL before `AccessibleDark`: `Palette::Accessible` puts G at
+    /// `#000000`, which on the application's dark panel is **1.20:1** — under
+    /// even the 3:1 a graphical object needs, so the G trace and the G letters
+    /// under it were both invisible. `to_scene` emits no background rect, so
+    /// the caller's field is the field.
+    #[test]
+    fn each_palette_is_legible_on_the_field_it_is_meant_for() {
+        use crate::contrast::{parse_hex, ratio};
+        // The application's own two panels, and a white page for the SVG
+        // `pl trace --svg` writes.
+        let dark = parse_hex("#161a1d").expect("hex");
+        let light = parse_hex("#fafbfc").expect("hex");
+        let white = (255u8, 255u8, 255u8);
+        for base in b"ACGT" {
+            for bg in [light, white] {
+                // 3:1, the graphical-object threshold this project already
+                // applies to Okabe-Ito — see `contrast`'s own test naming the
+                // three members that fail it on white.
+                for p in [Palette::Classic, Palette::Accessible] {
+                    let c = parse_hex(p.color(*base)).expect("hex");
+                    assert!(
+                        ratio(c, bg) >= 3.0,
+                        "{p:?} {} on {bg:?}: {:.2}:1",
+                        *base as char,
+                        ratio(c, bg)
+                    );
+                }
+                for at_least in [true, false] {
+                    let c = parse_hex(Palette::Accessible.quality(at_least)).expect("hex");
+                    assert!(ratio(c, bg) >= 3.0, "quality bar: {:.2}:1", ratio(c, bg));
+                }
+            }
+            // The dark field clears 4.5:1, not merely 3:1, because the base
+            // letters drawn in these colours are text.
+            let c = parse_hex(Palette::AccessibleDark.color(*base)).expect("hex");
+            assert!(
+                ratio(c, dark) >= 4.5,
+                "AccessibleDark {} on the dark panel: {:.2}:1",
+                *base as char,
+                ratio(c, dark)
+            );
+            for at_least in [true, false] {
+                let c = parse_hex(Palette::AccessibleDark.quality(at_least)).expect("hex");
+                assert!(
+                    ratio(c, dark) >= 3.0,
+                    "quality bar: {:.2}:1",
+                    ratio(c, dark)
+                );
+            }
+            // And the control: the light-field palette really is the one that
+            // fails there, so the split is not decoration.
+            let g = parse_hex(Palette::Accessible.color(b'G')).expect("hex");
+            assert!(ratio(g, dark) < 3.0, "{:.2}:1", ratio(g, dark));
+        }
+        // Four distinct colours in each palette, or the picture has three
+        // channels.
+        for p in [
+            Palette::Classic,
+            Palette::Accessible,
+            Palette::AccessibleDark,
+        ] {
+            let mut seen: Vec<&str> = b"ACGT".iter().map(|b| p.color(*b)).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), 4, "{p:?}");
+        }
     }
 
     #[test]

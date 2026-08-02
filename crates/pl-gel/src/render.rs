@@ -27,7 +27,12 @@ pub struct Lane {
 }
 
 /// Layout.
-#[derive(Debug, Clone, Copy)]
+///
+/// NOT `Copy` since [`Options::note`] arrived. That is deliberate: a caveat is
+/// a `String` because [`crate::Simulation::caveat`] composes one, and the whole
+/// reason it is a method rather than a UI string is that no caller may be
+/// trusted to remember it.
+#[derive(Debug, Clone)]
 pub struct Options {
     pub lane_width: f64,
     pub lane_gap: f64,
@@ -37,6 +42,15 @@ pub struct Options {
     pub note_unplaced: bool,
     /// Dark background with light bands, the way a stained gel photographs.
     pub inverted: bool,
+    /// A sentence laid out under the picture — normally
+    /// [`crate::Simulation::caveat`].
+    ///
+    /// The exported SVG used to carry no calibration statement at all: the CLI
+    /// `println!`s the caveat beside the table and the file goes out bare, so a
+    /// modelled gel reached a reader with nothing saying it was modelled. The
+    /// map crate solved the same problem by putting its disclosure INTO the
+    /// scene rather than beside it, and this is that fix for the gel.
+    pub note: Option<String>,
 }
 
 impl Default for Options {
@@ -47,6 +61,27 @@ impl Default for Options {
             scale: 4.0,
             note_unplaced: true,
             inverted: true,
+            note: None,
+        }
+    }
+}
+
+impl Options {
+    /// The background this picture is drawn on.
+    ///
+    /// Exposed because `pl_draw::contrast::audit` takes the background as a
+    /// parameter, and a caller that hard-coded `"#15181c"` to satisfy it would
+    /// be a second source of truth for a colour chosen here.
+    pub fn background(&self) -> &'static str {
+        self.palette().0
+    }
+
+    /// `(background, band, text, dim)`.
+    fn palette(&self) -> (&'static str, &'static str, &'static str, &'static str) {
+        if self.inverted {
+            ("#15181c", "#f2f4f7", "#e6e9ee", "#9aa4b0")
+        } else {
+            ("#ffffff", "#1c2026", "#1c2026", "#5d6774")
         }
     }
 }
@@ -58,6 +93,14 @@ const LABEL_OFFSET: f64 = 4.0;
 const BAND_LABEL_SIZE: f64 = 9.0;
 const LANE_LABEL_SIZE: f64 = 11.0;
 const NOTE_SIZE: f64 = 8.5;
+const CAVEAT_SIZE: f64 = 8.0;
+const CAVEAT_LEADING: f64 = 10.0;
+/// The narrowest a picture carrying a caveat is allowed to be.
+///
+/// A two-lane gel is 238 pt wide, and wrapping 250 characters of prose into
+/// 202 pt of text column produces fifteen lines of caption under a picture 424
+/// pt tall. The sentence is not optional, so the picture widens for it.
+const CAVEAT_MIN_WIDTH: f64 = 380.0;
 
 /// Width of a string in points, from Helvetica's advance widths.
 ///
@@ -188,11 +231,50 @@ fn layout(lanes: &[Lane], o: &Options) -> Layout {
         sample.max(ladder)
     };
     let gap = o.lane_gap.max(LABEL_OFFSET * 2.0 + in_gap);
-    let width = left
+    let mut width = left
         + right
         + lanes.len() as f64 * o.lane_width
         + (lanes.len().saturating_sub(1)) as f64 * gap;
+    // The caveat widens the picture rather than wrapping into a column the
+    // lanes happen to have produced, and the lanes stay centred in it: a
+    // two-lane gel pushed hard left under a full-width paragraph reads as a
+    // layout bug, which is not what anyone should be looking at while deciding
+    // whether to trust the positions.
+    let mut left = left;
+    if o.note.is_some() && width < CAVEAT_MIN_WIDTH {
+        left += (CAVEAT_MIN_WIDTH - width) / 2.0;
+        width = CAVEAT_MIN_WIDTH;
+    }
     Layout { left, gap, width }
+}
+
+/// Break a sentence into lines no wider than `width`, using the same advance
+/// table the margins are reserved from.
+///
+/// Greedy, on spaces. A word longer than the column is left long rather than
+/// hyphenated or cut: `every_label_is_inside_the_picture_it_is_drawn_on` would
+/// then be the thing that catches it, which is the right place for that to
+/// surface. Nothing in `caveat()` is one.
+fn wrap(s: &str, size: f64, width: f64) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in s.split_whitespace() {
+        let candidate = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur} {word}")
+        };
+        if !cur.is_empty() && text_width(&candidate, size) > width {
+            lines.push(std::mem::take(&mut cur));
+            cur = word.to_string();
+        } else {
+            cur = candidate;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
 }
 
 /// The captions for the fragments this lane's gel cannot place.
@@ -225,13 +307,18 @@ pub fn to_scene(lanes: &[Lane], o: &Options, title: &str) -> Scene {
     let lay = layout(lanes, o);
     let width = lay.width;
     let note_h = if o.note_unplaced { 46.0 } else { 14.0 };
-    let height = TOP + gel_h + note_h;
-
-    let (bg, band, text, dim) = if o.inverted {
-        ("#15181c", "#f2f4f7", "#e6e9ee", "#9aa4b0")
-    } else {
-        ("#ffffff", "#1c2026", "#1c2026", "#5d6774")
+    let caveat: Vec<String> = match &o.note {
+        Some(n) => wrap(n, CAVEAT_SIZE, width - PAD * 2.0),
+        None => Vec::new(),
     };
+    let caveat_h = if caveat.is_empty() {
+        0.0
+    } else {
+        caveat.len() as f64 * CAVEAT_LEADING + 8.0
+    };
+    let height = TOP + gel_h + note_h + caveat_h;
+
+    let (bg, band, text, dim) = o.palette();
 
     let mut items = vec![Item::Path {
         segs: rect(0.0, 0.0, width, height),
@@ -306,6 +393,18 @@ pub fn to_scene(lanes: &[Lane], o: &Options, title: &str) -> Scene {
         }
     }
 
+    for (k, line) in caveat.iter().enumerate() {
+        items.push(Item::Text {
+            x: PAD,
+            y: TOP + gel_h + note_h + 4.0 + k as f64 * CAVEAT_LEADING,
+            size: CAVEAT_SIZE,
+            anchor: Anchor::Start,
+            color: dim.into(),
+            bold: false,
+            text: line.clone(),
+        });
+    }
+
     Scene {
         width,
         height,
@@ -314,17 +413,16 @@ pub fn to_scene(lanes: &[Lane], o: &Options, title: &str) -> Scene {
     }
 }
 
-/// `2000` for one fragment, `2000/2100` for a band holding several.
+/// `2000` for one fragment, `2000/2100` for a band holding several — and a span
+/// with a count once there are more of them than anyone would read.
+///
+/// See [`crate::MAX_LISTED`] for what an uncapped list did to the picture.
 fn label_of(g: &Group) -> String {
-    g.sizes
-        .iter()
-        .map(u64::to_string)
-        .collect::<Vec<_>>()
-        .join("/")
+    g.label()
 }
 
 fn join(v: &[u64]) -> String {
-    v.iter().map(u64::to_string).collect::<Vec<_>>().join(", ")
+    crate::name_sizes(v, ", ")
 }
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> Vec<Seg> {
@@ -708,6 +806,147 @@ mod tests {
             narrow.width,
             wide.width
         );
+    }
+
+    /// PROVEN TO FAIL at 78a46f2: `Options` had no `note` field, so no gel
+    /// picture anywhere carried a calibration statement.
+    ///
+    /// `pl gel demo.gb --cut EcoRI --svg out.svg` printed the caveat to stdout
+    /// and wrote an SVG with nothing of the kind in it. That file is what
+    /// reaches a reader, and a modelled gel that does not say it is modelled is
+    /// a picture somebody will size an unknown band off.
+    #[test]
+    fn a_caveat_reaches_the_picture_and_not_only_the_terminal() {
+        let l = lane(&[2_000, 6_000], "EcoRI", false);
+        let caveat = l.sim.caveat();
+        let o = Options {
+            note: Some(caveat.clone()),
+            ..Default::default()
+        };
+        let sc = to_scene(&[l], &o, "t");
+        let drawn = texts(&sc).join(" ");
+        // Wrapped, so compare on the words rather than on the whole string.
+        for word in caveat.split_whitespace() {
+            assert!(drawn.contains(word), "{word:?} is missing from the picture");
+        }
+        assert!(
+            drawn.contains("not good enough"),
+            "the sentence that says what it cannot be used for: {drawn}"
+        );
+
+        // And the picture grew to hold it rather than drawing over the gel.
+        let bare = to_scene(
+            &[lane(&[2_000, 6_000], "EcoRI", false)],
+            &Options::default(),
+            "t",
+        );
+        assert!(sc.height > bare.height, "{} vs {}", sc.height, bare.height);
+        // Every line of it is inside the viewBox: an SVG clips at its viewport,
+        // so a caption past the edge is not close to the edge, it is gone.
+        for item in &sc.items {
+            let Item::Text {
+                x,
+                size,
+                anchor,
+                text,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            let (lo, hi) = extent(*x, *size, *anchor, text);
+            assert!(lo >= -1e-9 && hi <= sc.width + 1e-9, "{text:?}: {lo}..{hi}");
+        }
+    }
+
+    /// PROVEN TO FAIL before [`crate::MAX_LISTED`]: seven lanes of a genome
+    /// digest produced a `Scene` 280,947 pt wide.
+    ///
+    /// A BbsI digest of E. coli K-12 makes 2,309 cuts, and single-linkage
+    /// merging puts 1,769 of the fragments in ONE band. `label_of` joined every
+    /// one of their sizes with `/` — 8,780 characters — and `layout` reserves
+    /// half a band label at both margins and the whole of it in every
+    /// inter-lane gap. `pl gel NC_000913.3.gb --cut BbsI --svg` came out
+    /// `viewBox="0 0 80731.06 442"`; the GUI, which floors its fit scale so the
+    /// 8.5 pt captions stay legible, painted the first lane 4,283 px into a
+    /// 238,805 px canvas inside a 950 px pane, so almost every scrollbar
+    /// position showed an empty dark field.
+    ///
+    /// The bound is stated rather than relative: every other test in this file
+    /// uses a 3.2 kb plasmid, so none of them can see this.
+    #[test]
+    fn a_band_holding_a_thousand_fragments_does_not_widen_the_picture_off_the_screen() {
+        // 1,769 sizes one base apart: adjacent ones are far closer than a band
+        // width, so single linkage chains the whole run into one group — which
+        // is exactly what a genome digest does.
+        let sizes: Vec<u64> = (500..500 + 1_769).collect();
+        let lanes = vec![
+            lane(&[500, 1_000, 3_000, 10_000], "1kb ladder", true),
+            lane(&sizes, "BbsI", false),
+        ];
+        let sim = &lanes[1].sim;
+        assert_eq!(sim.groups.len(), 1, "the fixture must produce one band");
+        assert_eq!(sim.groups[0].sizes.len(), 1_769);
+
+        let o = Options {
+            note: Some(sim.caveat()),
+            ..Default::default()
+        };
+        let sc = to_scene(&lanes, &o, "t");
+        assert!(
+            sc.width < 1_200.0,
+            "a two-lane gel came out {} pt wide",
+            sc.width
+        );
+        let longest = texts(&sc).iter().map(|t| t.chars().count()).max().unwrap();
+        assert!(
+            longest < 200,
+            "the longest text item is {longest} characters"
+        );
+
+        // AND THE COUNT IS STILL SAID. Capping the label must not turn 1,769
+        // co-migrating fragments into a band that looks like one fragment.
+        let drawn = texts(&sc).join(" | ");
+        assert!(drawn.contains("1769 fragments"), "{drawn}");
+        assert!(
+            drawn.contains("500-2268"),
+            "the span, not three of the sizes"
+        );
+    }
+
+    /// The control: a band with four fragments in it still names all four.
+    #[test]
+    fn a_band_small_enough_to_read_is_still_named_fragment_by_fragment() {
+        let g = Group {
+            mm: 40.0,
+            sizes: vec![2_000, 2_050, 2_100, 2_150],
+        };
+        assert_eq!(g.label(), "2000/2050/2100/2150");
+        let mut five = g.sizes.clone();
+        five.push(2_200);
+        assert_eq!(
+            crate::name_sizes(&five, "/"),
+            "2000-2200 (5 fragments)",
+            "one more, and it counts instead"
+        );
+    }
+
+    /// The background is a fact about the picture, and a caller auditing its
+    /// contrast must not have to re-type the hex.
+    #[test]
+    fn the_background_colour_is_the_one_the_picture_is_drawn_on() {
+        for inverted in [true, false] {
+            let o = Options {
+                inverted,
+                ..Default::default()
+            };
+            let sc = to_scene(&[lane(&[2_000], "a", false)], &o, "t");
+            let first = match &sc.items[0] {
+                Item::Path { fill, .. } => fill.clone().expect("the background is filled"),
+                other => panic!("the first item is the background, got {other:?}"),
+            };
+            assert_eq!(first, o.background());
+        }
     }
 
     #[test]

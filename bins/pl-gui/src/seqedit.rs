@@ -1862,17 +1862,46 @@ impl SeqEdit {
     /// one cell per byte) nor what the file holds, and pasting it back needs
     /// consent for three characters. Skipping them and saying how many is the
     /// only option that is honest in both destinations.
-    pub fn copy(&self, mol: &Molecule) -> Option<(String, usize)> {
+    /// The bytes the selection names, and the ONE expression that decides which
+    /// arc that is.
+    ///
+    /// Split out so the readout, the clipboard and the reverse complement
+    /// cannot disagree. Reading `(lo, hi)` off a `through_origin` selection
+    /// describes the COMPLEMENT arc — 4,921 bases where 465 were selected — and
+    /// every number derived from it looks entirely reasonable.
+    pub fn selected_bases(&self, mol: &Molecule) -> Option<Vec<u8>> {
         let n = mol.len();
         let s = self.sel?.canonical(n, mol.topology.is_circular());
         if s.is_empty(n) {
             return None;
         }
-        let bytes = if s.through_origin {
-            mol.subseq(s.hi() + 1, s.lo())?
+        if s.through_origin {
+            mol.subseq(s.hi() + 1, s.lo())
         } else {
-            mol.subseq(s.lo() + 1, s.hi())?
-        };
+            mol.subseq(s.lo() + 1, s.hi())
+        }
+    }
+
+    pub fn copy(&self, mol: &Molecule) -> Option<(String, usize)> {
+        let bytes = self.selected_bases(mol)?;
+        let text: String = bytes
+            .iter()
+            .filter(|b| b.is_ascii_graphic())
+            .map(|b| *b as char)
+            .collect();
+        let skipped = bytes.len() - text.len();
+        Some((text, skipped))
+    }
+
+    /// The selection's reverse complement, for the clipboard.
+    ///
+    /// A 129-base reverse complement is not something to print on a status
+    /// line; it is something to put on the clipboard, which is why this is a
+    /// button and not a fact in the readout. Same bytes [`copy`](Self::copy)
+    /// returns, same non-graphic skip report, and case is preserved because
+    /// `Molecule::seq` is case-preserved and `reverse_complement` is too.
+    pub fn copy_revcomp(&self, mol: &Molecule) -> Option<(String, usize)> {
+        let bytes = pl_core::reverse_complement(&self.selected_bases(mol)?);
         let text: String = bytes
             .iter()
             .filter(|b| b.is_ascii_graphic())
@@ -2146,7 +2175,26 @@ impl SeqEdit {
                 // sits at whichever end they dragged to. That mismatch is
                 // silent, plausible, and costs a deletion at the wrong end of a
                 // cassette.
-                let mut out = format!("{}..{} · {} bp", fmt_int(a), fmt_int(b), fmt_int(count));
+                let mut out = format!(
+                    "{}..{} · {} bp{}",
+                    fmt_int(a),
+                    fmt_int(b),
+                    fmt_int(count),
+                    codon_clause(count)
+                );
+                // Everything below is computed from `selected_bases`, which is
+                // the same expression the clipboard uses. Deriving them from
+                // `(lo, hi)` instead would describe the complement arc of a
+                // through-origin selection and report a GC% for 4,921 bases
+                // where 465 were highlighted.
+                if let Some(bases) = self.selected_bases(mol) {
+                    out.push_str(" · ");
+                    out.push_str(&gc_clause(&bases));
+                    if let Some(t) = tm_clause(&bases, a, mol.len()) {
+                        out.push_str(" · ");
+                        out.push_str(&t);
+                    }
+                }
                 if s.through_origin {
                     out.push_str(" · crosses the origin");
                 } else if count == mol.len() && count > 0 {
@@ -2172,6 +2220,184 @@ impl SeqEdit {
             ),
             (c, _) => format!("insert at {at} · between {} and {at}", fmt_int(c)),
         }
+    }
+}
+
+/// The longest selection that gets a Tm, in bases.
+///
+/// [`pl_design::Constraints::LEN_HARD_MAX`], not a number of this module's own.
+/// The app must not report a Tm for an oligo `pl design` would refuse to
+/// consider, and one control giving two answers is a defect this project has
+/// already had to fix once.
+pub const TM_MAX_BP: u64 = pl_design::Constraints::LEN_HARD_MAX as u64;
+
+/// The shortest selection that gets a Tm, in bases.
+///
+/// [`pl_design::Constraints::LEN_HARD_MIN`], whose own doc calls it "the mirror
+/// of `LEN_HARD_MAX`, and named for the same reason". The rule stated above the
+/// cap — the app must not report a Tm for an oligo `pl design` would refuse to
+/// consider — was applied to ONE end of a pair of constants that exist to be
+/// used together, so the readout printed `Tm -178.3 °C` for two bases and
+/// `Tm -16.7 °C` for a six-base restriction site, in the same grammar as a
+/// measurement. `pl design --len 2..60` answers `expected a number from 8 to
+/// 60`; below eight the initiation and terminal terms dominate the stack and
+/// the quotient goes not merely imprecise but negative.
+pub const TM_MIN_BP: u64 = pl_design::Constraints::LEN_HARD_MIN as u64;
+
+/// How the readout says it is declining to compute a Tm, so the hover can
+/// recognise its own line rather than re-deriving the length rule.
+const TM_CAPPED: &str = "Tm n/a over";
+/// The same, at the other end.
+const TM_FLOORED: &str = "Tm n/a under";
+
+/// What hovering the readout says, or `None` when it makes no Tm claim.
+///
+/// [`pl_thermo::Method::describe`] VERBATIM, never a hand-written "50 mM Na+".
+/// It exists so that a number differing from another tool's reads as a
+/// documented modelling choice rather than a bug, and `design.rs` already
+/// renders the same string from the same call.
+pub fn tm_hover(readout: &str) -> Option<String> {
+    if !readout.contains("Tm ") {
+        return None;
+    }
+    let mut s = tm_method().describe();
+    if readout.contains(TM_CAPPED) {
+        s.push_str(
+            "\n\nThe model is two-state nearest-neighbour: one short oligo annealing to its \
+             complement in a single transition. A duplex of thousands of bases has no melting \
+             temperature, it has a melting profile, domain by domain. The formula does not blow \
+             up on one — it converges on a plausible number in the seventies — which is why this \
+             refuses rather than prints it.",
+        );
+    }
+    if readout.contains(TM_FLOORED) {
+        s.push_str(
+            "\n\nThe same model from the other end. A nearest-neighbour Tm is a stack of \
+             doublet terms plus fixed initiation and terminal ones, and below about eight bases \
+             the fixed terms dominate the stack: the quotient does not merely lose precision, \
+             it goes negative. `pl tm AT` returns -219.1 C. That is not a cold-melting duplex, \
+             it is a formula outside its range.",
+        );
+    }
+    Some(s)
+}
+
+/// Does this readout carry an actual melting temperature, as opposed to a
+/// sentence declining to give one?
+///
+/// The conditions belong beside a NUMBER. Printing "SantaLucia 1998
+/// nearest-neighbour, 50 nM oligo, 50 mM Na+" under a line that says
+/// `Tm n/a over 60 bp` states the conditions of a calculation that was not
+/// done.
+pub fn tm_shown(readout: &str) -> bool {
+    readout.contains("Tm ") && !readout.contains("Tm n/a")
+}
+
+/// The conditions behind every Tm this surface prints.
+///
+/// The same value `pl tm` uses: `cmd_tm` defaults `--table` to 1998 and
+/// `--salt` to santalucia, and leaves `--na`/`--oligo` at the struct defaults.
+/// Named once so the readout, its hover and the CLI cannot drift.
+pub fn tm_method() -> pl_thermo::Method {
+    pl_thermo::Method::default()
+}
+
+/// ` (43 codons)`, or ` (43 codons + 1)` when the selection is not a whole
+/// number of them.
+///
+/// The arithmetic a cloner is doing in their head while they drag over a
+/// cassette, and until now it was nowhere on screen. Below three bases there is
+/// no codon to count and the clause is omitted rather than printed as
+/// `(0 codons + 2)`.
+fn codon_clause(count: u64) -> String {
+    if count < 3 {
+        return String::new();
+    }
+    let (codons, rest) = (count / 3, count % 3);
+    let word = if codons == 1 { "codon" } else { "codons" };
+    if rest == 0 {
+        format!(" ({} {word})", fmt_int(codons))
+    } else {
+        format!(" ({} {word} + {rest})", fmt_int(codons))
+    }
+}
+
+/// `47.3% GC`, and what that percentage is *of*.
+///
+/// `Composition::gc_percent` is GC over UNAMBIGUOUS bases, so a selection with
+/// two Ns in it silently means something different from the File tab's
+/// whole-molecule figure unless the denominator is stated. `None` prints
+/// `GC n/a` — the File tab's own word — and never `0%`, which is a measurement.
+fn gc_clause(bases: &[u8]) -> String {
+    let c = pl_core::iupac::Composition::of(bases);
+    match c.gc_percent() {
+        None => "GC n/a".to_string(),
+        Some(gc) => {
+            let unambiguous = c.a + c.c + c.g + c.t;
+            if c.other > 0 {
+                format!("{gc:.1}% GC (of {} unambiguous)", fmt_int(unambiguous))
+            } else {
+                format!("{gc:.1}% GC")
+            }
+        }
+    }
+}
+
+/// `Tm 61.4 °C`, or the sentence saying why there is no number.
+///
+/// `start` is the 1-based molecule coordinate of `bases[0]` and `n` the
+/// molecule's length; together they turn `TmError::NotUnambiguous`'s 0-based
+/// index into the oligo into a coordinate the user can actually find. Printed
+/// raw, "base 7 is 'N'" points at a base nobody can locate when the selection
+/// begins at 4,231.
+///
+/// # Why there is a cap at all
+///
+/// The model is two-state nearest-neighbour: one oligo annealing to its
+/// complement in ONE transition. A 4 kb duplex has no melting temperature, it
+/// has a melting profile. The hazard is that the formula does not blow up — ΔH
+/// and ΔS both scale with length, so the quotient converges on something in the
+/// seventies — and a plausible number with a decimal point on it, from a model
+/// that does not apply, is the kind of wrong answer this codebase organises
+/// itself against. A silent omission is not good enough either: it reads as
+/// "not computed yet" and sends the user looking for the setting that turns it
+/// on.
+fn tm_clause(bases: &[u8], start: u64, n: u64) -> Option<String> {
+    let count = bases.len() as u64;
+    if count > TM_MAX_BP {
+        // Short here, in full on the hover. The clause has to say WHY — a
+        // silent omission reads as "not computed yet" and sends the user
+        // looking for the setting that turns it on — but most selections a
+        // cloner makes are longer than 60 bp, so the full paragraph would be
+        // wrapped across the readout of nearly every selection in the app.
+        // Naming the reason and the threshold is what stops it reading as a
+        // bug; the paragraph explaining the model belongs on the hover with
+        // the conditions.
+        return Some(format!(
+            "{TM_CAPPED} {TM_MAX_BP} bp — it melts over a range"
+        ));
+    }
+    // AND THE OTHER END OF THE SAME PAIR. Two bases came back -178.3 °C and a
+    // six-base restriction site -16.7 °C, printed in exactly the grammar of a
+    // measurement; `pl_thermo::tm` refuses only below TWO bases, so everything
+    // from a dinucleotide up was reaching the readout. The silent `None` is
+    // kept for the one-base case below, where nobody expects a number.
+    if (2..TM_MIN_BP).contains(&count) {
+        return Some(format!(
+            "{TM_FLOORED} {TM_MIN_BP} bp — too short for a nearest-neighbour stack"
+        ));
+    }
+    match pl_thermo::tm(bases, &tm_method()) {
+        Ok(t) => Some(format!("Tm {:.1} °C", t.tm)),
+        // A one-base selection has no duplex and nobody expects a number.
+        Err(pl_thermo::TmError::TooShort) => None,
+        Err(pl_thermo::TmError::NotUnambiguous(i, b)) => {
+            // Forward and through-origin at once: for a forward selection
+            // `start - 1 + i` never reaches `n`, so the modulo is inert.
+            let at = (start - 1 + i as u64) % n.max(1) + 1;
+            Some(format!("Tm n/a — base {} is {:?}", fmt_int(at), b as char))
+        }
+        Err(e) => Some(format!("Tm n/a — {e}")),
     }
 }
 

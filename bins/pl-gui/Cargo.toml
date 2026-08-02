@@ -12,13 +12,18 @@ name = "polylinker"
 path = "src/main.rs"
 
 [dependencies]
+pl-abif.workspace = true
 pl-core.workspace = true
 pl-design.workspace = true
+pl-doc.workspace = true
 pl-draw.workspace = true
 pl-enzymes.workspace = true
 pl-fileio.workspace = true
+pl-gel.workspace = true
 pl-index.workspace = true
+pl-sanger.workspace = true
 pl-scan.workspace = true
+pl-thermo.workspace = true
 
 # The GUI is the one place dependencies are accepted: it is distribution, not
 # logic. The correctness crates above still have none, and everything this

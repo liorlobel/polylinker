@@ -983,7 +983,8 @@ fn the_readout_never_prints_a_bare_position_while_a_selection_is_live() {
     let r = e.readout(&m);
     // Bases 4,961..=5,386 and 1..=40: 426 + 40 = 466, which is `n - (hi - lo)`
     // and not the 4,920 the caret difference would report.
-    assert_eq!(r, "4,961..40 · 466 bp · crosses the origin");
+    assert!(r.starts_with("4,961..40 · 466 bp"), "{r}");
+    assert!(r.ends_with("· crosses the origin"), "{r}");
     assert!(!r.starts_with("insert at"));
 
     e.sel = Some(Selection {
@@ -991,7 +992,260 @@ fn the_readout_never_prints_a_bare_position_while_a_selection_is_live() {
         head: 5386,
         through_origin: false,
     });
-    assert_eq!(e.readout(&m), "1..5,386 · 5,386 bp · whole molecule");
+    let r = e.readout(&m);
+    assert!(r.starts_with("1..5,386 · 5,386 bp"), "{r}");
+    assert!(r.ends_with("· whole molecule"), "{r}");
+}
+
+/// PROVEN TO FAIL at 78a46f2: the readout there is `4..132 · 129 bp` and
+/// nothing else. UX review finding 10.
+///
+/// The Tm oracle is `pl tm`, run against this exact oligo:
+///
+/// ```text
+/// $ pl tm GGATCCTTAACCGGTTAAGCTTGCATGCC
+/// SantaLucia 1998 nearest-neighbour, SantaLucia 1998 salt correction, 50 nM oligo, 50 mM Na+
+///    61.8C   51.7%     -230.2     -651.1  GGATCCTTAACCGGTTAAGCTTGCATGCC
+/// ```
+///
+/// Both figures are pinned as literals rather than recomputed from
+/// `pl_thermo::tm` here, because a test that calls the same function the code
+/// under test calls asserts only that Rust is deterministic.
+#[test]
+fn the_readout_reports_gc_and_a_tm_matching_pl_tm() {
+    let oligo = "GGATCCTTAACCGGTTAAGCTTGCATGCC";
+    let m = mol(&format!("TTTT{oligo}TTTT"), false);
+    let mut e = SeqEdit::new();
+    e.sel = Some(Selection {
+        anchor: 4,
+        head: 4 + oligo.len() as u64,
+        through_origin: false,
+    });
+    let r = e.readout(&m);
+    assert!(r.starts_with("5..33 · 29 bp"), "{r}");
+    assert!(r.contains("(9 codons + 2)"), "{r}");
+    // 51.7% from `pl tm`'s GC% column, to the same one decimal place.
+    assert!(r.contains("51.7% GC"), "{r}");
+    assert!(r.contains("Tm 61.8 °C"), "{r}");
+    // And the conditions are reachable, in pl-thermo's own words.
+    let h = tm_hover(&r).expect("the line makes a Tm claim");
+    assert_eq!(h, tm_method().describe());
+    assert!(
+        h.contains("50 mM Na+") && h.contains("SantaLucia 1998"),
+        "{h}"
+    );
+}
+
+/// PROVEN TO FAIL at 78a46f2, which reports no Tm at any length and so cannot
+/// report the wrong one either.
+///
+/// The hazard is that the two-state formula does NOT blow up as the oligo
+/// grows: ΔH and ΔS both scale with length, so the quotient converges on
+/// something in the seventies. A 4 kb selection would get a plausible number
+/// with a decimal point on it, from a model that does not apply.
+#[test]
+fn no_tm_is_offered_for_a_selection_too_long_to_have_one() {
+    let m = mol(&"ACGT".repeat(2_000), false);
+    let mut e = SeqEdit::new();
+    // Exactly at the bound, which is `pl design`'s own LEN_HARD_MAX: still
+    // shown, because the app must agree with the tool that would synthesise it.
+    e.sel = Some(Selection {
+        anchor: 0,
+        head: TM_MAX_BP,
+        through_origin: false,
+    });
+    let at = e.readout(&m);
+    assert!(at.contains("Tm ") && at.contains("°C"), "{at}");
+
+    // One base past it, and there is no number at all.
+    e.sel = Some(Selection {
+        anchor: 0,
+        head: TM_MAX_BP + 1,
+        through_origin: false,
+    });
+    let over = e.readout(&m);
+    assert!(!over.contains("°C"), "{over}");
+    assert!(over.contains("Tm n/a over 60 bp"), "{over}");
+    // Not silent: silence reads as "not computed yet" and sends the user
+    // looking for the setting that turns it on.
+    let h = tm_hover(&over).expect("the line still makes a Tm claim");
+    assert!(h.contains("melting profile"), "{h}");
+
+    // And a 4 kb selection is the case that matters.
+    e.sel = Some(Selection {
+        anchor: 0,
+        head: 4_000,
+        through_origin: false,
+    });
+    assert!(!e.readout(&m).contains("°C"), "{}", e.readout(&m));
+}
+
+/// PROVEN TO FAIL against the shipped readout, which had a cap and no floor:
+/// two bases came back `Tm -178.3 °C` and a six-base restriction site
+/// `Tm -16.7 °C`, in the same grammar as a measurement.
+///
+/// The cap's own comment states the rule — "the app must not report a Tm for
+/// an oligo `pl design` would refuse to consider" — and takes its number from
+/// `Constraints::LEN_HARD_MAX`. `LEN_HARD_MIN` sits eight lines below it in
+/// `params.rs`, documented as "the mirror of `LEN_HARD_MAX`, and named for the
+/// same reason", and both `pl design` interfaces validate `--len` against
+/// 8..60. The rule had been applied to one end of a pair.
+///
+/// The oracle is `pl tm`, which agrees on the numbers and is why they are
+/// meaningless rather than merely imprecise: `AT` is -219.1C, `ATGCAT` is
+/// -16.7C, `ATGCATG` is -2.5C, and only at eight bases (`ATGCATGC`, +12.0C)
+/// does the answer become physically possible.
+#[test]
+fn no_tm_is_offered_for_a_selection_too_short_to_have_one() {
+    let m = mol(&"ACGTACGTACGTACGT".repeat(4), false);
+    let mut e = SeqEdit::new();
+    // Exactly at the bound, which is `pl design`'s own LEN_HARD_MIN: shown,
+    // for the same reason the 60 bp end is shown at exactly 60.
+    e.sel = Some(Selection {
+        anchor: 0,
+        head: TM_MIN_BP,
+        through_origin: false,
+    });
+    let at = e.readout(&m);
+    assert!(at.contains("Tm ") && at.contains("°C"), "{at}");
+    assert!(!at.contains("n/a"), "{at}");
+
+    // One base short of it, and every length below, refuse — with a reason on
+    // the line, because a silent omission reads as "not computed yet".
+    for len in 2..TM_MIN_BP {
+        e.sel = Some(Selection {
+            anchor: 0,
+            head: len,
+            through_origin: false,
+        });
+        let r = e.readout(&m);
+        assert!(!r.contains("°C"), "{len} bp: {r}");
+        assert!(r.contains("Tm n/a under 8 bp"), "{len} bp: {r}");
+        let h = tm_hover(&r).expect("the line still makes a Tm claim");
+        assert!(h.contains("goes negative"), "{len} bp: {h}");
+        // And the conditions are NOT displayed beside a refusal: they would be
+        // the conditions of a calculation nobody did.
+        assert!(!tm_shown(&r), "{len} bp: {r}");
+    }
+
+    // A six-base selection is the case that matters: that is a restriction
+    // site, the commonest small thing a cloner drags out.
+    e.sel = Some(Selection {
+        anchor: 0,
+        head: 6,
+        through_origin: false,
+    });
+    let six = e.readout(&m);
+    assert!(six.contains("6 bp"), "{six}");
+    // -16.7 °C is what this used to print for a restriction site.
+    assert!(!six.contains("°C"), "no temperature at all: {six}");
+
+    // One base is still silent: nobody expects a number for a single base, and
+    // `pl_thermo` refuses it as `TooShort` on its own.
+    e.sel = Some(Selection {
+        anchor: 0,
+        head: 1,
+        through_origin: false,
+    });
+    let one = e.readout(&m);
+    assert!(!one.contains("Tm"), "{one}");
+
+    // The conditions ARE displayed beside a real number, which is the other
+    // half of the same rule.
+    e.sel = Some(Selection {
+        anchor: 0,
+        head: 20,
+        through_origin: false,
+    });
+    assert!(tm_shown(&e.readout(&m)), "{}", e.readout(&m));
+    // ...and not beside the cap at the other end either.
+    e.sel = Some(Selection {
+        anchor: 0,
+        head: TM_MAX_BP + 1,
+        through_origin: false,
+    });
+    assert!(!tm_shown(&e.readout(&m)), "{}", e.readout(&m));
+}
+
+/// PROVEN TO FAIL at 78a46f2 (no Tm), and against the obvious wrong fix:
+/// printing `TmError::NotUnambiguous`'s index as it comes.
+///
+/// The error's index is 0-based INTO THE OLIGO. Printed raw, "base 7 is 'N'"
+/// points at a base the user cannot find when the selection starts at 4,231.
+#[test]
+fn an_ambiguous_base_is_named_at_its_molecule_coordinate() {
+    let mut s = "A".repeat(4_300);
+    s.replace_range(4_236..4_237, "N"); // 0-based, so molecule base 4,237
+    let m = mol(&s, true);
+    let mut e = SeqEdit::new();
+    e.sel = Some(Selection {
+        anchor: 4_230,
+        head: 4_260,
+        through_origin: false,
+    });
+    let r = e.readout(&m);
+    assert!(r.contains("Tm n/a — base 4,237 is 'N'"), "{r}");
+    // The 0-based index into the oligo is 6, so the raw number would be 7.
+    assert!(!r.contains("base 7 is"), "{r}");
+
+    // GC over an N-bearing selection says what its denominator is, because
+    // otherwise it silently means something other than the File tab's figure.
+    assert!(r.contains("(of 29 unambiguous)"), "{r}");
+
+    // The same base, reached the other way round: a through-origin selection
+    // whose bases are read from `hi + 1`. Reading `(lo, hi)` here would
+    // describe the complement arc and name a different base entirely.
+    let m = mol(
+        &{
+            let mut s = "A".repeat(100);
+            s.replace_range(2..3, "N"); // molecule base 3
+            s
+        },
+        true,
+    );
+    e.sel = Some(Selection {
+        anchor: 95,
+        head: 10,
+        through_origin: true,
+    });
+    let r = e.readout(&m);
+    assert!(r.starts_with("96..10 · 15 bp"), "{r}");
+    assert!(r.contains("Tm n/a — base 3 is 'N'"), "{r}");
+}
+
+/// PROVEN TO FAIL at 78a46f2: `copy_revcomp` does not exist there.
+///
+/// The property that matters is that it reads the SAME arc `copy` does. A
+/// through-origin selection read as `(lo, hi)` describes the complement arc —
+/// 85 bases where 15 were selected — and the result looks entirely plausible.
+#[test]
+fn the_reverse_complement_is_of_the_arc_that_was_selected() {
+    let m = mol("AAACCCGGGTTTAAACCC", true);
+    let mut e = SeqEdit::new();
+    e.sel = Some(Selection {
+        anchor: 15,
+        head: 3,
+        through_origin: true,
+    });
+    // Bases 16..=18 then 1..=3: "CCC" ++ "AAA".
+    let (fwd, _) = e.copy(&m).expect("a selection");
+    assert_eq!(fwd, "CCCAAA");
+    let (rc, skipped) = e.copy_revcomp(&m).expect("a selection");
+    assert_eq!(rc, "TTTGGG");
+    assert_eq!(skipped, 0);
+
+    // Case is preserved, because `Molecule::seq` is.
+    let m = mol("aaGGtt", false);
+    e.sel = Some(Selection {
+        anchor: 0,
+        head: 6,
+        through_origin: false,
+    });
+    assert_eq!(e.copy_revcomp(&m).expect("all of it").0, "aaCCtt");
+
+    // Nothing selected is nothing copied, not an empty string.
+    e.sel = None;
+    assert!(e.copy_revcomp(&m).is_none());
 }
 
 // ---------------------------------------------------------------------------
