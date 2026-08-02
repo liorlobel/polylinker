@@ -21,6 +21,24 @@ pub mod methylation;
 
 use pl_core::{iupac, Molecule, Strand, Topology};
 
+/// Whether two cut ends can be ligated to each other.
+///
+/// Three-valued on purpose. A two-valued answer would have to call `BstXI` to
+/// `BstXI` either compatible — which is false, its `NNNN` overhangs agree only
+/// when the DNA makes them — or incompatible, which is false the other way. The
+/// same is true of every Type IIS enzyme, and Golden Gate exists precisely
+/// because those ends are chosen per construct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compatibility {
+    /// Same polarity and the same fixed bases, or both blunt.
+    Always,
+    /// They may anneal; the DNA decides. A Type IIS end, or an IUPAC code in
+    /// the overhang.
+    Sequence,
+    /// Opposite polarity, different lengths, or bases that cannot agree.
+    Never,
+}
+
 /// A restriction enzyme, in Biopython's coordinates.
 ///
 /// Two numbers describe every cut this project can make — Type IIP, Type IIS
@@ -92,6 +110,141 @@ impl Enzyme {
     /// The bottom-strand nick, as an offset from the start of the match.
     pub fn bottom_cut(&self) -> i64 {
         self.fst5 as i64 - self.ovhg as i64
+    }
+
+    /// Where the single-stranded end begins, as an offset into the site.
+    ///
+    /// The two nicks bracket the overhang, and which one comes first is what the
+    /// sign of `ovhg` records: a 5' overhang starts at the top nick, a 3' one at
+    /// the bottom nick.
+    fn overhang_start(&self) -> usize {
+        if self.ovhg > 0 {
+            self.bottom_cut().max(0) as usize
+        } else {
+            self.fst5 as usize
+        }
+    }
+
+    /// The bases of the overhang this enzyme leaves, read off its own site.
+    ///
+    /// `Some("")` for a blunt cutter. **`None` when the enzyme cuts outside its
+    /// site**: `BsaI` leaves whatever four bases happen to sit one past `GGTCTC`,
+    /// so the answer is a property of the DNA and not of the enzyme, and saying
+    /// otherwise is how a Golden Gate assembly gets designed wrong.
+    ///
+    /// The string may carry IUPAC codes. `BstXI` is `CCANNNNNNTGG` and its
+    /// overhang is four of those `N`s — fixed in *position* by the enzyme and not
+    /// in *identity* — which is why [`Enzyme::ligates_with`] has three answers
+    /// and not two.
+    pub fn overhang_seq(&self) -> Option<&'static str> {
+        if self.cuts_outside_site() {
+            return None;
+        }
+        let start = self.overhang_start();
+        self.site.get(start..start + self.overhang_len())
+    }
+
+    /// Can an end left by this enzyme be ligated to one left by `other`?
+    ///
+    /// This is the question behind "the polylinker has no `BglII` site, can I use
+    /// the `BamHI` one?" — and behind every subcloning that combines two
+    /// different digests. Compatibility is decided by the single-stranded end
+    /// alone, so enzymes with quite different recognition sites are
+    /// interchangeable at the junction: `BamHI`, `BglII` and `BclI` all leave
+    /// `GATC`.
+    ///
+    /// Three answers, not two, because two of the reasons an overhang is not
+    /// fixed are ordinary:
+    ///
+    /// - [`Compatibility::Always`] — same polarity, same fixed bases, or both
+    ///   blunt. Blunt ligates to blunt whatever the sequences are.
+    /// - [`Compatibility::Sequence`] — the ends *may* anneal, and whether they do
+    ///   depends on the DNA: a Type IIS enzyme, or an overhang carrying an IUPAC
+    ///   code. `BstXI` to `BstXI` is this, not `Always`.
+    /// - [`Compatibility::Never`] — opposite polarity, different lengths, or
+    ///   bases that cannot agree at some position.
+    ///
+    /// Polarity is checked before the bases and that is not a formality:
+    /// `KpnI` leaves `GTAC` as a 3' overhang and `BsrGI` leaves `GTAC` as a 5'
+    /// one. The same four letters, and they cannot anneal to each other.
+    pub fn ligates_with(&self, other: &Enzyme) -> Compatibility {
+        // A 5' end cannot anneal to a 3' end, and neither anneals to a blunt
+        // one, whatever the bases say.
+        if self.ovhg.signum() != other.ovhg.signum() {
+            return Compatibility::Never;
+        }
+        if self.is_blunt() {
+            return Compatibility::Always;
+        }
+        if self.overhang_len() != other.overhang_len() {
+            return Compatibility::Never;
+        }
+        let (a, b) = match (self.overhang_seq(), other.overhang_seq()) {
+            (Some(a), Some(b)) => (a, b),
+            // At least one is a Type IIS end: the bases are not ours to know.
+            _ => return Compatibility::Sequence,
+        };
+        let mut certain = true;
+        for (p, q) in a.bytes().zip(b.bytes()) {
+            let (mp, mq) = (iupac::code_mask(p), iupac::code_mask(q));
+            // Disjoint sets: no DNA can satisfy both.
+            if mp & mq == 0 {
+                return Compatibility::Never;
+            }
+            // They can agree, but only one arrangement of a degenerate site
+            // does, so this is a fact about a molecule and not about a pair of
+            // enzymes.
+            if mp.count_ones() > 1 || mq.count_ones() > 1 {
+                certain = false;
+            }
+        }
+        if certain {
+            Compatibility::Always
+        } else {
+            Compatibility::Sequence
+        }
+    }
+
+    /// Every catalogued enzyme whose ends always ligate to this one.
+    ///
+    /// Includes the enzyme itself — cutting twice with `BamHI` and re-closing is
+    /// the commonest case of all — and excludes anything whose compatibility
+    /// depends on the sequence, because a list a user reads as "these are
+    /// interchangeable" must not contain a maybe. Use [`Enzyme::ligates_with`]
+    /// for those.
+    pub fn partners(&self) -> Vec<&'static Enzyme> {
+        ENZYMES
+            .iter()
+            .filter(|e| self.ligates_with(e) == Compatibility::Always)
+            .collect()
+    }
+
+    /// The top strand across a junction made by ligating this enzyme's end to
+    /// `other`'s, when the bases are knowable.
+    ///
+    /// What it is for: telling whether the junction can be cut again. Ligating
+    /// `BamHI` to `BglII` gives `GGATCT`, which neither enzyme cuts — the
+    /// standard way to join two fragments and not have the seam re-open — while
+    /// `BamHI` to `BamHI` gives `GGATCC` straight back.
+    ///
+    /// `None` unless [`Compatibility::Always`] holds, since a junction whose
+    /// bases depend on the insert is not a string this function can honestly
+    /// return.
+    ///
+    /// Only the two half-sites are included. Whether a LONGER site spans the
+    /// seam depends on the flanking DNA, which lives in the construct and not in
+    /// the enzyme, so a caller checking for regenerated sites should search the
+    /// assembled molecule rather than this string alone.
+    pub fn junction(&self, other: &Enzyme) -> Option<String> {
+        if self.ligates_with(other) != Compatibility::Always {
+            return None;
+        }
+        let left = self.site.get(..self.overhang_start())?;
+        let overhang = self.overhang_seq()?;
+        let right = other
+            .site
+            .get(other.overhang_start() + other.overhang_len()..)?;
+        Some(format!("{left}{overhang}{right}"))
     }
 
     /// How many bases of the site are actually specified.
@@ -1579,5 +1732,281 @@ mod tests {
         assert_eq!(ENZYMES.len(), 58);
         assert_eq!(iis, 8);
         assert_eq!(ENZYMES.len() - iis, 50, "the count the docs must quote");
+    }
+
+    // -----------------------------------------------------------------------
+    // compatible ends
+    // -----------------------------------------------------------------------
+
+    fn e(name: &str) -> &'static Enzyme {
+        by_name(name).unwrap_or_else(|| panic!("{name} is not in the catalogue"))
+    }
+
+    /// Every catalogued overhang, against Biopython's own `ovhgseq`.
+    ///
+    /// Not a restatement: we derive the overhang by reading it off the site
+    /// between the two nicks, Biopython carries REBASE's tabulated value. The
+    /// run that produced these numbers compared all 58 — 50 Type IIP agreed on
+    /// site, sign and bases with **zero** disagreements, and for the 8 Type IIS
+    /// Biopython reports `fst5 > len(site)` and an `ovhgseq` of literally
+    /// `NNNN`/`NNN`, which is its way of saying what `None` says here.
+    ///
+    /// Pinned rather than re-run: Biopython is not a build dependency, and a
+    /// test that silently skips when an oracle is absent is a test that passes
+    /// for the wrong reason. `BspQI` and `SapI` are in the list because their
+    /// overhang is THREE bases, so a length check has something to fail on.
+    #[test]
+    fn the_overhangs_match_biopython_including_the_three_base_ones() {
+        for (name, ovhg, want) in [
+            ("AatII", 4i8, Some("ACGT")),
+            ("AflII", -4, Some("TTAA")),
+            ("ApaI", 4, Some("GGCC")),
+            ("AscI", -4, Some("CGCG")),
+            ("BsiWI", -4, Some("GTAC")),
+            ("BstBI", -2, Some("CG")),
+            ("ClaI", -2, Some("CG")),
+            ("MfeI", -4, Some("AATT")),
+            ("NcoI", -4, Some("CATG")),
+            ("NdeI", -2, Some("TA")),
+            ("NotI", -4, Some("GGCC")),
+            ("SacII", 2, Some("GC")),
+            ("SbfI", 4, Some("TGCA")),
+            ("SphI", 4, Some("CATG")),
+            // Type IIS: three bases, not four, and unknowable either way.
+            ("BspQI", -3, None),
+            ("SapI", -3, None),
+            ("AarI", -4, None),
+            ("PaqCI", -4, None),
+        ] {
+            let x = e(name);
+            assert_eq!(x.ovhg, ovhg, "{name} overhang sign/length");
+            assert_eq!(x.overhang_seq(), want, "{name} overhang bases");
+        }
+        // A three-base end cannot ligate to a four-base one, whatever the bases.
+        assert_eq!(e("SapI").overhang_len(), 3);
+        assert_eq!(e("BsaI").overhang_len(), 4);
+        assert_eq!(e("SapI").ligates_with(e("BsaI")), Compatibility::Never);
+    }
+
+    /// The overhangs, against what the enzymes are known to leave.
+    ///
+    /// Read off the site and the two nicks rather than tabulated, so this is the
+    /// check that the arithmetic agrees with the literature. `KpnI` and `BsrGI`
+    /// are both here because they are the pair that makes polarity matter.
+    #[test]
+    fn the_overhang_each_enzyme_leaves_is_the_one_the_catalogues_publish() {
+        for (name, want) in [
+            ("BamHI", "GATC"),
+            ("BglII", "GATC"),
+            ("BclI", "GATC"),
+            ("SalI", "TCGA"),
+            ("XhoI", "TCGA"),
+            ("NheI", "CTAG"),
+            ("XbaI", "CTAG"),
+            ("SpeI", "CTAG"),
+            ("AvrII", "CTAG"),
+            ("AgeI", "CCGG"),
+            ("XmaI", "CCGG"),
+            ("BspEI", "CCGG"),
+            ("EcoRI", "AATT"),
+            ("HindIII", "AGCT"),
+            ("KpnI", "GTAC"),  // 3'
+            ("BsrGI", "GTAC"), // 5' — same letters, other strand
+            ("PstI", "TGCA"),  // 3'
+            ("EcoRV", ""),     // blunt
+            ("SmaI", ""),
+        ] {
+            assert_eq!(e(name).overhang_seq(), Some(want), "{name}");
+        }
+        // A Type IIS enzyme has no answer to give: its overhang is four bases of
+        // the insert, not of the enzyme.
+        for name in ["BsaI", "BsmBI", "BbsI", "Esp3I", "SapI", "AarI"] {
+            assert_eq!(e(name).overhang_seq(), None, "{name}");
+        }
+    }
+
+    /// The families a cloner treats as interchangeable, and the junction that
+    /// decides whether the seam can be cut open again.
+    #[test]
+    fn compatible_families_ligate_and_their_junctions_say_what_survives() {
+        for family in [
+            vec!["BamHI", "BglII", "BclI"],
+            vec!["SalI", "XhoI"],
+            vec!["NheI", "XbaI", "SpeI", "AvrII"],
+            vec!["AgeI", "XmaI", "BspEI"],
+        ] {
+            for a in &family {
+                for b in &family {
+                    assert_eq!(
+                        e(a).ligates_with(e(b)),
+                        Compatibility::Always,
+                        "{a} and {b} leave the same overhang and must ligate"
+                    );
+                }
+            }
+        }
+
+        // Cutting with one enzyme and re-closing puts the site back.
+        assert_eq!(e("BamHI").junction(e("BamHI")).as_deref(), Some("GGATCC"));
+        assert_eq!(e("KpnI").junction(e("KpnI")).as_deref(), Some("GGTACC"));
+        assert_eq!(e("EcoRV").junction(e("EcoRV")).as_deref(), Some("GATATC"));
+
+        // Joining two DIFFERENT members of a family destroys both sites, which
+        // is the reason to do it: the seam cannot re-open.
+        for (a, b, seam) in [
+            ("BamHI", "BglII", "GGATCT"),
+            ("BamHI", "BclI", "GGATCA"),
+            ("XbaI", "SpeI", "TCTAGT"),
+            ("SalI", "XhoI", "GTCGAG"),
+            ("AgeI", "XmaI", "ACCGGG"),
+        ] {
+            let j = e(a)
+                .junction(e(b))
+                .expect("compatible ends make a junction");
+            assert_eq!(j, seam, "{a}+{b}");
+            for cutter in [a, b] {
+                assert!(
+                    cut_positions(j.as_bytes(), Topology::Linear, e(cutter)).is_empty(),
+                    "{cutter} still cuts the {a}+{b} junction {j}"
+                );
+            }
+        }
+        // The control: the same machinery DOES find the site when it is there,
+        // so "no cuts" above is a fact and not a broken search.
+        assert_eq!(
+            cut_positions(b"GGATCC", Topology::Linear, e("BamHI")).len(),
+            1,
+            "the search finds a real site, so finding none is meaningful"
+        );
+    }
+
+    /// The same four bases on opposite strands. This is the case a length-and-
+    /// letters comparison gets wrong, and it is a real trap: `KpnI` and `BsrGI`
+    /// both read `GTAC` in a catalogue.
+    #[test]
+    fn the_same_bases_at_opposite_polarity_never_ligate() {
+        let (kpn, bsrg) = (e("KpnI"), e("BsrGI"));
+        assert_eq!(kpn.overhang_seq(), bsrg.overhang_seq());
+        assert!(kpn.is_three_prime_overhang() && bsrg.is_five_prime_overhang());
+        assert_eq!(kpn.ligates_with(bsrg), Compatibility::Never);
+        assert_eq!(bsrg.ligates_with(kpn), Compatibility::Never);
+        assert_eq!(kpn.junction(bsrg), None);
+        // And a sticky end does not ligate to a blunt one.
+        assert_eq!(e("BamHI").ligates_with(e("EcoRV")), Compatibility::Never);
+        // Different bases, same polarity and length: also never.
+        assert_eq!(e("BamHI").ligates_with(e("EcoRI")), Compatibility::Never);
+        // Two 3' four-base ends whose bases simply differ.
+        assert_eq!(e("SacI").overhang_seq(), Some("AGCT"));
+        assert_eq!(e("PstI").overhang_seq(), Some("TGCA"));
+        assert_eq!(e("SacI").ligates_with(e("PstI")), Compatibility::Never);
+        // Same bases, DIFFERENT lengths: ClaI leaves CG over two bases, AscI
+        // CGCG over four, and a two-base end cannot fill a four-base gap.
+        assert_eq!(e("ClaI").overhang_len(), 2);
+        assert_eq!(e("AscI").overhang_len(), 4);
+        assert_eq!(e("ClaI").ligates_with(e("AscI")), Compatibility::Never);
+    }
+
+    /// An end whose bases the enzyme does not fix is a maybe, and must say so.
+    #[test]
+    fn an_unfixed_overhang_is_answered_with_sequence_not_with_yes() {
+        // Type IIS: the whole basis of Golden Gate is that these are chosen per
+        // construct. Claiming BsaI always ligates to BsaI would be the error
+        // that silently scrambles an assembly.
+        for name in ["BsaI", "BsmBI", "BbsI", "Esp3I"] {
+            assert_eq!(
+                e(name).ligates_with(e(name)),
+                Compatibility::Sequence,
+                "{name} to itself"
+            );
+            assert_eq!(e(name).junction(e(name)), None, "{name}");
+            assert!(
+                !e(name).partners().iter().any(|p| p.name == name),
+                "{name} must not appear in a list of certain partners"
+            );
+        }
+        // An IUPAC code inside the overhang is the same kind of maybe, reached
+        // by a different route: BstXI's site fixes WHERE its overhang is and not
+        // WHAT it says. Constructed rather than looked up, following the
+        // precedent in `specificity`'s own test — the table has no interrupted
+        // palindrome — which also means this branch is unreachable from the
+        // shipped catalogue today and must still be right for the day it is not.
+        let bst = Enzyme {
+            name: "BstXI",
+            site: "CCANNNNNNTGG",
+            fst5: 8,
+            ovhg: 4,
+        };
+        assert_eq!(bst.overhang_seq(), Some("NNNN"));
+        assert_eq!(bst.ligates_with(&bst), Compatibility::Sequence);
+        assert_eq!(bst.junction(&bst), None);
+        // Sequence-dependent is not the same as impossible: an N can be a G, so
+        // against another 3' four-base end the answer is "the DNA decides".
+        assert_eq!(bst.ligates_with(e("KpnI")), Compatibility::Sequence);
+        assert_eq!(bst.ligates_with(e("PstI")), Compatibility::Sequence);
+        // Polarity is still settled before the bases are ever consulted, so an
+        // N does not make it compatible with everything: BamHI is 5', BstXI 3'.
+        assert_eq!(bst.ligates_with(e("BamHI")), Compatibility::Never);
+        assert_eq!(bst.ligates_with(e("EcoRV")), Compatibility::Never);
+    }
+
+    /// Blunt is blunt: every flush end joins every other, and the junction is
+    /// simply the two halves.
+    #[test]
+    fn any_blunt_end_ligates_to_any_other() {
+        let blunt: Vec<&Enzyme> = ENZYMES.iter().filter(|x| x.is_blunt()).collect();
+        assert!(blunt.len() >= 8, "only {} blunt cutters", blunt.len());
+        for a in &blunt {
+            for b in &blunt {
+                assert_eq!(
+                    a.ligates_with(b),
+                    Compatibility::Always,
+                    "{} {}",
+                    a.name,
+                    b.name
+                );
+            }
+            assert!(
+                a.partners().len() >= blunt.len(),
+                "{} should list every blunt cutter",
+                a.name
+            );
+        }
+        assert_eq!(e("SmaI").junction(e("EcoRV")).as_deref(), Some("CCCATC"));
+    }
+
+    /// Whole-catalogue invariants, so a new enzyme cannot quietly break the
+    /// relation.
+    #[test]
+    fn compatibility_is_symmetric_reflexive_where_it_can_be_and_free_of_maybes() {
+        for a in ENZYMES {
+            // Symmetric: ligation does not care which fragment you name first.
+            for b in ENZYMES {
+                assert_eq!(
+                    a.ligates_with(b),
+                    b.ligates_with(a),
+                    "{} vs {} is not symmetric",
+                    a.name,
+                    b.name
+                );
+            }
+            // An enzyme is never INCOMPATIBLE with itself: two ends off the same
+            // cut always re-close, even when the bases are the insert's.
+            assert_ne!(
+                a.ligates_with(a),
+                Compatibility::Never,
+                "{} cannot re-close its own cut",
+                a.name
+            );
+            // `partners` is the list a user reads as "interchangeable", so it
+            // carries only certainties, and every entry survives a re-check.
+            for p in a.partners() {
+                assert_eq!(a.ligates_with(p), Compatibility::Always);
+                assert_eq!(a.overhang_len(), p.overhang_len());
+                assert_eq!(a.ovhg.signum(), p.ovhg.signum());
+            }
+        }
+        // The families are found by search, not asserted into existence.
+        let gatc: Vec<&str> = e("BamHI").partners().iter().map(|x| x.name).collect();
+        assert_eq!(gatc, vec!["BamHI", "BclI", "BglII"]);
     }
 }

@@ -24,6 +24,7 @@ USAGE:
     pl find-motif <IUPAC> <file>         search a sequence, both strands
     pl tm      <OLIGO>...                melting temperature
     pl goldengate <OVERHANG>...          check a Type IIS overhang set
+    pl ends    <ENZYME>...               which cut ends can be ligated together
     pl primers <file> --primer SEQ       where primers anneal
     pl design  <file> --region A..B      pick a PCR primer pair for a region
     pl trace   <file.ab1>... [--svg F]   read or draw a Sanger chromatogram
@@ -286,6 +287,7 @@ fn main() -> ExitCode {
         "find-motif" => cmd_find_motif(rest),
         "tm" => cmd_tm(rest),
         "goldengate" => cmd_goldengate(rest),
+        "ends" => cmd_ends(rest),
         "primers" => cmd_primers(rest),
         "design" => cmd_design(rest),
         "orfs" => cmd_orfs(rest),
@@ -3057,6 +3059,124 @@ fn cmd_goldengate(args: &[String]) -> Result<(), String> {
 {}",
         report.caveat()
     );
+    Ok(())
+}
+
+/// Which cut ends can be ligated together.
+///
+/// The question behind "the polylinker has no `BglII` site, can I use the
+/// `BamHI` one?", and behind every subcloning that joins two different digests.
+/// With one enzyme it lists the interchangeable ones; with two or more it
+/// answers for each pair and prints the junction, because whether the seam can
+/// be cut open again usually decides which pairing to use.
+fn cmd_ends(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &[], &[])?;
+    let names: Vec<String> = a
+        .files
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        return Err("name at least one enzyme: pl ends BamHI [BglII ...]".into());
+    }
+    let mut es: Vec<&'static pl_enzymes::Enzyme> = Vec::new();
+    for n in &names {
+        es.push(pl_enzymes::by_name(n).ok_or_else(|| format!("{n:?}: not in the shipped table"))?);
+    }
+
+    let describe = |e: &pl_enzymes::Enzyme| -> String {
+        let kind = if e.is_blunt() {
+            "blunt".to_string()
+        } else {
+            let side = if e.is_five_prime_overhang() {
+                "5'"
+            } else {
+                "3'"
+            };
+            match e.overhang_seq() {
+                Some(s) => format!("{side} {s}"),
+                // Not "unknown": the enzyme fixes the LENGTH and not the bases,
+                // and that distinction is the whole of Golden Gate.
+                None => format!("{side} {} bases, set by the insert", e.overhang_len()),
+            }
+        };
+        format!("{} ({})  {}", e.name, e.site, kind)
+    };
+
+    for e in &es {
+        println!("{}", describe(e));
+    }
+
+    if es.len() == 1 {
+        let e = es[0];
+        let mut others: Vec<&str> = e
+            .partners()
+            .iter()
+            .map(|p| p.name)
+            .filter(|n| *n != e.name)
+            .collect();
+        others.sort_unstable();
+        println!();
+        if e.overhang_seq().is_none() {
+            println!(
+                "  {} cuts outside its own site, so its ends are whatever the DNA\n  \
+                 has there. Two {} fragments ligate only when their overhangs match;\n  \
+                 use `pl goldengate` to check a set of them.",
+                e.name, e.name
+            );
+        } else if others.is_empty() {
+            println!("  nothing else in the table leaves a compatible end.");
+        } else {
+            println!("  interchangeable with: {}", others.join(", "));
+            println!();
+            for o in &others {
+                let o = pl_enzymes::by_name(o).expect("named from the table");
+                if let Some(j) = e.junction(o) {
+                    let recut: Vec<&str> = pl_enzymes::ENZYMES
+                        .iter()
+                        .filter(|x| {
+                            !pl_enzymes::cut_positions(j.as_bytes(), pl_core::Topology::Linear, x)
+                                .is_empty()
+                        })
+                        .map(|x| x.name)
+                        .collect();
+                    let note = if recut.is_empty() {
+                        "cut by nothing in the table".to_string()
+                    } else {
+                        format!("still cut by {}", recut.join(", "))
+                    };
+                    println!("    {} + {}  ->  {}   {}", e.name, o.name, j, note);
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    println!();
+    for (i, x) in es.iter().enumerate() {
+        for y in es.iter().skip(i + 1) {
+            let verdict = match x.ligates_with(y) {
+                pl_enzymes::Compatibility::Always => "yes".to_string(),
+                pl_enzymes::Compatibility::Never => {
+                    if x.ovhg.signum() != y.ovhg.signum() {
+                        "no -- opposite kinds of end".to_string()
+                    } else if x.overhang_len() != y.overhang_len() {
+                        "no -- overhangs are different lengths".to_string()
+                    } else {
+                        "no -- the overhangs cannot agree".to_string()
+                    }
+                }
+                pl_enzymes::Compatibility::Sequence => {
+                    "only sometimes -- an overhang here is set by the DNA".to_string()
+                }
+            };
+            match x.junction(y) {
+                Some(j) => println!("  {} + {}: {}   junction {}", x.name, y.name, verdict, j),
+                None => println!("  {} + {}: {}", x.name, y.name, verdict),
+            }
+        }
+    }
     Ok(())
 }
 
