@@ -172,6 +172,15 @@ impl Bench {
         self.tabs.iter().filter(|t| t.doc.unsaved()).count()
     }
 
+    /// The first tab with unsaved work, so a dialog can SHOW what it is about.
+    ///
+    /// The close guard asks about the workspace but has to point at a document,
+    /// and pointing at the active one describes a clean file while discarding a
+    /// dirty one behind it.
+    pub fn first_unsaved(&self) -> Option<usize> {
+        self.tabs.iter().position(|t| t.doc.unsaved())
+    }
+
     /// Store the active tab's view, so it can be restored when you come back.
     pub fn store(&mut self, v: DocView) {
         if let Some(t) = self.tabs.get_mut(self.active) {

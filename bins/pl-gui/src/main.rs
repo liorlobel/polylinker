@@ -3085,9 +3085,31 @@ impl App {
         // cleanly" on the next launch. A guard is a function of the state; when
         // the state stops being at risk the gesture the user asked for should
         // simply happen.
-        if self.document().is_none_or(|d| !d.unsaved()) {
+        // THE WHOLE BENCH, NOT THE ACTIVE TAB.
+        //
+        // ea436aa taught `close_request` to arm on `bench.any_unsaved()` and
+        // left this predicate reading the document on screen, which disarmed it
+        // again one frame later. Edit plasmid A, open plasmid B in a new tab,
+        // close the window: B is clean, so this resolved the guard with
+        // `preserved = true`, the app exited, and A's edits were gone — no
+        // dialog, and no recovery draft either, because `preserved` is exactly
+        // the answer that says none is needed.
+        //
+        // The commit that introduced the hazard is the one that claimed to have
+        // closed it. A guard now has two halves and they have to agree; this is
+        // the second half.
+        if !self.bench.any_unsaved() {
             self.resolve_guard(why, true);
             return;
+        }
+        // Ask about a tab that is ACTUALLY at risk, and show it. Naming the
+        // active document would describe a clean file while discarding a dirty
+        // one somewhere behind it, and a dialog the user can agree with while it
+        // omits the thing it is about is worse than no dialog at all.
+        if self.document().is_none_or(|d| !d.unsaved()) {
+            if let Some(i) = self.bench.first_unsaved() {
+                self.switch_tab(i);
+            }
         }
         let Some(d) = self.bench.get() else { return };
         let title = pl_fileio::caption_of(&d.title).to_string();
@@ -3194,8 +3216,16 @@ impl App {
                 // full disk or a permission error all leave the document dirty,
                 // and a guard that proceeded anyway would have done the exact
                 // damage it exists to prevent. Only a write that actually
-                // cleared `unsaved()` goes on to the discard.
-                if self.document().is_none_or(|d| !d.unsaved()) {
+                // cleared `unsaved()` goes on.
+                //
+                // AND ONLY WHEN THE WHOLE BENCH IS CLEAN. Asking the active
+                // document was right when it was the only one; with tabs, saving
+                // the file the dialog happens to be showing would resolve the
+                // guard and take every other dirty tab down with it. The modal
+                // stays up instead and `unsaved_modal` moves to the next tab
+                // that is still at risk, so the guard walks the bench rather
+                // than sampling it — one question per document that needs one.
+                if !self.bench.any_unsaved() {
                     self.resolve_guard(why, true);
                 }
             }
@@ -13259,6 +13289,59 @@ mod tests {
             "the deliberate quit must reach the file, or the next launch calls it a crash"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// PROVEN TO FAIL at ea436aa — the commit that claimed to have closed this.
+    ///
+    /// `close_request` was taught to arm on `bench.any_unsaved()`, and
+    /// `unsaved_modal`'s early-out was left reading the document on screen, so
+    /// it disarmed the guard one frame later. Edit plasmid A, open plasmid B in
+    /// a new tab, close the window: B is clean, the modal resolved with
+    /// `preserved = true`, and the app exited. A's edits were gone with no
+    /// dialog — and no recovery draft either, because `preserved` is precisely
+    /// the answer that says none is needed.
+    ///
+    /// A guard with two halves needs both to agree, and only one of them was
+    /// changed. That is the whole lesson: `any_unsaved` in one place and
+    /// `document()` in the other reads as a fix and behaves as a hole.
+    #[test]
+    fn a_dirty_background_tab_still_stops_the_window_closing() {
+        let (mut app, a) = app_with_a("bg-dirty");
+        app.bench
+            .get_mut()
+            .unwrap()
+            .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        assert!(app.document().unwrap().unsaved(), "tab A must be dirty");
+
+        // A second, CLEAN tab in front of it.
+        let b = temp_file("bg-clean", "fa", PLASMID_B);
+        app.load(b.clone());
+        app.bench.get_mut().unwrap().mark_saved();
+        assert!(!app.document().unwrap().unsaved(), "tab B must be clean");
+        assert_eq!(app.bench.len(), 2);
+
+        // The window close is requested and the guard latches.
+        app.closing = true;
+        let ctx = test_ctx();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.unsaved_modal(ui.ctx());
+        });
+
+        // The app must NOT be on its way out.
+        assert!(
+            !app.close_now && !app.let_it_go,
+            "the window closed with an edited tab behind the active one"
+        );
+        assert!(app.closing, "the guard disarmed itself");
+        // And it moved to the tab it is asking about, because a dialog that
+        // names a clean file while discarding a dirty one is worse than none.
+        assert!(
+            app.document().unwrap().unsaved(),
+            "the dialog is describing a clean document"
+        );
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 
     /// PROVEN TO FAIL at 528dcd9: `load`'s Ok arm called `adopt` directly, with
