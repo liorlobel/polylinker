@@ -761,17 +761,20 @@ fn draft_age(
 /// Why the unsaved-changes question is being asked, which is the only sentence
 /// in the dialog that varies with the path that raised it.
 #[derive(Clone, Copy, PartialEq, Eq)]
+/// What is about to cost the user their unsaved work.
+///
+/// ONE VARIANT, WHERE THERE WERE FOUR. `Open`, `Restore` and `Product` all
+/// meant "a document is about to be replaced", and since the bench holds more
+/// than one document nothing replaces anything: opening a file, restoring a
+/// crash draft and opening a religation product all add a tab. Closing the
+/// window is the only remaining way to lose work, so it is the only remaining
+/// question.
+///
+/// Kept as an enum rather than collapsed into bare strings because the next
+/// thing that can genuinely destroy work — Stage 2's "forget this bench" — will
+/// want to be a second variant, and a `match` is where that gets noticed.
 enum Losing {
     Close,
-    Open,
-    Restore,
-    /// A construct from Molecule > Cut and religate…, which is not a file and
-    /// must not claim to be one. Its own variant because 28e9d91 shipped that
-    /// path calling `adopt` DIRECTLY, with no guard at all — an eighth way to
-    /// destroy an edited document silently, of exactly the class cc36cf7 was
-    /// written to eliminate, and reusing `Open`'s wording here would have told
-    /// the user a file was being opened when none was.
-    Product,
 }
 
 impl Losing {
@@ -786,11 +789,6 @@ impl Losing {
         match (self, one) {
             (Losing::Close, true) => "Closing Polylinker discards it.",
             (Losing::Close, false) => "Closing Polylinker discards them.",
-            // "closes it" is about the DOCUMENT, which is singular either way,
-            // so these two do not vary.
-            (Losing::Open, _) => "Opening another file closes it.",
-            (Losing::Restore, _) => "Restoring that draft closes it.",
-            (Losing::Product, _) => "Opening the construct closes it.",
         }
     }
 
@@ -801,21 +799,8 @@ impl Losing {
     fn discard_label(self) -> &'static str {
         match self {
             Losing::Close => "Close without saving",
-            Losing::Open => "Discard and open",
-            Losing::Restore => "Discard and restore",
-            Losing::Product => "Discard and open the construct",
         }
     }
-}
-
-/// A document parsed and waiting behind the unsaved-changes question.
-struct PendingOpen {
-    doc: Document,
-    status: String,
-    why: Losing,
-    /// The recovery row this came from, removed only when the adoption actually
-    /// happens: removing it and then cancelling makes the draft unreachable.
-    stale_row: Option<usize>,
 }
 
 /// A `.dna` write whose destination is chosen and whose losses are not yet
@@ -998,7 +983,6 @@ struct App {
     /// records-in-file and unrepresentable-locations clauses — *before* the
     /// adoption, and a cancelled question must not leave the toolbar describing
     /// a file that is not open.
-    pending_open: Option<PendingOpen>,
     /// The window has asked to close and the guard held it back.
     closing: bool,
     /// Set by the guard when the window may finally go. Read once in `ui`,
@@ -1489,7 +1473,7 @@ impl App {
                 // original with a draft the user has not looked at.
                 Ok(d) => {
                     let status = format!("recovered from {}", path.display());
-                    self.take_over(d, status, Losing::Restore, Some(i));
+                    self.take_over(d, status, Some(i));
                 }
                 Err(e) => self.error = Some(format!("{}: {e}", path.display())),
             }
@@ -1661,7 +1645,6 @@ impl App {
             show_old_drafts: false,
             discard_armed: None,
             title_shown: String::new(),
-            pending_open: None,
             closing: false,
             close_now: false,
             let_it_go: false,
@@ -2125,25 +2108,26 @@ impl App {
         }
     }
 
-    /// Take on `d`, or park it behind the unsaved-changes question.
+    /// Open `d` in a new tab.
     ///
-    /// The one funnel for a document that REPLACES another. Called with the
-    /// replacement already parsed, so every prompt corresponds to a swap that
-    /// is really going to happen; see [`App::pending_open`].
-    fn take_over(&mut self, d: Document, status: String, why: Losing, stale_row: Option<usize>) {
-        // The guard is a durable path, so the open run closes first — the rule
-        // this codebase already enforces structurally, rather than a second
-        // "or a run is open" disjunct in `unsaved()`.
+    /// THE UNSAVED-CHANGES QUESTION IS GONE FROM HERE, and its absence is the
+    /// point. This used to be the funnel for a document that REPLACED another,
+    /// and every path through it had to ask permission first because the answer
+    /// decided whether somebody's edits survived. Since the bench holds more
+    /// than one document, opening replaces nothing: the new file arrives beside
+    /// the old one, both are still there, and there is no longer a question to
+    /// ask. cc36cf7 guarded seven such paths; the container removed the hazard
+    /// they were guarding.
+    ///
+    /// Prompting anyway would be worse than useless. "Opening another file
+    /// closes it" would simply be false, and a guard that fires when nothing is
+    /// at stake is exactly how a user learns to click through the one that
+    /// matters — which is now the window-close guard, and asks about every tab.
+    ///
+    /// The run is still settled first: it is uncommitted work on `App`, and the
+    /// new tab is about to take `App`'s view fields.
+    fn take_over(&mut self, d: Document, status: String, stale_row: Option<usize>) {
         self.settle();
-        if self.document().is_some_and(|c| c.unsaved()) {
-            self.pending_open = Some(PendingOpen {
-                doc: d,
-                status,
-                why,
-                stale_row,
-            });
-            return;
-        }
         if let Some(i) = stale_row {
             if i < self.stale.len() {
                 let _ = self.stale.remove(i);
@@ -2153,19 +2137,8 @@ impl App {
         self.status = status;
     }
 
-    /// Let a parked document go without adopting it.
-    ///
-    /// It is holding a live `DigestState::Running`; dropping it without this
-    /// burns a core producing an answer nobody will read, which is the exact
-    /// waste `doc.rs`'s cancellation was written to stop.
-    fn drop_pending_open(&mut self) {
-        if let Some(p) = self.pending_open.take() {
-            p.doc.digest.cancel();
-        }
-    }
-
     fn load(&mut self, path: PathBuf) {
-        self.load_as(path, Losing::Open)
+        self.load_as(path)
     }
 
     /// One Open, one dispatcher, one answer.
@@ -2190,7 +2163,7 @@ impl App {
     /// a chromatogram onto their plasmid is precisely the false positive
     /// cc36cf7's redefinition of `unsaved()` exists to eliminate, and it is how
     /// a guard becomes a reflex click.
-    fn load_as(&mut self, path: PathBuf, why: Losing) {
+    fn load_as(&mut self, path: PathBuf) {
         // A read error is deliberately ignored here and left to
         // `Document::open` below, so an unreadable file gives the one sentence
         // it has always given rather than two different ones depending on which
@@ -2262,7 +2235,7 @@ impl App {
                 }
                 // A caret from the previous document names bases this one does
                 // not have.
-                self.take_over(d, status, why, None);
+                self.take_over(d, status, None);
             }
             // A FAILED load must leave the open document alone.
             //
@@ -3018,14 +2991,12 @@ impl App {
     /// printable key live underneath a dialog whose own text is a count of the
     /// thing they change.
     ///
-    /// `pending_open` and `closing` are both here: the first is a parked
-    /// document waiting to be adopted, the second the latched window close, and
-    /// either one means the modal is up.
+    /// `closing` — the latched window close — is now the only document-level
+    /// question this has to cover. `pending_open`, a document parked behind the
+    /// unsaved-changes prompt, was here too until the bench made opening
+    /// non-destructive and there stopped being anything to park.
     fn asking(&self) -> bool {
-        self.edit.pending_paste.is_some()
-            || self.pending_dna.is_some()
-            || self.pending_open.is_some()
-            || self.closing
+        self.edit.pending_paste.is_some() || self.pending_dna.is_some() || self.closing
     }
 
     /// The window close, held back until the user has been asked.
@@ -3083,12 +3054,10 @@ impl App {
     /// and the document behind stays fully live — so the caret could be moved
     /// between the question and the answer.
     fn unsaved_modal(&mut self, ctx: &egui::Context) {
-        let why = if self.pending_open.is_some() {
-            self.pending_open
-                .as_ref()
-                .map(|p| p.why)
-                .unwrap_or(Losing::Open)
-        } else if self.closing {
+        // Closing is the only gesture left that can lose work. Opening a file,
+        // restoring a draft and opening a construct all add a tab now, so the
+        // three cases this used to choose between no longer exist.
+        let why = if self.closing {
             Losing::Close
         } else {
             return;
@@ -3212,7 +3181,6 @@ impl App {
             cancel = true;
         }
         if cancel {
-            self.drop_pending_open();
             self.closing = false;
             self.status = "nothing was closed".into();
         } else if discard {
@@ -3262,23 +3230,6 @@ impl App {
                 // its own close and make the window impossible to shut.
                 self.let_it_go = true;
                 self.close_now = true;
-            }
-            // A construct resolves exactly like an opened file: the parked
-            // document is adopted, or it is dropped. It is listed explicitly
-            // rather than folded into a `_` arm so that the next variant added
-            // here is a compile error and not a silent fall-through — which is
-            // how this path came to have no guard at all.
-            Losing::Open | Losing::Restore | Losing::Product => {
-                let Some(p) = self.pending_open.take() else {
-                    return;
-                };
-                if let Some(i) = p.stale_row {
-                    if i < self.stale.len() {
-                        let _ = self.stale.remove(i);
-                    }
-                }
-                self.adopt(p.doc);
-                self.status = p.status;
             }
         }
     }
@@ -3620,7 +3571,7 @@ impl eframe::App for App {
                 match Document::from_bytes(bytes, f.name.clone(), None) {
                     Ok(d) => {
                         let what = describe(d.molecule(), d.format);
-                        self.take_over(d, what, Losing::Open, None);
+                        self.take_over(d, what, None);
                     }
                     // Same rule as `load`'s Err arm: an unreadable payload is
                     // not a reason to destroy the document that IS open.
@@ -9275,7 +9226,7 @@ impl App {
                                 String::new()
                             }
                         );
-                        self.take_over(d, status, Losing::Product, None);
+                        self.take_over(d, status, None);
                     }
                     // The writer and the reader are both ours, so this is a bug
                     // rather than a bad file; say which of the two to look at.
@@ -13314,7 +13265,7 @@ mod tests {
     /// no dirty check anywhere on the path, so opening a second file over an
     /// edited one destroyed it silently.
     #[test]
-    fn opening_a_second_file_over_an_edited_one_asks_first() {
+    fn opening_a_second_file_keeps_the_edited_one_in_its_own_tab() {
         let (mut app, a) = app_with_a("swap-a");
         app.bench
             .get_mut()
@@ -13324,30 +13275,38 @@ mod tests {
         let b = temp_file("swap-b", "fa", PLASMID_B);
 
         app.load(b.clone());
-        assert!(app.pending_open.is_some(), "the swap is parked");
-        assert_eq!(
-            app.document().unwrap().title,
-            "swap-a.fa",
-            "and the edited document is still the one on screen"
-        );
-        // The status must still describe what is open, not the parked file.
-        assert!(
-            !app.status.contains("swap-b"),
-            "the toolbar must not describe a file that is not open: {:?}",
-            app.status
-        );
 
-        app.resolve_guard(Losing::Open, false);
+        // Two tabs, the new one in front. 528dcd9 made this ASK first, because
+        // `load` called `adopt` directly and destroyed the edited file; the
+        // bench answers it better by not replacing anything, so the property to
+        // pin is no longer "the user was warned" but "the edit is still there"
+        // — which is what the warning existed to achieve.
+        assert_eq!(app.bench.len(), 2, "opening replaced instead of adding");
         assert_eq!(app.document().unwrap().title, "swap-b.fa");
-        assert!(app.pending_open.is_none());
+        assert!(
+            app.bench.any_unsaved(),
+            "the edit vanished when the second file was opened"
+        );
+        assert_eq!(app.bench.unsaved_count(), 1);
+
+        // And going back finds it exactly as it was left.
+        app.switch_tab(0);
+        assert_eq!(app.document().unwrap().title, "swap-a.fa");
+        assert!(app.document().unwrap().molecule().topology.is_circular());
+        assert!(app.document().unwrap().unsaved());
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
     }
 
-    /// The other half: cancelling must put nothing at risk, and must leave the
-    /// recovery row it came from reachable.
+    /// Closing the tab you just opened puts you back where you were, with the
+    /// edit intact.
+    ///
+    /// This used to be "cancelling the question keeps the document", which was
+    /// the same property expressed through a dialog that no longer exists:
+    /// opening adds a tab, so the way to undo an open is to close it. Ctrl+W is
+    /// unguarded precisely because this holds.
     #[test]
-    fn cancelling_the_question_keeps_the_document_and_the_row() {
+    fn closing_the_tab_you_just_opened_returns_you_to_the_edited_one() {
         let (mut app, a) = app_with_a("cancel-a");
         app.bench
             .get_mut()
@@ -13356,10 +13315,16 @@ mod tests {
             .unwrap();
         let b = temp_file("cancel-b", "fa", PLASMID_B);
         app.load(b.clone());
-        app.drop_pending_open();
-        assert!(app.pending_open.is_none());
+        assert_eq!(app.bench.len(), 2);
+
+        app.close_tab(app.bench.active());
+        assert_eq!(app.bench.len(), 1);
         assert_eq!(app.document().unwrap().title, "cancel-a.fa");
         assert!(app.document().unwrap().unsaved(), "still dirty");
+        assert!(
+            app.document().unwrap().molecule().topology.is_circular(),
+            "the edit itself did not survive"
+        );
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
     }
@@ -14474,9 +14439,14 @@ mod tests {
             assert_eq!(d.log.cursor(), cursor, "{what}: the history moved");
             assert_eq!(d.molecule().seq, seq, "{what}: the bases changed");
             assert!(app.error.is_none(), "{what}: the screen was taken over");
-            assert!(
-                app.pending_open.is_none(),
-                "{what}: the unsaved-changes question was raised for a read"
+            // A chromatogram is attached to the open document; it must not
+            // arrive as a tab of its own. The old form of this asserted that no
+            // unsaved-changes question was raised, which said the same thing
+            // through machinery that no longer exists.
+            assert_eq!(
+                app.bench.len(),
+                1,
+                "{what}: taking a read opened a second tab"
             );
             if i == 0 {
                 assert_eq!(app.reads.len(), 1, "{what}: the read was not kept");
@@ -15946,24 +15916,30 @@ mod tests {
             app.clone_panel(ui.ctx());
         });
 
-        // The edited document is still the open one, unchanged, and the
-        // construct is parked behind the question.
-        assert!(
-            app.pending_open.is_some(),
-            "the construct was adopted without asking"
+        // The construct arrives in ITS OWN TAB and the edited document is
+        // untouched behind it. 28e9d91 called `adopt` here and destroyed the
+        // edit; fe89c5c parked it behind a question; the bench needs neither,
+        // because nothing is replaced. The property is the same one all three
+        // were reaching for and is now checkable without any dialog: the edit is
+        // still there.
+        assert_eq!(
+            app.bench.len(),
+            2,
+            "the construct did not open in a new tab"
         );
+        app.switch_tab(0);
         let d = app.document().expect("still open");
         assert_eq!(d.molecule().seq, before, "the edited molecule changed");
         assert_eq!(d.log.cursor(), cursor, "the edit history moved");
         assert!(d.unsaved(), "the edit stopped counting as unsaved work");
 
-        // And the question names the construct rather than claiming a file is
-        // being opened, because no file is.
-        assert_eq!(
-            Losing::Product.discard_label(),
-            "Discard and open the construct"
+        // And the construct is genuinely there to go back to.
+        app.switch_tab(1);
+        assert_ne!(
+            app.document().expect("the construct").molecule().seq,
+            before,
+            "the second tab is not the construct"
         );
-        assert!(Losing::Product.consequence(true).contains("construct"));
     }
 
     /// PROVEN TO FAIL at 28e9d91: `adopt` closed the design panel and the
