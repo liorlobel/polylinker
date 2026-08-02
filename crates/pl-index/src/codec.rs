@@ -654,20 +654,46 @@ mod tests {
         // path by pushing each separator-split component, so such a path would
         // escape the root and drive an arbitrary-file read at the consumer.
         // Refused here, once, rather than trusted at the read.
+        // Unsafe wherever the index is opened: `..` walks up on every platform,
+        // and a leading separator makes the path absolute on every platform.
         for path in [
             "../../../etc/passwd",
             "..",
             "sub/../../escape.gb",
             "/etc/passwd",
-            "\\\\server\\share\\x.gb",
-            "..\\..\\windows.gb",
-            "C:/Windows/System32/x.gb",
         ] {
             let mut lib = sample();
             lib.rows[3].path = path.to_string();
             assert!(
                 parse(&to_bytes(&lib)).is_err(),
                 "path {path:?} escaped the root and was not refused"
+            );
+        }
+
+        // Unsafe only where the separator and the drive letter MEAN something.
+        // These three escape through `PathBuf::push`'s prefix and root handling
+        // on Windows and are refused there. On Unix a backslash is an ordinary
+        // filename character and `C:` is an ordinary directory name, so `abs`
+        // joins each as one component and the result stays under the root — the
+        // same reason `R:S-isomer.gb` is kept below. Refusing them everywhere
+        // would be the over-refusal this test's accept-half exists to prevent,
+        // and it would buy no safety: each platform refuses what escapes it.
+        //
+        // e0109f8 asserted all three unconditionally, which passed only because
+        // its guard was pure string-matching and therefore equally wrong on both
+        // platforms.
+        #[cfg(windows)]
+        for path in [
+            "\\\\server\\share\\x.gb",
+            "..\\..\\windows.gb",
+            "C:/Windows/System32/x.gb",
+            "C:evil.gb",
+        ] {
+            let mut lib = sample();
+            lib.rows[3].path = path.to_string();
+            assert!(
+                parse(&to_bytes(&lib)).is_err(),
+                "path {path:?} escaped the root on Windows and was not refused"
             );
         }
         // A legitimate nested relative path is still accepted.
