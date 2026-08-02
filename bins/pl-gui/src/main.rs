@@ -2474,6 +2474,25 @@ impl App {
                 if faithful {
                     if let Some(d) = self.bench.get_mut() {
                         d.mark_saved();
+                        // AND THE DOCUMENT NOW LIVES THERE. `path` was assigned
+                        // once, at construction, and never again — a grep for
+                        // `.path = ` across bins/pl-gui returned nothing — so a
+                        // document written by Save As stayed `path: None`
+                        // forever. It is clean and it is nowhere.
+                        //
+                        // What that costs today: every subsequent Ctrl+S opens
+                        // the picker again, because there is no path to write
+                        // to; and `autosave`'s base-cursor guard tests
+                        // `here.original.is_some()`, so a saved-but-pathless
+                        // document keeps writing recovery drafts of a file that
+                        // is already on disk.
+                        //
+                        // Only on a FAITHFUL write, alongside `mark_saved` and
+                        // for the same reason: a FASTA that dropped nine
+                        // features has not saved the user's work, and pointing
+                        // the document at it would make the app believe
+                        // otherwise twice over.
+                        d.path = Some(path.clone());
                     }
                 }
                 self.wrote(&path, &note);
@@ -2602,6 +2621,12 @@ impl App {
             Ok(()) => {
                 if let Some(d) = self.bench.get_mut() {
                     d.mark_saved();
+                    // Same rule as `export`: a write the document is marked
+                    // clean by is a write the document now lives at. The `.dna`
+                    // path's losses were disclosed and accepted in the modal
+                    // that raised this, so it counts as faithful in the sense
+                    // `mark_saved` already uses one line above.
+                    d.path = Some(p.path.clone());
                 }
                 // The cache omission still gets said, once, through the channel
                 // that already puts the consequence leftmost.
@@ -13769,6 +13794,63 @@ mod tests {
         if let (Some(t), Some(d)) = (typed, app.bench.get_mut()) {
             app.edit.type_text(d, t, now);
         }
+    }
+
+    /// PROVEN TO FAIL at 5ef1c08: `Document::path` was assigned once, at
+    /// construction, and never again — a grep for `.path = ` across
+    /// bins/pl-gui returned nothing. A document written by Save As was marked
+    /// clean and left pointing nowhere.
+    ///
+    /// It is clean and it is nowhere, and both halves cost something today,
+    /// before any workspace exists: every later Ctrl+S reopens the picker
+    /// because there is no path to write to, and `autosave`'s base-cursor guard
+    /// tests `here.original.is_some()`, so a saved-but-pathless document keeps
+    /// writing recovery drafts of a file that is already on disk.
+    ///
+    /// Driven through `write_dna`, which takes an explicit path — `export`
+    /// raises a native picker and cannot be reached from a test at all.
+    #[test]
+    fn a_written_document_records_where_its_bytes_went() {
+        let mut app = App::blank();
+        let mol = pl_core::Molecule {
+            name: "construct".into(),
+            seq: b"ACGTACGTACGTACGT".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let title = "construct".to_string();
+        let (bytes, _) = pl_fileio::genbank::write_reporting(&mol, &title, today());
+        app.adopt(Document::from_bytes(bytes.as_bytes(), title, None).expect("re-read"));
+
+        // The state a religation product arrives in: real work, no path.
+        assert!(app.document().unwrap().path.is_none());
+        assert!(app.document().unwrap().unsaved());
+
+        let path = temp_file("where-it-went", "dna", "");
+        let (dna, unwritable) =
+            pl_fileio::snapgene::from_molecule_reporting(app.document().unwrap().molecule());
+        app.write_dna(PendingDna {
+            path: path.clone(),
+            bytes: dna,
+            unwritable,
+            history: false,
+            notes: Vec::new(),
+            overwriting_source: false,
+            dest_lost: Vec::new(),
+            source_lost: Vec::new(),
+            then: None,
+        });
+
+        assert!(
+            !app.document().unwrap().unsaved(),
+            "the write did not clear the dirty state"
+        );
+        assert_eq!(
+            app.document().unwrap().path.as_deref(),
+            Some(path.as_path()),
+            "the document was marked clean and left pointing nowhere"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// PROVEN TO FAIL at 4ca407b: nothing scheduled the frame on which an
