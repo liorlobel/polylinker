@@ -789,15 +789,33 @@ pub mod tests {
         );
     }
 
-    /// A damaged file's sentence, pinned on the 68-byte fixture the indexer
-    /// already ships. `parse` must refuse it and the refusal must be readable.
+    /// The 68-byte "not a sequence file" case, BUILT rather than read off disk.
+    ///
+    /// This was `std::fs::read("tests/library-fixture/trace.ab1")`, and the
+    /// comment beside it claimed the indexer already shipped that file. It does
+    /// not. `.gitignore` carries a blanket `*.ab1` — there so nobody commits a
+    /// real chromatogram — and the copy on a developer's disk is a BY-PRODUCT of
+    /// having run `crates/pl-scan/tests/convergence.rs`, whose "not a sequence
+    /// file" case writes exactly these bytes into the fixture directory.
+    ///
+    /// So the test read a file that another crate's test binary happens to
+    /// leave behind: green on a machine that had run that suite, red on every
+    /// fresh clone, and red under `cargo test -p pl-gui` alone. Building the
+    /// bytes needs no ordering between two test binaries and no file at all.
+    /// The SCF case in `loading_a_trace_never_touches_the_open_document` was
+    /// already constructed this way; this is the same discipline.
+    pub(crate) fn truncated_ab1() -> Vec<u8> {
+        let mut v = b"ABIF".to_vec();
+        v.extend_from_slice(&[0u8; 64]);
+        v
+    }
+
+    /// A damaged file's sentence, pinned on the same 68 bytes the indexer
+    /// classifies as "not a sequence file". `parse` must refuse it and the
+    /// refusal must be readable.
     #[test]
     fn the_truncated_fixture_is_refused_with_a_sentence_a_person_can_act_on() {
-        let data = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/library-fixture/trace.ab1"
-        ))
-        .expect("the fixture");
+        let data = truncated_ab1();
         let e = pl_abif::parse(&data).expect_err("68 bytes is not a chromatogram");
         let s = e.to_string();
         // The sentence sends the user to the right conclusion: the file is

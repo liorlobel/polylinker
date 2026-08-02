@@ -13773,19 +13773,17 @@ mod tests {
     /// trains people to click through the guard.
     #[test]
     fn loading_a_trace_never_touches_the_open_document() {
-        // A minimal ABIF, an SCF wearing `.ab1`, and the 68-byte truncated
-        // fixture the indexer already ships.
+        // A minimal ABIF, an SCF wearing `.ab1`, and the 68 bytes the indexer
+        // classifies as "not a sequence file". All three are BUILT: see
+        // `reads::tests::truncated_ab1` for why the third stopped being read
+        // off disk.
         let good = reads::tests::ab1(b"ACGTACGTACGTACGTACGT", &[40u8; 20]);
         let scf = {
             let mut v = b".scf".to_vec();
             v.extend_from_slice(&[0u8; 64]);
             v
         };
-        let truncated = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/library-fixture/trace.ab1"
-        ))
-        .expect("the fixture");
+        let truncated = reads::tests::truncated_ab1();
 
         for (i, (what, bytes)) in [
             ("a parseable trace", good),
