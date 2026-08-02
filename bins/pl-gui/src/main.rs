@@ -1038,8 +1038,16 @@ struct App {
     design: Option<design::Panel>,
     /// The cut-and-religate panel, when it is open.
     clone_panel: Option<clone::Panel>,
-    /// What is open. Holds at most one document today; see [`bench::Bench`].
+    /// What is open. See [`bench::Bench`].
     bench: bench::Bench,
+    /// Tabs the user closed, newest last, for Ctrl+Shift+T.
+    ///
+    /// A closed tab keeps its document AND its undo history, which is what lets
+    /// Close Tab be unguarded: nothing is destroyed, so nothing has to be asked
+    /// about. Bounded, because an unbounded one is a memory leak shaped like a
+    /// feature — a user who closes fifty tabs in a session is not going to
+    /// reopen the first.
+    closed: Vec<bench::Tab>,
 
     /// The Feature editor, if it is open.
     ///
@@ -1632,6 +1640,7 @@ impl App {
     fn blank() -> Self {
         App {
             bench: bench::Bench::default(),
+            closed: Vec::new(),
             error: None,
             notice: None,
             edit: seqedit::SeqEdit::new(),
@@ -2023,7 +2032,6 @@ impl App {
     /// bases are visible is a feature in the wrong place.
     fn open_feature_editor(&mut self, index: Option<usize>) {
         self.settle();
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else {
             return;
         };
@@ -2404,7 +2412,6 @@ impl App {
         // Assigned by the FASTA arm below; GenBank is always faithful enough to
         // count as a save.
         let mut faithful = true;
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let (ext, filter) = if as_fasta {
@@ -2505,7 +2512,6 @@ impl App {
     /// a destination exists.
     fn save_dna(&mut self, then: Option<Losing>) {
         self.settle();
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else { return };
         // `file_stem`, not `locus_name`: `locus_name` replaces every character
         // outside [A-Za-z0-9_.-] and truncates to the sixteen columns a GenBank
@@ -2755,7 +2761,6 @@ impl App {
         // The map is drawn from `log.current()`, so an open run would be
         // missing from it.
         self.settle();
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let Some(path) = rfd::FileDialog::new()
@@ -2842,7 +2847,6 @@ impl App {
     /// `--sites unique`, which is its default.
     fn export_svg(&mut self) {
         self.settle();
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let Some(path) = rfd::FileDialog::new()
@@ -2905,7 +2909,6 @@ impl App {
             self.gel_cache = Some((key, built));
             return;
         }
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else {
             self.gel_cache = Some((key, built));
             return;
@@ -2984,7 +2987,6 @@ impl App {
     /// which formats exist.
     fn export_map_eps(&mut self) {
         self.settle();
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let Some(path) = rfd::FileDialog::new()
@@ -3053,7 +3055,19 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if ctx.input(|i| i.viewport().close_requested()) && !self.let_it_go {
             self.settle();
-            if self.document().is_some_and(|d| d.unsaved()) {
+            // EVERY TAB, not the one on screen. With a single document those
+            // were the same sentence; with a bench they are not, and the
+            // difference is somebody's work. Edit a plasmid, open a second in a
+            // new tab, close the window — and a guard that asked only about the
+            // active document would let the first go without a word. That is
+            // the class of loss cc36cf7 spent a whole commit closing when there
+            // was only one way to reach it.
+            //
+            // `settle` above still settles only the ACTIVE tab's run, and that
+            // is right rather than an oversight: a run is uncommitted work
+            // living on `App`, so only the active tab can have one, and
+            // `switch_tab` settles as it leaves.
+            if self.bench.any_unsaved() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.closing = true;
             }
@@ -3106,16 +3120,29 @@ impl App {
             self.resolve_guard(why, true);
             return;
         }
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else { return };
         let title = pl_fileio::caption_of(&d.title).to_string();
         // "0 edits that are not in any file" is absurd and would be the first
         // thing a user sees after a crash recovery, so the never-written case
         // gets its own sentence rather than a count of nothing.
+        // OTHER TABS COUNT. The sentence used to describe the document on
+        // screen, which was the whole workspace; it is not any more, and a
+        // dialog that named one plasmid while silently discarding three would
+        // be worse than no dialog — the user would read it, agree with it, and
+        // lose work it never mentioned.
+        let others = self
+            .bench
+            .unsaved_count()
+            .saturating_sub(usize::from(d.unsaved()));
+        let and_others = match others {
+            0 => String::new(),
+            1 => " Another tab also has unsaved work.".to_string(),
+            n => format!(" {n} other tabs also have unsaved work."),
+        };
         let stake = match d.unsaved_ops() {
-            Some(0) => format!("{title} has not been saved to a file."),
-            Some(1) => format!("{title} has 1 edit that is not in any file."),
-            Some(n) => format!("{title} has {n} edits that are not in any file."),
+            Some(0) => format!("{title} has not been saved to a file.{and_others}"),
+            Some(1) => format!("{title} has 1 edit that is not in any file.{and_others}"),
+            Some(n) => format!("{title} has {n} edits that are not in any file.{and_others}"),
             // Reachable by saving and then seeking onto another branch from the
             // History tab: the distance genuinely does not exist.
             None => format!("{title} has changes that are not in any file."),
@@ -3622,6 +3649,44 @@ impl eframe::App for App {
             self.export(false);
         }
 
+        // TAB NAVIGATION, behind the same guards as the other accelerators —
+        // `asking()` and `text_edit_focused()` — so Ctrl+W typed into the
+        // Features filter closes a word and not somebody's plasmid.
+        //
+        // Ctrl+W is unguarded on purpose: a closed tab keeps its document and
+        // its undo history and Ctrl+Shift+T brings it back, so closing destroys
+        // nothing. The question belongs at the one place work really goes away,
+        // which is closing the window, and asking it twice is how a guard turns
+        // into a reflex.
+        if !self.asking() && !ctx.text_edit_focused() {
+            let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
+            if cmd && ctx.input(|i| i.key_pressed(egui::Key::W)) && !self.bench.is_empty() {
+                self.close_tab(self.bench.active());
+            }
+            if cmd && ctx.input(|i| i.key_pressed(egui::Key::Tab)) && self.bench.len() > 1 {
+                let n = self.bench.len();
+                let at = self.bench.active();
+                let next = if shift {
+                    (at + n - 1) % n
+                } else {
+                    (at + 1) % n
+                };
+                self.switch_tab(next);
+            }
+            if cmd && shift && ctx.input(|i| i.key_pressed(egui::Key::T)) {
+                if let Some(t) = self.closed.pop() {
+                    self.settle();
+                    let v = self.take_view();
+                    self.bench.store(v);
+                    self.bench.reopen(t);
+                    if let Some(v) = self.bench.take_active_view() {
+                        self.put_view(v);
+                    }
+                    self.doc_generation = self.doc_generation.wrapping_add(1);
+                }
+            }
+        }
+
         // The digest worker cannot wake the UI, so poll it and keep repainting
         // while it runs.
         let mut running = false;
@@ -3662,6 +3727,7 @@ impl eframe::App for App {
         // `App::hot_shown` for why one field could not do this.
         self.hot_shown = std::mem::take(&mut self.hot);
         self.top_bar(ui);
+        self.tab_strip(ui);
         self.side_panel(ui);
         self.central(ui);
         self.paste_dialog(&ctx);
@@ -5172,11 +5238,12 @@ impl App {
     }
 
     fn enzymes_tab(&mut self, ui: &mut Ui) {
-        // self.bench.get(), not self.document(): the accessor borrows ALL of
-        // self for as long as d lives, and this function goes on to write
-        // self.enzyme_set from a closure. Through the field the borrow is
-        // disjoint, which is what the old self.document() gave for free
-        // and is the one real cost of putting the document behind a method.
+        // `self.bench.get()`, not `self.document()`. The accessor borrows all of
+        // `self` for as long as `d` lives, and this function goes on to write
+        // `self.enzyme_set` from a closure; through the field the borrow is
+        // disjoint, which is what `self.document.as_ref()` gave for free. That
+        // is the one real cost of putting the document behind a method, and it
+        // is why every mutable use goes through the field as well.
         let d = self.bench.get().expect("checked by caller");
         ui.add_space(4.0);
 
@@ -5700,7 +5767,6 @@ impl App {
     ///   abandoned branch is still there and still reachable, which is the
     ///   afternoon's work every other editor silently throws away.
     fn history_tab(&mut self, ui: &mut Ui) {
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else { return };
         let ops = d.log.all_ops();
 
@@ -6176,11 +6242,6 @@ impl App {
 
         {
             {
-                // self.bench.get(), not self.document(): the accessor borrows ALL of
-                // self for as long as d lives, and this function goes on to write
-                // self.enzyme_set from a closure. Through the field the borrow is
-                // disjoint, which is what the old self.document() gave for free
-                // and is the one real cost of putting the document behind a method.
                 let d = self.bench.get().expect("checked by caller");
                 let mol = d.molecule();
                 let edit = &self.edit;
@@ -7530,11 +7591,6 @@ impl App {
     /// cut.
     fn sequence_readout(&mut self, ui: &mut Ui) {
         let (mol_line, other_arc, has_sel) = {
-            // self.bench.get(), not self.document(): the accessor borrows ALL of
-            // self for as long as d lives, and this function goes on to write
-            // self.enzyme_set from a closure. Through the field the borrow is
-            // disjoint, which is what the old self.document() gave for free
-            // and is the one real cost of putting the document behind a method.
             let d = self.bench.get().expect("checked by caller");
             let mol = d.molecule();
             let n_c = mol.len();
@@ -7780,11 +7836,6 @@ impl App {
                 t.bad_codon_starts.clone(),
             )
         };
-        // self.bench.get(), not self.document(): the accessor borrows ALL of
-        // self for as long as d lives, and this function goes on to write
-        // self.enzyme_set from a closure. Through the field the borrow is
-        // disjoint, which is what the old self.document() gave for free
-        // and is the one real cost of putting the document behind a method.
         let d = self.bench.get().expect("checked by caller");
         let ds = d.molecule().double_stranded;
         let complement = self.layout.complement.unwrap_or(ds != Some(false));
@@ -8047,11 +8098,6 @@ impl App {
         has_cuts: bool,
         typing: bool,
     ) {
-        // self.bench.get(), not self.document(): the accessor borrows ALL of
-        // self for as long as d lives, and this function goes on to write
-        // self.enzyme_set from a closure. Through the field the borrow is
-        // disjoint, which is what the old self.document() gave for free
-        // and is the one real cost of putting the document behind a method.
         let d = self.bench.get().expect("checked by caller");
         let scanning = d.digest.is_running();
         let unavailable = match &d.digest {
@@ -8223,7 +8269,6 @@ impl App {
     /// nothing, rather than inventing a span. A linear scan is fine even at
     /// MG1655's ~9,000 features: it happens on a click, not per frame.
     fn select_feature_under(&mut self, caret: u64) {
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else { return };
         let base = caret.max(1);
         let mut best: Option<(u64, usize, u64, u64)> = None;
@@ -8423,11 +8468,6 @@ impl App {
     }
 
     fn file_tab(&mut self, ui: &mut Ui) {
-        // self.bench.get(), not self.document(): the accessor borrows ALL of
-        // self for as long as d lives, and this function goes on to write
-        // self.enzyme_set from a closure. Through the field the borrow is
-        // disjoint, which is what the old self.document() gave for free
-        // and is the one real cost of putting the document behind a method.
         let d = self.bench.get().expect("checked by caller");
         let m = d.molecule();
         ui.add_space(6.0);
@@ -8595,7 +8635,6 @@ impl App {
     /// gel changes between two frames in which nothing changed, so the key
     /// below is the complete list of what a picture depends on.
     fn gel_ready(&mut self) -> Result<(), String> {
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else {
             self.gel_cache = None;
             return Err("no molecule is open".into());
@@ -8781,7 +8820,6 @@ impl App {
                 });
                 return;
             }
-            // Field, not accessor: self.gel is written below. See nzymes_tab.
             let Some(d) = self.bench.get() else {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -8997,7 +9035,6 @@ impl App {
     /// are visible would return primers for a sequence that is not on screen.
     fn open_design(&mut self) {
         self.settle();
-        // Field, not accessor: self.gel is written below. See nzymes_tab.
         let Some(d) = self.bench.get() else {
             return;
         };
@@ -9026,11 +9063,161 @@ impl App {
     ///
     /// Named `document()` rather than `active()` so the 88 call sites this
     /// replaced read as they did — `self.document()` where they said
-    /// `self.document()`. Renaming them as well would have been churn on
-    /// top of a container swap, and this stage is worth being reviewable as a
+    /// `self.document.as_ref()`. Renaming them as well would have been churn on
+    /// top of a container swap, and that stage was worth being reviewable as a
     /// no-behaviour-change diff.
     fn document(&self) -> Option<&Document> {
         self.bench.get()
+    }
+
+    /// The open documents, one row, above the panels.
+    ///
+    /// Hidden entirely at one tab. A strip that shows a single item teaches
+    /// nothing and costs a row of a laptop screen, and this app's own map has
+    /// already had the argument about spending vertical space on something that
+    /// says nothing.
+    ///
+    /// The dot marks unsaved work, and it is the only place a user can see that
+    /// a tab they are NOT looking at has edits in it — which is the whole reason
+    /// the close guard had to change.
+    fn tab_strip(&mut self, ui: &mut Ui) {
+        let titles = self.bench.titles();
+        if titles.len() < 2 {
+            return;
+        }
+        let active = self.bench.active();
+        let mut go: Option<usize> = None;
+        let mut shut: Option<usize> = None;
+        egui::Panel::top(egui::Id::new("tabs")).show(ui, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                for (i, (title, unsaved)) in titles.iter().enumerate() {
+                    // Bounded, for the reason the Features list is bounded: a
+                    // 150-character /label must not be able to lay out the
+                    // application. See `a_long_feature_name_cannot_lay_out_the_panel`.
+                    let shown = pl_fileio::caption_of(title);
+                    let label = format!("{}{}", if *unsaved { "• " } else { "" }, shown);
+                    let r = ui
+                        .add(
+                            egui::Button::selectable(i == active, label)
+                                .wrap_mode(egui::TextWrapMode::Truncate),
+                        )
+                        .on_hover_text(title);
+                    if r.clicked() {
+                        go = Some(i);
+                    }
+                    if r.middle_clicked() {
+                        shut = Some(i);
+                    }
+                }
+            });
+            ui.add_space(2.0);
+        });
+        if let Some(i) = go {
+            self.switch_tab(i);
+        }
+        if let Some(i) = shut {
+            self.close_tab(i);
+        }
+    }
+
+    /// Close tab `i`.
+    ///
+    /// NO GUARD HERE, and that is deliberate rather than an omission: a closed
+    /// tab is kept and Ctrl+Shift+T puts it back, edits and undo history
+    /// intact, so closing one destroys nothing. The question is asked once, at
+    /// the point where work really does go away — closing the window — and
+    /// asking it twice is how a guard becomes a reflex click.
+    fn close_tab(&mut self, i: usize) {
+        if i == self.bench.active() {
+            self.settle();
+            let v = self.take_view();
+            self.bench.store(v);
+        }
+        if let Some(t) = self.bench.close(i) {
+            self.closed.push(t);
+            // The panels belonged to a molecule that is no longer on screen.
+            self.close_design("the design panel was closed: its tab was closed");
+            self.close_feature_editor("the feature editor was closed: its tab was closed");
+            self.clone_panel = None;
+            if let Some(v) = self.bench.take_active_view() {
+                self.put_view(v);
+            }
+            self.doc_generation = self.doc_generation.wrapping_add(1);
+        }
+    }
+
+    /// Lift the active tab's view off `App`, leaving a blank one behind.
+    ///
+    /// Written out field by field, with `put_view` its mirror, because the
+    /// failure mode is silent: a field this forgets stays on `App` and then
+    /// belongs to whichever tab you switch TO, so one molecule's caret,
+    /// selection or feature filter appears over another's. Nothing crashes and
+    /// nothing looks wrong — it just describes the wrong plasmid.
+    /// `no_view_state_leaks_between_tabs` enumerates the fields independently so
+    /// the two lists have to agree.
+    fn take_view(&mut self) -> bench::DocView {
+        bench::DocView {
+            status: std::mem::take(&mut self.status),
+            notice: self.notice.take(),
+            edit: std::mem::replace(&mut self.edit, seqedit::SeqEdit::new()),
+            selected: self.selected.take(),
+            hot: self.hot.take(),
+            hot_shown: self.hot_shown.take(),
+            filter: std::mem::take(&mut self.filter),
+            enz_strip: std::mem::take(&mut self.enz_strip),
+            orf_strip: std::mem::take(&mut self.orf_strip),
+            tr: std::mem::take(&mut self.tr),
+            doc_code: self.doc_code,
+            gel: std::mem::take(&mut self.gel),
+            central_view: std::mem::replace(&mut self.central_view, CentralView::Map),
+        }
+    }
+
+    fn put_view(&mut self, v: bench::DocView) {
+        self.status = v.status;
+        self.notice = v.notice;
+        self.edit = v.edit;
+        self.selected = v.selected;
+        self.hot = v.hot;
+        self.hot_shown = v.hot_shown;
+        self.filter = v.filter;
+        self.enz_strip = v.enz_strip;
+        self.orf_strip = v.orf_strip;
+        self.tr = v.tr;
+        self.doc_code = v.doc_code;
+        self.gel = v.gel;
+        self.central_view = v.central_view;
+    }
+
+    /// Show tab `i`.
+    ///
+    /// The open typing run is SETTLED first, for the reason every durable action
+    /// settles it: a run is uncommitted work living outside the op log, and
+    /// carrying one across a switch would leave it to be committed against
+    /// whichever molecule you land on.
+    ///
+    /// The three panels that belong to a molecule are closed, exactly as `adopt`
+    /// closes them — the design panel writes coordinates into a named file, the
+    /// feature editor holds an index into one feature list, and the religation
+    /// panel holds a whole digest. Switching tabs invalidates all three as
+    /// thoroughly as replacing the document did, and this is the second entrance
+    /// to that hazard rather than a new one.
+    fn switch_tab(&mut self, i: usize) {
+        if i == self.bench.active() || i >= self.bench.len() {
+            return;
+        }
+        self.settle();
+        self.close_design("the design panel was closed: it was designed against another tab");
+        self.close_feature_editor("the feature editor was closed: it was opened on another tab");
+        self.clone_panel = None;
+        let out = self.take_view();
+        self.bench.store(out);
+        if let Some(v) = self.bench.activate(i) {
+            self.put_view(v);
+        }
+        // The digest, the ORF scan and the map all key off this.
+        self.doc_generation = self.doc_generation.wrapping_add(1);
     }
 
     /// Draw the cut-and-religate panel and adopt a product if one was asked for.
@@ -9124,7 +9311,6 @@ impl App {
         };
         let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
         let (seq, at) = {
-            // Field, not accessor: self.gel is written below. See nzymes_tab.
             let Some(d) = self.bench.get() else {
                 self.design = Some(panel);
                 return;
@@ -9848,7 +10034,6 @@ fn gel_pane(ui: &mut Ui, built: &gel::Built, methods: &mut bool, show_all: &mut 
 /// Carried as text rather than as the enzyme, because the interesting half —
 /// which OTHER enzymes leave an end this one can be ligated to — is a property
 /// of the molecule on screen, not of the enzyme, and a row should not go looking
-/// for it. `enzymes_tab` computes it once against the enzymes that actually cut.
 struct EndNote {
     /// `5' GATC`, `3' GTAC`, `blunt`, or `5' NNNN` when the sequence sets it.
     chip: String,
