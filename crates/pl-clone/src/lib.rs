@@ -273,6 +273,35 @@ pub fn cut(seq: &Dseq, enzyme: &Enzyme) -> Vec<Dseq> {
     try_cut(seq, enzyme).unwrap_or_default()
 }
 
+/// Cut with every enzyme in turn: a double digest.
+///
+/// Which is also what the tube does — the enzymes are in it together and the
+/// order they happen to reach a site in does not change the pieces — so this is
+/// the same operation repeated rather than a new one.
+///
+/// An enzyme that does not cut a piece leaves it whole, and one that cuts
+/// nothing at all leaves the molecule as it was. The result is therefore never
+/// empty for a non-empty input, and a single circular fragment coming back is
+/// the caller's signal that none of these enzymes cut.
+///
+/// Lived in `bins/pl-gui/src/clone.rs` and had to move: [`ligate::subclone`]
+/// needs the same thing, and a digest performed one way in the GUI and another
+/// way in the engine is two answers to "what are the fragments".
+pub fn digest<'a>(seq: &Dseq, enzymes: impl IntoIterator<Item = &'a Enzyme>) -> Vec<Dseq> {
+    let mut frags = vec![seq.clone()];
+    for e in enzymes {
+        let mut next = Vec::with_capacity(frags.len() + 1);
+        for f in &frags {
+            match try_cut(f, e) {
+                Ok(parts) if !parts.is_empty() => next.extend(parts),
+                _ => next.push(f.clone()),
+            }
+        }
+        frags = next;
+    }
+    frags
+}
+
 /// As [`cut`], but says why a molecule could not be digested.
 pub fn try_cut(seq: &Dseq, enzyme: &Enzyme) -> Result<Vec<Dseq>, CutError> {
     // ASCII up front, the guard `pcr` already applies to its template, and for
@@ -332,9 +361,35 @@ pub fn try_cut(seq: &Dseq, enzyme: &Enzyme) -> Result<Vec<Dseq>, CutError> {
         let b = t.iter().map(|x| x + ovhg).collect();
         (t, b)
     } else {
-        // On a linear molecule the outermost boundaries are the molecule's own
-        // ends, on both strands. Using `start + ovhg` there would invent an
-        // overhang the molecule does not have, and lose the bases beyond it.
+        // On a linear molecule the outermost boundaries are THE STRANDS' OWN
+        // ENDS, which are not the same thing as the molecule's ends and were
+        // written as if they were.
+        //
+        // `full` is the flattened duplex — watson plus whatever of crick hangs
+        // off either side — so `[0, n]` on both strands says "this molecule is
+        // blunt at both ends". For an input straight off a file that is true.
+        // For a fragment that came out of an earlier cut it is FALSE, and that
+        // is the ordinary case the moment a second enzyme is added:
+        //
+        //     EcoRI + BamHI on a plasmid, in the tube together
+        //
+        // The EcoRI cut leaves AATT overhangs; the BamHI cut of those pieces
+        // then reported their outer ends as Blunt. Every double digest in this
+        // program has been describing two of its ends wrongly — the GUI's
+        // fragment list printed "blunt" for a sticky end, and the religation
+        // search, which is sticky-only by default, refused the join that a
+        // ligase actually makes. "No sticky ends match" for an EcoRI/BamHI
+        // double digest, which is the commonest cloning there is.
+        //
+        // Watson occupies `[0, w)` and crick `[-ovhg, -ovhg + c)` in `Dseq`
+        // coordinates; `full` starts at the leftmost of the two. Placing the
+        // outer boundaries there costs nothing when the input is blunt — both
+        // reduce to `[0, n]` — and is the whole fix when it is not.
+        let origin = std::cmp::min(0, -seq.ovhg);
+        let w = seq.watson.len() as i64;
+        let c = seq.crick.len() as i64;
+        let (w_lo, w_hi) = (-origin, w - origin);
+        let (c_lo, c_hi) = (-seq.ovhg - origin, -seq.ovhg + c - origin);
         //
         // A cut also needs *both* nicks to land on the molecule, and that is
         // now enforced upstream: `place()` in `pl-enzymes/src/lib.rs` 702-718
@@ -355,22 +410,31 @@ pub fn try_cut(seq: &Dseq, enzyme: &Enzyme) -> Result<Vec<Dseq>, CutError> {
         // n in 1..=60), so it was a check that could not fail, and the
         // `usable.is_empty()` return under it was doubly dead because
         // `tops.is_empty()` above already handles a wholly uncut molecule.
-        // A `debug_assert` over the *tight* range says the same thing honestly
-        // and trips if pl-enzymes ever loosens -- which it could, because
+        // A `debug_assert` over the *tight* range said the same thing honestly
+        // and tripped if pl-enzymes ever loosened -- which it could, because
         // `cut_positions`' public doc does not promise this; only an internal
         // comment in `cut_sites` does.
-        debug_assert!(
-            tops.iter()
-                .all(|t| (1..n).contains(t) && (1..n).contains(&(t + ovhg))),
-            "pl-enzymes gave a linear cut with a nick off the molecule: \
-             tops={tops:?} ovhg={ovhg} n={n}"
-        );
-        let mut t = vec![0i64];
+        //
+        // IT IS A FILTER NOW, and the reason is the paragraph above rather than
+        // a loss of nerve. pl-enzymes guarantees both nicks land on `full`, and
+        // `full` is no longer the same thing as the duplex: a fragment with a
+        // four-base overhang has four bases that exist on one strand only, and a
+        // recognition site is not a site there — there is nothing for the enzyme
+        // to bind. `cut_positions` cannot know that, because it is handed a
+        // string. So the range that has to hold is the DUPLEX, both nicks
+        // strictly inside it, and pl-enzymes' guarantee is exactly this
+        // condition in the blunt case where the two coincide.
+        let inside = |t: &i64| t > &w_lo && t < &w_hi && t + ovhg > c_lo && t + ovhg < c_hi;
+        let tops: Vec<i64> = tops.iter().copied().filter(|t| inside(t)).collect();
+        if tops.is_empty() {
+            return Ok(vec![seq.clone()]);
+        }
+        let mut t = vec![w_lo];
         t.extend(tops.iter().copied());
-        t.push(n);
-        let mut b = vec![0i64];
+        t.push(w_hi);
+        let mut b = vec![c_lo];
         b.extend(tops.iter().map(|x| x + ovhg));
-        b.push(n);
+        b.push(c_hi);
         (t, b)
     };
 
@@ -816,6 +880,115 @@ mod tests {
         assert_eq!(frags[1].watson, "GATCCTTTT");
         assert_eq!(frags[1].crick, "AAAAG");
         assert_eq!(frags[1].ovhg, -4);
+    }
+
+    /// A double digest must not flatten the first enzyme's sticky ends.
+    ///
+    /// PROVEN TO FAIL against 8c41d59, and it is not a corner: EcoRI + BamHI is
+    /// the commonest cloning there is. `try_cut` works on `to_string_full()` —
+    /// the flattened duplex — and then placed the outer fragment boundaries at
+    /// `[0, n]` on BOTH strands, which says "this molecule is blunt at both
+    /// ends". True for a molecule off a file, false for a piece that came out of
+    /// an earlier cut.
+    ///
+    /// So `left=Blunt right=GATC` for a fragment whose left end is a live AATT
+    /// overhang. What that cost, in the running program:
+    ///
+    ///   - the religation panel's fragment list printed "blunt" for a sticky
+    ///     end, which is a wrong answer to a question a user asks a plasmid
+    ///     editor precisely because they cannot see the answer themselves;
+    ///   - the ligation search is sticky-only by default, so it refused the join
+    ///     a ligase makes and reported "No sticky ends match. Blunt ends are
+    ///     excluded" for a perfectly ordinary directional double digest.
+    ///
+    /// NOTHING COVERED THIS. Every `try_cut` test cut a molecule read from a
+    /// string, and every one of those is blunt-ended, so the boundary that was
+    /// wrong was the one no test ever exercised. The combined digest shipped
+    /// with tests that counted fragments and never asked what their ends were.
+    #[test]
+    fn a_second_enzyme_does_not_flatten_the_first_ones_sticky_ends() {
+        let eco = by_name("EcoRI").expect("in the table");
+        let bam = by_name("BamHI").expect("in the table");
+        // One EcoRI site and one BamHI site in a circle.
+        let m = Dseq::new(
+            "GAATTCTTTTTTTTTTTTTTTTTTTTGGATCCAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            true,
+        );
+        let once = try_cut(&m, eco).expect("EcoRI cuts");
+        assert_eq!(once.len(), 1, "one cut in a circle linearises it");
+        let aatt = End::Overhang {
+            five_prime: true,
+            bases: "AATT".into(),
+        };
+        let gatc = End::Overhang {
+            five_prime: true,
+            bases: "GATC".into(),
+        };
+        assert_eq!(
+            (once[0].left_end(), once[0].right_end()),
+            (aatt.clone(), aatt.clone()),
+            "the premise: one EcoRI cut leaves two AATT overhangs"
+        );
+
+        let twice = try_cut(&once[0], bam).expect("BamHI cuts the fragment");
+        assert_eq!(twice.len(), 2);
+        assert_eq!(
+            (twice[0].left_end(), twice[0].right_end()),
+            (aatt.clone(), gatc.clone()),
+            "the EcoRI end of the first piece was flattened to blunt"
+        );
+        assert_eq!(
+            (twice[1].left_end(), twice[1].right_end()),
+            (gatc, aatt),
+            "the EcoRI end of the second piece was flattened to blunt"
+        );
+
+        // ORDER MUST NOT MATTER, because in the tube it does not. Cutting with
+        // BamHI first and EcoRI second is the same digest, and a fix that only
+        // repaired the second cut's outer ends would give two different answers
+        // to one question.
+        let other = digest(&m, [bam, eco]);
+        let mut a: Vec<(usize, End, End)> = twice
+            .iter()
+            .map(|f| (f.len(), f.left_end(), f.right_end()))
+            .collect();
+        let mut b: Vec<(usize, End, End)> = other
+            .iter()
+            .map(|f| (f.len(), f.left_end(), f.right_end()))
+            .collect();
+        a.sort_by_key(|x| x.0);
+        b.sort_by_key(|x| x.0);
+        assert_eq!(a, b, "the two enzymes gave different answers in each order");
+    }
+
+    /// A recognition site lying in a single-stranded overhang is not a site.
+    ///
+    /// The other half of the same fix, and the half that could have been missed:
+    /// once the outer boundaries follow the strands, a nick can be asked for
+    /// outside the duplex — and `cut_positions` cannot refuse it, because it is
+    /// handed a flattened string and has no way to know which bases are paired.
+    /// An enzyme has nothing to bind to on one strand, so the cut does not
+    /// happen.
+    #[test]
+    fn an_enzyme_does_not_cut_where_only_one_strand_is_there() {
+        // A duplex whose left four bases are a watson-only overhang, with the
+        // BamHI site placed so that it lies entirely inside that overhang.
+        let f = Dseq::from_parts("GGATCCAAAACCCCGGGGTTTT", "AAAACCCCGGGGTTTT", -6, false);
+        assert_eq!(
+            f.left_end(),
+            End::Overhang {
+                five_prime: true,
+                bases: "GGATCC".into()
+            },
+            "the premise: the site is on one strand only"
+        );
+        let out = try_cut(&f, by_name("BamHI").expect("in the table")).expect("not an error");
+        assert_eq!(
+            out.len(),
+            1,
+            "a site with no complementary strand was treated as a real one"
+        );
+        assert_eq!(out[0], f, "and the molecule came back unchanged");
     }
 
     #[test]

@@ -279,27 +279,13 @@ pub fn plan(mol: &Molecule, enzymes: &BTreeSet<String>, blunt: bool) -> Plan {
     }
     let seq: String = String::from_utf8_lossy(&mol.seq).to_ascii_uppercase();
     let circular = mol.topology.is_circular();
-    let mut d = pl_clone::Dseq::new(&seq, circular);
+    let d = pl_clone::Dseq::new(&seq, circular);
 
-    // Cut with each enzyme in turn. A double digest is the same operation
-    // twice, which is also how the tube works.
-    let mut frags: Vec<pl_clone::Dseq> = vec![d.clone()];
-    for name in enzymes {
-        let Some(e) = pl_enzymes::by_name(name) else {
-            continue;
-        };
-        let mut next = Vec::new();
-        for f in &frags {
-            match pl_clone::try_cut(f, e) {
-                Ok(parts) if !parts.is_empty() => next.extend(parts),
-                // An enzyme that does not cut this piece leaves it whole.
-                _ => next.push(f.clone()),
-            }
-        }
-        frags = next;
-        d = frags[0].clone();
-    }
-    let _ = d;
+    // The digest itself lives in `pl-clone` since Stage 4. It was written out
+    // here, and `subclone` needs the identical operation on a second molecule —
+    // a digest performed one way in the panel and another way in the engine is
+    // two answers to "what are the fragments".
+    let frags = pl_clone::digest(&d, enzymes.iter().filter_map(|n| pl_enzymes::by_name(n)));
 
     if frags.len() == 1 && frags[0].circular {
         return Plan {
