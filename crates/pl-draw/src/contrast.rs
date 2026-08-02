@@ -169,14 +169,43 @@ pub fn audit(scene: &crate::Scene, background: &str, scale: f64) -> Vec<Finding>
                 check_graphic(&mut out, stroke, background, bg, "circle");
             }
             crate::Item::Path {
-                stroke: Some(s),
+                fill,
+                stroke,
                 title,
                 ..
             } => {
                 let what = title.clone().unwrap_or_else(|| "path".into());
-                check_graphic(&mut out, s, background, bg, &what);
-            }
-            _ => {}
+                if let Some(s) = stroke {
+                    check_graphic(&mut out, s, background, bg, &what);
+                }
+                // A FILL IS THE BOUNDARY WHEN THERE IS NO STROKE.
+                //
+                // This arm used to be `Path { stroke: Some(s), .. }` and
+                // everything else fell into `_ => {}`, so `audit` never
+                // measured a fill at all — while `pl export --check-contrast`
+                // printed "contrast ok (WCAG 2.2 AA)" and its own help promises
+                // to "measure every colour".
+                //
+                // docs/UX-REVIEW-2026-07-31.md finding 8 caught it on a real
+                // figure: two pure-white and two pure-yellow filled bands
+                // passed a check claiming AA. Those particular bands ARE
+                // discernible, because `scene` gives every band a
+                // `FEATURE_STROKE` hairline and the stroke was measured — but
+                // that is the renderer being careful, not the check being
+                // right, and an unstroked fill had nothing looking at it.
+                //
+                // SC 1.4.11 asks whether the BOUNDARY is perceivable, so a
+                // stroked shape is judged on its stroke and an unstroked one on
+                // its fill. That is a pure tightening: nothing that passed
+                // before fails now, and the hole is closed.
+                if let (Some(f), None) = (fill, stroke) {
+                    check_graphic(&mut out, f, background, bg, &format!("{what} (fill)"));
+                }
+            } // NO CATCH-ALL. Every variant of `Item` is handled above, and the
+              // `_ => {}` that used to sit here is the reason a fill could go
+              // unmeasured while the tool reported AA. Exhaustive, a new kind of
+              // drawable is a compile error in this function — which is the only
+              // way an audit stays an audit as the renderer grows.
         }
     }
     out
@@ -413,6 +442,70 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].ratio, 0.0);
         assert!(!audit(&s, "not-a-colour", 1.0).is_empty());
+    }
+
+    fn band(fill: Option<&str>, stroke: Option<&str>) -> Scene {
+        Scene {
+            width: 100.0,
+            height: 100.0,
+            title: "t".into(),
+            items: vec![Item::Path {
+                segs: vec![
+                    crate::scene::Seg::Move(0.0, 0.0),
+                    crate::scene::Seg::Line(9.0, 0.0),
+                ],
+                fill: fill.map(str::to_string),
+                stroke: stroke.map(str::to_string),
+                stroke_width: 0.6,
+                title: Some("cat promoter".into()),
+            }],
+        }
+    }
+
+    /// PROVEN TO FAIL at 115dd33: `audit` matched `Path { stroke: Some(s), .. }`
+    /// and dropped the rest into `_ => {}`, so a filled shape with no stroke was
+    /// not measured at all and a white band on white was reported as passing AA.
+    #[test]
+    fn an_unstroked_fill_is_measured_because_it_is_the_only_boundary_there_is() {
+        // White on white: 1:1. Nothing about this shape is perceivable, and the
+        // whole point of the check is to say so.
+        let f = audit(&band(Some("#ffffff"), None), "#ffffff", 1.0);
+        assert_eq!(f.len(), 1, "a white fill on white passed the audit: {f:?}");
+        assert_eq!(f[0].kind, Kind::Graphic);
+        assert_eq!(f[0].required, 3.0);
+        assert!(f[0].ratio < 1.01, "{}", f[0].ratio);
+        // Named so a reader can find it in a figure with many bands, and marked
+        // as the fill so it is not confused with a stroke finding.
+        assert!(f[0].what.contains("cat promoter"), "{}", f[0].what);
+        assert!(f[0].what.contains("fill"), "{}", f[0].what);
+
+        // The same fill is fine on a dark ground, which is the real remedy.
+        assert!(audit(&band(Some("#ffffff"), None), "#22262a", 1.0).is_empty());
+        // And an unmeasurable fill is a finding, not a pass -- the same rule
+        // the strokes and labels already follow.
+        assert_eq!(
+            audit(&band(Some("rebeccapurple"), None), "#ffffff", 1.0).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_stroked_shape_is_judged_on_its_stroke_and_not_on_its_fill() {
+        // SC 1.4.11 asks whether the BOUNDARY is perceivable. This is exactly
+        // the figure finding 8 examined: pure-white bands that are legitimately
+        // readable because the exporter outlines every one of them with
+        // FEATURE_STROKE. The fill is white on white and the shape still passes,
+        // because the hairline is what a reader sees.
+        let outlined = band(Some("#ffffff"), Some(crate::ink::FEATURE_STROKE));
+        assert!(
+            audit(&outlined, "#ffffff", 1.0).is_empty(),
+            "the hairline is the boundary and it meets 3:1"
+        );
+        // A failing stroke is still reported, and reported once -- extending to
+        // fills must not double-count a shape that has both.
+        let bad = audit(&band(Some("#ffffff"), Some("#f4f4f4")), "#ffffff", 1.0);
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        assert_eq!(bad[0].what, "cat promoter");
     }
 
     #[test]

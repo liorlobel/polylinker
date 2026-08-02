@@ -1775,6 +1775,14 @@ fn draw_circular(
                     if pts.len() >= 2 {
                         p.add(Shape::line(pts, Stroke::new(w, b.color)));
                     }
+                    // THE BOUNDARY, which the screen did not have and the figure
+                    // always did. See `OUTLINE_PT`.
+                    for edge in [base - w * 0.5, base + w * 0.5] {
+                        let e = arc_points(center, edge, body0, body1);
+                        if e.len() >= 2 {
+                            p.add(Shape::line(e, Stroke::new(OUTLINE_PT, pal.line)));
+                        }
+                    }
                 }
                 if head > 0.0 {
                     let (tip_a, base_a) = if b.reverse {
@@ -1782,7 +1790,16 @@ fn draw_circular(
                     } else {
                         (a1, a1 - head)
                     };
-                    draw_arrowhead(p, center, base, tip_a, base_a, barb_half(w), b.color);
+                    draw_arrowhead(
+                        p,
+                        center,
+                        base,
+                        tip_a,
+                        base_a,
+                        barb_half(w),
+                        b.color,
+                        pal.line,
+                    );
                 }
             }
             // Thin connectors show the joins, split the same way.
@@ -2088,6 +2105,36 @@ fn barb_half(w: f32) -> f32 {
 /// which no test could reach and which therefore could not be asserted against
 /// `LANE_STEP` — see [`barb_half`] for the 1.10 pt of a neighbouring feature's band
 /// that bought.
+/// The hairline that keeps a feature's boundary visible when its own colour is
+/// not — the screen's half of docs/UX-REVIEW-2026-07-31.md finding 8.
+///
+/// On screen a band was `Shape::line(pts, Stroke::new(w, b.color))`: a stroked
+/// polyline in the feature's own colour with NO outline. In the exported figure
+/// every band carries `stroke="#2b2f34" stroke-width="0.6"`. So a white feature
+/// was a visible white band in the figure Lior sends to a journal and invisible
+/// on the screen he proofread it on — `cat promoter` and `sacB promoter` in
+/// light theme, white on a near-white ring, with blank white swatches beside
+/// them in the list.
+///
+/// The file's own colour still wins: that is the right policy for fidelity and
+/// the feature dialog says so. Nothing guarantees the file's colour is
+/// distinguishable from what it is drawn on, and SC 1.4.11 asks for a
+/// perceivable BOUNDARY rather than a particular fill — so the boundary is
+/// added and the colour is left alone.
+///
+/// Drawn in `pal.line`, the backbone's own ink, which is theme-aware and
+/// contrasts with the ring background by construction — the backbone is drawn
+/// on that background and has to be visible on it. A dark hairline on a dark
+/// ring would only move the problem from light theme to dark.
+///
+/// Deliberately 1.0 pt, under the `stroke.width >= 6.0` that four test helpers
+/// here use to find a band body, and the head's outline carries a TRANSPARENT
+/// fill, under the `fill != TRANSPARENT` that `arrowheads` uses. Both are
+/// invisible to every existing geometry filter, so this adds a boundary without
+/// silently changing what those tests measure.
+const OUTLINE_PT: f32 = 1.0;
+
+#[allow(clippy::too_many_arguments)]
 fn draw_arrowhead(
     p: &egui::Painter,
     center: Pos2,
@@ -2096,11 +2143,17 @@ fn draw_arrowhead(
     base_angle: f32,
     barb: f32,
     color: Color32,
+    outline: Color32,
 ) {
     let tip = polar(center, radius, tip_angle);
     let a = polar(center, radius + barb, base_angle);
     let b = polar(center, radius - barb, base_angle);
     p.add(Shape::convex_polygon(vec![tip, a, b], color, Stroke::NONE));
+    p.add(Shape::convex_polygon(
+        vec![tip, a, b],
+        Color32::TRANSPARENT,
+        Stroke::new(OUTLINE_PT, outline),
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -3082,6 +3135,56 @@ mod tests {
             ctx.memory(|m| m.focused()).is_none(),
             "Tab landed on the map, which has no keyboard behaviour of its own \
              and whose focus silently stops the sequence view accepting keys"
+        );
+    }
+
+    /// PROVEN TO FAIL at 115dd33: on screen a band was a stroked polyline in
+    /// the feature's own colour with NO outline, while every band in the
+    /// exported figure carries `stroke="#2b2f34" stroke-width="0.6"` — so a
+    /// white feature was visible in the figure and invisible on the screen it
+    /// was proofread on. See `OUTLINE_PT`.
+    ///
+    /// Differential against a feature-less control, so it counts what the
+    /// FEATURE contributes and not what the ring already draws at the same
+    /// width — the ruler ticks are hairlines too, and an absolute count would
+    /// pass or fail on them.
+    #[test]
+    fn a_band_carries_the_boundary_on_screen_that_it_carries_in_the_figure() {
+        let hair = |shapes: &[Shape]| {
+            shapes
+                .iter()
+                .filter(|s| {
+                    matches!(s, Shape::Path(p)
+                        if !p.closed && (p.stroke.width - OUTLINE_PT).abs() < 0.01)
+                })
+                .count()
+        };
+        let head_outline = |shapes: &[Shape]| {
+            shapes
+                .iter()
+                .filter(|s| {
+                    matches!(s, Shape::Path(p)
+                        if p.closed
+                            && p.points.len() == 3
+                            && p.fill == Color32::TRANSPARENT
+                            && (p.stroke.width - OUTLINE_PT).abs() < 0.01)
+                })
+                .count()
+        };
+
+        let (bare, _) = paint(&forward(&[]), 900.0, 700.0);
+        let (one, _) = paint(&forward(&[(400, 1_400)]), 900.0, 700.0);
+
+        assert_eq!(head_outline(&bare), 0, "the control has an arrowhead");
+        assert_eq!(
+            head_outline(&one),
+            1,
+            "the arrowhead is drawn with no outline"
+        );
+        assert!(
+            hair(&one) >= hair(&bare) + 2,
+            "one feature added {} hairlines, not the two edges of its band",
+            hair(&one) as i64 - hair(&bare) as i64
         );
     }
 
