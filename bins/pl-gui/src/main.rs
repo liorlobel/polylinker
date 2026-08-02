@@ -947,14 +947,23 @@ struct App {
     lib_query: String,
     lib_absent: bool,
 
-    /// Where this window's autosave goes, and what was left behind by a
+    /// Where this window's autosaves go, and what was left behind by a
     /// process that did not exit cleanly.
     ///
     /// The recovery file's *presence* is the crash flag. Nothing is written to
     /// say "we crashed" — a flag recorded during a crash is a flag that does
     /// not get recorded — so quitting normally deletes it and anything still
     /// there at startup is by definition an unclean exit.
-    recovery: Option<std::path::PathBuf>,
+    ///
+    /// The DIRECTORY, since Stage 2. The slot within it belongs to the tab, not
+    /// to the window: see [`bench::Tab::recovery`].
+    recovery_dir: Option<std::path::PathBuf>,
+    /// There was nowhere to write when this window started.
+    ///
+    /// Read by the close guard, which must not promise a crash copy it cannot
+    /// keep. Decided once, at startup, rather than by stat-ing sixty-four names
+    /// on every frame the dialog is on screen.
+    autosave_off: bool,
     stale: Vec<(std::path::PathBuf, Result<recover::Snapshot, String>)>,
     /// What each stale draft is, beyond its header: the length off its LOCUS
     /// line and the mtime of the file it came from.
@@ -1000,9 +1009,11 @@ struct App {
     abandoned_unsaved: bool,
     /// A `.dna` write waiting on the lossiness question.
     pending_dna: Option<PendingDna>,
-    /// What the recovery file on disk already holds, so an idle window does not
-    /// rewrite the same bytes forever.
-    autosaved: Option<Autosaved>,
+    /// When the last autosave PASS ran, for the thirty-second throttle.
+    ///
+    /// Session-wide, unlike the memo beside it: one pass covers every tab, so
+    /// what is throttled is the walk. The memo of what each slot already holds
+    /// moved to [`bench::Tab::autosaved`], because it names a document.
     last_autosave: Option<std::time::Instant>,
     /// Which application owns `.dna` on this machine, read at most once.
     ///
@@ -1198,8 +1209,12 @@ struct GridGeom {
 /// The cursor is content-addressed, so two different edits from the same parent
 /// cannot share it, and the path and title separate two documents that happen
 /// to sit at the same point in their own histories.
+///
+/// `pub(crate)` and stored on [`bench::Tab`] since Stage 2: one memo for the
+/// session named one document, so switching tabs inside the thirty-second window
+/// left the memo describing a file it no longer matched.
 #[derive(PartialEq, Eq)]
-struct Autosaved {
+pub(crate) struct Autosaved {
     original: Option<std::path::PathBuf>,
     title: String,
     cursor: Option<pl_core::oplog::OpId>,
@@ -1569,6 +1584,22 @@ impl App {
         })
     }
 
+    /// Will an edit made now reach a crash-recovery file?
+    ///
+    /// Asked by the close guard, whose dialog says "a crash-recovery copy is
+    /// kept" — a sentence that must not be printed when it is false. It was
+    /// `self.recovery.is_some()`, one bit for the whole window, and per-tab
+    /// slots make that question smaller in one direction and larger in the
+    /// other: a tab may hold no slot merely because it has never been dirty, so
+    /// "no slot yet" is not "not covered".
+    ///
+    /// `autosave_off` is the honest half — decided once at startup, when every
+    /// slot was found taken — and `any_armed` covers the window that has already
+    /// written something.
+    fn autosave_armed(&self) -> bool {
+        self.recovery_dir.is_some() && (!self.autosave_off || self.bench.any_armed())
+    }
+
     fn autosave(&mut self, forced: bool) {
         // THE THROTTLE COMES FIRST, and that ordering is the whole of a defect
         // this shipped with.
@@ -1596,90 +1627,142 @@ impl App {
                 return;
             }
         }
-        if self.document().is_none() || self.recovery.is_none() {
+        let Some(dir) = self.recovery_dir.clone() else {
+            return;
+        };
+        if self.bench.is_empty() {
             return;
         }
         // Design B's rule 6, and the one whose absence loses data: an autosave
         // that wrote `log.current()` while a typing run was open would write a
         // recovery file missing the user's last forty keystrokes.
+        //
+        // Only the ACTIVE tab can have a run open — a run lives on `App` and
+        // belongs to whatever is on screen — so one settle covers the walk.
         self.settle();
-        let Some(doc) = self.document() else { return };
-        let here = Autosaved {
-            original: doc.path.clone(),
-            title: doc.title.clone(),
-            cursor: doc.log.cursor(),
-        };
-        // Already on disk, byte for byte. See [`Autosaved`] for why this is a
-        // cursor and not the op count it used to be.
-        //
-        // `forced` overrides it because the memo has no notion of the header:
-        // the guard's final write changes `exit: unsaved`, not the molecule, and
-        // a document last written thirty seconds ago at this same cursor
-        // short-circuited it. Caught in the running application, not by a test —
-        // the draft survived "Close without saving" and the relaunch still said
-        // the session had crashed.
-        if !forced && self.autosaved.as_ref() == Some(&here) {
-            return;
+
+        // EVERY TAB, and that is Stage 2's first correction. This read
+        // `self.document()` and wrote one file, so once the bench could hold
+        // more than one document, every tab except the visible one had no crash
+        // copy at all: two edited plasmids, a power cut, and one of them came
+        // back. The per-document rules below are unchanged; what changed is how
+        // many documents they are asked about.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let day = today();
+        let abandoned = self.abandoned_unsaved;
+        let mut held = self.bench.slots();
+        let mut failed: Option<String> = None;
+        let mut off: Option<String> = None;
+        let mut wrote = false;
+        for tab in self.bench.each_mut() {
+            let here = Autosaved {
+                original: tab.doc.path.clone(),
+                title: tab.doc.title.clone(),
+                cursor: tab.doc.log.cursor(),
+            };
+            // Already on disk, byte for byte. See [`Autosaved`] for why this is
+            // a cursor and not the op count it used to be.
+            //
+            // `forced` overrides it because the memo has no notion of the
+            // header: the guard's final write changes `exit: unsaved`, not the
+            // molecule, and a document last written thirty seconds ago at this
+            // same cursor short-circuited it. Caught in the running application,
+            // not by a test — the draft survived "Close without saving" and the
+            // relaunch still said the session had crashed.
+            if !forced && tab.autosaved.as_ref() == Some(&here) {
+                continue;
+            }
+            // An unedited document THAT CAME FROM A FILE has nothing to protect:
+            // the user's own file already holds it. Writing one anyway would
+            // also let merely *opening* a second file discard the first one's
+            // unsaved draft, which is the opposite of this function's job.
+            //
+            // Undoing back to the base of the document already in the recovery
+            // file is a different case: that really is the state on screen, so
+            // it is written, and the file stops offering a branch the user has
+            // stepped off.
+            //
+            // `here.original.is_some()` is the half that was missing, and its
+            // absence lost data. A document restored from the recovery banner
+            // (the restore path drops the path deliberately) and a payload
+            // dropped in as bytes from a browser both sit at the base of an
+            // empty log with nothing on disk behind them — "the user's own file
+            // already holds it" is simply false for them, and this branch
+            // refused to write either. The unsaved-changes guard's forced final
+            // autosave walks straight into it, so the dialog's promise of a kept
+            // copy would have been a lie.
+            //
+            // `forced` is the third exemption, and it is the one that was
+            // missing. The guard has just told the user "a crash-recovery copy
+            // is kept"; a document undone back to its own base still has to
+            // honour that, because what the forced write records is not the
+            // molecule but the fact that the exit was deliberate.
+            let same_document = tab
+                .autosaved
+                .as_ref()
+                .is_some_and(|a| a.same_document(&here));
+            if !forced && here.cursor.is_none() && here.original.is_some() && !same_document {
+                continue;
+            }
+            // Claimed HERE rather than when the tab was opened, so a document
+            // nobody has touched consumes nothing and the sixty-four slots bound
+            // the documents with work at risk rather than the documents on
+            // screen.
+            let path = match &tab.recovery {
+                Some(p) => p.clone(),
+                None => match recover::claim_next(&dir, &held) {
+                    Some(p) => {
+                        held.push(p.clone());
+                        tab.recovery = Some(p.clone());
+                        p
+                    }
+                    // Nowhere left to write. Named, because a user who believes
+                    // one document is covered when it is not is worse off than
+                    // one who knows — and the tab strip gives no hint which.
+                    None => {
+                        off = Some(tab.doc.title.clone());
+                        continue;
+                    }
+                },
+            };
+            let snap = recover::Snapshot {
+                original: tab.doc.path.clone(),
+                title: tab.doc.title.clone(),
+                saved_at: stamp,
+                ops: tab.doc.log.path().len(),
+                abandoned,
+                genbank: pl_fileio::genbank::write(tab.doc.molecule(), &tab.doc.title, day),
+            };
+            wrote = true;
+            match recover::write(&path, &snap) {
+                Ok(()) => tab.autosaved = Some(here),
+                // A failed autosave must not interrupt the work it exists to
+                // protect, but it must not be silent either -- a user who thinks
+                // they are covered and is not is worse off than one who knows.
+                Err(e) => failed = Some(e),
+            }
         }
-        // An unedited document THAT CAME FROM A FILE has nothing to protect:
-        // the user's own file already holds it. Writing one anyway would also
-        // let merely *opening* a second file discard the first one's unsaved
-        // draft, which is the opposite of this function's job.
-        //
-        // Undoing back to the base of the document already in the recovery file
-        // is a different case: that really is the state on screen, so it is
-        // written, and the file stops offering a branch the user has stepped
-        // off.
-        //
-        // `here.original.is_some()` is the half that was missing, and its
-        // absence lost data. A document restored from the recovery banner (the
-        // restore path drops the path deliberately) and a payload dropped in as
-        // bytes from a browser both sit at the base of an empty log with
-        // nothing on disk behind them — "the user's own file already holds it"
-        // is simply false for them, and this branch refused to write either.
-        // The unsaved-changes guard's forced final autosave walks straight into
-        // it, so the dialog's promise of a kept copy would have been a lie.
-        //
-        // `forced` is the third exemption, and it is the one that was missing.
-        // The guard has just told the user "a crash-recovery copy is kept"; a
-        // document undone back to its own base still has to honour that,
-        // because what the forced write records is not the molecule but the
-        // fact that the exit was deliberate.
-        let same_document = self
-            .autosaved
-            .as_ref()
-            .is_some_and(|a| a.same_document(&here));
-        if !forced && here.cursor.is_none() && here.original.is_some() && !same_document {
-            return;
+        // The clock is set when a write was ATTEMPTED, not when the walk merely
+        // decided there was nothing to do. A failure that left it unset made the
+        // next frame due again, so a full disk retried a multi-megabyte write on
+        // every frame — and, now that the throttle also bounds the settle, would
+        // have taken run coalescing down with it. Thirty seconds is the right
+        // retry interval for the same reason it is the right write interval. A
+        // pass that wrote nothing must NOT set it, or the first edit after an
+        // idle spell would wait out a full period before reaching disk.
+        if wrote {
+            self.last_autosave = Some(now);
         }
-        let ops = doc.log.path().len();
-        let Some(path) = self.recovery.clone() else {
-            return;
-        };
-        let snap = recover::Snapshot {
-            original: doc.path.clone(),
-            title: doc.title.clone(),
-            saved_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            ops,
-            abandoned: self.abandoned_unsaved,
-            genbank: pl_fileio::genbank::write(doc.molecule(), &doc.title, today()),
-        };
-        // The clock is set either way. A failure that left it unset made the
-        // next frame due again, so a full disk retried a multi-megabyte write
-        // on every frame — and, now that the throttle also bounds the settle,
-        // would have taken run coalescing down with it. Thirty seconds is the
-        // right retry interval for the same reason it is the right write
-        // interval.
-        self.last_autosave = Some(now);
-        match recover::write(&path, &snap) {
-            Ok(()) => self.autosaved = Some(here),
-            // A failed autosave must not interrupt the work it exists to
-            // protect, but it must not be silent either -- a user who thinks
-            // they are covered and is not is worse off than one who knows.
-            Err(e) => self.status = format!("autosave failed: {e}"),
+        if let Some(e) = failed {
+            self.status = format!("autosave failed: {e}");
+        } else if let Some(title) = off {
+            self.status = format!(
+                "autosave is off for {title}: every recovery slot is taken by a session that \
+                 did not close cleanly — see Recover"
+            );
         }
     }
 
@@ -1707,7 +1790,8 @@ impl App {
             lib_mode: library::Mode::Name,
             lib_query: String::new(),
             lib_absent: false,
-            recovery: None,
+            recovery_dir: None,
+            autosave_off: false,
             stale: Vec::new(),
             stale_extra: std::collections::HashMap::new(),
             show_old_drafts: false,
@@ -1718,7 +1802,6 @@ impl App {
             let_it_go: false,
             abandoned_unsaved: false,
             pending_dna: None,
-            autosaved: None,
             last_autosave: None,
             dna_owner: None,
             design: None,
@@ -1792,7 +1875,15 @@ impl App {
                 // targeted by `recovery_path` — hidden from the banner, then
                 // deleted by the next clean quit. `claim` lists it and takes the
                 // next free slot instead.
-                let (path, mine) = recover::claim(&dir);
+                // `claim` still runs, for its second return value: anything
+                // already sitting at one of THIS PID's slot names belongs to a
+                // dead session that held our number, and both halves of the PID
+                // convention turn against the user unless it is listed. The
+                // path it offers is dropped — slots are handed to tabs by
+                // `claim_next` when they first have something to protect — but
+                // its absence still means there is nowhere to write at all.
+                let (first_free, mine) = recover::claim(&dir);
+                app.autosave_off = first_free.is_none();
                 app.stale.extend(mine);
                 // Newest first, the order `stale` returns and the banner shows.
                 app.stale.sort_by_key(|(p, s)| {
@@ -1801,7 +1892,7 @@ impl App {
                         p.clone(),
                     )
                 });
-                app.recovery = path;
+                app.recovery_dir = Some(dir);
                 // Both halves of "is this draft newer than my file?", computed
                 // once. Per frame this would stat up to 64 files and re-parse a
                 // 4.6 Mb LOCUS line on every repaint.
@@ -1829,7 +1920,7 @@ impl App {
                         app.stale.len()
                     );
                 }
-                if app.recovery.is_none() {
+                if app.autosave_off {
                     app.status =
                         "autosave is off: every recovery slot for this process is taken by a \
                          session that did not close cleanly — see Recover"
@@ -2013,7 +2104,18 @@ impl App {
         self.close_feature_editor(
             "the feature editor was closed: it was opened on the previous file",
         );
-        self.last_autosave = Some(std::time::Instant::now());
+        // ...but not out of somebody else's pocket. The period is ONE clock for
+        // the window, so with a bench this line spends every tab's grace on the
+        // document that just arrived: open a file every twenty-five seconds and
+        // an edited background tab's crash copy is never written at all. When
+        // work elsewhere is already at risk, the clock it is waiting on stands.
+        //
+        // The cost is bounded and is not data: the new document's first typing
+        // run may be settled by the next pass instead of by its own idle timer,
+        // which is one extra operation in its log.
+        if !self.bench.unsaved_elsewhere() {
+            self.last_autosave = Some(std::time::Instant::now());
+        }
     }
 
     /// Drop the design panel, saying so if there was a report worth keeping.
@@ -3242,7 +3344,7 @@ impl App {
             // guard by letting the user answer it with a lossy write.
             "Save as GenBank…"
         };
-        let armed = self.recovery.is_some();
+        let armed = self.autosave_armed();
         let mut cancel = false;
         let mut discard = false;
         let mut save = false;
@@ -3342,7 +3444,7 @@ impl App {
                 // the user's own file, `on_exit` clears the recovery slot as it
                 // does after any other clean exit, and leaving a draft behind
                 // would make the next launch contradict what just happened.
-                if self.recovery.is_some() && !preserved {
+                if self.autosave_armed() && !preserved {
                     self.abandoned_unsaved = true;
                     self.autosave(true);
                 }
@@ -3587,9 +3689,15 @@ impl eframe::App for App {
         // in here, and the dialog said so in as many words. Deleting it would
         // make that a lie, which is the one thing this whole guard exists to
         // stop.
-        if let Some(p) = &self.recovery {
-            if !self.abandoned_unsaved {
-                recover::clear(p);
+        //
+        // EVERY tab's slot, not one: the sweep has to be as wide as the walk
+        // that wrote them, or a clean quit leaves the background tabs' drafts
+        // behind and the next launch reports a crash that did not happen.
+        if !self.abandoned_unsaved {
+            for tab in self.bench.each() {
+                if let Some(p) = &tab.recovery {
+                    recover::clear(p);
+                }
             }
         }
         // Once, here, and not on drag-release or per frame — that would be a
@@ -9232,7 +9340,23 @@ impl App {
             let v = self.take_view();
             self.bench.store(v);
         }
-        if let Some(t) = self.bench.close(i) {
+        if let Some(mut t) = self.bench.close(i) {
+            // The slot goes back, and the draft with it.
+            //
+            // A recovery file answers "what was open when this stopped?", and a
+            // closed tab was not open. Keeping it would also make the slot
+            // unreusable for as long as the reopen stack held the tab — the
+            // stack is unbounded, so sixty-four opens and closes would exhaust
+            // autosave for the whole session.
+            //
+            // This is not a regression on the reopen stack: Ctrl+Shift+T reads
+            // memory and never read this file, and before per-tab slots the next
+            // autosave overwrote the closed document's draft anyway. What a
+            // crash loses here is exactly what it lost before.
+            if let Some(p) = t.recovery.take() {
+                recover::clear(&p);
+            }
+            t.autosaved = None;
             self.closed.push(t);
             // The panels belonged to a molecule that is no longer on screen.
             self.close_design("the design panel was closed: its tab was closed");
@@ -12334,15 +12458,20 @@ mod tests {
     // autosave
     // -----------------------------------------------------------------------
 
-    /// An app with a recovery file of its own, in the temp directory.
+    /// An app with a recovery DIRECTORY of its own, and the slot its first tab
+    /// with something to protect will be given.
+    ///
+    /// A directory per test, not a file per test. Slots are numbered rather than
+    /// named, so two tests sharing one directory would race for slot 0 — and
+    /// this suite runs them in parallel threads of one process, which is also
+    /// why the name is not simply the PID.
     fn app_with_recovery(name: &str) -> (App, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("pl-gui-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pl-gui-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a temp directory");
-        let path = dir.join(format!("{name}.recover"));
-        let _ = std::fs::remove_file(&path);
         let mut app = App::blank();
-        app.recovery = Some(path.clone());
-        (app, path)
+        app.recovery_dir = Some(dir.clone());
+        (app, recover::recovery_path(&dir, 0))
     }
 
     /// A document holding `seq`, circularised, so it has exactly one edit.
@@ -12361,6 +12490,177 @@ mod tests {
         let (mol, _, _) =
             pl_fileio::load_with_report(snap.genbank.as_bytes()).expect("a readable body");
         (mol, snap.title)
+    }
+
+    /// The headline of Stage 2, and a live data-loss bug at the commit before
+    /// it.
+    ///
+    /// PROVEN TO FAIL against 4280ea3: `autosave` read `self.document()` — the
+    /// tab on screen — and wrote one file, so a document edited and then left in
+    /// a background tab had NO crash copy anywhere. Two edited plasmids and a
+    /// power cut, and one of them came back. The bench shipped in ea436aa and
+    /// this hole opened with it: the close guard learned to ask about every tab
+    /// in the same commit, and the autosave beneath it did not.
+    ///
+    /// Driven with the background tab as the ONE that is dirty, so a write that
+    /// merely covered the active document cannot pass.
+    #[test]
+    fn a_tab_you_are_not_looking_at_still_gets_a_crash_copy() {
+        let (mut app, first) = app_with_recovery("background");
+        let dir = first
+            .parent()
+            .expect("a slot has a directory")
+            .to_path_buf();
+        // Both from a file and both clean, so neither has anything to protect
+        // yet and neither has taken a slot.
+        let a = temp_file("bg-a", "fa", PLASMID_A);
+        let b = temp_file("bg-b", "fa", PLASMID_A);
+        app.load(a.clone());
+        app.load(b.clone());
+        assert_eq!(app.bench.len(), 2, "the premise: two tabs");
+        assert!(!app.bench.any_armed(), "a clean tab consumes no slot");
+
+        // Edit the FIRST tab, then go back to the second and leave it there.
+        app.switch_tab(0);
+        app.bench
+            .get_mut()
+            .unwrap()
+            .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        app.switch_tab(1);
+        assert!(
+            !app.document().unwrap().unsaved(),
+            "the premise: the document ON SCREEN is clean, and the dirty one is behind it"
+        );
+
+        assert_eq!(app.bench.unsaved_count(), 1, "the premise: one dirty tab");
+        // Opening the second document started the period, as it should. The
+        // thirty seconds are a separate question from which documents get
+        // written.
+        app.last_autosave = None;
+        app.autosave(false);
+        let drafts: Vec<(pl_core::Molecule, String)> = (0..4)
+            .map(|s| recover::recovery_path(&dir, s))
+            .filter(|p| p.exists())
+            .map(|p| autosaved(&p))
+            .collect();
+        assert_eq!(
+            drafts.len(),
+            1,
+            "one document had unsaved work, so exactly one draft is owed"
+        );
+        assert_eq!(
+            drafts[0].0.topology,
+            pl_core::Topology::Circular,
+            "the background tab's edit was never written anywhere"
+        );
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Opening a file must not spend a dirty tab's autosave period.
+    ///
+    /// PROVEN TO FAIL with the guard in `adopt` removed: `adopt` restarts the
+    /// window's one autosave clock so that a newly opened document's first
+    /// typing run is not forced closed on the frame after it appears. Correct
+    /// while there was one document — the only clock being restarted belonged to
+    /// the document that had nothing to lose — and with a bench it spends every
+    /// OTHER tab's grace as well. Open a file every twenty-five seconds and the
+    /// edited tab behind you is never written to disk at all: an autosave that
+    /// exists, is enabled, has a slot, and never fires.
+    #[test]
+    fn opening_a_file_does_not_restart_an_edited_tabs_autosave_period() {
+        let (mut app, first) = app_with_recovery("starve");
+        let dir = first
+            .parent()
+            .expect("a slot has a directory")
+            .to_path_buf();
+        app.bench
+            .set(edited_doc("dirty.fa", "AAAACCCCGGGGTTTTAAGG"));
+        // The period as it stands with the write already due.
+        app.last_autosave = std::time::Instant::now().checked_sub(App::AUTOSAVE_EVERY);
+        assert!(app.last_autosave.is_some(), "a clock older than one period");
+
+        // The user opens something else. THROUGH `adopt`, which is the line
+        // under test — `bench.set` alone would not touch the clock at all.
+        app.adopt(edited_doc("new.fa", "GGGGGGGGTTTTTTTTAACC"));
+
+        app.autosave(false);
+        assert!(
+            first.exists(),
+            "opening a file pushed an already-due crash copy out by another period"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sweep on the way out must be as wide as the walk on the way in.
+    ///
+    /// PROVEN TO FAIL with `on_exit`'s loop reduced to the active tab: the
+    /// background tab's draft is still on disk afterwards, so the next launch
+    /// reports "A previous session did not close cleanly" about a session that
+    /// closed perfectly cleanly, and offers a draft of work the user still has.
+    /// Crying wolf here is not cosmetic — it is how the banner that matters
+    /// becomes one more thing to dismiss.
+    #[test]
+    fn a_clean_quit_clears_every_tabs_slot_and_not_just_the_visible_one() {
+        let (mut app, first) = app_with_recovery("sweep");
+        let dir = first
+            .parent()
+            .expect("a slot has a directory")
+            .to_path_buf();
+        app.bench.set(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.set(edited_doc("b.fa", "GGGGGGGGTTTTTTTTAACC"));
+        app.autosave(false);
+        let held: Vec<std::path::PathBuf> = app.bench.slots();
+        assert_eq!(held.len(), 2, "the premise: two drafts on disk");
+        assert!(held.iter().all(|p| p.exists()));
+
+        // Through the trait, because that is who calls it: `on_exit` is
+        // `eframe::App`'s, and reaching it any other way would be testing a
+        // function eframe does not run.
+        eframe::App::on_exit(&mut app, None);
+        for p in &held {
+            assert!(
+                !p.exists(),
+                "{} survived a clean quit, so the next launch reports a crash",
+                p.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Closing a tab gives its slot back, and takes its draft with it.
+    ///
+    /// The reopen stack is unbounded, so a slot held for as long as a closed tab
+    /// might come back is a slot leaked for the rest of the session: sixty-four
+    /// opens and closes and autosave is off for everything after. This is also
+    /// the honest answer to what a recovery file means — "what was open when
+    /// this stopped" — and it costs nothing that was not already lost, since
+    /// Ctrl+Shift+T reads memory and the single-slot autosave overwrote a closed
+    /// document's draft on its next pass anyway.
+    #[test]
+    fn closing_a_tab_returns_its_recovery_slot() {
+        let (mut app, first) = app_with_recovery("closed");
+        let dir = first
+            .parent()
+            .expect("a slot has a directory")
+            .to_path_buf();
+        app.bench.set(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.autosave(false);
+        assert!(first.exists(), "the premise: slot 0 is taken and written");
+
+        app.close_tab(0);
+        assert!(!first.exists(), "the draft outlived the tab it belonged to");
+
+        // And the slot is free again: the next document gets slot 0 rather than
+        // slot 1, which is what stops the leak.
+        app.bench.set(edited_doc("c.fa", "TTTTAAAACCCCGGGGAACC"));
+        app.last_autosave = None;
+        app.autosave(false);
+        assert_eq!(autosaved(&first).1, "c.fa", "the freed slot was not reused");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -12399,27 +12699,48 @@ mod tests {
         assert_eq!(mol.topology, pl_core::Topology::Linear);
     }
 
+    /// Stage 2 edits this one deliberately, as Stage 1 edited "`set` REPLACES".
+    ///
+    /// It asserted that the ONE recovery file followed the document on screen,
+    /// which was the best answer available while there was one file: editing A,
+    /// then opening and editing B, left the single draft holding A's molecule
+    /// under A's title and B's work written nowhere at all. The identity bug
+    /// underneath is still real and still checked — both documents are
+    /// circularised from their base and the log is content-addressed, so both
+    /// cursors are the SAME `OpId`, which is why the memo carries path and title
+    /// too — but "the file follows the visible document" is no longer the right
+    /// answer. Each document has its own file, and the background tab keeps its
+    /// crash copy.
     #[test]
-    fn opening_a_second_document_does_not_inherit_the_first_ones_autosave_state() {
-        // Both documents are circularised from their base, and the log is
-        // content-addressed, so both cursors are the *same* OpId — which is
-        // why the identity carries the title and path as well. Before, editing
-        // A once and then B once left the single recovery file holding A's
-        // molecule under A's title, and B's work was never written at all.
-        let (mut app, path) = app_with_recovery("swap");
+    fn each_document_gets_its_own_recovery_slot() {
+        let (mut app, first) = app_with_recovery("swap");
+        let second = recover::recovery_path(first.parent().expect("a slot has a directory"), 1);
         app.bench.set(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
         app.autosave(false);
-        assert_eq!(autosaved(&path).1, "a.fa", "the premise");
+        assert_eq!(autosaved(&first).1, "a.fa", "the premise");
+        assert!(!second.exists(), "one document, one slot");
 
         app.bench.set(edited_doc("b.fa", "GGGGGGGGTTTTTTTTAACC"));
         app.last_autosave = None;
         app.autosave(false);
 
-        let (mol, title) = autosaved(&path);
-        assert_eq!(title, "b.fa", "the recovery file follows the open document");
+        // The second document went to a slot of its own...
+        let (mol, title) = autosaved(&second);
+        assert_eq!(title, "b.fa");
         assert_eq!(
             mol.seq.to_ascii_uppercase(),
             b"GGGGGGGGTTTTTTTTAACC".to_vec()
+        );
+        // ...and the first is still there, which is the whole of what changed:
+        // before this, the tab you were not looking at had no crash copy.
+        let (mol, title) = autosaved(&first);
+        assert_eq!(
+            title, "a.fa",
+            "the background tab's draft was overwritten by the one on screen"
+        );
+        assert_eq!(
+            mol.seq.to_ascii_uppercase(),
+            b"AAAACCCCGGGGTTTTAAGG".to_vec()
         );
     }
 

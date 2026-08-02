@@ -316,6 +316,25 @@ pub fn claim(dir: &Path) -> (Option<PathBuf>, Vec<Found>) {
     (None, found)
 }
 
+/// A free recovery slot for this process, avoiding the ones already handed out.
+///
+/// [`claim`] decides by EXISTENCE, which is exactly right for another run's
+/// leftovers and exactly wrong for our own. A slot given to a tab that has not
+/// autosaved yet is not on disk, so `claim` would hand the same name to the next
+/// tab and the two would write over each other — one draft on disk for two
+/// documents, with the loser's edits gone and nothing saying so. The names this
+/// process is already holding are therefore passed in rather than inferred.
+///
+/// `None` when every slot is taken. The caller must then say autosave is off for
+/// that document rather than overwrite a file it has promised to list.
+pub fn claim_next(dir: &Path, held: &[PathBuf]) -> Option<PathBuf> {
+    (0..MAX_SLOTS).map(|s| recovery_path(dir, s)).find(|p| {
+        // `try_exists` rather than `exists`, for the same reason as `claim`: a
+        // name we cannot stat is one we must not assume is free.
+        !held.contains(p) && matches!(p.try_exists(), Ok(false))
+    })
+}
+
 /// Write a snapshot atomically.
 ///
 /// Temp file, flush, `sync_all`, rename. Durability before visibility: a rename

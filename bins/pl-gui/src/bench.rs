@@ -94,9 +94,30 @@ impl Default for DocView {
     }
 }
 
-/// One tab: a document and how you were looking at it.
+/// One tab: a document, how you were looking at it, and where it autosaves.
 pub struct Tab {
     pub doc: Document,
+    /// The recovery slot this tab's crash copy is written to.
+    ///
+    /// PER TAB, and that is Stage 2's first correction. `autosave` wrote
+    /// `App::document()` — the tab on screen — into one file, so with the bench
+    /// in place every OTHER open document had no crash copy at all. Two edited
+    /// plasmids, a power cut, and one of them came back.
+    ///
+    /// Handed out lazily, by [`crate::recover::claim_next`], at the moment a tab
+    /// first has something to protect: a clean tab consumes no slot, so the
+    /// sixty-four bound counts documents with unsaved work rather than documents
+    /// that happen to be open. `None` means either "nothing to protect yet" or
+    /// "there was no slot left", and the two are distinguished by
+    /// `App::autosave_off` rather than by this field.
+    pub recovery: Option<std::path::PathBuf>,
+    /// What is already in that slot, so an untouched tab is not rewritten.
+    ///
+    /// Was one field on `App`, which was correct for one document and wrong for
+    /// two in a way that cost data rather than performance: the memo names a
+    /// document, so switching tabs inside the thirty-second window made the memo
+    /// disagree with the file it described.
+    pub autosaved: Option<crate::Autosaved>,
     /// The view state for this tab while it is NOT active.
     ///
     /// The active tab's view lives on `App`, because several hundred call sites
@@ -137,6 +158,8 @@ impl Bench {
         self.tabs.push(Tab {
             doc: d,
             view: DocView::default(),
+            recovery: None,
+            autosaved: None,
         });
         self.active = self.tabs.len() - 1;
     }
@@ -170,6 +193,21 @@ impl Bench {
     /// How many tabs hold unsaved work, for a dialog that has to be specific.
     pub fn unsaved_count(&self) -> usize {
         self.tabs.iter().filter(|t| t.doc.unsaved()).count()
+    }
+
+    /// Is there unsaved work in a tab OTHER than the one on screen?
+    ///
+    /// Asked by `App::adopt`, which restarts the autosave period when a document
+    /// opens. That is right for the document arriving — its first typing run
+    /// must not be forced closed on the frame after it appears — and wrong for
+    /// everybody else, because the period is one clock for the window: open a
+    /// file every twenty-five seconds and an edited background tab's crash copy
+    /// is never written at all.
+    pub fn unsaved_elsewhere(&self) -> bool {
+        self.tabs
+            .iter()
+            .enumerate()
+            .any(|(i, t)| i != self.active && t.doc.unsaved())
     }
 
     /// The first tab with unsaved work, so a dialog can SHOW what it is about.
@@ -235,6 +273,39 @@ impl Bench {
         self.tabs
             .get_mut(self.active)
             .map(|t| std::mem::take(&mut t.view))
+    }
+
+    /// Every recovery slot this bench is holding.
+    ///
+    /// Handed to the allocator so it cannot give one name to two tabs. Includes
+    /// slots held by CLEAN tabs, which still own the file they last wrote.
+    pub fn slots(&self) -> Vec<std::path::PathBuf> {
+        self.tabs
+            .iter()
+            .filter_map(|t| t.recovery.clone())
+            .collect()
+    }
+
+    /// Is any tab covered by autosave?
+    ///
+    /// The close guard's dialog promises "a crash-recovery copy is kept", and
+    /// with one slot per tab that promise is no longer one bit for the session.
+    pub fn any_armed(&self) -> bool {
+        self.tabs.iter().any(|t| t.recovery.is_some())
+    }
+
+    /// Every tab, for the autosave walk and the clean-exit sweep.
+    ///
+    /// The workspace-wide QUESTIONS stay as `any_unsaved` and `unsaved_count`,
+    /// for the reason `all` gives below. This is different in kind: the caller
+    /// is not folding tabs into an answer it could get wrong, it is doing the
+    /// same durable thing to each of them.
+    pub fn each_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+        self.tabs.iter_mut()
+    }
+
+    pub fn each(&self) -> impl Iterator<Item = &Tab> {
+        self.tabs.iter()
     }
 
     /// Nothing open.
