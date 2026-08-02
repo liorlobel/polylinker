@@ -2246,6 +2246,22 @@ impl App {
     /// is what keeps `autosave` from forcing the very first typing run closed
     /// on the frame after it opens.
     fn adopt(&mut self, d: Document) {
+        // THE OUTGOING TAB'S VIEW, PUT DOWN BEFORE THE NEW ONE ARRIVES, and its
+        // absence was a Stage 1 bug that Stage 3 makes expensive. `bench.set`
+        // pushes a tab and makes it active; every field below then overwrites
+        // `App`'s copy of the view. `store` was never called, so the tab you
+        // were on kept whatever `switch_tab` last wrote there — for a tab you
+        // had never switched away from, `DocView::default()`. Open plasmid A,
+        // put the caret at base 4,000, select a feature, filter the list, open
+        // plasmid B, come back: a fresh caret at zero and an empty filter.
+        //
+        // Cheap while a view was a caret and a checkbox. Now that a view carries
+        // the design panel, the religation plan and the feature editor, the same
+        // omission would throw away work rather than a scroll position.
+        if !self.bench.is_empty() {
+            let out = self.take_view();
+            self.bench.store(out);
+        }
         self.bench.set(d);
         // The annotation index's other half of its identity. Two documents can
         // sit at the same cursor — every one of them starts at `None` — so
@@ -2292,38 +2308,28 @@ impl App {
         self.selected = None;
         self.hot = None;
         self.hot_shown = None;
-        // The design panel belongs to the molecule it was opened on. It used to
-        // survive a document swap holding the previous file's title, length,
-        // topology, target and report while being redrawn against the new
-        // molecule's bases — and "Add to document" then wrote file A's primer
-        // coordinates, under file A's name, into file B. Nothing in the panel
-        // says which file it came from once the title bar has changed, so it is
-        // closed rather than relabelled.
-        self.close_design("the design panel was closed: it was designed against the previous file");
-        // THE SAME RULE, AND 28e9d91 DID NOT FOLLOW IT. The cut-and-religate
-        // panel holds a plan built from one molecule's bases: its fragments,
-        // its ends, the parent intervals each fragment was traced back to, and
-        // the finished constructs. `adopt` did not touch it, so it survived a
-        // document swap showing plasmid A's digest while B was on screen — and
-        // "Open" then built A's construct, from a file no longer open, labelled
-        // with A's name, as though it had come from the plasmid in front of you.
+        // THE THREE PANELS ARE NOT CLOSED HERE ANY MORE, and the hazard they
+        // were closed for is gone rather than tolerated.
         //
-        // A wrong construct is the worst thing this program can produce, so the
-        // panel is closed rather than relabelled: a religation plan costs
-        // milliseconds to recompute and nothing in it says which molecule it
-        // came from once the title bar has changed.
-        if self.clone_panel.take().is_some() {
-            self.notice = Some(
-                "the cut-and-religate panel was closed: its digest was of the previous file".into(),
-            );
-        }
-        // And for the same reason: the editor holds an INDEX into the previous
-        // file's feature list plus a clone of the feature at it. Left open
-        // across a document swap, one press of Save writes file A's feature over
-        // whatever happens to sit at that index in file B.
-        self.close_feature_editor(
-            "the feature editor was closed: it was opened on the previous file",
-        );
+        // Each belongs to one molecule and cannot survive being pointed at
+        // another: the design panel held the previous file's title, target and
+        // report while being redrawn against new bases, and "Add to document"
+        // wrote file A's primer coordinates, under file A's name, into file B;
+        // the religation panel held A's fragments and built A's construct from a
+        // file no longer open; the feature editor held an index into A's feature
+        // list and one Save wrote A's feature over whatever sat at that index in
+        // B. A wrong construct is the worst thing this program can produce.
+        //
+        // Closing them was the fix available while they lived on `App` and the
+        // window held one document. It is not needed now and it is not right
+        // now: `store` above has just put all three down with the tab they were
+        // opened on, and the tab arriving below carries `None` for each. Nothing
+        // is pointed at the wrong molecule, and nothing the user spent minutes
+        // building is thrown away for a swap they can undo by clicking a tab.
+        self.enzyme_set = pl_enzymes::EnzymeSet::All;
+        self.design = None;
+        self.clone_panel = None;
+        self.feature_edit = None;
         // ...but not out of somebody else's pocket. The period is ONE clock for
         // the window, so with a bench this line spends every tab's grace on the
         // document that just arrived: open a file every twenty-five seconds and
@@ -9649,6 +9655,9 @@ impl App {
                 recover::clear(&p);
             }
             t.autosaved = None;
+            // The panels went into `t` with the view, so there is nothing here
+            // to close: what belonged to the closed molecule left with it, and
+            // Ctrl+Shift+T brings the religation plan back along with the tab.
             self.closed.push(t);
             // The bound the field's doc has always claimed and never had. A tab
             // holds a whole `Document` — sequence, features and the entire undo
@@ -9660,9 +9669,6 @@ impl App {
                 self.closed.remove(0);
             }
             // The panels belonged to a molecule that is no longer on screen.
-            self.close_design("the design panel was closed: its tab was closed");
-            self.close_feature_editor("the feature editor was closed: its tab was closed");
-            self.clone_panel = None;
             if let Some(v) = self.bench.take_active_view() {
                 self.put_view(v);
             }
@@ -9694,6 +9700,10 @@ impl App {
             doc_code: self.doc_code,
             gel: std::mem::take(&mut self.gel),
             central_view: std::mem::replace(&mut self.central_view, CentralView::Map),
+            enzyme_set: std::mem::replace(&mut self.enzyme_set, pl_enzymes::EnzymeSet::All),
+            design: self.design.take(),
+            clone_panel: self.clone_panel.take(),
+            feature_edit: self.feature_edit.take(),
         }
     }
 
@@ -9711,6 +9721,10 @@ impl App {
         self.doc_code = v.doc_code;
         self.gel = v.gel;
         self.central_view = v.central_view;
+        self.enzyme_set = v.enzyme_set;
+        self.design = v.design;
+        self.clone_panel = v.clone_panel;
+        self.feature_edit = v.feature_edit;
     }
 
     /// Show tab `i`.
@@ -9720,20 +9734,22 @@ impl App {
     /// carrying one across a switch would leave it to be committed against
     /// whichever molecule you land on.
     ///
-    /// The three panels that belong to a molecule are closed, exactly as `adopt`
-    /// closes them — the design panel writes coordinates into a named file, the
-    /// feature editor holds an index into one feature list, and the religation
-    /// panel holds a whole digest. Switching tabs invalidates all three as
-    /// thoroughly as replacing the document did, and this is the second entrance
-    /// to that hazard rather than a new one.
+    /// The three panels that belong to a molecule TRAVEL WITH IT, since Stage 3.
+    ///
+    /// They used to be closed here, and that was right while they lived on
+    /// `App`: the design panel writes coordinates into a named file, the feature
+    /// editor holds an index into one feature list, and the religation panel
+    /// holds a whole digest, so carrying any of them across a switch would have
+    /// described the wrong plasmid. Held per tab there is nothing to carry — the
+    /// swap puts them down with the tab they belong to — and the old comment's
+    /// justification, that "a religation plan costs milliseconds to recompute",
+    /// was the weakest part of it: a plan is a cut, a fragment choice and a
+    /// junction the user picked, and none of that is recomputable at all.
     fn switch_tab(&mut self, i: usize) {
         if i == self.bench.active() || i >= self.bench.len() {
             return;
         }
         self.settle();
-        self.close_design("the design panel was closed: it was designed against another tab");
-        self.close_feature_editor("the feature editor was closed: it was opened on another tab");
-        self.clone_panel = None;
         let out = self.take_view();
         self.bench.store(out);
         if let Some(v) = self.bench.activate(i) {
@@ -13073,6 +13089,122 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// THE TEST TWO DOC COMMENTS HAVE NAMED SINCE STAGE 1, AND WHICH DID NOT
+    /// EXIST.
+    ///
+    /// `bench.rs` says "which is why `no_view_state_leaks_between_tabs`
+    /// enumerates them rather than trusting this comment", and `take_view` says
+    /// it "enumerates the fields independently so the two lists have to agree".
+    /// A grep for the name found the two comments and nothing else. Both were
+    /// written to explain why a silent failure mode was safe, and both were the
+    /// only thing standing over it.
+    ///
+    /// PROVEN TO FAIL against 8dacfdf on the fields Stage 3 moves: `enzyme_set`,
+    /// `design`, `clone_panel` and `feature_edit` were on `App` and shared by
+    /// every tab, so narrowing to the six enzymes in one plasmid's MCS narrowed
+    /// the plasmid in the next tab too — the Enzymes list, the map's ticks, the
+    /// gel's lanes and the digest cache key all read it — and the three panels
+    /// were destroyed on every switch.
+    ///
+    /// IT CANNOT CATCH A FIELD ADDED TOMORROW, and saying so is part of the
+    /// test. Nothing short of a derive can. What it does is make each field's
+    /// absence from `take_view` or `put_view` a failure with that field's name
+    /// on it, which is the difference between a bug that is found and one that
+    /// quietly describes the wrong plasmid.
+    #[test]
+    fn no_view_state_leaks_between_tabs() {
+        let mut app = App::blank();
+        app.bench
+            .set(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGGCCTT"));
+        app.bench
+            .set(edited_doc("b.fa", "GGGGTTTTAAAACCCCTTAACCGG"));
+        app.switch_tab(0);
+
+        // Tab A gets a distinguishable value in every field a view carries.
+        app.status = "A's status".into();
+        app.notice = Some("A's notice".into());
+        app.edit.caret = 7;
+        app.selected = Some(0);
+        app.hot = Some(0);
+        app.hot_shown = Some(0);
+        app.filter = "A's filter".into();
+        app.enz_strip = true;
+        app.orf_strip = true;
+        app.doc_code = pl_core::translate::table(4).expect("table 4");
+        app.central_view = CentralView::Gel;
+        app.enzyme_set = pl_enzymes::EnzymeSet::Unique;
+        app.clone_panel = Some(clone::Panel::new(&["BamHI".to_string()].into()));
+
+        app.switch_tab(1);
+        // NOTHING of A's is visible on B. Each of these is a way for one
+        // molecule's state to describe another's, and none of them fails loudly.
+        assert_eq!(app.status, "", "the status followed the tab switch");
+        assert_eq!(app.notice, None, "the notice followed the tab switch");
+        assert_eq!(app.edit.caret, 0, "the caret followed the tab switch");
+        assert_eq!(app.selected, None, "the selection is an index into A");
+        assert_eq!(app.hot, None, "the highlight is an index into A");
+        assert_eq!(app.hot_shown, None, "the highlight is an index into A");
+        assert_eq!(app.filter, "", "the feature filter followed the tab switch");
+        assert!(!app.enz_strip && !app.orf_strip, "A's tracks are on B");
+        assert_eq!(app.doc_code.id, 11, "A's genetic code is B's");
+        assert_eq!(app.central_view, CentralView::Map, "A's view is B's");
+        assert_eq!(
+            app.enzyme_set,
+            pl_enzymes::EnzymeSet::All,
+            "narrowing the enzymes for one plasmid narrowed them for the other, and the \
+             Enzymes list, the map ticks, the gel lanes and the digest key all read this"
+        );
+        assert!(
+            app.clone_panel.is_none(),
+            "A's digest is on screen beside B's molecule"
+        );
+
+        // ...and ALL of A's is still A's.
+        app.switch_tab(0);
+        assert_eq!(app.status, "A's status");
+        assert_eq!(app.notice.as_deref(), Some("A's notice"));
+        assert_eq!(app.edit.caret, 7);
+        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.hot, Some(0));
+        assert_eq!(app.hot_shown, Some(0));
+        assert_eq!(app.filter, "A's filter");
+        assert!(app.enz_strip && app.orf_strip);
+        assert_eq!(app.doc_code.id, 4);
+        assert_eq!(app.central_view, CentralView::Gel);
+        assert_eq!(app.enzyme_set, pl_enzymes::EnzymeSet::Unique);
+        assert!(app.clone_panel.is_some(), "the religation panel was lost");
+    }
+
+    /// Opening a file must not blank the tab you were on.
+    ///
+    /// PROVEN TO FAIL against 8dacfdf: `adopt` called `bench.set` and then
+    /// overwrote every one of `App`'s view fields, without ever calling `store`.
+    /// A tab you had never switched away from therefore held
+    /// `DocView::default()`, so opening a second file silently discarded the
+    /// first's caret, selection and feature filter — visible only when you
+    /// clicked back and found yourself at base zero.
+    ///
+    /// It was cheap when a view was a caret and two checkboxes. Stage 3 puts the
+    /// design panel, the religation plan and the feature editor in the same
+    /// struct, and the same omission then throws away work.
+    #[test]
+    fn opening_a_file_does_not_blank_the_tab_you_were_on() {
+        let mut app = App::blank();
+        app.bench
+            .set(edited_doc("first.fa", "AAAACCCCGGGGTTTTAAGGCCTT"));
+        app.edit.caret = 11;
+        app.filter = "rep".into();
+        app.adopt(edited_doc("second.fa", "GGGGTTTTAAAACCCCTTAACCGG"));
+        assert_eq!(app.bench.len(), 2, "the premise");
+
+        app.switch_tab(0);
+        assert_eq!(
+            (app.edit.caret, app.filter.as_str()),
+            (11, "rep"),
+            "opening a second file discarded the first tab's view"
+        );
+    }
+
     /// The reopen stack's doc claimed a bound the code did not have.
     ///
     /// PROVEN TO FAIL against 0881cac: `close_tab` only ever pushed, so a
@@ -15810,16 +15942,30 @@ mod tests {
         );
     }
 
+    /// The design panel is never pointed at a molecule it was not opened on.
+    ///
     /// PROVEN TO FAIL at dfd6ac9: `adopt` reset the caret, the selection and the
     /// highlight but not `self.design`, so the panel survived a document swap
     /// holding the old file's title, length and report — and "Add to document"
     /// wrote file A's primer coordinates, under file A's name, into file B.
+    ///
+    /// STAGE 3 EDITS WHAT IT ASSERTS, deliberately, as Stage 1 edited "`set`
+    /// REPLACES". The hazard is unchanged and so is the rule: the panel on
+    /// screen belongs to the document on screen. What changed is how that is
+    /// achieved. Closing it was the only way while it lived on `App` and the
+    /// window held one document; held per tab it is simply put down with the tab
+    /// it was opened on, so the swap is safe AND the minutes of work in it come
+    /// back when the user clicks that tab again. A panel destroyed by an action
+    /// the user can undo with one click was never the point — pointing it at the
+    /// wrong plasmid was.
     #[test]
-    fn opening_another_file_closes_the_design_panel_rather_than_reusing_it() {
+    fn opening_another_file_leaves_the_design_panel_with_the_tab_it_was_opened_on() {
         let mut app = app_designing();
         let seq = app.document().unwrap().molecule().seq.clone();
         design_frame(&mut app);
         app.design.as_mut().unwrap().run(&seq);
+        let was = app.design.as_ref().map(|p| p.bp);
+        assert!(was.is_some(), "the premise: a panel with a report in it");
 
         let other: String = (0..900u32)
             .scan(999u64, |s, _| {
@@ -15836,14 +15982,18 @@ mod tests {
             app.document().is_some(),
             "the premise: the second file opened"
         );
-        assert!(app.design.is_none(), "the panel is gone");
+        // THE HAZARD, and it is the same one: nothing is designing against the
+        // molecule now on screen.
         assert!(
-            app.notice
-                .as_deref()
-                .unwrap_or_default()
-                .contains("previous file"),
-            "and it was said: {:?}",
-            app.notice
+            app.design.is_none(),
+            "the previous file's design panel is pointed at the new molecule"
+        );
+        // ...and the work is not gone. Click back and it is where it was left.
+        app.switch_tab(0);
+        assert_eq!(
+            app.design.as_ref().map(|p| p.bp),
+            was,
+            "the panel did not come back with the tab it belongs to"
         );
     }
 
@@ -17165,8 +17315,16 @@ mod tests {
     /// screen, and "Open" built A's construct under A's name — a construct from
     /// a file that is no longer open, presented as if it came from the one in
     /// front of you. That is the failure mode this program can least afford.
+    /// STAGE 3 EDITS WHAT IT ASSERTS, as it edits the design panel's twin above,
+    /// and the rule it is really about does not move: the religation plan on
+    /// screen digested the molecule on screen. The plan now goes DOWN WITH ITS
+    /// TAB rather than being destroyed — and of the three panels this is the one
+    /// where that matters most. `adopt`'s old comment claimed a religation plan
+    /// "costs milliseconds to recompute", which was never true of the part that
+    /// counts: the enzymes, the fragment and the junction are choices a person
+    /// made, and no amount of CPU brings those back.
     #[test]
-    fn a_document_swap_closes_the_religation_panel_it_invalidates() {
+    fn a_document_swap_takes_the_religation_panel_down_with_its_own_tab() {
         let mut app = seq_app();
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
         let first = app.document().expect("open").molecule().clone();
@@ -17191,12 +17349,17 @@ mod tests {
             app.clone_panel.is_none(),
             "the panel outlived the molecule it digested, so Open would build the wrong construct"
         );
+        // And the plan is not destroyed by a swap the user undoes with one
+        // click. It is where they left it, beside the plasmid it was cut from.
+        app.switch_tab(0);
         assert!(
-            app.notice
-                .as_deref()
-                .is_some_and(|n| n.contains("previous file")),
-            "closing it silently is the same surprise as leaving it open: {:?}",
-            app.notice
+            app.clone_panel.as_ref().is_some_and(|p| p.plan.is_some()),
+            "the religation plan did not come back with the tab it was built on"
+        );
+        assert_eq!(
+            app.document().map(|d| d.molecule().seq.clone()),
+            Some(first.seq),
+            "it came back beside a different molecule, which is the original hazard"
         );
     }
 

@@ -59,6 +59,28 @@ pub struct DocView {
     pub doc_code: pl_core::translate::Code,
     pub gel: gel::View,
     pub central_view: CentralView,
+    /// Which enzymes this molecule is being considered with.
+    ///
+    /// Stage 3. It was one choice for the window, so narrowing to the six
+    /// enzymes in your MCS narrowed the plasmid in the next tab too — and the
+    /// Enzymes list, the map's tick marks, the gel's lanes and the digest cache
+    /// key all read it, so the other document's list simply lost enzymes with
+    /// nothing saying why.
+    pub enzyme_set: pl_enzymes::EnzymeSet,
+    /// The Design primers panel, the cut-and-religate panel, and the feature
+    /// editor: the three windows that belong to a molecule.
+    ///
+    /// THEY USED TO BE CLOSED ON EVERY TAB SWITCH, and that was the honest thing
+    /// to do while they lived on `App`: each holds an index into one feature
+    /// list, a digest of one molecule, or a selection on one sequence, and
+    /// carrying any of them across a switch would have described the wrong
+    /// plasmid. Held per tab they need no such rule — switching away puts them
+    /// down and switching back picks them up, which is what "tabs as projects"
+    /// asked for, and a religation plan is minutes of work rather than the
+    /// milliseconds `switch_tab`'s old comment assumed.
+    pub design: Option<crate::design::Panel>,
+    pub clone_panel: Option<crate::clone::Panel>,
+    pub feature_edit: Option<crate::featedit::Panel>,
 }
 
 impl Default for DocView {
@@ -90,6 +112,14 @@ impl Default for DocView {
             doc_code: pl_core::translate::table(1).expect("the standard code is compiled in"),
             gel: gel::View::default(),
             central_view: CentralView::Map,
+            // The whole table, which is what `App::blank` starts from and what
+            // `adopt` reset to. A newly opened molecule has not been narrowed to
+            // anything, and defaulting to a subset would hide cutters from a
+            // document nobody has made a choice about yet.
+            enzyme_set: pl_enzymes::EnzymeSet::All,
+            design: None,
+            clone_panel: None,
+            feature_edit: None,
         }
     }
 }
