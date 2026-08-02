@@ -28,6 +28,7 @@
 
 pub mod assembly;
 pub mod goldengate;
+pub mod ligate;
 
 use pl_core::{reverse_complement, Topology};
 use pl_enzymes::Enzyme;
