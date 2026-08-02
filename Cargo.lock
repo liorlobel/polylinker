@@ -2354,6 +2354,7 @@ dependencies = [
  "eframe",
  "egui-phosphor",
  "pl-abif",
+ "pl-clone",
  "pl-core",
  "pl-design",
  "pl-doc",

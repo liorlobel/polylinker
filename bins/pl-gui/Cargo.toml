@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 pl-abif.workspace = true
+pl-clone.workspace = true
 pl-core.workspace = true
 pl-design.workspace = true
 pl-doc.workspace = true

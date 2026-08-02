@@ -10,6 +10,7 @@
 
 mod aa;
 mod annot;
+mod clone;
 mod design;
 mod doc;
 mod featedit;
@@ -324,6 +325,8 @@ pub const SET_ORIGIN_ITEM: &str = "Set origin at selected feature";
 pub const ADD_FEATURE_ITEM: &str = "Add feature…";
 /// The item in [`MOLECULE_MENU`] that opens the feature editor on the selection.
 pub const EDIT_FEATURE_ITEM: &str = "Edit selected feature…";
+/// The item in [`MOLECULE_MENU`] that cuts and religates.
+pub const CLONE_ITEM: &str = "Cut and religate…";
 
 /// The path a user has to walk to set the origin, as prose points at it.
 pub fn set_origin_path() -> String {
@@ -1024,6 +1027,8 @@ struct App {
     /// It holds a snapshot of the selection it was opened on, not a live
     /// reference to it -- see `design.rs`.
     design: Option<design::Panel>,
+    /// The cut-and-religate panel, when it is open.
+    clone_panel: Option<clone::Panel>,
 
     /// The Feature editor, if it is open.
     ///
@@ -1646,6 +1651,7 @@ impl App {
             last_autosave: None,
             dna_owner: None,
             design: None,
+            clone_panel: None,
             feature_edit: None,
             feature_editor_opens: 0,
             layout: settings::Layout::default(),
@@ -3620,6 +3626,7 @@ impl eframe::App for App {
         self.side_panel(ui);
         self.central(ui);
         self.paste_dialog(&ctx);
+        self.clone_panel(&ctx);
         self.design_panel(&ctx);
         self.feature_editor(&ctx);
         // After the panels, so the question paints over the document it is
@@ -4199,6 +4206,21 @@ impl App {
                         ui.close();
                     }
                 });
+                ui.separator();
+                // Restriction cloning. Seeded from whatever is ticked for the
+                // gel, because somebody who has just looked at a digest is
+                // asking about that digest.
+                if ui
+                    .button(CLONE_ITEM)
+                    .on_hover_text(
+                        "cut this molecule and see which fragments religate; a product opens \
+                         as a new unsaved document",
+                    )
+                    .clicked()
+                {
+                    self.clone_panel = Some(clone::Panel::new(&self.gel.picked));
+                    ui.close();
+                }
                 ui.add_enabled_ui(sel.is_some(), |ui| {
                     if ui.button("Remove selected feature").clicked() {
                         if let Some(i) = sel {
@@ -8937,6 +8959,76 @@ impl App {
                 self.design = Some(p);
             }
             Err(e) => self.notice = Some(e),
+        }
+    }
+
+    /// Draw the cut-and-religate panel and adopt a product if one was asked for.
+    ///
+    /// The product becomes a document THROUGH THE FILE PATH — serialised to
+    /// GenBank and parsed straight back — rather than by hand-building a
+    /// `Document`. That is a deliberate detour: it means a construct behaves
+    /// exactly like one that was opened from disk, gets the same load report,
+    /// the same digest worker and the same unsaved-changes protection, and it
+    /// cannot drift into a second, subtly different way of being a document.
+    /// `of_molecule` exists for the same job and is `#[cfg(test)]`, which is the
+    /// right place for it.
+    ///
+    /// It arrives with no path, so it is unsaved by construction and the close
+    /// guard already covers it. A product nobody saves is a product nobody
+    /// loses by accident.
+    fn clone_panel(&mut self, ctx: &egui::Context) {
+        // Checked before the take, for the reason `design_panel` documents: a
+        // panel that outlives its document is the state that writes one file's
+        // answer into another.
+        if self.document.is_none() {
+            self.clone_panel = None;
+            return;
+        }
+        let Some(mut panel) = self.clone_panel.take() else {
+            return;
+        };
+        let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
+        let mol = self
+            .document
+            .as_ref()
+            .expect("checked above")
+            .molecule()
+            .clone();
+        let keep = clone::show(ctx, &mut panel, &mol, dark);
+
+        if let Some(i) = panel.wanted.take() {
+            if let Some(p) = panel.plan.as_ref().and_then(|pl| pl.prods.get(i)) {
+                let title = format!("{} product", mol.name);
+                let (bytes, _unwritable) =
+                    pl_fileio::genbank::write_reporting(&p.mol, &title, today());
+                match Document::from_bytes(bytes.as_bytes(), title, None) {
+                    Ok(d) => {
+                        let n = p.mol.seq.len();
+                        let carried = p.carried;
+                        let dropped = p.dropped;
+                        self.adopt(d);
+                        self.notice = Some(format!(
+                            "{n} bp construct opened as a new unsaved document — \
+                             {carried} feature(s) carried over{}",
+                            if dropped > 0 {
+                                format!(", {dropped} left behind")
+                            } else {
+                                String::new()
+                            }
+                        ));
+                    }
+                    // The writer and the reader are both ours, so this is a bug
+                    // rather than a bad file; say which of the two to look at.
+                    Err(e) => {
+                        self.error = Some(format!(
+                            "the product could not be re-read after being written: {e}"
+                        ))
+                    }
+                }
+            }
+        }
+        if keep {
+            self.clone_panel = Some(panel);
         }
     }
 
@@ -15569,6 +15661,59 @@ mod tests {
         );
         assert_eq!(ecorv.chip, "blunt");
         assert!(ecorv.hover.contains("SmaI"), "{}", ecorv.hover);
+    }
+
+    /// The whole path a user walks: digest, religate, open the product.
+    ///
+    /// The step this covers that `clone::tests` cannot is the LAST one — the
+    /// product going out through the GenBank writer and coming back in through
+    /// `Document::from_bytes`. A molecule that plans correctly and then cannot
+    /// be re-read is still a feature nobody can use, and that hand-off is
+    /// exactly where a construct would lose its topology or its features.
+    #[test]
+    fn a_religated_product_survives_becoming_a_document() {
+        let seq = "AAAAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCC";
+        let mut m = pl_core::Molecule {
+            name: "pTest".into(),
+            seq: seq.as_bytes().to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let mut f = pl_core::Feature::new("a gene", "CDS");
+        f.strand = pl_core::Strand::Forward;
+        f.segments.push(pl_core::Segment::new(15, 30));
+        m.features.push(f);
+
+        let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
+        let plan = clone::plan(&m, &picked, false);
+        assert_eq!(plan.prods.len(), 1, "{:?}", plan.note);
+        let p = &plan.prods[0];
+
+        let title = "pTest product".to_string();
+        let (bytes, unwritable) = pl_fileio::genbank::write_reporting(&p.mol, &title, today());
+        assert!(
+            unwritable.is_empty(),
+            "the product could not be fully written: {unwritable:?}"
+        );
+        let d = Document::from_bytes(bytes.as_bytes(), title, None).expect("re-read");
+
+        // The construct survives the trip intact.
+        assert_eq!(d.molecule().seq.len(), seq.len(), "length changed");
+        assert!(
+            d.molecule().topology.is_circular(),
+            "a circular product came back linear, so the plasmid became a fragment"
+        );
+        assert_eq!(
+            d.molecule().features.len(),
+            1,
+            "the feature did not survive"
+        );
+        assert_eq!(d.molecule().features[0].name, "a gene");
+
+        // No path, so it is unsaved by construction and the close guard covers
+        // it. A product nobody saves must not be a product silently lost.
+        assert!(d.path.is_none());
+        assert!(d.unsaved(), "the product must count as unsaved work");
     }
 
     fn seq_app() -> App {
