@@ -339,6 +339,13 @@ pub fn dropped_summary(dropped: &[DroppedBlocks]) -> Option<String> {
 pub fn write_blocks(blocks: &[Block]) -> Vec<u8> {
     let mut out = Vec::with_capacity(blocks.iter().map(Block::size_on_disk).sum());
     for b in blocks {
+        // The length field is a u32; a caller must drop or refuse a ≥4 GiB
+        // payload before here (see `from_molecule_reporting`) rather than let the
+        // cast truncate it into a corrupt frame.
+        debug_assert!(
+            b.payload.len() <= u32::MAX as usize,
+            "block payload exceeds the u32 .dna length field"
+        );
         out.push(b.kind);
         out.extend_from_slice(&(b.payload.len() as u32).to_be_bytes());
         out.extend_from_slice(&b.payload);
@@ -1080,6 +1087,23 @@ pub fn from_molecule_reporting(mol: &Molecule) -> (Vec<u8>, Vec<String>) {
             payload: notes_xml(mol, &mut unwritable).into_bytes(),
         });
     }
+    // The `.dna` block header stores payload length as a big-endian u32, so a
+    // payload of 4 GiB or more cannot be framed — `write_blocks` would truncate
+    // the length field and desynchronise every block after it. No real molecule
+    // approaches this, but drop-and-report is the discipline everywhere else in
+    // this writer, not a silently corrupt frame.
+    blocks.retain(|b| {
+        if b.payload.len() > u32::MAX as usize {
+            unwritable.push(format!(
+                "{} block: {} bytes exceeds the 4 GiB the .dna length field can hold and was not written",
+                block_name(b.kind),
+                b.payload.len()
+            ));
+            false
+        } else {
+            true
+        }
+    });
     (write_blocks(&blocks), unwritable)
 }
 

@@ -24,22 +24,51 @@
 
 mod json;
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 
 use json::{arr, obj, s, Value};
 
 const PROTOCOL: &str = "2024-11-05";
 
+/// The most a single JSON-RPC request line may be before it is refused. A
+/// well-formed request is tiny; an unterminated or oversized line must not be
+/// allowed to buffer without bound (and then 4x-amplify into a `Vec<char>` in
+/// the parser).
+const MAX_REQUEST: usize = 16 * 1024 * 1024;
+
 fn main() {
     let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
     let mut out = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    while let Ok(Some((bytes, overflowed))) = read_request(&mut reader, MAX_REQUEST) {
+        if overflowed {
+            let r = error_for(&Value::Null, -32700, "request line exceeds the size limit");
+            let _ = writeln!(out, "{}", json::write(&r));
+            let _ = out.flush();
+            continue;
+        }
+        let Ok(line) = String::from_utf8(bytes) else {
+            let r = error_for(&Value::Null, -32700, "request line is not valid UTF-8");
+            let _ = writeln!(out, "{}", json::write(&r));
+            let _ = out.flush();
+            continue;
+        };
         if line.trim().is_empty() {
             continue;
         }
         let response = match json::parse(&line) {
-            Ok(req) => handle(&req),
+            // A panic in a parser below (the format readers are thousands of LOC
+            // over hostile input) must degrade this one request, not kill the
+            // long-lived server for every request after it. A notification still
+            // gets no reply, even on panic.
+            Ok(req) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(&req))) {
+                    Ok(r) => r,
+                    Err(_) => req.get("id").map(|id| {
+                        error_for(id, -32603, "internal error while handling the request")
+                    }),
+                }
+            }
             Err(e) => Some(error_for(
                 &Value::Null,
                 -32700,
@@ -51,6 +80,47 @@ fn main() {
         if let Some(r) = response {
             let _ = writeln!(out, "{}", json::write(&r));
             let _ = out.flush();
+        }
+    }
+}
+
+/// Read one `\n`-terminated request line without ever buffering more than `cap`
+/// bytes. Returns `Ok(None)` at EOF, or `Ok(Some((bytes, overflowed)))` where
+/// `overflowed` marks a line that exceeded `cap` — its content is dropped and
+/// the caller refuses it, so one long line cannot exhaust memory.
+fn read_request(r: &mut impl BufRead, cap: usize) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    let mut line = Vec::new();
+    let mut overflowed = false;
+    loop {
+        let available = r.fill_buf()?;
+        if available.is_empty() {
+            return Ok(if line.is_empty() && !overflowed {
+                None
+            } else {
+                Some((line, overflowed))
+            });
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                if !overflowed && line.len() + i <= cap {
+                    line.extend_from_slice(&available[..i]);
+                } else {
+                    overflowed = true;
+                    line.clear();
+                }
+                r.consume(i + 1);
+                return Ok(Some((line, overflowed)));
+            }
+            None => {
+                let n = available.len();
+                if !overflowed && line.len() + n <= cap {
+                    line.extend_from_slice(available);
+                } else {
+                    overflowed = true;
+                    line.clear();
+                }
+                r.consume(n);
+            }
         }
     }
 }
@@ -323,7 +393,24 @@ fn whole_arg(a: &Value, key: &str) -> Result<Option<i64>, String> {
 
 /// Load record 1 of a file, together with what else the file held.
 fn load(path: &str) -> Result<(pl_core::Molecule, pl_fileio::LoadReport), String> {
-    let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    // The read-only server's one filesystem door, and the path is untrusted: the
+    // assistant driving it can be steered by injected content. Refuse a
+    // non-regular file — a FIFO would hang, `/dev/zero` would read forever — and
+    // cap the bytes actually read (not a stat that a growing file outraces), the
+    // way `pl-scan` bounds the same risk.
+    const MAX_FILE: u64 = 512 * 1024 * 1024;
+    let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path}: not a regular file"));
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut data = Vec::new();
+    file.take(MAX_FILE + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| format!("{path}: {e}"))?;
+    if data.len() as u64 > MAX_FILE {
+        return Err(format!("{path}: exceeds the {MAX_FILE}-byte size limit"));
+    }
     pl_fileio::load_with_report(&data)
         .map(|(m, _, r)| (m, r))
         .map_err(|e| format!("{path}: {e}"))

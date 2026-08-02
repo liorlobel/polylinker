@@ -341,7 +341,7 @@ impl std::fmt::Display for OpError {
             }
             OpError::IdCollision { id } => write!(
                 f,
-                "operation id {id} is already used by a different operation;                  refusing rather than losing the edit"
+                "operation id {id} is already used by a different operation; refusing rather than losing the edit"
             ),
             OpError::AtEnd => write!(f, "nothing further in that direction"),
         }

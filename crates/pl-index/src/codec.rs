@@ -391,8 +391,27 @@ pub fn parse(data: &[u8]) -> Result<Library, OpenError> {
                 OpenError::BadTable(format!("line {}: column {}: {e}", n + 1, COLUMNS[i]))
             })
         };
+        let path = unescape(c[0]);
+        // The stored path is a root-relative locator that `pl_scan::abs` rebuilds
+        // by pushing each separator-split component onto the root. An absolute
+        // path or a `..` component — in a shared or hostile `.plx` whose SHA-1
+        // trailer its author made valid — would escape the root and drive an
+        // arbitrary-file read at the consumer. A real index (paths come from
+        // `strip_prefix(root)`) never contains either, so this rejects only forged
+        // ones. Both separators and a drive letter are checked because `abs` runs
+        // on Windows too.
+        if path.starts_with('/')
+            || path.starts_with('\\')
+            || path.split(['/', '\\']).any(|p| p == "..")
+            || path.chars().nth(1) == Some(':')
+        {
+            return Err(OpenError::BadTable(format!(
+                "line {}: path {path:?} is not a safe root-relative path",
+                n + 1
+            )));
+        }
         lib.rows.push(Row {
-            path: unescape(c[0]),
+            path,
             record: num(1)? as u32,
             size: num(2)?,
             mtime_ns: c[3].parse::<i128>().map_err(|e| {
@@ -603,6 +622,38 @@ mod tests {
             assert!(back.complete, "path {path:?} rewrote complete");
             assert_eq!(back.packed_bases, lib.packed_bases, "path {path:?}");
         }
+    }
+
+    #[test]
+    fn a_path_that_escapes_the_root_is_refused_at_parse() {
+        // A shared or hostile `.plx`, whose SHA-1 trailer its author made valid,
+        // could carry a `..` or absolute path. `pl_scan::abs` rebuilds an on-disk
+        // path by pushing each separator-split component, so such a path would
+        // escape the root and drive an arbitrary-file read at the consumer.
+        // Refused here, once, rather than trusted at the read.
+        for path in [
+            "../../../etc/passwd",
+            "..",
+            "sub/../../escape.gb",
+            "/etc/passwd",
+            "\\\\server\\share\\x.gb",
+            "..\\..\\windows.gb",
+            "C:/Windows/System32/x.gb",
+        ] {
+            let mut lib = sample();
+            lib.rows[3].path = path.to_string();
+            assert!(
+                parse(&to_bytes(&lib)).is_err(),
+                "path {path:?} escaped the root and was not refused"
+            );
+        }
+        // A legitimate nested relative path is still accepted.
+        let mut lib = sample();
+        lib.rows[3].path = "sub/deep/ok.gb".to_string();
+        assert!(
+            parse(&to_bytes(&lib)).is_ok(),
+            "a real nested path was refused"
+        );
     }
 
     #[test]

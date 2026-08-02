@@ -77,7 +77,10 @@ impl Overhang {
     /// a copy of itself in the wrong orientation, and the assembly is a mixture
     /// rather than a construct.
     pub fn is_palindromic(&self) -> bool {
-        !self.bases.is_empty() && reverse_complement(&self.bases) == self.bases
+        // Case-insensitive, like the near-neighbour check: a soft-masked
+        // lowercase overhang is the same sticky end as its uppercase twin.
+        let up = self.bases.to_ascii_uppercase();
+        !up.is_empty() && reverse_complement(&up) == up
     }
 }
 
@@ -209,6 +212,20 @@ fn one_substitution_apart(a: &[u8], b: &[u8]) -> Option<usize> {
 /// Check a set of overhangs for the faults that can be found without data.
 pub fn check(overhangs: &[Overhang]) -> Report {
     let mut faults = Vec::new();
+    // The exact fault checks below (repeat, cross-pairing, palindrome) read
+    // `bases` or the `names` derived from them with byte-exact `==`, while the
+    // near-neighbour check folds case — an inverted-severity inconsistency, since
+    // the fatal checks are the case-sensitive ones. Canonicalise to uppercase
+    // here, once, so a soft-masked lowercase overhang and its uppercase twin are
+    // the same sticky end everywhere. Production overhangs already arrive
+    // uppercase from `Dseq`; this closes the gap for any built directly.
+    let overhangs: Vec<Overhang> = overhangs
+        .iter()
+        .map(|o| Overhang {
+            bases: o.bases.to_ascii_uppercase(),
+            five_prime: o.five_prime,
+        })
+        .collect();
     let names: Vec<String> = overhangs.iter().map(Overhang::as_str).collect();
 
     if overhangs.is_empty() {

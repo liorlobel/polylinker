@@ -120,18 +120,45 @@ pub fn scan(root: &Path, now_ns: u128, opts: &ScanOptions) -> (Library, ScanRepo
             continue;
         }
 
-        let data = match std::fs::read(&f.path) {
-            Ok(d) => d,
-            Err(e) => {
-                report.unreadable.push((f.rel.clone(), e.to_string()));
-                rows.push(Row {
-                    path: f.rel.clone(),
-                    state: pl_index::State::Unreadable,
-                    problem: e.to_string(),
-                    ..Default::default()
-                });
-                report.records += 1;
-                continue;
+        // Cap the read itself, not just the walk-time `f.size`: a file that grew
+        // between the walk's stat and here (a sequencer still writing) would
+        // otherwise be allocated and SHA-1'd in full despite the gate above,
+        // paying the very cost the cap exists to avoid.
+        let data = {
+            use std::io::Read;
+            let read = std::fs::File::open(&f.path).and_then(|fh| {
+                let mut buf = Vec::new();
+                fh.take(MAX_BYTES + 1).read_to_end(&mut buf)?;
+                Ok(buf)
+            });
+            match read {
+                Ok(d) if d.len() as u64 > MAX_BYTES => {
+                    // Grew past the cap since the walk; treat it as TooLarge, the
+                    // same outcome the `f.size` gate above would have given.
+                    rows.push(Row {
+                        path: f.rel.clone(),
+                        state: pl_index::State::TooLarge,
+                        size: f.size,
+                        mtime_ns: f.mtime_ns,
+                        problem: format!("grew past the {MAX_BYTES}-byte cap while being read"),
+                        ..Default::default()
+                    });
+                    report.parsed += 1;
+                    report.records += 1;
+                    continue;
+                }
+                Ok(d) => d,
+                Err(e) => {
+                    report.unreadable.push((f.rel.clone(), e.to_string()));
+                    rows.push(Row {
+                        path: f.rel.clone(),
+                        state: pl_index::State::Unreadable,
+                        problem: e.to_string(),
+                        ..Default::default()
+                    });
+                    report.records += 1;
+                    continue;
+                }
             }
         };
         let content = content_id(&data);

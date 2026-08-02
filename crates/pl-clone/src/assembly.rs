@@ -332,7 +332,15 @@ fn finish(
         let first = &seqs[path[0].0][path[0].1 as usize];
         let last = &seqs[path[path.len() - 1].0][path[path.len() - 1].1 as usize];
         let k = terminal_overlap(last, first, opts.limit)?;
-        if k > acc.len() {
+        // The closing homology must lie within the last fragment's own tail
+        // contribution to `acc` (`len(last) - incoming`), not spill into the
+        // fragment before it. A short adapter whose incoming arm and closing arm
+        // overlap — `len(Fm) < incoming + k` — would otherwise have `truncate`
+        // eat bases off Fm's predecessor and return a confident circular product
+        // with a wrong sequence and a valid-looking cdseguid. Refuse the
+        // degenerate topology rather than assemble it wrong.
+        let incoming = js.last().copied().unwrap_or(0);
+        if k > acc.len() || k + incoming > last.len() {
             return None;
         }
         acc.truncate(acc.len() - k);
