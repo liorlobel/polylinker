@@ -49,8 +49,19 @@ function out() {
 const outText = () => new TextDecoder().decode(out());
 const outJson = () => JSON.parse(outText());
 
+/* `pl_alloc` returns null on failure rather than trapping, so every caller has
+   to check: address 0 is inside linear memory and `set(..., 0)` overwrites the
+   module's own data without throwing. This harness is the in-tree implementer of
+   the ABI contract, so it demonstrates the check the contract requires rather
+   than relying on allocations here being small enough never to fail. */
+function alloc(len) {
+  const ptr = w.pl_alloc(len);
+  if (ptr === 0) throw new Error(`pl_alloc(${len}) returned null`);
+  return ptr;
+}
+
 function open(buf) {
-  const ptr = w.pl_alloc(buf.length);
+  const ptr = alloc(buf.length);
   u8().set(buf, ptr);
   const rc = w.pl_open(ptr, buf.length);
   w.pl_free(ptr, buf.length);
@@ -59,7 +70,7 @@ function open(buf) {
 
 function withStr(s, fn) {
   const b = new TextEncoder().encode(s);
-  const ptr = w.pl_alloc(b.length);
+  const ptr = alloc(b.length);
   u8().set(b, ptr);
   try {
     return fn(ptr, b.length);

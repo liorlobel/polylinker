@@ -387,6 +387,21 @@ function coreSequence() {
 
 function withBytes(bytes, fn) {
   const ptr = W.pl_alloc(bytes.length);
+  /* A NULL HERE IS NOT A POINTER, AND ADDRESS 0 IS WRITABLE.
+     `pl_alloc` used to route allocation failure through `handle_alloc_error` to
+     a wasm `unreachable`: loud, contained, impossible to ignore. e0109f8 changed
+     it to return null, which is the friendlier ABI only if somebody checks — and
+     nothing did. `mem().set(bytes, 0)` does not throw, because address 0 is
+     inside linear memory: it would quietly overwrite the module's own data with
+     the user's file and carry on, and every number this page then displayed
+     would be read out of the wreckage. A change that turns a trap into silent
+     corruption is not hardening, so the check the new ABI assumes is here. */
+  if (ptr === 0) {
+    throw new Error(
+      "out of memory: could not allocate " + bytes.length +
+        " bytes for this file",
+    );
+  }
   mem().set(bytes, ptr);
   try {
     return fn(ptr, bytes.length);

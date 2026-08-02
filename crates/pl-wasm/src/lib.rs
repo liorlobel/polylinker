@@ -102,7 +102,14 @@ pub extern "C" fn pl_alloc(len: usize) -> *mut u8 {
 /// afterwards.
 #[no_mangle]
 pub unsafe extern "C" fn pl_free(ptr: *mut u8, len: usize) {
-    if !ptr.is_null() && len > 0 {
+    // The same `> isize::MAX` refusal `pl_alloc`, `pl_open` and `read_str` make.
+    // e0109f8 added it to those three and left this one, so the commit's claim
+    // that "the FFI entry points reject len > isize::MAX before from_raw_parts"
+    // was true of every such call but this. A capacity above `isize::MAX` cannot
+    // have come from `pl_alloc` — it refuses those — so this can only be reached
+    // by a caller that broke the documented precondition, and reconstructing the
+    // Vec would hand the allocator a capacity it never issued.
+    if !ptr.is_null() && len > 0 && len <= isize::MAX as usize {
         drop(Vec::from_raw_parts(ptr, 0, len));
     }
 }
@@ -774,6 +781,28 @@ mod tests {
         let (rc, json) = open(b"not a sequence file at all");
         assert_eq!(rc, 1);
         assert!(json.starts_with(r#"{"error":"#), "{json}");
+    }
+
+    /// The allocator ABI, which e0109f8 changed and left untested.
+    ///
+    /// That commit made `pl_alloc` return null instead of routing failure
+    /// through `handle_alloc_error` to a wasm trap. Null is the friendlier
+    /// contract only if callers check it — address 0 is inside linear memory, so
+    /// `set(bytes, 0)` overwrites the module's own data without throwing — and
+    /// the two JS callers did not. They do now; this pins the Rust half.
+    #[test]
+    fn an_over_range_allocation_returns_null_rather_than_trapping() {
+        // Refused for exceeding the slice precondition, not attempted.
+        assert!(pl_alloc(usize::MAX).is_null());
+        assert!(pl_alloc(isize::MAX as usize + 1).is_null());
+        // The boundary itself is a request, not a refusal: it will fail in the
+        // allocator and come back null too, but by the other route.
+        let ok = pl_alloc(64);
+        assert!(!ok.is_null(), "an ordinary allocation must still succeed");
+        unsafe { pl_free(ok, 64) };
+        // A length no `pl_alloc` can have issued is not handed to the allocator
+        // as a capacity. Nothing to observe but the absence of a crash.
+        unsafe { pl_free(std::ptr::null_mut(), 0) };
     }
 
     #[test]

@@ -393,18 +393,41 @@ pub fn parse(data: &[u8]) -> Result<Library, OpenError> {
         };
         let path = unescape(c[0]);
         // The stored path is a root-relative locator that `pl_scan::abs` rebuilds
-        // by pushing each separator-split component onto the root. An absolute
-        // path or a `..` component — in a shared or hostile `.plx` whose SHA-1
-        // trailer its author made valid — would escape the root and drive an
-        // arbitrary-file read at the consumer. A real index (paths come from
-        // `strip_prefix(root)`) never contains either, so this rejects only forged
-        // ones. Both separators and a drive letter are checked because `abs` runs
-        // on Windows too.
-        if path.starts_with('/')
-            || path.starts_with('\\')
-            || path.split(['/', '\\']).any(|p| p == "..")
-            || path.chars().nth(1) == Some(':')
-        {
+        // by pushing each `/`-split part onto the root. An absolute path or a
+        // `..` part — in a shared or hostile `.plx` whose SHA-1 trailer its
+        // author made valid — escapes the root and drives an arbitrary-file read
+        // at the consumer. A real index (paths come from `strip_prefix(root)`)
+        // never contains either, so this rejects only forged ones.
+        //
+        // ASKED OF `Path`, NOT OF THE CHARACTERS, and that is the whole point.
+        // e0109f8 tested `path.chars().nth(1) == Some(':')` to catch a Windows
+        // drive letter, which refuses any name whose second character is a colon
+        // — so `R:S-isomer.gb` in a library root was rejected and, because this
+        // returns `BadTable`, ONE such file made the whole index unopenable.
+        // A colon is legal in a POSIX filename and `R:S` is ordinary
+        // stereochemistry. It was wrong in the other direction too: the colon
+        // had to be the second character of the WHOLE path, so `sub/a:b.gb`
+        // sailed through and `plasmids/R:S.gb` was fine while `R:S.gb` was not
+        // — a rule that depended on how long the first directory's name was.
+        //
+        // The real defect is not in the string, it is in the join:
+        // `PathBuf::push` REPLACES the path when the pushed part carries a
+        // Windows prefix, so `C:evil` and `C:\evil` take over. Asking `Path` to
+        // parse each part answers exactly that question on the platform that
+        // will do the joining: a part is safe when it is one `Normal` component
+        // and nothing else. On Windows `R:S-isomer.gb` parses as `Prefix(R:)` +
+        // `Normal` and is refused — correctly, since a colon cannot be in a
+        // Windows filename and such a part could only be a drive. On Unix the
+        // same string is one `Normal` component and is kept. `..` is `ParentDir`,
+        // an empty part (from a leading or doubled separator) yields no
+        // component, and a part holding a stray `\` is two components on
+        // Windows, where it would have been a separator.
+        let safe = !path.is_empty()
+            && path.split('/').all(|part| {
+                let mut it = std::path::Path::new(part).components();
+                matches!(it.next(), Some(std::path::Component::Normal(_))) && it.next().is_none()
+            });
+        if !safe {
             return Err(OpenError::BadTable(format!(
                 "line {}: path {path:?} is not a safe root-relative path",
                 n + 1
@@ -654,6 +677,65 @@ mod tests {
             parse(&to_bytes(&lib)).is_ok(),
             "a real nested path was refused"
         );
+
+        // THE OTHER HALF, and the half that was missing: names a scientist
+        // actually has must survive. The refusal above returns `BadTable`, which
+        // fails the WHOLE index, so one over-refused file costs a user their
+        // entire library — a worse outcome than the read this guard prevents.
+        //
+        // `R:S-isomer.gb` is the case that motivated this: e0109f8 tested
+        // `chars().nth(1) == Some(':')`, so a colon anywhere in second position
+        // was refused, and stereochemistry puts one there. It was also position-
+        // dependent — `plasmids/R:S.gb` passed while `R:S.gb` did not.
+        //
+        // Unix-only, because these are legal filenames only where a colon and a
+        // backslash are ordinary characters. On Windows the same strings parse
+        // as a drive prefix or a separator and MUST be refused, which the block
+        // above asserts.
+        #[cfg(not(windows))]
+        for path in [
+            "R:S-isomer.gb",
+            "a:b.gb",
+            "12:30-timecourse.gb",
+            "sub/R:S-isomer.gb",
+            "C--drive-notes.gb",
+            "..hidden-but-not-parent.gb",
+            "two..dots.gb",
+        ] {
+            let mut lib = sample();
+            lib.rows[3].path = path.to_string();
+            assert!(
+                parse(&to_bytes(&lib)).is_ok(),
+                "{path:?} is a legal filename and refusing it costs the whole index"
+            );
+        }
+
+        // AND THE SAME THING WITHOUT A `cfg`, so it runs everywhere.
+        //
+        // The block above is Unix-only by necessity — these are legal names only
+        // where a colon is an ordinary character — which means on Windows it
+        // compiles to nothing and cannot fail. This says the part that is true
+        // on every platform: whether a NAME is safe cannot depend on how deep it
+        // sits, because `abs` pushes each part through the same `push`.
+        //
+        // That is exactly what the old rule got wrong. `chars().nth(1)` looked at
+        // the second character of the whole path, so `R:S.gb` was refused and
+        // `plasmids/R:S.gb` accepted — the verdict turned on the length of the
+        // first directory's name. Whatever a platform decides about a colon, it
+        // must decide it the same way in both places, so this fails against that
+        // rule on Windows and Unix alike.
+        for name in ["R:S-isomer.gb", "a:b.gb", "x.gb"] {
+            let verdict = |p: &str| {
+                let mut lib = sample();
+                lib.rows[3].path = p.to_string();
+                parse(&to_bytes(&lib)).is_ok()
+            };
+            assert_eq!(
+                verdict(name),
+                verdict(&format!("plasmids/{name}")),
+                "{name:?} is judged differently at the root than one directory down"
+            );
+        }
     }
 
     #[test]
