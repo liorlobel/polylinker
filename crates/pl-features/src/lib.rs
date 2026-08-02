@@ -2207,6 +2207,140 @@ mod tests {
     }
 
     #[test]
+    fn a_signed_record_whose_provenance_is_not_cleared_does_not_ship() {
+        // The licence gate arrived in e0109f8 with NO test, gating what a
+        // release may ship — the one constraint here with legal weight rather
+        // than merely correctness weight — so this is it.
+        //
+        // THE HOLE IS NARROWER THAN IT LOOKS, and this test aims at the part
+        // that is real. `content_digest` hashes each record's provenance quads,
+        // so APPENDING an uncleared row to an already-signed record changes the
+        // digest, `apply_signoff` reports it and forces the row back to
+        // Proposed — `a_signed_row_that_changes_loses_its_sign_off` covers that
+        // and it was already covered before the gate existed. What was NOT
+        // covered is a record signed WHILE the uncleared row was already there:
+        // the digest matches, the signature stands, and `review_status` alone
+        // says ship it. A curator can reach that state by honest mistake —
+        // `build.py --show` prints the quads but does not refuse an uncleared
+        // one — which is the whole reason "discipline is not a control".
+        //
+        // Addgene's terms do not clear it for use as data; see
+        // features/SOURCING.md. `check_signoff.py` plants this exact row.
+        let tainted = "PLF:0001\tdescription\taddgene\tAddgene-52961\t\
+             noncommercial-informational-only\thttps://www.addgene.org/52961/\t2026-07-28\tdeadbeef";
+        let f = format!(
+            "{FH}\n{}\n{}\n",
+            feat("PLF:0001", "ATGACGT", "MT", "cds", "reviewed", "L. Lobel"),
+            feat("PLF:0002", "ATGACGT", "MT", "cds", "reviewed", "L. Lobel"),
+        );
+        let p = format!(
+            "{PH}\n{}\n{}\n{tainted}\n",
+            prov("PLF:0001"),
+            prov("PLF:0002")
+        );
+
+        // Both signed over the tables AS THEY STAND, tainted row included, so
+        // both digests are honest and both signatures hold.
+        let (staged, _) = Db::parse(&f, &p, "");
+        let dig = |id: &str| {
+            let r = staged
+                .records
+                .iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id} missing from the fixture"));
+            staged.content_digest(r)
+        };
+        let s = format!(
+            "{SH}\nPLF:0001\treviewed\tL. Lobel\t2026-07-28\t{}\tchecked\n\
+             PLF:0002\treviewed\tL. Lobel\t2026-07-28\t{}\tchecked\n",
+            dig("PLF:0001"),
+            dig("PLF:0002")
+        );
+
+        let (db, errs) = Db::parse(&f, &p, &s);
+
+        // THE CONTROL, and without it this test proves nothing: both signatures
+        // must survive. If PLF:0001 had been demoted to Proposed by the digest
+        // check, it would drop out of `reviewed()` for a reason that has nothing
+        // to do with the licence gate, and the assertion below would pass on a
+        // build where that gate had been deleted.
+        for id in ["PLF:0001", "PLF:0002"] {
+            let r = db.records.iter().find(|r| r.id == id).expect(id);
+            assert_eq!(
+                r.review_status,
+                ReviewStatus::Reviewed,
+                "{id}'s signature must hold, or this tests the digest and not the licence"
+            );
+        }
+        // The audit reports it — but only reports it, which is the gap.
+        assert!(
+            errs.iter().any(|e| e.problem.contains("addgene")),
+            "the taint must be reported: {errs:?}"
+        );
+
+        // And the shipped subset leaves it behind, record and provenance alike.
+        let shipped = db.reviewed();
+        let ids: Vec<&str> = shipped.records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["PLF:0002"],
+            "a signed record with uncleared provenance reached a release"
+        );
+        assert!(
+            !shipped.provenance.iter().any(|x| x.source_db == "addgene"),
+            "the uncleared provenance row shipped even though its record did not"
+        );
+        // Scoped: the clean sibling is untouched. A gate that drops the whole
+        // table on one bad row would be safe and useless.
+        assert_eq!(
+            shipped
+                .provenance
+                .iter()
+                .filter(|x| x.record_id == "PLF:0002")
+                .count(),
+            staged
+                .provenance
+                .iter()
+                .filter(|x| x.record_id == "PLF:0002")
+                .count(),
+            "the clean record lost provenance rows it was entitled to keep"
+        );
+
+        // The same tables with the taint removed ship BOTH, so the exclusion is
+        // caused by the licence and by nothing else in the fixture.
+        //
+        // RE-SIGNED, and it has to be: `content_digest` covers the provenance
+        // quads, so deleting the row moves PLF:0001's digest and the old
+        // signature lapses. Reusing `s` here fails with "the row has changed
+        // since it was signed" — which is the append-after-signing defence
+        // doing its job, and precisely why it is NOT the hole this test is
+        // about. Two mechanisms, and the fixture has to keep them apart.
+        let clean = p.replace(&format!("{tainted}\n"), "");
+        assert_ne!(
+            clean, p,
+            "the fixture moved; the tainted row was not removed"
+        );
+        let (staged2, _) = Db::parse(&f, &clean, "");
+        let dig2 = |id: &str| {
+            let r = staged2.records.iter().find(|r| r.id == id).expect(id);
+            staged2.content_digest(r)
+        };
+        let s2 = format!(
+            "{SH}\nPLF:0001\treviewed\tL. Lobel\t2026-07-28\t{}\tchecked\n\
+             PLF:0002\treviewed\tL. Lobel\t2026-07-28\t{}\tchecked\n",
+            dig2("PLF:0001"),
+            dig2("PLF:0002")
+        );
+        let (db2, errs2) = Db::parse(&f, &clean, &s2);
+        assert!(errs2.is_empty(), "the control must load clean: {errs2:?}");
+        assert_eq!(
+            db2.reviewed().records.len(),
+            2,
+            "with the licence cleared, the same two records ship"
+        );
+    }
+
+    #[test]
     fn a_signed_row_that_changes_loses_its_sign_off() {
         // The case the whole content-hash design exists for, and the one the
         // id-stability audit in build.py cannot catch on a fresh clone: it

@@ -5225,6 +5225,22 @@ impl App {
         // because the closure below is already borrowing the document the
         // digest came from, and because a tick must not change the list it is
         // being drawn into halfway down.
+        // THE END EACH CUT LEAVES, and which of the others it can be joined to.
+        //
+        // Narrower than `pl ends` on purpose. The catalogue answer — every
+        // enzyme anywhere that leaves `GATC` — is a reference lookup; the
+        // question in front of a plasmid is "of the enzymes that cut THIS, which
+        // are interchangeable", because those are the alternatives the polylinker
+        // actually offers. So the partner list is intersected with the cutters.
+        //
+        // Computed once for the tab rather than per row: it is O(cutters²) and
+        // the row is redrawn every frame.
+        let cutters: Vec<&'static pl_enzymes::Enzyme> = results
+            .iter()
+            .filter(|x| !x.is_non_cutter())
+            .map(|x| x.enzyme)
+            .collect();
+
         let picked = self.gel.picked.clone();
         let mut toggles: Vec<(String, bool)> = Vec::new();
         let uniq: Vec<_> = shown.iter().filter(|(_, x)| x.is_unique_cutter()).collect();
@@ -5248,6 +5264,7 @@ impl App {
                         true,
                         verdict(*i),
                         poor_single_site_note(e.enzyme.name, e.count()),
+                        &end_note(e.enzyme, &cutters),
                         &mut on,
                     );
                     if on != was {
@@ -5273,6 +5290,7 @@ impl App {
                         false,
                         verdict(*i),
                         poor_single_site_note(e.enzyme.name, e.count()),
+                        &end_note(e.enzyme, &cutters),
                         &mut on,
                     );
                     if on != was {
@@ -9660,6 +9678,98 @@ fn gel_pane(ui: &mut Ui, built: &gel::Built, methods: &mut bool, show_all: &mut 
 /// on the gel as fact, one row giving two opposite answers. `gel::View` now
 /// reads the same verdict this row draws.
 #[allow(clippy::too_many_arguments)]
+/// What one row says about the end its enzyme leaves.
+///
+/// Carried as text rather than as the enzyme, because the interesting half —
+/// which OTHER enzymes leave an end this one can be ligated to — is a property
+/// of the molecule on screen, not of the enzyme, and a row should not go looking
+/// for it. `enzymes_tab` computes it once against the enzymes that actually cut.
+struct EndNote {
+    /// `5' GATC`, `3' GTAC`, `blunt`, or `5' NNNN` when the sequence sets it.
+    chip: String,
+    hover: String,
+}
+
+/// What to say about the end `e` leaves, given the enzymes that cut this
+/// molecule.
+///
+/// NARROWER THAN `pl ends` ON PURPOSE. The catalogue answer — every enzyme
+/// anywhere that leaves `GATC` — is a reference lookup. In front of a plasmid
+/// the question is "of the enzymes that cut THIS one, which are
+/// interchangeable", because those are the alternatives its polylinker actually
+/// offers. So the partner list is intersected with `cutters`.
+///
+/// A free function rather than a closure inside the tab, so it can be asserted
+/// without standing up a document, a digest worker and a frame.
+fn end_note(e: &pl_enzymes::Enzyme, cutters: &[&'static pl_enzymes::Enzyme]) -> EndNote {
+    let side = if e.is_blunt() {
+        "blunt".to_string()
+    } else {
+        let s = if e.is_five_prime_overhang() {
+            "5'"
+        } else {
+            "3'"
+        };
+        match e.overhang_seq() {
+            Some(o) => format!("{s} {o}"),
+            None => format!("{s} {}", "N".repeat(e.overhang_len())),
+        }
+    };
+    // A Type IIS end is not a fact about the enzyme, so it gets a sentence and
+    // no partner list: "interchangeable with BsmBI" would be false in general.
+    if e.overhang_seq().is_none() {
+        return EndNote {
+            chip: side,
+            hover: format!(
+                "{} cuts outside its own site, so the {} bases of the overhang come from the \
+                 sequence and not from the enzyme. Two fragments join only where those bases \
+                 match — which is what Golden Gate exploits.",
+                e.name,
+                e.overhang_len()
+            ),
+        };
+    }
+    let mates: Vec<&str> = cutters
+        .iter()
+        .filter(|o| o.name != e.name && e.ligates_with(o) == pl_enzymes::Compatibility::Always)
+        .map(|o| o.name)
+        .collect();
+    let hover = if mates.is_empty() {
+        format!(
+            "Leaves {side}. Nothing else that cuts this molecule leaves an end it can be \
+             ligated to."
+        )
+    } else {
+        // The junction is the reason to prefer one partner over another: a seam
+        // neither enzyme cuts cannot re-open.
+        let seams: Vec<String> = mates
+            .iter()
+            .filter_map(|m| {
+                let o = pl_enzymes::by_name(m)?;
+                let j = e.junction(o)?;
+                let recut = pl_enzymes::ENZYMES.iter().any(|x| {
+                    !pl_enzymes::cut_positions(j.as_bytes(), pl_core::Topology::Linear, x)
+                        .is_empty()
+                });
+                Some(format!(
+                    "{}+{} = {j}{}",
+                    e.name,
+                    o.name,
+                    if recut { "" } else { ", cut by neither" }
+                ))
+            })
+            .collect();
+        format!(
+            "Leaves {side}, the same end as {}. A fragment cut with any of them can be ligated \
+             here.\n{}",
+            mates.join(", "),
+            seams.join("\n")
+        )
+    };
+    EndNote { chip: side, hover }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn enzyme_row(
     ui: &mut Ui,
     name: &str,
@@ -9668,6 +9778,7 @@ fn enzyme_row(
     unique: bool,
     blocked: Option<pl_enzymes::methylation::SiteEffect>,
     poor_single_site: Option<&'static str>,
+    end: &EndNote,
     in_gel: &mut bool,
 ) {
     ui.horizontal(|ui| {
@@ -9701,6 +9812,17 @@ fn enzyme_row(
             ui.label(RichText::new("1-site").size(10.5).color(pal(ui).warn))
                 .on_hover_text(note);
         }
+        // The end this cut leaves. Small and always present, because "which of
+        // these can I swap for the one my polylinker actually has" is a question
+        // you ask WHILE reading the list, and the answer used to live only in
+        // `pl ends`.
+        ui.label(
+            RichText::new(&end.chip)
+                .monospace()
+                .size(10.5)
+                .color(pal(ui).muted),
+        )
+        .on_hover_text(&end.hover);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let shown: Vec<String> = positions.iter().take(4).map(|p| fmt_int(*p)).collect();
             let more = if positions.len() > 4 { MORE_MARK } else { "" };
@@ -15365,6 +15487,88 @@ mod tests {
              window, so one /label still sets the width of the pane",
             at.x + w
         );
+    }
+
+    /// The Enzymes tab's end chip and its hover, over the enzymes that cut.
+    ///
+    /// The narrowing is the point, and it is what a catalogue-wide answer gets
+    /// wrong: `BamHI` is interchangeable with `BclI` and `BglII` in the table,
+    /// but if only `BglII` cuts the plasmid in front of you then `BclI` is not
+    /// an alternative you have, and offering it sends somebody looking for a
+    /// site that is not there.
+    #[test]
+    fn the_end_chip_names_only_the_alternatives_this_molecule_offers() {
+        let cut = |names: &[&str]| -> Vec<&'static pl_enzymes::Enzyme> {
+            names
+                .iter()
+                .map(|n| pl_enzymes::by_name(n).unwrap())
+                .collect()
+        };
+        let bam = pl_enzymes::by_name("BamHI").unwrap();
+
+        // All three cut: both partners are real options here.
+        let all = end_note(bam, &cut(&["BamHI", "BglII", "BclI", "EcoRI"]));
+        assert_eq!(all.chip, "5' GATC");
+        assert!(
+            all.hover.contains("BglII") && all.hover.contains("BclI"),
+            "{}",
+            all.hover
+        );
+        // EcoRI leaves AATT and must not be offered.
+        assert!(!all.hover.contains("EcoRI"), "{}", all.hover);
+        // The junction, and the reason to choose it.
+        assert!(all.hover.contains("BamHI+BglII = GGATCT"), "{}", all.hover);
+        assert!(all.hover.contains("cut by neither"), "{}", all.hover);
+
+        // Only BglII present: BclI is compatible in the CATALOGUE and is not an
+        // option in this molecule, so it must not be named.
+        let some = end_note(bam, &cut(&["BamHI", "BglII"]));
+        assert!(some.hover.contains("BglII"), "{}", some.hover);
+        assert!(
+            !some.hover.contains("BclI"),
+            "BclI does not cut this molecule and must not be offered: {}",
+            some.hover
+        );
+
+        // Nothing compatible cuts it: say so rather than show an empty list.
+        let alone = end_note(bam, &cut(&["BamHI", "EcoRI", "HindIII"]));
+        assert!(alone.hover.contains("Nothing else"), "{}", alone.hover);
+        assert!(!alone.hover.contains("same end as"), "{}", alone.hover);
+
+        // Polarity, in the surface a user actually reads: KpnI is 3' and BsrGI
+        // 5', both GTAC, and neither may be offered as the other's partner.
+        let kpn = end_note(
+            pl_enzymes::by_name("KpnI").unwrap(),
+            &cut(&["KpnI", "BsrGI"]),
+        );
+        assert_eq!(kpn.chip, "3' GTAC");
+        assert!(kpn.hover.contains("Nothing else"), "{}", kpn.hover);
+
+        // A Type IIS end gets a sentence, not a partner list, and the chip shows
+        // the length rather than bases it does not have.
+        let bsa = end_note(
+            pl_enzymes::by_name("BsaI").unwrap(),
+            &cut(&["BsaI", "BsmBI"]),
+        );
+        assert_eq!(bsa.chip, "5' NNNN");
+        assert!(
+            bsa.hover.contains("cuts outside its own site"),
+            "{}",
+            bsa.hover
+        );
+        assert!(
+            !bsa.hover.contains("BsmBI"),
+            "a Type IIS end must not be advertised as interchangeable: {}",
+            bsa.hover
+        );
+
+        // Blunt reads as blunt, not as an empty overhang.
+        let ecorv = end_note(
+            pl_enzymes::by_name("EcoRV").unwrap(),
+            &cut(&["EcoRV", "SmaI"]),
+        );
+        assert_eq!(ecorv.chip, "blunt");
+        assert!(ecorv.hover.contains("SmaI"), "{}", ecorv.hover);
     }
 
     fn seq_app() -> App {
