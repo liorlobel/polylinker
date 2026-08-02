@@ -3407,16 +3407,24 @@ mod tests {
             "emphasised head {:.5}, wanted {want:.5}",
             a_tip - a_base
         );
+        // Upper bound carries the same 1e-6 float-noise tolerance as the primary
+        // `the_body_stops_where_the_arrowhead_begins`: the body ends exactly on the
+        // seam, so the angle recovered from the rendered f32 points sits a single
+        // ULP either side of it (measured excess here is ~3e-8 rad against a seam of
+        // ~1.8e-3). 1e-6 rad is 1800x under the seam and ~24000x under the visible
+        // overshoot this test exists to catch, so it fails on the defect, not on noise.
+        let over = a_e - a_base;
         assert!(
-            a_e - a_base <= seam,
-            "the emphasised body runs {:.2} pt of arc past the head's base",
-            (a_e - a_base) * r
+            over <= seam + 1e-6,
+            "the emphasised body runs {over:.5} rad ({:.2} pt of arc at r={r:.1}) past the \
+             head's base; the seam allows {seam:.5}",
+            over * r
         );
         // And the seam is still THERE under emphasis: see the same pair in
         // `the_body_stops_where_the_arrowhead_begins`. Bounded-above only, a seam of
         // zero passes every assertion in this file.
         assert!(
-            a_e - a_base >= seam - 1e-4,
+            over >= seam - 1e-4,
             "the emphasised body abuts the head's base instead of running {SEAM_PT} pt under it"
         );
         assert!(

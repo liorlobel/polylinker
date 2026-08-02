@@ -14,6 +14,13 @@
 //! The floors are deliberately loose — they are tripwires for an order-of-
 //! magnitude regression, not benchmarks. Raise one only with a reason in the
 //! commit message, the same rule as `$BenchFloor`.
+//!
+//! The size and memory floors are profile-independent and assert in every
+//! build. The wall-clock timing floors are meaningful only on an optimized
+//! build — a debug build runs the same work ~25x slower and would trip them for
+//! no real regression — so they are gated behind `#[cfg(not(debug_assertions))]`
+//! and enforced in release, where CI runs them. A plain `cargo test` still
+//! prints the timings and checks size, memory and correctness.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -136,6 +143,8 @@ fn a_three_thousand_plasmid_library_stays_within_its_budgets() {
     let open_ms = t.elapsed().as_millis();
     println!("open (incl. SHA-1 over every byte): {open_ms} ms");
     assert_eq!(back.rows.len(), RECORDS);
+    // Release-only timing floor; see the module header.
+    #[cfg(not(debug_assertions))]
     assert!(open_ms < 3_000, "opening took {open_ms} ms");
 
     // --- searching it -----------------------------------------------------
@@ -155,7 +164,8 @@ fn a_three_thousand_plasmid_library_stays_within_its_budgets() {
         );
         assert_eq!(r.coverage.searched, RECORDS);
         // Measured throughput is ~335 Mbase/s; 24 Mbase is ~72 ms. A second
-        // is an order of magnitude of headroom.
+        // is an order of magnitude of headroom. Release-only; see the header.
+        #[cfg(not(debug_assertions))]
         assert!(ms < 1_000, "{pattern} took {ms} ms");
         // The scan must not materialise a reverse-complemented corpus, which
         // would cost another 12 MB per query.
@@ -176,6 +186,8 @@ fn a_three_thousand_plasmid_library_stays_within_its_budgets() {
     let ms = t.elapsed().as_millis();
     println!("search by text: {ms} ms, {} records", r.matches.len());
     assert_eq!(r.matches.len(), RECORDS);
+    // Release-only timing floor; see the module header.
+    #[cfg(not(debug_assertions))]
     assert!(ms < 500, "text search took {ms} ms");
 }
 
