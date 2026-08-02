@@ -764,6 +764,13 @@ enum Losing {
     Close,
     Open,
     Restore,
+    /// A construct from Molecule > Cut and religate…, which is not a file and
+    /// must not claim to be one. Its own variant because 28e9d91 shipped that
+    /// path calling `adopt` DIRECTLY, with no guard at all — an eighth way to
+    /// destroy an edited document silently, of exactly the class cc36cf7 was
+    /// written to eliminate, and reusing `Open`'s wording here would have told
+    /// the user a file was being opened when none was.
+    Product,
 }
 
 impl Losing {
@@ -782,6 +789,7 @@ impl Losing {
             // so these two do not vary.
             (Losing::Open, _) => "Opening another file closes it.",
             (Losing::Restore, _) => "Restoring that draft closes it.",
+            (Losing::Product, _) => "Opening the construct closes it.",
         }
     }
 
@@ -794,6 +802,7 @@ impl Losing {
             Losing::Close => "Close without saving",
             Losing::Open => "Discard and open",
             Losing::Restore => "Discard and restore",
+            Losing::Product => "Discard and open the construct",
         }
     }
 }
@@ -3202,7 +3211,12 @@ impl App {
                 self.let_it_go = true;
                 self.close_now = true;
             }
-            Losing::Open | Losing::Restore => {
+            // A construct resolves exactly like an opened file: the parked
+            // document is adopted, or it is dropped. It is listed explicitly
+            // rather than folded into a `_` arm so that the next variant added
+            // here is a compile error and not a silent fall-through — which is
+            // how this path came to have no guard at all.
+            Losing::Open | Losing::Restore | Losing::Product => {
                 let Some(p) = self.pending_open.take() else {
                     return;
                 };
@@ -9006,16 +9020,23 @@ impl App {
                         let n = p.mol.seq.len();
                         let carried = p.carried;
                         let dropped = p.dropped;
-                        self.adopt(d);
-                        self.notice = Some(format!(
-                            "{n} bp construct opened as a new unsaved document — \
-                             {carried} feature(s) carried over{}",
+                        // THROUGH `take_over`, NEVER `adopt`. 28e9d91 called
+                        // `adopt` here directly, so a user who had edited their
+                        // plasmid and then religated it lost those edits the
+                        // moment they clicked Open — no prompt, no undo. That is
+                        // the eighth path of the class cc36cf7 exists to close,
+                        // and it was introduced by the commit that added this
+                        // panel. The one funnel asks the question; the parked
+                        // construct is adopted only if the answer is yes.
+                        let status = format!(
+                            "{n} bp construct — {carried} feature(s) carried over{}",
                             if dropped > 0 {
                                 format!(", {dropped} left behind")
                             } else {
                                 String::new()
                             }
-                        ));
+                        );
+                        self.take_over(d, status, Losing::Product, None);
                     }
                     // The writer and the reader are both ours, so this is a bug
                     // rather than a bad file; say which of the two to look at.
@@ -15661,6 +15682,71 @@ mod tests {
         );
         assert_eq!(ecorv.chip, "blunt");
         assert!(ecorv.hover.contains("SmaI"), "{}", ecorv.hover);
+    }
+
+    /// PROVEN TO FAIL at 28e9d91: the clone panel's product path called
+    /// `self.adopt(d)` directly, with no unsaved check on it. Edit a plasmid,
+    /// religate it, click Open, and the edits were gone — no prompt, no undo.
+    ///
+    /// It is the EIGHTH path of the class cc36cf7 was written to close, and it
+    /// arrived in the commit that added the panel, which is the honest reason
+    /// this test exists: a guard that was exhaustive when it was written stops
+    /// being exhaustive the moment somebody adds a route past it, and nothing
+    /// structural stopped that here.
+    #[test]
+    fn opening_a_religated_product_cannot_silently_discard_an_edited_document() {
+        let mut app = seq_app();
+        let d = app.document.as_mut().expect("a document");
+        d.apply(pl_core::OpKind::InsertAt {
+            at: 1,
+            seq: "AAAA".to_string(),
+        })
+        .expect("an ordinary insert");
+        assert!(d.unsaved(), "the fixture depends on there being an edit");
+        let before = d.molecule().seq.clone();
+        let cursor = d.log.cursor();
+
+        // DRIVEN THROUGH THE PANEL, not by calling `take_over` directly. The
+        // defect was never in the funnel — it was that this path did not use
+        // it — so a test that calls the funnel itself asserts the wrong thing
+        // and passes against the broken code. Checked: with the call site put
+        // back to `adopt`, the version below goes red and the direct one did
+        // not.
+        let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
+        let seq_mol = app.document.as_ref().expect("open").molecule().clone();
+        let mut panel = clone::Panel::new(&picked);
+        panel.plan = Some(clone::plan(&seq_mol, &picked, true));
+        panel.stale = false;
+        assert!(
+            panel.plan.as_ref().is_some_and(|p| !p.prods.is_empty()),
+            "the fixture must produce a construct, or nothing is being opened"
+        );
+        panel.wanted = Some(0);
+        app.clone_panel = Some(panel);
+        let ctx = test_ctx();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = ui;
+            app.clone_panel(ui.ctx());
+        });
+
+        // The edited document is still the open one, unchanged, and the
+        // construct is parked behind the question.
+        assert!(
+            app.pending_open.is_some(),
+            "the construct was adopted without asking"
+        );
+        let d = app.document.as_ref().expect("still open");
+        assert_eq!(d.molecule().seq, before, "the edited molecule changed");
+        assert_eq!(d.log.cursor(), cursor, "the edit history moved");
+        assert!(d.unsaved(), "the edit stopped counting as unsaved work");
+
+        // And the question names the construct rather than claiming a file is
+        // being opened, because no file is.
+        assert_eq!(
+            Losing::Product.discard_label(),
+            "Discard and open the construct"
+        );
+        assert!(Losing::Product.consequence(true).contains("construct"));
     }
 
     /// The whole path a user walks: digest, religate, open the product.
