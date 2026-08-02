@@ -154,7 +154,7 @@ jobs:
         run: |
           python bench/run.py bench/polylinker-bench.json \
             -- target/release/pl bench-adapter | tee /tmp/bench.txt
-          grep -q "     0      5    176" /tmp/bench.txt \
+          grep -qE "^all +176 +0 +0 +176 +100\.0%" /tmp/bench.txt \
             || { echo "::error::bench score changed — update the expected line if intended"; exit 1; }
 
       - name: The benchmark regenerates identically
