@@ -226,6 +226,41 @@ impl Bench {
         }
     }
 
+    /// Add a tab WITHOUT switching to it.
+    ///
+    /// `set` is the open path and makes what it opens active, which is right for
+    /// a file the user just asked for and wrong for a bench being put back: run
+    /// through `set`, a restored session flips the active tab once per document
+    /// and lands on whichever happened to be last, not on the one that was on
+    /// screen when the window closed.
+    ///
+    /// The view is passed in rather than defaulted because one of its fields
+    /// cannot be: `doc_code` is read from the molecule, and a tab left at the
+    /// `DocView` default shows table 1 until it is switched away from and back.
+    pub fn push_background(&mut self, d: Document, view: DocView) {
+        self.tabs.push(Tab {
+            doc: d,
+            view,
+            recovery: None,
+            autosaved: None,
+        });
+    }
+
+    /// Make `i` active and hand back its stored view, even when it already is.
+    ///
+    /// [`Bench::activate`] refuses that case deliberately — clicking the tab you
+    /// are on must not scatter a default view over your caret. Restoring a bench
+    /// is the one caller for which it is right: every tab went in through
+    /// `push_background`, so `App`'s own fields hold nothing and the stored view
+    /// is the only copy there is.
+    pub fn focus(&mut self, i: usize) -> Option<DocView> {
+        if i >= self.tabs.len() {
+            return None;
+        }
+        self.active = i;
+        Some(std::mem::take(&mut self.tabs[i].view))
+    }
+
     /// Make `i` active and hand back its stored view.
     ///
     /// `None` when `i` is not a tab or is already active — the caller must not

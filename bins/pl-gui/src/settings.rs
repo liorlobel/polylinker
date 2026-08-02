@@ -41,6 +41,15 @@ pub struct Layout {
     /// bacteria.
     pub code: u8,
     pub orf_min_aa: usize,
+    /// Put back the documents that were open when Polylinker last closed.
+    ///
+    /// Shipped ON, because it is what the workspace was asked for: no project
+    /// file, no Save Workspace, the bench is simply there. Shipped WITH A SWITCH
+    /// in the same commit, because "the app opens six files on launch" is a
+    /// preference and not a fact of nature — a user who works from a file
+    /// manager wants an empty window, and one whose last session ended in a
+    /// directory that is now unmounted wants it more.
+    pub restore_tabs: bool,
 }
 
 impl Default for Layout {
@@ -54,6 +63,7 @@ impl Default for Layout {
             orf_track: false,
             code: 11,
             orf_min_aa: 30,
+            restore_tabs: true,
         }
     }
 }
@@ -141,6 +151,13 @@ pub fn parse(text: &str) -> Layout {
                     }
                 }
             }
+            // `!= "0"` rather than `== "1"`, and that is the only place in this
+            // parser where the default is not what an unreadable value falls
+            // back to. The default here is ON, so a garbled line must land on
+            // ON: reading `restore_tabs: yes` as OFF would silently stop
+            // restoring anybody's bench and look exactly like the feature being
+            // broken.
+            "restore_tabs" => out.restore_tabs = v != "0",
             _ => {}
         }
     }
@@ -160,6 +177,7 @@ pub fn render(l: Layout) -> String {
     s.push_str(&format!("orf_track: {}\n", u8::from(l.orf_track)));
     s.push_str(&format!("code: {}\n", l.code));
     s.push_str(&format!("orf_min_aa: {}\n", l.orf_min_aa));
+    s.push_str(&format!("restore_tabs: {}\n", u8::from(l.restore_tabs)));
     s
 }
 
@@ -196,8 +214,22 @@ mod tests {
             orf_track: true,
             code: 4,
             orf_min_aa: 12,
+            restore_tabs: false,
         };
         assert_eq!(parse(&render(l)), l);
+    }
+
+    /// The one setting whose default is ON, so an unreadable value must land on
+    /// ON. Falling back to OFF would stop restoring anybody's bench and be
+    /// indistinguishable from the feature not working.
+    #[test]
+    fn a_garbled_restore_tabs_line_leaves_the_workspace_switched_on() {
+        for line in ["restore_tabs: yes", "restore_tabs:", "restore_tabs: true"] {
+            let l = parse(&format!("{HEADER}\n{line}\n"));
+            assert!(l.restore_tabs, "{line:?} switched the workspace off");
+        }
+        // And the one value that really does mean off.
+        assert!(!parse(&format!("{HEADER}\nrestore_tabs: 0\n")).restore_tabs);
     }
 
     #[test]

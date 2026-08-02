@@ -22,6 +22,7 @@ mod reads;
 mod recover;
 mod scene;
 mod seqedit;
+mod session;
 mod settings;
 /// The ligature guard reads the vendored faces at test time and nothing at run
 /// time, so it is not compiled into the shipped binary. Gated rather than left
@@ -958,6 +959,14 @@ struct App {
     /// The DIRECTORY, since Stage 2. The slot within it belongs to the tab, not
     /// to the window: see [`bench::Tab::recovery`].
     recovery_dir: Option<std::path::PathBuf>,
+    /// Where this window records WHICH documents are open, so the next launch
+    /// can put the bench back.
+    ///
+    /// Holds no molecule and is not a recovery file: see [`session`].
+    session: Option<std::path::PathBuf>,
+    /// The list last written, so a window whose tabs have not changed rewrites
+    /// only to say it is still running.
+    session_written: Option<session::Session>,
     /// There was nowhere to write when this window started.
     ///
     /// Read by the close guard, which must not promise a crash copy it cannot
@@ -1584,6 +1593,183 @@ impl App {
         })
     }
 
+    /// The bench as a list of files, for [`session`].
+    ///
+    /// A document with no path is COUNTED and not listed. There is nowhere to
+    /// point at, and writing a copy of the molecule here would make this a
+    /// second recovery mechanism sitting beside the real one — with its own
+    /// staleness, its own banner and its own way of handing back the wrong
+    /// branch. The count is what lets the restore say what it could not do.
+    ///
+    /// Deduped by CANONICAL path. The same file reached through a mapped drive,
+    /// a symlink and a relative argument is three strings and one document, and
+    /// a bench restored from the undeduped list opens it three times — three
+    /// tabs, three sets of edits, one file underneath, and the last save wins.
+    fn session_now(&self) -> session::Session {
+        let mut open: Vec<PathBuf> = Vec::new();
+        let mut withheld = 0usize;
+        let mut active = None;
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for (i, tab) in self.bench.each().enumerate() {
+            let Some(p) = tab.doc.path.clone() else {
+                withheld += 1;
+                continue;
+            };
+            let key = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            if i == self.bench.active() {
+                active = Some(open.len());
+            }
+            open.push(p);
+        }
+        session::Session {
+            open,
+            withheld,
+            active,
+            saved_at: unix_now(),
+            // Set by `record_session`, which is the only caller that knows.
+            closed: false,
+        }
+    }
+
+    /// Record the bench, if it has changed or if it is time to say we are alive.
+    ///
+    /// AN IDLE WINDOW DOES TOUCH THE DISK HERE, which the autosave beside it
+    /// goes out of its way not to do, and the reason is a requirement rather
+    /// than laziness: the freshness of this file is the whole of what stops a
+    /// second window claiming this one's bench, so a window with six tabs open
+    /// and nothing to save still has to keep saying so. It is one two-hundred
+    /// byte write per thirty seconds.
+    fn record_session(&mut self, closing: bool) {
+        let Some(path) = self.session.clone() else {
+            return;
+        };
+        let mut now = self.session_now();
+        now.closed = closing;
+        let due = self
+            .session_written
+            .as_ref()
+            .is_none_or(|w| w.open != now.open || w.active != now.active);
+        // Always on the way out, whatever the memo says: what the last write
+        // records is not the tab list but that this bench now has no owner, and
+        // without it a relaunch inside the live window refuses to restore.
+        if !closing
+            && !due
+            && self.session_written.as_ref().is_some_and(|w| {
+                now.saved_at.saturating_sub(w.saved_at) < Self::AUTOSAVE_EVERY.as_secs()
+            })
+        {
+            return;
+        }
+        // A failure is silent, unlike an autosave failure. Nothing here is the
+        // user's data, and a status line about a tab list would push aside one
+        // about their molecule.
+        if session::write(&path, &now).is_ok() {
+            self.session_written = Some(now);
+        }
+    }
+
+    /// Put back the bench a previous run left, skipping what it must not open.
+    ///
+    /// Three exclusions, and each of them costs somebody something if it is
+    /// missed:
+    ///
+    ///   - a path a stale RECOVERY DRAFT claims. The banner is about to offer a
+    ///     draft of that file with edits in it; opening the file underneath as
+    ///     well puts a clean copy of the same plasmid on the bench beside it,
+    ///     and the user cannot see which of the two identically titled tabs is
+    ///     the one they were working in;
+    ///   - a path that is already open, canonically, because the restore runs
+    ///     before the command line and a double-clicked file is not owed a
+    ///     second tab;
+    ///   - a file that is no longer there. Counted, and named in the status, so
+    ///     "your bench is one short" is a sentence rather than a mystery.
+    fn restore_session(&mut self, s: session::Session) {
+        let canon =
+            |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let claimed: Vec<PathBuf> = self
+            .stale
+            .iter()
+            .filter_map(|(_, snap)| snap.as_ref().ok())
+            .filter_map(|snap| snap.original.as_ref())
+            .map(|p| canon(p))
+            .collect();
+        let mut seen: Vec<PathBuf> = self
+            .bench
+            .each()
+            .filter_map(|t| t.doc.path.as_ref())
+            .map(|p| canon(p))
+            .collect();
+        let (mut opened, mut missing, mut deferred, mut refused) = (0, 0, 0, 0);
+        let mut want = None;
+        for (i, p) in s.open.iter().enumerate() {
+            let key = canon(p);
+            if seen.contains(&key) {
+                continue;
+            }
+            if claimed.contains(&key) {
+                deferred += 1;
+                continue;
+            }
+            if !p.exists() {
+                missing += 1;
+                continue;
+            }
+            let Ok(d) = Document::open(p) else {
+                refused += 1;
+                continue;
+            };
+            seen.push(key);
+            // The genetic code is read from THIS molecule, as `adopt` reads it,
+            // and stored with the tab. Left at the `DocView` default a restored
+            // tab would show table 1 until the user switched to it and back.
+            let view = bench::DocView {
+                doc_code: aa::modal_table(d.molecule())
+                    .or_else(|| pl_core::translate::table(self.layout.code))
+                    .unwrap_or(pl_core::translate::TABLE11),
+                ..Default::default()
+            };
+            self.bench.push_background(d, view);
+            if s.active == Some(i) {
+                want = Some(self.bench.len() - 1);
+            }
+            opened += 1;
+        }
+        if opened == 0 {
+            return;
+        }
+        // Every tab went in behind the scenes, so `App`'s own view fields hold
+        // nothing yet and the tab that should be on screen has to be pulled
+        // forward explicitly. `focus`, not `activate`: index 0 is already
+        // `active` and `activate` refuses that case on purpose.
+        if let Some(v) = self.bench.focus(want.unwrap_or(0)) {
+            self.put_view(v);
+        }
+        self.doc_generation = self.doc_generation.wrapping_add(1);
+        let mut said = format!(
+            "reopened {opened} document(s) from your last session — {}",
+            self.document()
+                .map(|d| describe(d.molecule(), d.format))
+                .unwrap_or_default()
+        );
+        // What it could NOT do, in the same breath. "Reopened 4 documents" when
+        // there were six is true and misleading at once.
+        for (n, why) in [
+            (s.withheld, "had never been saved to a file"),
+            (missing, "no longer exist"),
+            (refused, "could not be read"),
+            (deferred, "have unsaved drafts — see Recover"),
+        ] {
+            if n > 0 {
+                said = format!("{said}  —  {n} {why}");
+            }
+        }
+        self.status = said;
+    }
+
     /// Will an edit made now reach a crash-recovery file?
     ///
     /// Asked by the close guard, whose dialog says "a crash-recovery copy is
@@ -1791,6 +1977,8 @@ impl App {
             lib_query: String::new(),
             lib_absent: false,
             recovery_dir: None,
+            session: None,
+            session_written: None,
             autosave_off: false,
             stale: Vec::new(),
             stale_extra: std::collections::HashMap::new(),
@@ -1931,6 +2119,23 @@ impl App {
             // point: a user who believes they are covered and is not is worse
             // off than one who knows they are not.
             Err(e) => app.status = format!("autosave is off: {e}"),
+        }
+        // THE BENCH, put back. Claimed before the command line so that a
+        // double-clicked file lands on top of the restored tabs and is the one
+        // on screen — and so `restore_session` can see what is already open and
+        // not open it twice.
+        //
+        // The recovery banner is read first, above, because `restore_session`
+        // must not open a file that a draft is about to be offered for.
+        if let Ok(base) = recover::state_base() {
+            if std::fs::create_dir_all(&base).is_ok() {
+                app.session = Some(session::path(&base));
+                if app.layout.restore_tabs {
+                    if let Some(s) = session::claim(&base, unix_now()) {
+                        app.restore_session(s);
+                    }
+                }
+            }
         }
         app.open_argv(std::env::args_os().skip(1));
         app
@@ -3654,6 +3859,18 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
+/// Seconds since the Unix epoch, or 0 if the clock will not say.
+///
+/// Zero is "unknown" everywhere it is read — `recover::maybe_live` refuses to
+/// call it a claim of life, and the session claim sorts it last — so a machine
+/// with a broken clock loses freshness and nothing else.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Local date as (day, month index, year), without a date crate.
 /// Howard Hinnant's civil-from-days, in UTC.
 fn today() -> (u32, usize, i32) {
@@ -3700,6 +3917,12 @@ impl eframe::App for App {
                 }
             }
         }
+        // The bench, one last time. The frame loop has been writing this all
+        // along — a workspace that only survives a polite goodbye is missing on
+        // the mornings it was wanted — so this exists to catch the tabs closed
+        // in the final frames, and to leave a stamp that ages out promptly
+        // rather than one up to thirty seconds old.
+        self.record_session(true);
         // Once, here, and not on drag-release or per frame — that would be a
         // synchronous file write inside a paint loop. If the app crashes the
         // layout is lost, and that is the right trade: a window layout is not
@@ -3773,6 +3996,12 @@ impl eframe::App for App {
         }
 
         self.autosave(false);
+        // DURING the session, not only in `on_exit`. A window that is killed
+        // rather than closed — a crash, a power cut, a reboot that does not wait
+        // — never reaches `on_exit`, and a workspace that only survives a polite
+        // goodbye is a workspace that is missing on exactly the mornings it was
+        // wanted. It is also the heartbeat: see `record_session`.
+        self.record_session(false);
 
         // A THROTTLE WITH NOTHING TO WAKE IT NEVER FIRES.
         //
@@ -3796,6 +4025,13 @@ impl eframe::App for App {
         // still sleeps.
         if let Some(due) = self.autosave_due_in() {
             ctx.request_repaint_after(due);
+        }
+        // ...and the same for the session heartbeat, which unlike the autosave
+        // is owed even by a window with nothing at risk: the stamp it writes is
+        // what tells the next window this bench has an owner. An idle window
+        // that stopped waking would go silently claimable.
+        if self.session.is_some() {
+            ctx.request_repaint_after(Self::AUTOSAVE_EVERY);
         }
 
         if debug_geometry() {
@@ -4151,6 +4387,48 @@ impl App {
                 if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
                     self.pick_file();
                 }
+                // The workspace switch, beside Open because that is what it
+                // governs: whether the next launch opens the bench you left.
+                //
+                // NOT on the tab strip, which is where it belongs by subject
+                // and cannot go: the strip appears only with two or more tabs,
+                // and a preference that disappears whenever one document is open
+                // is one nobody can find at the moment they want it — which is
+                // usually right after a launch restored six.
+                menu_with_caret(ui, "Workspace", |ui| {
+                    let mut on = self.layout.restore_tabs;
+                    if ui
+                        .checkbox(&mut on, "Reopen these documents next time")
+                        .on_hover_text(
+                            "Polylinker remembers which files are open and puts them back when \
+                             it starts. The list holds paths only — no copy of any molecule is \
+                             made, and your files are not touched.",
+                        )
+                        .changed()
+                    {
+                        self.layout.restore_tabs = on;
+                        // Written on the click, not left to `on_exit`. What this
+                        // switch is ABOUT is the run that never reaches a clean
+                        // exit, so storing it only on one would be the one
+                        // setting whose value a crash can silently revert.
+                        settings::save(self.layout);
+                        self.status = if on {
+                            "the documents open here will be reopened next time".into()
+                        } else {
+                            "Polylinker will start with an empty bench".into()
+                        };
+                    }
+                    // What is actually in the list, so the sentence above is
+                    // checkable rather than a promise. A never-saved document
+                    // cannot be in it, and this is where that is least
+                    // surprising to find out.
+                    let s = self.session_now();
+                    let mut said = format!("{} file(s) in the list", s.open.len());
+                    if s.withheld > 0 {
+                        said = format!("{said}; {} never saved to a file", s.withheld);
+                    }
+                    ui.label(RichText::new(said).color(pal(ui).muted).size(11.0));
+                });
                 let has = self.document().is_some();
                 ui.add_enabled_ui(has, |ui| {
                     menu_with_caret(ui, "Save", |ui| {
@@ -12234,10 +12512,11 @@ mod tests {
             .collect();
         assert_eq!(
             carets.len(),
-            3,
-            "{} disclosure carets painted in the toolbar, not 3. The three menus \
-             are Save, Export map and Molecule; a button that opens a menu and does not \
-             say so is the defect `menu_with_caret` exists to fix.",
+            4,
+            "{} disclosure carets painted in the toolbar, not 4. The four menus \
+             are Save, Workspace, Export map and Molecule; a button that opens a menu \
+             and does not say so is the defect `menu_with_caret` exists to fix. Bump \
+             this deliberately when a menu is added, never to make it pass.",
             carets.len()
         );
         for c in &carets {
@@ -12592,6 +12871,146 @@ mod tests {
             first.exists(),
             "opening a file pushed an already-due crash copy out by another period"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bench comes back, in order, with the tab you left on screen on
+    /// screen.
+    ///
+    /// PROVEN TO FAIL against df754cd, where there is no `session` module at
+    /// all: closing Polylinker with six plasmids open and reopening it gave an
+    /// empty window, every time, and the only way back was six trips through the
+    /// file picker.
+    ///
+    /// Driven end to end — `record_session` writes it, `session::claim` takes
+    /// it, `restore_session` puts it back — because the three agree about a file
+    /// format and a test that only exercised one of them would pass while the
+    /// pair disagreed.
+    #[test]
+    fn the_bench_comes_back_in_order_with_the_same_tab_on_screen() {
+        let dir = std::env::temp_dir().join(format!("pl-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let files: Vec<PathBuf> = ["ws-a", "ws-b", "ws-c"]
+            .iter()
+            .map(|n| temp_file(n, "fa", PLASMID_A))
+            .collect();
+
+        let mut first = App::blank();
+        // Under a FOREIGN name, because the reader is a different process in
+        // every real case and `claim` refuses its own live file by design — a
+        // window must never restore the bench it is sitting in.
+        first.session = Some(dir.join("session-999995"));
+        for f in &files {
+            first.load(f.clone());
+        }
+        // Not the last one: an active index that is merely "wherever the loop
+        // finished" would pass without being carried at all.
+        first.switch_tab(1);
+        // A document that has never been written cannot be listed, and must be
+        // counted rather than quietly dropped.
+        first
+            .bench
+            .set(edited_doc("never-saved.fa", "AAAACCCCGGGGTTTT"));
+        first.switch_tab(1);
+        eframe::App::on_exit(&mut first, None);
+
+        let mut next = App::blank();
+        let s = session::claim(&dir, unix_now()).expect("the bench was not recorded");
+        assert_eq!(s.withheld, 1, "the unsaved document was not counted");
+        next.restore_session(s);
+        assert_eq!(next.bench.len(), 3, "the bench came back the wrong size");
+        assert_eq!(
+            next.bench
+                .each()
+                .map(|t| t.doc.path.clone().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            files,
+            "the tabs came back in the wrong order"
+        );
+        assert_eq!(
+            next.document().and_then(|d| d.path.clone()),
+            Some(files[1].clone()),
+            "the tab that was on screen is not the one on screen"
+        );
+        assert!(
+            next.status.contains("never been saved"),
+            "the restore did not say what it could not do: {:?}",
+            next.status
+        );
+
+        for f in &files {
+            let _ = std::fs::remove_file(f);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file with a crash draft waiting for it must not also be opened fresh.
+    ///
+    /// PROVEN TO FAIL with the `claimed` check removed from `restore_session`:
+    /// the banner offers a draft of pUC19 with an hour of edits in it, and the
+    /// workspace opens pUC19 from disk beside it. Two tabs, one title, and the
+    /// one in front is the one WITHOUT the work. Whichever the user types into,
+    /// the other is the one they meant.
+    #[test]
+    fn the_workspace_does_not_open_a_file_a_draft_is_about_to_be_offered_for() {
+        let file = temp_file("ws-claimed", "fa", PLASMID_A);
+        let mut app = App::blank();
+        app.stale = vec![(
+            PathBuf::from("somewhere.recover"),
+            Ok(recover::Snapshot {
+                original: Some(file.clone()),
+                title: "ws-claimed.fa".into(),
+                saved_at: 1,
+                ops: 4,
+                abandoned: false,
+                genbank: String::new(),
+            }),
+        )];
+        app.restore_session(session::Session {
+            open: vec![file.clone()],
+            withheld: 0,
+            active: Some(0),
+            saved_at: 1,
+            closed: true,
+        });
+        assert_eq!(
+            app.bench.len(),
+            0,
+            "the file was opened over the draft the banner is about to offer"
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// The heartbeat, and the flag that stops it locking the user out.
+    ///
+    /// A session file's freshness is what stops a second window claiming this
+    /// one's bench. Applied on its own it also refuses the ordinary case —
+    /// quitting and relaunching — so the clean exit says so, and this drives
+    /// both halves through `App` rather than asserting about the codec.
+    #[test]
+    fn a_running_window_keeps_its_bench_and_a_closed_one_hands_it_over() {
+        let dir = std::env::temp_dir().join(format!("pl-hb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let file = temp_file("ws-hb", "fa", PLASMID_A);
+
+        let mut app = App::blank();
+        // Foreign name, for the reason the test above gives.
+        app.session = Some(dir.join("session-999994"));
+        app.load(file.clone());
+        app.record_session(false);
+        assert_eq!(
+            session::claim(&dir, unix_now()),
+            None,
+            "a second window would have claimed a running window's bench"
+        );
+
+        eframe::App::on_exit(&mut app, None);
+        let s = session::claim(&dir, unix_now()).expect("a closed window hands its bench over");
+        assert_eq!(s.open, vec![file.clone()]);
+
+        let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -176,7 +176,12 @@ pub fn salvage(text: &str) -> Option<&str> {
 }
 
 /// Escape one header value, in a single pass over the input.
-fn escape(s: &str) -> String {
+///
+/// `pub(crate)` so `session.rs` uses this one rather than growing a second. A
+/// chain of `replace` calls turns `C:\temp\thing` into a tab and two lost
+/// directories; that has bitten this project twice already, and a copy of the
+/// careful version is a copy that can be edited into the careless one.
+pub(crate) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
         match c {
@@ -190,7 +195,7 @@ fn escape(s: &str) -> String {
 }
 
 /// The inverse, also single-pass.
-fn unescape(s: &str) -> String {
+pub(crate) fn unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars();
     while let Some(c) = it.next() {
