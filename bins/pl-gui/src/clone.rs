@@ -50,6 +50,13 @@ pub struct Prod {
     /// Features carried over, and features that could not be.
     pub carried: usize,
     pub dropped: usize,
+    /// What was sealed at each junction, already in words.
+    ///
+    /// A `5' GATC` for a ligation and a `30 bp homology` for an assembly — two
+    /// different kinds of fact that a report has to state in one sentence, so
+    /// they are turned into words where the difference is still known rather
+    /// than downstream where it is not.
+    pub junctions: Vec<String>,
 }
 
 /// The whole answer for one set of enzymes.
@@ -204,6 +211,7 @@ pub fn show(
         p.stale = false;
     }
     let mut open = true;
+    let mut wanted_report: Option<usize> = None;
     egui::Window::new("Cut and religate")
         .open(&mut open)
         .resizable(true)
@@ -488,9 +496,32 @@ pub fn show(
                     if ui.button("Open").clicked() {
                         p.wanted = Some(i);
                     }
+                    // Beside Open, because the two are the same decision seen
+                    // from two ends: the construct you take is the construct you
+                    // have to be able to describe six months later.
+                    if ui
+                        .button("Copy record")
+                        .on_hover_text(
+                            "The enzymes, the fragments and where each came from, the                              junctions, the features that travelled and the ones that did                              not — followed by what a plan does not establish about a                              reaction.",
+                        )
+                        .clicked()
+                    {
+                        wanted_report = Some(i);
+                    }
                 });
             }
         });
+    // AFTER the closure. The report reads `p.plan` and the closure holds `p`
+    // mutably; more to the point, a clipboard write inside the paint closure is
+    // a side effect buried in a layout pass, which is where this codebase has
+    // twice found one it did not expect.
+    if let Some(i) = wanted_report {
+        if let Some(pl) = &p.plan {
+            if let Some(text) = report(mol, donor_mol, p.method, &p.enzymes, p.homology, pl, i) {
+                ctx.copy_text(text);
+            }
+        }
+    }
     open
 }
 
@@ -563,6 +594,15 @@ fn locate(frag: &str, parent: &str, circular: bool) -> Option<(u64, u64)> {
     let s = hit?;
     Some((s as u64 + 1, (s + fb.len()) as u64))
 }
+
+/// A finished molecule and how it was put together: the fragments in order, and
+/// what was sealed at each junction.
+///
+/// A named type because the three arms that produce it — ligation, subcloning
+/// and homology assembly — must produce the SAME thing for `build` to be able to
+/// read it, and because clippy is right that the tuple had stopped being
+/// legible.
+type Laid = (pl_clone::Dseq, Vec<(usize, bool)>, Vec<String>);
 
 /// One molecule going into the plan, with its sequence in the form the digest
 /// and `locate` both want.
@@ -704,7 +744,17 @@ pub fn plan(
             ..Default::default()
         };
         let laid = match pl_clone::assembly::assemble(&frags, true, opts) {
-            Ok(ps) => ps.into_iter().map(|p| (p.seq, p.order)).collect::<Vec<_>>(),
+            Ok(ps) => ps
+                .into_iter()
+                .map(|p| {
+                    let js: Vec<String> = p
+                        .junctions
+                        .iter()
+                        .map(|n| format!("{n} bp homology"))
+                        .collect();
+                    (p.seq, p.order, js)
+                })
+                .collect::<Vec<_>>(),
             Err(e) => {
                 return Plan {
                     frags: described,
@@ -716,7 +766,7 @@ pub fn plan(
         };
         let prods: Vec<Prod> = laid
             .iter()
-            .map(|(seq, order)| build(&sources, &frags, &described, seq, order))
+            .map(|(seq, order, js)| build(&sources, &frags, &described, seq, order, js.clone()))
             .collect();
         let note = prods.is_empty().then(|| {
             format!(
@@ -765,9 +815,15 @@ pub fn plan(
     };
     // Both arms produce the same thing: a molecule and the fragments laid down
     // in order, in the flattened index space above.
-    let laid: Vec<(pl_clone::Dseq, Vec<(usize, bool)>)> = if donor.is_none() {
+    let laid: Vec<Laid> = if donor.is_none() {
         match pl_clone::ligate::ligate(&pools[0], &opts) {
-            Ok(ps) => ps.into_iter().map(|p| (p.seq, p.order)).collect(),
+            Ok(ps) => ps
+                .into_iter()
+                .map(|p| {
+                    let js: Vec<String> = p.junctions.iter().map(end_label).collect();
+                    (p.seq, p.order, js)
+                })
+                .collect(),
             Err(e) => {
                 return Plan {
                     frags: described,
@@ -791,7 +847,8 @@ pub fn plan(
                         .iter()
                         .map(|(pool, flipped)| (offsets[*pool] + route[*pool], *flipped))
                         .collect();
-                    (c.product.seq, order)
+                    let js: Vec<String> = c.product.junctions.iter().map(end_label).collect();
+                    (c.product.seq, order, js)
                 })
                 .collect(),
             Err(e) => {
@@ -807,7 +864,7 @@ pub fn plan(
 
     let prods: Vec<Prod> = laid
         .iter()
-        .map(|(seq, order)| build(&sources, &frags, &described, seq, order))
+        .map(|(seq, order, js)| build(&sources, &frags, &described, seq, order, js.clone()))
         .collect();
 
     let note = if prods.is_empty() {
@@ -829,6 +886,161 @@ pub fn plan(
     }
 }
 
+/// The cloning that was planned, as prose somebody can paste into a notebook or
+/// a methods section.
+///
+/// EVERY NUMBER COMES FROM THE RUN. `pl_doc::methods` is handed a topic and
+/// nothing else, so it can only describe defaults, and its own doc says a caller
+/// that knows what a run used should print it from the run. This is that caller.
+/// The two halves are joined and not blurred: what happened, then what a plan
+/// does not establish about a reaction.
+///
+/// Past tense and passive, matching the paragraphs it is appended to, so it can
+/// be edited rather than rewritten.
+pub fn report(
+    mol: &Molecule,
+    donor: Option<&Molecule>,
+    method: Method,
+    enzymes: &BTreeSet<String>,
+    homology: usize,
+    pl: &Plan,
+    i: usize,
+) -> Option<String> {
+    let prod = pl.prods.get(i)?;
+    let names: Vec<String> = enzymes.iter().cloned().collect();
+    let mut out = String::new();
+
+    let describe = |m: &Molecule| {
+        format!(
+            "{} ({} bp, {})",
+            m.name,
+            m.seq.len(),
+            if m.topology.is_circular() {
+                "circular"
+            } else {
+                "linear"
+            }
+        )
+    };
+    match method {
+        Method::Restriction | Method::GoldenGate => {
+            out.push_str(&format!(
+                "{} was digested with {}",
+                describe(mol),
+                names.join(" and ")
+            ));
+            if let Some(d) = donor {
+                out.push_str(&format!(", as was {}", describe(d)));
+            }
+            out.push_str(&format!(", giving {} fragment(s). ", pl.frags.len()));
+        }
+        Method::Gibson => {
+            out.push_str(&describe(mol));
+            if let Some(d) = donor {
+                out.push_str(&format!(" and {}", describe(d)));
+            }
+            if !names.is_empty() {
+                out.push_str(&format!(" (linearised with {})", names.join(" and ")));
+            }
+            out.push_str(&format!(
+                " were assembled by homology of at least {homology} bp. "
+            ));
+        }
+    }
+
+    // WHICH PIECES, by their place in their own parent. A construct nobody can
+    // trace back to a band on a gel cannot be built, so the report says where
+    // each piece came from rather than only how long it was.
+    let pieces: Vec<String> = prod
+        .order
+        .iter()
+        .map(|(idx, flipped)| {
+            let f = &pl.frags[*idx];
+            let whose = if donor.is_some() {
+                let parent = if f.parent == 0 {
+                    mol.name.clone()
+                } else {
+                    donor.map(|d| d.name.clone()).unwrap_or_default()
+                };
+                format!("{parent} ")
+            } else {
+                String::new()
+            };
+            let at = match f.from {
+                Some((a, b)) => format!("{a}..{b}"),
+                None => "position not determined".into(),
+            };
+            format!(
+                "{whose}{at} ({} bp{})",
+                f.len,
+                if *flipped { ", inverted" } else { "" }
+            )
+        })
+        .collect();
+    out.push_str(&format!(
+        "The construct was assembled from {}",
+        pieces.join(" and ")
+    ));
+    if !prod.junctions.is_empty() {
+        out.push_str(&format!(", joined at {}", prod.junctions.join(" and ")));
+    }
+    out.push_str(&format!(
+        ", giving a {} bp {} molecule. ",
+        prod.mol.seq.len(),
+        if prod.circular { "circular" } else { "linear" }
+    ));
+
+    // The features, and what did NOT travel. A count of what was carried
+    // without the count of what was not reads as "everything".
+    out.push_str(&format!(
+        "{} annotated feature(s) were carried into the construct",
+        prod.carried
+    ));
+    if prod.dropped > 0 {
+        out.push_str(&format!(
+            "; {} were not, because their span did not sit whole inside one placeable              fragment",
+            prod.dropped
+        ));
+    }
+    out.push('.');
+
+    // The overhang check travels with the record, faults and caveat alike. A
+    // Golden Gate methods paragraph that omits the fidelity caveat is the one
+    // sentence in it a reviewer would ask for.
+    if let Some(g) = &pl.gg {
+        out.push_str(&format!(
+            " The Type IIS overhangs were {}.",
+            if g.overhangs.is_empty() {
+                "not determined".to_string()
+            } else {
+                g.overhangs.join(", ")
+            }
+        ));
+        if g.faults.is_empty() {
+            out.push_str(" No structural fault was found in the set.");
+        } else {
+            out.push_str(" Faults found: ");
+            out.push_str(
+                &g.faults
+                    .iter()
+                    .map(|(l, fatal)| format!("{l}{}", if *fatal { "" } else { " (minor)" }))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            );
+            out.push('.');
+        }
+        out.push_str(&format!(" The check is {}", g.caveat));
+    }
+
+    out.push_str(
+        "
+
+",
+    );
+    out.push_str(&pl_doc::methods(pl_doc::topic("cloning")?));
+    Some(out)
+}
+
 /// Turn one ligation product into a molecule, carrying what can be carried.
 ///
 /// `sources` is one molecule per digest; `described[i].parent` says which one a
@@ -842,6 +1054,7 @@ fn build(
     described: &[Frag],
     seq: &pl_clone::Dseq,
     order: &[(usize, bool)],
+    junctions: Vec<String>,
 ) -> Prod {
     let full = seq.to_string_full();
     // Named after every parent that actually contributed, in order, and not
@@ -937,6 +1150,7 @@ fn build(
         order: order.to_vec(),
         carried,
         dropped,
+        junctions,
     }
 }
 
@@ -1285,6 +1499,113 @@ mod tests {
             r.gg.is_none(),
             "a plain religation claimed to have checked Golden Gate overhangs"
         );
+    }
+
+    /// Stage 6: the construct, written down.
+    ///
+    /// PROVEN TO FAIL against 15e3b4a, where `report` does not exist and the
+    /// only record of a cloning was the construct itself — a sequence with no
+    /// account of where it came from. Six months later that is a plasmid nobody
+    /// can describe in a methods section without reconstructing the reasoning
+    /// from memory.
+    ///
+    /// EVERY NUMBER IS ASSERTED AGAINST THE RUN, not merely present. A report
+    /// that named the right enzymes and the wrong fragment, or counted the
+    /// features it carried and stayed silent about the ones it did not, would
+    /// pass a test that only looked for keywords — and would be worse than no
+    /// report, because it reads as authoritative.
+    #[test]
+    fn the_record_states_what_was_done_and_what_it_does_not_establish() {
+        let seq = "AAAAGGATCCTTTTGCGCGCATATATGGATCCAAAATTTTCCCC";
+        let mut m = mol(seq, true);
+        m.name = "pTest".into();
+        let mut keeps = Feature::new("kept", "CDS");
+        keeps.segments.push(Segment::new(12, 22));
+        m.features.push(keeps);
+        let mut cut_in_two = Feature::new("straddles", "misc_feature");
+        cut_in_two.segments.push(Segment::new(25, 36));
+        m.features.push(cut_in_two);
+
+        let pl = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["BamHI"]),
+            false,
+            25,
+        );
+        let i = pl
+            .prods
+            .iter()
+            .position(|pr| pr.circular)
+            .expect("a circular religation");
+        let r = report(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["BamHI"]),
+            25,
+            &pl,
+            i,
+        )
+        .expect("a record");
+
+        // What was done, in the run's own numbers.
+        assert!(r.contains("pTest"), "{r}");
+        assert!(r.contains("BamHI"), "{r}");
+        assert!(
+            r.contains(&format!("{} bp", seq.len())),
+            "the parent length: {r}"
+        );
+        assert!(r.contains("5' GATC"), "the junction is not named: {r}");
+        assert!(
+            r.contains(&format!("{} bp", pl.prods[i].mol.seq.len())),
+            "the product length: {r}"
+        );
+        // BOTH counts. A carried count without a dropped count reads as
+        // "everything travelled", which is the one thing it must not say.
+        assert!(
+            r.contains(&format!("{} annotated", pl.prods[i].carried)),
+            "{r}"
+        );
+        assert!(pl.prods[i].dropped > 0, "the fixture must drop something");
+        assert!(
+            r.contains("were not, because"),
+            "the record is silent about the features that did not travel: {r}"
+        );
+        // And the limits, from `pl_doc`, so the two halves are joined rather
+        // than blurred: what happened, then what it does not establish.
+        assert!(
+            r.contains("this is a plan and not a result"),
+            "the record claims a result: {r}"
+        );
+        assert!(r.contains("transformation"), "{r}");
+    }
+
+    /// A Golden Gate record must carry the fidelity caveat.
+    ///
+    /// It is the one sentence in such a paragraph a reviewer would ask for, and
+    /// the crate that computes the check insists on it: an empty fault list is
+    /// "no structural fault found", not "this will work".
+    #[test]
+    fn a_golden_gate_record_carries_the_caveat_the_check_insists_on() {
+        let seq = "AAAAGGTCTCAGATCTTTTTTTTTTTTTTTTTTTTGATCTGAGACCAAAACCCCGGGGTTTT";
+        let mut m = mol(seq, true);
+        m.name = "pGG".into();
+        let e = ticked(&["BsaI"]);
+        let pl = plan(&m, None, Method::GoldenGate, &e, false, 25);
+        let Some(i) = pl.prods.iter().position(|pr| pr.circular) else {
+            // No circular product is a legitimate outcome for this fixture; the
+            // caveat then belongs to the panel, which shows it either way.
+            assert!(pl.gg.is_some(), "the overhang check must still have run");
+            return;
+        };
+        let r = report(&m, None, Method::GoldenGate, &e, 25, &pl, i).expect("a record");
+        assert!(
+            r.contains("fidelity"),
+            "no caveat in a Golden Gate record: {r}"
+        );
+        assert!(r.contains("Type IIS overhangs"), "{r}");
     }
 
     /// Naming the molecule that was not cut, rather than "this molecule".
