@@ -17284,7 +17284,14 @@ mod tests {
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
         let seq_mol = app.document().expect("open").molecule().clone();
         let mut panel = clone::Panel::new(&picked);
-        panel.plan = Some(clone::plan(&seq_mol, None, &picked, true));
+        panel.plan = Some(clone::plan(
+            &seq_mol,
+            None,
+            clone::Method::Restriction,
+            &picked,
+            true,
+            25,
+        ));
         panel.stale = false;
         assert!(
             panel.plan.as_ref().is_some_and(|p| !p.prods.is_empty()),
@@ -17347,7 +17354,14 @@ mod tests {
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
         let first = app.document().expect("open").molecule().clone();
         let mut panel = clone::Panel::new(&picked);
-        panel.plan = Some(clone::plan(&first, None, &picked, true));
+        panel.plan = Some(clone::plan(
+            &first,
+            None,
+            clone::Method::Restriction,
+            &picked,
+            true,
+            25,
+        ));
         panel.stale = false;
         app.clone_panel = Some(panel);
         assert!(app.clone_panel.is_some(), "the fixture needs a panel open");
@@ -17403,7 +17417,7 @@ mod tests {
         m.features.push(f);
 
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
-        let plan = clone::plan(&m, None, &picked, false);
+        let plan = clone::plan(&m, None, clone::Method::Restriction, &picked, false, 25);
         assert_eq!(plan.prods.len(), 1, "{:?}", plan.note);
         let p = &plan.prods[0];
 

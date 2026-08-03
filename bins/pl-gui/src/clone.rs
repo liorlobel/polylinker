@@ -60,10 +60,47 @@ pub struct Plan {
     pub note: Option<String>,
 }
 
+/// How the pieces are joined.
+///
+/// The engine has had all of these since long before anything could reach them.
+/// `pl-clone` could cut, could ligate by ends, could assemble by homology and
+/// could validate a Golden Gate overhang set — and `bins/pl-gui` offered one of
+/// the four, so the rest were code nobody could run by clicking anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    /// Cut with restriction enzymes, join by compatible ends.
+    Restriction,
+    /// Join by sequence HOMOLOGY: Gibson, HiFi, In-Fusion, SLIC.
+    ///
+    /// The overlap is designed into the primers rather than left by an enzyme,
+    /// so the ends play no part and the enzymes above are optional — they are
+    /// there only to linearise a vector.
+    Gibson,
+}
+
+impl Method {
+    pub fn label(self) -> &'static str {
+        match self {
+            Method::Restriction => "Restriction",
+            Method::Gibson => "Gibson / HiFi",
+        }
+    }
+}
+
 /// The panel's own state. Outlives a frame; does not outlive its document.
 pub struct Panel {
+    pub method: Method,
     pub enzymes: BTreeSet<String>,
     pub blunt: bool,
+    /// Shortest homology that counts as a junction, for [`Method::Gibson`].
+    ///
+    /// Exposed because it is a real experimental parameter — a 20 bp HiFi
+    /// overlap and a 40 bp Gibson one are both ordinary — and because leaving it
+    /// at a hidden 25 would silently report "no assembly" for a design that
+    /// works. Bounded below at 12 in the UI: under about 20 a chance match in a
+    /// plasmid stops being negligible, and a chance match here does not give a
+    /// wrong length, it gives a confidently wrong construct.
+    pub homology: usize,
     /// The OTHER tab whose digest supplies the insert, if there is one.
     ///
     /// Stage 4, and the whole of it. `None` religates the open molecule on its
@@ -91,8 +128,10 @@ impl Panel {
     /// has just looked at a digest is asking about THAT digest.
     pub fn new(picked: &BTreeSet<String>) -> Self {
         Panel {
+            method: Method::Restriction,
             enzymes: picked.clone(),
             blunt: false,
+            homology: 25,
             donor: None,
             plan: None,
             stale: true,
@@ -126,7 +165,9 @@ pub fn show(
     }
     let donor_mol = donor.map(|(_, _, m)| *m);
     if p.stale {
-        p.plan = Some(plan(mol, donor_mol, &p.enzymes, p.blunt));
+        p.plan = Some(plan(
+            mol, donor_mol, p.method, &p.enzymes, p.blunt, p.homology,
+        ));
         p.stale = false;
     }
     let mut open = true;
@@ -145,9 +186,29 @@ pub fn show(
             );
             ui.add_space(6.0);
 
+            // HOW the pieces are joined, first, because it changes what every
+            // control below means: the enzymes are a digest under Restriction
+            // and a linearisation under Gibson.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Join by").strong());
+                for m in [Method::Restriction, Method::Gibson] {
+                    if ui.selectable_label(p.method == m, m.label()).clicked() && p.method != m {
+                        p.method = m;
+                        p.stale = true;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+
             // Enzymes: only the ones that cut, so the list is short and every
             // entry does something.
-            ui.label(egui::RichText::new("Cut with").strong());
+            ui.label(
+                egui::RichText::new(match p.method {
+                    Method::Restriction => "Cut with",
+                    Method::Gibson => "Linearise with (optional)",
+                })
+                .strong(),
+            );
             ui.horizontal_wrapped(|ui| {
                 for e in pl_enzymes::ENZYMES {
                     // EITHER molecule, once there are two. An enzyme that cuts
@@ -173,8 +234,31 @@ pub fn show(
                 }
             });
             ui.add_space(4.0);
-            if ui.checkbox(&mut p.blunt, "join blunt ends too").changed() {
-                p.stale = true;
+            match p.method {
+                Method::Restriction => {
+                    if ui.checkbox(&mut p.blunt, "join blunt ends too").changed() {
+                        p.stale = true;
+                    }
+                }
+                Method::Gibson => {
+                    ui.horizontal(|ui| {
+                        ui.label("homology at least");
+                        // Floored at 12 rather than 1. Below about 20 a chance
+                        // match in a plasmid stops being negligible, and a
+                        // chance match does not give a wrong length — it gives a
+                        // confidently wrong construct. 12 is low enough for
+                        // anyone who really means it and high enough that the
+                        // slider cannot be dragged into nonsense.
+                        let r = ui.add(
+                            egui::DragValue::new(&mut p.homology)
+                                .range(12..=120)
+                                .suffix(" bp"),
+                        );
+                        if r.changed() {
+                            p.stale = true;
+                        }
+                    });
+                }
             }
 
             // THE INSERT, from another tab. Offered only when there is another
@@ -405,10 +489,15 @@ struct Source<'a> {
 pub fn plan(
     mol: &Molecule,
     donor: Option<&Molecule>,
+    method: Method,
     enzymes: &BTreeSet<String>,
     blunt: bool,
+    homology: usize,
 ) -> Plan {
-    if enzymes.is_empty() {
+    // An enzyme is required to CUT and optional to ASSEMBLE. Gibson's overlap is
+    // designed into the primers; the enzymes are there only to linearise a
+    // vector, and a user with two PCR products needs none at all.
+    if enzymes.is_empty() && method == Method::Restriction {
         return Plan {
             frags: Vec::new(),
             prods: Vec::new(),
@@ -450,7 +539,7 @@ pub fn plan(
     // moment there are two, and the one it is silent about is the one the user
     // has to go and look at.
     for (i, pool) in pools.iter().enumerate() {
-        if pool.len() == 1 && pool[0].circular {
+        if !enzymes.is_empty() && pool.len() == 1 && pool[0].circular {
             return Plan {
                 frags: Vec::new(),
                 prods: Vec::new(),
@@ -485,6 +574,62 @@ pub fn plan(
             });
             frags.push(f.clone());
         }
+    }
+
+    // GIBSON JOINS BY HOMOLOGY AND NOT BY ENDS, so it does not go through
+    // `ligate` at all — the shapes of the ends are irrelevant and the blunt
+    // policy has nothing to decide. `assemble` uses every fragment, which is
+    // right: a Gibson reaction contains exactly the pieces amplified for it.
+    if method == Method::Gibson {
+        // A circle has no ends to overlap. Said rather than assembled around,
+        // because `assemble` reads a fragment as a plain string and would
+        // happily match a circular vector's arbitrary start against something —
+        // an answer resting on a junction that does not exist in the tube.
+        if let Some(name) = sources
+            .iter()
+            .enumerate()
+            .find(|(i, _)| pools[*i].len() == 1 && pools[*i][0].circular)
+            .map(|(_, s)| s.mol.name.clone())
+        {
+            return Plan {
+                frags: described,
+                prods: Vec::new(),
+                note: Some(format!(
+                    "{name} is circular. Gibson joins ends, so linearise it first — tick an \
+                     enzyme that cuts it once."
+                )),
+            };
+        }
+        let opts = pl_clone::assembly::Options {
+            limit: homology,
+            ..Default::default()
+        };
+        let laid = match pl_clone::assembly::assemble(&frags, true, opts) {
+            Ok(ps) => ps.into_iter().map(|p| (p.seq, p.order)).collect::<Vec<_>>(),
+            Err(e) => {
+                return Plan {
+                    frags: described,
+                    prods: Vec::new(),
+                    note: Some(e.to_string()),
+                }
+            }
+        };
+        let prods: Vec<Prod> = laid
+            .iter()
+            .map(|(seq, order)| build(&sources, &frags, &described, seq, order))
+            .collect();
+        let note = prods.is_empty().then(|| {
+            format!(
+                "No two of these share {homology} bp or more at their ends. Gibson needs the \
+                 overlap designed into the primers; lower the homology only if you know the \
+                 junction really is shorter."
+            )
+        });
+        return Plan {
+            frags: described,
+            prods,
+            note,
+        };
     }
 
     let opts = pl_clone::ligate::Options {
@@ -700,7 +845,14 @@ mod tests {
 
     #[test]
     fn nothing_ticked_asks_for_an_enzyme_rather_than_showing_an_empty_list() {
-        let p = plan(&mol("ACGTACGTACGT", true), None, &BTreeSet::new(), false);
+        let p = plan(
+            &mol("ACGTACGTACGT", true),
+            None,
+            Method::Restriction,
+            &BTreeSet::new(),
+            false,
+            25,
+        );
         assert!(p.frags.is_empty() && p.prods.is_empty());
         assert!(p.note.unwrap().contains("Tick an enzyme"));
     }
@@ -710,8 +862,10 @@ mod tests {
         let p = plan(
             &mol("ACGTACGTACGTACGT", true),
             None,
+            Method::Restriction,
             &ticked(&["BamHI"]),
             false,
+            25,
         );
         assert!(p.note.unwrap().contains("None of BamHI cuts"));
     }
@@ -726,7 +880,14 @@ mod tests {
         f.segments.push(Segment::new(15, 30));
         m.features.push(f);
 
-        let p = plan(&m, None, &ticked(&["BamHI"]), false);
+        let p = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["BamHI"]),
+            false,
+            25,
+        );
         assert_eq!(p.frags.len(), 1, "one site in a circle gives one fragment");
         assert!(p.frags[0].from.is_some(), "the fragment must be placeable");
         assert_eq!(p.frags[0].left, "5' GATC");
@@ -785,7 +946,14 @@ mod tests {
         gene.segments.push(Segment::new(8, 20));
         giver.features.push(gene);
 
-        let p = plan(&vector, Some(&giver), &ticked(&["EcoRI", "BamHI"]), false);
+        let p = plan(
+            &vector,
+            Some(&giver),
+            Method::Restriction,
+            &ticked(&["EcoRI", "BamHI"]),
+            false,
+            25,
+        );
         assert!(p.note.is_none(), "{:?}", p.note);
         assert_eq!(p.frags.len(), 4, "two pieces from each digest");
         assert_eq!(
@@ -838,6 +1006,107 @@ mod tests {
         }
     }
 
+    /// Stage 5: two pieces with designed overlaps, joined by homology.
+    ///
+    /// PROVEN TO FAIL against c6fa736: `plan` had no `Method`, so the ONLY join
+    /// it could make was by compatible ends. `pl_clone::assembly` has been in
+    /// the crate the whole time, fully tested against pydna, and nothing in the
+    /// application could reach it — the same gap `ligate` was in before Stage 4.
+    ///
+    /// The pieces here have NO compatible ends whatsoever: both are blunt, so
+    /// the restriction path finds nothing even with blunt joining on. That is
+    /// the point of the fixture. It is homology or it is nothing.
+    #[test]
+    fn two_linear_pieces_with_a_designed_overlap_assemble_by_homology() {
+        // 30 bases shared at each junction, which is an ordinary Gibson design.
+        let a_tail = "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTT";
+        let b_tail = "TTGGCCAATTGGCCAATTGGCCAATTGGCC";
+        let a = format!("{b_tail}AAAACCCCGGGGTTTTAAAACCCCGGGGTTTT{a_tail}");
+        let b = format!("{a_tail}CCCCAAAAGGGGTTTTCCCCAAAAGGGGTTTT{b_tail}");
+        let mut left = mol(&a, false);
+        left.name = "piece A".into();
+        let mut gene = Feature::new("gfp", "CDS");
+        gene.segments.push(Segment::new(35, 55));
+        left.features.push(gene);
+        let mut right = mol(&b, false);
+        right.name = "piece B".into();
+
+        // THE CONTROL, and it is what makes the assertion below mean anything:
+        // no ligation reaches this construct. Both pieces are blunt, so there
+        // is no sticky end to seal — and blunt joining is left OFF, which is
+        // both the default and the honest comparison, since a blunt policy
+        // joins any end to any other and would "succeed" at a junction the
+        // overlaps were designed to make instead.
+        let by_ends = plan(
+            &left,
+            Some(&right),
+            Method::Restriction,
+            &ticked(&["BamHI"]),
+            false,
+            25,
+        );
+        assert!(
+            by_ends.prods.is_empty(),
+            "the fixture is supposed to be unreachable by ligation"
+        );
+
+        let p = plan(
+            &left,
+            Some(&right),
+            Method::Gibson,
+            &BTreeSet::new(),
+            false,
+            25,
+        );
+        assert!(p.note.is_none(), "{:?}", p.note);
+        assert_eq!(p.frags.len(), 2, "two pieces, uncut");
+        let prod = p
+            .prods
+            .iter()
+            .find(|pr| pr.circular)
+            .expect("no circular assembly");
+        // Each 30 bp overlap is written ONCE in the product, so the circle is
+        // the two pieces minus the two junctions. A construct at `a + b` would
+        // carry both overlaps twice, which is a 60 bp duplication in a plasmid.
+        assert_eq!(
+            prod.mol.seq.len(),
+            a.len() + b.len() - 60,
+            "the overlaps were written twice"
+        );
+        assert_eq!(prod.carried, 1, "the gene did not travel");
+        assert!(prod.mol.name.contains("piece A") && prod.mol.name.contains("piece B"));
+    }
+
+    /// A circle has no ends to overlap, and saying so beats guessing.
+    ///
+    /// `assemble` reads a fragment as a plain string, so a circular vector's
+    /// arbitrary start would be matched against something and the answer would
+    /// rest on a junction that does not exist in the tube.
+    #[test]
+    fn a_circular_vector_is_asked_to_be_linearised_rather_than_assembled() {
+        let mut v = mol("AAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAACCCCGGGG", true);
+        v.name = "still a circle".into();
+        let p = plan(&v, None, Method::Gibson, &BTreeSet::new(), false, 25);
+        let note = p.note.expect("a note");
+        assert!(note.contains("still a circle"), "{note}");
+        assert!(note.contains("linearise"), "{note}");
+    }
+
+    /// The homology floor is a real parameter and the message says the number.
+    #[test]
+    fn homology_shorter_than_the_floor_is_reported_with_the_floor_in_it() {
+        // 14 bases shared: found at 12, not at 25.
+        let shared = "GGCCTTAAGGCCTT";
+        let a = format!("AAAACCCCGGGGTTTTAAAACCCC{shared}");
+        let b = format!("{shared}TTTTGGGGCCCCAAAATTTTGGGG");
+        let x = mol(&a, false);
+        let y = mol(&b, false);
+        let strict = plan(&x, Some(&y), Method::Gibson, &BTreeSet::new(), false, 25);
+        let note = strict.note.expect("a note at 25");
+        assert!(note.contains("25 bp"), "{note}");
+        assert!(strict.prods.is_empty());
+    }
+
     /// Naming the molecule that was not cut, rather than "this molecule".
     ///
     /// With one molecule "None of BamHI cuts this molecule" was unambiguous.
@@ -849,7 +1118,14 @@ mod tests {
         v.name = "cuttable".into();
         let mut d = mol("ACGTACGTACGTACGTACGTACGT", true);
         d.name = "uncuttable".into();
-        let p = plan(&v, Some(&d), &ticked(&["BamHI"]), false);
+        let p = plan(
+            &v,
+            Some(&d),
+            Method::Restriction,
+            &ticked(&["BamHI"]),
+            false,
+            25,
+        );
         let note = p.note.expect("a note");
         assert!(note.contains("uncuttable"), "{note}");
     }
@@ -864,7 +1140,14 @@ mod tests {
         f.segments.push(Segment::new(25, 36));
         m.features.push(f);
 
-        let p = plan(&m, None, &ticked(&["BamHI"]), false);
+        let p = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["BamHI"]),
+            false,
+            25,
+        );
         assert_eq!(p.frags.len(), 2, "two sites, two fragments");
         for prod in &p.prods {
             assert_eq!(prod.carried, 0, "a straddling feature must not travel");
@@ -876,10 +1159,17 @@ mod tests {
     #[test]
     fn blunt_products_appear_only_when_asked_for() {
         let m = mol("GATATCAAAAAAAAAAAAAAAAAAAAGATATCTTTTTTTTTT", true);
-        let off = plan(&m, None, &ticked(&["EcoRV"]), false);
+        let off = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["EcoRV"]),
+            false,
+            25,
+        );
         assert!(off.prods.is_empty());
         assert!(off.note.unwrap().contains("blunt"));
-        let on = plan(&m, None, &ticked(&["EcoRV"]), true);
+        let on = plan(&m, None, Method::Restriction, &ticked(&["EcoRV"]), true, 25);
         assert!(
             !on.prods.is_empty(),
             "with blunt on there must be a product"
