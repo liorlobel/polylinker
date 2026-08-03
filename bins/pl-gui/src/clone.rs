@@ -58,6 +58,28 @@ pub struct Plan {
     pub prods: Vec<Prod>,
     /// Why there is nothing to show, when there is nothing to show.
     pub note: Option<String>,
+    /// The Golden Gate overhang check, for [`Method::GoldenGate`].
+    ///
+    /// Separate from `note` because it is not a refusal: a set with a fatal
+    /// fault still assembles into SOMETHING, and hiding the products would be
+    /// less honest than showing them beside the reason they are not what was
+    /// intended.
+    pub gg: Option<GgReport>,
+}
+
+/// What the Golden Gate overhang check found.
+///
+/// A view of `pl_clone::goldengate::Report`, flattened to strings, so the panel
+/// does not have to match on `Fault` and the crate does not have to know about
+/// a `Ui`. `fatal` travels with each line because the two severities are
+/// genuinely different and must not be painted the same: a repeat or a
+/// palindrome gives you a DIFFERENT construct, a near neighbour gives you mostly
+/// the right one with a wrong minor product.
+pub struct GgReport {
+    pub overhangs: Vec<String>,
+    pub faults: Vec<(String, bool)>,
+    pub usable: bool,
+    pub caveat: &'static str,
 }
 
 /// How the pieces are joined.
@@ -76,6 +98,16 @@ pub enum Method {
     /// so the ends play no part and the enzymes above are optional — they are
     /// there only to linearise a vector.
     Gibson,
+    /// Cut with a Type IIS enzyme and ligate the released pieces.
+    ///
+    /// A restriction cloning by mechanism, and a different operation in
+    /// practice: the recognition site leaves with the cut, so the junction
+    /// carries no scar and cannot be re-cut, and WHICH pieces join is decided
+    /// entirely by four bases the designer chose. That is why this is its own
+    /// method rather than a checkbox — the answer a user needs is not "what can
+    /// be built" but "will these overhangs build the one thing I meant", and
+    /// `pl_clone::goldengate` answers it.
+    GoldenGate,
 }
 
 impl Method {
@@ -83,6 +115,7 @@ impl Method {
         match self {
             Method::Restriction => "Restriction",
             Method::Gibson => "Gibson / HiFi",
+            Method::GoldenGate => "Golden Gate",
         }
     }
 }
@@ -191,7 +224,7 @@ pub fn show(
             // and a linearisation under Gibson.
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Join by").strong());
-                for m in [Method::Restriction, Method::Gibson] {
+                for m in [Method::Restriction, Method::Gibson, Method::GoldenGate] {
                     if ui.selectable_label(p.method == m, m.label()).clicked() && p.method != m {
                         p.method = m;
                         p.stale = true;
@@ -206,6 +239,10 @@ pub fn show(
                 egui::RichText::new(match p.method {
                     Method::Restriction => "Cut with",
                     Method::Gibson => "Linearise with (optional)",
+                    // Only the Type IIS enzymes are offered below, so the label
+                    // says which family rather than leaving a user to wonder
+                    // where BamHI went.
+                    Method::GoldenGate => "Cut with (Type IIS only)",
                 })
                 .strong(),
             );
@@ -215,6 +252,14 @@ pub fn show(
                     // only the donor is exactly the one a user reaches for when
                     // the insert has the site and the vector's is somewhere
                     // else — and it was not on this list at all.
+                    // Golden Gate needs the recognition site to LEAVE with the
+                    // cut — that is the whole of why its junctions carry no
+                    // scar — so a Type IIP enzyme cannot do it, and offering
+                    // fifty that cannot is how a user concludes the method is
+                    // broken.
+                    if p.method == Method::GoldenGate && !e.cuts_outside_its_site() {
+                        continue;
+                    }
                     let cuts = !pl_enzymes::cut_positions(&mol.seq, mol.topology, e).is_empty()
                         || donor_mol.is_some_and(|d| {
                             !pl_enzymes::cut_positions(&d.seq, d.topology, e).is_empty()
@@ -240,6 +285,10 @@ pub fn show(
                         p.stale = true;
                     }
                 }
+                // Golden Gate has neither knob: the blunt policy is meaningless
+                // for a method whose whole point is a chosen four-base overhang,
+                // and homology is not how it joins.
+                Method::GoldenGate => {}
                 Method::Gibson => {
                     ui.horizontal(|ui| {
                         ui.label("homology at least");
@@ -342,6 +391,53 @@ pub fn show(
                         .color(pal.ink2),
                     );
                 }
+                ui.add_space(6.0);
+            }
+
+            // THE OVERHANG CHECK, above the products rather than below them.
+            // It is the answer to the question a Golden Gate design actually
+            // poses, and a user who reads the product list first has already
+            // decided the assembly works.
+            if let Some(g) = &pl.gg {
+                ui.label(
+                    egui::RichText::new(if g.usable {
+                        "Overhangs: no structural fault found"
+                    } else {
+                        "Overhangs: this set will not build one construct"
+                    })
+                    .strong()
+                    .color(if g.usable { pal.ink } else { pal.warn }),
+                );
+                if !g.overhangs.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("  {}", g.overhangs.join("  ")))
+                            .monospace()
+                            .size(11.0)
+                            .color(pal.ink2),
+                    );
+                }
+                for (line, fatal) in &g.faults {
+                    // The two severities are painted differently because they
+                    // ARE different: a repeat or a palindrome gives you another
+                    // construct, a near neighbour gives you mostly the right one
+                    // with a wrong minor product.
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "  {} {line}",
+                            // WORDS, not a glyph. This project ships its own
+                            // faces and has a test that every character in a
+                            // refusal exists in them; a decorative cross is one
+                            // more thing that can come out as a box, and
+                            // "fatal" is clearer than any symbol anyway.
+                            if *fatal { "fatal:" } else { "minor:" }
+                        ))
+                        .size(11.0)
+                        .color(if *fatal { pal.warn } else { pal.muted }),
+                    );
+                }
+                // ALWAYS, and the crate insists on it: an empty fault list is
+                // "no structural fault found" and not "this will work".
+                ui.label(egui::RichText::new(g.caveat).size(10.5).color(pal.muted));
                 ui.add_space(6.0);
             }
 
@@ -502,6 +598,7 @@ pub fn plan(
             frags: Vec::new(),
             prods: Vec::new(),
             note: Some("Tick an enzyme to cut with.".into()),
+            gg: None,
         };
     }
     let mut sources: Vec<Source> = vec![Source {
@@ -543,6 +640,7 @@ pub fn plan(
             return Plan {
                 frags: Vec::new(),
                 prods: Vec::new(),
+                gg: None,
                 note: Some(format!(
                     "None of {} cuts {}.",
                     enzymes.iter().cloned().collect::<Vec<_>>().join(", "),
@@ -594,6 +692,7 @@ pub fn plan(
             return Plan {
                 frags: described,
                 prods: Vec::new(),
+                gg: None,
                 note: Some(format!(
                     "{name} is circular. Gibson joins ends, so linearise it first — tick an \
                      enzyme that cuts it once."
@@ -611,6 +710,7 @@ pub fn plan(
                     frags: described,
                     prods: Vec::new(),
                     note: Some(e.to_string()),
+                    gg: None,
                 }
             }
         };
@@ -629,8 +729,35 @@ pub fn plan(
             frags: described,
             prods,
             note,
+            gg: None,
         };
     }
+
+    // GOLDEN GATE. The ligation is the same one `ligate` and `subclone` already
+    // do — the pieces are joined by their ends, and T4 ligase does not know
+    // which enzyme made them. What is different, and what the whole method rests
+    // on, is WHICH pieces join: the recognition site leaves with the cut, so the
+    // junction carries no scar, and four bases the designer chose decide the
+    // order. So the answer a user needs here is not "what can be built" but
+    // "will these overhangs build the one thing I meant", and that is a question
+    // about the overhang SET rather than about any product.
+    let gg = (method == Method::GoldenGate).then(|| {
+        let overhangs: Vec<pl_clone::goldengate::Overhang> = frags
+            .iter()
+            .filter_map(pl_clone::goldengate::left_overhang)
+            .collect();
+        let r = pl_clone::goldengate::check(&overhangs);
+        GgReport {
+            overhangs: r.overhangs.clone(),
+            faults: r
+                .faults
+                .iter()
+                .map(|f| (f.to_string(), f.is_fatal()))
+                .collect(),
+            usable: r.is_usable(),
+            caveat: r.caveat(),
+        }
+    });
 
     let opts = pl_clone::ligate::Options {
         blunt,
@@ -646,6 +773,7 @@ pub fn plan(
                     frags: described,
                     prods: Vec::new(),
                     note: Some(e.to_string()),
+                    gg,
                 }
             }
         }
@@ -671,6 +799,7 @@ pub fn plan(
                     frags: described,
                     prods: Vec::new(),
                     note: Some(e.to_string()),
+                    gg,
                 }
             }
         }
@@ -696,6 +825,7 @@ pub fn plan(
         frags: described,
         prods,
         note,
+        gg,
     }
 }
 
@@ -1105,6 +1235,56 @@ mod tests {
         let note = strict.note.expect("a note at 25");
         assert!(note.contains("25 bp"), "{note}");
         assert!(strict.prods.is_empty());
+    }
+
+    /// Stage 5b: the question a Golden Gate design actually poses.
+    ///
+    /// PROVEN TO FAIL against a9f69e4: `pl_clone::goldengate` has been in the
+    /// crate the whole time — repeats, palindromes, cross-pairing and
+    /// single-mismatch neighbours, each in both orientations — and the only way
+    /// to reach any of it was `pl goldengate` in a terminal. The panel could cut
+    /// with BsaI and ligate the pieces, and said nothing whatever about whether
+    /// the overhangs would give you one construct or four.
+    ///
+    /// THE FIXTURE HAS A REAL FAULT IN IT. A cassette whose two BsaI sites leave
+    /// the SAME four-base overhang cannot build one thing: the junctions are
+    /// interchangeable. A check that only ever ran on a clean set would pass
+    /// against a `check` that returned no faults for anything.
+    #[test]
+    fn a_golden_gate_overhang_set_is_checked_and_its_faults_are_named() {
+        // Two inward-facing BsaI sites, both releasing GATC: the same overhang
+        // at both junctions.
+        let seq = "AAAAGGTCTCAGATCTTTTTTTTTTTTTTTTTTTTGATCTGAGACCAAAACCCCGGGGTTTT";
+        let m = mol(seq, true);
+        let p = plan(&m, None, Method::GoldenGate, &ticked(&["BsaI"]), false, 25);
+        let g = p.gg.expect("Golden Gate must report on the overhangs");
+        assert!(
+            !g.overhangs.is_empty(),
+            "no overhang was read off the digest at all"
+        );
+        assert!(
+            !g.faults.is_empty(),
+            "a set with one overhang at two junctions was reported as clean: {:?}",
+            g.overhangs
+        );
+        assert!(
+            !g.usable,
+            "a repeated overhang is fatal — the junctions can swap"
+        );
+        assert!(g.faults.iter().any(|(_, fatal)| *fatal), "{:?}", g.faults);
+        // The caveat travels with the answer, always. An empty fault list means
+        // "no structural fault found", not "this will work", and the crate says
+        // so in words the panel must not drop.
+        assert!(g.caveat.contains("fidelity"), "{}", g.caveat);
+
+        // AND THE OTHER METHODS DO NOT PRETEND TO ANSWER IT. A restriction
+        // religation of the same molecule reports no overhang check, because it
+        // has not made one.
+        let r = plan(&m, None, Method::Restriction, &ticked(&["BsaI"]), false, 25);
+        assert!(
+            r.gg.is_none(),
+            "a plain religation claimed to have checked Golden Gate overhangs"
+        );
     }
 
     /// Naming the molecule that was not cut, rather than "this molecule".

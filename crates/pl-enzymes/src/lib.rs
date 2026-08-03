@@ -94,6 +94,21 @@ impl Enzyme {
     pub fn is_three_prime_overhang(&self) -> bool {
         self.ovhg > 0
     }
+    /// Does this enzyme cut OUTSIDE its recognition site? A Type IIS enzyme.
+    ///
+    /// Read off `fst5`, whose own doc already states the rule: `BsaI` is
+    /// `GGTCTCN^NNNN`, so `fst5` is 7 on a six-base site. The alternative is a
+    /// second, hand-maintained list of names, and a list is a thing that goes
+    /// out of date against the table beside it.
+    ///
+    /// Here rather than in a caller because it is a fact about an enzyme, and
+    /// Golden Gate rests on it: the whole method works because the recognition
+    /// site leaves with the cut, so the junction carries no scar and cannot be
+    /// re-cut. It is the difference between offering the handful of enzymes that
+    /// can do it and offering fifty that cannot.
+    pub fn cuts_outside_its_site(&self) -> bool {
+        self.fst5 as usize > self.site.len()
+    }
     /// Length of the single-stranded end, whichever kind it is.
     pub fn overhang_len(&self) -> usize {
         self.ovhg.unsigned_abs() as usize
