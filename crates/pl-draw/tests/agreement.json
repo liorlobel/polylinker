@@ -17708,5 +17708,11 @@
    "v": 360.00000001,
    "out": "360"
   }
- ]
+ ],
+ "root": {
+  "font-family": "Helvetica, 'Nimbus Sans', Arial, sans-serif",
+  "stroke-linecap": "round",
+  "stroke-linejoin": "round",
+  "xml:space": "preserve"
+ }
 }

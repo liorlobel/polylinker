@@ -19,7 +19,8 @@
 //! the failure mode this project has now hit twice.
 
 use pl_draw::{
-    angle, commas, esc, isotonic, n, nice_step, place_column, polar, ranges, safe_color, LabelBox,
+    angle, commas, esc, isotonic, n, nice_step, place_column, polar, ranges, safe_color, svg_of,
+    LabelBox, Scene,
 };
 
 mod json;
@@ -43,6 +44,16 @@ fn load() -> Json {
 
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() <= EPS * (1.0 + a.abs().max(b.abs()))
+}
+
+/// One attribute of an opening tag, or `None` if the tag does not carry it.
+///
+/// The match is anchored on a preceding space, because `space="` occurs inside
+/// `xml:space="` and an unanchored search would read the two as one attribute.
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let pat = format!(" {name}=\"");
+    let at = tag.find(&pat)? + pat.len();
+    Some(tag[at..].split('"').next()?.to_string())
 }
 
 #[test]
@@ -225,6 +236,67 @@ fn xml_escaping_agrees() {
     for c in doc.get("esc").arr() {
         let s = c.get("s").str();
         assert_eq!(esc(s), c.get("out").str(), "esc({s:?})");
+    }
+}
+
+/// The two renderers must PRESENT their documents alike, not only compute alike.
+///
+/// PROVEN TO FAIL against 7bf5aad, on three of the four attributes: the
+/// TypeScript root asked for `system-ui, -apple-system, 'Segoe UI', Helvetica,
+/// …` where this crate asks for `Helvetica, 'Nimbus Sans', Arial, sans-serif`,
+/// and carried neither `stroke-linecap` nor `stroke-linejoin` where this crate
+/// carries both. Every other test in this file passed throughout, which is the
+/// point of adding this one: they each compare a single pure function, the root
+/// element belongs to no function, and so the harness whose whole purpose is
+/// catching drift could not see the drift 7bf5aad opened. It survived four
+/// commits.
+///
+/// None of the four is decoration.
+///
+/// * `font-family` decides which advances the reserved margin is actually spent
+///   in. Both renderers reserve with the same 0.55 em/character estimate — see
+///   `label_width` — which is what keeps their radii identical, and an estimate
+///   names no face, so the root has to. With `system-ui` first, one renderer
+///   drew in Segoe UI on Windows and San Francisco on macOS while the other drew
+///   in Helvetica.
+/// * `stroke-linecap` and `stroke-linejoin` decide where every leader-line elbow
+///   and every arrowhead point lands. SVG's initial values are `butt` and
+///   `miter`; this crate states `round` because its PDF back end emits `1 J 1 j`.
+/// * `xml:space` decides whether a run of spaces inside a label is drawn at the
+///   width it was measured at — and in a cut-site label the run is a delimiter
+///   `fit_label` splits on, not spacing. See
+///   `pdf::file_tests::a_cut_site_labels_two_spaces_reach_the_page_in_both_formats`.
+///
+/// Presence is asserted as well as equality, so this cannot pass by both sides
+/// being equally silent — which is the state all four attributes were in for
+/// `xml:space` when this test was written, and equality alone would have called
+/// that agreement.
+#[test]
+fn svg_root_presentation_attributes_agree() {
+    let doc = load();
+    let want = doc.get("root");
+    // The root is a constant template, so any scene reaches it; an empty one
+    // keeps this about the document element and nothing inside it.
+    let svg = svg_of(&Scene {
+        width: 620.0,
+        height: 620.0,
+        title: "pTEST".into(),
+        items: Vec::new(),
+    });
+    let root = &svg[..svg.find('>').expect("a root element")];
+    for key in [
+        "font-family",
+        "stroke-linecap",
+        "stroke-linejoin",
+        "xml:space",
+    ] {
+        let ts = want.get(key).opt_str();
+        assert!(
+            ts.is_some(),
+            "the TypeScript root carries no {key}, so both renderers leave it to \
+             whatever opens the file — regenerate the fixture once it is fixed"
+        );
+        assert_eq!(attr(root, key), ts, "root {key}: rust vs ts");
     }
 }
 

@@ -63,7 +63,25 @@ const DEFAULT_THEME: Theme = {
  *  0.55 is a reasonable mean for the digits and mixed-case Latin that feature
  *  names consist of, in the sans-serif faces SVG viewers fall back to. It only
  *  has to be good enough to reserve space; being wrong by a few percent shifts
- *  a label, it does not break the layout. */
+ *  a label, it does not break the layout.
+ *
+ *  **Still an estimate, and still 0.55, on purpose.** The obvious alternative is
+ *  Helvetica's own advance tables — `crates/pl-draw/src/pdf.rs` carries them,
+ *  and they really would measure the face the root now asks for. Adopting them
+ *  here would be a mistake, because this number is spent on exactly one thing:
+ *  `margin`, which fixes the ring's radius. `pl-draw` reserves that same margin
+ *  with the same 0.55 em/character — see its `label_width`, whose doc names
+ *  *this file* as the reason it does not use its own tables there either — so
+ *  measuring differently on one side would put the ring at a different radius in
+ *  the two renderers. That is precisely the drift
+ *  `crates/pl-draw/tests/agreement.rs` exists to catch, and it would buy a
+ *  precision this renderer has nothing to spend on: it never fits, crops or
+ *  shortens a label, so unlike `pl-draw`'s `fit_label` there is no decision here
+ *  that a width off by a few percent can get wrong, and the margin is capped at
+ *  30% of the canvas in any case.
+ *
+ *  What an estimate cannot do is name a face — 0.55 em/character is no
+ *  typeface's metric — which is why the `font-family` on the root does. */
 function textWidth(s: string, fontSize: number): number {
   return s.length * fontSize * 0.55;
 }
@@ -390,9 +408,34 @@ export function renderCircularMap(
       ? ''
       : `<rect width="${n(width)}" height="${n(height)}" fill="${theme.background}"/>`;
 
+  // Three presentation attributes, each of which decides something the geometry
+  // above already assumed. They are checked against the Rust renderer's root in
+  // `crates/pl-draw/tests/agreement.rs`, because a root element belongs to no
+  // function and a function-by-function harness cannot see it drift.
+  //
+  //   font-family   The chain is metric-compatible: Nimbus Sans is the free
+  //                 clone on Linux, Arial is compatible by design, and whichever
+  //                 a viewer resolves the advances are Helvetica's — which is
+  //                 what `pl-draw`'s width tables measure and what its PDF and
+  //                 EPS exports of the same molecule are typeset in. This used
+  //                 to lead with `system-ui, -apple-system, 'Segoe UI'`, so the
+  //                 same scene drew in Segoe UI on Windows and San Francisco on
+  //                 macOS while the other renderer drew it in Helvetica.
+  //   stroke-*      SVG's initial values are `butt` and `miter`. Leaving them
+  //                 unstated is not "the default look" but the other value:
+  //                 `pl-draw` states `round` for both because its PDF back end
+  //                 emits `1 J 1 j`, so every leader elbow and arrowhead point
+  //                 differed between the two renderings of one map.
+  //   xml:space     Without it the parser collapses a run of whitespace in a
+  //                 `<text>` to one space, while `textWidth` above has already
+  //                 reserved room for every character of the run. Feature names
+  //                 arrive from files — a GenBank `/label=` carries whatever the
+  //                 submitter typed — and `esc` strips only the control
+  //                 characters XML forbids.
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${n(width)}" height="${n(height)}" ` +
-    `viewBox="0 0 ${n(width)} ${n(height)}" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">` +
+    `viewBox="0 0 ${n(width)} ${n(height)}" font-family="Helvetica, 'Nimbus Sans', Arial, sans-serif" ` +
+    `stroke-linecap="round" stroke-linejoin="round" xml:space="preserve">` +
     `<title>${esc(molecule.name)}</title>` +
     bg +
     body.join('') +

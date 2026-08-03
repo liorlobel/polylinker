@@ -50,6 +50,110 @@ test('produces a well-formed, self-contained svg', () => {
   assert.ok(!svg.includes('undefined'));
 });
 
+/** The opening `<svg …>` tag, without the `>`. */
+function root(svg: string): string {
+  return svg.slice(0, svg.indexOf('>'));
+}
+
+/**
+ * The root must ask for the typeface the layout arithmetic assumed.
+ *
+ * PROVEN TO FAIL against 7bf5aad, where the root named
+ * `system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif`.
+ *
+ * `textWidth` reserves the margin — and so fixes the ring's radius — from a
+ * 0.55 em/character estimate, and `crates/pl-draw/src/lib.rs`'s `label_width`
+ * reserves with the same constant precisely so the two renderers place the ring
+ * identically. What an estimate cannot do is name a face, so the root has to.
+ * With `system-ui` first, a browser drew the figure in Segoe UI on Windows and
+ * San Francisco on macOS while the Rust renderer drew the same scene in
+ * Helvetica: two implementations agreeing to 1e-6 on every coordinate and
+ * producing two different pictures, which is the one failure
+ * `crates/pl-draw/tests/agreement.rs` exists to prevent and the one kind it
+ * could not see.
+ *
+ * The three names are metric-compatible. Nimbus Sans is the free clone shipped
+ * on Linux and Arial is compatible by design, which is what `pl-draw`'s
+ * Helvetica width tables were cross-checked against; whichever a viewer
+ * resolves, the advances are the same.
+ */
+test('the root asks for the typeface the layout was measured against', () => {
+  const { svg } = renderCircularMap(pUC19ish);
+  const family = /font-family="([^"]*)"/.exec(root(svg))?.[1];
+  assert.ok(family, 'the root names no typeface, so every viewer picks its own');
+  assert.ok(
+    family.startsWith('Helvetica'),
+    `the layout is drawn in whatever comes first here: ${family}`,
+  );
+  for (const compatible of ['Nimbus Sans', 'Arial']) {
+    assert.ok(
+      family.includes(compatible),
+      `${compatible} is the fallback where Helvetica is absent, and it is missing: ${family}`,
+    );
+  }
+  assert.ok(
+    !/system-ui|-apple-system|Segoe/.test(family),
+    `a face nothing here measured is offered ahead of the fallbacks: ${family}`,
+  );
+});
+
+/**
+ * Corners must be capped and joined the way the other renderer caps and joins.
+ *
+ * PROVEN TO FAIL against 7bf5aad, where the root stated neither. SVG's initial
+ * values are `butt` caps and `miter` joins with a limit of 4; `pl-draw` states
+ * `round` for both because its PDF back end emits `1 J 1 j`, so leaving them
+ * unstated here is not "the default", it is the other value. Every leader-line
+ * elbow — each one a two-segment path with a real corner at the elbow — and
+ * every arrowhead point differed between the two renderings of one map.
+ */
+test('the root rounds its stroke caps and joins, as the rust renderer does', () => {
+  const { svg } = renderCircularMap(pUC19ish);
+  assert.ok(
+    root(svg).includes('stroke-linecap="round"'),
+    `caps left at butt while the other renderer rounds them: ${root(svg)}`,
+  );
+  assert.ok(
+    root(svg).includes('stroke-linejoin="round"'),
+    `joins left at miter while the other renderer rounds them: ${root(svg)}`,
+  );
+});
+
+/**
+ * A run of spaces inside a name must survive the XML parser.
+ *
+ * PROVEN TO FAIL against 7bf5aad, where the root carried no `xml:space`. The
+ * default is `xml:space="default"`, under which a parser collapses every run of
+ * whitespace in character data to a single space — while `textWidth` had
+ * already counted each character of the run and reserved the margin for all of
+ * them. The label then draws narrower than the room kept for it: 3.34 pt per
+ * collapsed space at 12 pt, Helvetica's advance for U+0020 (278/1000 em) in the
+ * face the root now asks for.
+ *
+ * This renderer never *builds* such a run — its cut-site labels are
+ * `EcoRI (396)`, one space and parentheses, where `crates/pl-draw` builds
+ * `EcoRI  402` with two. The run arrives from the file instead: a GenBank
+ * `/label=` or `/gene=` qualifier carries whatever the submitter typed, `esc`
+ * deliberately strips only the control characters XML forbids, and nothing
+ * between the file and the `<text>` normalises a double space.
+ */
+test('a run of spaces in a name is drawn at the width it was reserved', () => {
+  const spaced: Molecule = {
+    name: 'pSPACED',
+    length: 2686,
+    features: [{ name: 'T7  promoter', type: 'promoter', segments: [{ start: 100, end: 400 }] }],
+  };
+  const { svg } = renderCircularMap(spaced, { width: 700, height: 700 });
+  assert.ok(
+    svg.includes('T7  promoter'),
+    'the run was normalised before emission, so this proves nothing',
+  );
+  assert.ok(
+    root(svg).includes('xml:space="preserve"'),
+    `the name was measured with both spaces and will be drawn with one: ${root(svg)}`,
+  );
+});
+
 test('every feature and site gets a label, on a map with room', () => {
   const { labels, hiddenLabels } = renderCircularMap(pUC19ish, { width: 700, height: 700 });
   assert.deepEqual(hiddenLabels, []);
