@@ -50,6 +50,18 @@ pub struct Layout {
     /// manager wants an empty window, and one whose last session ended in a
     /// directory that is now unmounted wants it more.
     pub restore_tabs: bool,
+    /// The printed width of an exported figure, in millimetres.
+    ///
+    /// `None` exports at the scene's own units, which is what every export did
+    /// before this existed and stays the default: a figure with no stated size
+    /// is one a journal's system will scale itself, which is the right answer
+    /// until somebody says otherwise.
+    ///
+    /// A NUMBER and not a named preset, because a preset is a pair of numbers
+    /// (single and double column) plus a minimum type size, and storing the name
+    /// would make the file's meaning depend on a table that can change under it.
+    /// The presets choose the number; the file records what was chosen.
+    pub figure_mm: Option<f64>,
 }
 
 impl Default for Layout {
@@ -64,6 +76,7 @@ impl Default for Layout {
             code: 11,
             orf_min_aa: 30,
             restore_tabs: true,
+            figure_mm: None,
         }
     }
 }
@@ -178,6 +191,19 @@ pub fn parse(text: &str) -> Layout {
             // restoring anybody's bench and look exactly like the feature being
             // broken.
             "restore_tabs" => out.restore_tabs = v != "0",
+            // Same band as every other number here, and for the same reason:
+            // the file is hand-editable and a `figure_mm: nan` that reached
+            // `Fit::to_width_mm` would propagate through the scale into every
+            // coordinate, and geometry would simply vanish with nothing on
+            // screen explaining why. 20 mm is a small inset; 500 mm is past any
+            // journal's page.
+            "figure_mm" => {
+                if let Ok(mm) = v.parse::<f64>() {
+                    if mm.is_finite() && (20.0..=500.0).contains(&mm) {
+                        out.figure_mm = Some(mm);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -198,6 +224,11 @@ pub fn render(l: Layout) -> String {
     s.push_str(&format!("code: {}\n", l.code));
     s.push_str(&format!("orf_min_aa: {}\n", l.orf_min_aa));
     s.push_str(&format!("restore_tabs: {}\n", u8::from(l.restore_tabs)));
+    // Written only when set, so an untouched file says nothing about figure size
+    // rather than asserting the default as a choice.
+    if let Some(mm) = l.figure_mm {
+        s.push_str(&format!("figure_mm: {mm:.1}\n"));
+    }
     s
 }
 
@@ -235,6 +266,7 @@ mod tests {
             code: 4,
             orf_min_aa: 12,
             restore_tabs: false,
+            figure_mm: Some(89.0),
         };
         assert_eq!(parse(&render(l)), l);
     }

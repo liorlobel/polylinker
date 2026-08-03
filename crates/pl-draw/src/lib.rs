@@ -1234,8 +1234,13 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
 
 /// Render a molecule as a standalone SVG document.
 pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
+    circular_svg_at(mol, opts, None)
+}
+
+/// As [`circular_svg`], at a physical width in millimetres. See [`svg_at`].
+pub fn circular_svg_at(mol: &Molecule, opts: Options, width_mm: Option<f64>) -> (String, Report) {
     let (sc, report) = scene(mol, opts);
-    (svg_of(&sc), report)
+    (svg_at(&sc, width_mm), report)
 }
 
 /// Render a molecule as a one-page PDF.
@@ -1244,13 +1249,33 @@ pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
 /// `Report` carries what the *drawing* could not show; the second report is
 /// what the PDF's font could not encode.
 pub fn circular_pdf(mol: &Molecule, opts: Options) -> (Vec<u8>, Report, pdf::Report) {
+    circular_pdf_at(mol, opts, None)
+}
+
+/// As [`circular_pdf`], at a physical width in millimetres. See [`pdf::pdf_at`].
+pub fn circular_pdf_at(
+    mol: &Molecule,
+    opts: Options,
+    width_mm: Option<f64>,
+) -> (Vec<u8>, Report, pdf::Report) {
     let (sc, report) = scene(mol, opts);
-    let (bytes, pdf_report) = pdf::to_pdf(&sc);
+    let (bytes, pdf_report) = pdf::pdf_at(&sc, width_mm);
     (bytes, report, pdf_report)
 }
 
 /// A scene as SVG.
-pub fn svg_of(sc: &Scene) -> String {
+/// The scene as SVG, at a physical width.
+///
+/// `Some(mm)` puts a real size on the root element and leaves every coordinate
+/// alone: the `viewBox` already carries the drawing's own units, so `width` and
+/// `height` in millimetres make the file that size when it is placed, with no
+/// geometry touched and nothing to round. That is the whole change — an SVG
+/// scaled by rewriting its numbers is an SVG somebody has edited.
+///
+/// `None` is what [`svg_of`] passes and is byte-identical to what this crate has
+/// always emitted, which is the proof that adding the option moved nothing: the
+/// existing tests pass untouched.
+pub fn svg_at(sc: &Scene, width_mm: Option<f64>) -> String {
     let mut body = String::new();
     for item in &sc.items {
         match item {
@@ -1314,14 +1339,27 @@ pub fn svg_of(sc: &Scene) -> String {
             }
         }
     }
+    let (w, h) = match width_mm {
+        Some(mm) => {
+            let fit = page::Fit::to_width_mm(sc, mm);
+            (
+                format!("{}mm", n(fit.width_mm)),
+                format!("{}mm", n(fit.height_mm)),
+            )
+        }
+        None => (n(sc.width).to_string(), n(sc.height).to_string()),
+    };
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"><title>{}</title>{body}</svg>"##,
-        n(sc.width),
-        n(sc.height),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {} {}" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"><title>{}</title>{body}</svg>"##,
         n(sc.width),
         n(sc.height),
         esc(&sc.title)
     )
+}
+
+/// The scene as SVG at its own scene units. See [`svg_at`].
+pub fn svg_of(sc: &Scene) -> String {
+    svg_at(sc, None)
 }
 
 /// A path's segments as an SVG `d` attribute.

@@ -3273,8 +3273,9 @@ impl App {
             return;
         };
         let set = self.enzyme_set;
+        let width_mm = self.layout.figure_mm;
         let (bytes, drawn, font) =
-            pl_draw::circular_pdf(d.molecule(), Self::figure_options(d, set));
+            pl_draw::circular_pdf_at(d.molecule(), Self::figure_options(d, set), width_mm);
 
         let mut note = Self::figure_note(&drawn);
         if !font.unencodable.is_empty() {
@@ -3287,6 +3288,22 @@ impl App {
         match std::fs::write(&path, bytes) {
             Ok(()) => self.wrote(&path, &note.join("  —  ")),
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+        }
+    }
+
+    /// The scale an EPS needs to come out at the chosen printed width.
+    ///
+    /// EPS is the odd one of the three: `to_eps` has always taken a scale and
+    /// multiplies the coordinates by it, where the SVG carries a `viewBox` and
+    /// the PDF a `cm` matrix. So the same choice reaches the three writers three
+    /// different ways, and this is the only one that needs arithmetic here.
+    ///
+    /// `Fit` does it, so the number is the same one the CLI computes and the
+    /// three formats cannot disagree about what "89 mm" means.
+    fn figure_scale(&self, sc: &pl_draw::Scene) -> f64 {
+        match self.layout.figure_mm {
+            Some(mm) => pl_draw::page::Fit::to_width_mm(sc, mm).scale,
+            None => 1.0,
         }
     }
 
@@ -3359,7 +3376,9 @@ impl App {
             return;
         };
         let set = self.enzyme_set;
-        let (svg, drawn) = pl_draw::circular_svg(d.molecule(), Self::figure_options(d, set));
+        let width_mm = self.layout.figure_mm;
+        let (svg, drawn) =
+            pl_draw::circular_svg_at(d.molecule(), Self::figure_options(d, set), width_mm);
 
         match std::fs::write(&path, svg) {
             Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
@@ -3427,10 +3446,13 @@ impl App {
             self.gel_cache = Some((key, built));
             return;
         };
+        let width_mm = self.layout.figure_mm;
         let bytes = match fmt {
-            Fmt::Svg => pl_draw::svg_of(&built.scene).into_bytes(),
-            Fmt::Pdf => pl_draw::pdf::to_pdf(&built.scene).0,
-            Fmt::Eps => pl_draw::eps::to_eps(&built.scene, 1.0).0.into_bytes(),
+            Fmt::Svg => pl_draw::svg_at(&built.scene, width_mm).into_bytes(),
+            Fmt::Pdf => pl_draw::pdf::pdf_at(&built.scene, width_mm).0,
+            Fmt::Eps => pl_draw::eps::to_eps(&built.scene, self.figure_scale(&built.scene))
+                .0
+                .into_bytes(),
         };
 
         let mut note = Vec::new();
@@ -3500,7 +3522,7 @@ impl App {
         };
         let set = self.enzyme_set;
         let (sc, drawn) = pl_draw::scene(d.molecule(), Self::figure_options(d, set));
-        let (eps, _) = pl_draw::eps::to_eps(&sc, 1.0);
+        let (eps, _) = pl_draw::eps::to_eps(&sc, self.figure_scale(&sc));
         match std::fs::write(&path, eps) {
             Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
             Err(e) => self.error = Some(format!("{}: {e}", path.display())),
@@ -4733,6 +4755,69 @@ impl App {
                     let showing_gel = self.central_view == CentralView::Gel;
                     let subject = if showing_gel { "Gel" } else { "Map" };
                     menu_with_caret(ui, "Export figure", |ui| {
+                        // THE PRINTED WIDTH, above the three formats, because
+                        // it applies to all of them. `pl_draw::page` has
+                        // carried the journal presets, the physical width and
+                        // `min_dpi_line_art` since it was written, and the GUI
+                        // called none of it — figure sizing was CLI-only, so a
+                        // user exporting from the app got a 720 pt square and
+                        // scaled it by hand in Illustrator.
+                        ui.label(
+                            RichText::new("Printed width")
+                                .color(pal(ui).muted)
+                                .size(11.0),
+                        );
+                        let mut mm = self.layout.figure_mm;
+                        if ui
+                            .selectable_label(mm.is_none(), "as drawn")
+                            .on_hover_text(
+                                "No physical size. The figure carries its own units and                                  whatever opens it decides how big it is.",
+                            )
+                            .clicked()
+                        {
+                            mm = None;
+                        }
+                        for p in pl_draw::page::PRESETS {
+                            for (label, w) in
+                                [("single", p.single_mm), ("double", p.double_mm)]
+                            {
+                                let on = mm.is_some_and(|m| (m - w).abs() < 0.01);
+                                if ui
+                                    .selectable_label(
+                                        on,
+                                        format!("{} · {label} · {w:.0} mm", p.name),
+                                    )
+                                    .on_hover_text(format!(
+                                        "Type must stay at or above {:.1} pt, and line art                                          wants {:.0} dpi if it is ever rasterised.",
+                                        p.min_font_pt, p.min_dpi_line_art
+                                    ))
+                                    .clicked()
+                                {
+                                    mm = Some(w);
+                                }
+                            }
+                        }
+                        if mm != self.layout.figure_mm {
+                            self.layout.figure_mm = mm;
+                        }
+                        // WHAT IT WILL ACTUALLY BE, measured off the scene that
+                        // is about to be written rather than promised. The
+                        // minimum type size is a real refusal in `pl export`
+                        // and must not be silent here.
+                        if let (Some(w), Some(d)) = (mm, self.bench.get()) {
+                            let set = self.enzyme_set;
+                            let (sc, _) = pl_draw::scene(d.molecule(), Self::figure_options(d, set));
+                            let fit = pl_draw::page::Fit::to_width_mm(&sc, w);
+                            let mut say = format!(
+                                "{:.0} x {:.0} mm at {:.2}x",
+                                fit.width_mm, fit.height_mm, fit.scale
+                            );
+                            if let Some(pt) = fit.min_font_pt {
+                                say.push_str(&format!("; smallest type {pt:.1} pt"));
+                            }
+                            ui.label(RichText::new(say).size(10.5).color(pal(ui).muted));
+                        }
+                        ui.separator();
                         for (fmt, why) in [
                             (Fmt::Svg, "Vector, for a figure"),
                             (Fmt::Pdf, "The same picture, for a manuscript"),
@@ -14214,6 +14299,71 @@ mod tests {
             ),
             "the manual closed itself, or turned a page, because a different plasmid \
              came to the front"
+        );
+    }
+
+    /// The GUI's figure at a printed width is byte-for-byte the CLI's.
+    ///
+    /// PROVEN TO FAIL against 7ba75bc, in two ways at once. `pl_draw::page` —
+    /// the journal presets, the physical width, `min_dpi_line_art` — had ZERO
+    /// callers outside its own file, so the GUI built a bare `Options` and
+    /// figure sizing was CLI-only. And `svg_of` and `to_pdf` took no scale at
+    /// all, so even a control wired to them would have moved the EPS and left
+    /// the other two at 720 pt: a "Printed width" that lies for two of the three
+    /// formats it sits above.
+    ///
+    /// BYTE-FOR-BYTE against the same call the CLI makes, because "deterministic
+    /// output" is this project's stated selling point and a GUI that produced a
+    /// nearly-identical figure would break it in the way nobody notices — two
+    /// panels of one figure, exported from two surfaces, that do not line up.
+    #[test]
+    fn the_apps_figure_is_the_same_bytes_as_the_command_lines() {
+        let mut app = App::blank();
+        app.bench.set(Document::of_molecule(pl_core::Molecule {
+            name: "pFig".into(),
+            seq: b"AAAAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCCGGGG".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        }));
+        // Cloned out of the borrow, so the layout can be changed between
+        // renders without holding the document.
+        let mol = app.document().expect("a molecule").molecule().clone();
+        let opts = App::figure_options(app.document().unwrap(), app.enzyme_set);
+
+        // Nature, single column.
+        let mm = pl_draw::page::preset("nature")
+            .expect("a shipped preset")
+            .single_mm;
+        app.layout.figure_mm = Some(mm);
+
+        let (gui_svg, _) = pl_draw::circular_svg_at(&mol, opts.clone(), app.layout.figure_mm);
+        let (cli_svg, _) = pl_draw::circular_svg_at(&mol, opts.clone(), Some(mm));
+        assert_eq!(gui_svg, cli_svg, "the two surfaces disagree about 89 mm");
+        assert!(
+            gui_svg.contains("mm\""),
+            "the app's SVG carries no physical size at all"
+        );
+
+        // ...and with no width chosen, exactly what the app has always written.
+        app.layout.figure_mm = None;
+        let (plain, _) = pl_draw::circular_svg_at(&mol, opts.clone(), app.layout.figure_mm);
+        let (old, _) = pl_draw::circular_svg(&mol, opts.clone());
+        assert_eq!(
+            plain, old,
+            "choosing no width changed the output, so every figure exported before \
+             today would now come out different"
+        );
+
+        // THE EPS TAKES ITS SCALE THE OTHER WAY and must still land on the same
+        // size. It is the one format whose coordinates are multiplied rather
+        // than wrapped in a viewBox or a matrix, so it is the one that can
+        // silently disagree.
+        app.layout.figure_mm = Some(mm);
+        let (sc, _) = pl_draw::scene(&mol, opts);
+        let fit = pl_draw::page::Fit::to_width_mm(&sc, mm);
+        assert!(
+            (app.figure_scale(&sc) - fit.scale).abs() < 1e-12,
+            "the EPS would be written at a different scale from the SVG and the PDF"
         );
     }
 

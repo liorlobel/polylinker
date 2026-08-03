@@ -262,14 +262,33 @@ fn pdf_string(bytes: &[u8]) -> String {
 /// One page, one font, no compression — the content stream stays readable, so
 /// `strings map.pdf` shows the drawing commands and a reviewer can check the
 /// file without a library. A plasmid map is tens of kilobytes either way.
-pub fn to_pdf(scene: &Scene) -> (Vec<u8>, Report) {
+/// The scene as PDF, at a physical width.
+///
+/// `Some(mm)` sets the MediaBox to that size in points and prefixes the content
+/// stream with a `cm` scale matrix, so every coordinate below is written exactly
+/// as it always was and the PAGE is what changes. Rewriting the numbers instead
+/// would round a thousand of them, and this file's whole geometry is checked
+/// against the SVG's by `tests/agreement.rs` — two renderers that round
+/// differently stop agreeing.
+///
+/// `None` is what [`to_pdf`] passes, and is byte-identical to what this crate
+/// has always emitted: every existing test passes untouched, which is the proof
+/// that adding the option moved nothing.
+pub fn pdf_at(scene: &Scene, width_mm: Option<f64>) -> (Vec<u8>, Report) {
+    let fit = width_mm.map(|mm| crate::page::Fit::to_width_mm(scene, mm));
+    let scale = fit.as_ref().map(|f| f.scale).unwrap_or(1.0);
     let mut report = Report::default();
     let h = scene.height;
     // PDF's origin is bottom-left with y up; the scene is top-left with y down.
     let fy = |y: f64| h - y;
 
     let mut c = String::new();
-    c.push_str("q\n1 J 1 j\n"); // round caps and joins, matching the SVG default look
+    c.push_str("q\n");
+    if let Some(f) = &fit {
+        // The whole of the physical sizing, in one matrix.
+        c.push_str(&format!("{} 0 0 {} 0 0 cm\n", n(f.scale), n(f.scale)));
+    }
+    c.push_str("1 J 1 j\n"); // round caps and joins, matching the SVG default look
 
     for item in &scene.items {
         match item {
@@ -456,8 +475,8 @@ pub fn to_pdf(scene: &Scene) -> (Vec<u8>, Report) {
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
              /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>",
-            n(scene.width),
-            n(scene.height)
+            n(scene.width * scale),
+            n(scene.height * scale)
         )
         .as_bytes(),
     );
@@ -503,6 +522,11 @@ pub fn to_pdf(scene: &Scene) -> (Vec<u8>, Report) {
         .as_bytes(),
     );
     (out, report)
+}
+
+/// The scene as PDF at its own scene units. See [`pdf_at`].
+pub fn to_pdf(scene: &Scene) -> (Vec<u8>, Report) {
+    pdf_at(scene, None)
 }
 
 #[cfg(test)]
@@ -799,6 +823,65 @@ mod file_tests {
             "declared {declared}, actual {}",
             e - s + 1
         );
+    }
+
+    /// A printed width must move ALL THREE formats, or the control lies.
+    ///
+    /// PROVEN TO FAIL against 7ba75bc: `to_eps` took a scale and `svg_of` and
+    /// `to_pdf` did not, so a "printed width" control would have resized the
+    /// EPS and left the SVG and the PDF at their scene units. A user setting
+    /// "Nature, single column" and exporting a PDF would get a 720 pt square,
+    /// and nothing on screen would say so — the defect class `docs/PLAN.md`
+    /// item 33 is about, a control whose effect is invisible.
+    ///
+    /// 89 mm is Nature's single column. The assertions are on the PAGE — the
+    /// SVG root's `width`, the PDF's MediaBox — because that is what a journal's
+    /// submission system measures, and because the geometry inside deliberately
+    /// does not move: the SVG keeps its `viewBox` and the PDF gets a `cm`
+    /// matrix, so `tests/agreement.rs` still compares two renderers that round
+    /// identically.
+    #[test]
+    fn a_printed_width_reaches_svg_and_pdf_and_not_only_eps() {
+        let sc = sample();
+        let mm = 89.0;
+        let fit = crate::page::Fit::to_width_mm(&sc, mm);
+        let want_pt = mm / crate::page::MM_PER_INCH * crate::page::PT_PER_INCH;
+        assert!(
+            (fit.width_pt - want_pt).abs() < 0.5,
+            "the fixture's own arithmetic: {} vs {want_pt}",
+            fit.width_pt
+        );
+
+        // SVG: a real size on the root, and the drawing untouched behind it.
+        let svg = crate::svg_at(&sc, Some(mm));
+        assert!(
+            svg.contains(r#"width="89mm""#),
+            "the SVG carries no physical width: {}",
+            &svg[..svg.find('>').unwrap_or(200).min(svg.len())]
+        );
+        assert!(
+            svg.contains(&format!(r#"viewBox="0 0 {} {}""#, sc.width, sc.height)),
+            "the viewBox moved, so the geometry was rescaled rather than the page"
+        );
+
+        // PDF: the MediaBox in points, and a scale matrix rather than rewritten
+        // coordinates.
+        let (bytes, _) = pdf_at(&sc, Some(mm));
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("/MediaBox [0 0 252.28"),
+            "the PDF page is not 89 mm wide"
+        );
+        assert!(
+            text.contains(" 0 0 ") && text.contains(" cm"),
+            "the PDF has no scale matrix, so its coordinates were rewritten"
+        );
+
+        // And the control: with no width asked for, both are exactly what this
+        // crate has always emitted. That is what lets every other test in the
+        // file stand unchanged as the proof.
+        assert_eq!(crate::svg_at(&sc, None), crate::svg_of(&sc));
+        assert_eq!(pdf_at(&sc, None).0, to_pdf(&sc).0);
     }
 
     #[test]
