@@ -56,6 +56,18 @@ use std::path::{Path, PathBuf};
 use crate::recover::{escape, unescape};
 
 const HEADER: &str = "polylinker-session 1";
+/// The same list, saved deliberately under a name the user chose.
+///
+/// A SECOND HEADER AND NOT A SECOND CODEC. A project and a session hold exactly
+/// the same thing — which files were open, and which was on screen — and the
+/// only difference is that one was asked for. Two codecs for one list would be
+/// two places for the escaping to drift, and this module's own doc records that
+/// trap costing two directories of a Windows path twice already.
+///
+/// It is a distinct header because the two files mean different things to the
+/// program: a session is claimed, consumed and deleted, and a project is opened
+/// as many times as the user likes and never touched.
+const PROJECT_HEADER: &str = "polylinker-project 1";
 const SEPARATOR: &str = "--";
 
 /// What was on the bench when this was written.
@@ -74,6 +86,11 @@ pub struct Session {
     pub active: Option<usize>,
     /// When this was written, in seconds since the Unix epoch.
     pub saved_at: u64,
+    /// The name the user gave this, if it was saved as a project.
+    ///
+    /// `None` for the automatic session file, which nobody named and nobody
+    /// asked for.
+    pub name: Option<String>,
     /// The window that wrote this has since closed.
     ///
     /// Without it, freshness alone locks a user out of their own bench: quit and
@@ -91,8 +108,15 @@ pub struct Session {
 /// Encode a session. One `key: value` header, then one path per line.
 pub fn encode(s: &Session) -> String {
     let mut out = String::with_capacity(64 + s.open.len() * 64);
-    out.push_str(HEADER);
+    out.push_str(if s.name.is_some() {
+        PROJECT_HEADER
+    } else {
+        HEADER
+    });
     out.push('\n');
+    if let Some(n) = &s.name {
+        out.push_str(&format!("name: {}\n", escape(n)));
+    }
     out.push_str(&format!("saved: {}\n", s.saved_at));
     out.push_str(&format!("withheld: {}\n", s.withheld));
     if let Some(i) = s.active {
@@ -117,7 +141,8 @@ pub fn encode(s: &Session) -> String {
 /// damaged tab list holds nothing anyone would miss.
 pub fn decode(text: &str) -> Option<Session> {
     let mut lines = text.lines();
-    if lines.next() != Some(HEADER) {
+    let head = lines.next();
+    if head != Some(HEADER) && head != Some(PROJECT_HEADER) {
         return None;
     }
     let mut s = Session::default();
@@ -136,6 +161,7 @@ pub fn decode(text: &str) -> Option<Session> {
             "withheld" => s.withheld = v.parse().unwrap_or(0),
             "active" => s.active = v.parse().ok(),
             "exit" => s.closed = v == "closed",
+            "name" => s.name = Some(unescape(v)),
             _ => {}
         }
     }
@@ -265,6 +291,7 @@ mod tests {
             withheld: 2,
             active: Some(1),
             saved_at: 1_785_000_000,
+            name: None,
             closed: false,
         }
     }
@@ -295,6 +322,47 @@ mod tests {
         // a non-atomic write can leave. It must read as no list, never as an
         // empty bench that would then be restored over the user's tabs.
         assert_eq!(decode(&format!("{HEADER}\nwithheld: 0\n")), None);
+    }
+
+    /// A project is the same list under a name, and must not be mistaken for a
+    /// session.
+    ///
+    /// PROVEN TO FAIL against 806478a, where there is no `name` at all. The two
+    /// files hold the same thing and mean different things: a session is
+    /// claimed, consumed and deleted on the next launch, and a project is opened
+    /// as many times as the user likes and never touched. A project picked up by
+    /// `claim` would be silently eaten the first time Polylinker started.
+    #[test]
+    fn a_named_project_round_trips_and_is_never_claimed_as_a_session() {
+        let named = Session {
+            name: Some("June cloning".into()),
+            ..sample()
+        };
+        let back = decode(&encode(&named)).expect("a project");
+        assert_eq!(back, named, "the name did not survive the round trip");
+        assert!(
+            encode(&named).starts_with("polylinker-project"),
+            "a project is written under the session header"
+        );
+        assert!(
+            encode(&sample()).starts_with("polylinker-session"),
+            "a session is written under the project header"
+        );
+
+        // And a project sitting in the state directory is not a bench to claim.
+        // `claim` looks for `session-*`; a `.plproj` lives wherever the user put
+        // it and is never named that, so the guard is the NAME rather than the
+        // header — asserted here so that a future `claim` which scanned more
+        // widely would have to face this.
+        let d = dir("project");
+        write(&d.join("June.plproj"), &named).unwrap();
+        assert_eq!(
+            claim(&d, 9_000_000),
+            None,
+            "a saved project was consumed as if it were an abandoned session"
+        );
+        assert!(d.join("June.plproj").exists(), "and it must still be there");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The rule that stops a second window stealing the first one's bench.
@@ -434,6 +502,7 @@ mod tests {
                     withheld: 0,
                     active: None,
                     saved_at: at,
+                    name: None,
                     closed: true,
                 },
             )

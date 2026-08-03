@@ -1645,6 +1645,7 @@ impl App {
             withheld,
             active,
             saved_at: unix_now(),
+            name: None,
             // Set by `record_session`, which is the only caller that knows.
             closed: false,
         }
@@ -1684,6 +1685,92 @@ impl App {
         // about their molecule.
         if session::write(&path, &now).is_ok() {
             self.session_written = Some(now);
+        }
+    }
+
+    /// Write the bench to a file the user names.
+    ///
+    /// The same list the automatic session file holds, under a name and an
+    /// extension. NOT A NEW FORMAT: a project and a session are the same
+    /// question — which files were open, and which was on screen — and only one
+    /// of them was asked for. Two codecs for one list would be two places for
+    /// the path escaping to drift, and `session.rs` records that trap costing
+    /// two directories of a Windows path twice already.
+    ///
+    /// It holds PATHS and no molecule, exactly as the session file does, so a
+    /// project is a pointer to the user's own files rather than a second copy of
+    /// them that can go stale. That is the trade and it is stated in the status:
+    /// move a plasmid and the project reports it missing rather than silently
+    /// opening a version from a week ago.
+    fn save_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Save project")
+            .add_filter("Polylinker project", &["plproj"])
+            .set_file_name("bench.plproj")
+            .save_file()
+        else {
+            return;
+        };
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "project".into());
+        let mut s = self.session_now();
+        s.name = Some(name.clone());
+        // `closed` says nothing here and must not be written: it is the flag
+        // that lets a LAUNCH claim an abandoned session, and a project is never
+        // claimed. Left false, which is what `session_now` gives.
+        match session::write(&path, &s) {
+            Ok(()) => {
+                self.status = format!(
+                    "saved {name} — {} file(s){}",
+                    s.open.len(),
+                    if s.withheld > 0 {
+                        format!(
+                            ", {} not in it because they have never been saved",
+                            s.withheld
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Open a project, adding its documents to the bench.
+    ///
+    /// ADDING, not replacing. Every other open path in this program adds a tab
+    /// since Stage 1, which is the whole reason opening a file can no longer
+    /// cost anybody their work, and a project that closed the bench would be the
+    /// one exception — the one place a click still destroys unsaved edits.
+    /// `restore_session` already skips what is open, so opening a project twice
+    /// is not twelve tabs.
+    fn open_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open project")
+            .add_filter("Polylinker project", &["plproj"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(s) = std::fs::read_to_string(&path)
+            .ok()
+            .as_deref()
+            .and_then(session::decode)
+        else {
+            // Named rather than silent, unlike the automatic session file. That
+            // one is nobody's data and its absence means nothing; this one the
+            // user made on purpose and went looking for.
+            self.error = Some(format!("{}: not a Polylinker project", path.display()));
+            return;
+        };
+        let n = s.open.len();
+        let name = s.name.clone();
+        self.restore_session(s);
+        if let Some(name) = name {
+            self.status = format!("opened {name} — {n} file(s) listed; {}", self.status);
         }
     }
 
@@ -4416,6 +4503,7 @@ impl App {
                 // and a preference that disappears whenever one document is open
                 // is one nobody can find at the moment they want it — which is
                 // usually right after a launch restored six.
+                let (mut save, mut load) = (false, false);
                 menu_with_caret(ui, "Workspace", |ui| {
                     let mut on = self.layout.restore_tabs;
                     if ui
@@ -4439,6 +4527,31 @@ impl App {
                             "Polylinker will start with an empty bench".into()
                         };
                     }
+                    ui.separator();
+                    // A NAMED project, beside the automatic one, because the two
+                    // answer different questions. The session file is "put my
+                    // bench back"; a project is "this set of plasmids is a
+                    // piece of work I will come back to", and a user with three
+                    // of those needs to be able to say which.
+                    if ui
+                        .button("Save project…")
+                        .on_hover_text(
+                            "Writes the list of open files under a name. Paths only — no                              copy of any molecule is made, so the project follows your                              files rather than duplicating them.",
+                        )
+                        .clicked()
+                    {
+                        save = true;
+                        ui.close();
+                    }
+                    if ui
+                        .button("Open project…")
+                        .on_hover_text("Adds the project's documents to the bench.")
+                        .clicked()
+                    {
+                        load = true;
+                        ui.close();
+                    }
+                    ui.separator();
                     // What is actually in the list, so the sentence above is
                     // checkable rather than a promise. A never-saved document
                     // cannot be in it, and this is where that is least
@@ -4450,6 +4563,16 @@ impl App {
                     }
                     ui.label(RichText::new(said).color(pal(ui).muted).size(11.0));
                 });
+                // OUTSIDE the menu closure, which borrows `self` and raises a
+                // native file dialog if either of these is run inside it — a
+                // modal OS window opened from inside a paint pass, which is the
+                // same shape of mistake as writing the clipboard there.
+                if save {
+                    self.save_project();
+                }
+                if load {
+                    self.open_project();
+                }
                 let has = self.document().is_some();
                 ui.add_enabled_ui(has, |ui| {
                     menu_with_caret(ui, "Save", |ui| {
@@ -13029,6 +13152,7 @@ mod tests {
             withheld: 0,
             active: Some(0),
             saved_at: 1,
+            name: None,
             closed: true,
         });
         assert_eq!(
