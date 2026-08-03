@@ -1290,6 +1290,29 @@ pub fn circular_pdf_at(
 /// `None` is what [`svg_of`] passes and is byte-identical to what this crate has
 /// always emitted, which is the proof that adding the option moved nothing: the
 /// existing tests pass untouched.
+///
+/// # `xml:space`
+///
+/// The root says `preserve`, and it has to. A cut-site label is `EcoRI  7,530`
+/// — a name, **two** spaces, a coordinate — and [`fit_label`] parses it back
+/// apart on exactly that pair to drop a coordinate whole, so the run is a
+/// delimiter and not decoration. XML's default is `xml:space="default"`, under
+/// which a renderer
+/// collapses every run of whitespace to one space. So the SVG drew `EcoRI
+/// 7,530` while [`pdf::text_width_in`] had measured `EcoRI  7,530`, and the PDF
+/// and the EPS of the same figure drew both spaces, because neither format
+/// collapses anything.
+///
+/// Measured, at 12 pt, with resvg rendering this crate's own output: the label
+/// inked 41 px as shipped and 44 px with `preserve` — the missing 3.34 pt of a
+/// space. `Anchor::Middle` put half of that error on each side, so every
+/// centred site label on every SVG map sat 1.67 pt off from where the PDF put
+/// it. This is the same defect class as the `font-family` one recorded in
+/// [`pdf`]: a string measured one way and drawn another, in the format most
+/// people look at first.
+///
+/// On the root rather than on each `<text>` because it inherits, and because
+/// the root is already where this file states document-wide typography.
 pub fn svg_at(sc: &Scene, width_mm: Option<f64>) -> String {
     let mut body = String::new();
     for item in &sc.items {
@@ -1365,7 +1388,7 @@ pub fn svg_at(sc: &Scene, width_mm: Option<f64>) -> String {
         None => (n(sc.width).to_string(), n(sc.height).to_string()),
     };
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {} {}" font-family="Helvetica, 'Nimbus Sans', Arial, sans-serif" stroke-linecap="round" stroke-linejoin="round"><title>{}</title>{body}</svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {} {}" font-family="Helvetica, 'Nimbus Sans', Arial, sans-serif" stroke-linecap="round" stroke-linejoin="round" xml:space="preserve"><title>{}</title>{body}</svg>"##,
         n(sc.width),
         n(sc.height),
         esc(&sc.title)

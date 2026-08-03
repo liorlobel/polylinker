@@ -1013,6 +1013,78 @@ mod file_tests {
         );
     }
 
+    /// A cut-site label's two spaces must survive into all three formats.
+    ///
+    /// PROVEN TO FAIL against 7bf5aad. `EcoRI  7,530` is a name, two spaces and
+    /// a coordinate; `fit_label` splits it on `rsplit_once("  ")` to drop the
+    /// coordinate whole rather than truncate into it, so the pair is a
+    /// delimiter. `text_width_in` measured both spaces, the PDF and the EPS
+    /// drew both — and the SVG said nothing about `xml:space`, whose XML
+    /// default is `default`, under which every renderer collapses the run to
+    /// one space.
+    ///
+    /// So the SVG drew a label 3.34 pt narrower at 12 pt than the number the
+    /// layout had cropped and centred it against, and narrower than the PDF of
+    /// the same scene. `Anchor::Middle` split that error across both sides:
+    /// 1.67 pt of offset on every centred site label on every SVG map this tool
+    /// has produced. Same class as the `font-family` defect eight lines above —
+    /// measured in one thing, drawn in another — in the format most people open
+    /// first.
+    ///
+    /// Measured with resvg over this crate's own output: 41 px of ink as
+    /// shipped, 44 px with `preserve`.
+    ///
+    /// Asserted on BOTH back ends, because the claim is that they agree about
+    /// one scene. Checking the SVG alone would pass while the PDF quietly
+    /// stopped emitting the second space. **What this cannot check is a
+    /// renderer that ignores `xml:space`** — it is a structural test, and the
+    /// px numbers above are the evidence that the attribute does the work.
+    #[test]
+    fn a_cut_site_labels_two_spaces_reach_the_page_in_both_formats() {
+        const LABEL: &str = "EcoRI  7,530";
+        let mut sc = sample();
+        sc.items.push(Item::Text {
+            x: 100.0,
+            y: 80.0,
+            size: 12.0,
+            anchor: Anchor::Middle,
+            color: "#22262a".into(),
+            bold: false,
+            text: LABEL.into(),
+        });
+
+        // The layout measured both spaces, which is what makes dropping one a
+        // disagreement rather than a preference.
+        let two = text_width_in(LABEL, 12.0, false);
+        let one = text_width_in("EcoRI 7,530", 12.0, false);
+        assert!(
+            (two - one - 12.0 * 278.0 / 1000.0).abs() < 1e-9,
+            "the width tables do not price a space at 278/1000 em: {two} vs {one}"
+        );
+
+        let svg = crate::svg_of(&sc);
+        assert!(
+            svg.contains(LABEL),
+            "the SVG does not carry the label's two spaces at all"
+        );
+        let root = &svg[..svg.find('>').expect("a root element")];
+        assert!(
+            root.contains(r#"xml:space="preserve""#),
+            "the SVG leaves xml:space at its default, so a renderer collapses \
+             `EcoRI  7,530` to `EcoRI 7,530` and draws it {} pt narrower than \
+             the layout measured: {root}",
+            two - one
+        );
+
+        // And the PDF still draws both, so the two formats agree.
+        let (bytes, _) = to_pdf(&sc);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains(LABEL),
+            "the PDF stopped emitting the second space, so the two now disagree \
+             the other way"
+        );
+    }
+
     #[test]
     fn a_name_that_helvetica_cannot_spell_is_reported() {
         let mut sc = sample();
