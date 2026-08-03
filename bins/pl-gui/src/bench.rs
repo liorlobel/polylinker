@@ -49,6 +49,12 @@ pub struct DocView {
     pub selected: Option<usize>,
     pub hot: Option<usize>,
     pub hot_shown: Option<usize>,
+    /// The find bar: the query, its hits and which one is selected.
+    ///
+    /// PER TAB, and the coordinates are why. "3 of 7" beside a molecule that has
+    /// neither is a sentence about another plasmid, and the selection the hit
+    /// sets is an index into bases this tab may not have.
+    pub find: crate::find::Find,
     /// The Features tab's search box. `adopt` never reset it, so it survived a
     /// document swap lighting nothing — a bug with one document, and a leak
     /// with two.
@@ -105,6 +111,7 @@ impl Default for DocView {
             selected: None,
             hot: None,
             hot_shown: None,
+            find: crate::find::Find::default(),
             filter: String::new(),
             enz_strip: false,
             orf_strip: false,

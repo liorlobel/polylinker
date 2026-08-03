@@ -15,6 +15,7 @@ mod clone;
 mod design;
 mod doc;
 mod featedit;
+mod find;
 mod gel;
 mod library;
 mod map;
@@ -1092,6 +1093,14 @@ struct App {
     /// somewhere plausible, nothing errors, and it happens on the second file
     /// the user opens.
     doc_generation: u64,
+    /// The find bar for the tab on screen. Parked in `bench::DocView`.
+    find: find::Find,
+    /// Put the caret in the query box on the next frame.
+    ///
+    /// Not in `DocView`: it is a fact about this window's keyboard for one
+    /// frame, not about the document. One-shot, because a widget that requests
+    /// focus every frame cannot be tabbed away from.
+    find_focus: bool,
     /// Features by position, lanes, and the enzyme cuts — see `annot.rs`.
     annot: annot::AnnotIndex,
     /// The `(version, filter, digest-is-done)` the cut list was built for.
@@ -2100,6 +2109,8 @@ impl App {
             feature_editor_opens: 0,
             layout: settings::Layout::default(),
             doc_generation: 0,
+            find: find::Find::default(),
+            find_focus: false,
             annot: annot::AnnotIndex::default(),
             cuts_for: None,
             annot_scratch: Vec::new(),
@@ -4198,6 +4209,7 @@ impl eframe::App for App {
         if keys.save && self.document().is_some() {
             self.export(false);
         }
+        self.find_keys(&keys);
 
         // TAB NAVIGATION, behind the same guards as the other accelerators —
         // `asking()` and `text_edit_focused()` — so Ctrl+W typed into the
@@ -4278,6 +4290,10 @@ impl eframe::App for App {
         self.hot_shown = std::mem::take(&mut self.hot);
         self.top_bar(ui);
         self.tab_strip(ui);
+        // Between the tab strip and the panels, so it is a band across the
+        // window rather than something inside one tab: find searches the
+        // molecule, not the list you happen to be looking at.
+        self.find_bar(ui);
         self.side_panel(ui);
         self.central(ui);
         self.paste_dialog(&ctx);
@@ -4347,6 +4363,32 @@ struct Shortcuts {
     /// field was computed from `cmd` rather than `edits`. Both existing guard
     /// tests now assert `save` as well, so the answer is pinned either way.
     save: bool,
+    /// Ctrl+F: open the find bar and put the caret in it.
+    ///
+    /// Guarded exactly as the other four are — a Ctrl+F typed into the Features
+    /// filter belongs to that box.
+    find: bool,
+    /// F3 / Shift+F3: the next and previous hit.
+    ///
+    /// READ BEFORE THE TEXT-BOX GUARD, and that is the whole reason the guard
+    /// grew a second exit rather than a third condition. Stepping through hits
+    /// is what you do WHILE the query box has focus, so a `find_next` that stood
+    /// down for a focused text box would stand down for the only text box it
+    /// exists to serve.
+    ///
+    /// F3 and not Enter: `Enter` belongs to whichever box has it, and the find
+    /// box takes its own through `Response::lost_focus`, so nothing global has
+    /// to guess whose Enter it was. The clone panel's two primer boxes made that
+    /// concrete — a global Enter would have jumped the find bar from inside
+    /// them.
+    find_next: bool,
+    find_prev: bool,
+    /// Escape: close the find bar.
+    ///
+    /// Also read before the guard, for the same reason and with the same
+    /// safety: egui clears focus on Escape and does not consume the event, so
+    /// one press both leaves the box and closes the bar.
+    close_find: bool,
 }
 
 impl App {
@@ -4409,8 +4451,32 @@ impl App {
         // silently stops being savable because of a stray keystroke is still a
         // poor answer to a question the user is looking at.
         let designing = self.design.is_some() || self.feature_edit.is_some();
-        if asking || typing {
+        // THE FIND KEYS ARE READ FIRST, above the text-box guard, and the two
+        // that are must be keys no text box wants: F3 and Escape. Stepping
+        // through hits is what a user does while the query box has focus, so a
+        // `find_next` that stood down for a focused text box would stand down
+        // for the one box it exists to serve. Escape is safe for the same
+        // reason and one more: egui clears focus on it and does not consume the
+        // event, so a single press leaves the box and closes the bar.
+        //
+        // `asking` still gates them. A modal is a modal.
+        if asking {
             return Shortcuts::default();
+        }
+        let (find_next, find_prev, close_find) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::F3) && !i.modifiers.shift,
+                i.key_pressed(egui::Key::F3) && i.modifiers.shift,
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if typing {
+            return Shortcuts {
+                find_next,
+                find_prev,
+                close_find,
+                ..Default::default()
+            };
         }
         // Ctrl+Z / Ctrl+Y, plus Ctrl+Shift+Z for the mac-shaped habit.
         ctx.input(|i| {
@@ -4428,6 +4494,10 @@ impl App {
                 // symptom — a save dialog opening mid-word while renaming a
                 // feature — would be blamed on the text box.
                 save: cmd && !i.modifiers.shift && i.key_pressed(egui::Key::S),
+                find: cmd && i.key_pressed(egui::Key::F),
+                find_next,
+                find_prev,
+                close_find,
             }
         })
     }
@@ -5356,11 +5426,12 @@ impl App {
                     // The one tab whose whole state is its own — `self.scan`,
                     // `self.lib_mode`, `self.lib_query`, `self.lib_absent` —
                     // and which needs no molecule to answer its question. It is
-                    // also the only cross-file search in the app, and there is
-                    // no in-document search at all, so it is the only sequence
-                    // search that exists. "Where did I put that plasmid?" is
-                    // the first thing asked, and it was asked in exactly the
-                    // state where the feature that answers it refused.
+                    // also the only CROSS-FILE search in the app. Ctrl+F now
+                    // searches the open molecule — the two answer different
+                    // questions and the distinction is worth keeping — but
+                    // "where did I put that plasmid?" is still the first thing
+                    // asked, and it was asked in exactly the state where the
+                    // feature that answers it refused.
                     Tab::Library => self.library_tab(ui),
                     // The second tab that answers with no molecule open, and
                     // for a different reason: `pl trace file.ab1` already
@@ -6709,6 +6780,171 @@ impl App {
         self.cuts_for = Some(key);
     }
 
+    /// Act on the find keys.
+    ///
+    /// A FUNCTION and not four lines in `ui`, for exactly the reason
+    /// `autosave_due_in` is one: `ui` takes an `eframe::Frame` and cannot be
+    /// driven from a test, so a decision written inline there is a decision no
+    /// test can reach. That is how the missing autosave wake-up arrived, and it
+    /// is written down beside it.
+    ///
+    /// Here rather than in the bar so the keys work whether or not the bar has
+    /// focus, and outside every paint closure: `refresh_find` settles the open
+    /// typing run, which is an op-log write.
+    fn find_keys(&mut self, keys: &Shortcuts) {
+        if keys.find && self.document().is_some() {
+            self.find.open = true;
+            self.find_focus = true;
+        }
+        if keys.close_find {
+            self.find.open = false;
+        }
+        if self.find.open && self.document().is_some() {
+            self.refresh_find();
+            if keys.find_next {
+                self.find.next();
+                self.show_hit();
+            }
+            if keys.find_prev {
+                self.find.prev();
+                self.show_hit();
+            }
+        }
+    }
+
+    /// Recompute the hits, if the query or the molecule has moved.
+    ///
+    /// Called from `App::ui`, OUTSIDE every paint closure, and that placement is
+    /// the point: `settle` commits the open typing run through `Document::apply`
+    /// — an op-log write — and a write buried in a layout pass is a thing this
+    /// file has found twice and written down both times.
+    ///
+    /// Memoised on `(query, seq_version)` because it runs every frame the bar is
+    /// open, and a 4.6 Mb genome is not a per-frame scan.
+    fn refresh_find(&mut self) {
+        // The run first, or the search reads bases the user has typed and the
+        // document does not yet have — and the selection a hit sets would then
+        // be measured against a molecule that is about to change under it.
+        self.settle();
+        let Some(d) = self.bench.get() else { return };
+        let key = (self.find.query.clone(), d.seq_version);
+        if self.find.done.as_ref() == Some(&key) {
+            return;
+        }
+        let (seq, circular) = (
+            d.molecule().seq.clone(),
+            d.molecule().topology.is_circular(),
+        );
+        self.find.search(&self.find.query.clone(), &seq, circular);
+        self.find.done = Some(key);
+    }
+
+    /// Select the current hit, so the map's arc and the sequence view follow.
+    ///
+    /// Through `SeqEdit::set_selection`, which is the one sanctioned setter:
+    /// assigning `sel` behind an open run's back leaves the highlight in place
+    /// and types at the run's start, which is the defect that made it the only
+    /// door.
+    fn show_hit(&mut self) {
+        let k = self.find.query.trim().len() as u64;
+        let Some(h) = self.find.hits.get(self.find.at).copied() else {
+            return;
+        };
+        let Some(d) = self.bench.get() else { return };
+        let n = d.molecule().span();
+        let circular = d.molecule().topology.is_circular();
+        if k == 0 || n == 0 {
+            return;
+        }
+        let sel = find::selection(h, k, n, circular);
+        let head = sel.head;
+        let Some(d) = self.bench.get_mut() else {
+            return;
+        };
+        self.edit.set_selection(d, sel, head);
+    }
+
+    /// The find bar. Nothing is decided here — see `refresh_find`.
+    fn find_bar(&mut self, ui: &mut Ui) {
+        if !self.find.open || self.document().is_none() {
+            return;
+        }
+        let mut step: i8 = 0;
+        let mut close = false;
+        egui::Panel::top(egui::Id::new("pl-find")).show(ui, |ui| {
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Find").strong());
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.find.query)
+                        .id(egui::Id::new("pl-find-query"))
+                        .hint_text("bases, IUPAC codes allowed")
+                        .desired_width(220.0),
+                );
+                // Focus is requested once, on the frame Ctrl+F was pressed, and
+                // not every frame — a widget that grabs focus continuously
+                // cannot be tabbed away from.
+                if self.find_focus {
+                    r.request_focus();
+                    self.find_focus = false;
+                }
+                // ENTER BELONGS TO THIS BOX and is taken here rather than
+                // globally, so nothing has to guess whose Enter it was. The
+                // clone panel's primer boxes make that concrete.
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    step = if ui.input(|i| i.modifiers.shift) {
+                        -1
+                    } else {
+                        1
+                    };
+                    r.request_focus();
+                }
+                if ui.button("Prev").on_hover_text("Shift+F3").clicked() {
+                    step = -1;
+                }
+                if ui.button("Next").on_hover_text("F3").clicked() {
+                    step = 1;
+                }
+                let tally = self.find.tally();
+                ui.label(RichText::new(tally).size(11.0).color(
+                    if self.find.hits.is_empty() && !self.find.query.trim().is_empty() {
+                        pal(ui).warn
+                    } else {
+                        pal(ui).muted
+                    },
+                ));
+                // WHAT WAS SEARCHED FOR, in the motif's own words. An empty
+                // result only reads as "searched and absent" if the question is
+                // visible — otherwise a mistyped query and a real absence look
+                // identical.
+                if let Some(what) = &self.find.what {
+                    ui.label(RichText::new(what).size(10.5).color(pal(ui).muted));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").on_hover_text("Escape").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(3.0);
+        });
+        // Applied after the closure, for the reason every other panel in this
+        // file applies its answer after: `step` moves the caret and the
+        // selection through `&mut self`.
+        if step != 0 {
+            if step > 0 {
+                self.find.next();
+            } else {
+                self.find.prev();
+            }
+            self.show_hit();
+        }
+        if close {
+            self.find.open = false;
+        }
+    }
+
+    /// Start, stop or leave the ORF scan alone, and reserve its strip from the
     /// Start, stop or leave the ORF scan alone, and reserve its strip from the
     /// last COMPLETED answer.
     ///
@@ -10015,6 +10251,7 @@ impl App {
             selected: self.selected.take(),
             hot: self.hot.take(),
             hot_shown: self.hot_shown.take(),
+            find: std::mem::take(&mut self.find),
             filter: std::mem::take(&mut self.filter),
             enz_strip: std::mem::take(&mut self.enz_strip),
             orf_strip: std::mem::take(&mut self.orf_strip),
@@ -10036,6 +10273,7 @@ impl App {
         self.selected = v.selected;
         self.hot = v.hot;
         self.hot_shown = v.hot_shown;
+        self.find = v.find;
         self.filter = v.filter;
         self.enz_strip = v.enz_strip;
         self.orf_strip = v.orf_strip;
@@ -13615,6 +13853,144 @@ mod tests {
         }
     }
 
+    /// Ctrl+F, twenty bases of a primer, and the map shows you where it lands.
+    ///
+    /// PROVEN TO FAIL against beb6c0e: there was no `Key::F` handler anywhere in
+    /// the binary, and the Library tab — "the only sequence search in the app"
+    /// by its own comment — searches an indexed FOLDER, not the molecule on
+    /// screen. Every competing plasmid editor has had this for thirty years and
+    /// it is the most-used key in the category.
+    ///
+    /// Driven end to end through `App::ui`'s own shortcut path: real Ctrl+F,
+    /// real typing, real F3. The assertion is on the SELECTION, because that is
+    /// what makes a hit useful — the map's arc and the sequence view both read
+    /// it, so a find that reported "1 of 2" and moved nothing would look right
+    /// in a screenshot and be useless in the hand.
+    #[test]
+    fn ctrl_f_finds_a_site_and_selects_it() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        // Two EcoRI sites, one at 5 and one at 25.
+        app.bench.set(Document::of_molecule(pl_core::Molecule {
+            name: "p".into(),
+            seq: b"AAAAGAATTCTTTTTTTTTTTTTTGAATTCAAAA".to_vec(),
+            topology: pl_core::Topology::Linear,
+            ..Default::default()
+        }));
+
+        let cmd = egui::Modifiers {
+            command: true,
+            ctrl: true,
+            ..Default::default()
+        };
+        let ctrl_f = egui::RawInput {
+            modifiers: cmd,
+            events: vec![egui::Event::Key {
+                key: egui::Key::F,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: cmd,
+            }],
+            ..window()
+        };
+        let _ = ctx.run_ui(ctrl_f, |ui| {
+            let keys = app.global_shortcuts(ui.ctx());
+            app.find_keys(&keys);
+        });
+        assert!(app.find.open, "Ctrl+F did not open the find bar");
+
+        // Type the query the way a user pastes one, then let a frame run.
+        app.find.query = "GAATTC".into();
+        let _ = ctx.run_ui(window(), |ui| {
+            let keys = app.global_shortcuts(ui.ctx());
+            app.find_keys(&keys);
+        });
+        assert_eq!(
+            app.find.hits.len(),
+            2,
+            "both EcoRI sites should be found: {:?}",
+            app.find.hits
+        );
+
+        // F3 steps to the next hit and selects it.
+        let f3 = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::F3,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..window()
+        };
+        let _ = ctx.run_ui(f3, |ui| {
+            let keys = app.global_shortcuts(ui.ctx());
+            app.find_keys(&keys);
+        });
+        let sel = app.edit.sel.expect("a hit selects its bases");
+        assert_eq!(
+            (sel.anchor.min(sel.head), sel.anchor.max(sel.head)),
+            (24, 30),
+            "the selection is not on the second GAATTC"
+        );
+        // And the map reads the same span, which is the whole point of setting
+        // the selection rather than reporting a number.
+        assert_eq!(
+            app.selection_segment().map(|s| (s.start, s.end)),
+            Some((25, 30)),
+            "the map would draw its arc somewhere else"
+        );
+    }
+
+    /// Escape closes the bar even though a text box has the keyboard.
+    ///
+    /// The find keys are read ABOVE `global_shortcuts`' text-box guard, which is
+    /// the one structural change this feature makes to the most-guarded function
+    /// in the file. It is safe only because the two keys it lifts are keys no
+    /// text box wants — F3 and Escape — and this pins that: Ctrl+Z typed into a
+    /// focused box must still belong to the box.
+    #[test]
+    fn the_find_keys_pass_a_focused_box_and_the_editing_keys_still_do_not() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        app.bench.set(edited_doc("x.fa", "AAAAGAATTCTTTT"));
+        // Simulate a focused text box by focusing one.
+        let id = egui::Id::new("a-box");
+        let mut text = String::new();
+        let _ = ctx.run_ui(window(), |ui| {
+            let r = ui.add(egui::TextEdit::singleline(&mut text).id(id));
+            r.request_focus();
+        });
+        assert!(ctx.text_edit_focused(), "the fixture needs a focused box");
+
+        let keys = app.global_shortcuts(&ctx);
+        assert!(
+            !keys.undo && !keys.redo && !keys.save && !keys.open && !keys.find,
+            "an editing shortcut reached the document from inside a text box"
+        );
+
+        let esc = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..window()
+        };
+        let mut got = Shortcuts::default();
+        let _ = ctx.run_ui(esc, |ui| {
+            let _ = ui.add(egui::TextEdit::singleline(&mut text).id(id));
+            got = app.global_shortcuts(ui.ctx());
+        });
+        assert!(
+            got.close_find,
+            "Escape could not close the find bar from the box it exists to serve"
+        );
+    }
+
     /// The History tab advertised a branch it would not let you visit.
     ///
     /// PROVEN TO FAIL against 13433a0: `history_tab` painted every row as a
@@ -13806,6 +14182,8 @@ mod tests {
         app.hot = Some(0);
         app.hot_shown = Some(0);
         app.filter = "A's filter".into();
+        app.find.open = true;
+        app.find.query = "GAATTC".into();
         app.enz_strip = true;
         app.orf_strip = true;
         app.doc_code = pl_core::translate::table(4).expect("table 4");
@@ -13823,6 +14201,10 @@ mod tests {
         assert_eq!(app.hot, None, "the highlight is an index into A");
         assert_eq!(app.hot_shown, None, "the highlight is an index into A");
         assert_eq!(app.filter, "", "the feature filter followed the tab switch");
+        assert!(
+            !app.find.open && app.find.query.is_empty(),
+            "A's search followed the tab switch, so \"3 of 7\" now sits beside a              molecule that has neither"
+        );
         assert!(!app.enz_strip && !app.orf_strip, "A's tracks are on B");
         assert_eq!(app.doc_code.id, 11, "A's genetic code is B's");
         assert_eq!(app.central_view, CentralView::Map, "A's view is B's");
@@ -13846,6 +14228,10 @@ mod tests {
         assert_eq!(app.hot, Some(0));
         assert_eq!(app.hot_shown, Some(0));
         assert_eq!(app.filter, "A's filter");
+        assert!(
+            app.find.open && app.find.query == "GAATTC",
+            "the search was lost"
+        );
         assert!(app.enz_strip && app.orf_strip);
         assert_eq!(app.doc_code.id, 4);
         assert_eq!(app.central_view, CentralView::Gel);
@@ -21270,8 +21656,8 @@ mod tests {
     /// strip is drawn above the guard — so the user could select the one surface
     /// that needs no molecule and be told there was nothing open.
     ///
-    /// The Library is the only cross-file search in the app and there is no
-    /// in-document search at all, so it is the only sequence search that exists.
+    /// The Library is the only CROSS-FILE search in the app. Ctrl+F searches the
+    /// open molecule; the two answer different questions.
     #[test]
     fn the_library_tab_opens_with_no_document() {
         let ctx = test_ctx();
