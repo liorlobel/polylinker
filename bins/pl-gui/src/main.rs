@@ -17,6 +17,7 @@ mod doc;
 mod featedit;
 mod find;
 mod gel;
+mod help;
 mod library;
 mod map;
 mod reads;
@@ -1043,6 +1044,14 @@ struct App {
     design: Option<design::Panel>,
     /// The cut-and-religate panel, when it is open.
     clone_panel: Option<clone::Panel>,
+    /// The Help window, when it is open.
+    ///
+    /// ON `App` AND NOT IN `bench::DocView`, deliberately. Every field there
+    /// belongs to one molecule — that is what `no_view_state_leaks_between_tabs`
+    /// enumerates — and a window describing no plasmid cannot describe the wrong
+    /// one. Parked per tab it would mean switching documents changed which page
+    /// of the manual you were reading.
+    help: Option<help::Panel>,
     /// What is open. See [`bench::Bench`].
     bench: bench::Bench,
     /// Tabs the user closed, newest last, for Ctrl+Shift+T.
@@ -2105,6 +2114,7 @@ impl App {
             dna_owner: None,
             design: None,
             clone_panel: None,
+            help: None,
             feature_edit: None,
             feature_editor_opens: 0,
             layout: settings::Layout::default(),
@@ -4210,6 +4220,9 @@ impl eframe::App for App {
             self.export(false);
         }
         self.find_keys(&keys);
+        if keys.help && self.help.is_none() {
+            self.help = Some(help::Panel::default());
+        }
 
         // TAB NAVIGATION, behind the same guards as the other accelerators —
         // `asking()` and `text_edit_focused()` — so Ctrl+W typed into the
@@ -4300,6 +4313,7 @@ impl eframe::App for App {
         self.clone_panel(&ctx);
         self.design_panel(&ctx);
         self.feature_editor(&ctx);
+        self.help_window(&ctx);
         // After the panels, so the question paints over the document it is
         // about. Lossiness first: it is raised BY the unsaved-changes modal's
         // save button, and `unsaved_modal` stands down while it is up so the
@@ -4383,6 +4397,12 @@ struct Shortcuts {
     /// them.
     find_next: bool,
     find_prev: bool,
+    /// F1: the Help window.
+    ///
+    /// Behind the same stand-down as the other four. NOT in the `designing`
+    /// guard set: that exists because an undo underneath a panel changes the
+    /// bases the panel describes, and this window describes no bases.
+    help: bool,
     /// Escape: close the find bar.
     ///
     /// Also read before the guard, for the same reason and with the same
@@ -4495,6 +4515,7 @@ impl App {
                 // feature — would be blamed on the text box.
                 save: cmd && !i.modifiers.shift && i.key_pressed(egui::Key::S),
                 find: cmd && i.key_pressed(egui::Key::F),
+                help: i.key_pressed(egui::Key::F1),
                 find_next,
                 find_prev,
                 close_find,
@@ -4755,6 +4776,34 @@ impl App {
                 // were not competing for the space, they were both taking it.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     egui::global_theme_preference_switch(ui);
+                    // HELP, at the right and not in the left run. That run is
+                    // the DOCUMENT's verbs — Open, Workspace, Save, Export,
+                    // Molecule — and its width was measured and fought over at
+                    // eight buttons against an 880 pt minimum, where "each one
+                    // is 9 pt in the wrong direction". Help is about the
+                    // application, and the application's other affordance, the
+                    // theme switch, is already here. Its width comes out of the
+                    // filename's elision budget, which is computed after this
+                    // cluster has spent.
+                    menu_with_caret(ui, "Help", |ui| {
+                        for (label, page) in [
+                            ("About Polylinker", help::Page::About),
+                            ("What it computes", help::Page::Topic("tm")),
+                            ("Licences and notices", help::Page::Licence(0)),
+                        ] {
+                            if ui.button(label).clicked() {
+                                self.help = Some(help::Panel { page });
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        ui.label(
+                            RichText::new(help::version())
+                                .monospace()
+                                .size(10.5)
+                                .color(pal(ui).muted),
+                        );
+                    });
                     if let Some(d) = self.document() {
                         if d.digest.is_running() {
                             ui.add(egui::Spinner::new().size(13.0));
@@ -6816,6 +6865,17 @@ impl App {
             self.enz_strip = self.annot.cut_count() > 0;
         }
         self.cuts_for = Some(key);
+    }
+
+    /// Draw the Help window, if it is open.
+    fn help_window(&mut self, ctx: &egui::Context) {
+        let Some(mut p) = self.help.take() else {
+            return;
+        };
+        let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
+        if help::show(ctx, &mut p, dark) {
+            self.help = Some(p);
+        }
     }
 
     /// Act on the find keys.
@@ -13187,11 +13247,11 @@ mod tests {
             .collect();
         assert_eq!(
             carets.len(),
-            4,
-            "{} disclosure carets painted in the toolbar, not 4. The four menus \
-             are Save, Workspace, Export map and Molecule; a button that opens a menu \
-             and does not say so is the defect `menu_with_caret` exists to fix. Bump \
-             this deliberately when a menu is added, never to make it pass.",
+            5,
+            "{} disclosure carets painted in the toolbar, not 5. The five menus \
+             are Save, Workspace, Export figure, Molecule and Help; a button that opens \
+             a menu and does not say so is the defect `menu_with_caret` exists to fix. \
+             Bump this deliberately when a menu is added, never to make it pass.",
             carets.len()
         );
         for c in &carets {
@@ -13295,7 +13355,14 @@ mod tests {
     fn the_vendored_faces_are_the_files_notice_records() {
         // The record itself. Compiled in so that a change to either side has to
         // be a change to both.
-        const NOTICE_TEXT: &str = include_str!("../../../NOTICE");
+        // THE FILE THE HELP WINDOW SHOWS, not a second `include_str!` of the
+        // same path. This test's whole argument is that a hash living in two
+        // places with nothing joining them stays green while one goes stale;
+        // two independent inclusions of NOTICE would be that defect again, one
+        // axis over — the test could pass against a file the user never sees.
+        let notice_text: &str = help::notice();
+        #[allow(non_snake_case)]
+        let NOTICE_TEXT = notice_text;
 
         for (what, bytes, len, want) in [
             (
@@ -14026,6 +14093,127 @@ mod tests {
         assert!(
             got.close_find,
             "Escape could not close the find bar from the box it exists to serve"
+        );
+    }
+
+    /// F1 opens the Help window, and every methods topic is on screen in it.
+    ///
+    /// PROVEN TO FAIL against 7ba75bc: there was no `Key::F1` handler, no Help
+    /// menu and no window. `pl-doc` compiled eleven methods paragraphs into this
+    /// binary and the GUI reached TWO of them, both write-only — the gel's
+    /// `Methods…` button and the cloning record put them on the clipboard and
+    /// never on screen. Nine were compiled in and reachable by no gesture at all.
+    ///
+    /// The assertion walks `pl_doc::TOPICS` rather than a list written here, so
+    /// a topic added later cannot go silently unsurfaced — which is the exact
+    /// bug this window exists to fix, arriving again by a different door.
+    #[test]
+    fn f1_opens_help_and_every_methods_topic_is_reachable_in_it() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        assert!(app.help.is_none(), "the premise");
+
+        let f1 = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::F1,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..window()
+        };
+        let _ = ctx.run_ui(f1, |ui| {
+            let keys = app.global_shortcuts(ui.ctx());
+            if keys.help && app.help.is_none() {
+                app.help = Some(help::Panel::default());
+            }
+        });
+        assert!(app.help.is_some(), "F1 did not open the Help window");
+
+        // Two frames: egui needs one to place the window before its contents
+        // are laid out where a scrape can find them.
+        let mut painted: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(window(), |ui| {
+                let c = ui.ctx().clone();
+                app.help_window(&c);
+            });
+            painted = flat_shapes(&out.shapes)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
+
+        // The version, which the GUI displayed nowhere at all.
+        assert!(
+            painted.iter().any(|t| t.contains("Polylinker 0.")),
+            "the About page shows no version: {painted:?}"
+        );
+
+        // EVERY TOPIC'S PARAGRAPH RENDERS, which is the claim that matters and
+        // is stronger than "its label is on screen". A label in a scrolling
+        // index proves only that it fits; this proves the body draws the topic's
+        // own methods text, including the limits sentence `pl-doc` requires
+        // every paragraph to carry.
+        for t in pl_doc::TOPICS {
+            app.help = Some(help::Panel {
+                page: help::Page::Topic(t.name),
+            });
+            let mut body: Vec<String> = Vec::new();
+            for _ in 0..2 {
+                let out = ctx.run_ui(window(), |ui| {
+                    let c = ui.ctx().clone();
+                    app.help_window(&c);
+                });
+                body = flat_shapes(&out.shapes)
+                    .iter()
+                    .filter_map(|s| match s {
+                        egui::Shape::Text(x) => Some(x.galley.text().to_string()),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            assert!(
+                body.iter().any(|p| p.contains(t.title)),
+                "{:?} does not draw its own title",
+                t.name
+            );
+            assert!(
+                body.iter().any(|p| p.contains("Limits:")),
+                "{:?} is drawn without the limits sentence that makes it citable: {body:?}",
+                t.name
+            );
+        }
+    }
+
+    /// The Help window survives a document switch, because it describes none.
+    ///
+    /// It is on `App` and deliberately NOT in `bench::DocView`. Every field
+    /// there belongs to one molecule — which is what
+    /// `no_view_state_leaks_between_tabs` enumerates — and a window that
+    /// describes no plasmid cannot describe the wrong one. Parked per tab, this
+    /// would mean switching documents changed which page of the manual you were
+    /// reading, and closed it entirely when you opened a file.
+    #[test]
+    fn the_help_window_is_not_per_document() {
+        let mut app = App::blank();
+        app.bench.set(edited_doc("a.fa", "AAAACCCCGGGGTTTT"));
+        app.help = Some(help::Panel {
+            page: help::Page::Topic("gel"),
+        });
+        app.bench.set(edited_doc("b.fa", "GGGGTTTTAAAACCCC"));
+        app.switch_tab(0);
+        assert!(
+            matches!(
+                app.help.as_ref().map(|h| &h.page),
+                Some(help::Page::Topic("gel"))
+            ),
+            "the manual closed itself, or turned a page, because a different plasmid \
+             came to the front"
         );
     }
 
