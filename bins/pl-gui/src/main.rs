@@ -8703,6 +8703,48 @@ impl App {
                 // not moved, so the rebuild has to be asked for.
                 self.annot.version = (u64::MAX, None);
             }
+            // THE THRESHOLD THE DISCLOSURE LINE ADVERTISES. `orf_min_aa` was
+            // persisted, validated `1..=100_000`, read by the scanner and
+            // WRITTEN BY NO WIDGET — so the strip announced "≥30 aa" about a
+            // number reachable only by hand-editing the layout file. Telling a
+            // user about a knob and not giving them one is worse than silence.
+            //
+            // Only while the strip is on: a control for a track nobody is
+            // looking at is noise, and this row is already dense.
+            //
+            // A `ComboBox` and not a `DragValue`, for the reason the code combo
+            // beside it is one — `DragValue` calls `request_focus` on click, so
+            // it would take the keyboard and `sequence_keys` bails while
+            // anything is focused. A short list of the thresholds people
+            // actually use also beats a spinner over 100,000 values.
+            if self.layout.orf_track {
+                let mut aa = self.layout.orf_min_aa;
+                egui::ComboBox::from_id_salt("pl-orf-min-aa")
+                    .selected_text(format!("≥{aa} aa"))
+                    .show_ui(ui, |ui| {
+                        for n in settings::ORF_MIN_AA_CHOICES {
+                            ui.selectable_value(&mut aa, *n, format!("{n} aa"));
+                        }
+                    });
+                if aa != self.layout.orf_min_aa {
+                    self.layout.orf_min_aa = aa;
+                    // NOTHING ELSE IS ASKED FOR, and that is a fact about
+                    // `start_orfs` rather than an omission. `refresh_orfs` runs
+                    // at the top of this tab on every frame and calls it with
+                    // `(code, min_aa)`; `start_orfs` returns early only while
+                    // those match what is already in flight, so changing the
+                    // number here IS the request. Cancelling the worker by hand
+                    // as well would spawn two scans of the same molecule.
+                    //
+                    // The repaint is not optional. `update` decides whether to
+                    // keep the frame loop alive from the workers that were
+                    // running when it began — before this panel drew — so the
+                    // scan started by this click has nothing scheduled to
+                    // collect it, and the strip would sit empty until the user
+                    // moved the mouse.
+                    ui.ctx().request_repaint();
+                }
+            }
         });
 
         // -- what the tracks have to disclose ----------------------------
@@ -10690,6 +10732,26 @@ fn gel_controls(ui: &mut Ui, g: &mut GelControls) {
     // The CLI's own usage line for this number, because it is the dominant
     // uncertainty in the model and hiding it would be dishonest.
     .on_hover_text("This is what decides whether two fragments resolve.");
+    // THE THIRD CONDITION, and the one that was in the cache key and in no
+    // control. `Conditions::run_mm` sets how far the dye front travelled, which
+    // is what the whole migration model is scaled against — so the gel on
+    // screen was always an 80 mm run whatever the user actually did, and the
+    // two neighbouring knobs advertised by their presence that the conditions
+    // were adjustable.
+    //
+    // 20 to 300 mm: a 20 mm run is a quick check on a mini-gel and a 300 mm one
+    // is a long analytical gel run overnight. Below 20 nothing has separated;
+    // past 300 the front is off the end of any real tank.
+    ui.add(
+        egui::DragValue::new(&mut g.conditions.run_mm)
+            .speed(1.0)
+            .range(20.0..=300.0)
+            .suffix(" mm run"),
+    )
+    .on_hover_text(
+        "How far the dye front ran. Everything else scales to it — a longer run \
+         separates the small fragments and pushes the large ones together.",
+    );
     if ui
         .selectable_label(g.inverted, "dark field")
         .on_hover_text("A stained gel as it photographs. The picture is still flat rectangles.")
@@ -13386,6 +13448,171 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The strip advertised a threshold nobody could change.
+    ///
+    /// PROVEN TO FAIL against ba905e7: `Layout::orf_min_aa` was persisted,
+    /// validated `1..=100_000`, read by the scanner at exactly one place, and
+    /// written by NO WIDGET. The disclosure line under the ORF strip printed
+    /// "≥30 aa" — telling the user about a number reachable only by
+    /// hand-editing the layout file in their profile directory. Advertising a
+    /// knob and not supplying one is worse than saying nothing.
+    ///
+    /// Driven by a real click on the combo's own item, and the assertion is
+    /// that THE SCAN WAS RE-ASKED, not merely that a field moved. `start_orfs`
+    /// is keyed on `(code, min_aa)`, so a control that changed the number
+    /// without a frame following it would leave the previous threshold's ORFs
+    /// on screen under a new caption — a worse lie than the one it fixes.
+    #[test]
+    fn the_orf_threshold_can_be_changed_and_re_asks_the_scan() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        app.tab = Tab::Sequence;
+        app.layout.orf_track = true;
+        assert_eq!(app.layout.orf_min_aa, 30, "the premise: the default");
+
+        // Paint once so the scan is running at 30, then note how many times it
+        // has been asked for.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(window(), |ui| app.side_panel(ui));
+        }
+        let before = app.document().map(|d| d.orf_spawns).unwrap_or(0);
+
+        // Open the combo and click "50 aa".
+        let mut spot = None;
+        for _ in 0..2 {
+            let out = ctx.run_ui(window(), |ui| app.side_panel(ui));
+            spot = flat_shapes(&out.shapes).iter().find_map(|s| match s {
+                egui::Shape::Text(t) if t.galley.text().contains("≥30 aa") => {
+                    Some(egui::Rect::from_min_size(t.pos, t.galley.size()).center())
+                }
+                _ => None,
+            });
+        }
+        let at = spot.expect("no ORF threshold control is drawn beside the ORFs chip");
+        for input in [
+            pointer_to(at),
+            pointer_button(at, true),
+            pointer_button(at, false),
+        ] {
+            let _ = ctx.run_ui(input, |ui| app.side_panel(ui));
+        }
+        let mut item = None;
+        for _ in 0..2 {
+            let out = ctx.run_ui(window(), |ui| app.side_panel(ui));
+            item = flat_shapes(&out.shapes).iter().find_map(|s| match s {
+                egui::Shape::Text(t) if t.galley.text() == "50 aa" => {
+                    Some(egui::Rect::from_min_size(t.pos, t.galley.size()).center())
+                }
+                _ => None,
+            });
+        }
+        let item = item.expect("the combo offered no 50 aa choice");
+        for input in [
+            pointer_to(item),
+            pointer_button(item, true),
+            pointer_button(item, false),
+        ] {
+            let _ = ctx.run_ui(input, |ui| app.side_panel(ui));
+        }
+
+        assert_eq!(app.layout.orf_min_aa, 50, "the choice did not take");
+        // ...and the scan was asked again. One more frame, because
+        // `refresh_orfs` runs at the top of the tab.
+        let _ = ctx.run_ui(window(), |ui| app.side_panel(ui));
+        assert!(
+            app.document().map(|d| d.orf_spawns).unwrap_or(0) > before,
+            "the threshold moved and the scan was never re-asked, so the strip still \
+             shows the ORFs of a threshold nobody chose"
+        );
+    }
+
+    /// The gel's third condition was in the cache key and in no control.
+    ///
+    /// PROVEN TO FAIL against ba905e7: `gel_controls` offered agarose per cent
+    /// and band width and not `run_mm`, while `GelKey` carried
+    /// `c.run_mm.to_bits()` — so the simulation was keyed on a number the user
+    /// could not reach, and every gel on screen was an 80 mm run whatever they
+    /// had actually done. The two knobs beside it made that worse by
+    /// advertising, through their presence, that the conditions were adjustable.
+    ///
+    /// Run distance is what the whole migration model scales against, so this
+    /// is not cosmetic: a 40 mm run and a 200 mm run separate different pairs of
+    /// fragments, which is the one question the panel exists to answer.
+    #[test]
+    fn the_gel_run_distance_is_reachable_and_changes_the_answer() {
+        let ctx = test_ctx();
+        let mut g = GelControls {
+            conditions: pl_gel::Conditions::default(),
+            ..GelControls::of(&gel::View::default())
+        };
+        assert_eq!(g.conditions.run_mm, 80.0, "the premise: the default");
+
+        // The control exists and says what it is.
+        let out = ctx.run_ui(window(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| gel_controls(ui, &mut g));
+        });
+        let painted: Vec<String> = flat_shapes(&out.shapes)
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            painted.iter().any(|t| t.contains("mm run")),
+            "the run distance has no control: {painted:?}"
+        );
+
+        // And it is not decoration — the model answers differently. Two
+        // fragments that co-migrate on a short gel resolve on a long one.
+        let lengths = [1000u64, 1150];
+        let at = |run_mm: f64| {
+            pl_gel::Gel::modelled(pl_gel::Conditions {
+                run_mm,
+                ..pl_gel::Conditions::default()
+            })
+            .run(&lengths)
+        };
+        let spread = |s: &pl_gel::Simulation| {
+            let mm: Vec<f64> = s
+                .bands
+                .iter()
+                .filter_map(|b| match b.placement {
+                    pl_gel::Placement::At(mm) => Some(mm),
+                    _ => None,
+                })
+                .collect();
+            (mm.first().copied().unwrap_or(0.0) - mm.last().copied().unwrap_or(0.0)).abs()
+        };
+        let (short, long) = (spread(&at(25.0)), spread(&at(250.0)));
+        assert!(
+            long > short * 2.0,
+            "a ten-fold longer run barely moved the two bands apart, so the knob does \
+             nothing: {short:.2} mm vs {long:.2} mm"
+        );
+    }
+
+    /// Every offered threshold must be one the layout file will accept back.
+    ///
+    /// `MIN_AA` is private to `settings.rs`, so the widget cannot read the band
+    /// it must stay inside. A choice outside it would be written to the file,
+    /// silently rejected on the next launch, and the strip would revert to 30
+    /// with nothing said.
+    #[test]
+    fn every_orf_choice_survives_a_round_trip_through_the_layout_file() {
+        for n in settings::ORF_MIN_AA_CHOICES {
+            let l = settings::Layout {
+                orf_min_aa: *n,
+                ..Default::default()
+            };
+            assert_eq!(
+                settings::parse(&settings::render(l)).orf_min_aa,
+                *n,
+                "{n} aa is offered by the combo and refused by the parser"
+            );
+        }
     }
 
     /// The History tab advertised a branch it would not let you visit.

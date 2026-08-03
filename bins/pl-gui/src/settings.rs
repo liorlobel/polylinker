@@ -75,6 +75,26 @@ impl Default for Layout {
 /// a silently wrong protein.
 const MIN_AA: std::ops::RangeInclusive<usize> = 1..=100_000;
 
+/// The ORF thresholds the combo offers.
+///
+/// A short list rather than a spinner over a hundred thousand values, because
+/// the number is not continuous in practice — it is a choice between four
+/// questions, and the list is what makes that legible:
+///
+/// - **20 aa** — small ORFs and short peptides. Noisy on a plasmid and
+///   deliberately available: a 60 bp leader peptide is real and is invisible at
+///   any higher setting.
+/// - **30 aa** — the default, and `pl_core::orf::Params`' default, so the app
+///   and the CLI agree unless the user says otherwise.
+/// - **50 aa** — roughly where chance ORFs in a GC-balanced sequence stop being
+///   common, so the strip starts reading as signal.
+/// - **100 aa** — real genes only. What you want on a genome, where 30 aa
+///   returns thousands.
+///
+/// `pub` because `MIN_AA` above is private and the widget must not invent its
+/// own bounds; every entry here is inside it, which the round-trip test pins.
+pub const ORF_MIN_AA_CHOICES: &[usize] = &[20, 30, 50, 100];
+
 /// The widest and narrowest a stored width may be before it is disbelieved.
 ///
 /// Not the panel's own limits — those are recomputed every frame from the live
