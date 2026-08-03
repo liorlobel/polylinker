@@ -5072,6 +5072,51 @@ impl App {
         }
     }
 
+    /// Everything that has to be put right after the cursor moves.
+    ///
+    /// Undo, redo and a click in the History tab are one state change — the
+    /// cursor moved and the molecule under it is a different molecule — so they
+    /// get one function. Written out because the failure mode of each omission
+    /// is silent and specific, and because `do_undo` and `do_redo` were missing
+    /// three of these before this existed.
+    ///
+    /// `selected` was cleared. These were not:
+    ///
+    /// - **`hot` / `hot_shown`** are indices into `molecule().features`, and
+    ///   `hot_shown` is written one line before `top_bar` while `side_panel`
+    ///   runs before `central`. So a click in History changes the molecule
+    ///   mid-frame with `hot_shown` still naming a feature that is gone, and the
+    ///   map draws a highlight on the wrong band. `remove_feature` already
+    ///   states this rule — "leaves `hot` naming a different feature, drawn
+    ///   highlighted on the map under someone else's name" — and the undo path
+    ///   did not follow it.
+    /// - **the religation plan** is recomputed only when `stale`, and `stale` is
+    ///   set by user interaction alone. Nothing marked it when the bases moved,
+    ///   so undo left a plan built from the old molecule being redrawn against
+    ///   the new one — and Open then builds a construct from a sequence that is
+    ///   no longer on screen. `adopt` calls a wrong construct "the worst thing
+    ///   this program can produce"; this is the same hazard reached by Ctrl+Z.
+    ///
+    /// The caret is restored rather than kept: the log is a DAG, a move can land
+    /// on any earlier or forked state, and `n` changes arbitrarily.
+    ///
+    /// It does NOT bump `doc_generation`. That means "the document was
+    /// replaced", and this is the same document at another point in its own
+    /// history — the annotation index is keyed on `(doc_generation, cursor)` and
+    /// the cursor half already does the work.
+    fn after_the_cursor_moved(&mut self) {
+        let Some(d) = self.bench.get_mut() else {
+            return;
+        };
+        self.edit.restore(d);
+        self.selected = None;
+        self.hot = None;
+        self.hot_shown = None;
+        if let Some(p) = &mut self.clone_panel {
+            p.stale = true;
+        }
+    }
+
     fn do_undo(&mut self) {
         self.settle();
         // An edit across the origin is a rotate and then a range op, and both
@@ -5095,9 +5140,77 @@ impl App {
                 }
                 Err(e) => self.notice = Some(e.to_string()),
             }
-            self.edit.restore(d);
-            self.selected = None;
         }
+        self.after_the_cursor_moved();
+    }
+
+    /// Stand at another point in this document's history.
+    ///
+    /// The gesture the History tab advertised and did not offer: its own doc
+    /// comment has always said an abandoned branch "is still there and still
+    /// reachable", and it was reachable from `pl` and from nothing you could
+    /// click. `OpLog::seek` has been here the whole time; the rows were
+    /// `Label`s.
+    ///
+    /// `None` is the base — the file as opened — a legal target that had no row
+    /// at all.
+    ///
+    /// NO CONFIRMATION, and that is argued rather than assumed. The log is
+    /// append-only, so this discards nothing: the row you left is still in the
+    /// list, one click away. A dialog guarding a one-click-reversible move is
+    /// how a guard becomes a reflex — the argument `Losing::discard_label` and
+    /// `Document::has_history` both already make — and it would be incoherent
+    /// besides, since Ctrl+Z is a seek to the cursor's parent and asks nothing.
+    /// Guarding the mouse and not the keyboard, for one state change, teaches a
+    /// user only to click through.
+    ///
+    /// What replaces it is a status line naming where you were, so the move is
+    /// self-documenting and reversible by reading.
+    fn go_to(&mut self, to: Option<pl_core::oplog::OpId>) {
+        // Clicking the row you are standing on must cost nothing. A seek
+        // re-materialises the molecule and restarts the digest and the ORF scan
+        // — 1,712 ms and 425 ms on the genome this project tests against — and
+        // spending that to arrive where you already are is pure waste.
+        if self.document().map(|d| d.log.cursor()) == Some(to) {
+            return;
+        }
+        // FIRST, and the ordering is the part that loses data if inverted. An
+        // open typing run is uncommitted work living outside the log, and
+        // `edit.restore` below drops it. Settling *after* the seek would be
+        // worse: `commit` parents the run at the CURRENT cursor and applies
+        // coordinates measured against the screen, so it would fork the
+        // destination branch using the source branch's offsets.
+        self.settle();
+        let was = self.document().and_then(|d| {
+            let at = d.log.cursor()?;
+            let what = d.log.all_ops().iter().find(|o| o.id == at)?;
+            Some((at.short(), what.kind.describe()))
+        });
+        if let Some(d) = self.bench.get_mut() {
+            match d.seek(to) {
+                Ok(()) => {
+                    let now = match to {
+                        None => "the file as opened".to_string(),
+                        Some(id) => format!("at {}", id.short()),
+                    };
+                    self.status = match was {
+                        Some((id, what)) => {
+                            format!("{now} — you were at {id} ({what}); that row is still listed")
+                        }
+                        None => now,
+                    };
+                    self.notice = None;
+                }
+                // Unreachable by construction: every id offered came out of
+                // `all_ops()`. Handled anyway, and NOT by printing the error —
+                // `OpError::AtEnd` reads "nothing further in that direction",
+                // which is a sentence about stepping and nonsense about a seek.
+                Err(_) => {
+                    self.notice = Some("that point in the history could not be reached".into())
+                }
+            }
+        }
+        self.after_the_cursor_moved();
     }
 
     fn do_redo(&mut self) {
@@ -5116,9 +5229,8 @@ impl App {
                     self.status = "redone — the plasmid is renumbered again".into();
                 }
             }
-            self.edit.restore(d);
-            self.selected = None;
         }
+        self.after_the_cursor_moved();
     }
 
     /// The details panel never narrower than this.
@@ -6431,37 +6543,82 @@ impl App {
         });
         ui.add_space(4.0);
 
+        // Collected and applied after the loop. `d` is borrowed from the bench
+        // for the whole body, and `go_to` needs it mutably — the Features
+        // list's rule, and the reason nothing here calls a `&mut self` method
+        // inside the closure.
+        let mut wanted: Option<Option<pl_core::oplog::OpId>> = None;
+
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // THE BASE, which had no row. `seek(None)` is legal, it is the file
+            // as it was opened, and it is where "undo everything" lands — so
+            // the one point in the history a user is most likely to want was
+            // the one point the list did not offer.
+            if ui
+                .selectable_label(
+                    cursor.is_none(),
+                    RichText::new(format!(
+                        "{}          as opened",
+                        if cursor.is_none() { HISTORY_HERE } else { " " }
+                    ))
+                    .monospace()
+                    .size(11.0)
+                    .color(if cursor.is_none() {
+                        pal(ui).ink
+                    } else {
+                        pal(ui).muted
+                    }),
+                )
+                .on_hover_text("Go to the file as it was opened. Nothing is discarded.")
+                .clicked()
+            {
+                wanted = Some(None);
+            }
             for op in ops {
                 let here = Some(op.id) == cursor;
                 let live = on_path.contains(&op.id);
-                ui.horizontal(|ui| {
-                    // The cursor marker, then whether this edit is on the path
-                    // to the current state or on an abandoned branch.
-                    ui.label(
-                        RichText::new(if here { HISTORY_HERE } else { " " })
-                            .monospace()
-                            .color(pal(ui).accent),
-                    );
-                    let colour = if live { pal(ui).ink } else { pal(ui).muted };
-                    ui.label(
-                        RichText::new(op.id.short())
-                            .monospace()
-                            .size(11.0)
-                            .color(pal(ui).muted),
-                    );
-                    let text = RichText::new(op.kind.describe()).color(colour);
-                    ui.label(if here { text.strong() } else { text });
-                    if !live {
-                        ui.label(
-                            RichText::new("(other branch)")
-                                .color(pal(ui).muted)
-                                .size(11.0),
-                        );
-                    }
+                // ONE WIDGET PER ROW, not a `horizontal` of four labels with an
+                // `interact` over them. A single widget has one accessible
+                // name, is focusable and activates on Space and Enter, and its
+                // galley IS its hit target — so a test can click a row by
+                // finding its text rather than by guessing at a rect.
+                let colour = if live { pal(ui).ink } else { pal(ui).muted };
+                let mut text = RichText::new(format!(
+                    "{} {}  {}{}",
+                    if here { HISTORY_HERE } else { " " },
+                    op.id.short(),
+                    op.kind.describe(),
+                    if live { "" } else { "   (other branch)" }
+                ))
+                .monospace()
+                .size(11.0)
+                .color(colour);
+                if here {
+                    text = text.strong();
+                }
+                let r = ui.selectable_label(here, text);
+                if r.clicked() {
+                    wanted = Some(Some(op.id));
+                }
+                r.on_hover_text(if here {
+                    "You are here."
+                } else if live {
+                    "Go to this point. Nothing is discarded — the later edits stay listed."
+                } else {
+                    "Go to this branch. The branch you are on now stays listed."
                 });
             }
         });
+
+        if let Some(to) = wanted {
+            self.go_to(to);
+            // The seek restarts the digest and the ORF scan from inside the
+            // side panel, and `update` decided whether to keep the frame loop
+            // alive BEFORE the panel ran. Without this the answer arrives and
+            // nothing wakes to draw it, so the tab sits on a stale molecule
+            // until the user moves the mouse.
+            ui.ctx().request_repaint();
+        }
     }
 
     /// The editing surface.
@@ -13229,6 +13386,158 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The History tab advertised a branch it would not let you visit.
+    ///
+    /// PROVEN TO FAIL against 13433a0: `history_tab` painted every row as a
+    /// plain `ui.label` with no `Sense`, so `OpLog::seek` — which has been in
+    /// the crate since the beginning — was reachable from `pl` and from nothing
+    /// a user could click. Its own doc comment has said since it was written
+    /// that an abandoned branch "is still there and still reachable". It was
+    /// not, and that sentence is the reason this is a defect rather than a
+    /// missing feature.
+    ///
+    /// Driven by a real pointer click on a real row, found by its own text.
+    /// Calling `go_to` directly would test the seek and not the tab, and the
+    /// tab is the part that was broken.
+    #[test]
+    fn a_branch_in_the_history_can_be_clicked_and_visited() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        app.bench
+            .set(edited_doc("branchy.fa", "AAAACCCCGGGGTTTTAAGGCCTT"));
+        app.tab = Tab::History;
+        // Fork the log: edit, undo, edit differently. The abandoned op stays in
+        // `all_ops()` and is what the row we click names.
+        let d = app.bench.get_mut().unwrap();
+        d.apply(pl_core::OpKind::ReverseComplement).unwrap();
+        let abandoned = d.log.cursor().expect("an op to abandon");
+        d.undo().unwrap();
+        d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        let on_now = d.log.cursor().expect("the live branch");
+        assert_ne!(abandoned, on_now, "the fixture must really fork");
+        assert!(
+            !d.log.path().iter().any(|o| o.id == abandoned),
+            "the premise: the abandoned op is off the current path"
+        );
+
+        // Find the abandoned branch's row by its short id, then click it.
+        let short = abandoned.short();
+        let mut spot = None;
+        for _ in 0..2 {
+            let out = ctx.run_ui(window(), |ui| app.side_panel(ui));
+            spot = flat_shapes(&out.shapes).iter().find_map(|s| match s {
+                egui::Shape::Text(t) if t.galley.text().contains(&short) => {
+                    Some(egui::Rect::from_min_size(t.pos, t.galley.size()).center())
+                }
+                _ => None,
+            });
+        }
+        let at = spot.expect("the abandoned branch has no row on screen");
+        for input in [
+            pointer_to(at),
+            pointer_button(at, true),
+            pointer_button(at, false),
+        ] {
+            let _ = ctx.run_ui(input, |ui| app.side_panel(ui));
+        }
+
+        assert_eq!(
+            app.document().and_then(|d| d.log.cursor()),
+            Some(abandoned),
+            "clicking a branch row did not go there — the row is still inert"
+        );
+        assert!(
+            app.status.contains("you were at"),
+            "the move said nothing about where it came from: {:?}",
+            app.status
+        );
+    }
+
+    /// Undo left the map highlighting a feature that no longer exists.
+    ///
+    /// PROVEN TO FAIL against 13433a0: `do_undo` cleared `selected` and not
+    /// `hot`/`hot_shown`, and did not mark the religation plan stale. Both are
+    /// indices or bases belonging to the molecule that just went away.
+    ///
+    /// `hot_shown` is the sharper of the two because of frame order — it is
+    /// assigned one line before `top_bar`, and `side_panel` runs before
+    /// `central`, so an undo from the History tab changes the molecule
+    /// mid-frame while `hot_shown` still names a feature index into the
+    /// molecule that is gone. `remove_feature` already states the rule this
+    /// broke: it "leaves `hot` naming a different feature — drawn highlighted
+    /// on the map, under someone else's name".
+    #[test]
+    fn moving_the_cursor_drops_what_belonged_to_the_molecule_that_moved() {
+        let mut app = App::blank();
+        let mut m = pl_core::Molecule {
+            name: "p".into(),
+            seq: b"AAAAGGATCCTTTTGCGCGCATATATCCCGGG".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let mut f = pl_core::Feature::new("a gene", "CDS");
+        f.segments.push(pl_core::Segment::new(5, 20));
+        m.features.push(f);
+        app.bench.set(Document::of_molecule(m));
+        app.bench
+            .get_mut()
+            .unwrap()
+            .apply(pl_core::OpKind::ReverseComplement)
+            .unwrap();
+
+        // Everything that belongs to the molecule as it stands right now.
+        app.selected = Some(0);
+        app.hot = Some(0);
+        app.hot_shown = Some(0);
+        app.clone_panel = Some(clone::Panel::new(&["BamHI".to_string()].into()));
+        app.clone_panel.as_mut().unwrap().stale = false;
+
+        app.do_undo();
+
+        assert_eq!(
+            app.selected, None,
+            "the selection is an index into the old features"
+        );
+        assert_eq!(
+            app.hot, None,
+            "the hover highlight is an index into the old features"
+        );
+        assert_eq!(
+            app.hot_shown, None,
+            "the map draws a highlight on a feature that is gone"
+        );
+        assert!(
+            app.clone_panel.as_ref().is_some_and(|p| p.stale),
+            "the religation plan was built from bases that have moved, and Open would \
+             build a construct from a molecule that is no longer on screen"
+        );
+    }
+
+    /// Clicking the row you are standing on must cost nothing.
+    ///
+    /// A seek re-materialises the molecule and restarts the digest and the ORF
+    /// scan — measured at 1,712 ms and 425 ms on the 4.6 Mb genome this project
+    /// tests against. Spending that to arrive where you already are is pure
+    /// waste, and it would also clear the selection the user just made.
+    #[test]
+    fn going_to_where_you_already_are_changes_nothing() {
+        let mut app = App::blank();
+        app.bench
+            .set(edited_doc("still.fa", "AAAACCCCGGGGTTTTAAGG"));
+        let at = app.document().unwrap().log.cursor();
+        app.selected = Some(0);
+        app.status = "untouched".into();
+        app.go_to(at);
+        assert_eq!(app.document().unwrap().log.cursor(), at);
+        assert_eq!(
+            app.selected,
+            Some(0),
+            "a no-op seek cleared the selection anyway"
+        );
+        assert_eq!(app.status, "untouched", "a no-op seek reported a move");
     }
 
     /// THE TEST TWO DOC COMMENTS HAVE NAMED SINCE STAGE 1, AND WHICH DID NOT
