@@ -557,6 +557,21 @@ fn label_width(name: &str, font_size: f64) -> f64 {
 /// in — the same measurement `pdf::to_pdf` and `eps::to_eps` use to place an
 /// `Anchor::End` label and that the `/MediaBox`, the `%%BoundingBox` and the
 /// `viewBox` therefore crop against.
+///
+/// **THE SVG NOW ASKS FOR THAT TYPEFACE, and until recently it did not.** Its
+/// root carried `system-ui, -apple-system, 'Segoe UI', Helvetica, …`, so the
+/// layout was computed from Helvetica's advances and drawn in whatever the
+/// viewer put first — Segoe UI on Windows, whose advances differ. Every number
+/// this function feeds (the label that was shortened to fit, the viewBox it was
+/// cropped against) described a rendering nobody was going to see, and the
+/// error runs the same direction as the `label_width` defect recorded above:
+/// a name that fit when measured overflows when drawn.
+///
+/// `Helvetica, 'Nimbus Sans', Arial, sans-serif` is the metric-compatible
+/// chain — Nimbus Sans is the free clone shipped on Linux, Arial is metrically
+/// compatible by design and is what `pdf.rs`'s width tables were cross-checked
+/// against. Whichever of the three a viewer resolves, the advances are the ones
+/// measured here.
 fn drawn_width(name: &str, font_size: f64) -> f64 {
     crate::pdf::text_width_in(name, font_size, false)
 }
@@ -1350,7 +1365,7 @@ pub fn svg_at(sc: &Scene, width_mm: Option<f64>) -> String {
         None => (n(sc.width).to_string(), n(sc.height).to_string()),
     };
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {} {}" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"><title>{}</title>{body}</svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {} {}" font-family="Helvetica, 'Nimbus Sans', Arial, sans-serif" stroke-linecap="round" stroke-linejoin="round"><title>{}</title>{body}</svg>"##,
         n(sc.width),
         n(sc.height),
         esc(&sc.title)

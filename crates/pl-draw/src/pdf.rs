@@ -288,7 +288,13 @@ pub fn pdf_at(scene: &Scene, width_mm: Option<f64>) -> (Vec<u8>, Report) {
         // The whole of the physical sizing, in one matrix.
         c.push_str(&format!("{} 0 0 {} 0 0 cm\n", n(f.scale), n(f.scale)));
     }
-    c.push_str("1 J 1 j\n"); // round caps and joins, matching the SVG default look
+    // Round caps and joins. The comment here used to claim this matched "the
+    // SVG default look" and it did not: SVG's initial values are `butt` caps
+    // and `miter` joins with a limit of 4, so every stroked join in the PDF was
+    // rounded and the same join in the SVG was mitred — two renderings of one
+    // scene, differing at every corner. The SVG root now states round
+    // explicitly, and this line is what it is matching.
+    c.push_str("1 J 1 j\n");
 
     for item in &scene.items {
         match item {
@@ -822,6 +828,89 @@ mod file_tests {
             e - s + 1,
             "declared {declared}, actual {}",
             e - s + 1
+        );
+    }
+
+    /// The SVG must ask for the typeface its own arithmetic measured.
+    ///
+    /// PROVEN TO FAIL against 759b272, and this is a real defect rather than a
+    /// tidiness point. `drawn_width` measures every feature label with
+    /// `pdf::text_width_in` — HELVETICA's advances — and the label that was
+    /// shortened to fit, the `viewBox` it was cropped against and the
+    /// `Anchor::End` placement all come from that number. The root element then
+    /// asked for `system-ui, -apple-system, 'Segoe UI', Helvetica, …`, so a
+    /// browser on Windows drew the whole figure in Segoe UI.
+    ///
+    /// The layout was therefore computed in one typeface and rendered in
+    /// another, and the error runs the same direction as the `label_width`
+    /// defect recorded beside it: a name that fitted when measured overflows
+    /// when drawn. `pCMV-WPRE` at 12 pt is 73.33 pt in Helvetica, and the crate
+    /// cropped the page to that.
+    ///
+    /// The three names are the metric-compatible chain — Nimbus Sans is the
+    /// free clone on Linux and Arial is metrically compatible by design, which
+    /// is what `pdf.rs` cross-checked its width tables against. Whichever a
+    /// viewer resolves, the advances are the measured ones.
+    #[test]
+    fn the_svg_asks_for_the_typeface_its_own_measurements_describe() {
+        let svg = crate::svg_of(&sample());
+        let root = &svg[..svg.find('>').expect("a root element")];
+        assert!(
+            root.contains("font-family="),
+            "the SVG names no typeface at all, so every viewer picks its own"
+        );
+        // The measured face first. Anything ahead of it is a face the layout
+        // arithmetic knows nothing about.
+        let fam = root
+            .split("font-family=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("a font-family value");
+        assert!(
+            fam.starts_with("Helvetica"),
+            "the layout is measured in Helvetica and drawn in whatever comes first \
+             here: {fam:?}"
+        );
+        for metric_compatible in ["Nimbus Sans", "Arial"] {
+            assert!(
+                fam.contains(metric_compatible),
+                "{metric_compatible} is the fallback on a platform without Helvetica, and \
+                 it is missing: {fam:?}"
+            );
+        }
+        assert!(
+            !fam.contains("system-ui") && !fam.contains("Segoe"),
+            "a face whose advances nothing here measured is offered ahead of the \
+             fallbacks: {fam:?}"
+        );
+    }
+
+    /// The PDF and the SVG must join and cap their strokes the same way.
+    ///
+    /// PROVEN TO FAIL against 759b272: `pdf.rs` emitted `1 J 1 j` — round caps
+    /// and joins — under a comment claiming it matched "the SVG default look".
+    /// SVG's initial values are `butt` caps and `miter` joins with a limit of 4,
+    /// so the comment was false and every stroked corner differed between two
+    /// renderings of one scene. On a plasmid map that is every leader line's
+    /// elbow and every arrowhead's point.
+    ///
+    /// Asserted on both outputs rather than on one, because the claim is that
+    /// they agree; checking either alone would pass while they disagreed.
+    #[test]
+    fn the_two_vector_back_ends_stroke_their_corners_alike() {
+        let sc = sample();
+        let svg = crate::svg_of(&sc);
+        let root = &svg[..svg.find('>').expect("a root element")];
+        assert!(
+            root.contains(r#"stroke-linecap="round""#)
+                && root.contains(r#"stroke-linejoin="round""#),
+            "the SVG leaves caps and joins at butt and miter while the PDF rounds them: \
+             {root}"
+        );
+        let (bytes, _) = to_pdf(&sc);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("1 J 1 j"),
+            "the PDF stopped rounding, so the two now differ the other way"
         );
     }
 
