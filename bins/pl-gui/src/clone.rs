@@ -32,6 +32,18 @@ pub struct Frag {
     pub right: String,
     /// 1-based inclusive span in the parent, when the fragment could be placed.
     pub from: Option<(u64, u64)>,
+    /// Why `from` is `None`, when the reason is knowable.
+    ///
+    /// For a digest fragment this stays `None` and the panel says what it always
+    /// said — the bases matched in more than one place. For an AMPLICON that is
+    /// not what happened: `pcr` has already refused any pair whose 12 nt seed
+    /// binds twice, so a product it returns occurs at most once. The reason is
+    /// that the product is not a stretch of the template at all, and a 5' tail
+    /// does exactly that — forward `GAATTC` plus 20 nt of pUC19 amplifies a
+    /// product carrying an EcoRI site pUC19 does not have, which is the entire
+    /// reason anyone puts a tail on a primer. Saying "could not be placed in the
+    /// parent" there tells a user their file is ambiguous when it is not.
+    pub unplaced: Option<String>,
     /// Which digest this came out of: 0 the open molecule, 1 the donor.
     ///
     /// Stage 4. With one molecule the answer was always 0 and the field would
@@ -72,6 +84,13 @@ pub struct Plan {
     /// less honest than showing them beside the reason they are not what was
     /// intended.
     pub gg: Option<GgReport>,
+    /// The oligos this plan amplified with, for [`Method::Pcr`].
+    ///
+    /// Carried on the plan rather than passed to [`report`], which already takes
+    /// seven arguments — and this is the better home anyway: a methods paragraph
+    /// naming a product without naming the two oligos that made it cannot be
+    /// repeated by anybody.
+    pub pcr: Option<Primers>,
 }
 
 /// What the Golden Gate overhang check found.
@@ -115,6 +134,13 @@ pub enum Method {
     /// be built" but "will these overhangs build the one thing I meant", and
     /// `pl_clone::goldengate` answers it.
     GoldenGate,
+    /// Amplify between two primers.
+    ///
+    /// Not a joining method at all, and it sits here because it is the step
+    /// BETWEEN the two this panel already does: the app could design a primer
+    /// pair and could assemble fragments, and could not make the amplicon in
+    /// the middle. A user had to leave, run `pl pcr`, and come back.
+    Pcr,
 }
 
 impl Method {
@@ -123,8 +149,29 @@ impl Method {
             Method::Restriction => "Restriction",
             Method::Gibson => "Gibson / HiFi",
             Method::GoldenGate => "Golden Gate",
+            Method::Pcr => "PCR",
         }
     }
+}
+
+/// The two oligos a PCR amplifies with, 5'->3', **tails included**.
+///
+/// A NAMED PAIR and not `(&str, &str)`, and the reason is call sites rather than
+/// silence. `plan` is called from about twenty places; two adjacent `&str`
+/// parameters there are two things a reader cannot tell apart and a writer can
+/// transpose without the compiler noticing.
+///
+/// MEASURED, because the first draft of this comment claimed something better
+/// and untrue — that a swapped pair silently amplifies the complement arc of a
+/// circle. It does not: an oligo written as a reverse primer is the reverse
+/// complement of its binding site, so as a forward primer it has nothing on the
+/// plus strand to bind, and `pcr` answers "does not anneal" on a line and on a
+/// circle alike. `the_two_oligos_are_not_interchangeable` pins that. The type
+/// earns its place at the call site; the engine is what catches the swap.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Primers {
+    pub forward: String,
+    pub reverse: String,
 }
 
 /// The panel's own state. Outlives a frame; does not outlive its document.
@@ -141,6 +188,9 @@ pub struct Panel {
     /// plasmid stops being negligible, and a chance match here does not give a
     /// wrong length, it gives a confidently wrong construct.
     pub homology: usize,
+    /// The two oligos, for [`Method::Pcr`]. Seeded from the Design panel's
+    /// chosen pair when the panel is opened — see `App::open_clone_panel`.
+    pub primers: Primers,
     /// The OTHER tab whose digest supplies the insert, if there is one.
     ///
     /// Stage 4, and the whole of it. `None` religates the open molecule on its
@@ -166,12 +216,13 @@ pub struct Panel {
 impl Panel {
     /// Seeded from the enzymes already ticked for the gel, because a user who
     /// has just looked at a digest is asking about THAT digest.
-    pub fn new(picked: &BTreeSet<String>) -> Self {
+    pub fn new(picked: &BTreeSet<String>, primers: Primers) -> Self {
         Panel {
             method: Method::Restriction,
             enzymes: picked.clone(),
             blunt: false,
             homology: 25,
+            primers,
             donor: None,
             plan: None,
             stale: true,
@@ -206,7 +257,7 @@ pub fn show(
     let donor_mol = donor.map(|(_, _, m)| *m);
     if p.stale {
         p.plan = Some(plan(
-            mol, donor_mol, p.method, &p.enzymes, p.blunt, p.homology,
+            mol, donor_mol, p.method, &p.enzymes, &p.primers, p.blunt, p.homology,
         ));
         p.stale = false;
     }
@@ -232,7 +283,12 @@ pub fn show(
             // and a linearisation under Gibson.
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Join by").strong());
-                for m in [Method::Restriction, Method::Gibson, Method::GoldenGate] {
+                for m in [
+                    Method::Restriction,
+                    Method::Gibson,
+                    Method::GoldenGate,
+                    Method::Pcr,
+                ] {
                     if ui.selectable_label(p.method == m, m.label()).clicked() && p.method != m {
                         p.method = m;
                         p.stale = true;
@@ -241,6 +297,13 @@ pub fn show(
             });
             ui.add_space(4.0);
 
+            // PCR CUTS NOTHING, so the whole enzyme block goes. Leaving it
+            // visible would be worse than useless: the set is sticky across a
+            // method change — it is seeded from the gel — so a leftover BamHI
+            // would sit there looking like it takes part in the reaction.
+            if p.method == Method::Pcr {
+                primer_boxes(ui, p, mol, pal);
+            } else {
             // Enzymes: only the ones that cut, so the list is short and every
             // entry does something.
             ui.label(
@@ -251,6 +314,7 @@ pub fn show(
                     // says which family rather than leaving a user to wonder
                     // where BamHI went.
                     Method::GoldenGate => "Cut with (Type IIS only)",
+                    Method::Pcr => unreachable!("handled above"),
                 })
                 .strong(),
             );
@@ -297,6 +361,7 @@ pub fn show(
                 // for a method whose whole point is a chosen four-base overhang,
                 // and homology is not how it joins.
                 Method::GoldenGate => {}
+                Method::Pcr => unreachable!("handled above"),
                 Method::Gibson => {
                     ui.horizontal(|ui| {
                         ui.label("homology at least");
@@ -317,11 +382,17 @@ pub fn show(
                     });
                 }
             }
+            }
 
             // THE INSERT, from another tab. Offered only when there is another
             // tab to offer: a control whose menu is always empty teaches a user
             // the feature does not work.
-            if !others.is_empty() {
+            //
+            // Hidden under PCR: a PCR amplifies ONE template, the molecule on
+            // screen, and `amplify` ignores the donor rather than quietly
+            // repurposing it. A selector that changed nothing would be the worse
+            // of the two.
+            if !others.is_empty() && p.method != Method::Pcr {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Insert from").strong());
@@ -387,11 +458,14 @@ pub fn show(
                             f.len,
                             f.left,
                             f.right,
-                            match f.from {
-                                Some((a, b)) => format!("   from {a}..{b}"),
+                            match (f.from, &f.unplaced) {
+                                (Some((a, b)), _) => format!("   from {a}..{b}"),
+                                // An amplicon knows WHY it could not be placed,
+                                // and it is not ambiguity — see `Frag::unplaced`.
+                                (None, Some(why)) => format!("   {why}"),
                                 // Said out loud: this is why a product may carry
                                 // fewer features than the parent had.
-                                None => "   (could not be placed in the parent)".into(),
+                                (None, None) => "   (could not be placed in the parent)".into(),
                             }
                         ))
                         .monospace()
@@ -525,6 +599,90 @@ pub fn show(
     open
 }
 
+/// The two oligo boxes, and a picker over the primers the file already holds.
+///
+/// Two named boxes rather than one field with a separator, because the two are
+/// not interchangeable and a swap does not fail: on a circle, forward and
+/// reverse exchanged amplify the COMPLEMENT arc, so a 465 bp product becomes a
+/// 4,921 bp one and every number about it looks reasonable.
+fn primer_boxes(ui: &mut egui::Ui, p: &mut Panel, mol: &Molecule, pal: crate::theme::Palette) {
+    ui.label(egui::RichText::new("Amplify with").strong());
+    ui.label(
+        egui::RichText::new(
+            "Both oligos 5'->3', as you would order them. Tails included — a tail is the \
+             reason to have one.",
+        )
+        .color(pal.muted)
+        .size(11.0),
+    );
+    for (label, field) in [
+        ("forward", &mut p.primers.forward),
+        ("reverse", &mut p.primers.reverse),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(label).monospace().size(11.0));
+            if ui
+                .add(
+                    egui::TextEdit::singleline(field)
+                        .desired_width(360.0)
+                        .hint_text("ACGT..."),
+                )
+                .changed()
+            {
+                p.stale = true;
+            }
+        });
+    }
+    // The primers the FILE already carries. A `.dna` from SnapGene is full of
+    // them, and retyping one from the Features list is how a base gets dropped.
+    let known: Vec<(String, String)> = mol
+        .primers
+        .iter()
+        .filter(|pr| !pr.seq.is_empty())
+        .map(|pr| {
+            (
+                if pr.name.is_empty() {
+                    "unnamed".to_string()
+                } else {
+                    short(&pr.name)
+                },
+                pr.seq.to_ascii_uppercase(),
+            )
+        })
+        .collect();
+    if !known.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new("from this file:")
+                    .color(pal.muted)
+                    .size(11.0),
+            );
+            for (name, seq) in &known {
+                // Two buttons per primer, because which end it is is the user's
+                // knowledge and not ours. A single "use" button would have to
+                // guess, and guessing is the swap this whole panel is careful
+                // about.
+                if ui
+                    .small_button(format!("{name} →"))
+                    .on_hover_text(format!("Use {seq} as the forward primer"))
+                    .clicked()
+                {
+                    p.primers.forward = seq.clone();
+                    p.stale = true;
+                }
+                if ui
+                    .small_button(format!("← {name}"))
+                    .on_hover_text(format!("Use {seq} as the reverse primer"))
+                    .clicked()
+                {
+                    p.primers.reverse = seq.clone();
+                    p.stale = true;
+                }
+            }
+        });
+    }
+}
+
 /// A molecule's name, bounded, for a monospace column that must stay a column.
 ///
 /// The same reason the Features list and the tab strip bound theirs: a plasmid
@@ -627,9 +785,19 @@ pub fn plan(
     donor: Option<&Molecule>,
     method: Method,
     enzymes: &BTreeSet<String>,
+    primers: &Primers,
     blunt: bool,
     homology: usize,
 ) -> Plan {
+    // PCR BRANCHES FIRST, before a single fragment is built, and that ordering
+    // is load-bearing rather than tidy. With an empty enzyme set
+    // `pl_clone::digest` returns the whole molecule as one fragment, and
+    // neither the "Tick an enzyme" guard (Restriction only) nor the "None of X
+    // cuts" guard (`!enzymes.is_empty()`) fires — so falling through would show
+    // the uncut plasmid as "1 fragment" and hand it to `ligate`.
+    if method == Method::Pcr {
+        return amplify(mol, primers);
+    }
     // An enzyme is required to CUT and optional to ASSEMBLE. Gibson's overlap is
     // designed into the primers; the enzymes are there only to linearise a
     // vector, and a user with two PCR products needs none at all.
@@ -639,6 +807,7 @@ pub fn plan(
             prods: Vec::new(),
             note: Some("Tick an enzyme to cut with.".into()),
             gg: None,
+            pcr: None,
         };
     }
     let mut sources: Vec<Source> = vec![Source {
@@ -681,6 +850,7 @@ pub fn plan(
                 frags: Vec::new(),
                 prods: Vec::new(),
                 gg: None,
+                pcr: None,
                 note: Some(format!(
                     "None of {} cuts {}.",
                     enzymes.iter().cloned().collect::<Vec<_>>().join(", "),
@@ -708,6 +878,9 @@ pub fn plan(
                 left: end_label(&f.left_end()),
                 right: end_label(&f.right_end()),
                 from: locate(&f.watson, &sources[pi].seq, sources[pi].circular),
+                // A digest fragment's `None` really is ambiguity, which is what
+                // the panel has always said. Only an amplicon has a reason.
+                unplaced: None,
                 parent: pi,
             });
             frags.push(f.clone());
@@ -733,6 +906,7 @@ pub fn plan(
                 frags: described,
                 prods: Vec::new(),
                 gg: None,
+                pcr: None,
                 note: Some(format!(
                     "{name} is circular. Gibson joins ends, so linearise it first — tick an \
                      enzyme that cuts it once."
@@ -761,6 +935,7 @@ pub fn plan(
                     prods: Vec::new(),
                     note: Some(e.to_string()),
                     gg: None,
+                    pcr: None,
                 }
             }
         };
@@ -780,6 +955,7 @@ pub fn plan(
             prods,
             note,
             gg: None,
+            pcr: None,
         };
     }
 
@@ -830,6 +1006,7 @@ pub fn plan(
                     prods: Vec::new(),
                     note: Some(e.to_string()),
                     gg,
+                    pcr: None,
                 }
             }
         }
@@ -857,6 +1034,7 @@ pub fn plan(
                     prods: Vec::new(),
                     note: Some(e.to_string()),
                     gg,
+                    pcr: None,
                 }
             }
         }
@@ -883,6 +1061,7 @@ pub fn plan(
         prods,
         note,
         gg,
+        pcr: None,
     }
 }
 
@@ -944,6 +1123,19 @@ pub fn report(
             }
             out.push_str(&format!(
                 " were assembled by homology of at least {homology} bp. "
+            ));
+        }
+        // THE TWO OLIGOS BY SEQUENCE, because a methods paragraph naming a
+        // product without naming what made it cannot be repeated by anybody.
+        // They come off the plan rather than from an argument — `report` is
+        // already at seven.
+        Method::Pcr => {
+            let p = pl.pcr.clone().unwrap_or_default();
+            out.push_str(&format!(
+                "{} was amplified with {} and {}. ",
+                describe(mol),
+                p.forward,
+                p.reverse
             ));
         }
     }
@@ -1039,6 +1231,119 @@ pub fn report(
     );
     out.push_str(&pl_doc::methods(pl_doc::topic("cloning")?));
     Some(out)
+}
+
+/// Amplify between two oligos.
+///
+/// One template — the molecule on screen — because that is what a PCR has. The
+/// `donor` a subcloning uses is ignored here rather than quietly repurposed.
+///
+/// Everything hard is inside `pl_clone::pcr` and stays there: it doubles a
+/// circular template so a footprint straddling the origin is found as one run,
+/// measures travel as `(r_start + n - f_end) % n` so an amplicon across the
+/// origin is ordinary rather than `Inverted`, reads the middle base-by-base with
+/// `% n` because slicing wrapped, and judges specificity over BOTH strands at a
+/// 12 nt floor — refusing a pair that binds twice rather than picking one.
+fn amplify(mol: &Molecule, primers: &Primers) -> Plan {
+    let empty = |note: Option<String>| Plan {
+        frags: Vec::new(),
+        prods: Vec::new(),
+        note,
+        gg: None,
+        pcr: Some(primers.clone()),
+    };
+    let (f, r) = (primers.forward.trim(), primers.reverse.trim());
+    if f.is_empty() || r.is_empty() {
+        return empty(Some(
+            "Paste both primers, 5'->3', as you would order them — tails included.".into(),
+        ));
+    }
+    let seq: String = String::from_utf8_lossy(&mol.seq).to_ascii_uppercase();
+    let circular = mol.topology.is_circular();
+    let template = pl_clone::Dseq::new(&seq, circular);
+    let product = match pl_clone::pcr(f, r, &template) {
+        Ok(p) => p,
+        Err(e) => return empty(Some(refusal(&e))),
+    };
+
+    // ONE FRAGMENT, laid down once, unflipped — which is what an amplicon is.
+    // It goes through `build` like every other product so the feature remap,
+    // the naming and the carried/dropped counts are the same code and cannot
+    // drift into a second, subtly different answer.
+    let from = locate(&product.watson, &seq, circular);
+    // `None` here is NOT ambiguity. `pcr` has already refused any pair whose
+    // seed binds twice, so the product occurs at most once; what `None` means
+    // is that the product is not a stretch of the template — a 5' tail, or an
+    // overlapping pair on a circle giving a near-whole-plasmid product.
+    let unplaced = from.is_none().then(|| {
+        "not a stretch of the template — a 5' tail adds bases the template does not have, \
+         so nothing can be carried across"
+            .to_string()
+    });
+    let sources = vec![Source { mol, seq, circular }];
+    let described = vec![Frag {
+        len: product.len(),
+        left: end_label(&product.left_end()),
+        right: end_label(&product.right_end()),
+        from,
+        unplaced,
+        parent: 0,
+    }];
+    let frags = vec![product.clone()];
+    // No junctions. A PCR seals nothing, and `report` already omits the
+    // "joined at" clause when the list is empty.
+    let prods = vec![build(
+        &sources,
+        &frags,
+        &described,
+        &product,
+        &[(0, false)],
+        Vec::new(),
+    )];
+    Plan {
+        frags: described,
+        prods,
+        note: None,
+        gg: None,
+        pcr: Some(primers.clone()),
+    }
+}
+
+/// A PCR refusal, in words that name the character rather than drawing it.
+///
+/// `PcrError::NotDna` formats the offending character with `{found:?}`, and
+/// `char`'s `Debug` keeps any printable non-ASCII one literally. A primer pasted
+/// from a vendor's order sheet containing U+4E2D therefore comes back as "the
+/// forward primer contains '中'" — and this binary's proportional chain is Plex
+/// Sans, Ubuntu, Noto Emoji and emoji-icon-font, none of which has that glyph.
+/// `the_tofu_oracle_answers_both_ways_before_anything_relies_on_it` already pins
+/// U+4E2D as tofu in both families, so painting the error straight through tells
+/// a user their primer contains an empty box — the one shape that cannot say
+/// which character to delete.
+///
+/// So the character is named by CODEPOINT, which is always renderable.
+///
+/// KNOWN LIMIT, and it belongs to `pl-clone` rather than here: an ASCII
+/// character that is not a base — a `?` or a `-` left in a pasted oligo — is not
+/// `NotDna` at all. `pcr` checks only `is_ascii`, so such a primer simply fails
+/// to anneal and the user is told "the forward primer does not anneal", which
+/// sends them to look at their template instead of at the stray character.
+/// Widening that check is a correctness-crate change for a GUI reason and wants
+/// its own commit and its own argument.
+fn refusal(e: &pl_clone::PcrError) -> String {
+    match e {
+        // `found` IS NON-ASCII BY CONSTRUCTION. `pcr` raises this only under
+        // `!s.is_ascii()`, so there is no ASCII case to branch on and a branch
+        // for one would be a check that cannot fire. The first draft of this
+        // function had exactly that, and the test written for it failed against
+        // the branch rather than against the feature.
+        pl_clone::PcrError::NotDna { what, found } => format!(
+            "the {what} contains U+{:04X}, which is not a DNA base — it may be invisible \
+             where you pasted it from",
+            *found as u32
+        ),
+        other => other.to_string(),
+    }
 }
 
 /// Turn one ligation product into a molecule, carrying what can be carried.
@@ -1194,6 +1499,7 @@ mod tests {
             None,
             Method::Restriction,
             &BTreeSet::new(),
+            &Primers::default(),
             false,
             25,
         );
@@ -1208,6 +1514,7 @@ mod tests {
             None,
             Method::Restriction,
             &ticked(&["BamHI"]),
+            &Primers::default(),
             false,
             25,
         );
@@ -1229,6 +1536,7 @@ mod tests {
             None,
             Method::Restriction,
             &ticked(&["BamHI"]),
+            &Primers::default(),
             false,
             25,
         );
@@ -1295,6 +1603,7 @@ mod tests {
             Some(&giver),
             Method::Restriction,
             &ticked(&["EcoRI", "BamHI"]),
+            &Primers::default(),
             false,
             25,
         );
@@ -1386,6 +1695,7 @@ mod tests {
             Some(&right),
             Method::Restriction,
             &ticked(&["BamHI"]),
+            &Primers::default(),
             false,
             25,
         );
@@ -1399,6 +1709,7 @@ mod tests {
             Some(&right),
             Method::Gibson,
             &BTreeSet::new(),
+            &Primers::default(),
             false,
             25,
         );
@@ -1430,7 +1741,15 @@ mod tests {
     fn a_circular_vector_is_asked_to_be_linearised_rather_than_assembled() {
         let mut v = mol("AAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAACCCCGGGG", true);
         v.name = "still a circle".into();
-        let p = plan(&v, None, Method::Gibson, &BTreeSet::new(), false, 25);
+        let p = plan(
+            &v,
+            None,
+            Method::Gibson,
+            &BTreeSet::new(),
+            &Primers::default(),
+            false,
+            25,
+        );
         let note = p.note.expect("a note");
         assert!(note.contains("still a circle"), "{note}");
         assert!(note.contains("linearise"), "{note}");
@@ -1445,7 +1764,15 @@ mod tests {
         let b = format!("{shared}TTTTGGGGCCCCAAAATTTTGGGG");
         let x = mol(&a, false);
         let y = mol(&b, false);
-        let strict = plan(&x, Some(&y), Method::Gibson, &BTreeSet::new(), false, 25);
+        let strict = plan(
+            &x,
+            Some(&y),
+            Method::Gibson,
+            &BTreeSet::new(),
+            &Primers::default(),
+            false,
+            25,
+        );
         let note = strict.note.expect("a note at 25");
         assert!(note.contains("25 bp"), "{note}");
         assert!(strict.prods.is_empty());
@@ -1470,7 +1797,15 @@ mod tests {
         // at both junctions.
         let seq = "AAAAGGTCTCAGATCTTTTTTTTTTTTTTTTTTTTGATCTGAGACCAAAACCCCGGGGTTTT";
         let m = mol(seq, true);
-        let p = plan(&m, None, Method::GoldenGate, &ticked(&["BsaI"]), false, 25);
+        let p = plan(
+            &m,
+            None,
+            Method::GoldenGate,
+            &ticked(&["BsaI"]),
+            &Primers::default(),
+            false,
+            25,
+        );
         let g = p.gg.expect("Golden Gate must report on the overhangs");
         assert!(
             !g.overhangs.is_empty(),
@@ -1494,7 +1829,15 @@ mod tests {
         // AND THE OTHER METHODS DO NOT PRETEND TO ANSWER IT. A restriction
         // religation of the same molecule reports no overhang check, because it
         // has not made one.
-        let r = plan(&m, None, Method::Restriction, &ticked(&["BsaI"]), false, 25);
+        let r = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["BsaI"]),
+            &Primers::default(),
+            false,
+            25,
+        );
         assert!(
             r.gg.is_none(),
             "a plain religation claimed to have checked Golden Gate overhangs"
@@ -1531,6 +1874,7 @@ mod tests {
             None,
             Method::Restriction,
             &ticked(&["BamHI"]),
+            &Primers::default(),
             false,
             25,
         );
@@ -1593,7 +1937,15 @@ mod tests {
         let mut m = mol(seq, true);
         m.name = "pGG".into();
         let e = ticked(&["BsaI"]);
-        let pl = plan(&m, None, Method::GoldenGate, &e, false, 25);
+        let pl = plan(
+            &m,
+            None,
+            Method::GoldenGate,
+            &e,
+            &Primers::default(),
+            false,
+            25,
+        );
         let Some(i) = pl.prods.iter().position(|pr| pr.circular) else {
             // No circular product is a legitimate outcome for this fixture; the
             // caveat then belongs to the panel, which shows it either way.
@@ -1606,6 +1958,239 @@ mod tests {
             "no caveat in a Golden Gate record: {r}"
         );
         assert!(r.contains("Type IIS overhangs"), "{r}");
+    }
+
+    /// The step between the two this panel already did.
+    ///
+    /// PROVEN TO FAIL against da9fff7: `Method` had three variants and none of
+    /// them amplified anything. `pl_clone::pcr` has been in the crate the whole
+    /// time, cross-checked against pydna over 29 cases, and `pl-clone` has been
+    /// a GUI dependency since Stage 4 — so the app could design a primer pair
+    /// and could assemble fragments and could not make the amplicon in between.
+    /// A user had to leave, run `pl pcr`, and come back.
+    ///
+    /// The product is checked BY SEQUENCE against the template's own bases, not
+    /// by length: a product of the right length from the wrong arc of a circle
+    /// is the exact failure the named `Primers` type exists to prevent, and
+    /// length cannot see it.
+    #[test]
+    fn a_pair_of_primers_amplifies_the_span_between_them() {
+        let seq = "AAAAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCCGGGGAAAACCCCTTTT";
+        let mut m = mol(seq, false);
+        m.name = "pTest".into();
+        // 18 nt each, comfortably over the 12 nt specificity floor.
+        let fwd = &seq[4..22];
+        let rev =
+            String::from_utf8(pl_core::reverse_complement(&seq.as_bytes()[38..56])).expect("ascii");
+
+        let p = plan(
+            &m,
+            None,
+            Method::Pcr,
+            &BTreeSet::new(),
+            &Primers {
+                forward: fwd.into(),
+                reverse: rev.clone(),
+            },
+            false,
+            25,
+        );
+        assert!(p.note.is_none(), "{:?}", p.note);
+        assert_eq!(p.prods.len(), 1, "a PCR has one product");
+        let prod = &p.prods[0];
+        assert!(!prod.circular, "an amplicon is linear");
+        assert_eq!(
+            String::from_utf8_lossy(&prod.mol.seq),
+            seq[4..56],
+            "the amplicon is not the span between the two primers"
+        );
+        // The record names both oligos, or nobody can repeat it.
+        let r = report(&m, None, Method::Pcr, &BTreeSet::new(), 25, &p, 0).expect("a record");
+        assert!(
+            r.contains(fwd) && r.contains(&rev),
+            "the record omits an oligo: {r}"
+        );
+        assert!(r.contains("amplified with"), "{r}");
+    }
+
+    /// A swapped pair is refused, on a line and on a circle alike.
+    ///
+    /// WRITTEN TO CONFIRM THE OPPOSITE, and it is here because it did not. The
+    /// design this feature was built from asserted that a swap silently
+    /// amplifies the complement arc of a circle — a plausible and frightening
+    /// claim, and the stated reason for making `Primers` a named type. Measured,
+    /// it is false: an oligo written as a reverse primer IS the reverse
+    /// complement of its site, so as a forward primer it has nothing on the plus
+    /// strand to bind, and topology does not change that.
+    ///
+    /// So the named type is justified by its call sites — about twenty, two
+    /// adjacent `&str` among them — and not by a silent wrong answer, and the
+    /// doc comment on `Primers` says so. This test is what stops that claim
+    /// coming back.
+    #[test]
+    fn the_two_oligos_are_not_interchangeable() {
+        let seq = "AAAAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCCGGGGAAAACCCCTTTT";
+        let fwd = &seq[4..22];
+        let rev =
+            String::from_utf8(pl_core::reverse_complement(&seq.as_bytes()[38..56])).expect("ascii");
+        let swapped = Primers {
+            forward: rev.clone(),
+            reverse: fwd.into(),
+        };
+
+        // Linear: the swap is refused, and the refusal says why.
+        let line = plan(
+            &mol(seq, false),
+            None,
+            Method::Pcr,
+            &BTreeSet::new(),
+            &swapped,
+            false,
+            25,
+        );
+        assert!(line.prods.is_empty());
+        let line_note = line.note.clone().unwrap_or_default();
+        // "does not anneal" rather than "face away", and the distinction is
+        // real: the swapped reverse oligo is a plus-strand sequence, which has
+        // nothing to bind as a reverse primer. `Inverted` is what you get from
+        // two primers that DO both anneal and point outwards.
+        assert!(
+            line_note.contains("does not anneal"),
+            "the swap on a line was not named: {line_note:?}"
+        );
+
+        // Circular too, which is the half that was supposed to be dangerous.
+        let circle = plan(
+            &mol(seq, true),
+            None,
+            Method::Pcr,
+            &BTreeSet::new(),
+            &swapped,
+            false,
+            25,
+        );
+        assert!(
+            circle.prods.is_empty(),
+            "a swapped pair amplified something on a circle — if this ever fires, the              complement-arc hazard is real after all and the panel needs to say so"
+        );
+
+        // ...and the fixture is not simply inert: the RIGHT way round works on
+        // both topologies, so the refusals above are about the swap and not
+        // about the sequences.
+        let right = Primers {
+            forward: fwd.into(),
+            reverse: rev,
+        };
+        for circular in [false, true] {
+            let p = plan(
+                &mol(seq, circular),
+                None,
+                Method::Pcr,
+                &BTreeSet::new(),
+                &right,
+                false,
+                25,
+            );
+            assert_eq!(p.prods.len(), 1, "circular={circular}: {:?}", p.note);
+        }
+    }
+
+    /// A tailed primer's product is not a stretch of the template, and the
+    /// panel must say THAT rather than "could not be placed".
+    ///
+    /// Adding a site the template lacks is the entire reason anyone puts a tail
+    /// on a primer. `pcr` has already refused any pair whose 12 nt seed binds
+    /// twice, so an amplicon it returns occurs at most once — the digest's
+    /// sentence about ambiguity is simply not what happened here, and telling a
+    /// user their file is ambiguous when it is not sends them looking for a
+    /// repeat that does not exist.
+    #[test]
+    fn a_tailed_primer_is_told_apart_from_an_ambiguous_fragment() {
+        let seq = "AAAAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCCGGGGAAAACCCCTTTT";
+        let m = mol(seq, false);
+        let fwd = format!("GAATTC{}", &seq[4..22]);
+        let rev =
+            String::from_utf8(pl_core::reverse_complement(&seq.as_bytes()[38..56])).expect("ascii");
+        let p = plan(
+            &m,
+            None,
+            Method::Pcr,
+            &BTreeSet::new(),
+            &Primers {
+                forward: fwd,
+                reverse: rev,
+            },
+            false,
+            25,
+        );
+        assert_eq!(p.prods.len(), 1);
+        assert!(
+            p.prods[0].mol.seq.starts_with(b"GAATTC"),
+            "the tail is not in the product, which is the whole point of a tail"
+        );
+        let f = &p.frags[0];
+        assert!(
+            f.from.is_none(),
+            "a tailed product is not a stretch of the template"
+        );
+        let why = f.unplaced.as_deref().unwrap_or("");
+        assert!(
+            why.contains("tail"),
+            "the panel blames ambiguity for a tail: {why:?}"
+        );
+    }
+
+    /// A refusal must name a character the user can see.
+    ///
+    /// `PcrError::NotDna` formats the offending character with `{found:?}`, and
+    /// `char`'s Debug keeps a printable non-ASCII one literally. This binary's
+    /// proportional chain has no CJK, and the tofu oracle already pins U+4E2D as
+    /// a box in both families — so the error painted straight through would tell
+    /// a user their primer contains an empty rectangle, the one shape that
+    /// cannot say which character to delete.
+    #[test]
+    fn a_primer_with_an_invisible_character_is_named_by_codepoint() {
+        let m = mol("AAAAGGATCCTTTTGCGCGCATATATCCCGGG", false);
+        let p = plan(
+            &m,
+            None,
+            Method::Pcr,
+            &BTreeSet::new(),
+            &Primers {
+                forward: "AAAAGGATCC\u{4e2d}".into(),
+                reverse: "CCCGGG".into(),
+            },
+            false,
+            25,
+        );
+        let note = p.note.expect("a refusal");
+        assert!(
+            note.contains("U+4E2D"),
+            "the refusal does not name the character in a form that renders: {note}"
+        );
+        assert!(
+            !note.contains('\u{4e2d}'),
+            "the refusal paints the character it is complaining about: {note}"
+        );
+        // AND THE OTHER HALF, which is what stops this being a test about one
+        // string: an ordinary absence must not be dressed up as a bad character.
+        let p = plan(
+            &m,
+            None,
+            Method::Pcr,
+            &BTreeSet::new(),
+            &Primers {
+                forward: "GGGGGGGGGGGGGGGG".into(),
+                reverse: "CCCGGG".into(),
+            },
+            false,
+            25,
+        );
+        let n2 = p.note.unwrap_or_default();
+        assert!(
+            n2.contains("does not anneal") && !n2.contains("U+"),
+            "a primer that simply is not there was reported as a bad character: {n2}"
+        );
     }
 
     /// Naming the molecule that was not cut, rather than "this molecule".
@@ -1624,6 +2209,7 @@ mod tests {
             Some(&d),
             Method::Restriction,
             &ticked(&["BamHI"]),
+            &Primers::default(),
             false,
             25,
         );
@@ -1646,6 +2232,7 @@ mod tests {
             None,
             Method::Restriction,
             &ticked(&["BamHI"]),
+            &Primers::default(),
             false,
             25,
         );
@@ -1665,12 +2252,21 @@ mod tests {
             None,
             Method::Restriction,
             &ticked(&["EcoRV"]),
+            &Primers::default(),
             false,
             25,
         );
         assert!(off.prods.is_empty());
         assert!(off.note.unwrap().contains("blunt"));
-        let on = plan(&m, None, Method::Restriction, &ticked(&["EcoRV"]), true, 25);
+        let on = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["EcoRV"]),
+            &Primers::default(),
+            true,
+            25,
+        );
         assert!(
             !on.prods.is_empty(),
             "with blunt on there must be a product"

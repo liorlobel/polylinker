@@ -5020,7 +5020,7 @@ impl App {
                     )
                     .clicked()
                 {
-                    self.clone_panel = Some(clone::Panel::new(&self.gel.picked));
+                    self.open_clone_panel();
                     ui.close();
                 }
                 ui.add_enabled_ui(sel.is_some(), |ui| {
@@ -5212,6 +5212,44 @@ impl App {
             }
         }
         self.after_the_cursor_moved();
+    }
+
+    /// Open the cut-and-religate panel, seeded from what the user was just
+    /// looking at.
+    ///
+    /// The enzymes come from the gel's ticked set, on the precedent already in
+    /// `Panel::new`: somebody who has just looked at a digest is asking about
+    /// THAT digest. The primers come from the Design panel's expanded pair on
+    /// exactly the same argument — somebody who has just designed a pair is
+    /// asking about that pair.
+    ///
+    /// `oligo()` and never the footprint. The tail is the reason anyone adds
+    /// one, it is what the panel's own "Copy both" puts on the clipboard, and
+    /// seeding the footprint would amplify a product WITHOUT the site the user
+    /// designed in — six bases shorter, and nobody checks a length they did not
+    /// compute.
+    ///
+    /// Gated on `result_is_current`, for the reason `stale_reason` exists: a
+    /// report computed against a molecule that has since been edited describes
+    /// bases that may no longer be there, and priming against those is the
+    /// silent wrong answer this panel is otherwise careful about.
+    fn open_clone_panel(&mut self) {
+        let seed = self
+            .design
+            .as_ref()
+            .filter(|d| d.result_is_current())
+            .and_then(|d| match d.result.as_ref() {
+                Some(Ok(r)) => r
+                    .pairs
+                    .get(d.expanded.unwrap_or(0))
+                    .map(|p| clone::Primers {
+                        forward: String::from_utf8_lossy(&p.forward.oligo()).into_owned(),
+                        reverse: String::from_utf8_lossy(&p.reverse.oligo()).into_owned(),
+                    }),
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.clone_panel = Some(clone::Panel::new(&self.gel.picked, seed));
     }
 
     /// Stand at another point in this document's history.
@@ -14095,7 +14133,10 @@ mod tests {
         app.selected = Some(0);
         app.hot = Some(0);
         app.hot_shown = Some(0);
-        app.clone_panel = Some(clone::Panel::new(&["BamHI".to_string()].into()));
+        app.clone_panel = Some(clone::Panel::new(
+            &["BamHI".to_string()].into(),
+            clone::Primers::default(),
+        ));
         app.clone_panel.as_mut().unwrap().stale = false;
 
         app.do_undo();
@@ -14189,7 +14230,10 @@ mod tests {
         app.doc_code = pl_core::translate::table(4).expect("table 4");
         app.central_view = CentralView::Gel;
         app.enzyme_set = pl_enzymes::EnzymeSet::Unique;
-        app.clone_panel = Some(clone::Panel::new(&["BamHI".to_string()].into()));
+        app.clone_panel = Some(clone::Panel::new(
+            &["BamHI".to_string()].into(),
+            clone::Primers::default(),
+        ));
 
         app.switch_tab(1);
         // NOTHING of A's is visible on B. Each of these is a way for one
@@ -18329,12 +18373,13 @@ mod tests {
         // not.
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
         let seq_mol = app.document().expect("open").molecule().clone();
-        let mut panel = clone::Panel::new(&picked);
+        let mut panel = clone::Panel::new(&picked, clone::Primers::default());
         panel.plan = Some(clone::plan(
             &seq_mol,
             None,
             clone::Method::Restriction,
             &picked,
+            &clone::Primers::default(),
             true,
             25,
         ));
@@ -18399,12 +18444,13 @@ mod tests {
         let mut app = seq_app();
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
         let first = app.document().expect("open").molecule().clone();
-        let mut panel = clone::Panel::new(&picked);
+        let mut panel = clone::Panel::new(&picked, clone::Primers::default());
         panel.plan = Some(clone::plan(
             &first,
             None,
             clone::Method::Restriction,
             &picked,
+            &clone::Primers::default(),
             true,
             25,
         ));
@@ -18463,7 +18509,15 @@ mod tests {
         m.features.push(f);
 
         let picked: std::collections::BTreeSet<String> = ["BamHI".to_string()].into();
-        let plan = clone::plan(&m, None, clone::Method::Restriction, &picked, false, 25);
+        let plan = clone::plan(
+            &m,
+            None,
+            clone::Method::Restriction,
+            &picked,
+            &clone::Primers::default(),
+            false,
+            25,
+        );
         assert_eq!(plan.prods.len(), 1, "{:?}", plan.note);
         let p = &plan.prods[0];
 
