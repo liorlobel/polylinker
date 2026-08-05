@@ -35,11 +35,26 @@
     Floor on the number of files the manifest lists. Set equality with the
     archive is checked regardless; this exists because an archive of nothing
     agrees perfectly with a manifest of nothing.
+
+    Left at 0 the floor is DERIVED FROM THE PLATFORM in the archive's name,
+    because the platforms legitimately ship different numbers of files. The
+    fixed 19 that used to sit here was measured on Windows and failed both
+    other legs of the first release: tools/release.ps1 ships four
+    Windows-only files -- Install-Polylinker.ps1, Install.cmd,
+    README-WINDOWS.txt and polylinker.ico -- and says at its installer block
+    that they are deliberately not ported. A Linux archive carrying all three
+    binaries, the Python extension and all seven font licences was rejected
+    for being four files short of Windows.
+
+    The floor is the weaker half of the check. `RequiredMembers` below is the
+    half that matters: a count cannot tell a missing binary from a missing
+    licence, and lowering a count to make a red gate green is how a check
+    stops being one.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Archive,
-    [int]$MinimumFiles = 19
+    [int]$MinimumFiles = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -210,8 +225,55 @@ if (-not $rel.ContainsKey('SHA256SUMS.txt')) {
             Bad "$k is in the archive but not in the manifest, so it has no integrity record"
         }
     }
-    if ($listed.Count -lt $MinimumFiles) {
-        Bad "the manifest lists $($listed.Count) file(s); at least $MinimumFiles are expected"
+    # WHAT THE ARCHIVE MUST CONTAIN, BY NAME. The platform comes from the
+    # archive's own file name, which tools/release.ps1 builds from the label it
+    # was given, so a mislabelled archive is checked against the wrong set and
+    # says so loudly rather than passing quietly.
+    $isWinArchive = $Archive -match 'windows'
+    $isMacArchive = $Archive -match 'macos'
+    $x = if ($isWinArchive) { '.exe' } else { '' }
+
+    $required = @(
+        # The three programs, and the Python extension module. CPython loads it
+        # as .pyd on Windows and .so everywhere else -- including macOS, where
+        # cargo emits a .dylib and the name must still be .so.
+        "pl$x", "polylinker$x", "pl-mcp$x"
+        if ($isWinArchive) { 'polylinker.pyd' } else { 'polylinker.so' }
+
+        # Licensing. These are an obligation, not a courtesy: the GUI embeds
+        # nine font files and cannot be redistributed without their texts.
+        'LICENSE.txt', 'NOTICE.txt', 'TRADEMARKS.md', 'features/NOTICE.txt'
+        'licences/Hack-MIT-and-BitstreamVera.txt', 'licences/IBMPlex-OFL.txt'
+        'licences/Liberation-OFL.txt', 'licences/NotoEmoji-OFL.txt'
+        'licences/Phosphor-MIT.txt', 'licences/Ubuntu-UFL.txt'
+        'licences/emoji-icon-font-MIT.txt'
+
+        # The read-me that tells this platform's user how to get past its own
+        # quarantine or SmartScreen prompt. Shipping the wrong one is worse than
+        # shipping none, so exactly one is required and the others are banned.
+        if ($isWinArchive) { 'README-WINDOWS.txt' }
+        elseif ($isMacArchive) { 'README-MACOS.txt' } else { 'README-LINUX.txt' }
+
+        # Windows alone gets an installer. release.ps1 says at its installer
+        # block that this is deliberate and not an oversight.
+        if ($isWinArchive) { 'Install-Polylinker.ps1', 'Install.cmd', 'polylinker.ico' }
+    )
+    foreach ($r in $required) {
+        if ($listed -notcontains $r) { Bad "$r is required in a $(if ($isWinArchive) { 'Windows' } elseif ($isMacArchive) { 'macOS' } else { 'Linux' }) archive and is not in the manifest" }
+    }
+    # And the read-mes for the other platforms must NOT be here.
+    foreach ($w in 'README-WINDOWS.txt', 'README-MACOS.txt', 'README-LINUX.txt') {
+        if ($required -notcontains $w -and $listed -contains $w) {
+            Bad "$w is in a $(Split-Path -Leaf $Archive) archive, which will tell the reader to do the wrong thing"
+        }
+    }
+
+    # The floor, derived when the caller did not set one. See the comment on the
+    # parameter: this is the weak half, kept only because an empty archive
+    # agrees perfectly with an empty manifest.
+    $floor = if ($MinimumFiles -gt 0) { $MinimumFiles } else { $required.Count }
+    if ($listed.Count -lt $floor) {
+        Bad "the manifest lists $($listed.Count) file(s); at least $floor are expected"
     }
 
     # THE LICENCE OBLIGATION, at the last point it can be dropped.
