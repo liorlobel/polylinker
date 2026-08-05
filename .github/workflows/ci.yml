@@ -87,6 +87,46 @@ jobs:
       - name: The Python builder and the Rust loader agree on the schema
         run: cargo test -p pl-features --test schema_pin --locked -- --nocapture
 
+      # The same gap as the note four steps up, found again and this time on
+      # pl-draw. `--lib --bins` excludes these, so `tests/agreement.rs` -- the
+      # harness comparing this renderer against the TypeScript one, function by
+      # function -- had never run IN CI, on any platform, from the day it was
+      # written until this step; `zstream.rs` and `pngfile.rs` would have joined
+      # it there.
+      #
+      # "In CI", precisely, and not the stronger sentence: the local gate does
+      # run it -- `tools/ci.ps1`, `Step 'renderers agree (rust replays it)'`,
+      # and it was there at 713bd3b too -- so it has been running on one
+      # developer's machine, on one OS, and only when `node` is installed, which
+      # is the step's precondition. Where the stronger claim is true it is
+      # written in full: see the `pl-design` note below, "had never run in CI or
+      # in the local gate, on any platform".
+      #
+      # These three write the artefacts that the Python cross-checks in
+      # `tools/ci.ps1` then judge. Running them here does not run those checks;
+      # it proves the writers themselves work on all three platforms, which is
+      # where a raster is most likely to differ.
+      - name: Drawing, compression and PNG integration suites
+        run: cargo test -p pl-draw --test agreement --test zstream --test pngfile --test glyphs --test render --locked
+
+      # The same gap a third time, and this one had gone all the way: a grep
+      # for `pl-design` over `.github/` and `tools/` returned zero hits, so
+      # `crates/pl-design/tests/` -- design, determinism, purity, refusals,
+      # scoring, specificity_prefilter, 45 tests -- had never run in CI or in
+      # the local gate, on any platform.
+      #
+      # `purity.rs` is the one that matters most here, because it is the only
+      # enforcement left: it reads the crate's own sources and rejects std::fs,
+      # std::env, std::process, std::net, the ambient clocks, HashMap/HashSet
+      # (RandomState is seeded per process, so a report ordered by a hash
+      # iteration differs between runs) and `partial_cmp`. The wasm32 job below
+      # is not a backstop for it -- it builds `pl-wasm` and `pl-index`, and
+      # `pl-wasm` does not depend on `pl-design`. `determinism.rs` is the other
+      # one: nothing else asserts that two runs of one input agree byte for
+      # byte, which is the guarantee the whole crate is built around.
+      - name: Primer design integration suites
+        run: cargo test -p pl-design --tests --locked
+
   wasm:
     name: wasm32 build
     runs-on: ubuntu-latest
@@ -119,13 +159,75 @@ jobs:
       # The whole point of these jobs: our answers are checked against tools
       # that are not ours.
       - name: Install the oracles
-        run: pip install biopython seguid pydna
+        run: pip install biopython seguid pydna pillow fonttools resvg-py numpy
 
       - name: Build
         run: cargo build -p pl --release --locked
 
       - name: SEGUID checksums vs the reference implementation
         run: python reference/python/tests/xcheck_seguid.py target/release/pl
+
+      # `pl-draw` hand-writes DEFLATE, because `crates/` take no dependencies
+      # and a PNG needs one. Its own tests round-trip against an `inflate`
+      # written from RFC 1951 in this repository, which catches nearly
+      # everything and cannot catch the two of them misreading the spec the same
+      # way. `zlib` is the reference implementation, by other people, and is
+      # what will open these files. Checked one-shot and then a byte at a time,
+      # because a stream can decode correctly in one call and still be malformed
+      # for an incremental reader -- measured: appending four bytes was accepted
+      # by all ten one-shot decodes and rejected by all ten streaming ones.
+      - name: zlib streams vs zlib
+        run: |
+          cargo test -q -p pl-draw --test zstream --locked
+          python reference/python/tests/xcheck_deflate.py .
+
+      # Pillow is a different PNG decoder and stands in for every program that
+      # will open these figures. Every pixel is compared against the raw RGB
+      # buffer written beside the file, never against a re-encode.
+      #
+      # Measured limit, worth knowing before anyone calls the unit tests
+      # redundant with this: corrupting IDAT's CRC left Pillow opening the file
+      # with every pixel still matching. Pillow does not verify it. The Rust
+      # test `every_chunk_carries_the_right_crc` is the only cover for that.
+      - name: PNGs vs Pillow
+        run: |
+          cargo test -q -p pl-draw --test pngfile --locked
+          python reference/python/tests/xcheck_png.py .
+
+      # `font.rs` walks the `glyf` table by hand and nothing in this repository
+      # can check that walk -- a test reading `glyf` the way `font.rs` reads it
+      # agrees with itself by construction. fontTools is another implementation
+      # by other people, and the implied on-curve point is expanded by ITS
+      # `BasePen`, not re-derived here, so the rule under test is not a second
+      # copy of our own reasoning. It found two real off-by-ones in this reader
+      # before it first passed, both invisible in a rendered glyph.
+      - name: Glyph outlines vs fontTools
+        run: |
+          cargo test -q -p pl-draw --test glyphs --locked
+          python reference/python/tests/xcheck_glyphs.py .
+
+      # The whole raster against an independent SVG renderer, handed the SVG
+      # this crate emits and forced onto the same two font files it fills
+      # outlines from. The discriminator is WHERE the pixels differ, not how
+      # many: two correct antialiasing implementations disagree along edges and
+      # nowhere else, so every grossly differing pixel must sit on a gradient.
+      # A wrong arc, a wrong winding, a misplaced glyph or a hole in a stroke
+      # all put differing pixels in flat regions instead.
+      - name: The raster vs resvg
+        run: |
+          cargo test -q -p pl-draw --test render --locked
+          python reference/python/tests/xcheck_render.py .
+
+      # The taskbar button of a RUNNING window does not come from the .exe's
+      # icon resource: winit never reads it, and `ViewportBuilder::with_icon`
+      # takes raw RGBA rather than a .ico. So bins/pl-gui/icon/ holds two
+      # generated artefacts from one master. This decodes the .ico's 64 px frame
+      # with Pillow and compares all 16,384 bytes against the blob the window is
+      # handed, then compares every frame against a fresh resvg render of the
+      # master. main.rs's two sha256 prove the pair came out of one run of
+      # build-icon.py; only this compares a pixel.
+      - name: The window icon vs the .ico
+        run: python reference/python/tests/xcheck_icon.py .
 
       - name: Digest fragments and PCR vs pydna
         run: python reference/python/tests/xcheck_clone.py target/release/pl
@@ -230,12 +332,65 @@ jobs:
 
       # The taint gate brought an unlicensed file onto the runner. Prove the
       # working tree is clean of it afterwards, by content and not by name.
+      #
+      # THE SECOND HALF IS WHAT MAKES THAT SENTENCE TRUE, and it was missing.
+      # This step was `git status --porcelain` alone, which reports nothing
+      # about an IGNORED path -- and `.gitignore` ignores `snapgene.csv` at any
+      # depth, with no leading slash, so it matches in every directory. A
+      # payload left in the tree under the file's own name was therefore the
+      # one case this step could not see: `git status --porcelain` printed
+      # nothing and the step echoed "working tree clean". A step named
+      # "Nothing from the taint gate survived", claiming in this comment to
+      # check by content, was checking by name and missing the only name that
+      # matters. `--ignored` is not the fix on its own: `target/` is present by
+      # then and would fail the step on every run.
+      #
+      # So: half one is the dirty-tree check, unchanged. Half two hashes every
+      # file in the tree -- tracked, untracked and ignored alike, since it asks
+      # the filesystem and not git -- and compares each against the pinned
+      # sha256, which is the same constant `tools/hooks/pre-commit` compares
+      # staged blobs against. A rename defeats neither half.
+      #
+      # `target/` is the one exclusion, and it is a scoped claim rather than a
+      # hidden one: it is cargo's output, it is gigabytes, it is written by a
+      # build step that ran before the gate, and `features/build/taint_gate.py`
+      # cannot put anything there -- it fetches into `tempfile.mkdtemp()`,
+      # outside the repository entirely, and removes it in a `finally` before
+      # refusing to exit clean if it survived. This sweep is the defence in
+      # depth behind that, over the tree a person can leave a file in.
+      #
+      # The file count is asserted because this file already documents three
+      # ways a step here passed while checking nothing. A sweep that enumerated
+      # an empty tree would find no match and report success.
       - name: Nothing from the taint gate survived
         run: |
+          PINNED=793631d9eebf721efae9e1d6cd483b1cbb62f5adad41174afa8f8b78b1342d5c
+
           git status --porcelain > /tmp/tree.txt
           if [ -s /tmp/tree.txt ]; then
             echo "::error::the working tree is dirty after the taint gate:"
             cat /tmp/tree.txt
             exit 1
           fi
-          echo "working tree clean"
+
+          find . -path ./.git -prune -o -path ./target -prune -o -type f -print0 \
+            | xargs -0 -r sha256sum > /tmp/tree-hashes.txt
+          n=$(wc -l < /tmp/tree-hashes.txt)
+          if [ "$n" -lt 100 ]; then
+            echo "::error::the content sweep hashed only $n file(s); a checkout of this repository has 245 tracked files alone, so it enumerated almost nothing and proved nothing"
+            exit 1
+          fi
+          # Matched as a whole field, not with `grep "^$PINNED  "`. sha256sum
+          # separates the digest from the path with two spaces in text mode and
+          # with " *" in binary mode, and which one it picks is a property of
+          # the platform's coreutils. The two-space form was written first and
+          # measured NOT to fire against a planted file, because the sweep had
+          # emitted the binary form. A comparison that silently depends on
+          # whitespace is how this step got here.
+          awk -v p="$PINNED" '$1 == p' /tmp/tree-hashes.txt > /tmp/tainted.txt
+          if [ -s /tmp/tainted.txt ]; then
+            echo "::error::a file in the working tree has pLannotate's snapgene.csv contents, whatever it has been renamed to:"
+            cat /tmp/tainted.txt
+            exit 1
+          fi
+          echo "working tree clean, and none of the $n files in it hashes to the pinned blob"

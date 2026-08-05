@@ -211,7 +211,7 @@ These ship before the app and are separately published, separately licensed, sep
 | Accessibility pass: Okabe–Ito palette, redundant non-colour encoding, WCAG 2.2 AA, full keyboard operation, navigate-by-feature screen-reader model | 4 wk | ~1 in 12 men cannot separate a red AmpR arrow from a green CDS, and "unique cutters are bold" is currently the only non-colour channel in the entire category's design language. Also a soft procurement blocker (VPAT / EN 301 549). |
 | Autosave, crash recovery, file-association *conflict* handling, cloud-drive concurrent-edit detection | 3 wk | Losing an afternoon of annotation is a one-strike uninstall. Silently stealing the `.dna` association from an installed SnapGene will enrage exactly the user you are courting — **ask, don't take**. |
 | Docs (tutorial / how-to / reference / explanation), shipped **offline in-app**, plus a methods page per computation | 4 wk | A local-first tool whose help requires internet contradicts itself. The methods pages double as the answer to "why is your Tm different from SnapGene's." |
-| Signing, notarization, updater, Flathub, winget, Homebrew Cask | 8 wk + permanent | See §10. |
+| Signing, notarization, ~~updater~~, Flathub, winget, Homebrew Cask | 8 wk + permanent | See §10. **Updated 2026-08-05:** the updater is cancelled, not pending — see `docs/RELEASING.md`. Windows shipping is done: a zip plus a readable per-user PowerShell installer, `tools/installer/`. An MSI, winget and the rest wait on a certificate. |
 | `pl-cli`, `pl-py` (PyO3 wheel), `pl-mcp` | 3 wk | Nearly free once the library is factored. Reaches the population that produces contributors. SnapGene's programmatic surface is two commands; the MCP space is empty. |
 
 **Honest v1.0 total: 12–15 months for one developer, 8–10 for two.** Not 4–6.
@@ -239,6 +239,15 @@ These ship before the app and are separately published, separately licensed, sep
 > **ADR-1 — Tauri v2 shell + Vite + React 18 + TypeScript frontend + Rust compute core.**
 
 **Rationale.**
+
+> **SUPERSEDED, 2026-08-05 — the app is not Tauri.** `bins/pl-gui` is eframe/egui
+> with no webview (`README.md`: "one static binary, no webview"), so everything
+> below about a Tauri shell, its plugins, its `signCommand` and its
+> "free, signature-mandatory auto-updater" describes a stack that was evaluated
+> and not built. `docs/RELEASING.md` is the authority on releasing, signing and
+> updating, and it records that there is deliberately **no auto-updater at all**.
+> This section is kept because it is the record of how the decision was reached,
+> not a description of what exists.
 
 1. **The UI decision is forced, not chosen.** The only reusable open-source plasmid-editor UI in existence — OVE and seqviz — is React + SVG. Rewriting a virtualized sequence editor, circular map layout and chromatogram rendering in Qt or Swift is multi-person-year work producing nothing a user can see. Qt/PySide6 is licensing-fine and strategically wrong; BeeWare/Toga was still building primitives as of January 2026. Web frontend it is, which reduces the decision to *shell only*.
 2. **Tauri v2 is mature.** `tauri` 2.11.5 (2026-07-01), plugins shipping weekly, MIT/Apache-2.0, Commons Conservancy governance. It gives real filesystem access, OS file associations for `.dna`/`.gb`, native menus, and a **free, signature-mandatory auto-updater** that Electron matches only via third-party tooling — and which works even while Windows builds are still unsigned.
@@ -993,12 +1002,12 @@ A free, unrestricted tool whose purpose is designing novel constructs and export
 ### 9. Parser as attack surface
 **Probability: low-medium. Impact: severe.**
 A `.dna` file is untrusted binary arriving by email, containing LZMA-compressed history, zlib-compressed XML attachments, BGZF/BAM trace alignments, multiple XML payloads, and attacker-controlled 4-byte length fields feeding allocations and index arithmetic. Round-trip fuzzing is planned in the research; **security fuzzing is not mentioned at all.**
-**Mitigation:** §5.5. `cargo-fuzz` in CI from week 3. Decompression caps. XXE off. Refuse-with-error rather than allocate-on-trust. Plus the Tauri shell threat model (CSP, IPC surface) and **updater key custody** — Tauri's update signature "cannot be disabled," so one key compromise pushes arbitrary code to every install. The key lives with the fiscal host, in a hardware-backed or CI-only secret, with a documented rotation procedure. Not in a personal GitHub account.
+**Mitigation:** §5.5. `cargo-fuzz` in CI from week 3. Decompression caps. XXE off. Refuse-with-error rather than allocate-on-trust. Plus (**no longer applicable — there is no Tauri shell and no updater; see `docs/RELEASING.md`**) the Tauri shell threat model (CSP, IPC surface) and **updater key custody** — Tauri's update signature "cannot be disabled," so one key compromise pushes arbitrary code to every install. The key lives with the fiscal host, in a hardware-backed or CI-only secret, with a documented rotation procedure. Not in a personal GitHub account.
 
 ### 10. Windows code-signing *eligibility* (not cost)
 **Probability: medium. Impact: moderate but adoption-suppressing.**
 Azure Artifact Signing is $9.99/mo Basic — but restricted to **verified US/CA/EU/UK businesses and self-employed individuals**. A Bar-Ilan lab project or an unincorporated OSS org may simply not qualify. The fallback EV certificate is ~$400/yr plus a hardware token that cannot live in GitHub Actions. Unsigned Windows binaries plus SmartScreen warnings measurably suppress adoption in exactly the locked-down institutional environments the primary persona inhabits.
-**Mitigation:** Check eligibility in week 1, before it is a surprise. Pay Apple's $99/yr on day one — unavoidable, and macOS is heavily represented in wet labs. Ship Windows unsigned initially with published SHA-256 sums and GitHub Artifact Attestations / Sigstore provenance. Configure `bundle > windows > signCommand` from the start so signing swaps in later without touching the build. The fiscal host (risk 1) may also solve the eligibility problem.
+**Mitigation:** Check eligibility in week 1, before it is a surprise. Pay Apple's $99/yr on day one — unavoidable, and macOS is heavily represented in wet labs. Ship Windows unsigned initially with published SHA-256 sums and GitHub Artifact Attestations / Sigstore provenance. ~~Configure `bundle > windows > signCommand` from the start~~ — there is no Tauri bundler; `tools/release.ps1` takes `-WindowsCert` and calls `signtool` directly, resolving it out of the Windows SDK, so signing swaps in later without touching the build. The fiscal host (risk 1) may also solve the eligibility problem.
 
 ### 11. Upstream dependency risk on tg-oss
 **Probability: medium. Impact: moderate.**

@@ -3,9 +3,18 @@
     Build and verify Polylinker on Windows.
 
 .DESCRIPTION
-    Runs the same checks as CI: unit tests, corpus validation against real
-    files, clippy, formatting, and the two cross-implementation checks against
-    Python and Biopython.
+    A SUBSET of the gate, chosen for a first build on a new Windows machine:
+    the same unit-test invocation CI uses (`--lib --bins`), corpus validation
+    against real files, clippy, formatting, and two cross-implementation checks
+    against Python and Biopython.
+
+    It is not the whole gate and must not be read as one. `tools/ci.ps1` is,
+    and it runs roughly forty more steps this does not -- every other
+    integration suite, all the oracles, the release script, the benchmark, the
+    TypeScript side. This script printing ALL CHECKS PASSED means those five
+    things passed, no more. The header used to say "the same checks as CI",
+    which is how `--lib` alone survived here for as long as it did: nobody
+    re-reads a claim that sounds like it was checked.
 
     Requires a linker. rustup does not ship one, so on Windows this needs the
     MSVC toolset (Visual Studio Build Tools, "MSVC v143 ... build tools" plus a
@@ -79,7 +88,31 @@ if ($link) {
 }
 
 Section 'unit tests'
-$out = cargo test --workspace --lib 2>&1
+# `--bins` as well as `--lib`, because none of the three binary crates has a
+# library target: `bins/pl`, `bins/pl-gui` and `bins/pl-mcp` are all bare
+# `src/main.rs`. So `--lib` alone selected NOTHING from any of them, and this
+# script then printed ALL CHECKS PASSED.
+#
+# THE SHAPE IS THE POINT AND THE DIGITS ARE NOT. What does not move: three
+# binary crates, no lib target between them, and the whole of the GUI's
+# `#[cfg(test)]` body sitting behind `--bins`. The counts below move with the
+# tree and are here for scale -- the first version of this comment quoted
+# figures taken mid-session and four of its five were wrong by the evening,
+# which is the same decay the README-count test in `bins/pl/src/main.rs`
+# exists to stop. Nothing pins these, so read them as an order of magnitude.
+#
+# Re-measure with `cargo test --workspace --lib -- --list`, counting lines
+# ending `: test`. On this machine against a warm target, 2026-08-04:
+#
+#   --lib          938 tests,  ~2.5 s
+#   --lib --bins  1495 tests, ~15.4 s
+#   the difference: 557 tests that had never run here -- 507 in bins/pl-gui,
+#                   39 of pl-mcp's protocol tests, 11 of the CLI's
+#
+# `tools/ci.ps1:103` and `.github/workflows/ci.yml:63` have always run
+# `--lib --bins`, so this was a divergence from the gate it claims to mirror,
+# in the direction that reports success.
+$out = cargo test --workspace --lib --bins 2>&1
 $sum = ($out | Select-String '^test result').Line
 if ($LASTEXITCODE -eq 0) { Pass ($sum -join '; ') } else { $out | Select-Object -Last 25; Fail 'unit tests' }
 

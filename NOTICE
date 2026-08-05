@@ -8,20 +8,43 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
 Third-party components
 ================================================================================
 
-No third-party CODE is vendored into this repository. Two third-party FONT FILES
-are, as of 2026-07-30, under `bins/pl-gui/fonts/`; they are the first two entries
-below. Six third-party LICENCE TEXTS are there too -- one covering those two
-faces and one for each of the five that arrive through a crate -- because four
+No third-party CODE is vendored into this repository. Four third-party FONT FILES
+are: two under `bins/pl-gui/fonts/` since 2026-07-30, for the interface, and two
+under `crates/pl-draw/fonts/` since 2026-08-03, for the PNG raster back end.
+They are the first four entries below. Seven third-party LICENCE TEXTS are
+committed too -- one covering the two Plex faces, one covering the two Liberation
+faces, and one for each of the five that arrive through a crate -- because four
 of those licences require their text to accompany every copy, and a path into a
 Cargo registry is not something a recipient of `dist/` has.
+
+The two directories are separate on purpose. `bins/pl-gui/fonts/` is what the
+interface draws with; `crates/pl-draw/fonts/` is what the raster exporter fills
+outlines from, and it lives in the crate because `bins/pl` needs it too. Nothing
+uses a face from the other directory.
 
 Fonts embedded in the SHIPPED BINARY
 ------------------------------------
 
-Seven faces, 2,282,880 bytes, in polylinker.exe. Two are checked in here and
+Nine faces, 3,108,048 bytes, in polylinker.exe. Four are checked in here and
 five arrive through a crate.
 
-What the two vendored faces cost, measured rather than estimated: a release
+825,168 of those bytes -- the two Liberation faces, and nothing else in this
+list -- are in pl.exe as well, which reaches the same code through
+`pl export --png`. They are the only font data in that binary.
+
+THIS PARAGRAPH READ "Seven faces, 2,282,880 bytes ... Two are checked in here"
+FOR ONE DAY, 2026-08-03 to 2026-08-04, and the arithmetic is what pinned which
+seven it meant: 373,552 + 1,414,020 + 495,308 = 2,282,880 exactly, so the two
+Liberation faces added the day before were the ones missing. Both shipped
+executables link them -- the app through its export menu and `pl` through
+`--png`, each of which calls `pl_draw::png_at`, which rasterizes text by filling
+outlines from `crates/pl-draw/src/font.rs`. The top of this section already said
+four font files are vendored, so the file contradicted itself. It is now summed
+from the entries below by
+`the_face_count_notice_states_is_the_faces_notice_lists`, which reads the two
+committed pairs' lengths off the constants that embed them.
+
+What the two Plex faces cost, measured rather than estimated: a release
 build of `bins/pl-gui` went from 8,682,496 bytes at 0aa0f88 to 9,082,368 with
 them in, +399,872 (+4.61%). The faces themselves are 373,552 of that; the
 remaining 26,320 is what `lto = true` and `strip = true` did with the rest of
@@ -30,7 +53,8 @@ verbatim -- link-time optimisation does not compress them -- which is why they
 are close to 1:1 on the executable and why the subsetting question below was
 worth answering rather than assuming.
 
-The two vendored ones came in with the 2026-07-30 typography pass. Everything
+The two Plex faces came in with the 2026-07-30 typography pass and the two
+Liberation faces with the PNG back end on 2026-08-03. Everything
 about them below was read from the bytes committed to this repository -- the
 version from the file's own `name` table, the advance from its `hmtx`, the
 licence from the `LICENSE.txt` in the same release archive -- and not from a
@@ -134,6 +158,67 @@ this file is the only place that notice can travel at all.
             not. A walk that answered "reachable" for everything, or for
             nothing, fails that test, which is what makes the monospace
             verdict mean something.
+
+  Liberation Sans          410,712 bytes   typeface 2.1.5 (`name` ID 5)
+  Liberation Sans Bold     414,456 bytes   typeface 2.1.5 (`name` ID 5)
+    Added 2026-08-03, for the PNG raster back end. These are NOT for the
+    interface -- nothing on screen uses them. They exist because `pl-draw`
+    rasterizes text by filling glyph outlines, and it needs outlines for the
+    typeface its own arithmetic already measures.
+    SIL OPEN FONT LICENSE 1.1  (`name` ID 13, and the archive's LICENSE)
+      Digitized data copyright (c) 2010 Google Corporation.
+      Copyright (c) 2012 Red Hat, Inc.  (`name` ID 0)
+      Reserved Font Name: "Liberation" (and Arimo, Tinos, Cousine)
+      Designer: Steve Matteson (ID 9). Manufacturer: Ascender Corporation (ID 8)
+      Named in acknowledgement, which OFL clause 4 permits and distinguishes
+      from promotion or endorsement.
+    Files:  crates/pl-draw/fonts/LiberationSans-Regular.ttf
+    sha256  76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8
+            crates/pl-draw/fonts/LiberationSans-Bold.ttf
+    sha256  788abee4c806d660e8aee46689dd8540cd4bb98da03dcc9d171ce3efd99a9173
+    From:   https://github.com/liberationfonts/liberation-fonts/files/7261482/
+            liberation-fonts-ttf-2.1.5.tar.gz
+            (2,385,008 bytes,
+             sha256 7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0)
+            members liberation-fonts-ttf-2.1.5/LiberationSans-{Regular,Bold}.ttf
+            Taken from the upstream project's own release, not from a font
+            redistributor. A redistributor's copy may be rebuilt or subsetted,
+            and then the sha256 above is a hash of somebody's repackaging
+            rather than of the release it names.
+    WHY THIS FACE AND NOT ONE ALREADY HERE. `pl-draw` computes every label's
+            width from `pdf::HELVETICA` and `pdf::HELVETICA_BOLD`, and the
+            truncation, the viewBox crop and every `Anchor::End` placement come
+            out of those numbers. Drawing the glyphs in a face with different
+            advances would reintroduce, in raster, exactly the defect commit
+            7bf5aad fixed in the SVG: a figure measured in one typeface and
+            drawn in another. Liberation is metrically compatible with Arial,
+            which is metrically compatible with Helvetica by design, and which
+            is what those tables were cross-checked against.
+            MEASURED, from these bytes, not from that claim: scaling every
+            `hmtx` advance from 2048 units/em to 1/1000 em and rounding
+            reproduces both tables EXACTLY -- 0 mismatches over all 95
+            printable ASCII codepoints in BOTH weights, worst raw deviation
+            0.238/1000 em, which is 0.0029 pt at 12 pt. Asserted by
+            `the_vendored_face_has_the_advances_the_layout_measures`. Neither
+            Plex face would do: they are not metrically compatible with
+            anything here, and Plex Sans additionally ligates.
+    NOT SUBSETTED, and here the reason is stronger than it was for Plex. OFL
+            1.1 clause 3 forbids a Modified Version from carrying the Reserved
+            Font Name, and a subset is a Modified Version. Shipping the
+            upstream bytes keeps the name usable, keeps the sha256 above
+            checkable against the release, and keeps this an Original Version
+            under clause 2. A 37 KB derived glyph table would save 788 KB and
+            would be OFL-licensed derived data with a name we may not use.
+    Cost:   825,168 bytes of font. Whether that reaches a given binary depends
+            on whether it links the raster back end.
+
+  Licence text for the two Liberation faces, committed and shipped:
+    crates/pl-draw/fonts/Liberation-OFL.txt    4,414 bytes
+    sha256  93fed46019c38bbe566b479d22148e2e8a1e85ada614accb0211c37b2c61c19b
+    The LICENSE at the root of the release archive, unmodified. It is a
+    DIFFERENT file from the Plex OFL beside it -- same licence, different
+    copyright lines and different Reserved Font Names -- so it is committed
+    separately rather than deduplicated against it.
 
   Licence text for both Plex faces, committed and shipped:
     bins/pl-gui/fonts/IBMPlex-OFL.txt          4,456 bytes
@@ -441,13 +526,36 @@ HOW THE OBLIGATION TRAVELS, and what is still owed.
   exactly like a five-line list covering all of them.
 
   STILL OWED: `pl licences` prints the compiled-in feature-database attribution
-  and does not print this font block. Note that it is `pl.exe`, which embeds no
-  fonts at all -- the seven faces are in `polylinker.exe`, which has no licence
-  view of its own. So the honest statement of the gap is that the GUI cannot yet
-  state its own font attribution from inside itself, and it should be able to.
-  Two more OFL faces made that worse rather than better, and Phosphor makes it
-  worse again: like emoji-icon-font it carries no copyright in its own `name`
-  table, so this file is the only place its MIT notice can travel.
+  and does not print this font block. That is the whole of the gap now, and it
+  is one clause of the four this paragraph carried until 2026-08-04. The other
+  three each stopped being true on 2026-08-03, in the same pass, and what each
+  one said is described below rather than quoted, because
+  `the_still_owed_paragraph_owes_only_what_is_still_owed` asserts their wording
+  is absent from this file and a verbatim epitaph would be indistinguishable
+  from the claim itself to that test and to a skimming reader alike:
+
+    - It said pl.exe carried no font data. It carries two faces. `pl export
+      --png` reaches `crates/pl-draw/src/font.rs`, which is 825,168 bytes of
+      Liberation Sans under SIL OFL 1.1 -- and OFL clause 2 attaches to that
+      copy exactly as it does to the app's. That sentence is the reasoning path
+      by which `tools/release.ps1` shipped six font licence texts for seven
+      faces and none for Liberation; the array was corrected on 2026-08-04 and
+      now carries all seven.
+    - It put seven faces in polylinker.exe. Nine are there, 3,108,048 bytes;
+      see the head of this section.
+    - It said the GUI had no way to state its own font attribution from inside
+      itself, and should have one. It has one. `bins/pl-gui/src/help.rs` is
+      that page. It shows NOTICE, LICENSE, TRADEMARKS.md and all seven font
+      licence texts whole, each from an `include_str!` rather than a summary,
+      so what a user reads is the committed bytes and not a restatement of
+      them.
+
+  So what is left is the CLI, and it is a real gap rather than a tidiness one
+  now that `pl.exe` carries an OFL face: `pl licences` is a licence view that
+  says nothing about fonts. Two more OFL faces made that worse rather than
+  better, and Phosphor makes it worse again: like emoji-icon-font it carries no
+  copyright in its own `name` table, so this file is the only place its MIT
+  notice can travel.
 
 Considered and NOT shipped
 --------------------------

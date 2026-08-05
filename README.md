@@ -7,15 +7,37 @@ licensed database that cites every source. Publishes its own correctness. Never
 sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
-> build, Python bindings and an MCP server all work today, over 16 crates and
-> ~47,500 lines of dependency-free Rust, with 812 tests and a 39-step gate that
-> cross-checks the answers against Biopython, pydna, SciPy and the SEGUID
-> reference implementation.
+> build, Python bindings and an MCP server all work today, across 20 workspace
+> crates and 132,454 lines of Rust, 80,583 of it dependency-free (123 `.rs`
+> files under `crates/` and `bins/`), with 1,644 `#[test]` functions and a
+> 53-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
+> answers against Biopython, pydna, SciPy and the SEGUID reference
+> implementation. Counted 2026-08-05, and recounted on every test run since:
+> tests are lines matching `^\s*#\[test\]`, the attribute at the start of a
+> line, so a `#[test]` written mid-sentence in a doc comment is prose rather
+> than a test; lines are `wc -l`; crates are the `members` of the root
+> `Cargo.toml`; **dependency-free** is a property of a crate and not a mood —
+> a member every one of whose dependencies is another member of this
+> workspace. Eighteen of the twenty are, and the two that are not are the two
+> that face outwards: `bins/pl-gui` (eframe, rfd, egui-phosphor) and
+> `crates/pl-py` (pyo3). All six numbers are recomputed from the tree by
+> `the_readme_headline_counts_are_the_counts_in_the_tree` in
+> `bins/pl/src/main.rs`, which fails the gate when this paragraph disagrees
+> with it. They are asserted rather than written down because writing them
+> down did not work: the original figures here — 16 crates, ~47,500 lines,
+> 812 tests, 39 steps — were two to three times stale; the hand recount that
+> replaced them on 2026-08-04 — 125,788 lines, 119 files, 1,593 tests,
+> 43 steps — went stale the same day it landed; and the recount after *that*
+> was pinned by the test above while still calling every one of those lines
+> dependency-free, counting `pl-gui`'s and `pl-py`'s as though they took
+> nothing. A number a test recomputes is not the same thing as a sentence a
+> test reads, which is why the adjective now has a marker of its own.
 >
-> **Two things are deliberately not ready**, and they are the two that decide
-> whether you should trust it: the builds are **unsigned**, and the features
-> database ships **0 reviewed records**, so `pl annotate` finds nothing until a
-> curator signs rows off in `features/SIGNOFF.tsv`. See
+> **One thing is deliberately not ready**, and it is the one that decides
+> whether you should trust the download: the builds are **unsigned**. The
+> features database is *not* the other one any more — all 89 records carry a
+> named curator in `features/SIGNOFF.tsv`, so `pl annotate` reports by default,
+> and an approval lapses by itself the moment the row it approves changes. See
 > [Where this actually is](#where-this-actually-is).
 
 ---
@@ -52,7 +74,7 @@ Each ships before the app, stands alone, and survives the app.
 
 | Component | State |
 |---|---|
-| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model, SEGUID checksums, sequence search), `pl-enzymes` (digestion, Type IIP and Type IIS), `pl-clone` (sticky ends, fragments, PCR, Gibson and Golden Gate), `pl-fileio` (`.dna`, GenBank, FASTA), `pl-draw` (maps as SVG and PDF), `pl-thermo` (melting temperature), `pl-primer` (binding sites), `pl-design` (choosing a primer pair, **no I/O**), `pl-abif` (Sanger traces), `pl-index` (the library: packed sequence store and queries, **no I/O**), `pl-scan` (the one crate that touches the filesystem), `pl-wasm` (browser ABI), and the `pl` command. **Zero external dependencies.** |
+| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model, SEGUID checksums, sequence search), `pl-enzymes` (digestion, Type IIP and Type IIS), `pl-clone` (sticky ends, fragments, PCR, Gibson and Golden Gate), `pl-fileio` (`.dna`, GenBank, FASTA), `pl-draw` (maps as SVG, PDF, EPS and PNG), `pl-thermo` (melting temperature), `pl-primer` (binding sites), `pl-design` (choosing a primer pair, **no I/O**), `pl-abif` (Sanger traces), `pl-index` (the library: packed sequence store and queries, **no I/O**), `pl-scan` (the one crate that touches the filesystem), `pl-wasm` (browser ABI), and the `pl` command. **Zero external dependencies.** |
 | [`bins/pl-gui`](bins/pl-gui) | **The desktop app**, `polylinker.exe`. egui; one static binary, no webview. |
 | [`bench/`](bench/README.md) | **`polylinker-bench` v0.1** — a CC0 truth set, 176 cases, every expected value from an independent oracle. Polylinker scores **176/176, zero failures, nothing declined**. |
 | `prototype/dna-reader.html` | **Usable today.** The same Rust core compiled to wasm32 and inlined into one HTML file: opens `.dna`, GenBank and FASTA, draws maps, digests, exports GenBank/FASTA/SVG. No install, no network, no account — runs from a USB stick on a locked-down PC. Built by [`tools/build-web.ps1`](tools/build-web.ps1); not committed, because it is 257 KB of base64 that changes every rebuild. |
@@ -63,9 +85,10 @@ Each ships before the app, stands alone, and survives the app.
 | [`docs/PLAN.md`](docs/PLAN.md) | The architecture and roadmap this repo is built from. |
 | [`bins/pl-mcp`](bins/pl-mcp) | **MCP server**, read-only, no dependencies — so an assistant can ask about a plasmid without being able to overwrite one. |
 | [`crates/pl-py`](crates/pl-py) | **Python bindings** (PyO3, abi3), so a script already using Biopython can call the parts that are hard to get right without being rewritten. |
-| [`docs/AUDIT-2026-07-28.md`](docs/AUDIT-2026-07-28.md) | A 123-agent audit of the whole workspace: 90 confirmed findings, 89 fixed. Kept in the repo because the findings that mattered most were **checks that could not fail**, and that is worth being public about. |
+| [`docs/AUDIT-2026-07-28.md`](docs/AUDIT-2026-07-28.md) | A 123-agent audit of the whole workspace: 90 confirmed findings, 19 refuted, 90 of 90 fixed. Kept in the repo because the findings that mattered most were **checks that could not fail**, and that is worth being public about. |
+| Windows installer | **`tools/installer/Install-Polylinker.ps1`**, shipped inside the release zip. Per-user by default, no elevation, no updater, no network. It is a readable script and not a compiled `.msi` on purpose: without a code-signing certificate the only trust an installer can offer is that you can read it before you run it. See [`docs/RELEASING.md`](docs/RELEASING.md). |
 | Signing | **Not done.** Needs a code-signing certificate and an Apple Developer ID; see [`docs/RELEASING.md`](docs/RELEASING.md). Until then `SHA256SUMS.txt` is the only integrity guarantee. |
-| Features database | **84 records as of release 2026.07.28, 0 reviewed.** Machine-assembled from public sources and not shipped by default. This is the intended state, enforced by a test: the tool may propose and never assert. A row moves past `proposed` only when `features/SIGNOFF.tsv` names it with a sha256 of its content that still matches, so an approval lapses by itself when the row changes. `pl licences` prints the live count and the attribution. |
+| Features database | **89 records as of release 2026.07.28, all 89 reviewed.** Machine-assembled from public sources, then signed off row by row on 2026-07-28. A row moves past `proposed` only when `features/SIGNOFF.tsv` names it with a sha256 of its content that still matches, so an approval lapses by itself when the row changes and the shipped set shrinks without anyone deciding to shrink it. That mechanism, not the current count, is what enforces "the tool may propose and never assert". `pl licences` prints the live count and the attribution. |
 
 ### Getting your sequences out of `.dna`, today
 

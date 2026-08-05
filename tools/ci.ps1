@@ -164,6 +164,34 @@ Step 'pl-index stays pure (wasm32)' {
 Step 'pl-index and pl-scan tests' {
     cargo test -p pl-index -p pl-scan --tests
 }
+# The same omission, found again, and this one had gone all the way: NOTHING
+# ran `crates/pl-design/tests/`.
+#
+# `unit tests` is `--workspace --lib --bins`, which reaches no integration
+# target, so every other integration suite in this file is named explicitly --
+# pl-fileio's corpus, the step above, pl-index's scale test, pl-draw's five.
+# pl-design was never added to that list, and a grep for `pl-design` over
+# `tools/` and `.github/` returned zero hits, so six suites -- design.rs,
+# determinism.rs, purity.rs, refusals.rs, scoring.rs, specificity_prefilter.rs,
+# 45 tests between them -- had never been run by any gate on any platform.
+#
+# What was silently unenforced: `nothing_under_src_touches_storage_a_clock_or_
+# a_hash_order` (the crate's no-I/O, no-clock, no-hash-iteration-order rule),
+# `the_manifest_lists_only_workspace_crates` (the zero-dependency rule), and
+# `determinism.rs`, which is the only thing asserting that two runs of the same
+# input produce byte-identical output.
+#
+# The wasm32 backstop `purity.rs`'s header used to invoke does not exist for
+# this crate either: the only wasm32 builds here are `-p pl-wasm` and
+# `-p pl-index`, and `pl-wasm` does not depend on `pl-design`. So this step is
+# the whole enforcement, not a second line of it.
+#
+# All 45 passed on the first run after being added, which is the good outcome
+# and not evidence the step is unnecessary: it means the rules held while
+# nothing was checking them, and nothing would have said so if they had not.
+Step 'pl-design tests' {
+    cargo test -p pl-design --tests
+}
 # Size and speed at three thousand plasmids.
 #
 # Nothing else in this gate would notice an index costing 800 MB or a query
@@ -294,6 +322,216 @@ Step 'digest + PCR vs pydna' {
 Step 'motif vs Biopython (degenerate, both strands)' {
     python reference/python/tests/xcheck_motif.py target/release/pl.exe
 } { HavePy 'Bio' }
+# Are our zlib streams streams anybody else can read?
+#
+# `pl-draw` hand-writes DEFLATE, because `crates/` take no dependencies and a
+# PNG needs one. Its own tests round-trip against an `inflate` written from
+# RFC 1951 -- which catches nearly everything, and cannot catch the two of them
+# misreading the spec the same way, since one author read it once.
+#
+# `zlib` is the reference implementation, by other people, and is what will open
+# these files. Checked one-shot AND a byte at a time: a stream can decode
+# correctly in one call and still be malformed for an incremental reader, which
+# is what browsers and image libraries are. `eof` and `unused_data` are asserted
+# too, so a missing final-block bit cannot pass.
+#
+# Verified the way this file insists, with three deliberate breakages:
+#
+#   - Huffman codes written low-bit-first instead of high-bit-first: zlib
+#     refused 8 of the 10 streams. (The 2 that passed are the empty and
+#     single-byte cases, whose trees are too degenerate for bit order to show.)
+#   - the final-block bit never set: zlib refused 9 of 10.
+#   - four trailing bytes appended: one-shot decoding accepted ALL 10, and the
+#     byte-at-a-time pass rejected all 10 on `unused_data`.
+#
+# The third is why the streaming half is here, and it is the only one that
+# needed it -- the first two were caught by the one-shot decode on its own.
+# Trailing rubbish is the realistic version: a buffer written twice, or a length
+# computed once too often.
+#
+# `Have python`, not `HavePy`, and that is the whole reason this precondition
+# was missing: the three siblings below each need a package (`PIL`,
+# `fontTools`, `resvg_py`) and `HavePy` is what asks for one, while
+# xcheck_deflate.py imports `os`, `sys` and `zlib` and nothing else. So there
+# was no module to name -- and the interpreter went unasked-for with it. A
+# Rust-only machine then got FAIL from `Step`'s catch on the
+# CommandNotFoundException, which is precisely the outcome this file's header
+# says the skip mechanism exists to prevent. Reproduced with PATH cut to
+# `.cargo\bin` and System32: bare, `FAIL ... The term 'python' is not
+# recognized`; with this precondition, `SKIP`.
+Step 'zlib streams vs zlib' {
+    # THE EXIT CODE, not just the artifacts. `Step` judges on $LASTEXITCODE
+    # after the whole body, which would be Python's -- and the checkers only
+    # require the files to EXIST. So a failing Rust test left the previous
+    # run's output in target/tmp and this step read it and said ok. Same
+    # hazard the header of this file documents three earlier versions of.
+    cargo test -q -p pl-draw --test zstream 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output 'cargo test --test zstream failed; re-running it visibly'
+        cargo test -p pl-draw --test zstream
+        $global:LASTEXITCODE = 1
+        return
+    }
+    python reference/python/tests/xcheck_deflate.py .
+} { Have python }
+# Are our PNGs pictures anybody else sees the same way?
+#
+# `src/png/tests.rs` parses the file with the same understanding that wrote it:
+# it knows where IHDR is because it put IHDR there. PIL is a different decoder
+# by other people, and stands in for every program that will open these figures.
+# Every pixel is compared against the raw RGB buffer written beside the file --
+# never against a re-encode, so no second encoder of ours is in the loop -- and
+# `info["dpi"]` against the resolution asked for, because "at a specified
+# physical width and dpi" is the roadmap row and a figure whose dpi does not
+# survive arrives in a manuscript at a size nobody chose.
+#
+# Verified the way this file insists, and the fourth line is the useful one:
+#
+#   - channels written B,G,R instead of R,G,B: all 4 files failed, the flat one
+#     on 5120 of 7680 bytes.
+#   - IHDR CRC corrupted: PIL refused the file outright.
+#   - IHDR lying about its colour type, CRC recomputed to match: PIL refused.
+#   - **IDAT CRC corrupted: PIL opened it and every pixel still matched.**
+#
+# So PIL does not verify IDAT's CRC, and this step cannot see a wrong one. The
+# unit test `every_chunk_carries_the_right_crc` is the only thing covering that,
+# which is worth knowing before anyone decides it is redundant with this.
+Step 'PNGs vs PIL' {
+    # THE EXIT CODE, not just the artifacts. `Step` judges on $LASTEXITCODE
+    # after the whole body, which would be Python's -- and the checkers only
+    # require the files to EXIST. So a failing Rust test left the previous
+    # run's output in target/tmp and this step read it and said ok. Same
+    # hazard the header of this file documents three earlier versions of.
+    cargo test -q -p pl-draw --test pngfile 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output 'cargo test --test pngfile failed; re-running it visibly'
+        cargo test -p pl-draw --test pngfile
+        $global:LASTEXITCODE = 1
+        return
+    }
+    python reference/python/tests/xcheck_png.py .
+} { HavePy 'PIL' }
+# Glyph outlines vs fontTools.
+#
+# `crates/pl-draw/src/font.rs` walks the `glyf` table by hand, because
+# `crates/` take no dependencies. NOTHING IN THIS REPOSITORY CAN CHECK THAT
+# WALK: a test that reads `glyf` the way `font.rs` reads `glyf` agrees with
+# itself by construction. fontTools is another implementation, in another
+# language, by other people.
+#
+# The implied on-curve point -- where two consecutive off-curve points imply an
+# on-curve point at their midpoint -- is NOT re-derived on the Python side. The
+# checker subclasses `BasePen`, whose own `qCurveTo` performs that expansion,
+# so the rule under test is fontTools' statement of it and not a second copy of
+# ours. An earlier design proposed a glyph bounding box for this, which is
+# blind to ignoring the on-curve flag entirely.
+#
+# It earned its keep on the first run, before it ever passed: it found this
+# reader emitting an extra closing `Line` per contour (131 of 190 glyph-face
+# pairs) and then a second off-by-one where the loop revisited the contour's
+# start. Both are invisible in a rendered glyph. It now compares 8,657 outline
+# commands over 382 glyph-face pairs, 117 of them composites, with 0
+# disagreements.
+#
+# That said 3,504 until 2026-08-04, which is the ASCII-only total -- 95
+# codepoints across 2 faces, with NO composite among them. It was the figure
+# from before this session widened the range to Latin-1, and the reason for
+# widening it was precisely that ASCII judged `Face::composite` not at all. So
+# the one line in the repository that says how far the only independent oracle
+# reaches was quoting the reach it had before the composite branch was brought
+# inside it. `xcheck_glyphs.py` now re-derives all four numbers and fails this
+# step when they drift, so the figure cannot decay that way twice. (The 131 of
+# 190 above is past tense about the first run, and stays as it was.)
+Step 'glyph outlines vs fontTools' {
+    # THE EXIT CODE, not just the artifacts. `Step` judges on $LASTEXITCODE
+    # after the whole body, which would be Python's -- and the checkers only
+    # require the files to EXIST. So a failing Rust test left the previous
+    # run's output in target/tmp and this step read it and said ok. Same
+    # hazard the header of this file documents three earlier versions of.
+    cargo test -q -p pl-draw --test glyphs 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output 'cargo test --test glyphs failed; re-running it visibly'
+        cargo test -p pl-draw --test glyphs
+        $global:LASTEXITCODE = 1
+        return
+    }
+    python reference/python/tests/xcheck_glyphs.py .
+} { HavePy 'fontTools' }
+# The whole raster, against an independent SVG renderer.
+#
+# Every other check on the rasterizer is a property -- this pixel is dark, that
+# area is right, this colour parses. None of them can say the PICTURE is right.
+# resvg is handed the SVG this crate already emits and forced onto the same two
+# font files this crate fills outlines from, so a text disagreement is about
+# placement rather than about which face got picked. One comparison then covers
+# arc flattening, winding, stroke construction, antialiasing, glyph decoding,
+# glyph placement, the baseline constant, anchors and colour at once.
+#
+# THE DISCRIMINATOR IS *WHERE* THE PIXELS DIFFER, not how many. Two correct
+# antialiasing implementations disagree slightly along edges and nowhere else,
+# so every grossly differing pixel must sit on a gradient; a wrong arc, a wrong
+# winding, a misplaced glyph or a hole in a stroke all put differing pixels in
+# FLAT regions, where two correct renderers must agree exactly. A count-based
+# trend was tried first and discarded: at 1x the figure has ONE grossly
+# differing pixel, so any ratio against it is noise.
+#
+# Currently 98.3% of pixels identical at 1x and 99.5% at 4x, with 100% of the
+# residue on an edge at both.
+Step 'the raster vs resvg' {
+    # THE EXIT CODE, not just the artifacts. `Step` judges on $LASTEXITCODE
+    # after the whole body, which would be Python's -- and the checkers only
+    # require the files to EXIST. So a failing Rust test left the previous
+    # run's output in target/tmp and this step read it and said ok. Same
+    # hazard the header of this file documents three earlier versions of.
+    cargo test -q -p pl-draw --test render 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output 'cargo test --test render failed; re-running it visibly'
+        cargo test -p pl-draw --test render
+        $global:LASTEXITCODE = 1
+        return
+    }
+    python reference/python/tests/xcheck_render.py .
+} { (HavePy 'resvg_py') -and (HavePy 'PIL') -and (HavePy 'numpy') }
+# The window icon is the .ico's own 64 px frame, and both are polylinker.svg.
+#
+# THE TASKBAR BUTTON OF A RUNNING WINDOW DOES NOT COME FROM THE .EXE'S ICON.
+# winit never reads the executable's resource directory; a window's icon is an
+# `HICON` set with `WM_SETICON` on Windows and a `_NET_WM_ICON` property on X11,
+# both fed from `egui::ViewportBuilder::with_icon`, which takes raw RGBA and
+# cannot take a `.ico`. So `bins/pl-gui/icon/` holds two generated artefacts from
+# one master, and two artefacts from one master is the shape that goes stale --
+# this repository has produced that exact defect several times in one week.
+#
+# `bins/pl-gui/src/main.rs` holds a sha256 of each, which proves they came out of
+# ONE run of `build-icon.py`. It cannot compare a pixel: the `.ico`'s frames are
+# PNG and this project has no PNG decoder, only an encoder. THIS step is the one
+# that decodes the 64 px frame and compares all 16,384 bytes against the blob the
+# window gets, and then compares every frame against a fresh resvg render of
+# `polylinker.svg`.
+#
+# THAT LAST PART CLOSES THE GAP the step 'the built binaries carry their icon and
+# version resource' documents on itself. That step proves the .exe carries the
+# .ico's bytes and is blind to the .ico being a stale rasterisation of an edited
+# master, because both sides of its comparison move together. It stays
+# dependency-free and this step, which needs Python, resvg and PIL, is where the
+# master enters the comparison.
+#
+# Verified the way this file insists, on 2026-08-05, three injections:
+#
+#   * one byte of `polylinker-64.rgba` moved from 178 to 180 -> `the .ico's
+#     64x64 frame vs polylinker-64.rgba: 1 of 16384 bytes differ, first at byte
+#     5398 (pixel 1349, channel B): 178 became 180`;
+#   * the master's short blue bar moved 4 units and ONLY the .ico regenerated ->
+#     2 disagreements, 59 of 16384 bytes, which is the drift this exists for;
+#   * the same edit with NEITHER artefact regenerated -> 10 disagreements, every
+#     one of the nine frames and the blob. That is the gap the release-section
+#     step cannot see, and it is now red.
+#
+# `xcheck_oracles.py` pins the comparator itself, including the case where it
+# compares nothing.
+Step 'the window icon is the .ico''s own frame' {
+    python reference/python/tests/xcheck_icon.py .
+} { (HavePy 'resvg_py') -and (HavePy 'PIL') }
 # Is the PDF a PDF, and is it the same picture as the SVG?
 #
 # `pl-draw` builds one Scene and renders it twice, so they ought to match --
@@ -591,7 +829,9 @@ Step 'renderers agree (rust replays it)' {
     cargo test -p pl-draw --test agreement
 } { Have node }
 
-Write-Host "`nbenchmark" -ForegroundColor Cyan
+# This heading said "benchmark" while the two steps under it were the release
+# script and its manifest, because the benchmark used to be the only thing here.
+Write-Host "`nrelease" -ForegroundColor Cyan
 # The release script runs, and its manifest verifies.
 #
 # A checksum file is the only integrity guarantee an unsigned build has, so it
@@ -601,53 +841,603 @@ Write-Host "`nbenchmark" -ForegroundColor Cyan
 #
 # Signing itself cannot be checked here — see docs/RELEASING.md — because it
 # needs credentials issued to a person.
+#
+# NO LONGER GATED ON PYTHON. This step used to carry `{ Have python }`, and its
+# own comment recorded the cost: on a Rust-only machine the whole thing SKIPPED,
+# so the manifest was never checked at all, because one probe at the end of it
+# needed an interpreter. That probe is now a step of its own with its own
+# precondition, which is what it should always have been — the release output is
+# built once here and the steps that follow reuse it, so splitting costs one
+# variable and no build time.
+$script:release = $null
+$script:releaseFiles = @()
+
 Step 'release script and its manifest' {
     $out = Join-Path $env:TEMP ('pl-release-check-' + $PID)
-    try {
-        & "$PSScriptRoot/release.ps1" -Out $out -Quiet 2>&1 | Out-Null
-        $m = Join-Path $out 'SHA256SUMS.txt'
-        if (-not (Test-Path $m)) { throw 'no manifest was written' }
-        $bytes = [System.IO.File]::ReadAllBytes($m)
-        if ($bytes[0] -eq 0xEF) { throw 'the manifest has a BOM and will not verify' }
-        if ($bytes -contains 0x0D) { throw 'the manifest has CRLF and will not verify' }
-        # Pure ASCII. Windows PowerShell 5.1 reads a BOM-less script as ANSI, so
-        # a non-ASCII character in one of the script's strings comes back out
-        # double-encoded -- an em-dash in the dirty-tree warning reached the
-        # manifest as three mojibake bytes, and nothing else here would have
-        # noticed. A checksum file needs nothing ASCII cannot spell.
-        foreach ($b in $bytes) {
-            if ($b -gt 0x7F) { throw 'the manifest is not pure ASCII' }
-        }
-        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
-        $lines = $text -split "`n"
-        $sep = [Array]::IndexOf($lines, '--')
-        if ($sep -lt 4) { throw 'the manifest has no header' }
-        $n = 0
-        foreach ($line in $lines[($sep + 1)..($lines.Length - 1)]) {
-            if (-not $line) { continue }
-            if ($line -notmatch '^[0-9a-f]{64}  \S+$') { throw "not a checksum line: $line" }
-            $parts = $line -split '  ', 2
-            $actual = (Get-FileHash (Join-Path $out $parts[1]) -Algorithm SHA256).Hash.ToLower()
-            if ($actual -ne $parts[0]) { throw "$($parts[1]) does not match its recorded hash" }
-            $n++
-        }
-        if ($n -lt 3) { throw "only $n artifact(s) in the manifest" }
-        # The Python extension must be shipped under a name CPython will load.
-        # A correctly built `polylinker.dll` cannot be imported on Windows at
-        # all, and the failure reads as "the wheel is broken" rather than as a
-        # naming problem — which is exactly how it presented when a smoke test
-        # first tried to import one.
-        $py = Get-ChildItem $out -Filter 'polylinker.*' |
-              Where-Object { $_.Extension -in '.pyd', '.so' }
-        if (-not $py) { throw 'no importable Python extension in the release' }
-        $probe = python -c "import importlib.util as u, sys; s = u.spec_from_file_location('polylinker', sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m); print(len(m.enzymes()))" $py.FullName 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "the shipped extension does not import: $probe" }
-        Write-Host "        $n artifact(s), manifest verified" -ForegroundColor DarkGray
-    } finally {
-        Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
+    & "$PSScriptRoot/release.ps1" -Out $out -Quiet 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'release.ps1 failed' }
+    $script:release = $out
+
+    $m = Join-Path $out 'SHA256SUMS.txt'
+    if (-not (Test-Path $m)) { throw 'no manifest was written' }
+    $bytes = [System.IO.File]::ReadAllBytes($m)
+    if ($bytes[0] -eq 0xEF) { throw 'the manifest has a BOM and will not verify' }
+    if ($bytes -contains 0x0D) { throw 'the manifest has CRLF and will not verify' }
+    # Pure ASCII. Windows PowerShell 5.1 reads a BOM-less script as ANSI, so
+    # a non-ASCII character in one of the script's strings comes back out
+    # double-encoded -- an em-dash in the dirty-tree warning reached the
+    # manifest as three mojibake bytes, and nothing else here would have
+    # noticed. A checksum file needs nothing ASCII cannot spell.
+    foreach ($b in $bytes) {
+        if ($b -gt 0x7F) { throw 'the manifest is not pure ASCII' }
     }
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    $lines = $text -split "`n"
+    $sep = [Array]::IndexOf($lines, '--')
+    if ($sep -lt 4) { throw 'the manifest has no header' }
+    $listed = @()
+    foreach ($line in $lines[($sep + 1)..($lines.Length - 1)]) {
+        if (-not $line) { continue }
+        if ($line -notmatch '^[0-9a-f]{64}  \S+$') { throw "not a checksum line: $line" }
+        $parts = $line -split '  ', 2
+        $f = Join-Path $out $parts[1]
+        if (-not (Test-Path -LiteralPath $f)) { throw "the manifest lists $($parts[1]), which is not in the release" }
+        $actual = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLower()
+        if ($actual -ne $parts[0]) { throw "$($parts[1]) does not match its recorded hash" }
+        $listed += $parts[1]
+    }
+    $script:releaseFiles = $listed
+
+    # SET EQUALITY, not a floor and not a hardcoded list.
+    #
+    # This is the check that makes the licence obligation structural. Until
+    # 2026-08-05 the manifest covered four binaries out of sixteen files, and
+    # the eleven notice texts that four licences require to travel with every
+    # copy had no integrity record and no gate. A second list here — "and these
+    # eleven files must be present" — would be a fourth copy of `$notices` and
+    # would drift from it exactly as `dist/` did, twice, on 2026-08-03 and
+    # 2026-08-04. So nothing is enumerated: what is on disk must be what the
+    # manifest says, in both directions, and `release.ps1` already refuses to
+    # build a copy whose notice SOURCES are missing.
+    #
+    # The zip and its checksum sidecar are the two files that cannot be in the
+    # manifest, because they are built from it.
+    $onDisk = Get-ChildItem -LiteralPath $out -Recurse -File |
+        ForEach-Object { $_.FullName.Substring($out.Length + 1).Replace('\', '/') } |
+        Where-Object { $_ -ne 'SHA256SUMS.txt' -and $_ -notlike '*.zip' -and $_ -notlike '*.zip.sha256' }
+    $unhashed = @($onDisk | Where-Object { $listed -notcontains $_ })
+    if ($unhashed) { throw "shipped but not in the manifest: $($unhashed -join ', ')" }
+
+    # A floor as well, because set equality alone is satisfied by a release of
+    # nothing agreeing with a manifest of nothing. Nineteen is what the current
+    # `$artifacts` + `$notices` + installer produce; raise it when they grow.
+    #
+    # It read sixteen until 2026-08-05, by which time the release had been
+    # eighteen files for a while: the floor had become two files of slack rather
+    # than a floor, which is the same drift it exists to catch. Nineteen is those
+    # eighteen plus polylinker.ico, which `release.ps1` began shipping that day.
+    if ($listed.Count -lt 19) { throw "only $($listed.Count) file(s) in the manifest; at least 19 are expected" }
+
+    # And the specific obligation named in NOTICE, spelled out once here because
+    # this is the assertion whose failure is a licence violation rather than a
+    # papercut. Counted, not listed, for the reason above.
+    $lic = @($listed | Where-Object { $_ -like 'licences/*' })
+    if ($lic.Count -lt 7) { throw "only $($lic.Count) font licence text(s) shipped; NOTICE requires 7" }
+    foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'features/NOTICE.txt') {
+        if ($listed -notcontains $required) { throw "$required did not ship" }
+    }
+
+    $zip = Get-ChildItem -LiteralPath $out -Filter '*.zip'
+    if (-not $zip) { throw 'no Windows zip was produced' }
+    if (-not (Test-Path "$($zip.FullName).sha256")) { throw 'the zip has no checksum sidecar' }
+
+    Write-Host "        $($listed.Count) file(s) hashed, $($lic.Count) licence texts, manifest verified" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
 }
 
+# Read a PE image's resource directory straight out of the bytes on disk:
+# MZ -> PE signature -> optional header (PE32 or PE32+) -> data directory entry
+# 2 -> RVA translated through the section table -> the three-level
+# type/name/language tree. One object per leaf, with its bytes.
+#
+# A BYTE SCAN, NOT `Add-Type`, `System.Drawing` or `dumpbin`, for the reason the
+# CRT step above gives in full: it needs nothing installed, so it runs on a
+# Rust-only machine and on a CI runner. It also reads what the LINKER put in the
+# file rather than what Windows would make of it, which is the property the step
+# below is about -- `LoadImage` succeeding proves the icon is loadable, not that
+# it is the icon in this repository.
+function Get-PeResources($Path) {
+    $b = [System.IO.File]::ReadAllBytes($Path)
+    $u16 = { param($o) [BitConverter]::ToUInt16($b, $o) }
+    $u32 = { param($o) [BitConverter]::ToUInt32($b, $o) }
+
+    if ((& $u16 0) -ne 0x5A4D) { throw "$Path is not a PE image (no MZ)" }
+    $peOff = & $u32 0x3C
+    if ((& $u32 $peOff) -ne 0x00004550) { throw "$Path has no PE signature" }
+    $coff = $peOff + 4
+    $nSections = & $u16 ($coff + 2)
+    $optSize = & $u16 ($coff + 16)
+    $opt = $coff + 20
+    # 0x20B = PE32+; the data directory sits 16 bytes further in, because
+    # ImageBase and three of the size fields are 8 bytes rather than 4.
+    $dirOff = if ((& $u16 $opt) -eq 0x20B) { $opt + 112 } else { $opt + 96 }
+    $resRva = & $u32 ($dirOff + 2 * 8)
+    if ($resRva -eq 0) { throw "$Path carries no resource directory at all" }
+
+    $sections = @()
+    for ($i = 0; $i -lt $nSections; $i++) {
+        $s = $opt + $optSize + $i * 40
+        $sections += [pscustomobject]@{
+            VA = & $u32 ($s + 12); VSz = & $u32 ($s + 8)
+            Raw = & $u32 ($s + 20); RSz = & $u32 ($s + 16)
+        }
+    }
+    $toFile = {
+        param($rva)
+        foreach ($s in $sections) {
+            if ($rva -ge $s.VA -and $rva -lt ($s.VA + [Math]::Max($s.VSz, $s.RSz))) {
+                return $s.Raw + ($rva - $s.VA)
+            }
+        }
+        throw "RVA 0x$('{0:X}' -f $rva) is in no section of $Path"
+    }
+
+    $resBase = & $toFile $resRva
+    # A List rather than an array, and `.Add` rather than `+=`: `&` runs a
+    # scriptblock in a CHILD scope, so `$found += ...` inside `$walk` would
+    # create a local `$found` and discard every leaf it found. Mutating an
+    # object has no such problem.
+    $found = [System.Collections.Generic.List[object]]::new()
+    $walk = {
+        param($off, $level, $type, $name)
+        $n = (& $u16 ($off + 12)) + (& $u16 ($off + 14))   # named + id entries
+        for ($i = 0; $i -lt $n; $i++) {
+            $e = $off + 16 + $i * 8
+            $id = & $u32 $e
+            $ptr = & $u32 ($e + 4)
+            $child = $resBase + ($ptr -band 0x7FFFFFFF)
+            if (($ptr -band 0x80000000) -ne 0) {
+                # Level 0 is the type, level 1 the name, level 2 the language.
+                if ($level -eq 0) { & $walk $child 1 $id $null }
+                else { & $walk $child 2 $type $id }
+            } else {
+                $size = & $u32 ($child + 4)
+                $start = & $toFile (& $u32 $child)
+                $found.Add([pscustomobject]@{
+                    Type = $type; Name = $name; Size = $size
+                    Bytes = $b[$start..($start + $size - 1)]
+                })
+            }
+        }
+    }
+    & $walk $resBase 0 $null $null
+    , $found.ToArray()
+}
+
+# The shipped binaries must carry the version block and the icon.
+#
+# WHY THIS IS ASSERTED AGAINST THE .EXE AND NOT AGAINST THE BUILD SCRIPT
+#
+# `bins/winres.rs` writes a `.res` by hand and hands it to `link.exe` through
+# `cargo:rustc-link-arg-bin=<name>=...`. Cargo does not verify that `<name>`
+# names a real binary target: a typo makes the whole thing a silent no-op, the
+# build stays green, and the only symptom is an .exe with no version -- which is
+# precisely the state this repository was in until 2026-08-05, when
+# `(Get-Item polylinker.exe).VersionInfo` was empty on all three binaries and
+# `dist\polylinker.exe` had no resource directory at all. So nothing here asks
+# whether a build script ran. It reads the resource back out of the linked file.
+#
+# The version is read out of Cargo.toml with the same regex `release.ps1` uses,
+# rather than typed here, because a literal in the gate would be the second copy
+# of a number that is supposed to have exactly one.
+#
+# WHAT THIS DOES NOT CATCH: `polylinker.svg` being edited without rerunning
+# `bins/pl-gui/icon/build-icon.py`. The .ico would be stale and the .exe would
+# faithfully carry the stale frames -- both sides of every comparison below move
+# together. Closing that means rasterising SVG in the gate, which needs Python
+# and resvg, and this step is deliberately dependency-free. It is closed by the
+# step 'the window icon is the .ico's own frame' in the oracles section, which
+# renders the master and compares every frame against it; this one stays as it
+# is so that a Rust-and-PowerShell-only machine still proves the .exe carries the
+# .ico in the repository.
+#
+# NOR DOES IT SAY ANYTHING ABOUT THE RUNNING WINDOW. The resource this asserts is
+# read by Explorer, the Start Menu shortcut and Add/Remove Programs; winit does
+# not read it, and the taskbar button of a live window comes from
+# `window_icon()` in bins/pl-gui/src/main.rs. That is the other step's subject
+# too.
+Step 'the built binaries carry their icon and version resource' {
+    $repoIco = Join-Path $repo 'bins/pl-gui/icon/polylinker.ico'
+    if (-not (Test-Path $repoIco)) {
+        throw ("$repoIco is missing. " +
+               'Run: python bins/pl-gui/icon/build-icon.py -- it regenerates the .ico from polylinker.svg.')
+    }
+
+    # One copy of the version, and it is Cargo.toml's -- see release.ps1.
+    $version = ''
+    foreach ($line in (Get-Content (Join-Path $repo 'Cargo.toml'))) {
+        if ($line -match '^\s*version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
+    }
+    if (-not $version) { throw 'could not read the version out of Cargo.toml' }
+
+    # The seven fields Add/Remove Programs, the shell property sheet and any
+    # inventory tool read. Empty is what they all were before.
+    $fields = 'CompanyName', 'FileDescription', 'FileVersion',
+              'LegalCopyright', 'OriginalFilename', 'ProductName', 'ProductVersion'
+    foreach ($name in 'polylinker.exe', 'pl.exe') {
+        $f = Join-Path $script:release $name
+        if (-not (Test-Path $f)) { throw "$name is not in the release" }
+        $vi = (Get-Item $f).VersionInfo
+        foreach ($field in $fields) {
+            if (-not $vi.$field) { throw "$name has an empty $field; the version resource did not reach it" }
+        }
+        if ($vi.OriginalFilename -ne $name) {
+            throw "$name says its OriginalFilename is $($vi.OriginalFilename); the two build scripts have been crossed"
+        }
+        if ($vi.FileVersion -ne $version) {
+            throw "$name reports FileVersion $($vi.FileVersion) but Cargo.toml says $version"
+        }
+        if ($vi.ProductVersion -ne $version) {
+            throw "$name reports ProductVersion $($vi.ProductVersion) but Cargo.toml says $version"
+        }
+    }
+
+    # The icon, frame by frame. The group must describe the same set the .ico
+    # does, and each RT_ICON payload must be the .ico's own bytes: a group that
+    # merely has the right number of entries would survive an icon rebuilt from
+    # a different drawing.
+    $res = Get-PeResources (Join-Path $script:release 'polylinker.exe')
+    $grp = @($res | Where-Object { $_.Type -eq 14 })          # RT_GROUP_ICON
+    if ($grp.Count -ne 1) { throw "polylinker.exe has $($grp.Count) RT_GROUP_ICON resource(s); exactly 1 is expected" }
+    if (-not ($res | Where-Object { $_.Type -eq 16 })) { throw 'polylinker.exe carries no RT_VERSION' }
+
+    $ico = [System.IO.File]::ReadAllBytes($repoIco)
+    $gb = $grp[0].Bytes
+    $count = [BitConverter]::ToUInt16($gb, 4)
+    $icoCount = [BitConverter]::ToUInt16($ico, 4)
+    if ($count -ne $icoCount) {
+        throw "the group icon in polylinker.exe declares $count frame(s) but polylinker.ico has $icoCount"
+    }
+    for ($i = 0; $i -lt $count; $i++) {
+        # GRPICONDIRENTRY is 14 bytes; ICONDIRENTRY is 16. The difference is the
+        # 4-byte file offset becoming a 2-byte resource id.
+        $id = [BitConverter]::ToUInt16($gb, 6 + $i * 14 + 12)
+        $off = [BitConverter]::ToUInt32($ico, 6 + $i * 16 + 12)
+        $size = [BitConverter]::ToUInt32($ico, 6 + $i * 16 + 8)
+        $want = $ico[$off..($off + $size - 1)]
+        $got = @($res | Where-Object { $_.Type -eq 3 -and $_.Name -eq $id })
+        if ($got.Count -ne 1) { throw "the group names RT_ICON $id, and polylinker.exe has $($got.Count) of them" }
+        if (Compare-Object $want $got[0].Bytes -SyncWindow 0) {
+            throw "RT_ICON $id in polylinker.exe is not the corresponding frame of polylinker.ico"
+        }
+    }
+
+    # And the shipped copy is the same file the binary was built from, so the
+    # Start Menu shortcut and the running window cannot show two pictures.
+    $shipped = Join-Path $script:release 'polylinker.ico'
+    if (-not (Test-Path $shipped)) { throw 'polylinker.ico is not in the release, so the installer has no shortcut icon' }
+    if (Compare-Object $ico ([System.IO.File]::ReadAllBytes($shipped)) -SyncWindow 0) {
+        throw 'the polylinker.ico in the release differs from bins/pl-gui/icon/polylinker.ico'
+    }
+
+    # `pl` is a console tool. An icon on it would mean `bins/pl/build.rs` had
+    # been handed the GUI's arguments.
+    $plRes = Get-PeResources (Join-Path $script:release 'pl.exe')
+    if (-not ($plRes | Where-Object { $_.Type -eq 16 })) { throw 'pl.exe carries no RT_VERSION' }
+    if ($plRes | Where-Object { $_.Type -eq 14 }) {
+        throw 'pl.exe carries a group icon; the two build scripts have been crossed'
+    }
+
+    Write-Host "        version $version on 2 binaries, $count icon frames byte-identical to polylinker.ico" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+} { $script:release }
+
+# The Python extension must be shipped under a name CPython will load.
+# A correctly built `polylinker.dll` cannot be imported on Windows at
+# all, and the failure reads as "the wheel is broken" rather than as a
+# naming problem — which is exactly how it presented when a smoke test
+# first tried to import one.
+Step 'shipped Python extension imports' {
+    $py = Get-ChildItem $script:release -Filter 'polylinker.*' |
+          Where-Object { $_.Extension -in '.pyd', '.so' }
+    if (-not $py) { throw 'no importable Python extension in the release' }
+    $probe = python -c "import importlib.util as u, sys; s = u.spec_from_file_location('polylinker', sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m); print(len(m.enzymes()))" $py.FullName 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "the shipped extension does not import: $probe" }
+    Write-Host "        $probe enzymes" -ForegroundColor DarkGray
+} { (Have python) -and $script:release }
+
+# Nothing shipped may need a C runtime the user is not allowed to install.
+#
+# All four artifacts imported VCRUNTIME140.dll until 2026-08-05. That DLL is not
+# part of Windows; it comes from the VC++ redistributable, whose installer needs
+# administrator rights. `docs/PLAN.md:120` describes the primary user as someone
+# who has none, so on a freshly imaged machine the app was a missing-DLL dialog.
+# `.cargo/config.toml` links the CRT statically to fix it, at a measured cost of
+# 521,216 bytes across all four binaries.
+#
+# This is exactly the kind of property that regresses invisibly: nothing behaves
+# differently on a developer machine, which has the redistributable, and the
+# failure only appears on a machine nobody here owns. So it is asserted.
+#
+# THE CHECK IS A BYTE SCAN, NOT `dumpbin`. An imported DLL's name is stored as a
+# literal ASCII string in the PE import directory, so if the import exists the
+# string is certainly there. The check asserts ABSENCE, so the only error this
+# method can make is a false FAILURE from an incidental occurrence of the name —
+# the safe direction, and one that would be investigated rather than ignored. It
+# also needs nothing installed, so unlike `dumpbin` it runs on a Rust-only
+# machine and on a CI runner. `dumpbin /dependents` was used to establish the
+# baseline by hand and agrees: after the change, the imports are stock Windows
+# DLLs plus python3.dll for the extension.
+Step 'no C runtime redistributable is needed' {
+    $banned = 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'MSVCP140.dll', 'api-ms-win-crt-runtime-l1-1-0.dll'
+    $checked = 0
+    foreach ($f in (Get-ChildItem -LiteralPath $script:release -File |
+                    Where-Object { $_.Extension -in '.exe', '.pyd', '.dll' })) {
+        $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+        $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+        foreach ($b in $banned) {
+            if ($ascii.IndexOf($b, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "$($f.Name) references $b, which is not part of Windows and whose redistributable needs admin rights. Check .cargo/config.toml still sets +crt-static."
+            }
+        }
+        $checked++
+    }
+    if ($checked -lt 4) { throw "only $checked binary(ies) checked; expected at least 4" }
+    Write-Host "        $checked binaries, none needs the VC++ redistributable" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+} { $script:release }
+
+Write-Host "`ninstaller" -ForegroundColor Cyan
+
+# The PATH-editing functions, tested where they live.
+#
+# They are the only pure logic in the installer and the only part that can
+# damage something that was not ours: a PATH is a shell accumulated over years,
+# and the failure mode is not "the install failed" but "half my tools stopped
+# resolving". The cases include the one that actually occurs on this machine —
+# a user PATH ending in an unexpanded %USERPROFILE%, which a naive read/write
+# round trip silently bakes into an absolute path.
+Step 'installer PATH edits' {
+    & "$PSScriptRoot/installer/Install-Polylinker.ps1" -SelfTest
+}
+
+# The installer's plan must name every file the release produced, and must not
+# name a path outside the prefix it was given.
+#
+# The first half is the licence obligation again, at the third and last place it
+# can be dropped: `release.ps1` builds the notices, the manifest hashes them,
+# and this proves the installer actually copies them rather than a curated
+# subset of them.
+Step 'installer plan covers the whole release' {
+    $prefix = Join-Path $env:TEMP ('pl-install-plan-' + $PID)
+    # A CHILD PROCESS, not `& script.ps1`.
+    #
+    # Two reasons, both of which bit. The plan is printed with `Write-Host`,
+    # which writes to the host rather than to the pipeline, so an in-process
+    # call captured an empty string and this step cheerfully reported that the
+    # installer would not install any of eighteen files. And `Out-String` wraps
+    # at the console width, so even once captured, every long temp path arrived
+    # split across two lines and `features\NOTICE.txt` could not be found in it.
+    #
+    # A child process with a wide `-Width` fixes both, and it is what a user
+    # actually runs, so the exit code means what it says.
+    $host_ = (Get-Process -Id $PID).Path
+    $out = & $host_ -NoProfile -File "$PSScriptRoot/installer/Install-Polylinker.ps1" `
+        -DryRun -Prefix $prefix -Source $script:release `
+        -RegistryRoot "HKCU\Software\Polylinker-CI-$PID" `
+        -StateDir (Join-Path $env:TEMP "pl-state-$PID") `
+        -StartMenuDir (Join-Path $env:TEMP "pl-startmenu-$PID") `
+        -AddToPath -Associate 2>&1 | Out-String -Width 4096
+    if ($LASTEXITCODE -ne 0) { throw "the dry run failed:`n$out" }
+    if (-not $out.Trim()) { throw 'the dry run printed nothing, so this step would assert nothing' }
+    if (Test-Path $prefix) { throw 'a dry run created the install directory' }
+
+    foreach ($f in $script:releaseFiles) {
+        $leaf = Split-Path -Leaf $f
+        if ($out -notmatch [regex]::Escape($leaf)) {
+            throw "the installer plan never mentions $f, so it would not be installed"
+        }
+    }
+    # Every destination the plan writes to must be inside the prefix. The Start
+    # Menu shortcut is the one deliberate exception, and it prints as `shortcut`
+    # rather than as one of these three verbs.
+    #
+    # `\s{2,}` after the verb, not `\s+`: the plan pads its action column, but
+    # the prose in the "It will NOT" section is single-spaced, and a looser
+    # pattern read the sentence "will not write outside the paths listed above"
+    # as a plan line writing to a directory called "outside the paths listed
+    # above". The prose was reworded too -- a test that depends on prose not
+    # containing a keyword is a test waiting to break -- but the column format
+    # is the real discriminator and this is what should have keyed on it.
+    foreach ($line in ($out -split "`r?`n")) {
+        if ($line -match '^\s{2}(copy|write|create dir)\s{2,}(\S.*?)(\s+\(|$)') {
+            $dest = $Matches[2].Trim()
+            if (-not $dest.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "the plan writes outside the prefix: $dest"
+            }
+        }
+    }
+    # And the promises the product is built on.
+    foreach ($promise in 'contact the network', 'install an updater') {
+        if ($out -notmatch [regex]::Escape($promise)) { throw "the plan no longer states that it will not $promise" }
+    }
+    Write-Host "        $($script:releaseFiles.Count) file(s) in the plan, none outside the prefix" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+} { $script:release }
+
+# A real install, into a scratch prefix and a scratch registry root, then a real
+# uninstall — with a sentinel planted in the state directory that must survive.
+#
+# The sentinel is the point. `recovery\*.recover` is unsaved user work rescued
+# from a crash, and an uninstaller that removes it has destroyed the only copy
+# of somebody's afternoon. That is a promise in prose in three files; this is
+# the only thing that makes it a promise in fact.
+Step 'installer round trip leaves user state alone' {
+    $tag = "pl-rt-$PID"
+    $prefix = Join-Path $env:TEMP "$tag-prefix"
+    $state  = Join-Path $env:TEMP "$tag-state"
+    $menu   = Join-Path $env:TEMP "$tag-menu"
+    $regRoot = "HKCU\Software\Polylinker-CI-$PID"
+    $regProv = "HKCU:\Software\Polylinker-CI-$PID"
+    try {
+        Remove-Item -Recurse -Force $prefix, $state, $menu -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $regProv -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force (Join-Path $state 'recovery') | Out-Null
+        New-Item -ItemType Directory -Force (Join-Path $state 'index') | Out-Null
+        'unsaved work'    | Set-Content (Join-Path $state 'recovery\9999-0.recover')
+        'panel_width: 300' | Set-Content (Join-Path $state 'layout')
+        'cache'            | Set-Content (Join-Path $state 'index\demo.plx')
+
+        # A handler that was already there, exactly as an installed SnapGene
+        # would be. `docs/PLAN.md:212` says taking this is what enrages the user
+        # the project is courting, so it is asserted rather than trusted.
+        $dna = "$regProv\Classes\.dna"
+        New-Item -Path "$dna\OpenWithProgids" -Force | Out-Null
+        New-ItemProperty -Path "$dna\OpenWithProgids" -Name 'SnapGene.Document' -PropertyType String -Value '' -Force | Out-Null
+        New-ItemProperty -Path $dna -Name '(default)' -PropertyType String -Value 'SnapGene.Document' -Force | Out-Null
+
+        # A HASHTABLE, not an array. Splatting an array passes its elements
+        # positionally, and this script has no positional parameters, so
+        # `@common` as an array died with "a positional parameter cannot be
+        # found that accepts argument 'HKCU\Software\...'". Named splatting is
+        # what was meant.
+        $common = @{
+            Prefix = $prefix; Source = $script:release; RegistryRoot = $regRoot
+            StateDir = $state; StartMenuDir = $menu; Yes = $true
+        }
+        & "$PSScriptRoot/installer/Install-Polylinker.ps1" @common -AddToPath -Associate 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'the install failed' }
+
+        foreach ($f in $script:releaseFiles) {
+            $p = Join-Path $prefix ($f.Replace('/', '\'))
+            if (-not (Test-Path -LiteralPath $p)) { throw "$f was not installed" }
+        }
+        if (-not (Test-Path (Join-Path $prefix 'install-receipt.txt'))) { throw 'no receipt was written' }
+        if (-not (Test-Path (Join-Path $menu 'Polylinker.lnk')))        { throw 'no Start Menu shortcut' }
+        if (-not (Test-Path "$regProv\Uninstall\Polylinker"))           { throw 'no Add/Remove Programs entry' }
+        $stillSnapGene = (Get-ItemProperty -LiteralPath $dna).'(default)'
+        if ($stillSnapGene -ne 'SnapGene.Document') { throw "the install took the .dna default: it is now '$stillSnapGene'" }
+
+        & "$PSScriptRoot/installer/Install-Polylinker.ps1" -Uninstall -NoRelaunch @common 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'the uninstall failed' }
+
+        if (Test-Path $prefix)                              { throw 'the install directory survived the uninstall' }
+        if (Test-Path (Join-Path $menu 'Polylinker.lnk'))    { throw 'the Start Menu shortcut survived' }
+        if (Test-Path "$regProv\Uninstall\Polylinker")       { throw 'the Add/Remove Programs entry survived' }
+        if (Test-Path "$regProv\Classes\Polylinker_dna.1")   { throw 'a ProgId survived' }
+        $left = (Get-Item -LiteralPath "$dna\OpenWithProgids" -ErrorAction SilentlyContinue).Property
+        if ($left -contains 'Polylinker_dna.1') { throw 'a dangling OpenWithProgids entry survived' }
+        if ($left -notcontains 'SnapGene.Document') { throw "the uninstall removed somebody else's registration" }
+
+        # THE ONE THAT MATTERS.
+        if (-not (Test-Path (Join-Path $state 'recovery\9999-0.recover'))) {
+            throw 'THE UNINSTALL DELETED AN UNSAVED CRASH DRAFT'
+        }
+        if (-not (Test-Path (Join-Path $state 'layout')))        { throw 'the uninstall deleted the settings' }
+        if (-not (Test-Path (Join-Path $state 'index\demo.plx'))) { throw 'the uninstall deleted the cache without -RemoveCache' }
+
+        Write-Host '        installed, verified, uninstalled; user state intact' -ForegroundColor DarkGray
+        $global:LASTEXITCODE = 0
+    } finally {
+        Remove-Item -Recurse -Force $prefix, $state, $menu -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $regProv -ErrorAction SilentlyContinue
+    }
+} { $script:release }
+
+# The product's central claim, enforced mechanically.
+#
+# README.md's first line is "Never sends a sequence anywhere"; RELEASING.md:49-75
+# says there is no updater, on purpose, and lists four bars any future one must
+# clear. An installer is part of the product, and prose in a doc does not stop
+# anybody adding a version check to a script. This does.
+Step 'the installer contacts nothing' {
+    $banned = @(
+        'Invoke-WebRequest', 'Invoke-RestMethod', 'Start-BitsTransfer', 'System.Net',
+        'WebClient', 'HttpClient', 'curl.exe', 'schtasks', 'Register-ScheduledTask',
+        'New-Service', 'DownloadFile', 'DownloadString'
+    )
+    $hits = @()
+    foreach ($f in (Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'installer') -File)) {
+        $text = [System.IO.File]::ReadAllText($f.FullName)
+        foreach ($b in $banned) {
+            if ($text -match [regex]::Escape($b)) { $hits += "$($f.Name): $b" }
+        }
+    }
+    if ($hits) {
+        throw "the installer can reach the network or schedule work:`n    $($hits -join "`n    ")`nSee docs/RELEASING.md:49-75."
+    }
+    Write-Host "        $($banned.Count) forbidden facilities, none present" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
+
+# The zip must be a deterministic function of the directory it was built from.
+#
+# NOT "two builds of the same commit produce the same zip". They cannot, and
+# docs/RELEASING.md:77-84 says so plainly: the binaries embed absolute paths, and
+# a PE file carries a link timestamp, so a second `cargo build` relinks
+# `polylinker.pyd` into different bytes. Asserting that would be asserting a
+# property the project explicitly does not claim, and the first version of this
+# step did exactly that and failed on the `.pyd` — correctly.
+#
+# What IS in this project's gift is the packaging step: given the same bytes on
+# disk, the zip must come out the same. That reduces to three properties, and
+# `Compress-Archive` fails the first two, which is why the zip is written by
+# hand in release.ps1.
+Step 'the zip is a deterministic function of dist/' {
+    $zip = Get-ChildItem -LiteralPath $script:release -Filter '*.zip'
+    if (-not $zip) { throw 'no zip was produced' }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+    $z = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+    try {
+        $names = @($z.Entries | ForEach-Object { $_.FullName })
+        if ($names.Count -lt 16) { throw "the zip has only $($names.Count) entries" }
+
+        # 1. Entry order is sorted, so it does not depend on the order the
+        #    filesystem happened to enumerate.
+        $sorted = @($names | Sort-Object)
+        for ($i = 0; $i -lt $names.Count; $i++) {
+            if ($names[$i] -ne $sorted[$i]) { throw "the zip entries are not in sorted order (first difference: $($names[$i]))" }
+        }
+
+        # 2. Every timestamp is pinned, so the same bytes on two days produce the
+        #    same zip. This is the one Compress-Archive cannot satisfy: it stores
+        #    each file's current mtime.
+        #    Compared as a WALL CLOCK, not as an instant. A zip stores an MS-DOS
+        #    date and time with no timezone at all, so `LastWriteTime` reads
+        #    back as that same wall clock wearing the reader's local offset:
+        #    on this machine the pinned midnight comes back as
+        #    `2000-01-01 00:00:00 +02:00`, whose UtcDateTime is the 31st of
+        #    December. Comparing the instant therefore fails everywhere except
+        #    UTC, which is a bug in the test and not in the zip -- the bytes on
+        #    disk are identical either way.
+        $pinned = [DateTime]::new(2000, 1, 1, 0, 0, 0)
+        foreach ($e in $z.Entries) {
+            if ($e.LastWriteTime.DateTime -ne $pinned) {
+                throw "$($e.FullName) carries a live timestamp ($($e.LastWriteTime)), so the zip hash would change on every build"
+            }
+        }
+
+        # 3. Everything is under one top-level directory named for the version,
+        #    so extracting does not scatter sixteen files into Downloads.
+        $roots = @($names | ForEach-Object { ($_ -split '/')[0] } | Sort-Object -Unique)
+        if ($roots.Count -ne 1) { throw "the zip has $($roots.Count) top-level entries: $($roots -join ', ')" }
+
+        # And the contents really are the release, byte for byte.
+        foreach ($e in $z.Entries) {
+            $rel = $e.FullName.Substring($roots[0].Length + 1)
+            $onDisk = Join-Path $script:release ($rel.Replace('/', '\'))
+            if (-not (Test-Path -LiteralPath $onDisk)) { throw "the zip contains $rel, which is not in the release directory" }
+            if ((Get-Item -LiteralPath $onDisk).Length -ne $e.Length) { throw "$rel differs between the zip and the release directory" }
+        }
+        Write-Host "        $($names.Count) entries, sorted, pinned timestamps, one root '$($roots[0])'" -ForegroundColor DarkGray
+        $global:LASTEXITCODE = 0
+    } finally { $z.Dispose() }
+} { $script:release }
+
+if ($script:release) { Remove-Item -Recurse -Force $script:release -ErrorAction SilentlyContinue }
+
+Write-Host "`nbenchmark" -ForegroundColor Cyan
 Step 'polylinker-bench' {
     # An absolute path, and the score is asserted rather than assumed.
     #

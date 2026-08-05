@@ -225,14 +225,33 @@ export function radialLine(
  * Escape text for inclusion in XML character data or an attribute value.
  *
  * Control characters are dropped rather than escaped. XML 1.0 forbids most of
- * them outright — `&#1;` is just as illegal as a raw `` — so escaping
- * would have produced a document that still fails to parse. Feature names come
- * out of binary `.dna` payloads where a stray control byte is entirely
- * possible, and one such byte made the whole rendered map unparseable.
+ * them outright — `&#1;` is just as illegal as a raw U+0001 — so escaping would
+ * have produced a document that still fails to parse. Feature names come out of
+ * binary `.dna` payloads where a stray control byte is entirely possible, and
+ * one such byte made the whole rendered map unparseable.
+ *
+ * The dropped range is exactly the illegal one and no wider. U+007F (DEL) used
+ * to be stripped here as well, which was a silent disagreement with
+ * `pl_draw::esc`: DEL is a *legal* XML 1.0 character — the Char production is
+ * `#x9 | #xA | #xD | [#x20-#xD7FF] | ...` and #x7F falls inside [#x20-#xD7FF],
+ * confirmed by parsing it literally in both a text node and an attribute value
+ * with expat 2.8.1 — so the Rust renderer kept it while this one deleted it, and
+ * one feature name rendered two ways depending on which renderer drew the
+ * figure. Aligned on keeping it: this function's job is to produce a parseable
+ * document, not to censor characters the specification allows. Dropping a legal
+ * character is also the direction that loses data silently.
+ *
+ * `agreement.rs::xml_escaping_agrees` pins the two implementations together
+ * over the whole 0x00-0x1f range plus DEL; the corpus previously reached three
+ * control codepoints, all of which happened to agree.
+ *
+ * Written with \u escapes rather than literal control bytes on purpose. The
+ * literal form renders as invisible or replacement glyphs in a diff, which is
+ * how a stray DEL in a character class went unnoticed here.
  */
 export function esc(s: string): string {
   return s
-    .replace(/[ --]/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

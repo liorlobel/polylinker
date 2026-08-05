@@ -6,9 +6,8 @@ An openly licensed, provenance-tracked database of common plasmid features.
 this carries, and [`SOURCING.md`](SOURCING.md) for how each source was cleared
 and by what evidence.
 
-> **Status: v0.1 pre-release, 89 records. 84 carry a curator sign-off dated
-> 2026-07-28; the other 5 are `proposed` — machine-assembled, unread by any
-> human, and not shippable.**
+> **Status: v0.1 pre-release, 89 records. All 89 carry a curator sign-off dated
+> 2026-07-28, so none are left at `proposed`.**
 > `Db::reviewed()` ships only the rows [`SIGNOFF.tsv`](SIGNOFF.tsv) names with a
 > content digest that still matches. A sign-off lapses automatically the moment
 > the row it approves changes — including a change to its prose, because
@@ -127,7 +126,8 @@ schema learned to carry a peptide, FLAG took **that** id and nothing already
 published moved. One number is still reserved and empty — `PLF:3019`, factor Xa
 — held by its occurrence record rather than by sourcing or by length; the five
 that used to sit beside it (`PLF:3004`, `3015`, `3016`, `3018`, `3020`) were
-issued on 2026-07-28 and ship `proposed`. The build re-reads the previous
+issued on 2026-07-28 and signed the same day, at `SIGNOFF.tsv` lines 149-153, on
+the short-peptide basis recorded there. The build re-reads the previous
 `features.tsv` and refuses to
 write if any published id has come to mean a different sequence.
 

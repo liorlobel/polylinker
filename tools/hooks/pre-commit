@@ -8,7 +8,16 @@
 # any kind and no byte of it may ever be committed.
 #
 # Install: git config core.hooksPath tools/hooks
-# (checked by CI, which runs the same comparison over the staged tree)
+#
+# CI compares against the same PINNED digest, but over a different set of
+# bytes, and this line used to say otherwise: it claimed CI "runs the same
+# comparison over the staged tree", and nothing in .github/workflows/ci.yml
+# hashed any blob against PINNED at all. What CI now does, in the step
+# "Nothing from the taint gate survived", is sweep the WORKING TREE after the
+# taint gate has run -- every file, tracked or not, ignored or not, outside
+# target/ -- and refuse the pinned digest there. A runner has no index to
+# stage into, so the staged-tree half is this hook's alone and is the only
+# thing standing between the payload and the history.
 
 PINNED=793631d9eebf721efae9e1d6cd483b1cbb62f5adad41174afa8f8b78b1342d5c
 status=0
