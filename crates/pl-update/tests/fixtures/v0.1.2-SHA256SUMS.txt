@@ -1,0 +1,4 @@
+7a7f8d62e2d94444d21b3eec09943f8aa860e0818f1ec07f7f3d95752395c471  polylinker-0.1.2-linux-x64.tar.gz
+be327d36b3f03cdb9e5f0bd4228d29b2ac2c484f2a537f1aa425a9a3b67c57fb  polylinker-0.1.2-macos-universal.tar.gz
+539ab53b08161d7f52fd9f5c4827d8658901cf83b96604521d9b2d54e18c1e21  polylinker-0.1.2-windows-x64.msi
+cd7ba67c25d98bc6223b52f269d0d187979f631958baf21c03454921e159caf0  polylinker-0.1.2-windows-x64.zip

@@ -64,7 +64,7 @@ use crate::version::{Version, CURRENT_VERSION};
 use std::path::{Path, PathBuf};
 
 /// Where releases live. Compiled in, like the key, and for the same reason.
-pub const RELEASE_BASE_URL: &str = "https://github.com/polylinker/polylinker/releases";
+pub const RELEASE_BASE_URL: &str = "https://github.com/liorlobel/polylinker/releases";
 
 /// The manifest `.github/workflows/release.yml` publishes with every release.
 pub const MANIFEST_FILE_NAME: &str = "SHA256SUMS.txt";
@@ -652,15 +652,15 @@ mod tests {
         let v = Version::parse("0.2.0").unwrap();
         assert_eq!(
             manifest_url(&v),
-            "https://github.com/polylinker/polylinker/releases/download/v0.2.0/SHA256SUMS.txt"
+            "https://github.com/liorlobel/polylinker/releases/download/v0.2.0/SHA256SUMS.txt"
         );
         assert_eq!(
             signature_url(&v),
-            "https://github.com/polylinker/polylinker/releases/download/v0.2.0/SHA256SUMS.txt.sig"
+            "https://github.com/liorlobel/polylinker/releases/download/v0.2.0/SHA256SUMS.txt.sig"
         );
         assert_eq!(
             latest_manifest_url(),
-            "https://github.com/polylinker/polylinker/releases/latest/download/SHA256SUMS.txt"
+            "https://github.com/liorlobel/polylinker/releases/latest/download/SHA256SUMS.txt"
         );
         // The `v` prefix belongs to the tag and is added here, once. `Version`
         // itself refuses to carry it, so it cannot end up doubled.
@@ -673,7 +673,7 @@ mod tests {
                 assert_eq!(
                     url,
                     format!(
-                        "https://github.com/polylinker/polylinker/releases/download/v0.2.0/{name}"
+                        "https://github.com/liorlobel/polylinker/releases/download/v0.2.0/{name}"
                     )
                 );
                 assert!(name.starts_with("polylinker-0.2.0-"));
@@ -740,7 +740,7 @@ mod tests {
                 artifact_url(&v).unwrap_or_else(latest_manifest_url),
                 latest_manifest_url(),
             ] {
-                assert!(url.starts_with("https://github.com/polylinker/polylinker/releases/"));
+                assert!(url.starts_with("https://github.com/liorlobel/polylinker/releases/"));
                 assert!(!url.contains(".."), "{url}");
                 assert!(!url.chars().any(char::is_whitespace), "{url}");
                 assert!(!url.chars().any(|c| c.is_control()), "{url}");

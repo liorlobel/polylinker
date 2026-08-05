@@ -422,7 +422,7 @@ mod tests {
             .collect()
     }
 
-    const URL: &str = "https://github.com/polylinker/polylinker/releases/download/v1.2.3/x.txt";
+    const URL: &str = "https://github.com/liorlobel/polylinker/releases/download/v1.2.3/x.txt";
 
     #[test]
     fn the_argument_vector_this_crate_actually_builds_passes_its_own_audit() {
