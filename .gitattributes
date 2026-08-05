@@ -42,3 +42,16 @@ bins/pl-gui/icon/*.rgba -text
 # because only a checkout applies the conversion. Pinned to LF everywhere so
 # the working tree and the object store agree on all three platforms.
 *.rs text eol=lf
+
+# The Ed25519 verification vectors, added 2026-08-05 with the updater's
+# signature checking. `crates/pl-core/src/ed25519.rs` include_str!s this and
+# runs all 150 Project Wycheproof cases, and its header records the sha256 of
+# the upstream JSON it was converted from.
+#
+# Rust's `str::lines()` strips a trailing `\r`, so a CRLF checkout does NOT
+# break the parser -- this is not a bug fix, and pretending otherwise would be
+# the kind of comment this project keeps having to correct. It is pinned
+# because a security fixture should be the same bytes on every machine that
+# checks it, so the recorded hash refers to something reproducible and a future
+# change to the parser cannot be broken by a line ending.
+crates/pl-core/vectors/*.tsv -text
