@@ -1604,6 +1604,181 @@ Step 'the tar.gz writer produces an archive two other tools can read' {
 # PyYAML, because PowerShell has no YAML parser and a regex is not a parse. The
 # step below does the content assertions with no interpreter at all, so a
 # Rust-only machine still checks something rather than skipping the subject.
+Step 'the MSI is generated from the manifest and not from a second file list' {
+    # THE ONE CHECK THAT JUSTIFIES SHIPPING AN MSI AT ALL.
+    #
+    # docs/RELEASING.md refused a compiled installer on the grounds that every
+    # one of them carries a second list of files that drifts from the real
+    # payload -- and that is not hypothetical here: the notices list in
+    # release.ps1 drifted twice in one week, on 2026-08-03 and 2026-08-04, and a
+    # licence text stopped shipping each time.
+    #
+    # So tools/installer/Polylinker.wxs contains no files, and this step proves
+    # it: it regenerates the payload fragment and asserts the component set is
+    # exactly the manifest minus the three deliberate exclusions.
+    # FIRST, THE ASSERTION THIS STEP'S NAME ACTUALLY PROMISES.
+    #
+    # The comparison below was, in its first version, the whole step -- and it
+    # could not fail. It compared the manifest against a fragment that
+    # build-msi.ps1 had generated FROM the manifest four lines earlier, using the
+    # same parser. Two lists derived from one source agree by construction. It
+    # would have passed just as happily against a Polylinker.wxs stuffed with
+    # hand-written <File> elements, which is the exact thing the step exists to
+    # forbid. So the authoring file is checked first, and directly.
+    $wxsRaw = Get-Content -LiteralPath "$repo/tools/installer/Polylinker.wxs" -Raw
+    $wxsCode = [regex]::Replace($wxsRaw, '(?s)<!--.*?-->', '')
+    if ($wxsCode -match '<File\b') {
+        throw 'Polylinker.wxs contains a <File> element. The MSI payload must come from dist/SHA256SUMS.txt through build-msi.ps1, so that a licence text cannot stop shipping without the manifest saying so.'
+    }
+    if ($wxsCode -match '<ComponentGroup\b(?!Ref)') {
+        throw 'Polylinker.wxs defines a <ComponentGroup>. It may only reference the generated one with <ComponentGroupRef Id="PayloadComponents" />.'
+    }
+    if ($wxsCode -notmatch '<ComponentGroupRef\s+Id="PayloadComponents"') {
+        throw 'Polylinker.wxs does not reference the generated PayloadComponents group, so the MSI would ship no payload at all'
+    }
+
+    $dist = "$repo/dist"
+    $out = Join-Path ([IO.Path]::GetTempPath()) ("pl-msi-gen-" + [IO.Path]::GetRandomFileName())
+    try {
+        & "$PSScriptRoot/build-msi.ps1" -Dist $dist -Out $out -GenerateOnly -KeepIntermediate | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'build-msi.ps1 -GenerateOnly failed' }
+
+        $frag = Get-Content -LiteralPath (Join-Path $out 'Payload.wxs') -Raw
+        $inWxs = [regex]::Matches($frag, '!\(bindpath\.payload\)([^"]+)"') |
+                 ForEach-Object { $_.Groups[1].Value -replace '\\', '/' } | Sort-Object
+
+        $exclude = @('SHA256SUMS.txt', 'Install-Polylinker.ps1', 'Install.cmd')
+        $inManifest = @()
+        $past = $false
+        foreach ($line in Get-Content -LiteralPath (Join-Path $dist 'SHA256SUMS.txt')) {
+            if (-not $past) { if ($line.Trim() -eq '--') { $past = $true }; continue }
+            if ($line -match '^[0-9a-f]{64}\s\s(.+)$') {
+                $rel = $Matches[1].Trim()
+                if ($exclude -notcontains $rel) { $inManifest += $rel }
+            }
+        }
+        $inManifest = $inManifest | Sort-Object
+
+        $onlyWxs = $inWxs | Where-Object { $inManifest -notcontains $_ }
+        $onlyMan = $inManifest | Where-Object { $inWxs -notcontains $_ }
+        if ($onlyWxs) { throw "the MSI would install files the manifest does not list: $($onlyWxs -join ', ')" }
+        if ($onlyMan) { throw "the manifest lists files the MSI would not install: $($onlyMan -join ', ')" }
+        if ($inWxs.Count -lt 12) { throw "only $($inWxs.Count) files in the generated payload; that is too few to be the real one" }
+
+        # NEGATIVE CONTROL. The comparison above passes whenever two lists agree,
+        # including when both are wrong in the same way, so the comparison itself
+        # is exercised against a list known to differ. Without this the step
+        # would be one more check that cannot fail.
+        $doctored = $inManifest | Where-Object { $_ -ne 'polylinker.exe' }
+        $shouldDiffer = $inWxs | Where-Object { $doctored -notcontains $_ }
+        if (-not $shouldDiffer) {
+            throw 'the set comparison did not notice a deliberately removed polylinker.exe, so it proves nothing'
+        }
+
+        Write-Host "        $($inWxs.Count) components, equal to the manifest; comparison verified against a doctored list" -ForegroundColor DarkGray
+    } finally {
+        Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $global:LASTEXITCODE = 0
+} { Test-Path "$repo/dist/SHA256SUMS.txt" }
+
+Step 'the MSI takes no file type away from a program the reader already uses' {
+    # WiX's <Extension> element writes an extension's DEFAULT value, which is
+    # how an installer silently becomes the owner of .dna on a machine that has
+    # SnapGene on it. Polylinker.wxs writes OpenWithProgids entries by hand
+    # instead, and this step is what stops someone "simplifying" that later into
+    # the element that looks tidier and behaves worse.
+    $wxsPath = "$repo/tools/installer/Polylinker.wxs"
+    if (-not (Test-Path $wxsPath)) { throw 'tools/installer/Polylinker.wxs is missing' }
+    $raw = Get-Content -LiteralPath $wxsPath -Raw
+
+    # WELL-FORMED XML FIRST, because wix will not tell you until CI does.
+    #
+    # This caught a real one on the day it was written: the file used ' -- ' as
+    # an em-dash in its comments, following the house style of every .rs and
+    # .ps1 file in the tree, and XML forbids '--' inside a comment. Ten of them.
+    # The whole package would have failed to compile on the runner, several
+    # minutes into a release, for a punctuation habit.
+    try { [xml]$raw | Out-Null }
+    catch { throw "Polylinker.wxs is not well-formed XML, so wix build cannot read it: $($_.Exception.Message)" }
+    # Comments stripped first: this file explains at length why it does not use
+    # <Extension>, and a checker that cannot tell code from prose gets silenced
+    # rather than satisfied -- which the release-workflow checker already had to
+    # learn once.
+    $wxs = [regex]::Replace($raw, '(?s)<!--.*?-->', '')
+    $problems = @()
+
+    if ($wxs -match '<Extension\b') {
+        $problems += 'Polylinker.wxs uses <Extension>, which writes the extension default and takes the file type from whatever the reader already has'
+    }
+    if ($wxs -match '<ProgId\b') {
+        $problems += 'Polylinker.wxs uses <ProgId>, which writes the extension default for its child extensions'
+    }
+    foreach ($banned in 'ServiceInstall', 'ServiceControl', 'RemoteFile', 'DownloadUrl', 'ScheduledTask') {
+        if ($wxs -match [regex]::Escape($banned)) {
+            $problems += "Polylinker.wxs declares $banned; this installer copies files and writes registry values, nothing else"
+        }
+    }
+    # The UpgradeCode is the product's permanent identity. A new one makes the
+    # next release install ALONGSIDE this one instead of replacing it, and the
+    # damage is invisible until that release ships.
+    if ($wxs -notmatch 'UpgradeCode="78205503-D26C-4A6B-82DE-E0F834220A6D"') {
+        $problems += 'the UpgradeCode is not the one minted on 2026-08-05; changing it makes future releases install alongside this one rather than upgrading it'
+    }
+    # .plproj must not be claimed. The GUI decides format by content through
+    # pl_fileio, and nothing under crates/ knows the .plproj format -- it is a
+    # bench file read by bins/pl-gui/src/session.rs from a menu. A double-click
+    # reaches load_as() and fails.
+    if ($wxs -match '\.plproj') {
+        $problems += '.plproj is associated in Polylinker.wxs, but double-clicking one cannot work: load_as decides on content and no crate knows that format'
+    }
+    # And the associations that ARE there must be the additive kind.
+    $owp = ([regex]::Matches($wxs, 'OpenWithProgids')).Count
+    if ($owp -lt 8) { $problems += "only $owp OpenWithProgids entries; the installer associates eight extensions additively" }
+
+    if ($problems) { throw ($problems -join "`n        ") }
+    Write-Host "        no <Extension>, no default-handler theft, $owp additive associations, UpgradeCode pinned" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
+
+Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
+    # The real oracle: msiexec against this machine, then the disk and the
+    # registry are looked at.
+    #
+    # The per-USER pass is the one that always runs, because it needs no
+    # elevation and because it is the scope readers get by default. The
+    # per-machine pass is added only when the session happens to be elevated.
+    # The step is skipped entirely without wix, since a workstation with no .NET
+    # SDK cannot build an MSI to test and the other 62 steps are still worth
+    # running there.
+    $dist = "$repo/dist"
+    $out = Join-Path ([IO.Path]::GetTempPath()) ("pl-msi-" + [IO.Path]::GetRandomFileName())
+    try {
+        & "$PSScriptRoot/build-msi.ps1" -Dist $dist -Out $out | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'build-msi.ps1 failed' }
+        $msi = Get-ChildItem $out -Filter *.msi
+        if ($msi.Count -ne 1) { throw "expected one .msi, found $($msi.Count)" }
+
+        & "$PSScriptRoot/check-msi.ps1" -Msi $msi[0].FullName -Dist $dist -PerUser
+        if ($LASTEXITCODE -ne 0) { throw 'the MSI failed its check in the per-user scope, which is the default one' }
+
+        $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+                    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if ($elevated) {
+            & "$PSScriptRoot/check-msi.ps1" -Msi $msi[0].FullName -Dist $dist
+            if ($LASTEXITCODE -ne 0) { throw 'the MSI failed its check in the per-machine scope' }
+        } else {
+            Write-Host '        per-machine pass skipped: this session is not elevated' -ForegroundColor DarkGray
+        }
+    } finally {
+        Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $global:LASTEXITCODE = 0
+} {
+    (Test-Path "$repo/dist/SHA256SUMS.txt") -and
+    ($null -ne (Get-Command wix -ErrorAction SilentlyContinue))
+}
+
 Step 'the release workflow parses and covers three platforms' {
     # A here-string piped to `python -`, not a shell heredoc: `<<'PY'` is bash
     # and PowerShell has no such operator. Single-quoted, so nothing in the

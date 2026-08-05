@@ -242,7 +242,48 @@ three files:
 | `Install.cmd` | four lines, so double-clicking works |
 | `README-WINDOWS.txt` | verify, read, unblock, install — in that order |
 
-### Why a script and not an MSI
+### Why an MSI, and what it did and did not solve
+
+**This section argued the opposite until 2026-08-05, when the decision was
+reversed.** It is rewritten rather than deleted, because three of its four
+arguments were answered by the design and one was not, and a reader deciding
+whether to trust the installer deserves to know which is which.
+
+An MSI now ships: `polylinker-<version>-windows-x64.msi`, built by
+`tools/build-msi.ps1` from `tools/installer/Polylinker.wxs`. The zip and the
+readable PowerShell installer still ship alongside it.
+
+**Answered structurally — the second file list.** The strongest objection was
+that every compiled installer carries a second list of files, a WiX
+`<Component>` set, hand-copied from `release.ps1`'s `$notices` array — and that
+this copy had already drifted twice in one week, dropping a licence text each
+time. `Polylinker.wxs` therefore contains no files at all. The component set is
+**generated** from `dist/SHA256SUMS.txt`, the same manifest `check-archive.ps1`
+verifies, and the gate step *the MSI is generated from the manifest and not from
+a second file list* asserts the two are equal — including a negative control, so
+the comparison is known to be able to notice a difference rather than assumed to
+be. There is still exactly one file list; the MSI is a second reader of it, not
+a second copy of it.
+
+**Answered by where it runs — nothing installed on the build machine.** WiX is a
+`dotnet tool` and there is no .NET SDK here. It is therefore a *release-time*
+dependency only: the MSI is built on the `windows-latest` runner, and every MSI
+step in `tools/ci.ps1` skips itself when `wix` is absent, so a contributor
+without an SDK still runs a complete gate. `cargo build` and `cargo test`
+acquired no dependency at all.
+
+**Answered by writing it in the gate's own language.** `tools/check-msi.ps1` is
+PowerShell, like the rest of the gate. It installs with `msiexec`, asserts
+against the disk and the registry, uninstalls, and asserts nothing survived —
+including that a *planted* default handler for `.dna` is still intact, which is
+what turns "the associations are additive" from a hope into a measurement.
+
+**Not answered — signing.** Everything below is still true. The MSI ships
+anyway, because the standard Windows install experience was judged worth the
+cost. Two things reduce the damage: the MSI installs **for the current user by
+default**, which raises no elevation prompt at all and so never shows the
+`Publisher: Unknown` consent dialog; and the zip remains, for anyone whose
+policy refuses unsigned packages or who would simply rather read a script.
 
 Because there is no certificate, and every argument for a compiled installer
 quietly assumes one.
@@ -290,9 +331,20 @@ re-deciding:
    third language the gate cannot reach, holding the PATH and registry surgery
    whose bugs are the destructive kind.
 
-**When a certificate arrives, add an MSI and nothing else.** The `-AllUsers`
-layout below is deliberately the layout an MSI would use, so that is a port and
-not a redesign.
+**When a certificate arrives, sign the MSI, the three binaries and the zip.**
+That is now the only outstanding item on this list; the MSI itself arrived
+first, on 2026-08-05, and the `-AllUsers` layout below did turn out to be the
+layout it uses, so it was a port and not a redesign.
+
+One thing the port deliberately did **not** carry across. The PowerShell
+installer takes the *default* handler for `.plproj` (`Install-Polylinker.ps1`,
+the association table). The MSI does not associate `.plproj` at all, because
+double-clicking one cannot work: the GUI decides a file's format by content
+through `pl_fileio`, and no crate under `crates/` knows the `.plproj` format —
+it is a bench file read by `bins/pl-gui/src/session.rs` from a menu. A
+double-click reaches `load()` → `load_as()` and fails. The gate step *the MSI
+takes no file type away from a program the reader already uses* asserts the
+association stays absent.
 
 ### What it does
 

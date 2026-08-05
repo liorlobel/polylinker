@@ -17,14 +17,30 @@ run time at all.
 
 | Platform | File | Notes |
 |---|---|---|
-| Windows 10/11, x64 | `polylinker-{{VERSION}}-windows-x64.zip` | includes a per-user installer; no admin rights needed |
+| **Windows 10/11, x64** | **`polylinker-{{VERSION}}-windows-x64.msi`** | **the installer — start here.** Installs for you alone by default, so no admin rights and no elevation prompt |
+| Windows 10/11, x64 | `polylinker-{{VERSION}}-windows-x64.zip` | portable: unzip and run, nothing installed. Also contains a readable PowerShell installer |
 | macOS 11+, Apple Silicon **and** Intel | `polylinker-{{VERSION}}-macos-universal.tar.gz` | one universal binary for both |
 | Linux, x64, glibc 2.39 or newer | `polylinker-{{VERSION}}-linux-x64.tar.gz` | see the note below before downloading |
 
 Each archive contains `polylinker` (the editor), `pl` (the command line),
 `pl-mcp` (the MCP server), the Python extension module, the licence texts, and a
 `SHA256SUMS.txt` covering every one of them. Verify the archive against the
-checksum table at the bottom of this page before extracting it.
+checksum table at the bottom of this page before extracting it. The `.msi`
+installs that same set, minus the two installer files it replaces, and is in
+that checksum table too.
+
+### On Windows, which one?
+
+Take the **`.msi`** unless you have a reason not to. It puts Polylinker in the
+Start Menu and in Settings → Apps, offers to put `pl` on your PATH, and adds
+Polylinker to the "Open with" list for GenBank, FASTA, SnapGene `.dna` and
+`.ab1` trace files. It **adds** itself to those lists: if SnapGene owns `.dna`
+on your machine, it still will afterwards.
+
+Take the **`.zip`** if you want to run Polylinker without installing anything,
+or if you would rather read the installer before running it — nothing here is
+signed, and a script you can read is the only assurance on offer that is not a
+checksum. Its `Install-Polylinker.ps1` does the same job in text.
 
 ## Every one of these is unsigned
 
@@ -66,6 +82,14 @@ omission here is the instruction to click past it: the words that usually follow
 are not in anything this project ships, because teaching a labmate to dismiss a
 security warning is a worse outcome than an awkward paragraph. Read
 `README-WINDOWS.txt` inside the zip, check the SHA-256, and decide.
+
+The `.msi` carries no signature either, and SmartScreen treats it the same way.
+Two things are worth knowing before you open it. Its default is to install for
+you alone, which needs no administrator — so on that path Windows does not show
+the yellow-banded elevation dialog reading *Publisher: Unknown*, because it does
+not ask for elevation at all. If you choose "for everyone" instead, it does, and
+that dialog will name no publisher. Nothing is wrong; nobody has paid to be
+named.
 
 Some managed and locked-down machines — Windows and macOS both — refuse unsigned
 software outright by policy. If yours does, this will not run, and the right

@@ -9,6 +9,27 @@ double-click it. The installer below exists so it appears in the Start Menu and
 in Settings -> Apps like anything else, not because anything needs installing.
 
 
+THERE IS ALSO AN .MSI, AND FOR MOST PEOPLE IT IS THE EASIER ONE
+---------------------------------------------------------------
+
+The release page publishes polylinker-<version>-windows-x64.msi next to this
+zip. It is the ordinary Windows installer: double-click, next, done. It installs
+for you alone unless you choose "for everyone", so it needs no administrator and
+raises no elevation prompt on the default path.
+
+This zip is still here for two kinds of reader: anyone who wants to run
+Polylinker without installing anything at all, and anyone who would rather run
+an installer they can read first. That second one is what section 2 below is
+about, and the difference is real -- nothing here is code-signed, so being able
+to read the installer is the only assurance on offer that is not a checksum.
+
+One difference worth knowing if you use both. The .msi does NOT make Polylinker
+the default program for .plproj files, and Install-Polylinker.ps1 does. The .msi
+is the one that is right: Polylinker works out a file's format by looking inside
+it, and it does not recognise its own .plproj bench files that way, so
+double-clicking one does not open it. Open a bench from inside the app instead.
+
+
 1. VERIFY
 ---------
 

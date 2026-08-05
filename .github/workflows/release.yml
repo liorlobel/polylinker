@@ -228,15 +228,92 @@ jobs:
         shell: pwsh
         run: Get-Content dist/SHA256SUMS.txt
 
+      # -------------------------------------------------------------- Windows
+      #
+      # THE MSI. Built inside this job rather than in a matrix leg of its own,
+      # because it needs the dist/ this job has just produced and verified, and
+      # because tools/ci.ps1 asserts the build matrix is exactly three runners
+      # with three labels.
+      #
+      # WiX is a RELEASE-time dependency only. Nothing about `cargo build`,
+      # `cargo test` or the rest of tools/ci.ps1 needs it, and a contributor
+      # without a .NET SDK still runs a complete gate: the MSI steps skip
+      # themselves when `wix` is absent rather than failing.
+      #
+      # The version is pinned. An installer that changes shape because a
+      # toolchain published a new minor is not reproducible, and the MSI is the
+      # artifact where that matters most.
+      - name: Install the WiX Toolset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'installing wix failed' }
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'adding the WiX UI extension failed' }
+          wix --version
+
+      - name: Build the MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # -Out msi, never dist/. Three separate set-equality checks compare
+        # dist/ against the manifest and exclude only SHA256SUMS.txt, *.zip and
+        # *.zip.sha256, so an .msi left in dist/ would be swept into the
+        # manifest and then into the zip, roughly doubling the download.
+        run: ./tools/build-msi.ps1 -Dist dist -Out msi
+
+      - name: Install the MSI, check it, uninstall it
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # The real oracle: an actual msiexec install, assertions against the disk
+        # and the registry, an actual uninstall, and assertions that nothing
+        # survived it.
+        #
+        # BOTH SCOPES, and the per-user one first because it is the one readers
+        # get by default. Testing only per-machine is what let an install
+        # directory that a non-administrator cannot write to survive review: the
+        # package writes every registry value with Root="HKMU", so the two scopes
+        # exercise genuinely different code paths in Windows Installer.
+        run: |
+          $msi = Get-ChildItem msi -Filter *.msi
+          if ($msi.Count -ne 1) { throw "expected exactly one .msi, found $($msi.Count)" }
+          ./tools/check-msi.ps1 -Msi $msi[0].FullName -Dist dist -PerUser
+          if ($LASTEXITCODE -ne 0) { throw 'the MSI failed its check in the per-user scope, which is the default one' }
+          ./tools/check-msi.ps1 -Msi $msi[0].FullName -Dist dist
+          if ($LASTEXITCODE -ne 0) { throw 'the MSI failed its check in the per-machine scope' }
+
       - uses: actions/upload-artifact@v4
         with:
           name: polylinker-${{ matrix.label }}
           # The archive and its sidecar only. Everything else in dist/ is
           # already inside the archive.
+          #
+          # THE MSI IS NOT LISTED HERE, and that is deliberate rather than an
+          # omission. upload-artifact derives one search path per pattern and,
+          # when there is more than one, roots the artifact at their least common
+          # ancestor -- computed from the PATTERNS, not from what matched. Adding
+          # `msi/*.msi` would move the root from `dist` up to the workspace, so
+          # every file would arrive one directory deeper than the publish job
+          # looks for it, and NOTHING would be published. The MSI gets its own
+          # upload step below instead.
           path: |
             dist/*.zip
             dist/*.tar.gz
             dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: polylinker-windows-msi
+          # Its own artifact, so its own root. Both patterns are under msi/, so
+          # the files arrive at the top level of the artifact exactly as the
+          # three archives do, and the publish job's download flattens them into
+          # the same artifacts/ directory.
+          path: |
+            msi/*.msi
+            msi/*.msi.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -301,6 +378,27 @@ jobs:
               ./tools/check-archive.ps1 -Archive $p
               if ($LASTEXITCODE -ne 0) { throw "$name failed its archive check" }
           }
+
+          # The MSI, checked the same way minus the archive check -- it is an
+          # installer, not an archive, and check-archive.ps1 would reject it for
+          # having no manifest. It was already installed, asserted and
+          # uninstalled on the Windows runner; what is verified here is that the
+          # bytes survived the artifact store, which is the one thing that
+          # happened since.
+          #
+          # It is in this step rather than merely globbed onto the release
+          # because a missing MSI must fail the publish. The three archives
+          # publish together or not at all, and the installer most Windows
+          # readers will take is not a lesser member of that set.
+          $msiName = "polylinker-$version-windows-x64.msi"
+          $msiPath = Join-Path 'artifacts' $msiName
+          if (-not (Test-Path -LiteralPath $msiPath)) { throw "$msiName was not produced by the Windows job" }
+          $msiSide = "$msiPath.sha256"
+          if (-not (Test-Path -LiteralPath $msiSide)) { throw "$msiName has no .sha256 sidecar" }
+          $recorded = ((Get-Content $msiSide -Raw) -split '  ')[0].Trim()
+          $actual = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $recorded) { throw "$msiName does not match its sidecar after transit through the artifact store" }
+
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
 
       # One manifest over the three downloads, so a user can verify the file
@@ -311,7 +409,11 @@ jobs:
           set -euo pipefail
           cd artifacts
           rm -f SHA256SUMS.txt
-          sha256sum polylinker-*.zip polylinker-*.tar.gz | sort -k2 > SHA256SUMS.txt
+          # The .msi is in this table too. The release notes tell the reader to
+          # check what they downloaded against it, and the installer is the file
+          # most Windows readers will download -- leaving it out would point
+          # them at a table that cannot answer the question they have.
+          sha256sum polylinker-*.zip polylinker-*.tar.gz polylinker-*.msi | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Assemble the release notes
@@ -359,5 +461,6 @@ jobs:
             --verify-tag \
             artifacts/polylinker-*.zip \
             artifacts/polylinker-*.tar.gz \
+            artifacts/polylinker-*.msi \
             artifacts/polylinker-*.sha256 \
             artifacts/SHA256SUMS.txt

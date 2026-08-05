@@ -10,7 +10,7 @@ sends a sequence anywhere.
 > build, Python bindings and an MCP server all work today, across 20 workspace
 > crates and 132,472 lines of Rust, 80,583 of it dependency-free (123 `.rs`
 > files under `crates/` and `bins/`), with 1,644 `#[test]` functions and a
-> 60-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
+> 63-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-05, and recounted on every test run since:
 > tests are lines matching `^\s*#\[test\]`, the attribute at the start of a
@@ -86,7 +86,7 @@ Each ships before the app, stands alone, and survives the app.
 | [`bins/pl-mcp`](bins/pl-mcp) | **MCP server**, read-only, no dependencies — so an assistant can ask about a plasmid without being able to overwrite one. |
 | [`crates/pl-py`](crates/pl-py) | **Python bindings** (PyO3, abi3), so a script already using Biopython can call the parts that are hard to get right without being rewritten. |
 | [`docs/AUDIT-2026-07-28.md`](docs/AUDIT-2026-07-28.md) | A 123-agent audit of the whole workspace: 90 confirmed findings, 19 refuted, 90 of 90 fixed. Kept in the repo because the findings that mattered most were **checks that could not fail**, and that is worth being public about. |
-| Windows installer | **`tools/installer/Install-Polylinker.ps1`**, shipped inside the release zip. Per-user by default, no elevation, no updater, no network. It is a readable script and not a compiled `.msi` on purpose: without a code-signing certificate the only trust an installer can offer is that you can read it before you run it. See [`docs/RELEASING.md`](docs/RELEASING.md). |
+| Windows installer | **`polylinker-<version>-windows-x64.msi`**, built by [`tools/build-msi.ps1`](tools/build-msi.ps1) from [`tools/installer/Polylinker.wxs`](tools/installer/Polylinker.wxs). Installs for you alone by default — no administrator, no elevation prompt — with "for everyone" offered for machines where you are one. No updater, no network, no service, no scheduled task. It **adds** Polylinker to the "Open with" list for eight sequence formats and takes none of them away from SnapGene or anything else you already use. The MSI carries no file list of its own: it is generated from the same `SHA256SUMS.txt` the archive is verified against, because a second list is how a licence text stops shipping. The readable [`Install-Polylinker.ps1`](tools/installer/Install-Polylinker.ps1) still ships inside the zip for anyone who would rather run something they can read. See [`docs/RELEASING.md`](docs/RELEASING.md). |
 | Signing | **Not done.** Needs a code-signing certificate and an Apple Developer ID; see [`docs/RELEASING.md`](docs/RELEASING.md). Until then `SHA256SUMS.txt` is the only integrity guarantee. |
 | Features database | **89 records as of release 2026.07.28, all 89 reviewed.** Machine-assembled from public sources, then signed off row by row on 2026-07-28. A row moves past `proposed` only when `features/SIGNOFF.tsv` names it with a sha256 of its content that still matches, so an approval lapses by itself when the row changes and the shipped set shrinks without anyone deciding to shrink it. That mechanism, not the current count, is what enforces "the tool may propose and never assert". `pl licences` prints the live count and the attribution. |
 
