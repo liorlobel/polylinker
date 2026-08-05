@@ -90,8 +90,12 @@ foreach ($line in Get-Content -LiteralPath (Join-Path $distFull 'SHA256SUMS.txt'
 }
 if (-not $expected) { throw 'parsed no expected files out of the manifest' }
 
-$prefix = Join-Path ([IO.Path]::GetTempPath()) ("pl-msi-" + [IO.Path]::GetRandomFileName())
-$log = "$prefix.log"
+# Only the verbose msiexec log lives in temp. $prefix is NOT chosen here any
+# more: it is discovered after the install from the package's own App Paths
+# entry, because WixUI_Advanced overrides an APPLICATIONFOLDER passed on the
+# command line even under /qn.
+$log = Join-Path ([IO.Path]::GetTempPath()) ("pl-msi-" + [IO.Path]::GetRandomFileName() + ".log")
+$prefix = $null
 
 # ---------------------------------------------------------------- the planting
 # A default handler for .dna that the MSI must not disturb, and a witness value
@@ -115,14 +119,64 @@ function Cleanup-Planting {
 try {
     # ------------------------------------------------------------------ install
     Write-Host "  installing $(Split-Path -Leaf $msiPath)" -ForegroundColor Cyan
+    # NO APPLICATIONFOLDER OVERRIDE, deliberately.
+    #
+    # The first attempt passed APPLICATIONFOLDER=<temp dir> so the check could
+    # look in a known place, and every payload assertion then failed. WixUI_Advanced
+    # schedules WixSetDefaultPerUserFolder and WixSetDefaultPerMachineFolder in
+    # the INSTALLEXECUTE sequence as well as the UI one, so they run under /qn
+    # and overwrite the property. The package was installing correctly the whole
+    # time; the check was looking in a directory the installer had been told
+    # about and then talked out of.
+    #
+    # So the install goes wherever it really goes, and the check FINDS it -- from
+    # the App Paths value the package itself writes. That is a better test
+    # anyway: it exercises the default path a reader gets, and it verifies the
+    # installer's own record of where it put things.
+    #
     # The parentheses matter: without them the + binds to the RESULT of
-    # Start-Process rather than to the argument list, and msiexec is invoked
-    # with no scope arguments at all.
-    $installArgs = @('/i', "`"$msiPath`"", '/qn', '/l*v', "`"$log`"", "APPLICATIONFOLDER=`"$prefix`"") + $msiScopeArgs
+    # Start-Process rather than to the argument list.
+    $installArgs = @('/i', "`"$msiPath`"", '/qn', '/l*v', "`"$log`"") + $msiScopeArgs
     $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList $installArgs
     if ($p.ExitCode -ne 0) {
         $tail = (Get-Content -LiteralPath $log -Tail 25 -ErrorAction SilentlyContinue) -join "`n"
         throw "msiexec /i exited $($p.ExitCode). Log tail:`n$tail"
+    }
+
+    # ------------------------------------------------- where did it actually go
+    # Asked of the package rather than assumed. The App Paths value is written by
+    # C_AppPaths with Root="HKMU", so it is in whichever hive this install used,
+    # and its data is the full path to the installed polylinker.exe.
+    function Find-AppPath($root) {
+        $k = "$root\Software\Microsoft\Windows\CurrentVersion\App Paths\polylinker.exe"
+        if (-not (Test-Path $k)) { return $null }
+        (Get-ItemProperty $k -ErrorAction SilentlyContinue).'(default)'
+    }
+    $otherHive = if ($PerUser) { 'HKLM:' } else { 'HKCU:' }
+    $exePath = Find-AppPath $hive
+    $foundIn = $hive
+    if (-not $exePath) {
+        $exePath = Find-AppPath $otherHive
+        if ($exePath) { $foundIn = $otherHive }
+    }
+    if (-not $exePath) {
+        $keys = (Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
+                 Select-String -Pattern 'ALLUSERS|MSIINSTALLPERUSER|APPLICATIONFOLDER' |
+                 Select-Object -Last 12) -join "`n"
+        throw "the install reported success but wrote no App Paths entry in either hive, so where it went cannot be established.`nRelevant log lines:`n$keys"
+    }
+    $prefix = Split-Path -Parent $exePath
+    Note "installed to $prefix (App Paths found in $foundIn)"
+    if ($foundIn -ne $hive) {
+        # Say WHY, not just that. Windows Installer decides scope from ALLUSERS
+        # and MSIINSTALLPERUSER during InstallValidate, and the verbose log
+        # records the values it settled on. Printing them turns "it went to the
+        # wrong place" into something diagnosable without another CI round trip.
+        $why = (Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
+                Select-String -Pattern 'Property\(S\): (ALLUSERS|MSIINSTALLPERUSER|APPLICATIONFOLDER|WixAppFolder|ProductToBeRegistered)' |
+                Select-Object -Last 8 | ForEach-Object { $_.Line.Trim() }) -join "`n        "
+        Bad ("a $scope install was requested but the package registered itself in $foundIn, so it installed in the other scope." +
+             $(if ($why) { "`n        the installer settled on:`n        $why" } else { '' }))
     }
 
     # -------------------------------------------------------------- the payload
@@ -131,8 +185,15 @@ try {
         $t = Join-Path $prefix ($rel -replace '/', '\')
         if (-not (Test-Path -LiteralPath $t)) { $missing += $rel }
     }
-    if ($missing) { Bad "the MSI installed but these files are not on disk: $($missing -join ', ')" }
+    if ($missing) { Bad "the MSI installed but these files are not on disk under ${prefix}: $($missing -join ', ')" }
     else { Note "all $($expected.Count) payload files present under $prefix" }
+
+    # A per-user install must not have landed in Program Files: that is the
+    # directory a reader without administrator rights cannot write to, and
+    # putting it there is the bug this whole scope split exists to prevent.
+    if ($PerUser -and $prefix -like "$env:ProgramFiles*") {
+        Bad "a per-user install put the payload in $prefix, which a reader without administrator rights cannot write to"
+    }
 
     # The three programs must actually be executable, not merely present.
     foreach ($exe in 'pl.exe', 'polylinker.exe', 'pl-mcp.exe') {
@@ -247,7 +308,15 @@ try {
 finally {
     if (-not ($fail -and $KeepOnFailure)) {
         Cleanup-Planting
-        Remove-Item -LiteralPath $prefix -Recurse -Force -ErrorAction SilentlyContinue
+        # $prefix is NOT deleted here. It used to be a temp directory this script
+        # chose; it is now the real install directory, discovered from the
+        # package. Removing it would mean that a failed assertion deletes a
+        # genuine Polylinker installation off the machine running the gate. The
+        # uninstall above is what removes it, and whether it did is one of the
+        # things being asserted -- so deleting it here would also destroy the
+        # evidence for that assertion.
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "$log.uninstall" -Force -ErrorAction SilentlyContinue
     }
 }
 
