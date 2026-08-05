@@ -12,12 +12,14 @@
 //! and is always spelled out at that site.
 
 pub mod base64;
+pub mod ed25519;
 pub mod iupac;
 pub mod oplog;
 pub mod orf;
 pub mod seguid;
 pub mod sha1;
 pub mod sha256;
+pub mod sha512;
 pub mod translate;
 
 pub use iupac::{complement, matches, reverse_complement, Composition};

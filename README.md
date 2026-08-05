@@ -8,9 +8,9 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 20 workspace
-> crates and 132,487 lines of Rust, 80,583 of it dependency-free (123 `.rs`
-> files under `crates/` and `bins/`), with 1,644 `#[test]` functions and a
-> 63-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
+> crates and 135,092 lines of Rust, 83,188 of it dependency-free (125 `.rs`
+> files under `crates/` and `bins/`), with 1,677 `#[test]` functions and a
+> 64-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-05, and recounted on every test run since:
 > tests are lines matching `^\s*#\[test\]`, the attribute at the start of a

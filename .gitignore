@@ -76,3 +76,29 @@ packages/circular-map/dist/
 # name here, and tools/hooks/pre-commit additionally rejects any staged blob
 # whose sha256 is the pinned one, which catches it under a different filename.
 snapgene.csv
+
+# The oracle scratchpad, and a near-miss worth recording rather than quietly
+# fixing.
+#
+# Oracle work happens in scratchpad/: Python virtualenvs, downloaded test-vector
+# suites, throwaway comparison scripts. None of it belongs in history.
+#
+# On 2026-08-05, while proving the release-signing path, the Ed25519 RELEASE
+# PRIVATE KEY was written to scratchpad/relkey.pem for roughly thirty seconds so
+# that openssl could use it. `git add -A` had been run repeatedly in that same
+# session. Nothing was committed only because scratchpad/ happened not to exist
+# during any of those runs -- it had been created minutes earlier. That is luck,
+# not a safeguard. Hence this line, and hence the gate step that looks for key
+# material by CONTENT rather than trusting a path to be right.
+/scratchpad/
+
+# Private keys, anywhere, under any name.
+#
+# The release signing key lives OUTSIDE this repository, in a sibling directory,
+# and the only copy any machine other than the maintainer's sees is a GitHub
+# Actions secret. Nothing matching these patterns should ever be here. The gate
+# fails if one is, but a mistyped path should not be able to stage one either.
+*.pem
+*.key
+*.pfx
+*.p12

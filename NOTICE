@@ -17,6 +17,11 @@ faces, and one for each of the five that arrive through a crate -- because four
 of those licences require their text to accompany every copy, and a path into a
 Cargo registry is not something a recipient of `dist/` has.
 
+One third-party TEST-VECTOR FILE is vendored as well, since 2026-08-05:
+`crates/pl-core/vectors/ed25519_wycheproof.tsv`, under "Data" below. It is
+Apache-2.0, the same licence as this repository, and it is test data only --
+`#[cfg(test)]` reads it, so it is in no shipped binary.
+
 The two directories are separate on purpose. `bins/pl-gui/fonts/` is what the
 interface draws with; `crates/pl-draw/fonts/` is what the raster exporter fills
 outlines from, and it lives in the crate because `bins/pl` needs it too. Nothing
@@ -699,6 +704,24 @@ table, and the list of sources deliberately not used -- is `features/NOTICE`,
 and it must be packaged with any distribution that includes the database.
 
 The planned correctness benchmark (polylinker-bench) will be CC0.
+
+Ed25519 verification test vectors, in
+`crates/pl-core/vectors/ed25519_wycheproof.tsv` since 2026-08-05. Project
+Wycheproof's `ed25519_test.json`, release 0.9rc5, flattened to a tab-separated
+file; the file's own header carries the SHA-256 of the JSON it came from and the
+reason it is not committed as JSON. Test data only, read by `#[cfg(test)]` code
+in `crates/pl-core/src/ed25519.rs`, so unlike `features/` it reaches no shipped
+binary and imposes no runtime attribution obligation.
+
+  Project Wycheproof     https://github.com/C2SP/wycheproof
+  Licence                Apache License 2.0 -- this repository's own licence,
+                         so no new obligation beyond attribution.
+  Copyright              Google LLC and the C2SP contributors.
+
+It is vendored rather than downloaded during the build because `pl-core` must
+stay buildable with no network access, and because a verifier's test corpus
+that could change under it is a corpus that proves nothing about the build it
+was supposed to gate.
 
 ================================================================================
 Trademarks

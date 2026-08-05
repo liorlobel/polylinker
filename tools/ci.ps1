@@ -1604,6 +1604,73 @@ Step 'the tar.gz writer produces an archive two other tools can read' {
 # PyYAML, because PowerShell has no YAML parser and a regex is not a parse. The
 # step below does the content assertions with no interpreter at all, so a
 # Rust-only machine still checks something rather than skipping the subject.
+Step 'no private key material is anywhere in the tree' {
+    # WHY THIS LOOKS AT CONTENT AND NOT AT FILENAMES.
+    #
+    # .gitignore now lists *.pem, *.key and /scratchpad/, and that is worth
+    # having, but it is the weaker half. An ignore rule stops a file being
+    # STAGED; it does nothing about one already tracked, and it is keyed on a
+    # name the author chooses. The release signing key does not have to be
+    # called anything in particular to be a release signing key.
+    #
+    # This exists because of a real near-miss on 2026-08-05: the Ed25519 release
+    # private key was written into scratchpad/ for about thirty seconds during a
+    # signing experiment, in a session where `git add -A` ran repeatedly.
+    # Nothing was committed only because that directory happened to be younger
+    # than the last such run.
+    #
+    # So every tracked file is read and matched against what key material
+    # actually looks like, whatever it is called.
+    $problems = @()
+    # THE MARKERS ARE ASSEMBLED, NOT WRITTEN OUT, and that is not squeamishness.
+    #
+    # The first version spelled them literally, and the first thing it caught was
+    # tools/ci.ps1 -- itself. A scanner that contains the string it scans for is
+    # a scanner that fails on a clean tree, and the way that gets resolved in
+    # practice is by excluding the scanner from the scan, which is how the one
+    # file most likely to be edited carelessly becomes the one file nobody
+    # checks. This project already learned the same lesson on the
+    # release-workflow checker, which had to be taught to strip comments before
+    # it stopped failing on the sentence describing the rule it enforces.
+    #
+    # Splitting the delimiter means no file is exempt, including this one, while
+    # the assembled pattern still matches a genuine key block anywhere.
+    $b = '-----' + 'BEGIN '
+    $e = '-----'
+    $markers = @(
+        @{ Pattern = $b + '[A-Z ]*PRIVATE KEY' + $e;    What = 'a PEM private key block' }
+        @{ Pattern = $b + 'OPENSSH PRIVATE KEY' + $e;   What = 'an OpenSSH private key' }
+        @{ Pattern = $b + 'PGP PRIVATE KEY BLOCK' + $e; What = 'a PGP private key' }
+    )
+    # Tracked files only: an untracked scratch file is the author's business,
+    # and ignoring it is what .gitignore is for.
+    $tracked = & git -C $repo ls-files
+    foreach ($rel in $tracked) {
+        $p = Join-Path $repo $rel
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        $fi = Get-Item -LiteralPath $p
+        if ($fi.Length -gt 2MB) { continue }   # a key is small; a corpus is not
+        $text = Get-Content -LiteralPath $p -Raw -ErrorAction SilentlyContinue
+        if (-not $text) { continue }
+        foreach ($m in $markers) {
+            if ($text -match $m.Pattern) { $problems += "$rel contains $($m.What)" }
+        }
+    }
+
+    # scratchpad/ must stay untracked. It is where oracle virtualenvs and
+    # downloaded vector suites live, and where key material passes through
+    # during signing experiments. The .gitignore entry is what keeps it out;
+    # this is what notices if it ever got in anyway.
+    $inScratch = @($tracked | Where-Object { $_ -like 'scratchpad/*' -or $_ -eq 'scratchpad' })
+    if ($inScratch.Count) {
+        $problems += "scratchpad/ is tracked by git ($($inScratch.Count) file(s)); it holds oracle virtualenvs and, transiently, key material"
+    }
+
+    if ($problems) { throw ($problems -join "`n        ") }
+    Write-Host "        $($tracked.Count) tracked files scanned; no private key material, scratchpad untracked" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
+
 Step 'the MSI is generated from the manifest and not from a second file list' {
     # THE ONE CHECK THAT JUSTIFIES SHIPPING AN MSI AT ALL.
     #
