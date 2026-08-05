@@ -1,5 +1,12 @@
 #!signoff-version 1
-# Curator sign-off. ONE LINE PER SIGNED RECORD. Nothing is signed today.
+# Curator sign-off. ONE LINE PER SIGNED RECORD. 89 records are signed, all of
+# them by Lior Lobel on 2026-07-28 as the PI bulk approval of the v0.1 build.
+#
+# That sentence read "Nothing is signed today" until 2026-08-05. It was true
+# when the mechanism was built empty, and false from the moment the first row
+# landed sixty lines below it -- and it shipped that way in the first public
+# release. This is the file an auditor opens to check the "AI may propose,
+# never assert" rule, and its opening sentence contradicted its own contents.
 #
 # WHAT A LINE HERE MEANS
 #   A named human read the record named in column 1, checked its sequence

@@ -18402,12 +18402,30 @@ mod tests {
     /// unpinned number in a comment is the defect this test was written for.
     #[test]
     fn every_picker_driven_save_in_this_file_goes_through_atomic_write() {
-        const SRC: &str = include_str!("main.rs");
+        const RAW: &str = include_str!("main.rs");
+
+        // NEWLINES NORMALISED FIRST, and this is not defensive tidying. The
+        // first CI run this repository ever completed failed here and nowhere
+        // else, on windows-latest, 509 passed and this one.
+        //
+        // Git stores LF; `core.autocrlf` is on by default on GitHub's Windows
+        // runners; so a fresh checkout hands this file CRLF while the working
+        // tree it was written in had LF. The literal below is LF-only,
+        // `split_once` matched nothing, and the `expect` fired with "main.rs
+        // still has a `mod tests`" — a message naming the one thing that was
+        // not wrong.
+        //
+        // NO LOCAL GATE STEP COULD HAVE SEEN IT. All of them read the working
+        // tree, and only a checkout applies the conversion. Any test that
+        // `include_str!`s source and matches on `\n` has this shape;
+        // `.gitattributes` now pins `*.rs` to LF so the class cannot recur,
+        // and this normalisation stands regardless of that setting.
+        let src = RAW.replace("\r\n", "\n");
 
         // The non-test half. `\n#[cfg(test)]\nmod tests {` at column 0 is the
         // one boundary in this file; the two other `#[cfg(test)]` attributes
         // are indented on items inside `App`.
-        let body = SRC
+        let body = src
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("main.rs still has a `mod tests`")
             .0;

@@ -79,13 +79,36 @@ What this does and does not mean:
 1. Contributors who work on `.dna` format code **should not be SnapGene
    licensees**. See `CONTRIBUTING.md`.
 2. The format specification in this repository should be **re-derived and
-   signed off by a contributor who has never accepted the SnapGene EULA**
-   before the first public release. The corpus needed for this is freely
-   available: Addgene distributes `.dna` files publicly.
-3. Legal advice should be obtained before the first public commit, together
-   with Bar-Ilan University technology-transfer clearance for Apache-2.0
-   release. Institutional IP-assignment policy derails more academic open-source
-   releases than vendors do.
+   signed off by a contributor who has never accepted the SnapGene EULA**.
+   The corpus needed for this is freely available: Addgene distributes `.dna`
+   files publicly.
+3. Legal advice should be obtained, together with Bar-Ilan University
+   technology-transfer clearance for Apache-2.0 release. Institutional
+   IP-assignment policy derails more academic open-source releases than vendors
+   do.
+
+### Status of 2 and 3, as of 2026-08-05
+
+**Neither was done, and the repository was made public anyway.** Both items
+carried the words "before the first public release" and "before the first
+public commit" until that date. Those words are gone from the two paragraphs
+above because the deadline they named has passed — **not** because the work
+behind them has been done. It has not.
+
+The decision was the repository owner's, and it is recorded here rather than in
+a commit message so that it travels with the file it qualifies: the project is
+a laboratory tool for the owner's own use, and on that basis these two gates
+were set aside rather than met. Note that publishing does not narrow who can
+read the format code, whoever ends up running the binaries.
+
+Nothing above this section is affected. "How it was derived" and "What was NOT
+done" are statements of fact about how the work was actually carried out — the
+corpus was the owner's own `.dna` files; no decompiler, disassembler, debugger
+or `strings` was run against any SnapGene binary; no vendor resource or database
+was opened; Dotmatics was not contacted — and they remain true.
+
+Item 2 is still the single highest-value contribution an outside collaborator
+could make, for the reason `CONTRIBUTING.md` gives.
 
 ---
 

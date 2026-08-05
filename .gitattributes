@@ -34,3 +34,11 @@ crates/pl-draw/fonts/*.txt -text
 # covered here for the same reason.
 bins/pl-gui/icon/polylinker.ico -text
 bins/pl-gui/icon/*.rgba -text
+
+# Rust sources are read by tests that `include_str!` their own file and match
+# on newline literals, so a CRLF checkout changes what those tests see. The
+# first CI run this repository completed failed on exactly that: one test on
+# windows-latest, 509 others passing, invisible to every local gate step
+# because only a checkout applies the conversion. Pinned to LF everywhere so
+# the working tree and the object store agree on all three platforms.
+*.rs text eol=lf
