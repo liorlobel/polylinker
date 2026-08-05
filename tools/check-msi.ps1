@@ -253,10 +253,12 @@ try {
     # test wastes a CI round trip instead of answering the question.
     function Find-Arp($root) {
         $k = "$root\Software\Microsoft\Windows\CurrentVersion\Uninstall"
-        if (-not (Test-Path $k)) { return $null }
-        Get-ChildItem $k -ErrorAction SilentlyContinue |
-            ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
-            Where-Object { $_.DisplayName -eq 'Polylinker' }
+        if (-not (Test-Path $k)) { Note "no Uninstall key at all under $root"; return $null }
+        $all = @(Get-ChildItem $k -ErrorAction SilentlyContinue)
+        $hit = $all | ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+               Where-Object { $_.DisplayName -eq 'Polylinker' }
+        Note ("$root Uninstall: $($all.Count) entries, " + $(if ($hit) { "Polylinker among them ($($hit.PSChildName))" } else { 'no Polylinker' }))
+        $hit
     }
     $arp = Find-Arp $hive
     $otherHive = if ($PerUser) { 'HKLM:' } else { 'HKCU:' }

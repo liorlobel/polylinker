@@ -1659,6 +1659,29 @@ Step 'the MSI is generated from the manifest and not from a second file list' {
         }
         $inManifest = $inManifest | Sort-Object
 
+        # EVERY GENERATED <File> MUST CARRY AN EXPLICIT Name.
+        #
+        # Without it WiX names the installed file after the last segment of
+        # @Source, and @Source begins with !(bindpath.payload) with no separator
+        # after it -- so the whole string is one segment and the file lands on
+        # disk called "!(bindpath.payload)polylinker.exe". That shipped once. It
+        # installed and uninstalled cleanly and passed every registry assertion,
+        # because nothing about the registry is wrong in that state.
+        $files = [regex]::Matches($frag, '<File\b[^>]*/>')
+        foreach ($f in $files) {
+            $t = $f.Value
+            if ($t -notmatch 'Name="([^"]+)"') {
+                throw "a generated <File> has no Name attribute, so WiX would name it after the unresolved bindpath: $t"
+            }
+            $name = $Matches[1]
+            if ($t -notmatch 'Source="[^"]*[\\)]' + [regex]::Escape($name) + '"') {
+                throw "a generated <File> has Name='$name' that does not match the leaf of its Source: $t"
+            }
+        }
+        if ($files.Count -ne $inWxs.Count) {
+            throw "$($files.Count) <File> elements but $($inWxs.Count) sources parsed; the fragment is malformed"
+        }
+
         $onlyWxs = $inWxs | Where-Object { $inManifest -notcontains $_ }
         $onlyMan = $inManifest | Where-Object { $inWxs -notcontains $_ }
         if ($onlyWxs) { throw "the MSI would install files the manifest does not list: $($onlyWxs -join ', ')" }

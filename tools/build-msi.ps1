@@ -163,8 +163,23 @@ foreach ($d in ($byDir.Keys | Sort-Object)) {
     foreach ($p in ($byDir[$d] | Sort-Object)) {
         $fid = Id-For $p 'f'
         $src = '!(bindpath.payload)' + ($p -replace '/', '\')
+        $leaf = Split-Path -Leaf $p
+        # Name IS REQUIRED here, and leaving it out is not a tidiness question.
+        #
+        # WiX derives a File's destination name from the last path segment of
+        # @Source. It resolves !(bindpath.payload) when it goes looking for the
+        # bytes, but the NAME is taken from the unresolved string -- and there is
+        # no separator after the closing parenthesis to split on. So the whole
+        # thing becomes one segment, and the first build of this installer put
+        # files on disk called
+        #
+        #     !(bindpath.payload)polylinker.exe
+        #
+        # It installed, uninstalled, registered and unregistered cleanly. Every
+        # registry assertion passed. Only a check that looked for the payload BY
+        # NAME on disk could have caught it, which is the one that did.
         [void]$sb.AppendLine("      <Component Id=""c$fid"" Directory=""$dirId"">")
-        [void]$sb.AppendLine("        <File Id=""$fid"" Source=""$src"" KeyPath=""yes"" />")
+        [void]$sb.AppendLine("        <File Id=""$fid"" Name=""$leaf"" Source=""$src"" KeyPath=""yes"" />")
         [void]$sb.AppendLine('      </Component>')
     }
 }
