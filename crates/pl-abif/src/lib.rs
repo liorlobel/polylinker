@@ -39,7 +39,8 @@ pub enum Error {
         need: usize,
         got: usize,
     },
-    /// The directory points outside the file.
+    /// The directory points outside the file, or describes more payload than
+    /// the file could possibly hold.
     BadDirectory(String),
     /// No base calls at all — an `.fsa` fragment-analysis file, typically,
     /// which is a real thing to be handed and is not a chromatogram.
@@ -255,6 +256,40 @@ fn be_i32(b: &[u8], at: usize) -> i32 {
 /// an intact directory pointing at bytes that are gone. Chopping ten bytes off
 /// such a file is enough. Returning the surviving tags and nothing else made
 /// that indistinguishable from a file that never had them.
+///
+/// # What bounds the memory this can be made to spend
+///
+/// Two things, and the second is not implied by the first. The `end > data.len()`
+/// check bounds the directory, and each entry's own `dataoffset + datasize` is
+/// bounded against the file below — but nothing in either bounds their **sum**,
+/// and an entry claiming byte 0 to byte `data.len()` passes the per-entry check
+/// honestly. At 28 bytes a directory record an L-byte file holds `(L - 128) / 28`
+/// such entries, each copied and retained, so the bytes held at once grew as
+/// `L²/28` while the file grew as `L`. Measured on this code before the budget
+/// below existed: a 28,128-byte file with 1,000 entries retained 28,128,000
+/// bytes, exactly 1,000×. Carrying that measured ratio up, the same shape at
+/// 1,000,000 bytes holds `(1_000_000 - 128) / 28` = 35,709 entries and asks for
+/// 35.7 GB — and `.to_vec()` is the infallible path, so exhaustion is
+/// `handle_alloc_error` → `abort()`, so `File ▸ Open` on a crafted `.ab1` from a
+/// sequencing facility takes the whole GUI session with it. The same class of
+/// defect is why `pl_sanger::align` allocates through `try_reserve_exact`.
+///
+/// So the payloads are budgeted against the file length. Every payload of more
+/// than four bytes occupies real bytes of the file, they do not overlap in
+/// anything ABI writes, and the header and directory take their own space on
+/// top — so a well-formed file spends strictly less than `data.len()`. That is
+/// the loosest bound that still holds, which matters because a real `.ab1` is
+/// mostly its four DATA channels; the 97.4%-payload fixture in the tests is
+/// there to pin that such a file is not refused —
+/// `a_file_that_is_almost_all_payload_still_parses`, 8,010 payload bytes in
+/// 8,222, both asserted there rather than described.
+///
+/// Exceeding it is [`Error::BadDirectory`] and not a [`Dropped`] record, on
+/// purpose. `Dropped` means *this tag's data is not in the file*, and its
+/// `Display` says so in as many words; an entry inside the file but past the
+/// budget is not that, and reporting it as that would print a sentence about
+/// the file that is false. A directory describing more content than its file
+/// contains is a directory that is lying, which is what `BadDirectory` is for.
 pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>, Vec<Dropped>), Error> {
     if data.len() < 34 {
         return Err(Error::Truncated {
@@ -294,6 +329,10 @@ pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>, Vec<Dropped>), Error> {
 
     let mut out = Vec::with_capacity(count);
     let mut dropped = Vec::new();
+    // Payload bytes copied out of the file so far. See the budget paragraph on
+    // this function: without it the retained bytes grow as the square of the
+    // file length and a 1 MB `.ab1` aborts the process.
+    let mut claimed = 0usize;
     for i in 0..count {
         let o = offset + i * 28;
         let mut name = [0u8; 4];
@@ -334,7 +373,20 @@ pub fn tags(data: &[u8]) -> Result<(u16, Vec<Tag>, Vec<Dropped>), Error> {
             }
             let start = where_ as usize;
             match start.checked_add(size).and_then(|end| data.get(start..end)) {
-                Some(s) => s.to_vec(),
+                Some(s) => {
+                    // Budgeted *after* the range check, so an entry that points
+                    // off the end and is dropped spends nothing: it is only the
+                    // bytes actually copied that have to fit.
+                    claimed = claimed.saturating_add(s.len());
+                    if claimed > data.len() {
+                        return Err(Error::BadDirectory(format!(
+                            "the directory's entries claim {claimed} bytes of data \
+                             between them, more than this {}-byte file can hold",
+                            data.len()
+                        )));
+                    }
+                    s.to_vec()
+                }
                 None => {
                     note(&mut dropped);
                     continue;
@@ -711,6 +763,127 @@ mod tests {
         }
         let said = parse(&f).unwrap_err().to_string();
         assert!(said.contains("PBAS2"), "{said}");
+    }
+
+    /// A directory of `count` entries, every one of them claiming the whole
+    /// file as its payload (`dataoffset = 0`, `datasize = file length`).
+    ///
+    /// Each entry passes the per-entry range check on its own — byte 0 to byte
+    /// `len` really is inside the file — so this is the shape the per-entry
+    /// check cannot see. The file is exactly `128 + 28 * count` bytes: header,
+    /// then directory, and no heap at all.
+    fn every_entry_claims_the_whole_file(count: usize) -> Vec<u8> {
+        let len = 128 + count * 28;
+        let mut out = vec![0u8; 128];
+        out[..4].copy_from_slice(MAGIC);
+        out[4..6].copy_from_slice(&101u16.to_be_bytes());
+        out[6..10].copy_from_slice(b"tdir");
+        out[10..14].copy_from_slice(&1i32.to_be_bytes());
+        out[14..16].copy_from_slice(&1023i16.to_be_bytes());
+        out[16..18].copy_from_slice(&28i16.to_be_bytes());
+        out[18..22].copy_from_slice(&(count as i32).to_be_bytes());
+        out[22..26].copy_from_slice(&((count * 28) as i32).to_be_bytes());
+        out[26..30].copy_from_slice(&128i32.to_be_bytes());
+        for i in 0..count {
+            out.extend_from_slice(b"DATA");
+            out.extend_from_slice(&((9 + i) as i32).to_be_bytes());
+            out.extend_from_slice(&4i16.to_be_bytes());
+            out.extend_from_slice(&1i16.to_be_bytes());
+            out.extend_from_slice(&(len as i32).to_be_bytes()); // numelements
+            out.extend_from_slice(&(len as i32).to_be_bytes()); // datasize
+            out.extend_from_slice(&0i32.to_be_bytes()); // dataoffset: byte 0
+            out.extend_from_slice(&0i32.to_be_bytes());
+        }
+        assert_eq!(out.len(), len, "the file is exactly header + directory");
+        out
+    }
+
+    #[test]
+    fn the_directory_cannot_claim_more_payload_than_the_file_holds() {
+        // Each entry's own `dataoffset + datasize` was checked against the
+        // file; their SUM was not. At 28 bytes a directory record, an L-byte
+        // file holds (L - 128) / 28 entries, and each may name the whole file
+        // as its payload -- so the copies retained at once grow as L^2/28
+        // while the file grows as L. `.to_vec()` is the infallible path, so
+        // exhaustion is `handle_alloc_error` -> `abort()`: File > Open takes
+        // the whole GUI session with it, and `.ab1` files come from sequencing
+        // facilities, i.e. from outside.
+        //
+        // 1,000 entries in a 28,128-byte file is kept deliberately small so
+        // this test can run the broken code and report the ratio instead of
+        // aborting the test binary. The shape scales: the same file at
+        // 1,000,000 bytes holds 35,709 entries and asks for 35.7 GB.
+        let f = every_entry_claims_the_whole_file(1_000);
+        match tags(&f) {
+            Err(Error::BadDirectory(m)) => {
+                assert!(
+                    m.contains("28128-byte file"),
+                    "the message names the file: {m}"
+                );
+                // 56,256 is two whole-file payloads: the refusal lands on the
+                // SECOND entry, not after all 1,000 have been copied. That is
+                // the property that makes this a bound and not a report -- at
+                // most 2x the file is ever held, whatever the directory says.
+                assert!(
+                    m.contains("claim 56256 bytes"),
+                    "and refuses at the second entry, not the thousandth: {m}"
+                );
+            }
+            Ok((_, out, _)) => {
+                let held: usize = out.iter().map(|t| t.data.len()).sum();
+                panic!(
+                    "{} entries retained {held} bytes from a {}-byte file ({}x \
+                     amplification); at 1 MB this is an abort",
+                    out.len(),
+                    f.len(),
+                    held / f.len()
+                );
+            }
+            Err(e) => panic!("unexpected error {e:?}"),
+        }
+        // And `parse` refuses rather than surfacing a partial trace, because
+        // `tags` is the first thing it does.
+        assert!(matches!(parse(&f), Err(Error::BadDirectory(_))));
+    }
+
+    #[test]
+    fn a_file_that_is_almost_all_payload_still_parses() {
+        // The control for the budget above, and the reason it is the file
+        // length rather than anything smaller: a real `.ab1` is mostly its
+        // four DATA channels. This fixture is 8,222 bytes of which 8,010 --
+        // 97.4% -- are payload, and it must not be refused. A budget that
+        // cannot tell this file from the one above would be useless.
+        //
+        // BOTH NUMBERS ARE ASSERTED BELOW, not described. `build` emits 128
+        // header + 28 per directory entry + the heap and pads nothing, so the
+        // size is a consequence of the entry list two lines down and moves the
+        // moment anyone edits it -- which is how the figures this comment used
+        // to carry (8,296 of which 8,000, 96.4%) came to match no file. The
+        // `>= 96` this replaced passed at 97 and could not see that.
+        let f = build(&[
+            (b"PBAS", 2, 2, b"ACGTACGTAC"),
+            (b"DATA", 9, 4, &[7u8; 4000]),
+            (b"DATA", 10, 4, &[9u8; 4000]),
+        ]);
+        let payload = 10 + 4000 + 4000;
+        assert_eq!(payload, 8_010, "the payload this fixture carries");
+        assert_eq!(
+            f.len(),
+            128 + 3 * 28 + payload,
+            "header + directory + heap, no padding"
+        );
+        assert_eq!(f.len(), 8_222, "the size the comment above states");
+        // Tenths, because whole percent cannot tell 96.4 from 97.4.
+        assert_eq!(
+            payload * 1000 / f.len(),
+            974,
+            "{payload} of {} bytes is not 97.4% payload",
+            f.len()
+        );
+        let t = parse(&f).expect("an intact, payload-dominated file");
+        assert_eq!(t.channels[0].len(), 2000);
+        assert_eq!(t.channels[1].len(), 2000);
+        assert!(t.dropped.is_empty(), "{:?}", t.dropped);
     }
 
     #[test]

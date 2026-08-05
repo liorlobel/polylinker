@@ -336,8 +336,9 @@ impl EnzymeSet {
     /// neither the list nor the map, and the user gets no feedback that the
     /// control did nothing. That is the state `SixPlus` and `UniqueSixPlus` are
     /// permanently in against the built-in table, where every enzyme has a
-    /// 6-base or longer site (asserted by `specificity_counts_only_specified_bases`,
-    /// so a four-cutter makes this start discriminating loudly rather than
+    /// 6-base or longer site (asserted by
+    /// `specificity_counts_specified_bases_not_raw_length`, so a four-cutter
+    /// makes this start discriminating loudly rather than
     /// silently). It is a fact about the DATA and not about the code, so the UI
     /// asks the data rather than special-casing two variants.
     pub fn discriminates(self, results: &[Digest]) -> bool {
@@ -1033,6 +1034,66 @@ mod tests {
         cut_positions(seq, topo, by_name(name).unwrap())
     }
 
+    /// A doc comment that names a test must name one that exists.
+    ///
+    /// PROVEN TO FAIL at 713bd3b: two doc comments in this file
+    /// (`Sets::discriminates` and `a_filter_that_can_hide_nothing_can_be_asked`)
+    /// said the six-base invariant was "asserted by" and "pinned by" a test
+    /// called specificity-counts-only-specified-bases. A repo-wide grep found
+    /// that name in exactly those two sentences and nowhere else — there was no
+    /// such test. The invariant is real and it is pinned, by
+    /// `specificity_counts_specified_bases_not_raw_length`; what was broken was
+    /// the pointer, which is the worse failure of the two, because a reader
+    /// checking whether the claim is guarded greps the cited name, finds
+    /// nothing, and cannot tell an unguarded claim from a renamed test.
+    ///
+    /// (The stale name is written with hyphens above so that this doc comment
+    /// does not trip the rule it describes — which it did on the first run.)
+    ///
+    /// The rule: any backticked all-lowercase snake_case token of three or more
+    /// underscores appearing in a `///` line of this file is read as naming an
+    /// item in this file, and must be defined here. That shape is this
+    /// project's test-naming convention and nothing else in the file uses it —
+    /// at 713bd3b the scan yielded exactly one token, the phantom.
+    #[test]
+    fn every_test_a_doc_comment_names_is_defined_here() {
+        const SRC: &str = include_str!("lib.rs");
+
+        let defined: std::collections::BTreeSet<&str> = SRC
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("fn "))
+            .map(|rest| rest.split(['(', '<', ' ']).next().unwrap_or(""))
+            .collect();
+
+        let mut checked = 0usize;
+        for line in SRC.lines().filter(|l| l.trim_start().starts_with("///")) {
+            for tok in line.split('`').skip(1).step_by(2) {
+                let snake = !tok.is_empty()
+                    && tok
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    && tok.matches('_').count() >= 3;
+                if !snake {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    defined.contains(tok),
+                    "a doc comment cites `{tok}`, which is defined nowhere in \
+                     this file — either the test was renamed or it never existed"
+                );
+            }
+        }
+        // Without this the whole test degrades to a loop that never runs, which
+        // is the shape of defect this file's audit exists to catch.
+        assert!(
+            checked > 0,
+            "no doc comment in this file names a test any more; if that is \
+             deliberate, delete this test rather than leaving it green over an \
+             empty loop"
+        );
+    }
+
     #[test]
     fn ecori_cut_uses_the_biopython_convention() {
         // G^AATTC at position 1 => the base after the nick is 2.
@@ -1342,7 +1403,7 @@ mod tests {
     /// stated grounds that they now matter more.
     ///
     /// The set definitions are older than that pass and the no-op is documented
-    /// and pinned by `specificity_counts_only_specified_bases`. What was missing
+    /// and pinned by `specificity_counts_specified_bases_not_raw_length`. What was missing
     /// is a way for the UI to ASK, so a user who clicks "6+ base sites" is told
     /// the control did nothing instead of inferring it from a picture that did
     /// not move. Asked of the digest, so a table that gains a four-cutter makes

@@ -12,3 +12,25 @@ crates/pl-draw/tests/agreement.json -text
 # wrong on Windows for a reason that has nothing to do with the fonts. Pin them to
 # LF like the fixture above.
 bins/pl-gui/fonts/*.txt -text
+
+# The same rule for the second font directory, which arrived on 2026-08-03 with
+# the PNG raster back end. `crates/pl-draw/fonts/Liberation-OFL.txt` is asserted
+# exactly the same way — 4,414 bytes and a sha256, by `pl-draw/src/font/tests.rs`
+# against NOTICE — and the line above does not cover it. Without this, a Windows
+# checkout turns it into 4,516 bytes and breaks the provenance test on a fresh
+# clone. The `.ttf` files need no rule: Git treats them as binary already.
+crates/pl-draw/fonts/*.txt -text
+
+# The window icon, added 2026-08-05: 16,384 bytes of raw RGBA8 that
+# `bins/pl-gui/src/main.rs` `include_bytes!`s and hands to
+# `ViewportBuilder::with_icon`, with its length and sha256 asserted by
+# `the_window_icon_and_the_ico_are_one_generation`. Git's own heuristic already
+# calls it binary — the first pixels of a transparent-cornered icon are NUL — and
+# that is exactly why it is pinned here anyway: the file's classification would
+# otherwise depend on what the drawing happens to start with, and a redrawn icon
+# with an inked top-left corner could quietly become "text" and be CRLF-mangled
+# into a hash nobody can reproduce. The `.svg` is genuinely text and takes no
+# rule; the `.ico` is binary by content for the same heuristic reason and is
+# covered here for the same reason.
+bins/pl-gui/icon/polylinker.ico -text
+bins/pl-gui/icon/*.rgba -text

@@ -37,6 +37,7 @@ import contextlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_roundtrip                            # noqa: E402
 import xcheck_eps                                # noqa: E402
+import xcheck_icon                                # noqa: E402
 
 CHECKS = []
 
@@ -234,6 +235,56 @@ def eps_octal_width():
     naive = sum(xcheck_eps.HELVETICA[ord(c) - 0x20] for c in lit[1:-1]) * 12 / 1000
     return (b == b"\xd6lschl\xe4ger" and abs(wide - expect) < 0.01 and wide < naive,
             f"bytes={b!r} width={wide} expected {expect} (undecoded would be {naive})")
+
+
+# --------------------------------------------------------------------------
+# xcheck_icon.py -- the window icon must be the .ico's own frame
+# --------------------------------------------------------------------------
+#
+# `xcheck_icon.compare` is the only thing that stands between the taskbar button
+# of the running window and the executable's own icon becoming two different
+# drawings, so it is pinned here for the reason everything above is. It imports
+# at module scope safely: xcheck_icon keeps PIL and resvg_py inside `main`, so
+# this file still runs on a bare checkout with nothing but the standard library.
+
+BLUE = bytes((0x00, 0x72, 0xB2, 0xFF))
+
+
+@case("a single differing byte between the window icon and the .ico is reported")
+def icon_one_byte():
+    # The real failure mode at its smallest. A length check or a digest would
+    # also catch a swapped drawing; only a byte comparison catches an
+    # antialiased edge that moved by one level, which is what a re-render from a
+    # slightly edited master actually looks like.
+    b = bytearray(BLUE * 4)
+    b[6] = 0xB1
+    p = xcheck_icon.compare([("frame vs blob", BLUE * 4, bytes(b))])
+    return len(p) == 1 and "byte 6" in p[0], f"reported {p}"
+
+
+@case("a truncated window icon is reported, not compared as far as it goes")
+def icon_short():
+    # A `zip` over two buffers of different length compares the shorter one and
+    # passes. A blob half-written by an interrupted run of build-icon.py is
+    # exactly that shape.
+    p = xcheck_icon.compare([("frame vs blob", BLUE * 4, BLUE * 2)])
+    return len(p) == 1 and "8 bytes against 16" in p[0], f"reported {p}"
+
+
+@case("comparing nothing at all is reported, not counted as a pass")
+def icon_empty_run():
+    # The failure this project has shipped more often than any other. If the
+    # .ico's directory ever fails to yield frames, the pair list is empty and
+    # every byte comparison in it trivially succeeds.
+    p = xcheck_icon.compare([])
+    return len(p) == 1, f"reported {p}"
+
+
+@case("identical icon bytes are not reported")
+def icon_control_identical():
+    # The control.
+    p = xcheck_icon.compare([("frame vs blob", BLUE * 4, BLUE * 4)])
+    return not p, f"reported {p}"
 
 
 def main():

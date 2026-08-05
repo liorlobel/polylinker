@@ -133,8 +133,14 @@ and not commingled with Apache-2.0 code.
 ## 3a. Primer design (`pl-design`)
 
 Thermodynamic parameters come through `pl-thermo`, which took them from
-Biopython's `Bio.SeqUtils.MeltingTemp` — recorded in that crate's module doc and
-in §5 below. Nothing new was imported for the designer.
+Biopython's `Bio.SeqUtils.MeltingTemp` — recorded in that crate's module doc,
+under *Where the numbers came from* (`crates/pl-thermo/src/lib.rs`). The pointer
+used to say "§5 below" when this file stopped at §4, and the record it meant has
+never lived in a numbered section here at all. **A §5 now exists** — the archive,
+which §4 pushed down on 2026-08-04 — and it is not that record either, so a stale
+"§5 below" now lands somewhere real and wrong rather than nowhere. The sections
+here are §1, §2, §3, §3a, §4 and §5. The record itself was never missing, only
+the route to it. Nothing new was imported for the designer.
 
 **Not used, and nobody opened them:** `oligotm.c`, `thal.c`, `libprimer3.c` or
 any other file of the Primer3 source tree, including the C sources vendored
@@ -216,7 +222,145 @@ measurement, which is a bench project and not a software one.
 
 ---
 
-## 4. Archive
+## 4. Open published specifications — DEFLATE, zlib, PNG, TrueType
+
+The PNG export back end — `crates/pl-draw/src/deflate.rs`, `png.rs` and
+`font.rs` — is three file formats' worth of format knowledge (DEFLATE with its
+zlib wrapper, PNG, TrueType) taken from four published specifications, and
+**none of it arrived by anything resembling the route §1 describes.** Every one
+of those four is a document its own authors published in order that it be
+implemented, retrievable today by anybody, on terms printed inside the document
+itself.
+
+This section exists because the rule at the top of this file says every piece of
+format knowledge gets a row. It is **not** here because the knowledge is
+encumbered, and the difference is the reason the section is separate rather than
+another table under §1:
+
+- §1 is one vendor's undocumented container, inferred from the repository
+  owner's own files, carrying a live contract question, a disclosure, and a rule
+  in `CONTRIBUTING.md` about who may touch the code.
+- §4 is four published standards, read as published. There is no vendor, no
+  EULA, no clean-room question, nothing to re-derive before release, and **no
+  restriction whatever on who may work on this code.** A SnapGene licensee may
+  write PNG code here; that is not a concession, it is what an open
+  specification means.
+
+A reader who found the two sharing one table would be entitled to infer that
+PNG and `.dna` came to us the same way. They did not.
+
+### What was implemented, and from which document
+
+| Implemented | In | Specification | The document's own terms |
+|---|---|---|---|
+| DEFLATE: LZ77, canonical Huffman with depth limiting, the length/distance base and extra-bit tables, the code-length alphabet and its permutation | `deflate.rs` | **RFC 1951**, *DEFLATE Compressed Data Format Specification version 1.3*, P. Deutsch, May 1996, Informational | "Permission is granted to copy and distribute this document for any purpose and without charge" — © 1996 L. Peter Deutsch |
+| The zlib wrapper (`CMF`/`FLG` and its %31 check) and Adler-32 | `deflate.rs` | **RFC 1950**, *ZLIB Compressed Data Format Specification version 3.3*, P. Deutsch and J-L. Gailly, May 1996, Informational | the same sentence, verbatim — © 1996 Deutsch and Gailly |
+| The PNG container: signature, chunk framing and CRC, `IHDR`, `sRGB`/`gAMA`/`cHRM`, `pHYs`, filter type 0 | `png.rs` | **The PNG specification** — three overlapping publications, all open; see the retrieval table | W3C Software and Document Notice and License for the W3C printings; PNG 1.2 is published freely by the PNG Development Group |
+| `head`, `maxp`, `hhea`, `loca`, `glyf`, `cmap` format 4, `hmtx`, composite glyphs, and the implied on-curve point | `font.rs` | **The OpenType specification** 1.9.1 (Microsoft) and **Apple's TrueType Reference Manual** | both published on the vendors' own developer sites for implementers; neither sits behind an agreement of any kind |
+
+CRC-32 is not a fourth format. The PNG specification defines the chunk CRC
+itself, gives the polynomial in full and attributes it to ISO 3309 and
+ITU-T V.42; `deflate::crc32` is that polynomial in its reflected (`0xEDB88320`)
+form, which is the form PNG specifies.
+
+**The two Liberation Sans binaries are not covered by this section.** A font
+file is a work, not a fact about a format. Their provenance — the upstream
+release archive, the sha256 of every committed file, the OFL, the Reserved Font
+Name and why nothing is subsetted — is in `NOTICE`, and
+`the_vendored_faces_are_the_files_notice_records` joins that record to the bytes
+so it cannot go quietly stale.
+
+### The constants, and where each one comes from
+
+Every value in this table was read back out of what the code actually produces
+(see the last subsection), not transcribed from the source:
+
+| What `pl-draw` writes | Value | Where it comes from |
+|---|---|---|
+| `IHDR` depth and colour type | colour type 2, bit depth 8 | truecolour RGB; 8 and 16 are the depths PNG allows for type 2 |
+| `gAMA` | gAMA 45455 | the gamma PNG prints for an sRGB image |
+| `cHRM` | 31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000 | white point, then red, green, blue — x before y, ×100000 — the sRGB primaries in the order PNG prints them |
+| `sRGB` | rendering intent 0 | perceptual, the first of the four PNG defines |
+| `pHYs` | unit specifier 1 | the metre. PNG has no notion of inches, which is why `per_metre` exists |
+| the zlib header | 0x78 0x9C | RFC 1950 §2.2 — deflate, 32 KB window, no preset dictionary, and 0x789C = 31 × 996 so the mandatory %31 check passes |
+| the face's design grid | 2048 units per em | `head` + 18 of the committed Liberation Sans Regular, read by `Face::parse` |
+
+### Retrieved, and what each retrieval settled — 2026-08-04
+
+In the form `features/SOURCING.md` requires. Every URL below returned a body —
+none of §3a's 403s — and the two rows marked *partial* returned the document but
+not the passage wanted.
+
+| URL | What it settled |
+|---|---|
+| `rfc-editor.org/rfc/rfc1951.txt` | Title, author, May 1996, Informational; the copying permission quoted above; and that §3.1.1, §3.2.2, §3.2.5 and §3.2.7 — the four sections `deflate.rs` cites in its constants — are the sections it thinks they are |
+| `rfc-editor.org/rfc/rfc1950.txt` | Title, both authors, May 1996; the identical permission sentence; §2.2 the data format, §9 the Adler-32 appendix |
+| `libpng.org/pub/png/spec/1.2/PNG-Chunks.html` | Every value in the constants table above: the four rendering intents, the gamma, all eight chromaticities in order, the `pHYs` unit codes, and colour type 2's allowed depths |
+| `w3.org/TR/2003/REC-PNG-20031110/` | That the W3C Recommendation of 10 November 2003 is ISO/IEC 15948:2003(E), and the chunk-CRC polynomial with its ISO 3309 / ITU-T V.42 attribution. *Partial:* the sRGB chunk section did not come back in the retrieved text, which is why the row above cites PNG 1.2 for the values |
+| `w3.org/TR/png-3/` | That the current publication is the Third Edition, a W3C Recommendation of 24 June 2025 under the W3C permissive document licence, and that it states it is intended to become an International Standard but is not yet one. *Partial:* the chunk values were not in the retrieved text |
+| `learn.microsoft.com/en-us/typography/opentype/spec/{otff,head,hhea,maxp}` and `developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6loca.html` | Every byte offset in `Face::parse`, re-derived from the published field orders: `numTables` at 4, table records at 12 in 16-byte units with offset at +8 and length at +12; `head` `unitsPerEm` at 18 and `indexToLocFormat` at 50; `maxp` `numGlyphs` at 4; `hhea` `numberOfHMetrics` at 34. All nine agree. Apple's `loca` chapter supplies the short-form rule in as many words — "The actual local offset divided by 2 is stored" — which is the halving `Face::parse` undoes |
+
+**Which printing of the PNG specification.** Stated rather than smoothed,
+because the row would otherwise imply a precision it does not have: what is
+recorded here is a check made on 2026-08-04 against the documents above, not a
+claim about which of the three printings was open while the code was written. It
+does not matter for provenance — all three are open, and a constant is the same
+constant in each — but it is the kind of detail this file exists to get right.
+
+### What was NOT done
+
+- **No implementation was read or ported.** Not zlib's `deflate.c` or
+  `inflate.c`, not libpng, not `stb_truetype`, not FreeType, not fontTools'
+  Python. Nothing third-party is vendored (`NOTICE`) and nothing under
+  `crates/` takes a dependency at all, so there is no route by which any of them
+  could have arrived. The base and extra-bit tables in `deflate.rs` are the
+  specification's own tables: statements about a bit format, of the same kind as
+  §3's enzyme sites.
+- **The cross-checks in `reference/python/tests/` are run, never read.** They
+  are executed against artifacts and their verdicts believed; no line of any of
+  them is transcribed into Rust, and none is linked into anything shipped. The
+  single place another implementation's *behaviour* is deliberately relied on is
+  `xcheck_glyphs.py` subclassing fontTools' `BasePen` so that the
+  implied-on-curve expansion is fontTools' and not a second statement of our own
+  reading — and that is a call at test time, not a transcription.
+- **Nobody was asked for a specification, because nobody had to be.** That is
+  the whole distance between this section and §1's third bullet.
+
+### The oracles, and what is known about their licences
+
+Test-time only: executed, not linked, not distributed, not read. `NOTICE`'s
+*Test-time only* list records Biopython and jsdom in the same class.
+
+| Oracle | Judges | Licence, checked 2026-08-04 |
+|---|---|---|
+| CPython's `zlib` module | Every zlib stream this crate writes, one-shot and byte-at-a-time | It binds the reference implementation, zlib (© 1995-2026 Jean-loup Gailly and Mark Adler), under the zlib License — read from `zlib.net/zlib_license.html`. CPython's own licence was not separately retrieved, and nothing here turns on it |
+| Pillow (PIL) | That the PNGs open, and that every pixel and the dpi survive | MIT-CMU, from the package's own metadata |
+| fontTools | Every glyph outline, contour by contour | MIT, from the package's own metadata |
+| resvg, via `resvg_py` | The whole raster against an independent SVG renderer | Upstream resvg is Apache-2.0 or MIT at the user's option. **Which resvg `resvg_py` 0.3.4 vendors was not established** — its own metadata states no licence. Recorded as open rather than resolved, and it does not bear on provenance here because the tool is run and never read or linked |
+
+Nothing above is a source of format knowledge. They are second opinions, and
+the reason the file is written the way it is: the specification tells us what
+the bytes should be, and an implementation nobody here wrote tells us whether
+we read it correctly.
+
+### This row is checked, not merely written
+
+`pl_draw::tests::the_provenance_rows_record_the_constants_the_code_actually_writes`
+reads this file with `include_str!`, encodes a PNG, walks its chunks, compresses
+a real zlib stream and parses the committed face — then requires this section to
+contain every value it measured. Each needle is built from that measurement
+rather than typed into the test, so a constant that changes in the code and not
+here fails, and so does a number changed here and not there. It is scoped to the
+text between this heading and the next, so a digit that happens to appear under
+§1 cannot satisfy a claim about PNG.
+
+What it cannot do is judge whether the specification agrees. Nothing in this
+repository can; that is what the four oracles above are for, and why the
+retrieval table carries dates.
+
+---
+
+## 5. Archive
 
 `legal/archive/` should contain dated captures, made while the pages are live:
 

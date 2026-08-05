@@ -41,10 +41,14 @@ use pl_core::{Molecule, Strand};
 use std::collections::BTreeSet;
 
 pub mod contrast;
+pub mod deflate;
 pub mod eps;
+pub mod font;
 mod labels;
 pub mod page;
 pub mod pdf;
+pub mod png;
+pub mod raster;
 pub mod ring;
 pub mod scene;
 pub mod trace;
@@ -280,6 +284,20 @@ pub fn n(v: f64) -> String {
 }
 
 /// XML-escape text destined for a text node or an attribute value.
+///
+/// Drops exactly the control characters XML 1.0 forbids, and nothing else. In
+/// particular U+007F (DEL) is **kept**: the Char production is `#x9 | #xA | #xD
+/// | [#x20-#xD7FF] | ...` and #x7F is inside [#x20-#xD7FF], which was confirmed
+/// by parsing a document carrying a literal DEL in both a text node and an
+/// attribute value with expat 2.8.1 — it is accepted.
+///
+/// This behaviour is the one the TypeScript renderer was aligned *to*. Its
+/// `esc` in `packages/circular-map/src/geometry.ts` stripped DEL as well, so a
+/// feature name out of a binary `.dna` payload rendered one way here and
+/// another way there. Keeping it is the principled side: an escaper exists to
+/// produce a parseable document, and deleting a legal character loses data
+/// with nothing said. `tests/agreement.rs::xml_escaping_agrees` holds the two
+/// together across the whole 0x00-0x1f range plus DEL.
 pub fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1276,6 +1294,238 @@ pub fn circular_pdf_at(
     let (sc, report) = scene(mol, opts);
     let (bytes, pdf_report) = pdf::pdf_at(&sc, width_mm);
     (bytes, report, pdf_report)
+}
+
+/// Device pixels per scene unit, for a raster export at this size and
+/// resolution.
+///
+/// The one place the two sizing paths meet, so [`png_budget`] and [`png_at`]
+/// cannot disagree about how big the canvas is — a guard that measured a
+/// different canvas from the one that gets allocated is not a guard.
+fn png_scale(sc: &Scene, width_mm: Option<f64>, dpi: f64) -> f64 {
+    match width_mm {
+        Some(mm) => {
+            let fit = page::Fit::to_width_mm(sc, mm);
+            let (w, _) = fit.pixels(dpi);
+            if sc.width > 0.0 {
+                f64::from(w) / sc.width
+            } else {
+                1.0
+            }
+        }
+        // No stated size: the scene's units are points, which is already how
+        // the SVG's `viewBox` and the PDF's MediaBox read them.
+        None => dpi / page::PT_PER_INCH,
+    }
+}
+
+/// Peak live heap a PNG export costs, per pixel of the finished image.
+///
+/// Measured, not estimated, with a counting `GlobalAlloc` around `png_at` on
+/// the four-feature circular map in `tests/render.rs` (720 × 720 pt scene,
+/// 89 mm wide) on 2026-08-04:
+///
+/// | pixels | peak bytes | bytes/px |
+/// |---|---|---|
+/// | 255,025 | 9,640,936 | 37.80 |
+/// | 1,104,601 | 40,868,860 | 37.00 |
+/// | 4,418,404 | 162,662,680 | 36.81 |
+/// | 17,682,025 | 650,123,884 | 36.77 |
+/// | 298,978,681 | 10,987,919,938 | 36.75 |
+///
+/// It converges on 36.75 from above, and the model accounts for the measured
+/// bytes to within 50 of 162 million: for `n` pixels and `h` rows,
+/// [`png::Image`] holds `3n`, [`png::encode`]'s filtered scanlines are
+/// `3n + h` more, [`deflate::lz77`] allocates `prev = vec![usize::MAX; N]` at
+/// `8N` and reserves `N / 3` six-byte symbols at `2N` over that same
+/// `N = 3n + h` input, and the output vector reserves `3n / 4`. That is
+/// `3 + 3 + 24 + 6 + 0.75 = 36.75`, plus a fixed 256 KB hash head — which is
+/// why the small figures measure higher.
+///
+/// Rounded up here, because a bound quoted to a user should not be optimistic.
+pub const PNG_BYTES_PER_PIXEL: u64 = 37;
+
+/// The largest raster export this crate will attempt, in pixels.
+///
+/// **There has to be one.** Every input band the CLI enforces is per-flag —
+/// `--mm` 5..=500, `--dpi` 72..=2400, `--width`/`--height` 16..=20000 — and
+/// the canvas is their *product*. `pl export --png --journal nature --column
+/// double --dpi 2400` is inside every band and comes to 17,291 px square:
+/// 298,978,681 pixels and a measured 10.99 GB of live heap. A machine that
+/// cannot serve that does not get an error, it gets `handle_alloc_error`,
+/// which aborts with no diagnostic, no partial file and no mention of the dpi
+/// that caused it.
+///
+/// 100 megapixels is 3.7 GB at [`PNG_BYTES_PER_PIXEL`]. The number is set by
+/// what has to keep working rather than by what is comfortable. The widest
+/// preset column is Elsevier's 190 mm; on the square scene [`Options`]
+/// defaults to, that is 8,976 px a side at 1200 dpi — the resolution a journal
+/// asking for more than 300 asks for — which is 80.6 megapixels, inside the
+/// bound with room. The ceiling bites at 1,336 dpi for that widest column and
+/// at 1,388 for Nature's 183 mm. 2400 dpi at a double column is 3× over, and
+/// is the case this exists for.
+///
+/// A scene that is not square reaches the bound sooner on its long axis; the
+/// gel, which can be much taller than it is wide, is the one in this workspace
+/// that will. That is the intended behaviour — the refusal names the
+/// resolution that fits.
+///
+/// It is a bound on what we will *ask* for, not a promise the machine can
+/// serve it. 3.7 GB will still fail on a small laptop — but it fails as a
+/// refusal from [`png_budget`] on the way in, or as an allocation error the OS
+/// reports, rather than as a 300-megapixel abort.
+pub const MAX_PIXELS: u64 = 100_000_000;
+
+/// A raster export refused for its size. See [`png_budget`].
+///
+/// Carries the arithmetic rather than a sentence, so each surface can say it
+/// in its own voice; [`Display`](std::fmt::Display) is the sentence both the
+/// CLI and the GUI actually print.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Oversize {
+    /// Canvas width the export would have allocated.
+    pub w: u32,
+    /// Canvas height the export would have allocated.
+    pub h: u32,
+    /// The resolution asked for.
+    pub dpi: f64,
+    /// The highest whole dpi at this printed size that does fit, if any.
+    pub fits_at_dpi: Option<f64>,
+}
+
+impl Oversize {
+    /// Pixels in the refused canvas. `u64` because `u32 * u32` is not a `u32`.
+    pub fn pixels(&self) -> u64 {
+        u64::from(self.w) * u64::from(self.h)
+    }
+
+    /// Peak heap the refused export would have asked the allocator for.
+    pub fn bytes(&self) -> u64 {
+        self.pixels() * PNG_BYTES_PER_PIXEL
+    }
+}
+
+impl std::fmt::Display for Oversize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} x {} px is {:.0} megapixels, past the {} megapixel ceiling on a raster \
+             export: it would need about {:.1} GB of memory, and a machine that cannot \
+             spare that aborts rather than reports. ",
+            self.w,
+            self.h,
+            self.pixels() as f64 / 1e6,
+            MAX_PIXELS / 1_000_000,
+            self.bytes() as f64 / 1e9,
+        )?;
+        match self.fits_at_dpi {
+            Some(d) => write!(
+                f,
+                // Not "at this printed size": `png_at`'s `None` branch has no
+                // printed size at all — the scene's units are read as points —
+                // and the dpi still decides the canvas there, so this sentence
+                // has to be true of both branches.
+                "{:.0} dpi is what makes it that big; {:.0} dpi or less fits this \
+                 figure. Or export SVG, PDF or EPS, which have no resolution.",
+                self.dpi, d
+            ),
+            None => write!(
+                f,
+                "No resolution fits a figure this size. Export SVG, PDF or EPS, which \
+                 have no resolution, or make the figure smaller."
+            ),
+        }
+    }
+}
+
+/// The canvas a PNG export would allocate, or why it is refused.
+///
+/// The bound [`raster::draw`] does not have. Answering it costs no pixels: it
+/// is the same [`png_scale`] and [`raster::size`] the export itself runs,
+/// against [`MAX_PIXELS`].
+///
+/// `Ok` carries the real dimensions of the image — the ones `IHDR` will hold,
+/// which is not always what [`page::Fit::pixels`] reports, since `Fit` rounds
+/// the two axes independently and the canvas rounds its height against the
+/// already-rounded width.
+pub fn png_budget(sc: &Scene, width_mm: Option<f64>, dpi: f64) -> Result<(u32, u32), Oversize> {
+    let (w, h) = raster::size(sc, png_scale(sc, width_mm, dpi));
+    if u64::from(w) * u64::from(h) <= MAX_PIXELS {
+        return Ok((w, h));
+    }
+    // The highest dpi that fits. Pixel count goes as dpi squared, so one square
+    // root lands within a step or two of it — and then the answer is *checked*
+    // rather than trusted, because a suggestion the same guard would refuse is
+    // worse than no suggestion. Bounded: each step strictly decreases `d`.
+    let n = u64::from(w) * u64::from(h);
+    let mut d = (dpi * (MAX_PIXELS as f64 / n as f64).sqrt()).floor();
+    if !d.is_finite() {
+        d = 0.0;
+    }
+    while d >= 1.0 {
+        let (fw, fh) = raster::size(sc, png_scale(sc, width_mm, d));
+        if u64::from(fw) * u64::from(fh) <= MAX_PIXELS {
+            break;
+        }
+        d -= 1.0;
+    }
+    Err(Oversize {
+        w,
+        h,
+        dpi,
+        fits_at_dpi: (d >= 1.0).then_some(d),
+    })
+}
+
+/// The scene as a PNG, at a physical width and a resolution.
+///
+/// The raster member of the `*_at` family. Sizing goes through the same
+/// [`page::Fit`] the other three use, so the four cannot disagree about what
+/// 89 mm means.
+///
+/// `width_mm` is `Some` for a figure with a stated printed size — the pixel
+/// count then comes from [`page::Fit::pixels`], which was written for this and
+/// had no caller until now — and `None` for one without, where the scene's
+/// units are read as points and `dpi` is taken against the 72 pt inch. Both
+/// paths end in one number: device pixels per scene unit.
+///
+/// `dpi` also reaches the file, as `pHYs`. A PNG that does not record its
+/// resolution arrives in a manuscript at whatever size the layout program
+/// guesses, so a raster export without it is not a publication export.
+///
+/// The second return is what could not be drawn — see [`raster::Report`]. A
+/// caller that ignores it ships a figure with missing glyphs and no warning.
+///
+/// # Why this returns a `Result`
+///
+/// The three vector formats can encode any scene at any size; this one cannot.
+/// It allocates the whole picture, and at 37 bytes a pixel a canvas the flag
+/// bands permit runs to 11 GB — see [`MAX_PIXELS`]. [`png_budget`] is checked
+/// here rather than left to the caller because two of the three call sites in
+/// this workspace are GUI paths where an abort takes the user's unsaved work
+/// with it.
+pub fn png_at(
+    sc: &Scene,
+    width_mm: Option<f64>,
+    dpi: f64,
+    background: [u8; 3],
+) -> Result<(Vec<u8>, raster::Report), Oversize> {
+    png_budget(sc, width_mm, dpi)?;
+    let (img, report) = raster::draw(sc, png_scale(sc, width_mm, dpi), background);
+    Ok((png::encode(&img, Some(dpi)), report))
+}
+
+/// A molecule's map as a PNG. See [`png_at`], including why this can fail.
+pub fn circular_png_at(
+    mol: &Molecule,
+    opts: Options,
+    width_mm: Option<f64>,
+    dpi: f64,
+    background: [u8; 3],
+) -> Result<(Vec<u8>, Report, raster::Report), Oversize> {
+    let (sc, report) = scene(mol, opts);
+    let (bytes, raster_report) = png_at(&sc, width_mm, dpi, background)?;
+    Ok((bytes, report, raster_report))
 }
 
 /// A scene as SVG.

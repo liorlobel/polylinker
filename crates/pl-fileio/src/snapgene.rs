@@ -692,8 +692,46 @@ fn parse_primers(x: &str) -> Vec<Primer> {
 ///   what it skipped has to be visible. Before that, one stray tag shifted every
 ///   later depth and re-rooted the parse — see the `Event::Close` arm.
 ///
+/// - **Anything nested deeper than [`MAX_NOTE_PATH_DEPTH`]**, reported once as
+///   [`TOO_DEEP`] rather than once per element with a path that grows with the
+///   depth. That is a bound on a hostile payload, not on a shape — see the
+///   constant for what an unbounded report cost.
+///
 /// `snapgene::write` is unaffected either way: it re-emits the original block
 /// verbatim, so only the `from_molecule` path ever depended on this.
+/// Deepest open element whose report path is built from the stack.
+///
+/// Every open below a note builds `stack.join("/")` and retains it in the
+/// report, so D nested opens retained D paths averaging D/2 segments — O(D²)
+/// bytes for O(D) bytes of input, on a payload the file chooses. Measured on
+/// the code this replaced (`--release`): a 60 015-byte block 6 holding 20 000
+/// `<a>` opens produced 19 999 paths totalling 400 119 993 bytes in 513 ms —
+/// 6 667× the block — and doubling the depth quadrupled both (2 500 →
+/// 6 264 993 B, 5 000 → 25 029 993 B, 10 000 → 100 059 993 B). The 200 000
+/// opens that fit in 600 KB therefore ask for roughly 40 GB, allocated
+/// synchronously on the GUI thread, since `bins/pl-gui/src/doc.rs` hands
+/// `fs::read` straight to the reader with no size cap. This is the same defect
+/// `xml::unescape` was fixed for (xml.rs:54); `parse_notes` simply never got
+/// the equivalent bound.
+///
+/// 64 is far above anything a file contains: the deepest nesting anywhere in
+/// the 41-file corpus is one level below a note
+/// (`Notes/References/Reference`, two segments past the root), and the same
+/// number bounds the unmatched-close path in the `Event::Close` arm.
+///
+/// The `stack` itself is still one `String` per open element, i.e. linear in
+/// the payload and no worse than any other parser in this file; what is bounded
+/// here is the amplification, not the parse.
+const MAX_NOTE_PATH_DEPTH: usize = 64;
+
+/// The single entry that stands in for everything below [`MAX_NOTE_PATH_DEPTH`].
+///
+/// Named rather than dropped, for the reason the rest of this function names
+/// things: a reader who is told nothing concludes the file held nothing. One
+/// entry, not one per elided element — reporting per element is the quadratic
+/// the cap exists to remove.
+const TOO_DEEP: &str = "Notes/…/(nested deeper than 64 elements)";
+
 fn parse_notes(x: &str) -> (Vec<Note>, Vec<String>) {
     let mut out: Vec<Note> = Vec::new();
     let mut nested: Vec<String> = Vec::new();
@@ -777,9 +815,17 @@ fn parse_notes(x: &str) -> (Vec<Note>, Vec<String>) {
                         if stack.len() == 2 {
                             cur_has_child = true;
                         }
-                        let mut path = stack.join("/");
-                        path.push('/');
-                        path.push_str(&name);
+                        // Past the cap the path is not built at all — building
+                        // it is the O(depth²) the cap exists to remove. See
+                        // `MAX_NOTE_PATH_DEPTH`.
+                        let path = if stack.len() > MAX_NOTE_PATH_DEPTH {
+                            TOO_DEEP.to_string()
+                        } else {
+                            let mut p = stack.join("/");
+                            p.push('/');
+                            p.push_str(&name);
+                            p
+                        };
                         // One line per distinct path: a `<References>` holding
                         // eight `<Reference/>` elements is one thing this model
                         // cannot hold, not eight.
@@ -817,13 +863,23 @@ fn parse_notes(x: &str) -> (Vec<Note>, Vec<String>) {
                     // and named, because the text either side of it is fused
                     // into one value and the reader deserves to know why.
                     if !discarding {
-                        let mut path = stack.join("/");
-                        if !path.is_empty() {
-                            path.push('/');
-                        }
-                        path.push_str("</");
-                        path.push_str(&name);
-                        path.push('>');
+                        // Bounded for the same reason as the open path above,
+                        // and it is the same attack: 50 stray closes under
+                        // 20 000 opens retained 2 005 105 bytes of path text
+                        // for a 60 297-byte payload, one ~40 000-byte path per
+                        // distinct stray name.
+                        let path = if stack.len() > MAX_NOTE_PATH_DEPTH {
+                            TOO_DEEP.to_string()
+                        } else {
+                            let mut p = stack.join("/");
+                            if !p.is_empty() {
+                                p.push('/');
+                            }
+                            p.push_str("</");
+                            p.push_str(&name);
+                            p.push('>');
+                            p
+                        };
                         if !nested.contains(&path) {
                             nested.push(path);
                         }
@@ -874,11 +930,25 @@ fn parse_notes(x: &str) -> (Vec<Note>, Vec<String>) {
     // An unterminated final note still counts. `xml::scan` stops cleanly on a
     // truncated tag rather than erroring, so a block 6 cut short by a bad write
     // yields the notes that were complete plus this one — and any tail it lost,
-    // on the same terms as a note that closed properly. `stack` is still
-    // `[root, key]` here, because the close that would have popped it never came.
+    // on the same terms as a note that closed properly.
+    //
+    // `stack` is `[root, key, …]`, NOT `[root, key]`: the `Event::Open` arm
+    // pushes every non-self-closing child, so a file that ran out while a child
+    // was open leaves those children on it. A `stack.len() == 2` guard here
+    // therefore dropped the tail of exactly the notes this branch exists to
+    // rescue, in silence — the only loss in this function with no line in the
+    // report, and one the `Event::Close` unwind above already gets right because
+    // it reports as it passes depth 2 on its way down.
+    //
+    // Only the first two entries name the note; the rest name whatever was open
+    // when the input ended, which is reported at its own open. `min` rather than
+    // a bare `[..2]` because a panic in a reader whose whole job is surviving
+    // malformed files is the worst outcome available, even though `cur.is_some()`
+    // implies a depth of at least 2 (it is set at depth 1 and cleared by the
+    // unwind before the stack can pop below 2).
     if let Some(n) = cur.take() {
-        if cur_lost_tail && stack.len() == 2 {
-            let mut path = stack.join("/");
+        if cur_lost_tail {
+            let mut path = stack[..stack.len().min(2)].join("/");
             path.push_str("/text()");
             if !nested.contains(&path) {
                 nested.push(path);
@@ -1810,6 +1880,147 @@ mod tests {
         let (_, quiet) =
             parse_notes("<Notes><References>\n<Reference pubMedID=\"1\"/>\n</References></Notes>");
         assert_eq!(quiet, vec!["Notes/References/Reference".to_string()]);
+    }
+
+    #[test]
+    fn a_note_left_open_by_a_truncated_block_still_reports_the_tail_it_lost() {
+        // The end-of-input branch required `stack.len() == 2` on the strength of
+        // a comment claiming the stack "is still `[root, key]` here". It is not:
+        // the `Event::Open` arm pushes every non-self-closing child, so a block 6
+        // cut short while a child was open ends with `[Notes, Comments, sup]` and
+        // the note's lost tail was dropped in silence — the one loss in this
+        // function with no line in the report.
+        //
+        // The unwind in `Event::Close` gets the same shape right, because it
+        // reports as it passes depth 2 on its way down. The two paths must agree:
+        // whether a `<Comments>` lost its tail cannot depend on whether the
+        // writer that produced the file finished writing it.
+        let truncated = "<Notes><Comments>Grown at 37 <sup>o</sup>C overnight<sup>";
+        let (n, nested) = parse_notes(truncated);
+        assert_eq!(
+            n,
+            vec![Note::new("Comments", "Grown at 37")],
+            "the unterminated note itself still counts"
+        );
+        assert_eq!(
+            nested,
+            vec![
+                "Notes/Comments/sup".to_string(),
+                // Named from `[root, key]`, never from the whole stack: the tail
+                // belongs to `Comments`, not to the `<sup>` that was open when
+                // the file ran out.
+                "Notes/Comments/text()".to_string(),
+            ],
+            "\"C overnight\" is gone from the value and must be named"
+        );
+
+        // The same payload finished by its writer, to show the report does not
+        // turn on the truncation.
+        let (closed, from_closed) = parse_notes(&format!("{truncated}</sup></Comments></Notes>"));
+        assert_eq!(closed, n);
+        assert_eq!(from_closed, nested);
+    }
+
+    #[test]
+    fn the_report_does_not_grow_with_the_square_of_the_nesting_depth() {
+        // Every open below a note used to build `stack.join("/")` and retain it,
+        // so D nested opens retained D paths averaging D/2 segments. Measured on
+        // the code this test guards (`--release`, depth 20 000): a 60 015-byte
+        // block 6 produced 19 999 paths totalling 400 119 993 bytes in 513 ms —
+        // 6 667× the block, and doubling the depth quadrupled both (2 500 →
+        // 6 264 993 B, 5 000 → 25 029 993 B, 10 000 → 100 059 993 B). The
+        // 200 000 opens that fit in 600 KB therefore ask for ~40 GB, on the GUI
+        // thread: `bins/pl-gui/src/doc.rs` reads a `.dna` with no size cap.
+        //
+        // This is the same defect class as `xml::unescape`'s unbounded `find`
+        // (xml.rs:54), which has its own linearity test at xml.rs:487.
+        let depth = 20_000;
+        let mut deep = String::from("<Notes>");
+        for _ in 0..depth {
+            deep.push_str("<a>");
+        }
+        deep.push_str("</Notes>");
+
+        let (_, nested) = parse_notes(&deep);
+        let held: usize = nested.iter().map(String::len).sum();
+        assert!(
+            held <= deep.len(),
+            "{held} bytes of path text for a {}-byte payload — the report is \
+             growing with the depth, not with the input",
+            deep.len()
+        );
+        // The loss is named, on the same terms as every other shape this model
+        // cannot hold: a silent cap would be a file read as if it had nothing
+        // below the cap at all.
+        assert!(
+            nested.contains(&TOO_DEEP.to_string()),
+            "the elided subtree must be named: {nested:?}"
+        );
+        // ...and what is above the cap is still reported in full — one path per
+        // depth from the note down, exactly as a shallow file gets.
+        assert_eq!(nested.len(), MAX_NOTE_PATH_DEPTH);
+
+        // The unmatched-close arm builds a path from the same stack, so it
+        // needs the same bound. Measured with only that arm unguarded: 50 stray
+        // closes at depth 20 000 retained 2 005 105 bytes for a 60 297-byte
+        // payload.
+        let mut strays = deep[..deep.len() - "</Notes>".len()].to_string();
+        for i in 0..50 {
+            strays.push_str(&format!("</z{i}>"));
+        }
+        let (_, from_strays) = parse_notes(&strays);
+        let stray_held: usize = from_strays.iter().map(String::len).sum();
+        assert!(
+            stray_held <= strays.len(),
+            "{stray_held} bytes of path text for a {}-byte payload — the \
+             unmatched-close report is unbounded",
+            strays.len()
+        );
+
+        // The cap must not touch anything a file actually contains: the deepest
+        // nesting in the 41-file corpus is one level below a note.
+        let (_, shallow) = parse_notes(r#"<Notes><A><B><C x="1"/></B></A></Notes>"#);
+        assert_eq!(
+            shallow,
+            vec!["Notes/A/B".to_string(), "Notes/A/B/C".to_string()]
+        );
+
+        // Exactly at the cap the path is still built; one deeper is named.
+        let at_cap = nest_to("x", MAX_NOTE_PATH_DEPTH);
+        let (_, capped) = parse_notes(&at_cap);
+        assert!(
+            capped.iter().all(|p| p != TOO_DEEP),
+            "depth {MAX_NOTE_PATH_DEPTH} is within the cap: {capped:?}"
+        );
+        let over_cap = nest_to("x", MAX_NOTE_PATH_DEPTH + 1);
+        let (_, over) = parse_notes(&over_cap);
+        assert!(
+            over.contains(&TOO_DEEP.to_string()),
+            "depth {} is over the cap: {over:?}",
+            MAX_NOTE_PATH_DEPTH + 1
+        );
+        // ...and everything above the cap is still reported in full, so the cap
+        // costs only what is below it.
+        assert_eq!(over.len(), capped.len() + 1);
+
+        // The notice quotes the cap, so it must not drift away from it.
+        assert!(
+            TOO_DEEP.contains(&MAX_NOTE_PATH_DEPTH.to_string()),
+            "{TOO_DEEP} no longer names the cap of {MAX_NOTE_PATH_DEPTH}"
+        );
+    }
+
+    /// `<Notes>` wrapping `levels` nested `<x>` elements, i.e. a deepest element
+    /// sitting at `stack.len() == levels` when it opens.
+    fn nest_to(name: &str, levels: usize) -> String {
+        let mut s = String::from("<Notes>");
+        for _ in 0..levels {
+            s.push('<');
+            s.push_str(name);
+            s.push('>');
+        }
+        s.push_str("</Notes>");
+        s
     }
 
     #[test]

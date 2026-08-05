@@ -1430,9 +1430,20 @@ impl Db {
     }
 
     /// Whether a provenance row's (source, licence) pair is cleared for use as
-    /// data by features/SOURCING.md §1. The single source of truth for the taint
-    /// gate — `audit` reports a violation of it and `reviewed` refuses to ship
-    /// one — so the rule cannot drift between the two.
+    /// data. The single source of truth for the taint gate — `audit` reports a
+    /// violation of it and `reviewed` refuses to ship one — so the rule cannot
+    /// drift between the two.
+    ///
+    /// The clearing document is `features/SOURCING.md` §1 for every arm **but
+    /// one**. §1's table covers fourteen named sources and the INSDC feature
+    /// table is not among them, so the `insdc-ft` arm below is governed by §5
+    /// Risk 4 instead, which marks the question **[UNVERIFIED]** — whether the
+    /// INSDC feature-table *specification* itself carries a licence. This doc
+    /// used to cite §1 for the whole function, which sent anyone auditing the
+    /// one arm with an unresolved licence to a table that says nothing about
+    /// it. The decision is disclosed in `NOTICE`; `PROVENANCE.md`'s rule that
+    /// "an unretrievable licence is a hold, never a permission" is why the
+    /// licence string spells the hold out rather than reading as cleared.
     fn provenance_cleared(source_db: &str, licence: &str) -> bool {
         match source_db {
             "polylinker" => licence == "own-work",
@@ -2203,6 +2214,183 @@ mod tests {
             db.records.len(),
             ship.records.len(),
             db.census()
+        );
+    }
+
+    /// The two README files must state the sign-off count the database
+    /// actually has.
+    ///
+    /// PROVEN TO FAIL at 713bd3b, on both files at once: `README.md` said the
+    /// database "ships **0 reviewed records**" and "**84 records as of release
+    /// 2026.07.28, 0 reviewed**", and `features/README.md` said "89 records. 84
+    /// carry a curator sign-off ... the other 5 are `proposed`". Measured from
+    /// the shipped tables at that commit: 89 rows, `review_status=reviewed` on
+    /// all 89, and 89 `PLF:` lines in `SIGNOFF.tsv`. Every one of those numbers
+    /// was wrong, and they were wrong in the direction that reads *safer* than
+    /// the truth — the front page said the tool asserts nothing while by
+    /// default it writes 89 signed names onto somebody's map.
+    ///
+    /// [`Db::builtin`]'s own rustdoc records this same sentence being found
+    /// false and corrected *there* in an earlier pass; the READMEs were not
+    /// touched, because no check existed that could have noticed. This is that
+    /// check: the counts are generated from the live tables and searched for in
+    /// the prose, so signing a 90th row breaks the build rather than quietly
+    /// making the front page a lie.
+    ///
+    /// Deliberately `include_str!` and not `fs::read`: the paths resolve at
+    /// compile time relative to this file, so the test cannot pass by failing
+    /// to find the files.
+    #[test]
+    fn the_readmes_state_the_signoff_count_the_database_has() {
+        const ROOT_README: &str = include_str!("../../../README.md");
+        const FEATURES_README: &str = include_str!("../../../features/README.md");
+
+        let (db, errors) = Db::builtin();
+        assert!(errors.is_empty(), "{errors:?}");
+        let total = db.records.len();
+        let signed = db.reviewed().records.len();
+
+        // The whole phrase, built from the tables rather than written out.
+        // Matching a phrase and not a bare integer on purpose: "89" turns up in
+        // a README for many reasons, and a check that some digit occurs
+        // somewhere is a check that cannot fail.
+        let root_claim = format!(
+            "**{total} records as of release {}, all {signed} reviewed.**",
+            db.version
+        );
+        assert!(
+            ROOT_README.contains(&root_claim),
+            "README.md does not carry {root_claim:?}"
+        );
+        let features_claim =
+            format!("v0.1 pre-release, {total} records. All {signed} carry a curator sign-off");
+        assert!(
+            FEATURES_README.contains(&features_claim),
+            "features/README.md does not carry {features_claim:?}"
+        );
+
+        // And the claim that started this: nothing may say the shipped set is
+        // empty while it is not. Asserted as the absence of the exact stale
+        // wording, because that wording is what actually shipped.
+        assert_eq!(
+            total, signed,
+            "the assertions above assume every row signed"
+        );
+        for (name, text) in [
+            ("README.md", ROOT_README),
+            ("features/README.md", FEATURES_README),
+        ] {
+            assert!(
+                !text.contains("0 reviewed"),
+                "{name} still says the database ships 0 reviewed records; it ships {signed}"
+            );
+        }
+    }
+
+    /// `tools/release.ps1` must copy `features/NOTICE` into `dist/`, because
+    /// this crate puts the database it belongs to inside every shipped binary.
+    ///
+    /// PROVEN TO FAIL at HEAD on 2026-08-04, with `$notices` holding ten
+    /// entries and none of them from `features/`:
+    ///
+    /// ```text
+    /// tools/release.ps1 copies 10 notice(s) and none of them is
+    /// 'features/NOTICE'. NOTICE says it "must be packaged with any
+    /// distribution that includes the database", and this crate include_str!s
+    /// the database into every binary. Copied: ["NOTICE", "LICENSE",
+    /// "TRADEMARKS.md", "bins/pl-gui/fonts/IBMPlex-OFL.txt", ...]
+    /// ```
+    ///
+    /// Ten, and every one of them a *code* notice — the three top-level files
+    /// and seven font licence texts. Nothing the script copied had anything to
+    /// do with the data.
+    ///
+    /// [`Db::builtin`] `include_str!`s `features/features.tsv` and
+    /// `features/provenance.tsv`, and all four artifacts `release.ps1` ships —
+    /// `pl.exe`, `polylinker.exe`, `pl-mcp.exe` and the Python extension —
+    /// depend on this crate. So all four carry the CC BY 4.0 dataset and all
+    /// four carry its attribution obligations, whether or not the recipient
+    /// ever sees a source tree. `dist/` is exactly the case where they will
+    /// not: `NOTICE` and `pl licences` both end by pointing at `features/NOTICE`
+    /// "in the source distribution", and a user handed a zip of binaries has no
+    /// such thing.
+    ///
+    /// **THE GAP WAS PARTLY COVERED, WHICH IS WHY IT SURVIVED ELEVEN ENTRIES.**
+    /// `dist/NOTICE.txt` does ship, and it carries the UniProt CC BY 4.0
+    /// statement of changes, the NLM courtesy line and the Rfam CC0 note; `pl
+    /// licences` prints the same subset out of the compiled-in table. What
+    /// neither carries is the part `features/NOTICE` exists for: the per-family
+    /// Rfam primary-source credit table — 24 rows, `PLF:2000` to `PLF:2023`,
+    /// each naming the PMID taken from that family's own `#=GF RM` line — and
+    /// the "sources not used" list that records FPbase as HOLD and UniVec as
+    /// NO-GO. Rfam asks for per-family credit; the pointer is not the credit.
+    ///
+    /// PARSED OUT OF THE `$notices` ARRAY, NOT SEARCHED FOR IN THE FILE. The
+    /// script's comments name the paths they discuss, at length, so a
+    /// `contains("features/NOTICE")` over the whole script would go green on
+    /// the prose describing the defect — the same "a check that cannot fail"
+    /// shape [`Db::builtin`]'s neighbours keep running into. Only `From = '...'`
+    /// is read, which appears nowhere but in the array.
+    ///
+    /// Deliberately `include_str!` and not `fs::read`: the path resolves at
+    /// compile time relative to this file, so the test cannot pass by failing
+    /// to find the script, and editing the script rebuilds this crate.
+    #[test]
+    fn the_release_script_packages_the_database_notice() {
+        const RELEASE_PS1: &str = include_str!("../../../tools/release.ps1");
+        const ROOT_NOTICE: &str = include_str!("../../../NOTICE");
+
+        // The obligation, read from NOTICE rather than asserted from memory. If
+        // somebody deletes this sentence the test has to fail loudly rather
+        // than quietly stop meaning anything.
+        //
+        // Newlines normalised first because the sentence wraps and
+        // `include_str!` hands back whatever the checkout put on disk. Left as
+        // a bare `\n` this would assert the repository's line-ending policy as
+        // a side effect of asserting a licence obligation, and would fail on a
+        // CRLF checkout with a message about attribution.
+        let notice = ROOT_NOTICE.replace("\r\n", "\n");
+        assert!(
+            notice.contains(
+                "is `features/NOTICE`,\nand it must be packaged with any distribution that \
+                 includes the database."
+            ),
+            "NOTICE no longer says features/NOTICE must be packaged; if that obligation \
+             really has gone, this test goes with it"
+        );
+
+        // Every source path the script copies.
+        let copied: Vec<&str> = RELEASE_PS1
+            .match_indices("From = '")
+            .map(|(i, m)| {
+                let rest = &RELEASE_PS1[i + m.len()..];
+                let end = rest
+                    .find('\'')
+                    .expect("unterminated From = '...' in release.ps1");
+                &rest[..end]
+            })
+            .collect();
+
+        // The parser itself, against entries that were in the array before this
+        // test existed. A scan that silently matched nothing -- the array
+        // reformatted, the quoting changed -- would leave `copied` empty and
+        // make the assertion below vacuous while it went on reading as a check.
+        for anchor in ["NOTICE", "LICENSE", "bins/pl-gui/fonts/IBMPlex-OFL.txt"] {
+            assert!(
+                copied.contains(&anchor),
+                "the $notices parser found {} entry(ies) and not {anchor:?}; it is broken, \
+                 not the script",
+                copied.len()
+            );
+        }
+
+        assert!(
+            copied.contains(&"features/NOTICE"),
+            "tools/release.ps1 copies {} notice(s) and none of them is 'features/NOTICE'. \
+             NOTICE says it \"must be packaged with any distribution that includes the \
+             database\", and this crate include_str!s the database into every binary. \
+             Copied: {copied:?}",
+            copied.len()
         );
     }
 

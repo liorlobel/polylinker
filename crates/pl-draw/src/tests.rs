@@ -1496,3 +1496,233 @@ fn a_real_molecule_name_beats_the_filename_and_the_filename_beats_unnamed() {
         "a LOCUS name is a real name and a filename is a guess"
     );
 }
+
+/// `PROVENANCE.md` has to record the spec constants this crate actually writes.
+///
+/// The rule at `PROVENANCE.md:7` — every piece of format knowledge gets a row,
+/// with its source, in the same commit as the code — is prose, and prose about
+/// numbers goes stale in the direction of looking fine. The PNG stack is three
+/// formats read out of four published specifications, and the only thing that
+/// can tell whether the row still describes the encoder is the encoder.
+///
+/// So every needle below is BUILT FROM A MEASUREMENT, never written here as a
+/// literal: the gamma and the eight chromaticities come out of the `gAMA` and
+/// `cHRM` chunks of a PNG this crate encodes during the test, the header pair
+/// comes off a real zlib stream, the units-per-em comes from parsing the
+/// committed face. Change a constant in the code and this fails; change the
+/// number in the row and this fails; delete the section and this fails.
+///
+/// WHAT IT CANNOT DO is judge whether the specification says those are the
+/// right values. Nothing in this repository can — that is why `tools/ci.ps1`
+/// runs PIL, `zlib` and fontTools over the same artifacts, and why the row
+/// itself cites the documents and the dates they were read.
+///
+/// PROVEN TO FAIL three ways on 2026-08-04, because a documentation test that
+/// cannot fail is the failure mode this repository has caught twice already:
+///
+/// 1. Against the working tree before the section was written — `PROVENANCE.md
+///    has no section for the published specifications the PNG stack
+///    implements`.
+/// 2. Section present, one digit changed in the row (`gAMA 45455` → `45454`) —
+///    `the provenance section does not record "gAMA 45455", which is what this
+///    crate writes today`.
+/// 3. Row restored, the constant changed in `png.rs` instead
+///    (`45455u32` → `45454u32`) — `... does not record "gAMA 45454" ...`.
+///
+/// The second and third are the ones worth the lines. Either alone would be
+/// satisfied by a test that only checked the section exists.
+#[test]
+fn the_provenance_rows_record_the_constants_the_code_actually_writes() {
+    const PROV: &str = include_str!("../../../PROVENANCE.md");
+
+    // The section, not the file: a number that happens to appear in the .dna
+    // sections must not satisfy a claim about PNG.
+    let at = PROV.find("Open published specifications").expect(
+        "PROVENANCE.md has no section for the published specifications the PNG \
+         stack implements, and CONTRIBUTING.md:29 requires the row in the same \
+         commit as the code",
+    );
+    let sec = &PROV[at..];
+    let sec = sec.split_once("\n## ").map_or(sec, |(head, _)| head);
+
+    // One real file, walked as chunks rather than searched, so a needle cannot
+    // be satisfied by a byte run inside the compressed data.
+    let file = png::encode(&png::Image::filled(3, 2, [255, 255, 255]), Some(300.0));
+    let payload = |want: &[u8; 4]| -> Vec<u8> {
+        let mut i = 8;
+        while i + 12 <= file.len() {
+            let n = u32::from_be_bytes([file[i], file[i + 1], file[i + 2], file[i + 3]]) as usize;
+            if &file[i + 4..i + 8] == want {
+                return file[i + 8..i + 8 + n].to_vec();
+            }
+            i += 12 + n;
+        }
+        panic!(
+            "no {} chunk in the encoder's own output",
+            String::from_utf8_lossy(want)
+        )
+    };
+
+    let ihdr = payload(b"IHDR");
+    let gama = u32::from_be_bytes(payload(b"gAMA")[..4].try_into().unwrap());
+    let chrm: Vec<u32> = payload(b"cHRM")
+        .chunks_exact(4)
+        .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
+        .collect();
+    // Without this, an empty or short cHRM would join to the empty string, and
+    // `contains("")` is true of every file — the needle would stop being able to
+    // fail while still looking like an assertion.
+    assert_eq!(
+        chrm.len(),
+        8,
+        "cHRM carries {} values, not the white point and three primaries",
+        chrm.len()
+    );
+    let srgb = payload(b"sRGB")[0];
+    let phys = payload(b"pHYs")[8];
+    let zhdr = deflate::zlib(b"provenance");
+    let upem = font::Face::parse(font::REGULAR)
+        .expect("the committed regular face parses")
+        .units_per_em;
+
+    let needles = [
+        format!("colour type {}, bit depth {}", ihdr[9], ihdr[8]),
+        format!("gAMA {gama}"),
+        chrm.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        format!("rendering intent {srgb}"),
+        format!("unit specifier {phys}"),
+        format!("0x{:02X} 0x{:02X}", zhdr[0], zhdr[1]),
+        format!("{} units per em", upem as u64),
+    ];
+    for needle in &needles {
+        assert!(
+            sec.contains(needle.as_str()),
+            "the provenance section does not record {needle:?}, which is what \
+             this crate writes today"
+        );
+    }
+}
+
+/// The pixel budget refuses the canvas nothing else bounds, and refuses
+/// nothing else.
+///
+/// PROVEN TO FAIL against the working tree of 2026-08-04 — where `png_at`
+/// returned `(Vec<u8>, raster::Report)`, `png_budget` did not exist, and the
+/// invocation asserted below allocated 10,987,919,938 bytes — and again
+/// against the fixed tree with `png_at`'s `png_budget(..)?` replaced by
+/// `let _ = png_budget(..);`, which fails on `183 mm at 2400 dpi is
+/// 298978681 px and was not refused`.
+///
+/// `png_budget` and `png_at` are asserted to agree because they are two
+/// callers of `png_scale` and `raster::size`, and a guard measuring a
+/// different canvas from the one that gets allocated is not a guard.
+#[test]
+fn the_pixel_budget_refuses_a_canvas_no_flag_band_bounds() {
+    let mol = plasmid(3000, true);
+    let (sc, _) = scene(&mol, Options::default());
+
+    // Nature's double column at the dpi ceiling `bins/pl` accepts: inside the
+    // `--mm` band, inside the `--dpi` band, and 3x the ceiling on their
+    // product.
+    let e = png_budget(&sc, Some(183.0), 2400.0)
+        .expect_err("183 mm at 2400 dpi is 298978681 px and was not refused");
+    assert_eq!((e.w, e.h), (17291, 17291));
+    assert!(
+        e.pixels() > MAX_PIXELS,
+        "{} px is not past the {MAX_PIXELS} px ceiling",
+        e.pixels()
+    );
+    assert!(
+        png_at(&sc, Some(183.0), 2400.0, [255, 255, 255]).is_err(),
+        "png_budget refuses this and png_at renders it anyway"
+    );
+
+    // The message is the whole of what the user gets, so it carries all four
+    // numbers they need: what they asked for, what it came to, the ceiling,
+    // and a resolution that works.
+    let said = e.to_string();
+    for want in [
+        "17291 x 17291",
+        "299 megapixels",
+        "100 megapixel",
+        "2400 dpi",
+    ] {
+        assert!(
+            said.contains(want),
+            "the refusal does not say {want:?}: {said}"
+        );
+    }
+    assert!(
+        said.contains("11.1 GB"),
+        "the refusal does not price the allocation: {said}"
+    );
+
+    // The controls. Every journal preset at every resolution the GUI offers is
+    // an ordinary export and has to stay one — a guard that refuses a
+    // publication figure is a worse defect than the abort it prevents. Asked
+    // of `png_budget`, which costs no pixels, so all 48 are affordable.
+    for p in page::PRESETS {
+        for dpi in [150.0f64, 300.0, 600.0, 1200.0] {
+            for mm in [p.single_mm, p.double_mm] {
+                png_budget(&sc, Some(mm), dpi)
+                    .unwrap_or_else(|e| panic!("{} at {mm} mm, {dpi} dpi: {e}", p.name));
+            }
+        }
+    }
+
+    // ...and the dimensions it reports are the ones `IHDR` ends up holding.
+    // Rendered, so this is the real file rather than a second copy of the same
+    // arithmetic. One size: the claim is the agreement, not the coverage.
+    let (w, h) = png_budget(&sc, Some(89.0), 300.0).expect("89 mm at 300 dpi");
+    let (bytes, _) = png_at(&sc, Some(89.0), 300.0, [255, 255, 255]).expect("just checked");
+    let ihdr = |i: usize| u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap());
+    assert_eq!(
+        (w, h),
+        (ihdr(16), ihdr(20)),
+        "the budget measured a different canvas from the one IHDR describes"
+    );
+
+    // The three figures `MAX_PIXELS`'s own doc quotes for where the ceiling
+    // sits, measured here rather than worked out on paper — that doc is what a
+    // maintainer reads before moving the constant.
+    let elsevier = page::preset("elsevier")
+        .expect("a shipped preset")
+        .double_mm;
+    let wide = png_budget(&sc, Some(elsevier), 1200.0)
+        .expect("the widest preset column at 1200 dpi has to stay an ordinary export");
+    assert_eq!(
+        wide,
+        (8976, 8976),
+        "{elsevier} mm at 1200 dpi is not the 8,976 px MAX_PIXELS's doc names"
+    );
+    for (mm, top) in [(elsevier, 1336.0), (183.0, 1388.0)] {
+        png_budget(&sc, Some(mm), top)
+            .unwrap_or_else(|e| panic!("{mm} mm at {top} dpi is refused: {e}"));
+        assert!(
+            png_budget(&sc, Some(mm), top + 1.0).is_err(),
+            "{mm} mm still fits at {} dpi, so {top} is not where the ceiling bites",
+            top + 1.0
+        );
+    }
+
+    // The suggested dpi is the largest one that fits, not a safe guess.
+    let d = e
+        .fits_at_dpi
+        .expect("a 183 mm figure fits at some resolution");
+    png_budget(&sc, Some(183.0), d).expect("the refusal named a dpi it would refuse");
+    assert!(
+        png_budget(&sc, Some(183.0), d + 1.0).is_err(),
+        "{} dpi also fits, so {d} was not the largest",
+        d + 1.0
+    );
+
+    // And the branch with no printed width, where `--mm` is never read at all
+    // and the scene's units are points: `--width 720 --dpi 2400` is 24,000 px
+    // square, 576 megapixels, and was reachable the same way.
+    let e = png_budget(&sc, None, 2400.0).expect_err("720 pt at 2400 dpi was not refused");
+    assert_eq!((e.w, e.h), (24000, 24000), "{e}");
+    png_budget(&sc, None, 300.0).expect("the same figure at 300 dpi is 3000 px");
+}

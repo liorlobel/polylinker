@@ -428,8 +428,20 @@ pub fn help(t: Topic) -> &'static str {
                        reported unless you ask for it."
         }
         "checksum" => {
+            // Split by topology, because only one of the two invariances holds
+            // for both: rotating a LINEAR duplex makes a different molecule, so
+            // only `cdseguid` can promise origin-independence. The old wording
+            // here — "the same for the same molecule however it was rotated,
+            // exported or which strand was written first" — claimed it for
+            // everything. `pl-mcp`'s tool description and `methods` below were
+            // both already correct; this string is what `pl methods` with no
+            // argument prints and what the GUI Help window shows above the
+            // methods text, so it was the copy the user actually read.
             "A checksum that is the same for the same molecule however it was \
-                       rotated, exported or which strand was written first."
+                       exported and whichever strand was written first. A circular \
+                       molecule's is also the same however it was rotated; a linear \
+                       one's is not, because rotating a linear duplex makes a \
+                       different molecule."
         }
         "goldengate" => {
             "Structural problems in a Type IIS overhang set. No fidelity \
@@ -459,6 +471,41 @@ pub fn help(t: Topic) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rotation invariance may never be claimed without naming the topology it
+    /// holds for.
+    ///
+    /// PROVEN TO FAIL at 713bd3b: `help(checksum)` read "A checksum that is the
+    /// same for the same molecule however it was rotated, exported or which
+    /// strand was written first" — unconditional, and false for half the
+    /// molecules this program opens. `cdseguid` is origin-invariant; `ldseguid`
+    /// is not and cannot be, because rotating a linear duplex makes a different
+    /// molecule. `bins/pl-mcp/src/main.rs` had this same sentence corrected,
+    /// with a comment saying exactly that, and `methods(checksum)` was written
+    /// correctly from the start — only `help` kept the old form, and `help` is
+    /// what `pl methods` with no argument prints for every topic and what the
+    /// GUI Help window puts *above* the methods text. So a user with a linear
+    /// construct got a different `ldseguid=` after a rotation the tool had told
+    /// them could not change it.
+    ///
+    /// Asserted over every topic rather than over `checksum` alone: the trap is
+    /// the unqualified word, not the one arm that fell into it.
+    #[test]
+    fn no_topic_claims_rotation_invariance_without_naming_the_topology() {
+        for t in TOPICS {
+            for (surface, text) in [("help", help(*t).to_string()), ("methods", methods(*t))] {
+                if !text.contains("rotat") {
+                    continue;
+                }
+                assert!(
+                    text.contains("ircular"),
+                    "{}'s {surface} text claims rotation invariance without saying \
+                     it holds for circular molecules only: {text:?}",
+                    t.name
+                );
+            }
+        }
+    }
 
     #[test]
     fn every_topic_has_methods_text_and_help() {

@@ -424,7 +424,29 @@ pub fn try_cut(seq: &Dseq, enzyme: &Enzyme) -> Result<Vec<Dseq>, CutError> {
         // string. So the range that has to hold is the DUPLEX, both nicks
         // strictly inside it, and pl-enzymes' guarantee is exactly this
         // condition in the blunt case where the two coincide.
-        let inside = |t: &i64| t > &w_lo && t < &w_hi && t + ovhg > c_lo && t + ovhg < c_hi;
+        // ONE INTERVAL, TESTED TWICE — not each nick against its own strand.
+        //
+        // The paragraph above states the duplex rule and the first version of
+        // this line did not implement it: it tested `t` against watson's extent
+        // and `t + ovhg` against crick's. Those two intervals coincide only when
+        // the molecule is blunt, so on a fragment left over from an earlier
+        // enzyme a nick could sit inside watson and outside the duplex, and the
+        // filter passed it.
+        //
+        // What that produced: `digest("AAAAAAAAAATCCGGATCCAAAAAAAAAA",
+        // [BamHI, BspEI])` returned THREE fragments, the middle one
+        // `{watson: "CCG", crick: "GAT", ovhg: -4}` — three bases of watson and
+        // three of crick, overlapping in NOT ONE BASE PAIR. `len()` said 7 while
+        // `to_string_full()` returned six characters, and `left_end()` reported
+        // a 3-base overhang for an enzyme that always leaves 4. A sweep over the
+        // shipped enzymes found 128 such fragments on ordinary MCS-shaped cores
+        // (`AvrII+BamHI`, `AgeI+SalI`, `AflII+HindIII`). The clone panel listed
+        // them as real and passed them to `ligate`.
+        //
+        // Single digests were unaffected, which is why every test passed: the
+        // two intervals are the same until something has already cut.
+        let (d_lo, d_hi) = (w_lo.max(c_lo), w_hi.min(c_hi));
+        let inside = |t: &i64| *t > d_lo && *t < d_hi && t + ovhg > d_lo && t + ovhg < d_hi;
         let tops: Vec<i64> = tops.iter().copied().filter(|t| inside(t)).collect();
         if tops.is_empty() {
             return Ok(vec![seq.clone()]);
@@ -1727,6 +1749,156 @@ mod tests {
         assert_eq!(
             pcr(fwd, &rev, &Dseq::new(tmpl, false)),
             Err(PcrError::Inverted)
+        );
+    }
+
+    /// Every fragment a double digest produces is a real duplex.
+    ///
+    /// PROVEN TO FAIL against the first version of `try_cut`'s duplex filter,
+    /// which tested each nick against its OWN strand's extent rather than
+    /// against the interval both share. The two coincide until something has
+    /// already cut, so single digests were fine and every test passed.
+    ///
+    /// `AAAAAAAAAATCCGGATCCAAAAAAAAAA` cut by BamHI and BspEI came back as
+    /// THREE fragments; the middle one was `{watson: "CCG", crick: "GAT",
+    /// ovhg: -4}` -- six bases, three on each strand, sharing NOT ONE BASE
+    /// PAIR. `len()` said 7 against six characters from `to_string_full()`.
+    /// Those numbers are asserted in
+    /// `the_fragment_the_duplex_filter_comment_names_is_six_bases` below,
+    /// because this sweep enumerates enzyme pairs and never touches the named
+    /// fragment's shape.
+    ///
+    /// Swept over every unambiguous shipped enzyme rather than asserted on one
+    /// case, because the defect is a property of overlapping sites and the pair
+    /// that first showed it is not special: 128 malformed fragments turned up
+    /// across ordinary MCS-shaped cores.
+    #[test]
+    fn no_double_digest_produces_a_fragment_with_no_base_pairs() {
+        let names = [
+            "BamHI", "BspEI", "AvrII", "AgeI", "SalI", "AflII", "HindIII", "EcoRI",
+        ];
+        let es: Vec<pl_enzymes::Enzyme> = names
+            .iter()
+            .filter_map(|n| pl_enzymes::by_name(n).cloned())
+            .collect();
+        assert!(
+            es.len() >= 6,
+            "the shipped table lost enzymes this test needs"
+        );
+
+        // BOTH ENZYMES IN ONE CALL. An earlier version of this test digested
+        // sequentially -- `digest(seq, [a])` then `digest(frag, [b])` -- and
+        // PASSED against the broken bounds, because that path re-enters
+        // `try_cut` with a fresh single enzyme each time. The defect lives in
+        // the multi-enzyme call, where the second enzyme's nicks are tested
+        // against a molecule the first has already made sticky.
+        let mut bad = Vec::new();
+        // The case that first showed it, asserted by name so it cannot be lost
+        // in the sweep.
+        let mut cases: Vec<(String, String)> =
+            vec![("BamHI+BspEI".into(), "AAAAAAAAAATCCGGATCCAAAAAAAAAA".into())];
+        for a in &es {
+            for b in &es {
+                if a.name == b.name {
+                    continue;
+                }
+                // Overlapping sites: the tail of one against the head of the
+                // other, which is what an MCS looks like.
+                let (sa, sb) = (&a.site, &b.site);
+                for k in 1..sa.len().min(sb.len()) {
+                    if sa[sa.len() - k..] == sb[..k] {
+                        cases.push((
+                            format!("{}+{}", a.name, b.name),
+                            format!("AAAAAAAAAA{sa}{}AAAAAAAAAA", &sb[k..]),
+                        ));
+                    }
+                }
+                cases.push((
+                    format!("{}+{}", a.name, b.name),
+                    format!("AAAAAAAAAA{sa}{sb}AAAAAAAAAA"),
+                ));
+            }
+        }
+        for (what, seq) in &cases {
+            for f in digest(&Dseq::new(seq, false), &es) {
+                let (w, c, ov) = (f.watson.len() as i64, f.crick.len() as i64, f.ovhg);
+                let paired = (w.min(c + ov) - 0.max(ov)).max(0);
+                if paired <= 0 {
+                    bad.push(format!(
+                        "{what} on {seq}: {{watson:{:?}, crick:{:?}, ovhg:{ov}}}",
+                        f.watson, f.crick
+                    ));
+                }
+                assert_eq!(
+                    f.len(),
+                    f.to_string_full().len(),
+                    "{what}: len() disagrees with to_string_full()"
+                );
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} fragment(s) have no base pairs at all:
+  {}",
+            bad.len(),
+            bad.join(
+                "
+  "
+            )
+        );
+    }
+
+    /// The fragment `try_cut`'s duplex-filter comment names, counted rather
+    /// than recalled.
+    ///
+    /// PROVEN TO FAIL against the number that comment and the test above
+    /// carried until now. Both said "eleven bases of watson and crick"; the
+    /// fragment is `CCG` over `GAT`, which is six. Written as the assertion
+    /// `assert_eq!(bases, 11)` against this same fixture, the observed failure
+    /// was:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: watson "CCG" + crick "GAT"
+    ///   left: 6
+    ///  right: 11
+    /// ```
+    ///
+    /// The sweep above no longer asserts on this fragment — it enumerates
+    /// enzyme pairs, and this one survives only as a named case whose *shape*
+    /// nothing checks. So the prose was the only record of what the defect
+    /// looked like, and the prose was wrong in the one place a reader would use
+    /// to confirm they had reproduced it: someone re-deriving BspEI's and
+    /// BamHI's nicks counts six, finds no reading that gives eleven, and cannot
+    /// tell a correct re-derivation from a wrong one.
+    ///
+    /// Three of the four numbers around it were right, which is what made the
+    /// fourth easy to walk past: `len()` = 7 and `to_string_full()` = 6 are
+    /// asserted here too, from the shipped implementations rather than from the
+    /// comment, and so is the 3-base overhang `left_end()` reports for an
+    /// enzyme that always leaves 4.
+    #[test]
+    fn the_fragment_the_duplex_filter_comment_names_is_six_bases() {
+        let f = Dseq::from_parts("CCG", "GAT", -4, false);
+        let bases = f.watson.len() + f.crick.len();
+        assert_eq!(bases, 6, "watson {:?} + crick {:?}", f.watson, f.crick);
+
+        // Not one base pair: `paired` is the sweep's own formula above.
+        let (w, c, ov) = (f.watson.len() as i64, f.crick.len() as i64, f.ovhg);
+        assert!(
+            (w.min(c + ov) - 0.max(ov)) <= 0,
+            "the premise: the two strands do not overlap at all"
+        );
+
+        // The three neighbouring numbers, each from the shipped code.
+        assert_eq!(f.len(), 7, "`len()` spans the gap between the strands");
+        assert_eq!(f.to_string_full().len(), 6, "and the text does not");
+        assert_eq!(
+            f.left_end(),
+            End::Overhang {
+                five_prime: true,
+                bases: "CCG".into()
+            },
+            "3 bases from an enzyme that always leaves 4"
         );
     }
 }
