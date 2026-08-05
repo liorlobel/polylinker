@@ -2204,3 +2204,149 @@ fn the_disclosure_closes_on_a_multi_cutter_in_every_sites_mode() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- A1: the canvas nothing bounds -----------------------------------------
+
+/// A raster nobody's machine can hold is refused, with the arithmetic in the
+/// message.
+///
+/// PROVEN TO FAIL against the working tree of 2026-08-04. `--dpi` is banded
+/// 72..=2400 (`bins/pl/src/main.rs`), `--mm` 5..=500 and `--width`/`--height`
+/// 16..=20000, each on its own, and nothing looked at the product. The
+/// invocation below is the one the dpi band's own comment names as the reason
+/// 2400 is the ceiling, and at 183 mm it is 17,291 px square: 298,978,681
+/// pixels, and a measured 10.99 GB of live heap (`36.75` bytes per pixel —
+/// `Image::filled`'s 3, the filtered scanlines' 3, `deflate::lz77`'s
+/// `prev = vec![usize::MAX; n]` at 24 and its `Sym` reservation at 6). On a
+/// machine that cannot serve that, `handle_alloc_error` aborts: no diagnostic,
+/// no partial file, no mention of the dpi that caused it. On a machine that
+/// can, it takes minutes and produces a figure no journal asked for.
+///
+/// Observed failure before the fix, on a 128 GB machine where the allocation
+/// succeeds: `exit status was success` — the export ran to completion and
+/// wrote `map.png`.
+#[test]
+fn a_raster_too_big_to_hold_is_refused_before_it_is_allocated() {
+    let dir = scratch("export-png-budget");
+    write(&dir, "map.gb", &genbank("map", "AAAACCCCGGGGTTTT", true));
+
+    let out = run(
+        &dir,
+        &[
+            "export",
+            "map.gb",
+            "--png",
+            "--journal",
+            "nature",
+            "--column",
+            "double",
+            "--dpi",
+            "2400",
+        ],
+    );
+    let err = stderr(&out);
+    assert!(
+        !out.status.success(),
+        "a 299-megapixel export was attempted rather than refused: {err}"
+    );
+    assert!(
+        !dir.join("map.png").exists(),
+        "the refusal still left a file behind"
+    );
+    // Everything the user needs to act: what they asked for, what it came to,
+    // what the limit is, and a resolution that fits. A message missing the last
+    // one leaves them guessing at dpi values until one works.
+    for want in ["2400", "17291", "100", "1388"] {
+        assert!(
+            err.contains(want),
+            "the refusal does not mention {want:?}: {err}"
+        );
+    }
+
+    // The control: the same figure at the default resolution still exports.
+    // A guard that refuses a 4.7-megapixel publication figure is a worse bug
+    // than the one it fixes.
+    let ok = run(
+        &dir,
+        &[
+            "export",
+            "map.gb",
+            "--png",
+            "--journal",
+            "nature",
+            "--column",
+            "double",
+        ],
+    );
+    assert!(ok.status.success(), "{}", stderr(&ok));
+    assert!(dir.join("map.png").is_file(), "{}", stderr(&ok));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- A4: the size on the status line is the size in the file ---------------
+
+/// `pl export --png` reports the dimensions `IHDR` actually holds.
+///
+/// PROVEN TO FAIL against the working tree of 2026-08-04, where the status
+/// line came from `page::Fit::pixels` and the canvas came from
+/// `raster::size(sc, png_scale(..))`. Those are two roundings, not one: `Fit`
+/// rounds each axis against the printed size independently, while the canvas
+/// derives its scale from the *already rounded* width and rounds the height
+/// against that. Observed failure, verbatim:
+///
+/// ```text
+/// pl printed 1134 x 850 px and IHDR says 1134 x 851
+/// ```
+///
+/// Swept over five aspect ratios (4:3, 16:9, 3:4, ~golden, 2:5) x `--mm`
+/// 20..=200 x `--dpi` {72, 150, 300, 600}, **1,063 of 3,620 combinations
+/// disagree** — 656 with the file taller than reported and 407 shorter. So
+/// this is the ordinary case, not a corner: a user sizing a figure to a
+/// journal's pixel requirement is told a number the file does not carry.
+///
+/// Non-square on purpose. The GUI's figure options are 720 x 720, where the
+/// two roundings coincide for every mm and dpi, which is why the existing
+/// GUI-vs-CLI byte-parity test could not see this.
+#[test]
+fn the_pixel_size_printed_for_a_png_is_the_pixel_size_in_the_file() {
+    let dir = scratch("export-png-dims");
+    write(&dir, "map.gb", &genbank("map", "AAAACCCCGGGGTTTT", true));
+
+    let out = run(
+        &dir,
+        &[
+            "export", "map.gb", "--png", "--width", "720", "--height", "540", "--mm", "96",
+            "--dpi", "300",
+        ],
+    );
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+
+    let line = err
+        .lines()
+        .find(|l| l.contains(" px at "))
+        .unwrap_or_else(|| panic!("no pixel-size line in:\n{err}"));
+    let printed: Vec<u32> = line
+        .split_whitespace()
+        .filter_map(|w| w.parse::<u32>().ok())
+        .take(2)
+        .collect();
+    assert_eq!(printed.len(), 2, "{line:?} does not state two dimensions");
+
+    // IHDR: 8 bytes of signature, then a chunk header of length + type, then
+    // width and height. It is the first chunk by the spec, so the offsets are
+    // fixed.
+    let png = std::fs::read(dir.join("map.png")).expect("the export wrote map.png");
+    let at = |i: usize| u32::from_be_bytes(png[i..i + 4].try_into().unwrap());
+    assert_eq!(&png[12..16], b"IHDR", "the first chunk is not IHDR");
+    let (w, h) = (at(16), at(20));
+
+    assert_eq!(
+        (printed[0], printed[1]),
+        (w, h),
+        "pl printed {} x {} px and IHDR says {w} x {h}",
+        printed[0],
+        printed[1]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

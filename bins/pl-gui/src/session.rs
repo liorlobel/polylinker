@@ -30,6 +30,12 @@
 //! running, and is left alone. See [`crate::recover::maybe_live`], including its
 //! note on why freshness rather than a PID probe.
 //!
+//! That rule is about OTHER windows and is applied only to their names. A list
+//! sitting at `session-{our own pid}` when this run has not written one is a
+//! dead run's — nothing else can be holding this PID — and [`claim`] takes it
+//! however fresh it looks, exactly as [`crate::recover::claim`] does with a
+//! recovery slot.
+//!
 //! # Claimed exclusively, and not by the obvious means
 //!
 //! Two windows launched together — a user double-clicking two files, or a shell
@@ -168,6 +174,21 @@ pub fn decode(text: &str) -> Option<Session> {
     if !sawsep {
         return None;
     }
+    // THE FILE MUST END WHERE A LINE ENDS, and the header check above is not
+    // enough to know that. `sawsep` is set at the FIRST separator, so a list
+    // torn anywhere after it still parses: six tabs cut mid-path decode as
+    // three real ones plus a stump of the fourth, `active` is dropped by the
+    // bounds guard below, and the restore reports "1 no longer exist" naming a
+    // path that never existed. [`encode`] always ends a line — `--\n` at the
+    // very least — so a text that does not is a write that did not finish.
+    //
+    // What this does NOT catch, said plainly: a tear that lands exactly on a
+    // newline is a shorter list that is indistinguishable from a shorter list,
+    // and nothing short of a count or an atomic write can tell them apart. It
+    // costs tabs rather than inventing a path, which is the lesser of the two.
+    if !text.ends_with('\n') {
+        return None;
+    }
     s.open = lines
         .filter(|l| !l.trim().is_empty())
         .map(|l| PathBuf::from(unescape(l)))
@@ -186,14 +207,36 @@ pub fn path(dir: &Path) -> PathBuf {
     dir.join(format!("session-{}", std::process::id()))
 }
 
+/// Has this run written its own list yet?
+///
+/// The other half of [`claim`]'s existence rule, and the reason it can afford
+/// one: `claim` runs once, in `App::new`, BEFORE anything writes, so a
+/// `session-{pid}` sitting there at that moment cannot be ours. This flag is
+/// what makes that an assertion rather than a hope — once this process has
+/// touched its own name, `claim` refuses it again, so a window can never
+/// restore the bench it is sitting in even if some later caller asks it to.
+///
+/// Set BEFORE the write rather than after. `fs::write` truncates on open, so a
+/// write that fails may still have replaced what was there; the direction that
+/// costs nothing is to stop calling a name ours-once-touched a leftover.
+static OURS_WRITTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Write the list. Failure is silent, for the reason the module doc gives.
 ///
-/// Not atomic, and deliberately not: `recover::write` goes through a temp file
-/// and `sync_all` because a recovery file that exists and is empty looks like a
-/// recovery and is worse than none. A truncated tab list is read by [`decode`]
-/// as no list at all, which is the same outcome as not writing, so the cost of
-/// the careful version buys nothing and an `fsync` per tab switch is real.
+/// Not atomic, and the argument for that is narrower than it used to read. It
+/// said "a truncated tab list is read by `decode` as no list at all", which was
+/// false for the truncation that matters: `decode` accepted any prefix that
+/// reached the `--`, so a torn write became a real, shorter bench. [`decode`]
+/// now requires the text to end where a line ends, which is what makes the
+/// sentence true — see the note there for the one tear that check cannot see.
+/// With that in place the careful version buys only the line-boundary case, and
+/// an `fsync` per tab switch is real.
 pub fn write(path: &Path, s: &Session) -> Result<(), String> {
+    if path.file_name().is_some_and(|n| {
+        n == std::ffi::OsStr::new(format!("session-{}", std::process::id()).as_str())
+    }) {
+        OURS_WRITTEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     std::fs::write(path, encode(s)).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -208,15 +251,33 @@ pub fn write(path: &Path, s: &Session) -> Result<(), String> {
 /// the launch after next restores a bench from two sessions ago.
 pub fn claim(dir: &Path, now: u64) -> Option<Session> {
     let mine = path(dir);
+    // EXISTENCE, NOT THE NAME — `recover::claim`'s rule, and the same hazard.
+    //
+    // `std::process::id()` names a RUN only while that run is alive. Skipping
+    // `session-{pid}` because it carries our number meant that when the OS
+    // reissued a crashed run's PID, its whole bench was first ignored here and
+    // then written over by `record_session` on the very next frame: six tabs
+    // gone, silently, with no banner and no second chance. So a list at our own
+    // name is a leftover unless THIS run put it there, which [`OURS_WRITTEN`]
+    // is what knows.
+    let ours_is_a_leftover = !OURS_WRITTEN.load(std::sync::atomic::Ordering::Relaxed);
     let mut found: Vec<(u64, PathBuf)> = Vec::new();
     for e in std::fs::read_dir(dir).ok()?.flatten() {
         let p = e.path();
         let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) else {
             continue;
         };
-        // `session-` and not `session`: the claiming temp file below is
-        // `session.claiming-{pid}`, which must never be picked up as a list.
-        if !name.starts_with("session-") || p == mine {
+        // `session-` and not `session`, so a `.plproj` the user parked here is
+        // never eaten. The claiming marker below is `session-{pid}.claiming`
+        // (`with_extension` on a name that has no extension APPENDS), so it
+        // does match this prefix and is skipped further down instead: it is
+        // empty, and `decode("")` is `None`. That is incidental rather than
+        // deliberate, and the marker being empty is what keeps it true.
+        if !name.starts_with("session-") {
+            continue;
+        }
+        let is_mine = p == mine;
+        if is_mine && !ours_is_a_leftover {
             continue;
         }
         let Some(s) = std::fs::read_to_string(&p).ok().as_deref().and_then(decode) else {
@@ -229,7 +290,14 @@ pub fn claim(dir: &Path, now: u64) -> Option<Session> {
         // launch's to take however recently it was written — which is the
         // ordinary case, since quitting and relaunching is how a person moves
         // their bench from one run to the next.
-        if !s.closed && crate::recover::maybe_live(s.saved_at, now) {
+        //
+        // Freshness does not apply to our own name at all. It is a guess about
+        // whether some other process is still running, and no other process can
+        // be holding the PID this one is holding — so a file there is a dead
+        // run's however recently it was stamped, and asking "is it fresh?"
+        // would put exactly the just-crashed bench back into the case that
+        // loses it.
+        if !is_mine && !s.closed && crate::recover::maybe_live(s.saved_at, now) {
             continue;
         }
         found.push((s.saved_at, p));
@@ -237,9 +305,7 @@ pub fn claim(dir: &Path, now: u64) -> Option<Session> {
     found.sort_by_key(|(t, p)| (std::cmp::Reverse(*t), p.clone()));
     let mut it = found.into_iter();
     let (_, newest) = it.next()?;
-    for (_, old) in it {
-        let _ = std::fs::remove_file(old);
-    }
+    let superseded: Vec<PathBuf> = it.map(|(_, p)| p).collect();
     // EXCLUSIVE BY CREATION, and see the module doc for what this replaced.
     //
     // `create_new` is `O_EXCL` / `CREATE_NEW`: the filesystem itself refuses the
@@ -253,6 +319,12 @@ pub fn claim(dir: &Path, now: u64) -> Option<Session> {
     // names: the list it guards is `session-{pid}`, so the next run with a
     // different number is unaffected, and the same number is the case
     // `recover::claim` already treats as a leftover.
+    //
+    // NOTHING IS DELETED BEFORE THIS SUCCEEDS. Clearing the superseded lists
+    // above the marker meant a launch that lost the claim — or found a marker a
+    // crash had left behind — had already thrown away every bench but the one
+    // it then failed to take, so a stall that is supposed to cost one launch
+    // cost the older bench outright.
     let marker = newest.with_extension("claiming");
     std::fs::OpenOptions::new()
         .write(true)
@@ -263,9 +335,15 @@ pub fn claim(dir: &Path, now: u64) -> Option<Session> {
         .ok()
         .as_deref()
         .and_then(decode);
-    // The list first: a crash between these two leaves a marker with nothing to
-    // guard, which is inert, where the other order leaves a list nothing is
-    // guarding, which is a bench two windows could restore.
+    // Everything older than the one being claimed goes, because it is a
+    // superseded list of tabs and keeping it would mean the launch after next
+    // restores a bench from two sessions ago.
+    for old in superseded {
+        let _ = std::fs::remove_file(old);
+    }
+    // The list before the marker: a crash between these two leaves a marker with
+    // nothing to guard, which is inert, where the other order leaves a list
+    // nothing is guarding, which is a bench two windows could restore.
     let _ = std::fs::remove_file(&newest);
     let _ = std::fs::remove_file(&marker);
     out
@@ -482,6 +560,151 @@ mod tests {
             None,
             "the same bench was handed out twice"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A list torn mid-path is no list, not a shorter one.
+    ///
+    /// PROVEN TO FAIL without the newline requirement in `decode`: the six-tab
+    /// list below comes back as `["a.gb", "b.gb", "c.gb", "d"]` — three real
+    /// tabs and a stump of a fourth — with `active` silently dropped by the
+    /// bounds guard. The restore then says "reopened 3 document(s), 1 no longer
+    /// exists" and names `d`, a file the user never had, while `claim` has
+    /// already deleted the only copy of the real list.
+    #[test]
+    fn a_list_torn_mid_path_is_no_list_rather_than_a_shorter_one() {
+        let six = Session {
+            open: ["a.gb", "b.gb", "c.gb", "d.gb", "e.gb", "f.gb"]
+                .iter()
+                .map(PathBuf::from)
+                .collect(),
+            active: Some(5),
+            ..sample()
+        };
+        let text = encode(&six);
+        assert_eq!(decode(&text).as_ref(), Some(&six), "the premise");
+        // One byte into the fourth path, which is what a write that stopped
+        // part way through leaves — the separator and three whole tabs are
+        // already on disk.
+        let cut = text.find("d.gb").expect("the fourth path") + 1;
+        assert_eq!(
+            decode(&text[..cut]),
+            None,
+            "a torn write was read as a real, shorter bench"
+        );
+        // And every whole prefix is refused too, up to the one that is the
+        // whole file: the property is "it ends where a line ends", not "it is
+        // long enough".
+        assert_eq!(decode(&text[..text.len() - 1]), None);
+    }
+
+    /// The crashed run's bench is at OUR name, and skipping it is how it dies.
+    ///
+    /// PROVEN TO FAIL with `|| p == mine` back in the filter: the leftover is
+    /// not claimed, and `record_session` — which runs on the first frame — then
+    /// writes this run's empty bench straight over it.
+    ///
+    /// BOTH HALVES IN ONE TEST ON PURPOSE. `OURS_WRITTEN` is process-global, as
+    /// it must be, so the half that sets it has to run after the half that
+    /// needs it clear; two `#[test]`s would be two threads in an order nobody
+    /// chooses.
+    #[test]
+    fn a_bench_left_at_our_own_pid_is_a_leftover_until_this_run_writes_there() {
+        let d = dir("pidreuse");
+        let leftover = path(&d);
+        // Written raw rather than through `write`: a DIFFERENT process left
+        // this, the one that held this PID before the OS reissued it, so this
+        // run must not be recorded as having written its own list.
+        std::fs::write(
+            &leftover,
+            encode(&Session {
+                saved_at: 1_000_000,
+                ..sample()
+            }),
+        )
+        .unwrap();
+        // Fresh and not `closed` — what a crash leaves — and claimed anyway,
+        // because no other process can be holding the PID this one holds.
+        let got = claim(&d, 1_000_005).expect("the crashed run's bench was ignored, then lost");
+        assert_eq!(got.open, sample().open);
+        assert!(
+            !leftover.exists(),
+            "a claimed list is not left to be claimed twice"
+        );
+
+        // And once this run has written there, that same name is ours: a window
+        // must never restore the bench it is sitting in.
+        let d2 = dir("ours");
+        let ours = path(&d2);
+        write(
+            &ours,
+            &Session {
+                saved_at: 1_000_000,
+                closed: true,
+                ..sample()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            claim(&d2, 9_000_000),
+            None,
+            "a window claimed the bench it is sitting in"
+        );
+        assert!(ours.exists(), "and did not consume it either");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    /// A leftover marker stalls one launch. It must not also cost a bench.
+    ///
+    /// PROVEN TO FAIL with the `remove_file` loop back above the marker: the
+    /// older list is deleted by a launch that goes on to restore nothing, so
+    /// the one bench that was still recoverable is gone.
+    #[test]
+    fn a_marker_left_behind_stalls_the_claim_without_destroying_what_it_stalls() {
+        let d = dir("marker");
+        for (pid, at, file) in [("999988", 1_000u64, "old.gb"), ("999989", 5_000, "new.gb")] {
+            write(
+                &d.join(format!("session-{pid}")),
+                &Session {
+                    open: vec![PathBuf::from(file)],
+                    saved_at: at,
+                    closed: true,
+                    ..sample()
+                },
+            )
+            .unwrap();
+        }
+        // The name is the one the comment in `claim` gives, asserted rather
+        // than described: `with_extension` on a name with no extension appends.
+        let marker = d.join("session-999989").with_extension("claiming");
+        assert_eq!(
+            marker.file_name().unwrap().to_string_lossy(),
+            "session-999989.claiming"
+        );
+        // Left by a run that crashed between taking it and dropping it.
+        std::fs::write(&marker, "").unwrap();
+
+        assert_eq!(claim(&d, 9_000_000), None, "the marker did not hold");
+        assert!(
+            d.join("session-999988").exists(),
+            "a launch that restored nothing deleted the bench it could still have restored"
+        );
+        assert!(
+            d.join("session-999989").exists(),
+            "nor the one it stalled on"
+        );
+
+        // And when the marker goes, the bench the stall was protecting is still
+        // there to be restored — after which the older one is cleared as
+        // superseded, which is a claim that succeeded rather than one that did
+        // not.
+        std::fs::remove_file(&marker).unwrap();
+        assert_eq!(
+            claim(&d, 9_000_000).expect("a list").open,
+            vec![PathBuf::from("new.gb")]
+        );
+        assert!(!d.join("session-999988").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

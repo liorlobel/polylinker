@@ -7,17 +7,31 @@
 //! and never opens a terminal, that sentence was false. The About page is what
 //! makes the release document true.
 //!
-//! A `build.rs` is not a dependency. It adds nothing to `[dependencies]` and
-//! pulls in no crate, so this stays inside the rule that the GUI's four
-//! externals are the whole list.
+//! It also stamps the Windows resource: the application icon, and the
+//! VERSIONINFO block that puts a version in Add/Remove Programs. See
+//! `bins/winres.rs`, which writes the `.res` by hand.
+//!
+//! A `build.rs` is not a dependency. It adds nothing to `[dependencies]`, pulls
+//! in no crate, and -- because the `.res` is hand-written rather than delegated
+//! to `winres` or `embed-resource` -- needs no `rc.exe` on PATH either. So this
+//! stays inside the rule that the GUI's four externals are the whole list.
 //!
 //! Failure is not fatal, for the reason the CLI's copy gives: a source tarball
 //! has no `.git`, and a build that refused to proceed without one would make the
-//! project unbuildable by exactly the people most likely to package it.
+//! project unbuildable by exactly the people most likely to package it. The
+//! icon is the one exception -- it is checked into this repository, so a
+//! failure to read it is a broken checkout and says what to run.
 
+#[path = "../winres.rs"]
+mod winres;
+
+use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    // The icon, and the version block. A no-op off Windows-MSVC.
+    winres::emit("polylinker", Some(Path::new("icon/polylinker.ico")));
+
     // Rebuild when the checked-out commit changes, or the stamp goes stale the
     // moment anyone switches branch.
     println!("cargo:rerun-if-changed=../../.git/HEAD");

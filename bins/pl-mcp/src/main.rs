@@ -195,6 +195,20 @@ fn tool(name: &str, description: &str, props: Vec<(&str, &str, &str)>, required:
 }
 
 fn tool_list() -> Vec<Value> {
+    // The topic enumeration is generated from `pl_doc::TOPICS` rather than
+    // written out, because a second hand-written list goes out of date against
+    // the first the next time a topic is added — and here it already had. The
+    // string shipped nine of eleven names, missing `cloning` and `design`, on
+    // the one surface where the enumeration IS the machine-readable contract:
+    // an assistant that wants the methods paragraph for a primer *design*
+    // finds no `design`, calls `methods(topic="primers")`, and gets a
+    // well-formed methods paragraph about primer *binding sites* instead. The
+    // GUI builds its list this way already; this is the same decision.
+    let topics = pl_doc::TOPICS
+        .iter()
+        .map(|t| t.name)
+        .collect::<Vec<_>>()
+        .join(", ");
     vec![
         tool(
             "read_molecule",
@@ -255,9 +269,18 @@ fn tool_list() -> Vec<Value> {
         ),
         tool(
             "annotate",
-            "Find known features. The shipped database is entirely unreviewed, so \
-             this returns nothing unless include_proposed is set, and anything it \
-             does return is a suggestion to check rather than an identification.",
+            // States the RULE, not a count. The previous wording said the
+            // shipped database was "entirely unreviewed, so this returns
+            // nothing unless include_proposed is set" — which was true of the
+            // table this server was written against and false of the one it
+            // ships with, where every row carries a curator. An assistant
+            // reading it would have set include_proposed on every call to get
+            // any answer at all, opting itself into exactly the unreviewed rows
+            // the flag exists to keep out.
+            "Find known features. Only rows a named curator has signed off are \
+             searched unless include_proposed is set, and anything returned is a \
+             suggestion to check against its cited accession rather than an \
+             identification.",
             vec![
                 ("path", "string", "Path to the file"),
                 (
@@ -272,11 +295,7 @@ fn tool_list() -> Vec<Value> {
             "methods",
             "The methods paragraph for an operation, with its limits — generated \
              from the parameters the code actually uses.",
-            vec![(
-                "topic",
-                "string",
-                "tm, digest, gel, orfs, sanger, annotate, checksum, goldengate or primers",
-            )],
+            vec![("topic", "string", topics.as_str())],
             &["topic"],
         ),
     ]
@@ -910,6 +929,86 @@ mod tests {
         assert!(req(r#"{"jsonrpc":"2.0","method":"tools/list"}"#).is_none());
         // The same call *with* an id does get one.
         assert!(req(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).is_some());
+    }
+
+    /// The `methods` tool's schema must enumerate every topic `pl-doc` has, and
+    /// the `annotate` tool must not describe the shipped database as unreviewed.
+    ///
+    /// PROVEN TO FAIL at 713bd3b, on both arms:
+    ///
+    /// * the topic parameter advertised "tm, digest, gel, orfs, sanger,
+    ///   annotate, checksum, goldengate or primers" — 9 of `TOPICS`' 11, with
+    ///   `cloning` and `design` missing. This is the one surface where the
+    ///   enumeration *is* the machine-readable contract, and the failure is
+    ///   silent rather than loud: an assistant asked for the methods paragraph
+    ///   for a primer *design*, finding no `design`, calls
+    ///   `methods(topic="primers")` and gets the primer *binding site*
+    ///   paragraph — a well-formed methods paragraph about a different
+    ///   operation. The GUI already builds its list from `TOPICS` itself, with
+    ///   a comment saying a second hand-written list "would go out of date
+    ///   against the first the next time a topic is added". It did.
+    /// * `annotate` said "The shipped database is entirely unreviewed, so this
+    ///   returns nothing unless include_proposed is set". Measured against the
+    ///   compiled-in tables: 89 of 89 rows are signed, so the default call
+    ///   returns 89 records' worth of hits and the sentence told the assistant
+    ///   the opposite of what the tool does.
+    ///
+    /// Both arms read the description out of the live schema rather than out of
+    /// a copy here, so the check tracks the contract a client actually sees.
+    #[test]
+    fn the_schema_descriptions_match_what_the_tools_do() {
+        let r = req(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).unwrap();
+        let tools = r
+            .get("result")
+            .unwrap()
+            .get("tools")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let described = |tool: &str, prop: &str| -> String {
+            let t = tools
+                .iter()
+                .find(|t| t.get("name").unwrap().as_str() == Some(tool))
+                .unwrap_or_else(|| panic!("no {tool} tool"));
+            let v = if prop.is_empty() {
+                t.get("description").unwrap()
+            } else {
+                t.get("inputSchema")
+                    .unwrap()
+                    .get("properties")
+                    .unwrap()
+                    .get(prop)
+                    .unwrap_or_else(|| panic!("{tool} declares no {prop}"))
+                    .get("description")
+                    .unwrap()
+            };
+            v.as_str().unwrap().to_string()
+        };
+
+        let topics = described("methods", "topic");
+        for t in pl_doc::TOPICS {
+            assert!(
+                topics.contains(t.name),
+                "the methods schema does not offer {:?}, so a client asking for \
+                 it has to guess: {topics:?}",
+                t.name
+            );
+        }
+
+        let annotate = described("annotate", "");
+        let (db, _) = pl_features::Db::builtin();
+        let signed = db.reviewed().records.len();
+        assert!(
+            signed > 0,
+            "if the shipped database really is unsigned again, this test and \
+             the annotate description both describe the new state"
+        );
+        assert!(
+            !annotate.contains("entirely unreviewed"),
+            "the annotate schema calls the database entirely unreviewed while \
+             {signed} of {} rows are signed: {annotate:?}",
+            db.records.len()
+        );
     }
 
     #[test]

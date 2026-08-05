@@ -1,0 +1,56 @@
+# Link the C runtime into the binaries instead of depending on a redistributable.
+#
+# WHY THIS EXISTS
+#
+# Every artifact this workspace ships imported `VCRUNTIME140.dll`. That DLL is
+# not part of Windows. It arrives with the Visual C++ 2015-2022 redistributable,
+# whose own installer requires administrator rights.
+#
+# `docs/PLAN.md:120` describes the primary persona as someone who "cannot
+# install software requiring administrator rights". On a freshly imaged locked
+# down machine, that persona did not get Polylinker -- they got
+# "VCRUNTIME140.dll was not found", from an app whose entire pitch is that it is
+# one file you can run. An installer makes that *worse* rather than better,
+# because the install succeeds and the Start Menu shortcut appears before
+# anything fails.
+#
+# So this is a prerequisite for shipping an installer at all, not a tuning knob.
+#
+# WHAT IT COSTS, MEASURED
+#
+# Built twice on 2026-08-05, x86_64-pc-windows-msvc, rustc 1.97.1, into separate
+# target directories so both sets of bytes existed at once:
+#
+#   polylinker.exe   12,712,448 -> 12,892,672   +180,224   (+1.4%)
+#   pl.exe            3,467,776 ->  3,598,848   +131,072   (+3.8%)
+#   pl-mcp.exe        1,116,672 ->  1,224,192   +107,520   (+9.6%)
+#   polylinker.pyd      904,704 ->  1,007,104   +102,400   (+11.3%)
+#                    ----------    ----------   --------
+#                    18,201,600    18,722,816   +521,216   (+2.9%)
+#
+# Half a megabyte on eighteen, to stop depending on a component the target user
+# is not allowed to install. `dumpbin /dependents` over all four afterwards shows
+# no `VCRUNTIME140.dll` and no `api-ms-win-crt-*` stubs; what is left is stock
+# Windows plus `python3.dll` for the extension, which is correct for abi3.
+#
+# `tools/ci.ps1` re-runs that dumpbin check on every release build, because this
+# is exactly the kind of property that regresses silently: nothing about the app
+# behaves differently, and the failure only appears on a machine nobody here
+# owns.
+#
+# WHY IT IS SCOPED TO ONE TRIPLE
+#
+# `[build] rustflags` would also apply to `wasm32-unknown-unknown`, where
+# `crt-static` is meaningless, and to any future cross build. The problem being
+# solved is a Windows deployment problem, so the fix names Windows.
+#
+# WHAT THIS IS NOT
+#
+# Not a size optimisation and not a speed change. `[profile.release]` in the
+# workspace manifest already owns those. If a future change makes the static CRT
+# untenable -- an LNK4098 conflict from a C dependency that links the dynamic CRT
+# is the usual way -- the alternative is shipping `vcruntime140.dll` app-local
+# beside the executable, which is permitted for app-local deployment but puts a
+# redistribution grant into a project that currently needs none. Prefer this.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -20,7 +20,7 @@ USAGE:
     pl digest  <file> [--enzyme NAME]    restriction sites
     pl blocks  <file.dna>                anatomy of a SnapGene container
     pl checksum <file>...                SEGUID v2 checksums
-    pl export  <file>... [options]       plasmid map as SVG or PDF
+    pl export  <file>... [options]       plasmid map as SVG, PDF, EPS or PNG
     pl find-motif <IUPAC> <file>         search a sequence, both strands
     pl tm      <OLIGO>...                melting temperature
     pl goldengate <OVERHANG>...          check a Type IIS overhang set
@@ -221,6 +221,11 @@ EXPORT OPTIONS:
                                  applies, so the two agree)
     --pdf                        write PDF instead of SVG
     --eps                        write EPS instead of SVG
+    --png                        write PNG instead of SVG
+    --dpi <n>                    PNG resolution, 72 to 2400 (default: 300).
+                                 Refused, not clamped, and refused without
+                                 --png: the other three formats are vector and
+                                 have no resolution to set
     --mm <width>                 final printed width in millimetres
     --journal <name>             column width and type floor from a preset
     --column <single|double>     which of the preset's two column widths
@@ -1519,12 +1524,6 @@ fn cmd_checksum(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Render each molecule's map to a standalone SVG.
-///
-/// SVG rather than PNG because a map is a figure: it goes into a paper at
-/// whatever size the journal asks for, and a raster of it does not. The output
-/// is self-contained — no external stylesheet, no font file, no script — so it
-/// opens in Illustrator, Inkscape and a browser alike.
 /// Which cutters `pl export` puts on the figure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sites {
@@ -1584,13 +1583,54 @@ impl Sites {
     }
 }
 
+/// Render each molecule's map to a standalone figure: SVG, PDF, EPS or PNG.
+///
+/// SVG is the default, and the reason is unchanged by the other three: a map is
+/// a figure, it goes into a paper at whatever width the journal asks for, and
+/// only a vector form survives being scaled there. The SVG is self-contained —
+/// no external stylesheet, no font file, no script — so it opens in
+/// Illustrator, Inkscape and a browser alike. `--pdf` and `--eps` are the other
+/// two vector forms. `--png` is the raster one, and it exists because some
+/// submission systems take nothing else.
+///
+/// THIS BLOCK USED TO ARGUE THE OPPOSITE — "SVG rather than PNG because a map
+/// is a figure ... and a raster of it does not" — and it was attached to
+/// [`Sites`] rather than to this function, because the two doc runs had been
+/// written with no blank line between them. So the rationale documented a
+/// four-variant cutter filter, and it argued against a flag this file's own
+/// usage line advertises. `Sites` is private, so a rustdoc reader would never
+/// have seen the join; only somebody reading the source, who would have read it
+/// as policy. `the_export_rationale_is_attached_to_the_export_verb` pins both
+/// halves.
+///
+/// # What this function enforces that the other export paths do not
+///
+/// - `--dpi` is 72 to 2400 and defaults to 300. **Refused, not clamped**: a
+///   figure quietly written at a resolution nobody asked for is a figure
+///   somebody sends to a publisher believing otherwise. 72 is the floor
+///   because below it the raster is coarser than the points the scene is
+///   measured in; 2400 the ceiling because a double-column figure is already
+///   about 17,000 px across there.
+/// - `--dpi` without `--png` is an error. SVG, PDF and EPS have no resolution
+///   to set, and a flag that is accepted and discarded is how a user comes to
+///   believe a file is 600 dpi.
+/// - At most one of `--png`, `--pdf`, `--eps`. One figure is written per
+///   input, so a second format flag is doing nothing and nothing on screen
+///   says which.
+///
+/// Printed width comes from `--mm`, or from `--journal` with `--column`, for
+/// all four formats alike — one `page::Fit`, so they cannot disagree about what
+/// 89 mm means. Only the PNG turns that width into a pixel count, and `pHYs` is
+/// where it records the resolution it did so at, because a raster that does not
+/// carry its own resolution arrives in a manuscript at whatever size the layout
+/// program guesses.
 fn cmd_export(args: &[String]) -> Result<(), String> {
     let a = parse_args(
         args,
         &[
-            "outdir", "o", "width", "height", "mm", "journal", "column", "sites",
+            "outdir", "o", "width", "height", "mm", "journal", "column", "sites", "dpi",
         ],
-        &["pdf", "eps", "stdout", "no-ruler", "check-contrast"],
+        &["pdf", "eps", "png", "stdout", "no-ruler", "check-contrast"],
     )?;
     a.require_files()?;
 
@@ -1694,6 +1734,52 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         (None, None) => None,
     };
 
+    // Resolution, for the one format that has any.
+    //
+    // Refused rather than clamped, and refused positively: a figure quietly
+    // exported at a dpi nobody asked for is a figure somebody sends to a
+    // publisher believing otherwise. 72 is the floor because below it the
+    // raster is coarser than the points the scene is measured in; 2400 is the
+    // ceiling because a full-width figure at 2400 dpi is already 17,000 px
+    // across and no press asks for more.
+    //
+    // THIS BAND BOUNDS ONE FLAG, NOT THE CANVAS. So do `--mm`'s and
+    // `--width`/`--height`'s. The canvas is their product, and 2400 dpi at a
+    // double column — the very figure the sentence above uses to justify the
+    // ceiling — is 17,291 px square, 299 megapixels, 11 GB of live heap. That
+    // is caught by `pl_draw::MAX_PIXELS` where the pixels are about to be
+    // allocated, with the dimensions and a dpi that fits in the message. It is
+    // not caught here, because at this point the scene does not exist yet and
+    // the aspect ratio that decides the height is not known.
+    let dpi: f64 = match a.get("dpi") {
+        None => 300.0,
+        Some(v) => v
+            .parse::<f64>()
+            .ok()
+            .filter(|d| (72.0..=2400.0).contains(d))
+            .ok_or_else(|| format!("--dpi {v:?}: expected 72 to 2400"))?,
+    };
+    if a.has("dpi") && !a.has("png") {
+        return Err(
+            "--dpi sets a raster's resolution, and SVG, PDF and EPS have none. \
+             Add --png, or drop --dpi."
+                .into(),
+        );
+    }
+    // Two format flags means one of them is being ignored and the user cannot
+    // tell which. The same refusal `--column` and `--mm` already get.
+    let picked: Vec<&str> = ["png", "pdf", "eps"]
+        .into_iter()
+        .filter(|f| a.has(f))
+        .collect();
+    if picked.len() > 1 {
+        return Err(format!(
+            "--{} both name an output format, and one figure is written per input, \
+             so one of them is doing nothing. Give one.",
+            picked.join(" and --")
+        ));
+    }
+
     let outdir = a.get("outdir").or_else(|| a.get("o")).map(PathBuf::from);
     let to_stdout = a.has("stdout");
     let mut claimed: Vec<PathBuf> = Vec::new();
@@ -1724,6 +1810,8 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             "eps"
         } else if a.has("pdf") {
             "pdf"
+        } else if a.has("png") {
+            "png"
         } else {
             "svg"
         };
@@ -1799,6 +1887,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
 
         let as_pdf = a.has("pdf");
         let as_eps = a.has("eps");
+        let as_png = a.has("png");
         let (bytes, drawn, font) = if as_eps {
             let (scene, d) = pl_draw::scene(&mol, opts.clone());
             let fit = width_mm.map(|mm| pl_draw::page::Fit::to_width_mm(&scene, mm));
@@ -1807,6 +1896,37 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         } else if as_pdf {
             let (b, d, f) = pl_draw::circular_pdf(&mol, opts.clone());
             (b, d, Some(f))
+        } else if as_png {
+            // White, matching the background `--check-contrast` audits against
+            // a few lines down. A transparent figure would make that audit a
+            // claim about a background the file does not have.
+            //
+            // REFUSED RATHER THAN ATTEMPTED when the canvas is past
+            // `pl_draw::MAX_PIXELS`. Every band above is on one flag and the
+            // canvas is their product, so `--journal nature --column double
+            // --dpi 2400` clears all of them and still asks for 11 GB. The
+            // error carries the dimensions, the ceiling and a dpi that fits.
+            // The whole run stops rather than this one file, because the flags
+            // that caused it are the same for every input.
+            let (b, d, r) =
+                pl_draw::circular_png_at(&mol, opts.clone(), width_mm, dpi, [255, 255, 255])
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+            // Neither of these is allowed to be silent. A label that lost a
+            // glyph and a colour that did not parse are both defects in the
+            // picture that nothing downstream will mention.
+            for s in &r.unencodable {
+                eprintln!(
+                    "pl: {}: {s:?} holds a character the figure's typeface cannot draw",
+                    path.display()
+                );
+            }
+            for c in &r.unparsed_colours {
+                eprintln!(
+                    "pl: {}: {c:?} is not a colour this renderer reads, so it was not drawn",
+                    path.display()
+                );
+            }
+            (b, d, None)
         } else {
             let (s, d) = pl_draw::circular_svg(&mol, opts.clone());
             (s.into_bytes(), d, None)
@@ -1844,6 +1964,56 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         // The check the physical size exists for. Report it once per file,
         // whatever the format, because it is a property of the figure and not
         // of the encoder.
+        // A raster's resolution is the other half of its physical size, and
+        // `min_dpi_line_art` has sat on `Preset` since it was written with
+        // nothing reading it. A PNG under a journal's floor is the failure this
+        // whole row of the roadmap is about, so it is said out loud.
+        if as_png {
+            if width_mm.is_some() {
+                // `png_budget`, NOT `page::Fit::pixels`. The two are different
+                // roundings and disagree by a pixel on most of their domain:
+                // `Fit` rounds each axis against the printed size on its own,
+                // while the canvas takes its scale from the ALREADY ROUNDED
+                // width and rounds the height against that. Swept over five
+                // aspect ratios x `--mm` 20..=200 x `--dpi` {72, 150, 300,
+                // 600}, 1,063 of 3,620 combinations differ — 656 with the file
+                // taller than `Fit` reports and 407 shorter. `--width 720
+                // --height 540 --mm 96 --dpi 300` printed 1134 x 850 while
+                // IHDR said 1134 x 851.
+                //
+                // A figure sized to a journal's pixel requirement is sized
+                // against this line, so it has to be the file's own number.
+                // `png_budget` is what `png_at` sized the canvas with, and it
+                // costs no pixels to ask again. `Oversize` carries the same two
+                // dimensions, so the `Err` arm reports rather than panics —
+                // though it is unreachable here, the export above having
+                // already returned on it.
+                let (scene, _) = pl_draw::scene(&mol, opts.clone());
+                let (w, h) =
+                    pl_draw::png_budget(&scene, width_mm, dpi).unwrap_or_else(|o| (o.w, o.h));
+                eprintln!("pl: {}: {w} x {h} px at {dpi:.0} dpi", path.display());
+            } else {
+                eprintln!(
+                    "pl: {}: {dpi:.0} dpi, but no printed width was given, so the \
+                     figure has no physical size for that to be a resolution OF. \
+                     Add --mm <width> or --journal <name>.",
+                    path.display()
+                );
+            }
+            if let Some(p) = journal {
+                if dpi < p.min_dpi_line_art {
+                    eprintln!(
+                        "pl: {}: {dpi:.0} dpi is below {}'s {:.0} dpi minimum for line \
+                         art / raise --dpi, or export SVG, PDF or EPS, which have no \
+                         resolution and are what this publisher prefers",
+                        path.display(),
+                        p.name,
+                        p.min_dpi_line_art
+                    );
+                }
+            }
+        }
+
         if let Some(mm) = width_mm {
             let (scene, _) = pl_draw::scene(&mol, opts.clone());
             let fit = pl_draw::page::Fit::to_width_mm(&scene, mm);
@@ -2006,6 +2176,8 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             "eps"
         } else if as_pdf {
             "pdf"
+        } else if as_png {
+            "png"
         } else {
             "svg"
         };
@@ -3180,13 +3352,23 @@ fn cmd_ends(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Where primers anneal on a template, with footprint and tail kept apart.
-/// The paragraph a user pastes into a paper.
+/// Every source behind the compiled-in feature database, and what each one is
+/// licensed under.
 ///
-/// Generated from the parameters the code actually uses rather than written
-/// out, so a changed default changes the text. Prose in a manual drifts from
-/// the code the first time a constant moves, and the drift is invisible: the
-/// sentence still reads correctly and is no longer true.
+/// The (source, licence) → field-count table IS computed, from the provenance
+/// rows the binary carries, so a source that gains rows changes the counts.
+/// **The attribution block below it is not**: it is a hand-written literal, and
+/// a source added to `features/provenance.tsv` gains no attribution paragraph
+/// until somebody writes one here. That is a real gap and it is stated rather
+/// than papered over, because the doc that used to sit here claimed the
+/// opposite — "generated from the parameters the code actually uses rather than
+/// written out, so a changed default changes the text" — over a function that
+/// also had nothing to do with the two sentences of primer prose above it.
+/// Those belonged to [`cmd_primers`] and [`cmd_methods`] and have gone back.
+///
+/// The full notice, including the per-family Rfam credit table and the list of
+/// sources deliberately not used, is `features/NOTICE`; this prints the subset
+/// that has to travel inside the executable.
 fn cmd_licences(_args: &[String]) -> Result<(), String> {
     let (db, errs) = pl_features::Db::builtin();
     // If the compiled-in table did not load cleanly, say so rather than
@@ -3258,6 +3440,18 @@ SIGN-OFF: {reviewed} of {} record(s) have been reviewed by a named curator.
     Ok(())
 }
 
+/// The paragraph a user pastes into a paper, for one operation or for all of
+/// them.
+///
+/// Generated from the parameters the code actually uses rather than written
+/// out, so a changed default changes the text. Prose in a manual drifts from
+/// the code the first time a constant moves, and the drift is invisible: the
+/// sentence still reads correctly and is no longer true. (This is where those
+/// two sentences belong; they had been sitting on `cmd_licences`, whose
+/// attribution block is the one place in this file that *is* written out.)
+///
+/// The topic list comes from `pl_doc::TOPICS` rather than from a list here, for
+/// the same reason.
 fn cmd_methods(args: &[String]) -> Result<(), String> {
     let a = parse_args(args, &[], &[])?;
     let names: Vec<String> = a.files.iter().map(|p| p.display().to_string()).collect();
@@ -3761,7 +3955,7 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
             // table was signed off on 2026-07-28 an empty result carried the
             // "no rows are reviewed" notice and could not be mistaken for a
             // statement about the molecule; now that it can, say what was
-            // actually searched. 84 records is not the set of features that
+            // actually searched. 89 records is not the set of features that
             // exist, and a user who reads "nothing found" as "no features here"
             // has been misled by us, not by their plasmid.
             println!(
@@ -4276,6 +4470,11 @@ fn cmd_orfs(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Where primers anneal on a template, with footprint and tail kept apart.
+///
+/// The distinction is the whole point: only the footprint is duplex on the
+/// first cycle, so it is the footprint a Tm belongs to. This sentence had
+/// drifted onto `cmd_licences`, three functions and a thousand lines away.
 fn cmd_primers(args: &[String]) -> Result<(), String> {
     let a = parse_args(
         args,
@@ -5317,6 +5516,170 @@ fn today() -> (u32, usize, i32) {
 mod tests {
     use super::*;
 
+    /// The run of `///` lines immediately above the item that starts with
+    /// `item`, joined into one string.
+    ///
+    /// Attributes are stepped over, because `#[derive(..)]` sits between a doc
+    /// block and its enum and would otherwise cut the block off.
+    fn doc_above(src: &str, item: &str) -> String {
+        let lines: Vec<&str> = src.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with(item))
+            .unwrap_or_else(|| panic!("main.rs no longer declares {item:?}"));
+        let mut doc: Vec<&str> = Vec::new();
+        let mut i = at;
+        while i > 0 {
+            i -= 1;
+            let t = lines[i].trim_start();
+            if let Some(rest) = t.strip_prefix("///") {
+                doc.push(rest.trim());
+            } else if !t.starts_with("#[") {
+                break;
+            }
+        }
+        doc.reverse();
+        doc.join(" ")
+    }
+
+    /// `cmd_export`'s rationale has to be attached to `cmd_export`.
+    ///
+    /// PROVEN TO FAIL against the working tree before 2026-08-04, where the
+    /// whole "Render each molecule's map to a standalone SVG / SVG rather than
+    /// PNG because a map is a figure ... and a raster of it does not" block ran
+    /// unbroken into `/// Which cutters pl export puts on the figure` and
+    /// attached to `enum Sites`, leaving `fn cmd_export` with no doc at all.
+    /// Observed failure: `fn cmd_export carries no doc comment at all`.
+    ///
+    /// Two defects in one, which is why both halves are asserted. The rationale
+    /// documented the wrong item — `Sites` is a four-variant filter enum and
+    /// says nothing about output formats — and it argued AGAINST a format that
+    /// had shipped hours earlier, while the usage line eleven hundred lines
+    /// above already advertised "SVG, PDF, EPS or PNG". `Sites` is private, so
+    /// no rustdoc reader would ever have seen the join; only somebody reading
+    /// the source would, and they would have read it as settled policy.
+    ///
+    /// The format list is taken from the usage line rather than written out
+    /// here, so a fifth format added to `pl --help` and not to the doc fails.
+    ///
+    /// # The help text, added 2026-08-04
+    ///
+    /// The doc comment above `cmd_export` is for somebody reading the source.
+    /// A USER reads `pl --help`, and that half was unpinned: the usage line
+    /// advertised "SVG, PDF, EPS or PNG" while EXPORT OPTIONS listed `--pdf`
+    /// and `--eps` and stopped. `--png` and `--dpi` were accepted, validated
+    /// (72..=2400, refused without `--png`) and undocumented, so the only way
+    /// to learn the flag that writes the format the usage line advertises was
+    /// to read `parse_args`. PROVEN TO FAIL against that tree, verbatim:
+    ///
+    /// ```text
+    /// cmd_export accepts flags `pl --help`'s EXPORT OPTIONS block does not
+    /// document: ["--dpi", "--png"]
+    /// ```
+    ///
+    /// The flag list is read out of `cmd_export`'s own `parse_args` call
+    /// rather than written out here, for the same reason the format list comes
+    /// off the usage line: a flag added to the parser and not to the help is
+    /// the defect, and enumerating them here would just be a third copy to go
+    /// stale.
+    #[test]
+    fn the_export_rationale_is_attached_to_the_export_verb() {
+        const SRC: &str = include_str!("main.rs");
+
+        let export = doc_above(SRC, "fn cmd_export(");
+        assert!(
+            !export.is_empty(),
+            "fn cmd_export carries no doc comment at all"
+        );
+
+        // The user-facing list and the source reader's list have to name the
+        // same formats. `find` takes the usage line, which is the first
+        // occurrence in the file.
+        let usage = SRC
+            .lines()
+            .find(|l| l.contains("pl export "))
+            .expect("main.rs no longer has a `pl export` usage line");
+        let shouted = export.to_uppercase();
+        for fmt in ["SVG", "PDF", "EPS", "PNG"] {
+            assert!(
+                usage.contains(fmt),
+                "the usage line no longer advertises {fmt}: {usage:?}"
+            );
+            assert!(
+                shouted.contains(fmt),
+                "`pl --help` advertises {fmt} and cmd_export's doc does not \
+                 mention it"
+            );
+        }
+        // The rules that exist only for the raster format, and only in this
+        // function.
+        assert!(
+            export.contains("--dpi"),
+            "cmd_export's doc says nothing about --dpi, which it is the only \
+             verb to accept and which it refuses rather than clamps"
+        );
+
+        // The user's half. Every flag the parser accepts has to appear in the
+        // block a user reads, taken from `parse_args` rather than listed here
+        // so a flag added to one and not the other is what fails.
+        let call = SRC
+            .split_once("fn cmd_export(")
+            .expect("cmd_export is still in this file")
+            .1;
+        let call = &call[..call.find(")?;").expect("cmd_export still calls parse_args")];
+        let flags: Vec<&str> = call
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| *s != "args")
+            .collect();
+        assert!(
+            flags.len() > 10,
+            "cmd_export's parse_args call no longer reads as a list of flag \
+             names, so this assertion is measuring nothing: {flags:?}"
+        );
+
+        // EXPORT OPTIONS runs from its heading to the next one; every line in
+        // between is indented and the headings are not.
+        let block: String = USAGE
+            .lines()
+            .skip_while(|l| *l != "EXPORT OPTIONS:")
+            .skip(1)
+            .take_while(|l| l.starts_with(' '))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !block.is_empty(),
+            "`pl --help` no longer has an EXPORT OPTIONS block"
+        );
+        // One-character names are the short spelling, `-o`; everything else is
+        // long, `--outdir`.
+        let missing: Vec<String> = flags
+            .iter()
+            .map(|f| {
+                if f.len() == 1 {
+                    format!("-{f}")
+                } else {
+                    format!("--{f}")
+                }
+            })
+            .filter(|f| !block.contains(f.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "cmd_export accepts flags `pl --help`'s EXPORT OPTIONS block does \
+             not document: {missing:?}"
+        );
+
+        // ...and the enum keeps its one line about cutters, with none of the
+        // above having leaked back onto it.
+        let sites = doc_above(SRC, "enum Sites {");
+        assert_eq!(
+            sites, "Which cutters `pl export` puts on the figure.",
+            "enum Sites has picked up doc text that is not about cutters"
+        );
+    }
+
     #[test]
     fn flags_parse_in_both_spellings() {
         let a = parse_args(
@@ -5459,6 +5822,425 @@ mod tests {
         assert!(
             core == "unknown" || (core.len() >= 7 && core.chars().all(|c| c.is_ascii_hexdigit())),
             "{commit:?} is neither a short hash nor 'unknown'"
+        );
+    }
+
+    /// The workspace root, from this crate's manifest directory.
+    ///
+    /// `bins/pl` -> `bins` -> the root. `CARGO_MANIFEST_DIR` is absolute and
+    /// baked in at compile time, so the walk below does not depend on which
+    /// directory `cargo test` was invoked from.
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("bins/pl sits two levels below the workspace root")
+            .to_path_buf()
+    }
+
+    /// Every `.rs` file at or below `dir`, appended to `out`.
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("a readable directory entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The `> **Status: pre-release.**` blockquote, `>` markers stripped and
+    /// every run of whitespace collapsed to one space.
+    ///
+    /// Flattened for the same reason [`bins/pl-gui`]'s `flat_notice` is: README
+    /// hard-wraps, so every one of the four claims below spans a line break --
+    /// "125,788 lines of dependency-free Rust" was split after "lines", and
+    /// "1,593 `#[test]` functions" after "and a". A `find` against the raw text
+    /// would stop matching the moment a re-wrap moved a word, in silence and in
+    /// the passing direction.
+    fn status_blockquote(readme: &str) -> String {
+        let mut words: Vec<&str> = Vec::new();
+        let mut inside = false;
+        for line in readme.lines() {
+            let Some(rest) = line.strip_prefix('>') else {
+                if inside {
+                    break;
+                }
+                continue;
+            };
+            if rest.trim_start().starts_with("**Status:") {
+                inside = true;
+            }
+            if inside {
+                words.extend(rest.split_whitespace());
+            }
+        }
+        words.join(" ")
+    }
+
+    /// The number written immediately before `marker`, thousands separators
+    /// removed; `None` if `marker` is gone or is not preceded by digits.
+    ///
+    /// Walking backwards over digits rather than splitting on whitespace is
+    /// what lets one helper read both `"across 20 workspace crates"` and
+    /// `"a 43-step gate"`, where the number is glued to the marker.
+    fn number_before(flat: &str, marker: &str) -> Option<u64> {
+        let at = flat.find(marker)?;
+        let head = flat[..at].trim_end();
+        let digits: String = head
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit() || *c == ',')
+            .filter(|c| *c != ',')
+            .collect();
+        if digits.is_empty() {
+            return None;
+        }
+        digits.chars().rev().collect::<String>().parse().ok()
+    }
+
+    /// Every count in README's status blockquote is a count of the tree.
+    ///
+    /// PROVEN TO FAIL against the README in the working tree before this test
+    /// existed. Observed failure, verbatim:
+    ///
+    /// ```text
+    /// README's status blockquote is stale in 4 places:
+    ///   - claims 125788 before " lines of dependency-free Rust"; the tree has
+    ///     128951 (newline bytes in those files, i.e. `wc -l`)
+    ///   - claims 119 before " `.rs` files under"; the tree has 120 (*.rs files
+    ///     under crates/ and bins/)
+    ///   - claims 1593 before " `#[test]` functions"; the tree has 1620 (lines
+    ///     matching `^\s*#\[test\]` in those files)
+    ///   - claims 43 before "-step gate"; the tree has 44 (lines starting with
+    ///     `Step '` in tools/ci.ps1)
+    /// ```
+    ///
+    /// Four false measured claims on the repository's front page, all four
+    /// dated "Counted 2026-08-04" -- and all four were true when they were
+    /// written that morning. The recount that fixed E31 went stale the same day
+    /// it landed, because later work added a crate's worth of code, twenty-odd
+    /// tests and five gate steps. That is the argument for this test: a number
+    /// nobody recomputes is a number that decays, and the README states these
+    /// as measurements, not as impressions.
+    ///
+    /// THE TRADEOFF, stated so nobody has to rediscover it: this is a live
+    /// count, so **every commit that adds a `.rs` line, a `#[test]` or a
+    /// `Step` in `tools/ci.ps1` must also edit README.md**, or `cargo test
+    /// --workspace --lib --bins` (`tools/ci.ps1:103`) goes red. That is
+    /// deliberately annoying. The alternative -- correcting the four numbers
+    /// and trusting the next person to recount -- is exactly what was tried on
+    /// 2026-08-04 and failed inside a day. The friction is the mechanism, and
+    /// the failure message prints the right numbers, so the fix is a copy out
+    /// of the test output.
+    ///
+    /// # The sixth marker, and what the first five could not see
+    ///
+    /// A pinned number is not a pinned sentence. The marker used to be
+    /// `" lines of dependency-free Rust"`, so the digits were recomputed every
+    /// run while the adjective in the middle of them was never checked -- and
+    /// it was false. The two markers below now differ by about 63%, which is
+    /// how much of that one count was never dependency-free at all. It is
+    /// taken over `crates/` and `bins/`,
+    /// which includes the two members that do take external dependencies:
+    /// `bins/pl-gui` (eframe, rfd, egui-phosphor) and `crates/pl-py` (pyo3),
+    /// whose own manifest comment calls it "the first crate here with an
+    /// external dependency". README contradicted itself about this 57 lines
+    /// further down, where "**Zero external dependencies.**" is scoped to
+    /// `crates/` + `bins/pl`.
+    ///
+    /// So the claim was split in two -- all the Rust, and the dependency-free
+    /// subset -- and the subset gets its own marker and its own measurement.
+    /// **Derived from the manifests, never listed here**: a member counts as
+    /// dependency-free when every key in its `[dependencies]`,
+    /// `[dev-dependencies]` and `[build-dependencies]` names another member of
+    /// this workspace. Adding `serde` to `pl-core` therefore takes that whole
+    /// crate out of the subset on the next run, where a hand-written exclusion
+    /// list would have kept counting it. The membership of the set is too, so
+    /// a third dependency-taking crate fails with a message that says to
+    /// re-read the paragraph rather than to copy a new number into it.
+    ///
+    /// Each measurement is defined here rather than described, because the
+    /// test count is the one place where two defensible methods disagree. On
+    /// the tree as it stood before this test was added, lines matching
+    /// `^\s*#\[test\]` gave 1,619 and bare occurrences of the attribute gave
+    /// 1,620; the extra one is prose, `bins/pl-gui/src/session.rs:609` writing
+    /// "two `#[test]`s would be two threads" inside a doc comment. So the
+    /// line-anchored count is the one that counts test functions, the loose
+    /// one drifts with how often people write about tests, and README names
+    /// which it used. An unstated method is how the next drift hides.
+    ///
+    /// `bins/pl` is the home for this because it needs `std::fs` at test time:
+    /// `crates/pl-design` and `crates/pl-index` ban that even in tests via
+    /// their purity scanners, and an integration test under `tests/` would not
+    /// be selected by the gate's `--lib --bins` (that was E17).
+    #[test]
+    fn the_readme_headline_counts_are_the_counts_in_the_tree() {
+        const README: &str = include_str!("../../../README.md");
+
+        let root = repo_root();
+        let mut sources = Vec::new();
+        for dir in ["crates", "bins"] {
+            rust_sources(&root.join(dir), &mut sources);
+        }
+
+        let mut lines = 0usize;
+        let mut tests = 0usize;
+        for path in &sources {
+            let text =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            // Newline BYTES, not `str::lines()`, so this is `wc -l` exactly
+            // even for a file with no final newline. Every file in the tree
+            // has one today (rustfmt guarantees it), so the two agree; the
+            // byte count is the one that keeps agreeing if that changes.
+            lines += text.bytes().filter(|b| *b == b'\n').count();
+            tests += text
+                .lines()
+                .filter(|l| l.trim_start().starts_with("#[test]"))
+                .count();
+        }
+
+        let ci = std::fs::read_to_string(root.join("tools").join("ci.ps1"))
+            .expect("tools/ci.ps1 is readable");
+        let steps = ci.lines().filter(|l| l.starts_with("Step '")).count();
+
+        // "Workspace crates" is what the manifest says it is, not what happens
+        // to have a directory: an unlisted directory under `crates/` is not a
+        // workspace member and is not built by anything.
+        let manifest =
+            std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml is readable");
+        let members: Vec<&str> = manifest
+            .lines()
+            .skip_while(|l| l.trim() != "members = [")
+            .skip(1)
+            .take_while(|l| l.trim() != "]")
+            .filter_map(|l| l.trim().trim_end_matches(',').strip_prefix('"'))
+            .filter_map(|l| l.strip_suffix('"'))
+            .collect();
+        assert!(!members.is_empty(), "the [workspace] members list is empty");
+
+        // A member's own name, which is what a path dependency on it is spelled
+        // as. `pl-core.workspace = true` names a crate in this tree; `pyo3 =
+        // "0.29"` does not, and that difference is the whole of the test below.
+        let names: Vec<&str> = members
+            .iter()
+            .map(|m| m.rsplit('/').next().expect("a non-empty member path"))
+            .collect();
+
+        // Every dependency key a manifest declares, across `[dependencies]`,
+        // `[dev-dependencies]` and `[build-dependencies]`.
+        //
+        // A key is a line that OPENS with a bare identifier followed by `=` or
+        // `.`, which is what skips the continuation lines of the multi-line
+        // inline tables in `bins/pl-gui/Cargo.toml` — `"glow",` and `] }` are
+        // not dependency names, and counting them as unknown crates would have
+        // read as "external" for the wrong reason.
+        let dep_keys = |man: &str| -> Vec<String> {
+            let mut out = Vec::new();
+            let mut in_deps = false;
+            for line in man.lines() {
+                let l = line.trim();
+                if let Some(section) = l.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                    in_deps = section.ends_with("dependencies");
+                    continue;
+                }
+                if !in_deps || l.is_empty() || l.starts_with('#') {
+                    continue;
+                }
+                let key: String = l
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                let rest = l[key.len()..].trim_start();
+                if !key.is_empty() && (rest.starts_with('=') || rest.starts_with('.')) {
+                    out.push(key);
+                }
+            }
+            out
+        };
+
+        // "Dependency-free" is a property of a crate, not an adjective: a
+        // member is dependency-free when every crate it depends on is another
+        // member of this workspace. Derived rather than listed, so that adding
+        // a dependency to a crate moves its lines out of the count instead of
+        // leaving a hand-written exclusion list to go stale.
+        let mut free_lines = 0usize;
+        let mut with_deps: Vec<&str> = Vec::new();
+        for (m, _) in members.iter().zip(names.iter()) {
+            let man = std::fs::read_to_string(root.join(m).join("Cargo.toml"))
+                .unwrap_or_else(|e| panic!("{m}/Cargo.toml: {e}"));
+            let external: Vec<String> = dep_keys(&man)
+                .into_iter()
+                .filter(|k| !names.contains(&k.as_str()))
+                .collect();
+            let mut mine = Vec::new();
+            rust_sources(&root.join(m), &mut mine);
+            let n: usize = mine
+                .iter()
+                .map(|p| {
+                    std::fs::read_to_string(p)
+                        .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+                        .bytes()
+                        .filter(|b| *b == b'\n')
+                        .count()
+                })
+                .sum();
+            if external.is_empty() {
+                free_lines += n;
+            } else {
+                with_deps.push(m);
+            }
+        }
+        assert_eq!(
+            with_deps,
+            ["crates/pl-py", "bins/pl-gui"],
+            "the set of crates that take an external dependency changed; the \
+             README paragraph names them and has to be re-read, not just \
+             recounted"
+        );
+        let members = members.len();
+
+        let flat = status_blockquote(README);
+        assert!(
+            !flat.is_empty(),
+            "README no longer opens with a `> **Status:` blockquote, so none of \
+             its headline counts can be checked"
+        );
+
+        let mut stale: Vec<String> = Vec::new();
+        for (marker, measured, how) in [
+            (
+                " workspace crates",
+                members,
+                "members in the root Cargo.toml [workspace]",
+            ),
+            (
+                " lines of Rust",
+                lines,
+                "newline bytes in those files, i.e. `wc -l`",
+            ),
+            (
+                " of it dependency-free",
+                free_lines,
+                "the same count over the 18 members whose every dependency is \
+                 another member of this workspace",
+            ),
+            (
+                " `.rs` files under",
+                sources.len(),
+                "*.rs files under crates/ and bins/",
+            ),
+            (
+                " `#[test]` functions",
+                tests,
+                r"lines matching `^\s*#\[test\]` in those files",
+            ),
+            (
+                "-step gate",
+                steps,
+                "lines starting with `Step '` in tools/ci.ps1",
+            ),
+        ] {
+            match number_before(&flat, marker) {
+                None => stale.push(format!(
+                    "the blockquote no longer states a number before {marker:?}; \
+                     the tree has {measured} ({how})"
+                )),
+                Some(claimed) if claimed != measured as u64 => stale.push(format!(
+                    "claims {claimed} before {marker:?}; the tree has {measured} ({how})"
+                )),
+                Some(_) => {}
+            }
+        }
+        assert!(
+            stale.is_empty(),
+            "README's status blockquote is stale in {} places:\n  - {}",
+            stale.len(),
+            stale.join("\n  - ")
+        );
+    }
+
+    /// A gate step that shells out to Python is skipped without it, not failed.
+    ///
+    /// `tools/ci.ps1`'s own header states this as the file's contract: "Steps
+    /// that need something the machine may not have -- a corpus, Python
+    /// oracles, a wasm target -- are SKIPPED with a reason rather than
+    /// failing. A gate that fails for missing optional tooling teaches people
+    /// to ignore it." `Step` takes a `$Precondition` scriptblock for exactly
+    /// that, and its `catch` turns a missing command into FAIL -- so a step
+    /// that invokes `python` and carries no precondition is a red gate on
+    /// every Rust-only machine, which is the outcome the mechanism exists to
+    /// prevent.
+    ///
+    /// PROVEN TO FAIL against `tools/ci.ps1` in the working tree of
+    /// 2026-08-04. Observed failure, verbatim:
+    ///
+    /// ```text
+    /// 2 gate step(s) run `python` with no precondition, so a machine without
+    /// it gets FAIL where the file's header promises SKIP:
+    ///   - ci.ps1:351 Step 'zlib streams vs zlib'
+    ///   - ci.ps1:780 Step 'release script and its manifest'
+    /// ```
+    ///
+    /// The first was added the same day, alongside three siblings that each
+    /// carry one (`HavePy 'PIL'`, `HavePy 'fontTools'`, `HavePy 'resvg_py'`);
+    /// its checker imports only stdlib `zlib`, so `HavePy` was inapplicable
+    /// and `Have python` was dropped with it. The second predates it and was
+    /// already red at HEAD on such a machine.
+    ///
+    /// A false red, not a false green -- but the whole argument for a local
+    /// gate is that a red one means something.
+    ///
+    /// # How a step is delimited
+    ///
+    /// Bodies are indented and `Step` lines and their closing braces are not,
+    /// so a step runs from a line starting `Step '` to the next line starting
+    /// `}`. That closing line is `}` on its own when there is no precondition
+    /// and `} { ... }` when there is. A `Step` that never closes panics rather
+    /// than being skipped silently, and the step count is floored, so a
+    /// reformatting that breaks the delimiter fails this test instead of
+    /// quietly emptying it.
+    #[test]
+    fn every_gate_step_that_needs_python_says_so() {
+        let ci = std::fs::read_to_string(repo_root().join("tools").join("ci.ps1"))
+            .expect("tools/ci.ps1 is readable");
+        let lines: Vec<&str> = ci.lines().collect();
+
+        let mut steps = 0usize;
+        let mut naked: Vec<String> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.starts_with("Step '") {
+                continue;
+            }
+            steps += 1;
+            let name = line.split('\'').nth(1).unwrap_or("?");
+            let end = (i + 1..lines.len())
+                .find(|j| lines[*j].starts_with('}'))
+                .unwrap_or_else(|| panic!("Step '{name}' at ci.ps1:{} never closes", i + 1));
+            let has_precondition = lines[end].trim() != "}";
+            // `python` INVOKED, which is a whitespace-delimited token of its
+            // own -- not `reference/python/tests/xcheck_png.py`, which is an
+            // argument, and not a comment line explaining the mechanism.
+            let runs_python = lines[i..=end]
+                .iter()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .flat_map(|l| l.split_whitespace())
+                .any(|t| t == "python");
+            if runs_python && !has_precondition {
+                naked.push(format!("ci.ps1:{} Step '{name}'", i + 1));
+            }
+        }
+
+        assert!(steps > 30, "only {steps} steps found; the parser is broken");
+
+        assert!(
+            naked.is_empty(),
+            "{} gate step(s) run `python` with no precondition, so a machine \
+             without it gets FAIL where the file's header promises SKIP:\n  - {}",
+            naked.len(),
+            naked.join("\n  - ")
         );
     }
 }

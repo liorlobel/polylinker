@@ -62,6 +62,14 @@ pub struct Layout {
     /// would make the file's meaning depend on a table that can change under it.
     /// The presets choose the number; the file records what was chosen.
     pub figure_mm: Option<f64>,
+
+    /// Resolution for the raster export, in dots per inch.
+    ///
+    /// Not an `Option`: unlike a printed width, a raster always has SOME
+    /// resolution, and there is no honest way to write a PNG without one. 300
+    /// is the floor every journal preset in `pl_draw::page` states for line
+    /// art, so it is the default that does not need explaining.
+    pub figure_dpi: f64,
 }
 
 impl Default for Layout {
@@ -77,6 +85,7 @@ impl Default for Layout {
             orf_min_aa: 30,
             restore_tabs: true,
             figure_mm: None,
+            figure_dpi: 300.0,
         }
     }
 }
@@ -204,6 +213,17 @@ pub fn parse(text: &str) -> Layout {
                     }
                 }
             }
+            // Banded like every other number here, and matching `pl export
+            // --dpi` exactly, so the app and the command line refuse the same
+            // things. A garbled value keeps the default rather than reaching
+            // the encoder: a `figure_dpi: 0` would size the canvas to nothing.
+            "figure_dpi" => {
+                if let Ok(dpi) = v.parse::<f64>() {
+                    if dpi.is_finite() && (72.0..=2400.0).contains(&dpi) {
+                        out.figure_dpi = dpi;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -229,6 +249,10 @@ pub fn render(l: Layout) -> String {
     if let Some(mm) = l.figure_mm {
         s.push_str(&format!("figure_mm: {mm:.1}\n"));
     }
+    // Always written, unlike the width above, because a raster always has a
+    // resolution: there is no "unset" for it, only the default, and writing the
+    // default is what makes the file say what the app will actually do.
+    s.push_str(&format!("figure_dpi: {:.0}\n", l.figure_dpi));
     s
 }
 
@@ -267,6 +291,10 @@ mod tests {
             orf_min_aa: 12,
             restore_tabs: false,
             figure_mm: Some(89.0),
+            // Deliberately not the default, so a `figure_dpi` that never
+            // reached the file would fail here rather than round-trip through
+            // its own absence.
+            figure_dpi: 600.0,
         };
         assert_eq!(parse(&render(l)), l);
     }

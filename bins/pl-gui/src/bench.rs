@@ -133,6 +133,31 @@ impl Default for DocView {
 
 /// One tab: a document, how you were looking at it, and where it autosaves.
 pub struct Tab {
+    /// This tab's name for the rest of the program, for as long as it is open.
+    ///
+    /// A POSITION IS NOT AN IDENTITY, and anything outside `Bench` that holds a
+    /// tab by its position holds something that quietly starts naming a
+    /// different molecule. [`Bench::close`] is a `Vec::remove`, so every later
+    /// tab shifts down by one, and [`Bench::reopen`] pushes at the END rather
+    /// than back where the tab was: close and reopen the second of five tabs and
+    /// the bench that was A,B,C,D,E is A,C,D,E,B, with four of the five indices
+    /// now naming a different document.
+    ///
+    /// `clone::Panel::donor` is the field this exists for. It named the tab the
+    /// insert comes from, its resolution was numeric equality against a freshly
+    /// enumerated bench, and its staleness check fired only when the index
+    /// resolved to NOTHING — never when it resolved to something DIFFERENT. So
+    /// the donor row and the Copy-report text named one plasmid while the plan
+    /// held another's fragments, and Open then built a construct out of the
+    /// second while the screen described the first.
+    ///
+    /// TRAVELS WITH THE TAB through the reopen stack: `close` hands the whole
+    /// `Tab` out and `reopen` puts that same `Tab` back, so Ctrl+W followed by
+    /// Ctrl+Shift+T is the same tab, and anything pointing at it still is.
+    /// Unique for the life of one `Bench` and never reused — `next_id` only ever
+    /// counts up, so a closed tab's id resolves to nothing rather than to
+    /// whatever was opened after it.
+    pub id: TabId,
     pub doc: Document,
     /// The recovery slot this tab's crash copy is written to.
     ///
@@ -165,15 +190,34 @@ pub struct Tab {
     pub view: DocView,
 }
 
+/// A tab's stable name. See [`Tab::id`].
+///
+/// A newtype rather than a bare `u64` so that the one thing it must never be
+/// confused with — a tab's POSITION, which is a `usize` and which every
+/// enumerate-and-compare site also has to hand — cannot be assigned to it by
+/// mistake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TabId(u64);
+
 /// The open documents, and the index of the one on screen.
 #[derive(Default)]
 pub struct Bench {
     tabs: Vec<Tab>,
     /// Always a valid index into `tabs`, or 0 when `tabs` is empty.
     active: usize,
+    /// The id the next tab opened here will be given. Only ever counts up: see
+    /// [`Tab::id`] for why a reused id would be worse than none.
+    next_id: u64,
 }
 
 impl Bench {
+    /// Hand out the next id. The one place a [`TabId`] is made.
+    fn mint(&mut self) -> TabId {
+        let id = TabId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
     /// The document on screen.
     pub fn get(&self) -> Option<&Document> {
         self.tabs.get(self.active).map(|t| &t.doc)
@@ -192,7 +236,9 @@ impl Bench {
     /// unsaved-changes question moved off the open paths entirely and onto the
     /// one place work can still be lost: closing.
     pub fn set(&mut self, d: Document) {
+        let id = self.mint();
         self.tabs.push(Tab {
+            id,
             doc: d,
             view: DocView::default(),
             recovery: None,
@@ -275,7 +321,9 @@ impl Bench {
     /// cannot be: `doc_code` is read from the molecule, and a tab left at the
     /// `DocView` default shows table 1 until it is switched away from and back.
     pub fn push_background(&mut self, d: Document, view: DocView) {
+        let id = self.mint();
         self.tabs.push(Tab {
+            id,
             doc: d,
             view,
             recovery: None,
@@ -330,6 +378,12 @@ impl Bench {
     }
 
     /// Re-open a closed tab at the end, active.
+    ///
+    /// No new id: `t` is the same `Tab` `close` handed out, so it comes back as
+    /// the same tab and anything holding its [`Tab::id`] still names it. That is
+    /// the whole reason the id lives on `Tab` rather than being handed out here.
+    /// It comes back at the END and not where it was, which is exactly the
+    /// reordering that makes a positional reference wrong.
     pub fn reopen(&mut self, t: Tab) {
         self.tabs.push(t);
         self.active = self.tabs.len() - 1;

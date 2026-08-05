@@ -21,15 +21,33 @@
 //!
 //! # The licences, and why they are shown whole
 //!
-//! `NOTICE` lines 443-450 record this gap and name this page as the fix:
+//! `NOTICE`'s "HOW THE OBLIGATION TRAVELS, and what is still owed" paragraph
+//! recorded this gap and named this page as the fix. It now records the page as
+//! what closed it:
 //!
-//! > **STILL OWED:** … it is `pl.exe`, which embeds no fonts at all — the seven
-//! > faces are in `polylinker.exe`, which has no licence view of its own. So the
-//! > honest statement of the gap is that **the GUI cannot yet state its own font
-//! > attribution from inside itself, and it should be able to.**
+//! > It said the GUI had no way to state its own font attribution from inside
+//! > itself, and should have one. It has one. `bins/pl-gui/src/help.rs` is that
+//! > page. It shows NOTICE, LICENSE, TRADEMARKS.md and all seven font licence
+//! > texts whole, each from an `include_str!` rather than a summary, so what a
+//! > user reads is the committed bytes and not a restatement of them.
 //!
-//! Four of the six font licences require the notice to travel with each copy.
-//! Today it travels in `dist/`; a user handed the bare `.exe` has none of it.
+//! **Cited by heading and by quotation, not by line number.** This paragraph
+//! said "`NOTICE` lines 443-450" until 2026-08-04; by then 443-450 was the
+//! Phosphor shaping discussion and the passage had moved to line 511. A line
+//! citation into another file goes stale on any edit above it, silently, while
+//! still reading as authority — and the quotation it carried had never been
+//! verbatim either, so nothing could have caught the drift.
+//! `the_notice_passage_this_page_quotes_is_still_in_notice` now asserts the
+//! quoted words are in the NOTICE this binary ships.
+//!
+//! Seven font licence texts are in [`PAGES`] below, under four licences that
+//! require the notice to accompany each copy: SIL OFL 1.1, MIT, the Bitstream
+//! Vera licence reached through Hack, and UFL 1.0. This said "four of the six"
+//! until 2026-08-04, one short since Liberation arrived. They travel in `dist/`
+//! as well — `tools/release.ps1` copies all seven and refuses to ship without
+//! them, which it did not do for `Liberation-OFL.txt` until 2026-08-04. A user
+//! handed the bare `.exe` still has none of that, which is what this page is
+//! for.
 //!
 //! **Rendered verbatim from `include_str!`, never summarised and never
 //! restated.** Hand-writing the holders into this file would make a third copy
@@ -56,6 +74,16 @@ const PAGES: &[(&str, &str)] = &[
     ("Apache License 2.0", include_str!("../../../LICENSE")),
     ("Trademarks", include_str!("../../../TRADEMARKS.md")),
     ("IBM Plex — OFL", include_str!("../fonts/IBMPlex-OFL.txt")),
+    // A different file from the Plex OFL above -- the same licence, but
+    // different copyright lines and different Reserved Font Names -- so it is
+    // shown separately rather than deduplicated against it. These two faces
+    // are never drawn on screen; `pl-draw` fills their outlines when exporting
+    // a PNG, and a licence that travels only with the crate is a licence the
+    // person holding the .exe does not have.
+    (
+        "Liberation Sans — OFL",
+        include_str!("../../../crates/pl-draw/fonts/Liberation-OFL.txt"),
+    ),
     (
         "Hack — MIT and Bitstream Vera",
         include_str!("../fonts/Hack-MIT-and-BitstreamVera.txt"),
@@ -300,14 +328,19 @@ mod tests {
 
     /// Every licence this binary owes is compiled into it and non-empty.
     ///
-    /// `NOTICE` records the gap this closes: the seven faces are in
+    /// `NOTICE` records the gap this closes: the faces are in
     /// `polylinker.exe`, which had no licence view of its own, and four of the
-    /// six font licences require the notice to travel with each copy. An
+    /// font licences require the notice to travel with each copy. An
     /// `include_str!` that resolved to an empty file would satisfy the compiler
     /// and ship nothing.
+    ///
+    /// The count went 9 → 10 on 2026-08-03 with the two Liberation faces
+    /// `pl-draw` fills outlines from. They are never drawn on screen, and that
+    /// is exactly why the page matters: nothing in the interface would look
+    /// wrong if their licence were missing.
     #[test]
     fn every_notice_this_binary_owes_is_compiled_into_it() {
-        assert_eq!(PAGES.len(), 9, "a licence page was added or lost");
+        assert_eq!(PAGES.len(), 10, "a licence page was added or lost");
         for (name, text) in PAGES {
             assert!(
                 text.len() > 400,
@@ -326,6 +359,10 @@ mod tests {
             "Google Inc",
             "Bold Monday",
             "Phosphor Icons",
+            // The Liberation faces, whose OFL clause 4 attribution has no other
+            // route to somebody holding only the .exe.
+            "Red Hat, Inc.",
+            "Steve Matteson",
         ] {
             assert!(
                 notice.contains(owed),

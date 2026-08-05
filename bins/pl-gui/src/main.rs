@@ -10,6 +10,7 @@
 
 mod aa;
 mod annot;
+mod atomic;
 mod bench;
 mod clone;
 mod design;
@@ -34,7 +35,7 @@ mod settings;
 mod sfnt;
 mod theme;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Layout, RichText, Sense, Ui};
 use pl_core::Strand;
@@ -608,11 +609,128 @@ fn debug_geometry() -> bool {
     matches!(std::env::var("PL_GUI_DEBUG_GEOMETRY").as_deref(), Ok("1"))
 }
 
+/// The window icon's edge, in pixels, and the size of the `.ico` frame it was
+/// taken from. See [`window_icon`].
+const ICON_PX: u32 = 64;
+
+/// The window icon's pixels: 64 x 64 x 4 = 16,384 bytes of non-premultiplied
+/// RGBA8, top row first, written by `icon/build-icon.py` from
+/// `icon/polylinker.svg`.
+///
+/// A RAW BLOB AND NOT THE `.ico`, because `egui::IconData` is `Vec<u8>` plus a
+/// width and a height and there is no decoder here to get from one to the
+/// other; see [`window_icon`] for the whole argument.
+const ICON_RGBA: &[u8] = include_bytes!("../icon/polylinker-64.rgba");
+
+/// The picture the RUNNING WINDOW shows — the taskbar button, Alt-Tab, and the
+/// title bar.
+///
+/// **THIS IS NOT THE ICON IN THE EXECUTABLE, AND THAT IS THE WHOLE REASON THIS
+/// EXISTS.** `bins/winres.rs` writes a `.res` holding an RT_GROUP_ICON and nine
+/// RT_ICONs, `build.rs` links it with `cargo:rustc-link-arg-bin`, and the gate
+/// step `the built binaries carry their icon and version resource` proves every
+/// frame of it is byte-identical to `icon/polylinker.ico`. All of that is read
+/// by the SHELL: Explorer's file list, the Start Menu shortcut, Add/Remove
+/// Programs. **Nothing in the window stack looks at it.** A window's icon on
+/// Windows is an `HICON` handed over with `WM_SETICON`, on X11 a `_NET_WM_ICON`
+/// property, and both are fed from whatever `ViewportBuilder::with_icon` was
+/// given.
+///
+/// **AND THE FALLBACK IS NOT "NO ICON", WHICH IS WHY THIS WENT UNNOTICED.**
+/// `eframe::native::epi_integration` reads `native_options.viewport.icon` and
+/// `unwrap_or_else(|| Arc::new(load_default_egui_icon()))`, which is
+/// `include_bytes!("../../data/icon.png")` — a 512x512 RGBA image of egui's own
+/// logo. So the perfectly-iconned polylinker.exe was putting THE EGUI LOGO on
+/// its taskbar button, Alt-Tab entry and title bar, which reads as a deliberate
+/// choice rather than as a missing call.
+///
+/// # One source, because this repository keeps losing that argument
+///
+/// The master is `icon/polylinker.svg` — four rectangles, `#0072B2` and
+/// `#E69F00`. `icon/build-icon.py` rasterises it nine times through resvg,
+/// writes the `.ico`, and writes THE SAME 64 px `Image` out as this blob. Not a
+/// second render and not a resample: one `frames[SIZES.index(64)]`, used twice.
+///
+/// Four options were weighed and three rejected:
+///
+/// * Decoding a frame out of the committed `.ico` at startup. Its frames are
+///   PNG, so it needs an inflate, and the only one in this repository is
+///   `pl-draw/src/deflate/tests.rs`'s — `#[cfg(test)]`, and its own module
+///   header says it is deliberately written from RFC 1951 "to share as little
+///   reasoning with the encoder as possible". Promoting it makes it product
+///   code with product correctness obligations and quietly turns the encoder's
+///   only independent oracle into a sibling of the thing it checks. It would
+///   also need a PNG *reader*, and this project has none — `pl-draw` writes PNG
+///   and nothing anywhere reads one — so an icon would introduce a decoder
+///   surface bigger than the icon.
+/// * Drawing the four rectangles into a buffer in Rust at startup. Tiny and
+///   exact, and a SECOND COPY OF THE GEOMETRY, which is the drift that has bitten
+///   this repository repeatedly. Rejected on that alone.
+/// * Rendering the SVG through `pl_draw::raster`, which this binary already
+///   links. `raster::draw` takes a `pl_draw::Scene`, not an SVG — `pl-draw`
+///   *emits* SVG and cannot parse it — so the four rectangles would have to be
+///   restated as `Scene` items. That is the previous option with more steps.
+///
+/// What is left is a committed artefact from a committed generator, hashed by a
+/// test: the same shape as the vendored faces above, and for the same reason.
+///
+/// # Why 64, from what the linked eframe actually does with it
+///
+/// `IconData` holds ONE image, so the nine sizes the `.ico` carries collapse to
+/// a single compromise, and the compromise is decided by
+/// `eframe-0.35.0/src/native/app_icon.rs`. On Windows it does NOT go through
+/// winit — winit's `set_window_icon` sets `ICON_SMALL` only, which is the title
+/// bar and not the taskbar, and eframe says so in a comment. It calls
+/// `GetSystemMetrics(SM_CXICON)` and `SM_CXSMICON`, **Lanczos3-resizes this
+/// image to each**, and sends both with `WM_SETICON`. `SM_CXICON` is 32 at 100%
+/// DPI and 64 at 200%; `SM_CXSMICON` is 16 and 32.
+///
+/// So 64 is the exact size asked for at 200% DPI — the machine this is developed
+/// on — and every other size in that list is an integer halving of it, which is
+/// the case a resampler handles without inventing coverage along the four hard
+/// edges. Upscaling is the one thing to avoid and 64 never has to.
+///
+/// The cost is measured rather than assumed: the release `polylinker.exe` went
+/// from 12,897,280 bytes to 12,913,664 on 2026-08-05, a difference of exactly
+/// 16,384, or 0.127%. An incompressible blob in `.rdata` costs its own size and
+/// nothing more. 128 px would serve 400% DPI as well and cost 65,536, and no
+/// panel this ships to runs at 400%.
+///
+/// # What each platform does with it
+///
+/// * **Windows** — the pair above. The taskbar button and Alt-Tab take
+///   `ICON_BIG`, the title bar `ICON_SMALL`.
+/// * **X11** — winit sets `_NET_WM_ICON` from `with_window_icon`, at whatever
+///   size the window manager decides to sample.
+/// * **macOS** — winit documents `set_window_icon` as unsupported, and it would
+///   be easy to conclude the argument is wasted there. It is not: eframe's
+///   `set_title_and_icon_mac` builds an `NSBitmapImageRep` from these RGBA bytes
+///   directly and sets `NSApplication`'s icon, which is the Dock. It builds it
+///   from the raw pixels rather than from a PNG on purpose — egui #7155, a
+///   macOS bug where decoding a PNG for an `NSImage` can load a mismatched
+///   `libpng.dylib` and take the process down with SIGBUS.
+/// * **Wayland** — winit lists it as unsupported and there is no compositor
+///   protocol to carry it; the icon comes from the `.desktop` file instead.
+///
+/// Three of the four use these bytes, so there is no `cfg` here: a
+/// platform-conditional icon would make three platforms diverge to spare one
+/// a 16 KB `to_vec`.
+fn window_icon() -> egui::IconData {
+    egui::IconData {
+        // `IconData` owns its pixels, so the static slice has to be copied.
+        // 16,384 bytes, once, before the first frame.
+        rgba: ICON_RGBA.to_vec(),
+        width: ICON_PX,
+        height: ICON_PX,
+    }
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([880.0, 560.0])
+            .with_icon(window_icon())
             .with_title("Polylinker"),
         ..Default::default()
     };
@@ -629,6 +747,7 @@ enum Fmt {
     Svg,
     Pdf,
     Eps,
+    Png,
 }
 
 impl Fmt {
@@ -637,6 +756,7 @@ impl Fmt {
             Fmt::Svg => "svg",
             Fmt::Pdf => "pdf",
             Fmt::Eps => "eps",
+            Fmt::Png => "png",
         }
     }
     fn name(self) -> &'static str {
@@ -644,6 +764,7 @@ impl Fmt {
             Fmt::Svg => "SVG",
             Fmt::Pdf => "PDF",
             Fmt::Eps => "EPS",
+            Fmt::Png => "PNG",
         }
     }
 }
@@ -1026,6 +1147,19 @@ struct App {
     /// what is throttled is the walk. The memo of what each slot already holds
     /// moved to [`bench::Tab::autosaved`], because it names a document.
     last_autosave: Option<std::time::Instant>,
+    /// When the last pass STAMPED the drafts it already holds, for the heartbeat
+    /// throttle. A second clock, and the two cannot be merged.
+    ///
+    /// `last_autosave` is set only when a body actually reached disk, and the
+    /// comment at the end of [`App::autosave`] says why: a pass that wrote
+    /// nothing must leave the next edit due immediately, or the first keystroke
+    /// after a long idle spell waits out a whole period before it is protected.
+    /// The heartbeat has the opposite requirement — it must happen when nothing
+    /// changed, which is exactly the case that leaves `last_autosave` untouched,
+    /// and it must happen once per period rather than on every one of the frames
+    /// an idle window with unsaved work already spins through. One clock gives
+    /// up one property or the other.
+    last_touch: Option<std::time::Instant>,
     /// Which application owns `.dna` on this machine, read at most once.
     ///
     /// `None` means "not asked yet"; `Some(None)` means nothing owns it. The
@@ -1263,13 +1397,25 @@ impl Autosaved {
     }
 }
 
+/// What `App::map_png` produces: the file and the lines shown beside it, or
+/// the reason the canvas was refused. Named because it is a `Result` inside an
+/// `Option` and the two mean different things — see `App::map_png`.
+type MadePng = Result<(Vec<u8>, Vec<String>), pl_draw::Oversize>;
+
 impl App {
     /// How long an unsaved edit can survive a crash.
     ///
     /// Thirty seconds. The cost of getting this wrong is asymmetric: too often
-    /// wastes a few milliseconds of disk, too rarely costs an afternoon. It is
-    /// also skipped entirely when nothing has changed, so an idle window never
-    /// touches the disk at all.
+    /// wastes a few milliseconds of disk, too rarely costs an afternoon.
+    ///
+    /// It is also the heartbeat period. This used to say the pass was "skipped
+    /// entirely when nothing has changed, so an idle window never touches the
+    /// disk at all", and that economy was the defect: `recover::maybe_live` reads
+    /// the stamp in the draft to decide whether another window may Discard it, so
+    /// a window that stopped writing stopped looking alive. An idle window with a
+    /// draft on disk now rewrites it once per period — see the heartbeat in
+    /// [`App::autosave`] — which is the same rate `record_session` beside it
+    /// already pays for the same guarantee.
     const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
     /// How many closed tabs Ctrl+Shift+T can reach back through.
@@ -1593,22 +1739,6 @@ impl App {
         }
     }
 
-    /// Write the current document to the recovery file, if it is time.
-    ///
-    /// Never writes to the file the user opened. An editor that quietly
-    /// rewrites the original every few minutes has turned "close without
-    /// saving" into a lie.
-    ///
-    /// `forced` is the unsaved-changes guard making its promise true, and it
-    /// skips exactly three things: the throttle, the identity memo and the
-    /// base-cursor guard below. It is a PARAMETER and not a field cleared by
-    /// the caller because clearing `self.autosaved` to force a write also
-    /// destroyed the `same_document` escape hatch the base-cursor guard depends
-    /// on — so the forced write silently did nothing for a document sitting at
-    /// its own base, the `exit: unsaved` flag never reached the file, and the
-    /// next launch greeted a deliberate quit with "A previous session did not
-    /// close cleanly". Two concerns expressed through one field, and the second
-    /// one to arrive won.
     /// How long until an autosave is owed, or `None` when nothing is at risk.
     ///
     /// A function rather than three lines in `ui`, because `ui` needs an
@@ -1729,6 +1859,28 @@ impl App {
         else {
             return;
         };
+        self.write_project(&path);
+    }
+
+    /// [`Self::save_project`] with the picker already answered.
+    ///
+    /// Split out for the same reason `write_dna` is: a native file dialog
+    /// cannot be driven from a test, so a save site that keeps its write inside
+    /// the picker arm has no coverage at all. This was the eighth picker-driven
+    /// save and the last one still calling `fs::write` — through
+    /// [`session::write`], which is why it read as converted and was not.
+    ///
+    /// `session::write`'s own non-atomic justification does not reach here. It
+    /// argues from the per-tab-switch autosave cadence, where an `fsync` per
+    /// switch is a real cost and a torn list is re-derivable from the tabs that
+    /// are still open; this is one write per deliberate click onto a path the
+    /// user typed. What it costs to get wrong is smaller than a molecule — a
+    /// `.plproj` holds paths and no bases, deliberately, so a destroyed one
+    /// costs a list of filenames and `open_project` reports "not a Polylinker
+    /// project" rather than silently loading a short bench. Small is not
+    /// nothing, and `atomic.rs`'s opening line claims *every* file the user
+    /// asked this program to produce.
+    fn write_project(&mut self, path: &Path) {
         let name = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -1738,7 +1890,13 @@ impl App {
         // `closed` says nothing here and must not be written: it is the flag
         // that lets a LAUNCH claim an abandoned session, and a project is never
         // claimed. Left false, which is what `session_now` gives.
-        match session::write(&path, &s) {
+        //
+        // `session::encode` and not `session::write`: the codec is shared, the
+        // writer is not. `write` also sets `OURS_WRITTEN`, which is about the
+        // `session-{pid}` name and would be wrong to touch from here — it does
+        // not fire for a `.plproj`, but relying on that is relying on a
+        // filename comparison in another module.
+        match atomic::write(path, session::encode(&s)) {
             Ok(()) => {
                 self.status = format!(
                     "saved {name} — {} file(s){}",
@@ -1807,7 +1965,20 @@ impl App {
     ///     second tab;
     ///   - a file that is no longer there. Counted, and named in the status, so
     ///     "your bench is one short" is a sentence rather than a mystery.
+    ///
+    /// TWO CALLERS, AND ONLY ONE OF THEM STARTS EMPTY. At launch this runs
+    /// against a bench with nothing in it, and `App`'s own view fields hold
+    /// nothing either. File ▸ Open project runs it against a bench with the
+    /// user's work in it — `open_project`'s doc insists a project ADDS rather
+    /// than replaces — and there `App` is holding the live view of a tab that is
+    /// about to have another one focused over it. `held` is that distinction and
+    /// the store below is what it buys.
     fn restore_session(&mut self, s: session::Session) {
+        // Asked BEFORE the loop, because `push_background` leaves `active`
+        // alone: on an empty bench index 0 becomes one of the tabs pushed
+        // below, and storing `App`'s blank fields into it would overwrite the
+        // `doc_code` those pushes go out of their way to set.
+        let held = self.bench.get().is_some();
         let canon =
             |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let claimed: Vec<PathBuf> = self
@@ -1861,10 +2032,28 @@ impl App {
         if opened == 0 {
             return;
         }
-        // Every tab went in behind the scenes, so `App`'s own view fields hold
-        // nothing yet and the tab that should be on screen has to be pulled
-        // forward explicitly. `focus`, not `activate`: index 0 is already
-        // `active` and `activate` refuses that case on purpose.
+        // Whatever `App` is holding goes back to the tab it belongs to first.
+        // `Bench::focus` below is a `std::mem::take` and `put_view` is a plain
+        // field-by-field assignment, so without this the tab on screen has
+        // eighteen fields of `DocView::default()` scattered over it — the
+        // religation plan, the design panel, the feature editor, the caret, the
+        // Find query, the feature filter and the enzyme set all gone, with
+        // nothing saying so, and switching away and back does not bring them
+        // back because that tab's slot was never written. This is the same three
+        // lines, in the same order, that `close_tab` runs for the same reason.
+        //
+        // Skipped at launch, where there is no tab on screen to put down: see
+        // `held` above for why storing then would be actively wrong.
+        if held {
+            self.settle();
+            let v = self.take_view();
+            self.bench.store(v);
+        }
+        // Every tab the loop opened went in behind the scenes, so the one that
+        // should be on screen has to be pulled forward explicitly. `focus`, not
+        // `activate`: the target may already be `active` — it is whenever `want`
+        // is `None` and a tab was already there — and `activate` refuses that
+        // case on purpose.
         if let Some(v) = self.bench.focus(want.unwrap_or(0)) {
             self.put_view(v);
         }
@@ -1906,6 +2095,30 @@ impl App {
         self.recovery_dir.is_some() && (!self.autosave_off || self.bench.any_armed())
     }
 
+    /// Write the current document to the recovery file, if it is time.
+    ///
+    /// Never writes to the file the user opened. An editor that quietly
+    /// rewrites the original every few minutes has turned "close without
+    /// saving" into a lie.
+    ///
+    /// `forced` is the unsaved-changes guard making its promise true, and it
+    /// skips exactly three things: the throttle, the identity memo and the
+    /// base-cursor guard below. It is a PARAMETER and not a field cleared by
+    /// the caller because clearing `self.autosaved` to force a write also
+    /// destroyed the `same_document` escape hatch the base-cursor guard depends
+    /// on — so the forced write silently did nothing for a document sitting at
+    /// its own base, the `exit: unsaved` flag never reached the file, and the
+    /// next launch greeted a deliberate quit with "A previous session did not
+    /// close cleanly". Two concerns expressed through one field, and the second
+    /// one to arrive won.
+    ///
+    /// This block used to sit three hundred lines up, run straight into
+    /// `autosave_due_in`'s own doc with no item between them, and therefore
+    /// document `autosave_due_in` — a four-line pure query with no parameters
+    /// and no I/O, which has no `forced`, writes nothing and can lie to nobody.
+    /// The whole `forced` contract, including the shipped-defect narrative it
+    /// records, was attached to the wrong function while this one carried no
+    /// doc at all.
     fn autosave(&mut self, forced: bool) {
         // THE THROTTLE COMES FIRST, and that ordering is the whole of a defect
         // this shipped with.
@@ -1963,6 +2176,30 @@ impl App {
         let mut failed: Option<String> = None;
         let mut off: Option<String> = None;
         let mut wrote = false;
+        // THE HEARTBEAT, and it is not an optimisation — it is what makes
+        // `recover::maybe_live` true.
+        //
+        // That function decides whether a *second* window may offer to Discard a
+        // draft, and it decides it from `saved_at` alone; its own doc justified
+        // that by "the writer's own thirty-second cadence guarantees" a live
+        // session is never called dead. There was no such cadence. The memo gate
+        // below skips a tab whose `(path, title, cursor)` has not moved, so a
+        // window whose user stopped typing stopped stamping, and
+        // `LIVE_WINDOW_SECS` later its only crash copy was listed elsewhere
+        // under "A previous session did not close cleanly" with Discard enabled.
+        // The owner would not rewrite it either, because the memo still matched.
+        //
+        // So a tab that already holds a draft rewrites it once per period even
+        // with nothing to add. `record_session` beside this pays the same price
+        // for the same reason and says so: the freshness of the file is the whole
+        // of what stops another window acting on it, so a window with work open
+        // and nothing to save still has to keep saying it is there. What it costs
+        // is one rewrite of an already-written draft per document per thirty
+        // seconds — the cadence this file already runs at while anyone is typing.
+        let heartbeat = self
+            .last_touch
+            .is_none_or(|t| now.duration_since(t) >= Self::AUTOSAVE_EVERY);
+        let mut touched = false;
         for tab in self.bench.each_mut() {
             let here = Autosaved {
                 original: tab.doc.path.clone(),
@@ -1978,7 +2215,14 @@ impl App {
             // same cursor short-circuited it. Caught in the running application,
             // not by a test — the draft survived "Close without saving" and the
             // relaunch still said the session had crashed.
-            if !forced && tab.autosaved.as_ref() == Some(&here) {
+            //
+            // `unchanged` rather than a bare `continue`, because a tab that
+            // already has a file on disk still owes it a stamp — see the
+            // heartbeat above. A tab with no slot yet owes nothing: there is
+            // nothing on disk for another window to misread, and claiming a slot
+            // for a document with nothing to add is what the gate below refuses.
+            let unchanged = !forced && tab.autosaved.as_ref() == Some(&here);
+            if unchanged && !(heartbeat && tab.recovery.is_some()) {
                 continue;
             }
             // An unedited document THAT CAME FROM A FILE has nothing to protect:
@@ -2042,7 +2286,14 @@ impl App {
                 abandoned,
                 genbank: pl_fileio::genbank::write(tab.doc.molecule(), &tab.doc.title, day),
             };
-            wrote = true;
+            // A heartbeat is not an autosave and must not restart the autosave
+            // clock: the two are counted apart so that the first keystroke after
+            // an idle spell is still due immediately. See `last_touch`.
+            if unchanged {
+                touched = true;
+            } else {
+                wrote = true;
+            }
             match recover::write(&path, &snap) {
                 Ok(()) => tab.autosaved = Some(here),
                 // A failed autosave must not interrupt the work it exists to
@@ -2061,6 +2312,13 @@ impl App {
         // idle spell would wait out a full period before reaching disk.
         if wrote {
             self.last_autosave = Some(now);
+        }
+        // The heartbeat's own clock, and a real write is a heartbeat too — it
+        // put the same fresh stamp in the same file. Set on an ATTEMPT, for the
+        // reason above: a pass that failed must retry in thirty seconds, not on
+        // every frame of a window that is already spinning.
+        if wrote || touched {
+            self.last_touch = Some(now);
         }
         if let Some(e) = failed {
             self.status = format!("autosave failed: {e}");
@@ -2111,6 +2369,7 @@ impl App {
             abandoned_unsaved: false,
             pending_dna: None,
             last_autosave: None,
+            last_touch: None,
             dna_owner: None,
             design: None,
             clone_panel: None,
@@ -2635,6 +2894,18 @@ impl App {
         if let Some(i) = stale_row {
             if i < self.stale.len() {
                 let _ = self.stale.remove(i);
+                // `discard_armed` is a raw index into `self.stale`, and this is
+                // the other place a row is removed from it — the discard branch
+                // already clears it and this one did not. Arm Discard on row 3,
+                // then click Open on row 1: row 4 becomes row 3 and is drawn
+                // already saying "Discard — this deletes the draft", so one
+                // click permanently deletes it. The file deleted is the right
+                // one — `discard = Some(i)` carries the row that was clicked —
+                // so what the stale index costs is the two-click confirmation
+                // the banner's own comment insists on for exactly this action,
+                // silently, on a draft belonging to another session that cannot
+                // be asked.
+                self.discard_armed = None;
             }
         }
         self.adopt(d);
@@ -2949,7 +3220,10 @@ impl App {
                 )
             }
         };
-        match std::fs::write(&path, text) {
+        // `atomic::write`, not `fs::write`: a GenBank export that fails partway
+        // must not have already truncated the file it was overwriting. See that
+        // module's doc for the pattern and what it costs.
+        match atomic::write(&path, text) {
             Ok(()) => {
                 // GenBank's own note ("N features written as forward") is a
                 // strand-EXPRESSIBILITY nuance, not lost work, so GenBank
@@ -2987,7 +3261,9 @@ impl App {
                     self.status = format!("{} — the document is still unsaved", self.status);
                 }
             }
-            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+            // Already names the destination and says it survived; wrapping it in
+            // a second `{path}: ` would print the path twice.
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -3104,7 +3380,11 @@ impl App {
 
     /// The bytes, and the bookkeeping that must only happen on `Ok`.
     fn write_dna(&mut self, p: PendingDna) {
-        match std::fs::write(&p.path, &p.bytes) {
+        // The save path that overwrites somebody else's `.dna` — the one this
+        // whole modal exists to disclose — is the last one that may leave the
+        // destination truncated when it fails. `atomic::write`, like everywhere
+        // else here.
+        match atomic::write(&p.path, &p.bytes) {
             Ok(()) => {
                 if let Some(d) = self.bench.get_mut() {
                     d.mark_saved();
@@ -3134,7 +3414,7 @@ impl App {
                     }
                 }
             }
-            Err(e) => self.error = Some(format!("{}: {e}", p.path.display())),
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -3285,9 +3565,12 @@ impl App {
                 font.unencodable.join(", ")
             ));
         }
-        match std::fs::write(&path, bytes) {
+        // The figure exporters overwrite too — the picker's "replace?" is how a
+        // regenerated figure lands on the old one — so they go through
+        // `atomic::write` for the same reason the document saves do.
+        match atomic::write(&path, bytes) {
             Ok(()) => self.wrote(&path, &note.join("  —  ")),
-            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -3380,9 +3663,9 @@ impl App {
         let (svg, drawn) =
             pl_draw::circular_svg_at(d.molecule(), Self::figure_options(d, set), width_mm);
 
-        match std::fs::write(&path, svg) {
+        match atomic::write(&path, svg) {
             Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
-            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -3453,6 +3736,36 @@ impl App {
             Fmt::Eps => pl_draw::eps::to_eps(&built.scene, self.figure_scale(&built.scene))
                 .0
                 .into_bytes(),
+            // White, matching what `contrast::audit` is run against below and
+            // what the EPS already paints. A gel on a transparent ground would
+            // make that audit a claim about a background the file lacks.
+            Fmt::Png => {
+                // The raster twin of the `PAGE_LIMIT` guard above, and the one
+                // that matters more: a page box a viewer refuses costs a file,
+                // an unbounded canvas costs the process. A gel is the scene in
+                // this app most likely to hit it, because it grows on the long
+                // axis with the number of lanes — 500 mm at 1200 dpi is both
+                // reachable from this panel and 558 megapixels.
+                match pl_draw::png_at(
+                    &built.scene,
+                    width_mm,
+                    self.layout.figure_dpi,
+                    [255, 255, 255],
+                ) {
+                    Ok((b, r)) => {
+                        for c in &r.unparsed_colours {
+                            self.notice =
+                                Some(format!("{c:?} is not a colour this renderer reads"));
+                        }
+                        b
+                    }
+                    Err(e) => {
+                        self.notice = Some(format!("this gel will not export as PNG: {e}"));
+                        self.gel_cache = Some((key, built));
+                        return;
+                    }
+                }
+            }
         };
 
         let mut note = Vec::new();
@@ -3497,10 +3810,120 @@ impl App {
             ));
         }
         self.gel_cache = Some((key, built));
-        match std::fs::write(&path, bytes) {
+        match atomic::write(&path, bytes) {
             Ok(()) => self.wrote(&path, &note.join("  —  ")),
-            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+            Err(e) => self.error = Some(e),
         }
+    }
+
+    /// Write the map as PNG.
+    ///
+    /// The same `Scene` as the other three, at `layout.figure_dpi`. It is the
+    /// one format here with a resolution, and so the only one whose output
+    /// depends on a second number — both are reported, and the two ways a PNG
+    /// can be quietly wrong are said out loud rather than left in the file:
+    ///
+    /// - a printed width is what a dpi is a resolution OF. Without one there is
+    ///   no physical size for 300 dpi to mean anything against, and the figure
+    ///   arrives at whatever size the layout program picks.
+    /// - a glyph the face cannot draw, or a colour this renderer cannot read,
+    ///   is a hole in the picture that nothing downstream will mention.
+    ///
+    /// White background, matching what `contrast::audit` is run against in
+    /// `pl export --check-contrast` and what the EPS already paints.
+    fn export_map_png(&mut self) {
+        self.settle();
+        let Some(d) = self.bench.get() else { return };
+        let stem = pl_fileio::genbank::locus_name(&d.title);
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{stem}.png"))
+            .add_filter("PNG", &["png"])
+            .save_file()
+        else {
+            return;
+        };
+        let Some(made) = self.map_png() else {
+            return;
+        };
+        // A refusal is not a silent return: the user picked a filename and is
+        // owed the reason no file is at it, with the resolution that would
+        // work. Nothing is written, so the file they chose is untouched.
+        let (bytes, note) = match made {
+            Ok(v) => v,
+            Err(e) => {
+                self.notice = Some(Self::png_refusal(&e));
+                return;
+            }
+        };
+        match atomic::write(&path, bytes) {
+            Ok(()) => self.wrote(&path, &note.join("  —  ")),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// The PNG "Map PNG…" writes, and the clauses it writes beside the path.
+    ///
+    /// Split out of `export_map_png` so a test can hold the bytes the app
+    /// exports. Everything above this line in `export_map_png` is the file
+    /// picker, which a test cannot drive: `rfd::FileDialog::save_file` blocks on
+    /// a native modal, so a test that called `export_map_png` would hang the
+    /// suite rather than fail it. That is why the parity test for this format
+    /// used to reconstruct the export by calling `pl_draw::scene` and
+    /// `pl_draw::png_at` itself — and comparing that against
+    /// `circular_png_at`, which is those same two calls in that same order
+    /// (`crates/pl-draw/src/lib.rs`), so the comparison held for every possible
+    /// state of this method. A `figure_dpi` this method stopped reading, or a
+    /// background it painted black, was green.
+    ///
+    /// So this is the whole of the export bar the I/O, and the test asserts on
+    /// what it returns: the same bytes `pl export --png` writes, and the
+    /// pixel count the status line quotes.
+    ///
+    /// The line the panel shows when a raster export is refused for its size.
+    ///
+    /// Split out for the same reason `map_png` is: `export_map_png` blocks on
+    /// `rfd`'s native save dialog, so a test cannot reach the assignment. The
+    /// arithmetic is `pl_draw::Oversize`'s — dimensions, ceiling, cost and a
+    /// resolution that fits — and this only says which export it was about.
+    fn png_refusal(e: &pl_draw::Oversize) -> String {
+        format!("this figure will not export as PNG: {e}")
+    }
+
+    /// `None` when there is no document, the same condition that makes
+    /// `export_map_png` return without writing. `Some(Err(_))` when there is a
+    /// document and the canvas it asks for is past `pl_draw::MAX_PIXELS` —
+    /// two different reasons no file appears, and only the second one has
+    /// anything to tell the user. This panel can reach it by clicking: 500 mm
+    /// at 1200 dpi is 23,622 px square, 558 megapixels, 20.5 GB.
+    fn map_png(&self) -> Option<MadePng> {
+        let d = self.bench.get()?;
+        let set = self.enzyme_set;
+        let (sc, drawn) = pl_draw::scene(d.molecule(), Self::figure_options(d, set));
+        let dpi = self.layout.figure_dpi;
+        let width_mm = self.layout.figure_mm;
+        let (bytes, report) = match pl_draw::png_at(&sc, width_mm, dpi, [255, 255, 255]) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+
+        let mut note = Self::figure_note(&drawn);
+        match width_mm {
+            Some(mm) => {
+                let (w, h) = pl_draw::page::Fit::to_width_mm(&sc, mm).pixels(dpi);
+                note.push(format!("{w} x {h} px at {dpi:.0} dpi"));
+            }
+            None => note.push(format!(
+                "{dpi:.0} dpi, but no printed width is set, so the figure has no \
+                 physical size for that to be a resolution of"
+            )),
+        }
+        for s in &report.unencodable {
+            note.push(format!("{s:?} holds a character the typeface cannot draw"));
+        }
+        for c in &report.unparsed_colours {
+            note.push(format!("{c:?} is not a colour this renderer reads"));
+        }
+        Some(Ok((bytes, note)))
     }
 
     /// Write the map as EPS.
@@ -3523,9 +3946,9 @@ impl App {
         let set = self.enzyme_set;
         let (sc, drawn) = pl_draw::scene(d.molecule(), Self::figure_options(d, set));
         let (eps, _) = pl_draw::eps::to_eps(&sc, self.figure_scale(&sc));
-        match std::fs::write(&path, eps) {
+        match atomic::write(&path, eps) {
             Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
-            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -4817,11 +5240,45 @@ impl App {
                             }
                             ui.label(RichText::new(say).size(10.5).color(pal(ui).muted));
                         }
+                        // Resolution, for the one format below that has any.
+                        // Beside the printed width because the two are halves
+                        // of the same statement: pixels only mean something
+                        // once the figure has a physical size.
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Resolution").size(11.0));
+                            for dpi in [150.0f64, 300.0, 600.0, 1200.0] {
+                                if ui
+                                    .selectable_label(
+                                        (self.layout.figure_dpi - dpi).abs() < 0.5,
+                                        format!("{dpi:.0}"),
+                                    )
+                                    .on_hover_text(if dpi < 300.0 {
+                                        "below every journal preset's floor for line art"
+                                    } else {
+                                        "dots per inch, written into the PNG as pHYs"
+                                    })
+                                    .clicked()
+                                {
+                                    self.layout.figure_dpi = dpi;
+                                }
+                            }
+                        });
+                        if self.layout.figure_mm.is_none() {
+                            ui.label(
+                                RichText::new(
+                                    "PNG only; with no printed width it has nothing to \
+                                     be a resolution of",
+                                )
+                                .size(10.5)
+                                .color(pal(ui).muted),
+                            );
+                        }
                         ui.separator();
                         for (fmt, why) in [
                             (Fmt::Svg, "Vector, for a figure"),
                             (Fmt::Pdf, "The same picture, for a manuscript"),
                             (Fmt::Eps, "For a journal that asks for EPS"),
+                            (Fmt::Png, "Raster, when a system will not take vector"),
                         ] {
                             if ui
                                 .button(format!("{subject} as {}…", fmt.name()))
@@ -4833,6 +5290,7 @@ impl App {
                                     (false, Fmt::Svg) => self.export_svg(),
                                     (false, Fmt::Pdf) => self.export_pdf(),
                                     (false, Fmt::Eps) => self.export_map_eps(),
+                                    (false, Fmt::Png) => self.export_map_png(),
                                 }
                                 ui.close();
                             }
@@ -5169,6 +5627,56 @@ impl App {
         });
     }
 
+    /// How many rows `molecule().features` has right now.
+    ///
+    /// Zero with no document, which is the right answer for the only caller:
+    /// a list that is gone is a list that got shorter.
+    fn feature_rows(&self) -> usize {
+        self.bench.get().map_or(0, |d| d.molecule().features.len())
+    }
+
+    /// Forget the three feature-index fields if the list they index SHRANK.
+    ///
+    /// `selected`, `hot` and `hot_shown` are positions in
+    /// `molecule().features`. `remap_annotations` DROPS a feature whose bases
+    /// were all deleted — "Deleting the bases a feature describes deletes the
+    /// feature", `pl-core/src/oplog.rs` — and every row after the hole moves
+    /// down one, so `Some(1)` silently starts naming a different feature.
+    /// Nothing crashes: every read is a bounds-checked `.get()`. The map simply
+    /// highlights the wrong band, Molecule ▸ Edit selected feature… loads the
+    /// wrong feature and Save overwrites it, and `SET_ORIGIN_ITEM` rotates the
+    /// whole plasmid to a feature the user never clicked. `hot` and `hot_shown`
+    /// would self-heal on the next hover; `selected` never does.
+    ///
+    /// GATED ON THE ROW COUNT rather than on `kind`, because the row count is
+    /// the thing that actually matters and no list of opcodes stays right.
+    /// `SetFeature { index: Some(_) }` replaces in place, `Rotate` and
+    /// `ReverseComplement` rewrite coordinates without reordering
+    /// (`Molecule::rotate` assigns into each segment), and an `InsertAt` empties
+    /// nothing — all four leave the count alone and must NOT clear, or
+    /// `open_feature_editor`'s "THE FEATURE BEING EDITED IS THE HIGHLIGHTED ONE"
+    /// would be undone the moment Save landed, with Edit…/Duplicate/Remove going
+    /// disabled on the feature just edited. `SetFeature { index: None }` pushes
+    /// at the end, so the count GROWS and every existing row keeps its number —
+    /// hence `<` and not `!=`, which would throw away a hover highlight that is
+    /// still correct every time the user adds a feature.
+    ///
+    /// FOUR CALLERS, because there is no one funnel. `App::edit` is the Molecule
+    /// menu and the feature editor's Save; `App::settle` is a run of typing or
+    /// of held Backspace becoming one operation; `App::sequence_keys` is every
+    /// keystroke and paste that reaches `SeqEdit::apply_gesture`; and the
+    /// paste-confirmation dialog is the fourth. The last two go through
+    /// `SeqEdit`, which is handed a `&mut Document` and has no `App` to clear —
+    /// which is why a check on `App::edit` alone covered the menu and missed the
+    /// gesture a user actually makes most.
+    fn forget_feature_rows_if_shrunk(&mut self, before: usize) {
+        if self.feature_rows() < before {
+            self.selected = None;
+            self.hot = None;
+            self.hot_shown = None;
+        }
+    }
+
     /// Commit whatever the user has typed but not yet paid for.
     ///
     /// The one place a pending run becomes an operation. Every path that reads
@@ -5180,6 +5688,13 @@ impl App {
         if self.edit.run().is_none() {
             return;
         }
+        // A run of held Backspace can empty a feature, and `SeqEdit::commit`
+        // says so — `feature_loss` sits right beside its `doc.apply` and names
+        // "holding Backspace through a feature". THIS is where that lands, and
+        // it is the reason `App::edit`'s own check cannot cover the keyboard:
+        // `edit()` settles first and only then counts the rows, so a feature
+        // dropped by the flush is already gone before it looks.
+        let rows_before = d.molecule().features.len();
         // Only a genuine commit failure is promoted to the strip above the map.
         // The Sequence tab's own transient line — "'Z' is not a nucleotide" —
         // belongs under the sequence and must survive the next click.
@@ -5215,6 +5730,7 @@ impl App {
         // does — before an undo, before a save, on focus loss — and wiping a
         // notice the user has not read yet would be a regression this code does
         // not currently have.
+        self.forget_feature_rows_if_shrunk(rows_before);
     }
 
     /// Run an edit and report a refusal instead of dropping it.
@@ -5230,6 +5746,15 @@ impl App {
         };
         let what = kind.describe();
         let n_before = d.molecule().len();
+        // How many rows `molecule().features` had before the edit. See the call
+        // in the Ok arm: `selected`, `hot` and `hot_shown` are indices into that
+        // Vec, and this is what tells them it was renumbered.
+        //
+        // Captured AFTER `self.settle()`, deliberately and safely: a feature
+        // dropped by the flush belongs to the run that flushed, and `settle`
+        // makes the identical check against its own before-count. Counting from
+        // here would ask one question about two operations.
+        let features_before = d.molecule().features.len();
         match d.apply(kind.clone()) {
             Ok(()) => {
                 self.status = format!("{what} — Ctrl+Z to undo");
@@ -5261,7 +5786,16 @@ impl App {
                 ) {
                     self.edit.sel = None;
                 }
+                // `selected`, `hot` and `hot_shown` are indices into
+                // `molecule().features`, and this edit may have renumbered it.
+                // `remove_feature` and `after_the_cursor_moved` both clear these
+                // three for exactly that reason; this arm — the Molecule menu
+                // and the feature editor's Save — did not. See
+                // `forget_feature_rows_if_shrunk` for the whole of the rule and
+                // for the three OTHER paths that reach the log without passing
+                // through here.
                 self.edit.remember(d);
+                self.forget_feature_rows_if_shrunk(features_before);
                 true
             }
             // The log refuses an edit that would leave the annotations
@@ -5300,6 +5834,11 @@ impl App {
     ///   the new one — and Open then builds a construct from a sequence that is
     ///   no longer on screen. `adopt` calls a wrong construct "the worst thing
     ///   this program can produce"; this is the same hazard reached by Ctrl+Z.
+    ///   The line below is now belt and braces rather than the only guard:
+    ///   `clone::Panel::plan_at` catches every cursor move, including this one,
+    ///   because setting a flag here could never cover the FORWARD edits — the
+    ///   Molecule menu and every typed base are live behind the panel too, and
+    ///   they do not come through here.
     ///
     /// The caret is restored rather than kept: the log is a DAG, a move can land
     /// on any earlier or forked state, and `n` changes arbitrarily.
@@ -9615,6 +10154,15 @@ impl App {
                 return;
             };
             let n = d.molecule().len();
+            // How many feature rows this keystroke started with, checked once it
+            // is over. Text, Paste, Cut, Backspace and Delete all reach the log
+            // through `SeqEdit`, which is handed a `&mut Document` and has no
+            // `App` to clear — so `App::edit`'s check, which covers the Molecule
+            // menu, sees none of them. Counted around the whole `match` rather
+            // than inside the five arms that can shrink the list, because a list
+            // of arms is the same thing as a list of opcodes and stays right for
+            // exactly as long as nobody adds one.
+            let rows_before = d.molecule().features.len();
             match ev {
                 egui::Event::Text(t) => self.edit.type_text(d, &t, now),
                 // A paste that needs consent parks itself in `pending_paste`
@@ -9710,6 +10258,7 @@ impl App {
                 }
                 _ => {}
             }
+            self.forget_feature_rows_if_shrunk(rows_before);
         }
     }
 
@@ -10374,12 +10923,46 @@ impl App {
     /// intact, so closing one destroys nothing. The question is asked once, at
     /// the point where work really does go away — closing the window — and
     /// asking it twice is how a guard becomes a reflex click.
+    ///
+    /// THE STORE IS UNCONDITIONAL, and the `if i == self.bench.active()` it
+    /// replaces was a data-loss bug on every BACKGROUND close. The
+    /// `take_active_view` and `put_view` pair below always ran; for a background
+    /// close nothing had been stored, and the active tab's slot always holds
+    /// `DocView::default()`
+    /// because `Bench::activate`, `Bench::focus` and `Bench::take_active_view`
+    /// are all `std::mem::take`. `put_view` is a plain field-by-field
+    /// assignment, so middle-clicking another tab's close button scattered a
+    /// default view over the molecule STILL ON SCREEN: the religation plan, the
+    /// design panel, the feature editor, the caret, the Find query, the feature
+    /// filter, the enzyme set and the central view all reset, with nothing
+    /// saying so, and `switch_tab`'s own doc calls the plan "not recomputable at
+    /// all". It also observed `doc_code`'s stand-in — `bench.rs` says that value
+    /// "is NEVER observed" — switching the Sequence tab's translations to table
+    /// 1 under a molecule whose CDS features say otherwise.
+    ///
+    /// Store-then-close is what the Ctrl+Shift+T reopen path already does, and
+    /// it is right for both cases: the store targets `self.bench.active()`, so
+    /// on an active close the view goes into the tab that is about to be handed
+    /// to the reopen stack (which is what makes Ctrl+Shift+T bring the panels
+    /// back), and on a background close it goes into the tab that stays on
+    /// screen and comes straight back out.
+    ///
+    /// `settle()` moves with it and is correct unconditionally for the same
+    /// reason: it commits the pending typing run on `self.bench.get_mut()` — the
+    /// ACTIVE document — which is the one whose view is about to be lifted off
+    /// `App`, whichever tab is being closed. The reopen path settles here too
+    /// without closing anything.
+    ///
+    /// The out-of-range guard is what lets the store be unconditional: without
+    /// it a bad index would blank `App`, store the blank on the active tab and
+    /// then take neither back, since `Bench::close` returns `None`.
     fn close_tab(&mut self, i: usize) {
-        if i == self.bench.active() {
-            self.settle();
-            let v = self.take_view();
-            self.bench.store(v);
+        if i >= self.bench.len() {
+            return;
         }
+        self.settle();
+        let v = self.take_view();
+        self.bench.store(v);
         if let Some(mut t) = self.bench.close(i) {
             // The slot goes back, and the draft with it.
             //
@@ -10409,7 +10992,11 @@ impl App {
             while self.closed.len() > Self::REOPENABLE {
                 self.closed.remove(0);
             }
-            // The panels belonged to a molecule that is no longer on screen.
+            // Whatever is active NOW gets its view put back on `App`. After an
+            // active close that is the neighbour the bench moved to, and its
+            // panels are its own; after a background close it is the same tab
+            // that was on screen a moment ago, and this hands back the view
+            // stored above rather than a default.
             if let Some(v) = self.bench.take_active_view() {
                 self.put_view(v);
             }
@@ -10502,6 +11089,62 @@ impl App {
         self.doc_generation = self.doc_generation.wrapping_add(1);
     }
 
+    /// The tabs the clone panel may take an insert from, and what names them.
+    ///
+    /// The rest of the bench, resolved fresh every frame. Cloned rather than
+    /// borrowed because `clone::show` takes `&mut self.clone_panel`'s contents
+    /// and the bench is behind the same `&mut self`, and this runs once per
+    /// frame the panel is open.
+    ///
+    /// WHAT THAT COSTS, MEASURED RATHER THAN ASSUMED. This said "a plasmid is a
+    /// few hundred kilobytes at most", which took the bench for a rack of
+    /// plasmids. It is not: `close_tab`'s doc, `restore_session`'s and
+    /// `design.rs` all reason about the 4.6 Mb genome this project tests
+    /// against, and one tab of it in the donor position makes this **5,011,822
+    /// bytes per frame** — the sequence plus 4,641 features — at 2.112 ms a call
+    /// in a release build. Sixteen times the bound that used to be written here,
+    /// and the number to look at first if the panel janks with a genome open.
+    /// Asserted, not described, in
+    /// `a_donor_clone_is_megabytes_when_a_genome_is_on_the_bench`.
+    ///
+    /// KEYED ON `bench::TabId`, NOT ON POSITION. `clone::Panel::donor` holds
+    /// whichever value this hands out and re-resolves it here by equality, so
+    /// what goes in the first slot decides whether a reordered bench moves the
+    /// donor onto a different plasmid — see `clone::Panel::donor` for what an
+    /// index cost.
+    ///
+    /// A method rather than four lines inside `clone_panel`, because
+    /// `clone_panel` needs an `egui::Context` and cannot be driven from a test:
+    /// this is the half that decides which molecule the donor names, and an
+    /// untestable identity decision is how the positional one survived.
+    ///
+    /// THE LOG CURSOR TRAVELS WITH THE MOLECULE, as `clone_panel` takes the
+    /// active document's beside it. A plan has two parents and `clone::Panel`
+    /// has to be able to tell that EITHER of them moved — see
+    /// `clone::Panel::donor_at`.
+    fn clone_donors(
+        &self,
+    ) -> Vec<(
+        bench::TabId,
+        String,
+        pl_core::Molecule,
+        Option<pl_core::oplog::OpId>,
+    )> {
+        self.bench
+            .each()
+            .enumerate()
+            .filter(|(i, _)| *i != self.bench.active())
+            .map(|(_, t)| {
+                (
+                    t.id,
+                    t.doc.title.clone(),
+                    t.doc.molecule().clone(),
+                    t.doc.log.cursor(),
+                )
+            })
+            .collect()
+    }
+
     /// Draw the cut-and-religate panel and adopt a product if one was asked for.
     ///
     /// The product becomes a document THROUGH THE FILE PATH — serialised to
@@ -10529,20 +11172,22 @@ impl App {
         };
         let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
         let mol = self.document().expect("checked above").molecule().clone();
-        // The rest of the bench, resolved fresh. Cloned rather than borrowed
-        // because `show` takes `&mut self.clone_panel`'s contents and the bench
-        // is behind the same `&mut self`; a plasmid is a few hundred kilobytes
-        // at most and this runs once per frame the panel is open.
-        let others: Vec<(usize, String, pl_core::Molecule)> = self
-            .bench
-            .each()
-            .enumerate()
-            .filter(|(i, _)| *i != self.bench.active())
-            .map(|(i, t)| (i, t.doc.title.clone(), t.doc.molecule().clone()))
+        // WHICH molecule that is, taken beside it. Everything that can change
+        // the document behind this non-modal window moves the log cursor, and a
+        // plan built at one cursor and drawn at another is a digest of bases the
+        // user no longer has — see `clone::Panel::plan_at`.
+        let at = self.document().expect("checked above").log.cursor();
+        let others = self.clone_donors();
+        let refs: Vec<(
+            bench::TabId,
+            String,
+            &pl_core::Molecule,
+            Option<pl_core::oplog::OpId>,
+        )> = others
+            .iter()
+            .map(|(i, n, m, a)| (*i, n.clone(), m, *a))
             .collect();
-        let refs: Vec<(usize, String, &pl_core::Molecule)> =
-            others.iter().map(|(i, n, m)| (*i, n.clone(), m)).collect();
-        let keep = clone::show(ctx, &mut panel, &mol, &refs, dark);
+        let keep = clone::show(ctx, &mut panel, &mol, at, &refs, dark);
 
         if let Some(i) = panel.wanted.take() {
             if let Some(p) = panel.plan.as_ref().and_then(|pl| pl.prods.get(i)) {
@@ -10592,6 +11237,42 @@ impl App {
         }
     }
 
+    /// Bring the design panel's copy of the molecule back into line with the
+    /// document, once per frame.
+    ///
+    /// `doc_at` is where the document stands. `Panel::run` copies it onto the
+    /// report it produces, so the panel can tell whether the answer on screen is
+    /// still about the molecule on screen.
+    ///
+    /// `bp` and `circular` ARE THE OTHER TWO, and they were snapshotted in
+    /// `design::Panel::open` and never refreshed while `doc_at` was refreshed
+    /// here alone. `egui::Window` is not modal, so Molecule ▸ Make linear stays
+    /// live behind the panel: with it open on a circular plasmid, make the
+    /// molecule linear and press Design again, and `Panel::run` hands the stale
+    /// `self.circular` to `pl_design::design`, which then enumerates candidates
+    /// under a circular-template assumption — flanks that wrap the origin, and a
+    /// target that wraps at all — on a molecule that has two ends. The header
+    /// goes on printing `bp` and `circular` verbatim, so the panel still reads
+    /// "2,686 bp circular" over a linear document. Out-of-range targets are
+    /// refused cleanly by the engine, so what is left is wrong near the ends and
+    /// a header that names the wrong molecule.
+    ///
+    /// DELIBERATELY ONLY THESE THREE. Refreshing `target` as well would be a
+    /// different change and a wrong one: the region is the user's selection at
+    /// the moment they opened the panel, and
+    /// `a_report_computed_before_an_edit_cannot_be_added_after_it` pins
+    /// designing after an edit as intended behaviour, guarded by `doc_at`
+    /// against `result_at` rather than by re-snapshotting.
+    fn refresh_design_panel(&mut self, panel: &mut design::Panel) {
+        let Some(d) = self.bench.get() else {
+            return;
+        };
+        let mol = d.molecule();
+        panel.doc_at = d.log.cursor();
+        panel.bp = mol.len();
+        panel.circular = mol.topology.is_circular();
+    }
+
     fn design_panel(&mut self, ctx: &egui::Context) {
         // Checked *before* the take. Taking first and then returning on a
         // missing document dropped the panel, its constraints and its report
@@ -10610,17 +11291,14 @@ impl App {
             return;
         };
         let dark = ctx.options(|o| o.theme_preference) != egui::ThemePreference::Light;
-        let (seq, at) = {
+        let seq = {
             let Some(d) = self.bench.get() else {
                 self.design = Some(panel);
                 return;
             };
-            (d.molecule().seq.clone(), d.log.cursor())
+            d.molecule().seq.clone()
         };
-        // Where the document stands this frame. `Panel::run` copies it onto the
-        // report it produces, so the panel can tell whether the answer on
-        // screen is still about the molecule on screen.
-        panel.doc_at = at;
+        self.refresh_design_panel(&mut panel);
         let keep = design::show(ctx, &mut panel, &seq, dark);
 
         // Applied after the frame, because `App::edit` needs `&mut self` and
@@ -10853,7 +11531,14 @@ impl App {
             self.edit.pending_paste = None;
             if let Some(d) = self.bench.get_mut() {
                 let target = target.unwrap_or_else(|| self.edit.target(d));
+                // The fourth way into the log with no `App` in reach. A paste
+                // that replaces a selection can empty a feature exactly as a
+                // Backspace can, and this one does not go through
+                // `sequence_keys` at all — the dialog is answered a frame or
+                // more later.
+                let rows_before = d.molecule().features.len();
                 self.edit.insert_paste(d, &report, target);
+                self.forget_feature_rows_if_shrunk(rows_before);
             }
         }
     }
@@ -13560,6 +14245,458 @@ mod tests {
         }
     }
 
+    /// The `.ico` the shell gets, read only by the three tests below.
+    ///
+    /// `#[cfg(test)]` by virtue of being in this module, which is the point: the
+    /// executable carries these 2,627 bytes already, as a linked resource, and a
+    /// second copy in `.rdata` for a test to hash would be exactly the redundancy
+    /// [`window_icon`] refuses.
+    const ICO: &[u8] = include_bytes!("../icon/polylinker.ico");
+
+    /// `with_icon` gets the master's pixels, at the master's size.
+    ///
+    /// The app cannot be launched by a test — `run_native` owns the event loop —
+    /// so this asserts the value [`main`] hands to `ViewportBuilder::with_icon`
+    /// rather than a taskbar button. What that value IS, is the whole question:
+    /// a `Vec<u8>` with a width and a height, and **nothing downstream treats a
+    /// disagreement between the three as an error worth stopping for.** On
+    /// Windows, `IconData::to_image` is `RgbaImage::from_raw(width, height,
+    /// rgba)`, which returns `None` on any length that is not `width * height *
+    /// 4`; eframe turns that into `log::warn!("Invalid icon: {err}")` and
+    /// `AppIconStatus::NotSetIgnored`. egui-winit's `to_winit_icon` does the same
+    /// with `"Invalid IconData: {err}"`. So the whole symptom of getting this
+    /// wrong is the egui logo still on the taskbar and one line in a log this
+    /// binary does not even install a subscriber for.
+    ///
+    /// The colour assertion is what makes this about POLYLINKER'S icon rather
+    /// than about any 16,384-byte buffer. Both Okabe-Ito members of the drawing
+    /// must be present and nothing else may be fully opaque, which a blank
+    /// buffer, a solid fill, a truncated file and a channel-order mistake all
+    /// fail — `#0072B2` read as BGRA is `#B27200`, which is neither.
+    ///
+    /// As of the master at hand: 4,096 pixels, 1,164 carrying any ink, 910 fully
+    /// opaque (320 blue, 590 orange), 2,932 fully transparent. Those are recorded
+    /// here rather than asserted because the digests below already pin the bytes
+    /// exactly, and a second exact statement of the same thing is a second thing
+    /// to update when the drawing legitimately changes.
+    #[test]
+    fn the_window_icon_is_the_pixels_with_icon_is_handed() {
+        let icon = window_icon();
+        assert_eq!(
+            (icon.width, icon.height),
+            (ICON_PX, ICON_PX),
+            "the icon must be square and 64 px; see `window_icon` for why 64"
+        );
+        assert_eq!(
+            icon.rgba.len(),
+            (ICON_PX * ICON_PX * 4) as usize,
+            "{} bytes is not {ICON_PX}x{ICON_PX} RGBA8. `Icon::from_rgba` would \
+             reject this and eframe would log the rejection and open an \
+             unicorned window.",
+            icon.rgba.len()
+        );
+        assert_eq!(icon.rgba, ICON_RGBA, "window_icon() reshaped the blob");
+
+        // Transparent, not white — the taskbar is whatever colour the user chose.
+        assert_eq!(
+            &icon.rgba[..4],
+            &[0, 0, 0, 0],
+            "the top-left pixel is not transparent"
+        );
+
+        let mut opaque = std::collections::BTreeSet::new();
+        let mut inked = 0usize;
+        for px in icon.rgba.chunks_exact(4) {
+            if px[3] > 0 {
+                inked += 1;
+            }
+            if px[3] == 255 {
+                opaque.insert([px[0], px[1], px[2]]);
+            }
+        }
+        assert_eq!(
+            opaque,
+            std::collections::BTreeSet::from([[0x00, 0x72, 0xB2], [0xE6, 0x9F, 0x00]]),
+            "the fully opaque colours are {opaque:?}; polylinker.svg draws in \
+             Okabe-Ito #0072B2 and #E69F00 and nothing else. Channel order is the \
+             usual cause: #0072B2 written B,G,R,A reads as #B27200."
+        );
+        assert!(
+            (1..icon.rgba.len() / 4).contains(&inked),
+            "{inked} of 4096 pixels carry ink; an icon that is entirely empty or \
+             entirely filled is not this drawing"
+        );
+    }
+
+    /// The window icon and the `.ico` came out of ONE run of `build-icon.py`.
+    ///
+    /// **THIS IS THE DRIFT CHECK, and the drift is not hypothetical.** The two
+    /// files are separate artefacts of one generator. Edit `polylinker.svg` and
+    /// regenerate only the `.ico` — or hand-edit either — and the running window
+    /// shows one drawing while Explorer, the Start Menu and Add/Remove Programs
+    /// show another, with every existing check still green: the gate step `the
+    /// built binaries carry their icon and version resource` compares the .exe's
+    /// resource against the `.ico` and would go on passing, because both sides of
+    /// THAT comparison moved together.
+    ///
+    /// A digest per artefact, in one place, is what joins them: `build-icon.py`
+    /// writes both files in one pass and prints both digests, so a pair that
+    /// matches this list is a pair from the same pass. Run the script and paste
+    /// the two lines it prints — do not edit one digit to make this green, which
+    /// is precisely the failure it is here to report.
+    ///
+    /// WHAT IT DOES NOT DO: compare the PIXELS. The `.ico`'s frames are PNG and
+    /// nothing here can inflate one (see [`window_icon`]). Pixel equality between
+    /// the 64 px frame and this blob is the gate step `the window icon is the
+    /// .ico's own 64 px frame`, which decodes the frame with PIL and re-renders
+    /// the master with resvg. This test is the half that needs no Python and runs
+    /// on every `cargo test`.
+    #[test]
+    fn the_window_icon_and_the_ico_are_one_generation() {
+        for (what, bytes, len, want) in [
+            (
+                "icon/polylinker.ico",
+                ICO,
+                2_627usize,
+                "a77e020c6b4ae6c77f7bcb294a13333d5f0908c2b90e51ddd864e03f494c8d37",
+            ),
+            (
+                "icon/polylinker-64.rgba",
+                ICON_RGBA,
+                16_384,
+                "a1dce141c6de949cb2b3054b096e124a4a1c9a3e86f9a788cce3a4d999c56050",
+            ),
+        ] {
+            assert_eq!(
+                bytes.len(),
+                len,
+                "{what} is {} bytes, not {len}",
+                bytes.len()
+            );
+            let got = pl_core::sha256::sha256_hex(bytes);
+            assert_eq!(
+                got, want,
+                "{what} hashes to {got}, and this test says {want}. The two icon \
+                 artefacts are written by one run of bins/pl-gui/icon/build-icon.py \
+                 from one polylinker.svg; if only one of them has moved, the window \
+                 icon and the shell icon are now two different pictures. Run \
+                 `python bins/pl-gui/icon/build-icon.py` and paste BOTH digests it \
+                 prints."
+            );
+        }
+    }
+
+    /// The `.ico` really has a 64 x 64 frame, so the window icon is a frame of it
+    /// rather than a size it never carried.
+    ///
+    /// The directory and the PNG header are the parts of a `.ico` that are NOT
+    /// compressed — `ICONDIR`, then 16-byte `ICONDIRENTRY`s, then for each frame
+    /// an 8-byte PNG signature and an `IHDR` whose width, height, bit depth and
+    /// colour type are plain big-endian fields. So this reads exactly as far as
+    /// it can with no inflate, and stops there honestly.
+    ///
+    /// It earns its place next to the digests because a digest says "these bytes,
+    /// unchanged" and says nothing about what the bytes MEAN. Change `SIZES` in
+    /// `build-icon.py` to drop 64 and both digests would be updated by the same
+    /// run that dropped it, both would match, and the window icon would silently
+    /// become a size the `.ico` no longer rasterises — the resample the script's
+    /// own comment refuses for the `.ico`'s frames.
+    #[test]
+    fn the_ico_has_a_native_frame_at_the_window_icons_size() {
+        let le16 = |at: usize| u16::from_le_bytes([ICO[at], ICO[at + 1]]);
+        let le32 = |at: usize| u32::from_le_bytes(ICO[at..at + 4].try_into().unwrap());
+        let be32 = |at: usize| u32::from_be_bytes(ICO[at..at + 4].try_into().unwrap());
+
+        assert_eq!(
+            (le16(0), le16(2)),
+            (0, 1),
+            "not an ICONDIR of type 1 (icon)"
+        );
+        let count = le16(4) as usize;
+        assert_eq!(count, 9, "polylinker.ico declares {count} frames, not 9");
+
+        // Width and height are ONE BYTE each, with 0 meaning 256 — which is why
+        // 256 is the largest size an .ico can name, and why this compares against
+        // a u8.
+        let want = u8::try_from(ICON_PX).expect("the window icon is under 256 px");
+        let entry = (0..count)
+            .map(|i| 6 + i * 16)
+            .find(|&e| ICO[e] == want && ICO[e + 1] == want)
+            .unwrap_or_else(|| {
+                panic!(
+                    "polylinker.ico carries no {ICON_PX}x{ICON_PX} frame, so the \
+                     window icon is not one of its frames. Either ICON_PX or \
+                     SIZES in build-icon.py moved without the other."
+                )
+            });
+
+        let off = le32(entry + 12) as usize;
+        assert_eq!(
+            &ICO[off..off + 8],
+            b"\x89PNG\r\n\x1a\n",
+            "the {ICON_PX} px frame is not PNG-compressed"
+        );
+        assert_eq!(
+            &ICO[off + 12..off + 16],
+            b"IHDR",
+            "no IHDR after the signature"
+        );
+        assert_eq!(
+            (be32(off + 16), be32(off + 20)),
+            (ICON_PX, ICON_PX),
+            "the directory says {ICON_PX}x{ICON_PX} and IHDR disagrees"
+        );
+        // 8-bit, colour type 6 = truecolour with alpha. Anything else and the
+        // frame is not the same kind of image the blob is, so comparing them
+        // byte-for-byte in the gate would be comparing two layouts.
+        assert_eq!(
+            (ICO[off + 24], ICO[off + 25]),
+            (8, 6),
+            "the {ICON_PX} px frame is not 8-bit RGBA"
+        );
+    }
+
+    /// Every embedded face NOTICE lists, as `(name, bytes)`.
+    ///
+    /// The shape is fixed by the file: a face's entry opens at exactly two
+    /// spaces of indent with its name, then its byte count, then its version.
+    /// Everything else that carries a byte count — the licence texts, the
+    /// archive sizes, the executable sizes — is indented four or more, so the
+    /// two-space rule is what separates a FACE from everything else on the
+    /// page. Parsed rather than listed here on purpose: a list in this file
+    /// would be a second copy of NOTICE's, with nothing joining them, which is
+    /// the defect `the_vendored_faces_are_the_files_notice_records` above
+    /// spends a paragraph on.
+    fn notice_faces(notice: &str) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        for line in notice.lines() {
+            let Some(rest) = line.strip_prefix("  ") else {
+                continue;
+            };
+            if rest.starts_with(' ') {
+                continue;
+            }
+            let Some((head, _)) = rest.split_once(" bytes") else {
+                continue;
+            };
+            let Some(count) = head.split_whitespace().next_back() else {
+                continue;
+            };
+            let Ok(bytes) = count.replace(',', "").parse::<usize>() else {
+                continue;
+            };
+            let name = head[..head.len() - count.len()].trim().to_string();
+            out.push((name, bytes));
+        }
+        out
+    }
+
+    /// The shipped NOTICE with every run of whitespace collapsed to one space.
+    ///
+    /// Every sentence checked against this file spans a line break sooner or
+    /// later — NOTICE hard-wraps at 80 columns — and a `contains` against the
+    /// raw text stops matching the moment a re-wrap moves a word, in silence
+    /// and in the passing direction. That is not hypothetical here: the first
+    /// run of `the_still_owed_paragraph_owes_only_what_is_still_owed` reported
+    /// its SECOND arm, because `"embeds no fonts at all"` was wrapped after
+    /// "no" and the first arm had been unfailable from the moment it was
+    /// written.
+    fn flat_notice() -> String {
+        help::notice()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// A byte count written the way NOTICE writes it.
+    fn commas(n: usize) -> String {
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, c) in s.char_indices() {
+            if i > 0 && (s.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// The face count and byte total NOTICE states are the faces NOTICE lists.
+    ///
+    /// PROVEN TO FAIL against the NOTICE in the working tree before 2026-08-04,
+    /// which opened its embedded-fonts section with "Seven faces, 2,282,880
+    /// bytes, in polylinker.exe. Two are checked in here and five arrive
+    /// through a crate." Observed failure:
+    /// `NOTICE lists 9 faces totalling 3,108,048 bytes and does not say
+    ///  "Nine faces, 3,108,048 bytes, in polylinker.exe"`.
+    ///
+    /// The arithmetic is what pinned which seven that sentence meant:
+    /// 373,552 + 1,414,020 + 495,308 = 2,282,880 exactly, so the two Liberation
+    /// faces `crates/pl-draw/src/font.rs` embeds were the ones left out — and
+    /// the GUI reaches them, through `export_map_png` -> `pl_draw::png_at` ->
+    /// `raster` -> `font::REGULAR`. The same file said four font files are
+    /// vendored eighteen lines above, so it contradicted itself.
+    ///
+    /// This is a licence record, not a statistic. The count is the reasoning
+    /// path by which `tools/release.ps1` came to ship six licence texts for
+    /// seven faces, and the "STILL OWED" paragraph at the bottom of the same
+    /// section is the same count one more time.
+    #[test]
+    fn the_face_count_notice_states_is_the_faces_notice_lists() {
+        // The face list is read from the raw text, because the two-space indent
+        // that identifies a face entry IS line structure; every claim about it
+        // is then checked against the flattened copy.
+        let faces = notice_faces(help::notice());
+        let notice = flat_notice();
+        let total: usize = faces.iter().map(|(_, b)| b).sum();
+
+        // The four vendored files, joined to their real lengths on disk rather
+        // than to a number written twice. `pl_draw::font::REGULAR` and `BOLD`
+        // are the constants the raster back end fills outlines from, which is
+        // the whole reason they belong in this total.
+        for (what, len) in [
+            ("IBM Plex Mono", PLEX_MONO.len()),
+            ("IBM Plex Sans", PLEX_SANS.len()),
+            ("Liberation Sans", pl_draw::font::REGULAR.len()),
+            ("Liberation Sans Bold", pl_draw::font::BOLD.len()),
+        ] {
+            assert!(
+                faces.iter().any(|(n, b)| n == what && *b == len),
+                "NOTICE's embedded-face list has no {what} entry of {len} bytes; \
+                 it lists {faces:?}"
+            );
+        }
+
+        const WORDS: [&str; 13] = [
+            "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+            "Eleven", "Twelve",
+        ];
+        let claim = format!(
+            "{} faces, {} bytes, in polylinker.exe",
+            WORDS[faces.len()],
+            commas(total)
+        );
+        assert!(
+            notice.contains(&claim),
+            "NOTICE lists {} faces totalling {} bytes and does not say {claim:?}",
+            faces.len(),
+            commas(total)
+        );
+
+        // Vendored against crate-delivered, the other half of the same
+        // sentence. Four .ttf files are committed to this repository — two
+        // under bins/pl-gui/fonts and two under crates/pl-draw/fonts — and
+        // NOTICE said "Two are checked in here" for one day after the second
+        // pair arrived.
+        assert!(
+            notice.contains("Four are checked in here and five arrive through a crate"),
+            "NOTICE no longer splits the {} faces into four vendored and five \
+             crate-delivered",
+            faces.len()
+        );
+    }
+
+    /// The "STILL OWED" paragraph owes only what is still owed.
+    ///
+    /// PROVEN TO FAIL against the NOTICE in the working tree before 2026-08-04.
+    /// Observed failure, verbatim: `NOTICE still says "embeds no fonts at all".
+    /// bins/pl reaches pl_draw::font through --png, so it embeds 825,168 bytes
+    /// of Liberation Sans.` An assertion stops at the first arm, so that is the
+    /// one the run reported; the second arm was observed failing separately, on
+    /// the run before [`flat_notice`] was introduced, and all three phrases can
+    /// be read in that NOTICE at lines 511-516.
+    ///
+    /// This paragraph's job is to record which obligations travel with a
+    /// release. It is the section a packager reads, and it is the reasoning
+    /// path by which `Liberation-OFL.txt` was left out of `dist/` while the
+    /// face itself shipped — so a stale claim here is not a cosmetic one. The
+    /// clause that survives is asserted positively beside the three that did
+    /// not, because a test that only forbids wording cannot tell an update from
+    /// a deletion.
+    #[test]
+    fn the_still_owed_paragraph_owes_only_what_is_still_owed() {
+        let notice = flat_notice();
+        for (stale, why) in [
+            (
+                "embeds no fonts at all",
+                "bins/pl reaches pl_draw::font through --png, so it embeds \
+                 825,168 bytes of Liberation Sans",
+            ),
+            (
+                "the seven faces are in `polylinker.exe`",
+                "nine faces are, since this binary's PNG export reaches the \
+                 Liberation pair",
+            ),
+            (
+                "the GUI cannot yet state its own font attribution from inside itself",
+                "bins/pl-gui/src/help.rs is exactly that page and ships in this \
+                 binary",
+            ),
+        ] {
+            assert!(
+                !notice.contains(stale),
+                "NOTICE still says {stale:?}. {why}."
+            );
+        }
+        // What is genuinely still owed, and the only clause of the four that
+        // was true when it was written and is true now: `cmd_licences` in
+        // bins/pl prints a hand-written attribution block for the feature
+        // database and nothing about fonts.
+        assert!(
+            notice.contains(
+                "STILL OWED: `pl licences` prints the compiled-in feature-database \
+                 attribution"
+            ),
+            "NOTICE no longer records the one font-attribution obligation that \
+             has not been discharged"
+        );
+    }
+
+    /// The passage this binary's Help page quotes is in the NOTICE it ships.
+    ///
+    /// PROVEN TO FAIL against `help.rs` in the working tree before 2026-08-04,
+    /// and it failed against the UNEDITED NOTICE too, which is the finding: the
+    /// passage `help.rs` presented as a block quotation had never been the
+    /// bytes in NOTICE. It carried `**` emphasis, an ellipsis and an em dash
+    /// that the file it cited does not have, so the citation was a paraphrase
+    /// wearing quotation marks, and the line numbers it gave — "NOTICE lines
+    /// 443-450" — were by then the Phosphor shaping discussion, the passage
+    /// itself having moved to 511. Observed failure, abridged at the ellipsis:
+    /// `help.rs quotes "**STILL OWED:** … it is `pl.exe`, which embeds no fonts
+    /// at all — the seven faces are in `polylinker.exe`, …" and NOTICE does not
+    /// contain it`.
+    ///
+    /// A line-number citation into another file is unpinnable by construction —
+    /// it goes stale on any edit above it, in silence, and reads as authority
+    /// while doing so. So `help.rs` cites by section heading and by quotation
+    /// instead, and this is what makes the quotation a citation rather than a
+    /// second copy.
+    ///
+    /// Compared with whitespace collapsed, because NOTICE hard-wraps at 80 and
+    /// the quote wraps at whatever `//!` leaves.
+    #[test]
+    fn the_notice_passage_this_page_quotes_is_still_in_notice() {
+        const HELP_SRC: &str = include_str!("help.rs");
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        let quote = flat(
+            &HELP_SRC
+                .lines()
+                .filter_map(|l| l.trim_start().strip_prefix("//! >"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        assert!(
+            quote.len() > 60,
+            "help.rs quotes nothing from NOTICE any more, so this test cannot \
+             fail; it found {quote:?}"
+        );
+        assert!(
+            flat_notice().contains(&quote),
+            "help.rs quotes {quote:?} and NOTICE does not contain it"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // autosave
     // -----------------------------------------------------------------------
@@ -13808,6 +14945,127 @@ mod tests {
             "the file was opened over the draft the banner is about to offer"
         );
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// One tab already on screen, with work in it, and a project opened on top.
+    ///
+    /// `restore_session`'s own comment — "every tab went in behind the scenes,
+    /// so `App`'s own view fields hold nothing yet" — is true at startup and
+    /// FALSE through File ▸ Open project, which `open_project`'s doc insists
+    /// adds to the bench rather than replacing it. `Bench::focus` is
+    /// `std::mem::take`, and an active tab's stored slot always holds
+    /// `DocView::default()` for the reason `close_tab`'s doc sets out, so
+    /// `put_view` then assigned eighteen default fields over the live view.
+    ///
+    /// PROVEN TO FAIL with the `settle`/`take_view`/`store` removed again from
+    /// `restore_session`, which is where the tree stood before this commit:
+    ///
+    /// ```text
+    /// ---- tests::opening_a_project_keeps_the_view_of_the_tab_on_screen stdout ----
+    /// assertion `left == right` failed: File ▸ Open project lost the notice
+    ///   left: None
+    ///  right: Some("A's notice")
+    /// ```
+    ///
+    /// The notice is merely the first field `marked_view_survived` reaches after
+    /// the status; the caret, the selection, the Find query, the enzyme set and
+    /// all three panels went with it.
+    ///
+    /// This is the defect today's `close_tab` fix was written for, at the one
+    /// sibling call site the fix did not reach.
+    #[test]
+    fn opening_a_project_keeps_the_view_of_the_tab_on_screen() {
+        let here = temp_file("ws-live", "fa", PLASMID_A);
+        let added = temp_file("ws-added", "fa", PLASMID_A);
+        let mut app = App::blank();
+        app.load(here.clone());
+        mark_view(&mut app);
+
+        // `active: None` is what a project written from a one-tab bench with
+        // nothing selected gives, and it is the branch `open_project` reaches
+        // most: `want` stays `None` and `focus(0)` names the tab already there.
+        app.restore_session(session::Session {
+            open: vec![added.clone()],
+            withheld: 0,
+            active: None,
+            saved_at: 1,
+            name: Some("bench".into()),
+            closed: false,
+        });
+        assert_eq!(
+            app.bench.len(),
+            2,
+            "the premise: the project added its document to the bench"
+        );
+        assert_eq!(
+            app.document().and_then(|d| d.path.clone()),
+            Some(here.clone()),
+            "the premise: the tab on screen is still the one that was there"
+        );
+
+        // The status is the one field the restore legitimately owns — it reports
+        // what was opened, and saying nothing would be worse. Everything else on
+        // the view belongs to the tab that never went anywhere.
+        let said = std::mem::replace(&mut app.status, "A's status".into());
+        assert!(
+            said.contains("reopened 1"),
+            "the restore did not report what it opened: {said:?}"
+        );
+        marked_view_survived(&app, "File ▸ Open project");
+
+        let _ = std::fs::remove_file(&here);
+        let _ = std::fs::remove_file(&added);
+    }
+
+    /// The same loss from the other side: the project names the tab to show, so
+    /// the view that has to be put away is the one being switched AWAY from.
+    ///
+    /// Nothing on screen says it went, and switching back does not recover it —
+    /// tab 0's slot was never written, so `activate` hands out a default too.
+    ///
+    /// PROVEN TO FAIL with the `settle`/`take_view`/`store` removed again from
+    /// `restore_session`:
+    ///
+    /// ```text
+    /// ---- tests::opening_a_project_that_names_its_own_tab_keeps_the_other_one stdout ----
+    /// assertion `left == right` failed: File ▸ Open project, then back lost the
+    /// status line
+    ///   left: ""
+    ///  right: "A's status"
+    /// ```
+    ///
+    /// The status is simply the first field `marked_view_survived` reaches;
+    /// every other one had gone the same way, the religation plan included —
+    /// which `switch_tab`'s own doc calls "not recomputable at all".
+    #[test]
+    fn opening_a_project_that_names_its_own_tab_keeps_the_other_one() {
+        let here = temp_file("ws-live2", "fa", PLASMID_A);
+        let added = temp_file("ws-added2", "fa", PLASMID_A);
+        let mut app = App::blank();
+        app.load(here.clone());
+        mark_view(&mut app);
+
+        app.restore_session(session::Session {
+            open: vec![added.clone()],
+            withheld: 0,
+            active: Some(0),
+            saved_at: 1,
+            name: Some("bench".into()),
+            closed: false,
+        });
+        assert_eq!(
+            app.document().and_then(|d| d.path.clone()),
+            Some(added.clone()),
+            "the premise: the project named its own document, so that is the tab shown"
+        );
+
+        // Click back to where the work was. The status comes back with the tab
+        // this time, so the whole view is checked without an exclusion.
+        app.switch_tab(0);
+        marked_view_survived(&app, "File ▸ Open project, then back");
+
+        let _ = std::fs::remove_file(&here);
+        let _ = std::fs::remove_file(&added);
     }
 
     /// The heartbeat, and the flag that stops it locking the user out.
@@ -14367,6 +15625,163 @@ mod tests {
         );
     }
 
+    /// The app's PNG is the command line's PNG, byte for byte.
+    ///
+    /// The same argument as the test above, applied to the fourth format:
+    /// "deterministic output" is this project's stated selling point, and two
+    /// panels of one figure exported from two surfaces that do not line up is
+    /// the way it breaks that nobody notices.
+    ///
+    /// The raster has a second number the vector formats do not — the
+    /// resolution — so this checks that BOTH reach the file. A `figure_dpi` the
+    /// app read and did not pass would leave every GUI export at the default
+    /// while the control said otherwise, and the picture would still look
+    /// right at a glance.
+    ///
+    /// THE GUI SIDE IS `App::map_png`, the export itself. Until 2026-08-04 this
+    /// test built its "gui" bytes by calling `pl_draw::scene` and
+    /// `pl_draw::png_at` here and comparing them against `circular_png_at`,
+    /// which is those two calls in that order — so the equality held whatever
+    /// the app did, and the export path this test is named for was never run.
+    ///
+    /// PROVEN TO FAIL by pinning `let dpi = 300.0;` in `map_png` in place of
+    /// `self.layout.figure_dpi` — the mutation the doc above describes, and one
+    /// the old test could not see. All three arms were confirmed to fire on
+    /// their own, each with the arms above it neutered:
+    /// `the app's PNG is not the file pl export --png writes for 89 mm at 600
+    ///  dpi`; `the status line says "1051 x 1051 px at 300 dpi" for a 600 dpi
+    ///  export, not "2102 x 2102 px at 600 dpi"`; `150 dpi produced the same
+    ///  bytes as 600, so figure_dpi reaches nothing`.
+    #[test]
+    fn the_apps_png_is_the_same_bytes_as_the_command_lines() {
+        let mut app = App::blank();
+        app.bench.set(Document::of_molecule(pl_core::Molecule {
+            name: "pRaster".into(),
+            seq: b"AAAAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCCGGGG".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        }));
+        let mol = app.document().expect("a molecule").molecule().clone();
+        let opts = App::figure_options(app.document().unwrap(), app.enzyme_set);
+        let mm = pl_draw::page::preset("nature")
+            .expect("a shipped preset")
+            .single_mm;
+
+        app.layout.figure_mm = Some(mm);
+        app.layout.figure_dpi = 600.0;
+        // The app's own export, not a reconstruction of it.
+        let (gui, note) = app
+            .map_png()
+            .expect("the app has a document to export")
+            .expect("89 mm at 600 dpi is inside the pixel budget");
+        // ...against the call `pl export --png` makes, with the width, the
+        // resolution and the white background written out here rather than read
+        // back off `app.layout`, so the two sides cannot drift together.
+        let (cli, _, _) =
+            pl_draw::circular_png_at(&mol, opts.clone(), Some(mm), 600.0, [255, 255, 255])
+                .expect("89 mm at 600 dpi is inside the pixel budget");
+        assert!(
+            gui == cli,
+            "the app's PNG is not the file `pl export --png` writes for 89 mm at 600 dpi"
+        );
+
+        // The resolution really is the one that was set, and it really is in
+        // the file: 600 dpi is 23,622 px/m, and 89 mm at 600 dpi is 2,102 px.
+        let (sc, _) = pl_draw::scene(&mol, opts.clone());
+        let (w, h) = pl_draw::page::Fit::to_width_mm(&sc, mm).pixels(600.0);
+        assert_eq!(w, 2102, "89 mm at 600 dpi should be 2102 px wide");
+        // The status line is the only place the user is told either number, so
+        // it is held to the same arithmetic as the pixels.
+        let said = format!("{w} x {h} px at 600 dpi");
+        assert!(
+            note.contains(&said),
+            "the status line says {:?} for a 600 dpi export, not {said:?}",
+            note.join("  —  ")
+        );
+        assert!(
+            gui.windows(4).any(|c| c == b"pHYs"),
+            "the PNG carries no physical resolution at all"
+        );
+        // ...and moving the control moves the file, so it is not inert. Driven
+        // through `map_png` again, because the defect being guarded against is
+        // an export that ignores the control, not a `png_at` that ignores its
+        // argument.
+        app.layout.figure_dpi = 150.0;
+        let (coarser, _) = app
+            .map_png()
+            .expect("the document is still there")
+            .expect("89 mm at 150 dpi is inside the pixel budget");
+        assert!(
+            coarser != gui && coarser.len() < gui.len(),
+            "150 dpi produced the same bytes as 600, so figure_dpi reaches nothing"
+        );
+    }
+
+    /// A figure the app cannot hold is refused in the panel, not in the
+    /// allocator.
+    ///
+    /// PROVEN TO FAIL against the working tree of 2026-08-04: `map_png`
+    /// returned `Option<(Vec<u8>, Vec<String>)>` and `pl_draw::png_at` had no
+    /// bound at all, so this test does not compile there — and the behaviour it
+    /// asserts was a 20.5 GB allocation on the UI thread, taking the user's
+    /// unsaved bench with it when it failed. Against the fixed tree with
+    /// `png_at`'s `png_budget(..)?` replaced by `let _ = png_budget(..);` it
+    /// fails on `500 mm at 1200 dpi was rendered, not refused`.
+    ///
+    /// The settings are the ones the panel itself sets: `figure_mm` is banded
+    /// 20..=500 in `settings.rs` and the Resolution row offers 1200 by click,
+    /// so this is two clicks away and not a hand-edited config.
+    #[test]
+    fn a_map_too_big_to_hold_is_refused_with_a_resolution_that_is_not() {
+        let mut app = App::blank();
+        app.bench.set(Document::of_molecule(pl_core::Molecule {
+            name: "pRaster".into(),
+            seq: b"AAAAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCCGGGG".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        }));
+
+        app.layout.figure_mm = Some(500.0);
+        app.layout.figure_dpi = 1200.0;
+        // Matched rather than `expect_err`, which would `Debug`-print the 8.9 MB
+        // of PNG on the way to saying it should not exist.
+        let e = match app.map_png().expect("there is a document") {
+            Ok((bytes, _)) => panic!(
+                "500 mm at 1200 dpi was rendered, not refused: {} bytes of PNG",
+                bytes.len()
+            ),
+            Err(e) => e,
+        };
+        assert_eq!(
+            (e.w, e.h),
+            (23622, 23622),
+            "500 mm at 1200 dpi is 23,622 px square, which is what the docs on this \
+             path say and what the 20.5 GB in them is computed from"
+        );
+        assert!(
+            e.pixels() > pl_draw::MAX_PIXELS,
+            "{e} was refused but is inside the budget"
+        );
+        // The user is told, in the panel, with the resolution that works —
+        // silence would look exactly like a broken menu item. `export_map_png`
+        // itself cannot be driven from a test (it blocks on `rfd`'s native save
+        // dialog), so this is the line it sets, from the same function.
+        let notice = App::png_refusal(&e);
+        for want in [e.w.to_string(), "1200 dpi".into(), "megapixel".into()] {
+            assert!(
+                notice.contains(&want),
+                "the panel says {notice:?}, which does not mention {want:?}"
+            );
+        }
+
+        // The control: the same figure at the resolution the refusal named.
+        let d = e.fits_at_dpi.expect("some resolution fits 500 mm");
+        app.layout.figure_dpi = d;
+        app.map_png()
+            .expect("there is a document")
+            .expect("the app suggested a resolution it then refuses");
+    }
+
     /// The History tab advertised a branch it would not let you visit.
     ///
     /// PROVEN TO FAIL against 13433a0: `history_tab` painted every row as a
@@ -14522,6 +15937,369 @@ mod tests {
         assert_eq!(app.status, "untouched", "a no-op seek reported a move");
     }
 
+    /// Give the tab on screen a value that names IT in every field a `DocView`
+    /// carries.
+    ///
+    /// Shared with `marked_view_survived` by every test whose subject is "did a
+    /// field get left behind". The two failure modes — a field missing from
+    /// `take_view`/`put_view`, and a whole view scattered by a close — are the
+    /// same shape and both are silent, and a second hand-written enumeration
+    /// beside this one is one more list for a field to go missing from. So there
+    /// is exactly one.
+    ///
+    /// SIXTEEN OF THE EIGHTEEN, and saying which two are not here is part of the
+    /// helper: `tr` (the translation strips) and `gel` (the lane layout) are
+    /// derived from the molecule rather than typed by the user, so a wrong one
+    /// is recomputed rather than believed. Nothing here covers them.
+    fn mark_view(app: &mut App) {
+        app.status = "A's status".into();
+        app.notice = Some("A's notice".into());
+        app.edit.caret = 7;
+        app.selected = Some(0);
+        app.hot = Some(0);
+        app.hot_shown = Some(0);
+        app.filter = "A's filter".into();
+        app.find.open = true;
+        app.find.query = "GAATTC".into();
+        app.enz_strip = true;
+        app.orf_strip = true;
+        app.doc_code = pl_core::translate::table(4).expect("table 4");
+        app.central_view = CentralView::Gel;
+        app.enzyme_set = pl_enzymes::EnzymeSet::Unique;
+        app.clone_panel = Some(clone::Panel::new(
+            &["BamHI".to_string()].into(),
+            clone::Primers::default(),
+        ));
+        app.design = Some(
+            design::Panel::open(
+                "A's design".into(),
+                24,
+                true,
+                seqedit::Selection {
+                    anchor: 2,
+                    head: 18,
+                    through_origin: false,
+                },
+            )
+            .expect("a selection with bases in it"),
+        );
+        app.feature_edit = Some(
+            featedit::Panel::open(Some(0), rich_feature(), 400, false, None)
+                .expect("a molecule with a span"),
+        );
+    }
+
+    /// Assert everything [`mark_view`] set is still on `App`.
+    ///
+    /// `whose` names the gesture under test, so a failure says which one lost
+    /// the field rather than only which field was lost.
+    fn marked_view_survived(app: &App, whose: &str) {
+        assert_eq!(app.status, "A's status", "{whose} lost the status line");
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("A's notice"),
+            "{whose} lost the notice"
+        );
+        assert_eq!(app.edit.caret, 7, "{whose} put the caret back to base zero");
+        assert_eq!(app.selected, Some(0), "{whose} lost the selected feature");
+        assert_eq!(app.hot, Some(0), "{whose} lost the hover highlight");
+        assert_eq!(app.hot_shown, Some(0), "{whose} lost the hover highlight");
+        assert_eq!(app.filter, "A's filter", "{whose} lost the feature filter");
+        assert!(
+            app.find.open && app.find.query == "GAATTC",
+            "{whose} lost the Find query"
+        );
+        assert!(
+            app.enz_strip && app.orf_strip,
+            "{whose} lost the sequence tracks"
+        );
+        assert_eq!(app.doc_code.id, 4, "{whose} put the genetic code back to 1");
+        assert_eq!(
+            app.central_view,
+            CentralView::Gel,
+            "{whose} put the central view back to the map"
+        );
+        assert_eq!(
+            app.enzyme_set,
+            pl_enzymes::EnzymeSet::Unique,
+            "{whose} widened the enzyme set back to all of them, and the Enzymes list, the \
+             map ticks, the gel lanes and the digest key all read it"
+        );
+        assert!(
+            app.clone_panel.is_some(),
+            "{whose} closed the religation panel, which `switch_tab`'s own doc calls \"not \
+             recomputable at all\""
+        );
+        assert_eq!(
+            app.design.as_ref().map(|p| p.title.as_str()),
+            Some("A's design"),
+            "{whose} closed the primer design panel"
+        );
+        assert!(
+            app.feature_edit.is_some(),
+            "{whose} closed the feature editor with the form half filled in"
+        );
+    }
+
+    /// Closing a BACKGROUND tab must not touch the tab you are looking at.
+    ///
+    /// PROVEN TO FAIL with the store in `close_tab` back behind its old
+    /// `if i == self.bench.active()`:
+    ///
+    /// ```text
+    /// ---- tests::closing_a_background_tab_does_not_blank_the_one_on_screen stdout ----
+    /// assertion `left == right` failed: closing the tab to the right lost the status line
+    ///   left: ""
+    ///  right: "A's status"
+    /// ```
+    ///
+    /// The store was guarded and the `take_active_view` + `put_view` pair below
+    /// it was not. On a background close nothing had been stored, and the active
+    /// tab's own slot always holds `DocView::default()` — `Bench::activate`,
+    /// `Bench::focus` and `Bench::take_active_view` are all `std::mem::take` —
+    /// so `put_view`, which is a plain field-by-field assignment, scattered a
+    /// default view over the molecule still on screen. Middle-clicking another
+    /// tab's close button threw away the religation plan, the design panel, the
+    /// feature editor, the caret, the Find query, the feature filter, the enzyme
+    /// set and the central view, with nothing on screen saying so.
+    ///
+    /// BOTH DIRECTIONS, because they fail differently. Closing to the RIGHT
+    /// leaves `Bench::active` alone; closing to the LEFT decrements it, so the
+    /// view has to follow the tab across an index change as well.
+    #[test]
+    fn closing_a_background_tab_does_not_blank_the_one_on_screen() {
+        let mut app = App::blank();
+        app.bench
+            .set(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGGCCTT"));
+        app.bench
+            .set(edited_doc("b.fa", "GGGGTTTTAAAACCCCTTAACCGG"));
+        app.bench
+            .set(edited_doc("c.fa", "TTTTAAAACCCCGGGGAACCTTGG"));
+        app.switch_tab(1);
+        mark_view(&mut app);
+
+        app.close_tab(2);
+        assert_eq!(app.bench.len(), 2, "the premise: a tab was closed");
+        assert_eq!(
+            app.document().map(|d| d.title.as_str()),
+            Some("b.fa"),
+            "the premise: the tab on screen is still B"
+        );
+        marked_view_survived(&app, "closing the tab to the right");
+
+        app.close_tab(0);
+        assert_eq!(
+            app.document().map(|d| d.title.as_str()),
+            Some("b.fa"),
+            "the premise: the tab on screen is still B"
+        );
+        marked_view_survived(&app, "closing the tab to the left");
+    }
+
+    /// The clone panel's donor is a TAB, not a position in a list of tabs.
+    ///
+    /// PROVEN TO FAIL with `App::clone_donors` handing out the enumerate index
+    /// as the donor's name instead of `Tab::id`, which is what it did:
+    ///
+    /// ```text
+    /// ---- tests::the_clone_panels_donor_still_names_c_after_the_bench_reorders stdout ----
+    /// assertion `left == right` failed: the donor row and the Copy-report text
+    /// now name a different plasmid from the one `plan` holds the fragments of,
+    /// and Open builds the construct from that one
+    ///   left: Some("d.fa")
+    ///  right: Some("c.fa")
+    /// ```
+    ///
+    /// `Bench::close` is a `Vec::remove`, so closing a tab to the LEFT of the
+    /// donor shifts every later index down by one and `donor = Some(2)` starts
+    /// naming the tab that used to be third. Resolution is numeric equality
+    /// against a freshly enumerated bench and the staleness check fires only
+    /// when the donor resolves to NOTHING, so nothing anywhere notices: the
+    /// donor row and the Copy report name D, `plan` still holds C's fragments,
+    /// and Open adopts a construct built out of C under a description of D.
+    ///
+    /// ONE KEYSTROKE, and it was two until today. This was reachable only
+    /// through Ctrl+W then Ctrl+Shift+T while a background close still wiped
+    /// `clone_panel` outright; with `close_tab` fixed the panel survives a
+    /// background close, which is what makes the plain Ctrl+W below reach it.
+    #[test]
+    fn the_clone_panels_donor_still_names_c_after_the_bench_reorders() {
+        let mut app = App::blank();
+        for name in ["a.fa", "b.fa", "c.fa", "d.fa", "e.fa"] {
+            app.bench.set(edited_doc(name, "AAAACCCCGGGGTTTTAAGGCCTT"));
+        }
+        app.switch_tab(1);
+
+        // The user picks C out of the "Insert from" menu. That menu offers
+        // exactly what `clone_donors` returns and stores exactly what it hands
+        // out, so taking the value the same way is what makes this a test of
+        // the identity rather than of a literal.
+        let c = app
+            .clone_donors()
+            .into_iter()
+            .find(|(_, name, ..)| name == "c.fa")
+            .map(|(t, ..)| t)
+            .expect("c.fa is open and is not the active tab");
+        let mut panel = clone::Panel::new(&["BamHI".to_string()].into(), clone::Primers::default());
+        panel.donor = Some(c);
+        app.clone_panel = Some(panel);
+
+        // Ctrl+W on a tab to the LEFT of the donor.
+        app.close_tab(0);
+        assert!(
+            app.clone_panel.is_some(),
+            "the premise: a background close leaves the panel alone"
+        );
+        let named = app
+            .clone_panel
+            .as_ref()
+            .and_then(|p| p.donor)
+            .and_then(|t| app.clone_donors().into_iter().find(|(i, ..)| *i == t))
+            .map(|(_, name, ..)| name);
+        assert_eq!(
+            named.as_deref(),
+            Some("c.fa"),
+            "the donor row and the Copy-report text now name a different plasmid from the \
+             one `plan` holds the fragments of, and Open builds the construct from that one"
+        );
+    }
+
+    /// The design panel's idea of the template must not outlive the template.
+    ///
+    /// PROVEN TO FAIL with the two assignments removed from
+    /// `refresh_design_panel`, leaving it refreshing `doc_at` alone as it did:
+    ///
+    /// ```text
+    /// ---- tests::the_design_panel_re_reads_the_molecule_it_is_designing_against stdout ----
+    /// the panel would design circular-template primers on a linear molecule,
+    /// and its header still calls the molecule circular
+    /// ```
+    ///
+    /// ...and with `circular` put back and `bp` alone left stale, so that
+    /// neither half is carried by the other:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: the header prints the length the
+    /// molecule had when the panel opened
+    ///   left: 24
+    ///  right: 16
+    /// ```
+    ///
+    /// `bp` and `circular` were snapshotted in `design::Panel::open` and never
+    /// read again. `egui::Window` is not modal, so Molecule ▸ Make linear stays
+    /// live behind the panel: press Design after it and `Panel::run` hands the
+    /// stale `circular` to `pl_design::design`, which enumerates candidates
+    /// under a circular-template assumption — flanks and targets that wrap the
+    /// origin — on a molecule that has two ends, while the header goes on
+    /// printing "24 bp circular" over a linear document.
+    ///
+    /// `bp` is asserted beside it because the same snapshot is what the header
+    /// prints, and an edit that changes the length is the ordinary way to make
+    /// it wrong without touching the topology at all.
+    #[test]
+    fn the_design_panel_re_reads_the_molecule_it_is_designing_against() {
+        let mut app = App::blank();
+        app.bench
+            .set(edited_doc("p.fa", "AAAACCCCGGGGTTTTAAGGCCTT"));
+        let (bp, circular) = {
+            let m = app.document().expect("one tab").molecule();
+            (m.len(), m.topology.is_circular())
+        };
+        assert!(circular && bp == 24, "the premise: 24 bp, circular");
+        let mut panel = design::Panel::open(
+            "p.fa".into(),
+            bp,
+            circular,
+            seqedit::Selection {
+                anchor: 2,
+                head: 18,
+                through_origin: false,
+            },
+        )
+        .expect("a selection with bases in it");
+
+        // Both live behind the non-modal window: the Molecule menu and the
+        // Sequence tab are neither disabled nor guarded while it is open.
+        assert!(
+            app.edit(pl_core::OpKind::SetTopology(pl_core::Topology::Linear)),
+            "the premise: Molecule > Make linear applied"
+        );
+        assert!(
+            app.edit(pl_core::OpKind::DeleteRange { start: 1, len: 8 }),
+            "the premise: 8 bases deleted, {:?}",
+            app.notice
+        );
+
+        app.refresh_design_panel(&mut panel);
+        assert!(
+            !panel.circular,
+            "the panel would design circular-template primers on a linear molecule, and its \
+             header still calls the molecule circular"
+        );
+        assert_eq!(
+            panel.bp, 16,
+            "the header prints the length the molecule had when the panel opened"
+        );
+    }
+
+    /// Opening one draft must not leave another's Discard button pre-armed.
+    ///
+    /// PROVEN TO FAIL with the `self.discard_armed = None;` removed from
+    /// `take_over`:
+    ///
+    /// ```text
+    /// ---- tests::opening_a_draft_disarms_the_discard_button_on_every_other_row stdout ----
+    /// assertion `left == right` failed: row 4 moved up into row 3 and is drawn
+    /// already asking to be sure, so one click permanently deletes another
+    /// session's draft with no confirmation at all
+    ///   left: Some(3)
+    ///  right: None
+    /// ```
+    ///
+    /// `discard_armed` is a raw index into `self.stale`. The discard branch
+    /// clears it; `take_over` removes a row too — that is what Open on a
+    /// recovery row does — and did not. Arm Discard on row 3, then click Open on
+    /// row 1, and the row that was 4 is now 3 and comes back already saying
+    /// "Discard — this deletes the draft". The file that would then be deleted
+    /// is the right one, since `discard = Some(i)` carries the row that was
+    /// clicked. What is lost is the two-click confirmation the banner's comment
+    /// insists on for permanently deleting a draft belonging to a session that
+    /// cannot be asked.
+    #[test]
+    fn opening_a_draft_disarms_the_discard_button_on_every_other_row() {
+        let mut app = App::blank();
+        app.stale = (0..5)
+            .map(|i| {
+                (
+                    PathBuf::from(format!("draft{i}.recover")),
+                    Ok(recover::Snapshot {
+                        original: None,
+                        title: format!("draft{i}.fa"),
+                        saved_at: 1,
+                        ops: 4,
+                        abandoned: false,
+                        genbank: String::new(),
+                    }),
+                )
+            })
+            .collect();
+        app.discard_armed = Some(3);
+
+        // Open on row 1, which is what the banner's Open button does.
+        app.take_over(
+            edited_doc("recovered.fa", "AAAACCCCGGGGTTTTAAGG"),
+            "recovered".into(),
+            Some(1),
+        );
+
+        assert_eq!(app.stale.len(), 4, "the premise: a row was removed");
+        assert_eq!(
+            app.discard_armed, None,
+            "row 4 moved up into row 3 and is drawn already asking to be sure, so one click \
+             permanently deletes another session's draft with no confirmation at all"
+        );
+    }
+
     /// THE TEST TWO DOC COMMENTS HAVE NAMED SINCE STAGE 1, AND WHICH DID NOT
     /// EXIST.
     ///
@@ -14554,24 +16332,7 @@ mod tests {
         app.switch_tab(0);
 
         // Tab A gets a distinguishable value in every field a view carries.
-        app.status = "A's status".into();
-        app.notice = Some("A's notice".into());
-        app.edit.caret = 7;
-        app.selected = Some(0);
-        app.hot = Some(0);
-        app.hot_shown = Some(0);
-        app.filter = "A's filter".into();
-        app.find.open = true;
-        app.find.query = "GAATTC".into();
-        app.enz_strip = true;
-        app.orf_strip = true;
-        app.doc_code = pl_core::translate::table(4).expect("table 4");
-        app.central_view = CentralView::Gel;
-        app.enzyme_set = pl_enzymes::EnzymeSet::Unique;
-        app.clone_panel = Some(clone::Panel::new(
-            &["BamHI".to_string()].into(),
-            clone::Primers::default(),
-        ));
+        mark_view(&mut app);
 
         app.switch_tab(1);
         // NOTHING of A's is visible on B. Each of these is a way for one
@@ -14600,25 +16361,18 @@ mod tests {
             app.clone_panel.is_none(),
             "A's digest is on screen beside B's molecule"
         );
+        assert!(
+            app.design.is_none(),
+            "A's primer design is on screen beside B's molecule"
+        );
+        assert!(
+            app.feature_edit.is_none(),
+            "A's feature editor holds an index into A's feature list"
+        );
 
         // ...and ALL of A's is still A's.
         app.switch_tab(0);
-        assert_eq!(app.status, "A's status");
-        assert_eq!(app.notice.as_deref(), Some("A's notice"));
-        assert_eq!(app.edit.caret, 7);
-        assert_eq!(app.selected, Some(0));
-        assert_eq!(app.hot, Some(0));
-        assert_eq!(app.hot_shown, Some(0));
-        assert_eq!(app.filter, "A's filter");
-        assert!(
-            app.find.open && app.find.query == "GAATTC",
-            "the search was lost"
-        );
-        assert!(app.enz_strip && app.orf_strip);
-        assert_eq!(app.doc_code.id, 4);
-        assert_eq!(app.central_view, CentralView::Gel);
-        assert_eq!(app.enzyme_set, pl_enzymes::EnzymeSet::Unique);
-        assert!(app.clone_panel.is_some(), "the religation panel was lost");
+        marked_view_survived(&app, "switching away from a tab and back");
     }
 
     /// Opening a file must not blank the tab you were on.
@@ -14817,6 +16571,86 @@ mod tests {
             app.autosave(false);
         }
         assert!(!path.exists(), "an unchanged document was rewritten");
+
+        // And the heartbeat that keeps that draft looking alive
+        // (`an_idle_windows_draft_keeps_saying_it_is_alive`) is bounded the same
+        // way. Winding ITS clock back too must cost one write and not a hundred:
+        // an idle window with unsaved work already spins — `autosave_due_in`
+        // returns zero once the period is up — so a heartbeat on the bare gate
+        // above would be a rewrite of the whole molecule on every frame.
+        app.last_touch = std::time::Instant::now().checked_sub(App::AUTOSAVE_EVERY * 3);
+        app.autosave(false);
+        assert!(path.exists(), "the premise: the heartbeat was due");
+        std::fs::remove_file(&path).unwrap();
+        for _ in 0..100 {
+            app.autosave(false);
+        }
+        assert!(
+            !path.exists(),
+            "the heartbeat fired on every frame rather than once a period"
+        );
+    }
+
+    /// A running window's draft has to go on saying it is alive while its user
+    /// sits and thinks, or a second window offers to delete it.
+    ///
+    /// PROVEN TO FAIL against the working tree as handed over: `recover.rs`
+    /// justifies judging liveness from `saved_at` alone by "the writer's own
+    /// thirty-second cadence", and the writer had no such cadence. The memo gate
+    /// above skips any tab whose `(path, title, cursor)` is unchanged, so a
+    /// document that stopped being typed into stopped being stamped and its
+    /// `saved_at` froze. `LIVE_WINDOW_SECS` (90) later, a SECOND window lists
+    /// the running window's only crash copy under "A previous session did not
+    /// close cleanly" with an ENABLED Discard; two clicks call `recover::clear`
+    /// on it. The window that owns it never rewrites it — the memo still
+    /// matches — while `autosave_armed` goes on returning true and the close
+    /// guard goes on promising a recovery copy that is no longer on disk.
+    ///
+    /// The sibling `record_session` beats every thirty seconds for exactly this
+    /// reason and says so in as many words; this is the same requirement, on the
+    /// file that holds the molecule rather than the file that holds a tab list.
+    #[test]
+    fn an_idle_windows_draft_keeps_saying_it_is_alive() {
+        let (mut app, path) = app_with_recovery("heartbeat");
+        app.bench.set(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.autosave(false);
+        let first = recover::decode(&std::fs::read_to_string(&path).unwrap())
+            .expect("the premise: a draft with unsaved work in it");
+
+        // Stands in for the minutes this test cannot wait. What a stopped-typing
+        // window leaves on disk is precisely this: the body of the last edit,
+        // under the stamp of the last edit, however long ago that was.
+        let then = unix_now().saturating_sub(3 * recover::LIVE_WINDOW_SECS);
+        let stale_draft = recover::Snapshot {
+            saved_at: then,
+            ..first.clone()
+        };
+        std::fs::write(&path, recover::encode(&stale_draft)).unwrap();
+        assert!(
+            !recover::maybe_live(then, unix_now()),
+            "the premise: this stamp has aged out of the live window"
+        );
+
+        // The window is still open, still holds the work, and nothing was typed,
+        // so the memo still matches. Both throttles are wound back because what
+        // is under test is the pass that is DUE, not when it becomes due.
+        let long_ago = std::time::Instant::now().checked_sub(App::AUTOSAVE_EVERY * 3);
+        assert!(long_ago.is_some(), "a clock older than three periods");
+        app.last_autosave = long_ago;
+        app.last_touch = long_ago;
+        app.autosave(false);
+
+        let now = recover::decode(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            recover::maybe_live(now.saved_at, unix_now()),
+            "a live window's draft aged into the crashed group: another window \
+             would offer to delete it, with Discard enabled"
+        );
+        // A heartbeat and not an edit: the molecule, its title and its edit count
+        // are the ones that were already there.
+        assert_eq!(now.genbank, first.genbank, "the touch rewrote the molecule");
+        assert_eq!(now.title, first.title);
+        assert_eq!(now.ops, first.ops);
     }
 
     #[test]
@@ -16392,6 +18226,248 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// PROVEN TO FAIL against the six `fs::write` save sites this replaced:
+    /// the victim came back holding the first bytes of a `.dna` header instead
+    /// of its own, the document was marked clean, and `app.error` was `None`.
+    /// `fs::write` truncates the destination when it opens it, so a save that
+    /// dies on the very first write has already destroyed the file it was
+    /// overwriting — and the status line said nothing about that.
+    ///
+    /// Six, not seven, and the count was measured rather than carried over:
+    /// `git show 713bd3b:bins/pl-gui/src/main.rs | grep -n 'fs::write'` gives
+    /// 2952, 3107, 3288, 3383, 3500 and 3526 above the test module, which began
+    /// at 11546. The seventh site that used to be claimed here, `export_map_png`,
+    /// was written in the same session as `atomic.rs` and never called
+    /// `fs::write` at all. A seventh path did exist — `save_project`, reaching
+    /// `fs::write` through `session::write` rather than calling it — and the
+    /// wrong number is how it stayed unconverted: an auditor who finds six and
+    /// is told seven looks for a miscount, not for a save site in another
+    /// module. See `a_project_save_that_fails_does_not_destroy_the_project`.
+    ///
+    /// Driven through `write_dna`, one of the two save paths that take an
+    /// explicit destination. The other six raise a native picker and cannot be
+    /// reached from a test at all; they call the same `atomic::write`.
+    ///
+    /// The failure is injected at the staging file rather than by filling a
+    /// disk: `atomic::temp_beside` is a pure function of the destination and
+    /// this process, so a directory can be put exactly in its way. What that
+    /// stands in for is a full volume or a dead share — a failure that lands
+    /// after the user has committed to the save.
+    #[test]
+    fn a_save_that_cannot_be_written_does_not_destroy_what_it_overwrites() {
+        let victim = temp_file("not-a-casualty", "dna", "somebody else's construct");
+        let original = std::fs::read(&victim).unwrap();
+        std::fs::create_dir_all(atomic::temp_beside(&victim)).unwrap();
+
+        let mut app = App::blank();
+        let mol = pl_core::Molecule {
+            name: "construct".into(),
+            seq: b"ACGTACGTACGTACGT".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let title = "construct".to_string();
+        let (gb, _) = pl_fileio::genbank::write_reporting(&mol, &title, today());
+        app.adopt(Document::from_bytes(gb.as_bytes(), title, None).expect("re-read"));
+
+        let (dna, unwritable) =
+            pl_fileio::snapgene::from_molecule_reporting(app.document().unwrap().molecule());
+        app.write_dna(PendingDna {
+            path: victim.clone(),
+            bytes: dna,
+            unwritable,
+            history: false,
+            notes: Vec::new(),
+            overwriting_source: false,
+            dest_lost: Vec::new(),
+            source_lost: Vec::new(),
+            then: None,
+        });
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            original,
+            "a save that failed truncated the file it was overwriting"
+        );
+        let e = app.error.clone().expect("the failure must be reported");
+        assert!(
+            e.contains("not-a-casualty.dna") && e.contains("unchanged"),
+            "the error must name the destination and say it survived: {e:?}"
+        );
+        // And the document is still the only copy of the user's work.
+        assert!(
+            app.document().unwrap().unsaved(),
+            "a failed save marked the document clean"
+        );
+        assert!(app.document().unwrap().path.is_none());
+
+        let _ = std::fs::remove_dir_all(atomic::temp_beside(&victim));
+        let _ = std::fs::remove_file(&victim);
+    }
+
+    /// The eighth picker-driven save, held to the same rule as the other seven.
+    ///
+    /// PROVEN TO FAIL against `session::write`, which is what `save_project`
+    /// called until the fix. Reverting the one line in `write_project` and
+    /// re-running gave, with the byte arrays decoded:
+    ///
+    /// ```text
+    /// ---- tests::a_project_save_that_fails_does_not_destroy_the_project stdout ----
+    /// assertion `left == right` failed: a save that could not be staged
+    ///   replaced the project anyway
+    ///   left: "polylinker-project 1\nname: bench-not-a-casualty\n…\n--\n…"
+    ///  right: "somebody else's bench"
+    ///
+    /// test result: FAILED. 0 passed; 1 failed; 499 filtered out
+    /// ```
+    ///
+    /// The injection is the one `write_dna`'s test uses and it works here for
+    /// the same reason: a directory at `atomic::temp_beside` stops the atomic
+    /// writer and is invisible to `fs::write`, so the old code sails past it,
+    /// overwrites the destination and reports success. That asymmetry is the
+    /// assertion — a writer that cannot be stopped there is a writer that
+    /// truncates first and asks later. Note what `left` is: not a torn file but
+    /// a whole, valid, *wrong* project, and `app.error` was `None` behind it.
+    ///
+    /// What is at stake is smaller than a molecule and this test does not
+    /// pretend otherwise: a `.plproj` holds paths, so the loss is a list of
+    /// filenames and the plasmids themselves are untouched. It is here because
+    /// `atomic.rs`'s first line says "every file the user asked this program to
+    /// produce", and a claim with one exception is not a claim.
+    #[test]
+    fn a_project_save_that_fails_does_not_destroy_the_project() {
+        let victim = temp_file("bench-not-a-casualty", "plproj", "somebody else's bench");
+        let original = std::fs::read(&victim).unwrap();
+        std::fs::create_dir_all(atomic::temp_beside(&victim)).unwrap();
+
+        let (mut app, _) = app_with_a("project-save");
+        app.write_project(&victim);
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            original,
+            "a save that could not be staged replaced the project anyway"
+        );
+        let e = app.error.clone().expect("the failure must be reported");
+        assert!(
+            e.contains("bench-not-a-casualty.plproj") && e.contains("unchanged"),
+            "the error must name the destination and say it survived: {e:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(atomic::temp_beside(&victim));
+        let _ = std::fs::remove_file(&victim);
+    }
+
+    /// `atomic.rs`'s opening line, counted instead of asserted in prose.
+    ///
+    /// "One writer for every file the user asked this program to produce", and
+    /// the module doc backs it with a number — "eight picker-driven save sites
+    /// exist today, `grep -c '\.save_file()'` over `main.rs`, and all eight
+    /// come here". That number was seven when the module was written and eight
+    /// by the end of the day, and a wrong one is exactly how `save_project`
+    /// stayed unconverted: the header claimed seven `fs::write` sites, an
+    /// auditor counted six at 713bd3b, and the mismatch sent them looking for a
+    /// miscount rather than for a save reaching `fs::write` through another
+    /// module. Prose cannot hold this; a recount can.
+    ///
+    /// PROVEN TO FAIL by putting `save_project` back the way 713bd3b had it —
+    /// `write_project` calling `session::write(path, &s)` instead of
+    /// `atomic::write` — which is the one line the fix changed:
+    ///
+    /// ```text
+    /// ---- tests::every_picker_driven_save_in_this_file_goes_through_atomic_write stdout ----
+    /// assertion `left == right` failed: 8 save pickers and 7 `atomic::write`
+    ///   calls: a save picks a path and then does not write it through this
+    ///   module — ["save_project", "export", "save_dna", "export_pdf",
+    ///   "export_svg", "export_gel", "export_map_png", "export_map_eps"] vs
+    ///   ["export", "write_dna", "export_pdf", "export_svg", "export_gel",
+    ///   "export_map_png", "export_map_eps"]
+    ///   left: 7
+    ///  right: 8
+    /// ```
+    ///
+    /// `save_project` is in the first list and nothing it leads to is in the
+    /// second, which is the defect in one line. The `session::write` whitelist
+    /// catches the same revert from the other side and fires next.
+    ///
+    /// Three counts and one whitelist, all read out of this file's own source:
+    /// the pickers, the atomic writes they lead to, that `std::fs::write` is
+    /// gone from the non-test half entirely, and that `session::write` survives
+    /// only in `record_session`. The last is the one that catches a save
+    /// reaching a truncating writer indirectly, which is the shape nothing saw.
+    ///
+    /// SCOPED ABOVE `mod tests`, because the test half calls `std::fs::write`
+    /// a dozen times over to build fixtures and must go on doing so. No count
+    /// is quoted for that: it is not a claim anything rests on, and an
+    /// unpinned number in a comment is the defect this test was written for.
+    #[test]
+    fn every_picker_driven_save_in_this_file_goes_through_atomic_write() {
+        const SRC: &str = include_str!("main.rs");
+
+        // The non-test half. `\n#[cfg(test)]\nmod tests {` at column 0 is the
+        // one boundary in this file; the two other `#[cfg(test)]` attributes
+        // are indented on items inside `App`.
+        let body = SRC
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("main.rs still has a `mod tests`")
+            .0;
+
+        // Lines of code, not of prose: every count below is quoted in a doc
+        // comment somewhere in this crate, so counting the doc comments would
+        // count the claims as if they were the thing claimed.
+        let code = || body.lines().filter(|l| !l.trim_start().starts_with("//"));
+        let count = |needle: &str| code().filter(|l| l.contains(needle)).count();
+
+        // Which function a line is in, for a failure that names names.
+        let enclosing = |needle: &str| {
+            let mut out: Vec<&str> = Vec::new();
+            let mut fname = "?";
+            for l in code() {
+                if let Some(rest) = l.trim_start().strip_prefix("fn ") {
+                    fname = rest.split(['(', '<']).next().unwrap_or("?");
+                } else if let Some(rest) = l.trim_start().strip_prefix("pub fn ") {
+                    fname = rest.split(['(', '<']).next().unwrap_or("?");
+                }
+                if l.contains(needle) {
+                    out.push(fname);
+                }
+            }
+            out
+        };
+
+        let pickers = count(".save_file()");
+        assert_eq!(
+            pickers, 8,
+            "`atomic.rs`'s module doc states the number of picker-driven saves \
+             and it is now {pickers}; update both together"
+        );
+        assert_eq!(
+            count("atomic::write("),
+            pickers,
+            "{pickers} save pickers and {} `atomic::write` calls: a save picks \
+             a path and then does not write it through this module — {:?} vs {:?}",
+            count("atomic::write("),
+            enclosing(".save_file()"),
+            enclosing("atomic::write("),
+        );
+        assert_eq!(
+            count("std::fs::write("),
+            0,
+            "a truncating write is back in the non-test half, in {:?}",
+            enclosing("std::fs::write(")
+        );
+        assert_eq!(
+            enclosing("session::write("),
+            vec!["record_session"],
+            "`session::write` truncates, so the only save allowed to call it is \
+             the per-tab-switch autosave in `record_session`; these do not: {:?}",
+            enclosing("session::write(")
+                .into_iter()
+                .filter(|f| *f != "record_session")
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// PROVEN TO FAIL at 4ca407b: nothing scheduled the frame on which an
     /// autosave would become due, so on an idle app it never became due.
     ///
@@ -17615,6 +19691,330 @@ mod tests {
         assert_eq!(app.edit.sel, None, "and so does a reverse complement");
     }
 
+    /// A deletion that wipes out a feature left the pointers naming its
+    /// neighbour, and the Molecule menu then acted on the wrong one.
+    ///
+    /// PROVEN TO FAIL against the tree before this commit: `App::edit`'s Ok arm
+    /// transported the caret and collapsed `edit.sel` and stopped there, so
+    /// `selected` / `hot` / `hot_shown` — all three indices into
+    /// `molecule().features` — survived an edit that renumbered that list.
+    /// `remove_feature` and `after_the_cursor_moved` both clear them for exactly
+    /// this reason; the path every Molecule-menu item takes did not.
+    ///
+    /// THE MENU PATH ONLY. `App::edit` is not where a typed Backspace lands and
+    /// this test cannot see one: the two below drive the keyboard instead, and
+    /// each of them stays red on a repair confined to this arm.
+    ///
+    /// The three assertions below all read `Some(1)` at that commit:
+    ///
+    /// ```text
+    /// the selection is an index into a list that just got shorter
+    ///   left: Some(1)
+    ///  right: None
+    /// ```
+    ///
+    /// `Some(1)` is not a crash — every read is a bounds-checked `.get()` — it
+    /// is `ori`, which is what the second half of this test pins. "Set origin at
+    /// selected feature" (`SET_ORIGIN_ITEM`) reads `self.selected`, so one
+    /// Backspace too many and the whole plasmid is renumbered to start at a
+    /// feature the user never clicked.
+    #[test]
+    fn deleting_the_bases_under_a_feature_drops_the_pointers_at_it() {
+        let mut app = App::blank();
+        let mut m = pl_core::Molecule {
+            name: "p".into(),
+            seq: b"AAAACCCCGGTTTTGGCCAACCGGTTAACCGG".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        for (name, a, b) in [("lacZ-alpha", 1, 10), ("AmpR", 11, 20), ("ori", 21, 30)] {
+            let mut f = pl_core::Feature::new(name, "CDS");
+            f.segments.push(pl_core::Segment::new(a, b));
+            m.features.push(f);
+        }
+        app.bench.set(Document::of_molecule(m));
+
+        // The user clicked AmpR: the map highlights it, the Features row is
+        // marked, and Edit…/Duplicate/Remove/Set-origin are all enabled on it.
+        app.selected = Some(1);
+        app.hot = Some(1);
+        app.hot_shown = Some(1);
+
+        // ...and then deletes every base lacZ-alpha describes. `remap_annotations`
+        // drops a feature it emptied — "Deleting the bases a feature describes
+        // deletes the feature" — so the list is one shorter and everything after
+        // the hole moved down a row.
+        assert!(
+            app.edit(pl_core::OpKind::DeleteRange { start: 1, len: 10 }),
+            "the deletion was refused, so this test proves nothing"
+        );
+
+        let names: Vec<&str> = app
+            .document()
+            .unwrap()
+            .molecule()
+            .features
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["AmpR", "ori"],
+            "the premise: the emptied feature is gone and AmpR moved to row 0"
+        );
+
+        assert_eq!(
+            app.selected, None,
+            "the selection is an index into a list that just got shorter"
+        );
+        assert_eq!(
+            app.hot, None,
+            "the hover highlight is an index into a list that just got shorter"
+        );
+        assert_eq!(
+            app.hot_shown, None,
+            "the map draws its highlight from this one, a frame later"
+        );
+
+        // What the stale pointer would have meant, spelled out so the cost is
+        // not left to the reader's imagination: row 1 is no longer AmpR.
+        assert_eq!(
+            names[1], "ori",
+            "if `selected` had survived as Some(1) it would name ori, and \
+             \"Set origin at selected feature\" would rotate the plasmid to it"
+        );
+    }
+
+    /// The same three-feature molecule the test above uses, so the two differ
+    /// only in HOW the bases go away.
+    fn three_feature_app() -> App {
+        let mut app = App::blank();
+        let mut m = pl_core::Molecule {
+            name: "p".into(),
+            seq: b"AAAACCCCGGTTTTGGCCAACCGGTTAACCGG".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        for (name, a, b) in [("lacZ-alpha", 1, 10), ("AmpR", 11, 20), ("ori", 21, 30)] {
+            let mut f = pl_core::Feature::new(name, "CDS");
+            f.segments.push(pl_core::Segment::new(a, b));
+            m.features.push(f);
+        }
+        app.bench.set(Document::of_molecule(m));
+        app.tab = Tab::Sequence;
+        // The user clicked AmpR.
+        app.selected = Some(1);
+        app.hot = Some(1);
+        app.hot_shown = Some(1);
+        app
+    }
+
+    /// One Backspace, through the keyboard, as a raw event.
+    fn backspace_once(app: &mut App, ctx: &egui::Context) {
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Backspace,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..window()
+        };
+        let _ = ctx.run_ui(input, |ui| app.sequence_keys(ui, 0.0));
+    }
+
+    /// The same rule for the gesture that actually makes it: a typed Backspace.
+    ///
+    /// `App::edit` is the Molecule menu and the feature editor's Save. A
+    /// keystroke reaches the log somewhere else entirely — `sequence_keys`
+    /// routes Backspace to `SeqEdit::backspace`, which lands in
+    /// `SeqEdit::apply_gesture` or `SeqEdit::commit`, both of which take a
+    /// `&mut Document` and have no `App` to clear. That those paths drop
+    /// features is stated by the code beside them: `feature_loss` exists on both
+    /// precisely because they do, and names "holding Backspace through a
+    /// feature".
+    ///
+    /// PROVEN TO FAIL with the shrink check left only on `App::edit`, which is
+    /// where the fix for the menu path put it:
+    ///
+    /// ```text
+    /// ---- tests::backspacing_over_a_features_bases_drops_the_pointers_at_it stdout ----
+    /// assertion `left == right` failed: the selection is an index into a list a
+    /// typed Backspace just shortened, and Molecule > Edit selected feature
+    /// would now load ori under the belief it is AmpR
+    ///   left: Some(1)
+    ///  right: None
+    /// ```
+    ///
+    /// The two halves of the repair were then measured separately and each is
+    /// load-bearing: with only `App::settle`'s check in place this test is red
+    /// and the run test below is green, and with only `sequence_keys`' check in
+    /// place it is the other way round. A Backspace over a SELECTION never opens
+    /// a run — `SeqEdit::backspace` goes straight to `apply_gesture` — so
+    /// nothing settles and `settle` never looks.
+    #[test]
+    fn backspacing_over_a_features_bases_drops_the_pointers_at_it() {
+        let mut app = three_feature_app();
+        let ctx = test_ctx();
+
+        // Select every base lacZ-alpha describes and press Backspace once.
+        app.edit.caret = 10;
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 0,
+            head: 10,
+            through_origin: false,
+        });
+        backspace_once(&mut app, &ctx);
+
+        let names: Vec<String> = app
+            .document()
+            .expect("a document")
+            .molecule()
+            .features
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            ["AmpR", "ori"],
+            "the premise: the Backspace has to have emptied lacZ-alpha, or nothing \
+             renumbered"
+        );
+
+        assert_eq!(
+            app.selected, None,
+            "the selection is an index into a list a typed Backspace just shortened, \
+             and Molecule > Edit selected feature would now load ori under the belief \
+             it is AmpR"
+        );
+        assert_eq!(app.hot, None, "the hover highlight is the same index");
+        assert_eq!(app.hot_shown, None, "and so is the one the map draws from");
+    }
+
+    /// The other half of the same hole: a run of Backspaces is not an operation
+    /// until something settles it, and the settle is where the features go.
+    ///
+    /// `SeqEdit::backspace` with no selection opens a RUN and returns; the
+    /// document is untouched until `App::settle` calls `SeqEdit::commit`. So a
+    /// per-keystroke check in `sequence_keys` sees nothing at all here, and
+    /// `App::edit`'s check is captured AFTER its own `self.settle()` — which is
+    /// exactly the call that drops the feature.
+    ///
+    /// PROVEN TO FAIL with the shrink check removed from `App::settle` (both
+    /// with and without the `sequence_keys` half in place):
+    ///
+    /// ```text
+    /// ---- tests::a_run_of_backspaces_drops_the_pointers_when_it_settles stdout ----
+    /// assertion `left == right` failed: the run that emptied lacZ-alpha landed
+    /// through `settle`, so nothing on `App` ever saw the list get shorter
+    ///   left: Some(1)
+    ///  right: None
+    /// ```
+    #[test]
+    fn a_run_of_backspaces_drops_the_pointers_when_it_settles() {
+        let mut app = three_feature_app();
+        let ctx = test_ctx();
+
+        // Held down from base 10 back to base 0, one base per keystroke, with
+        // no selection anywhere — the run stays open the whole way.
+        app.edit.caret = 10;
+        for _ in 0..10 {
+            backspace_once(&mut app, &ctx);
+        }
+        assert_eq!(
+            app.document()
+                .expect("a document")
+                .molecule()
+                .features
+                .len(),
+            3,
+            "the premise: an open run has not reached the log yet"
+        );
+        assert_eq!(
+            app.selected,
+            Some(1),
+            "the premise: and nothing has cleared the pointers early"
+        );
+
+        // Anything that has to observe the document settles it first: a save, an
+        // autosave, an undo, the next menu item.
+        app.settle();
+        let names: Vec<String> = app
+            .document()
+            .expect("a document")
+            .molecule()
+            .features
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            ["AmpR", "ori"],
+            "the premise: the run has to have emptied lacZ-alpha when it landed"
+        );
+        assert_eq!(
+            app.selected, None,
+            "the run that emptied lacZ-alpha landed through `settle`, so nothing on \
+             `App` ever saw the list get shorter"
+        );
+        assert_eq!(app.hot, None, "the hover highlight is the same index");
+        assert_eq!(app.hot_shown, None, "and so is the one the map draws from");
+    }
+
+    /// The carve-out above, stated as a claim so it cannot be widened by
+    /// accident.
+    ///
+    /// `SetFeature` replaces at `index` or pushes at the end and `Rotate`
+    /// rewrites coordinates in place (`Molecule::rotate` assigns into each
+    /// segment and never reorders `features`), so neither renumbers the list and
+    /// neither may clear the pointers. Clearing on `SetFeature` in particular
+    /// would undo `open_feature_editor`'s "THE FEATURE BEING EDITED IS THE
+    /// HIGHLIGHTED ONE" the instant Save landed: the map highlight would vanish
+    /// and Edit…/Duplicate/Remove would go disabled on the feature the user had
+    /// just finished editing.
+    ///
+    /// This one passes on both sides of the fix. It is a fence, not a repro.
+    #[test]
+    fn an_edit_that_cannot_renumber_the_features_keeps_them_selected() {
+        let mut app = App::blank();
+        let mut m = pl_core::Molecule {
+            name: "p".into(),
+            seq: b"AAAACCCCGGTTTTGGCCAACCGGTTAACCGG".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        for (name, a, b) in [("lacZ-alpha", 1, 10), ("AmpR", 11, 20)] {
+            let mut f = pl_core::Feature::new(name, "CDS");
+            f.segments.push(pl_core::Segment::new(a, b));
+            m.features.push(f);
+        }
+        app.bench.set(Document::of_molecule(m));
+        app.selected = Some(1);
+        app.hot = Some(1);
+        app.hot_shown = Some(1);
+
+        let mut renamed = pl_core::Feature::new("bla", "CDS");
+        renamed.segments.push(pl_core::Segment::new(11, 20));
+        assert!(app.edit(pl_core::OpKind::SetFeature {
+            index: Some(1),
+            feature: Box::new(renamed),
+        }));
+        assert_eq!(
+            (app.selected, app.hot, app.hot_shown),
+            (Some(1), Some(1), Some(1)),
+            "renaming feature 1 in place left it at row 1; deselecting it would \
+             disable the menu items that act on it"
+        );
+
+        assert!(app.edit(pl_core::OpKind::Rotate { origin: 11 }));
+        assert_eq!(
+            (app.selected, app.hot, app.hot_shown),
+            (Some(1), Some(1), Some(1)),
+            "a rotate moves coordinates, not rows"
+        );
+    }
+
     /// PROVEN TO FAIL at 04afbb6: no feature editor to edit through.
     ///
     /// The App-level half of `featedit::tests::renaming_a_feature_changes_only_
@@ -18722,6 +21122,10 @@ mod tests {
             25,
         ));
         panel.stale = false;
+        // The plan above IS this document's, so say which document. Without it
+        // the frame below re-plans (`clone::Panel::plan_at`) and the assert that
+        // follows would be guarding a plan that was thrown away.
+        panel.plan_at = cursor;
         assert!(
             panel.plan.as_ref().is_some_and(|p| !p.prods.is_empty()),
             "the fixture must produce a construct, or nothing is being opened"
@@ -18822,6 +21226,279 @@ mod tests {
             app.document().map(|d| d.molecule().seq.clone()),
             Some(first.seq),
             "it came back beside a different molecule, which is the original hazard"
+        );
+    }
+
+    /// A 52 bp circle with two BamHI sites, which the two re-planning tests
+    /// below cut. Two sites means two fragments and a religation that gives a
+    /// whole circle back, so a product's sequence is a direct read-out of the
+    /// bases the plan was built from.
+    fn two_cut_app() -> App {
+        let m = pl_core::Molecule {
+            name: "twoCuts".into(),
+            seq: b"AAAAAGGATCCAAAAAAAAAAAAAAAGGATCCTTTTTTTTTTTTTTTTTTTT".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        let mut app = App::blank();
+        app.bench.set(Document::of_molecule(m));
+        app.tab = Tab::Sequence;
+        app
+    }
+
+    fn bam_hi() -> std::collections::BTreeSet<String> {
+        ["BamHI".to_string()].into()
+    }
+
+    /// The products of a plan as bare sequences, which is what "the panel is
+    /// describing this molecule" reduces to.
+    fn product_seqs(p: &clone::Plan) -> Vec<Vec<u8>> {
+        p.prods.iter().map(|x| x.mol.seq.clone()).collect()
+    }
+
+    /// What the panel would show if it re-planned this instant, computed with
+    /// the settings `clone::Panel::new` leaves behind — method `Restriction`,
+    /// `blunt` false, `homology` 25, no donor. An independent oracle rather
+    /// than a re-read of `panel.plan`, which is the value under test.
+    fn religation_oracle(app: &App, picked: &std::collections::BTreeSet<String>) -> clone::Plan {
+        clone::plan(
+            app.document().expect("a document").molecule(),
+            None,
+            clone::Method::Restriction,
+            picked,
+            &clone::Primers::default(),
+            false,
+            25,
+        )
+    }
+
+    fn one_clone_frame(app: &mut App, ctx: &egui::Context) -> Vec<Vec<u8>> {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.clone_panel(ui.ctx()));
+        product_seqs(
+            app.clone_panel
+                .as_ref()
+                .expect("the panel stayed open")
+                .plan
+                .as_ref()
+                .expect("a frame of the panel plans"),
+        )
+    }
+
+    /// Molecule ▸ Reverse complement behind the open religation panel must
+    /// re-plan it.
+    ///
+    /// `egui::Window` is not modal, and the clone panel is in NEITHER keyboard
+    /// guard: it is absent from the `designing` predicate that stands Ctrl+Z
+    /// down (`shortcuts`), and `sequence_keys` returns early for `self.design`
+    /// and `self.feature_edit` and not for this. So the Molecule menu, the
+    /// toolbar and every keystroke stay live behind it.
+    ///
+    /// PROVEN TO FAIL against 713bd3b's `clone.rs`: `p.stale = true` appeared
+    /// once in this file, in `after_the_cursor_moved`, so undo, redo and a click
+    /// in History re-planned and a FORWARD edit did not. `App::edit`'s Ok arm
+    /// moved the caret and the selection and said nothing to the panel. The
+    /// measured failure was the panel's first product still reading
+    /// `GATCCAAAAAAAAAAAAAAAGGATCCTTTTTTTTTTTTTTTTTTTTAAAAAG` — the pre-revcomp
+    /// digest — beside a molecule that now religates to
+    /// `GATCCTTTTTTTTTTTTTTTGGATCCTTTTTAAAAAAAAAAAAAAAAAAAAG`. Clicking Open
+    /// adopts `panel.plan.prods[i].mol`, which is `adopt`'s "worst thing this
+    /// program can produce": a construct assembled from bases the document no
+    /// longer has, with nothing on screen saying so.
+    #[test]
+    fn a_menu_edit_behind_the_religation_panel_re_plans_it() {
+        let mut app = two_cut_app();
+        let picked = bam_hi();
+        app.clone_panel = Some(clone::Panel::new(&picked, clone::Primers::default()));
+        let ctx = test_ctx();
+
+        let before = one_clone_frame(&mut app, &ctx);
+        assert!(
+            !before.is_empty(),
+            "the fixture must religate into something, or nothing is being checked"
+        );
+
+        // The menu item is `self.edit(OpKind::ReverseComplement)` and nothing
+        // else — see `molecule_menu`.
+        assert!(
+            app.edit(pl_core::OpKind::ReverseComplement),
+            "the fixture's edit was refused"
+        );
+        let want = product_seqs(&religation_oracle(&app, &picked));
+        assert_ne!(
+            before, want,
+            "the premise: this edit has to change what religates, or the assert below \
+             cannot fail"
+        );
+
+        assert_eq!(
+            one_clone_frame(&mut app, &ctx),
+            want,
+            "the panel is still offering constructs built from bases the document no \
+             longer has"
+        );
+    }
+
+    /// The same rule for the edit a user actually makes most: typing.
+    ///
+    /// Typed bases never touch `App::edit`. `sequence_keys` calls
+    /// `SeqEdit::type_text`, which opens a *run*, and `App::settle` is what
+    /// turns the run into an operation — so the one-line repair of the menu
+    /// path above leaves this one broken. Backspace, Delete and Paste reach the
+    /// log the same way, through `SeqEdit::apply_gesture`, which has no `App`
+    /// to mark.
+    ///
+    /// PROVEN TO FAIL against 713bd3b's `clone.rs` AND, separately, against the
+    /// `App::edit`-only repair the audit proposed — which turns the test above
+    /// green and leaves this one red, which is the whole reason it exists. Four
+    /// bases typed at the caret took the molecule from 52 bp to 56 bp while the
+    /// panel went on offering the 52 bp digest's products.
+    #[test]
+    fn typing_behind_the_religation_panel_re_plans_it() {
+        let mut app = two_cut_app();
+        let picked = bam_hi();
+        app.clone_panel = Some(clone::Panel::new(&picked, clone::Primers::default()));
+        let ctx = test_ctx();
+
+        let before = one_clone_frame(&mut app, &ctx);
+        assert!(
+            !before.is_empty(),
+            "the fixture must religate into something"
+        );
+
+        app.edit.caret = 0;
+        let d = app.bench.get_mut().expect("a document");
+        app.edit.type_text(d, "gggg", 0.0);
+        app.settle();
+        assert_eq!(
+            app.document().unwrap().molecule().seq.len(),
+            56,
+            "the premise: the typing has to have landed"
+        );
+
+        let want = product_seqs(&religation_oracle(&app, &picked));
+        assert_ne!(
+            before, want,
+            "the premise: the typing has to change what religates"
+        );
+        assert_eq!(
+            one_clone_frame(&mut app, &ctx),
+            want,
+            "the panel is still offering the pre-typing digest"
+        );
+    }
+
+    /// A 43 bp circle with two BamHI sites and no base in common with
+    /// [`two_cut_app`]'s vector, so a product built from it is recognisable on
+    /// sight. The second site sits at 21..27 and the test below deletes exactly
+    /// that, leaving one cut and one fragment.
+    fn donor_mol() -> pl_core::Molecule {
+        pl_core::Molecule {
+            name: "donor".into(),
+            seq: b"CCCCCGGATCCGCGCGCGCGCGGATCCACACACACACACACAC".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        }
+    }
+
+    /// [`religation_oracle`] with the insert coming from another tab.
+    fn subclone_oracle(
+        app: &App,
+        picked: &std::collections::BTreeSet<String>,
+        donor: bench::TabId,
+    ) -> clone::Plan {
+        let d = app
+            .clone_donors()
+            .into_iter()
+            .find(|(i, ..)| *i == donor)
+            .expect("the donor tab is open");
+        clone::plan(
+            app.document().expect("a document").molecule(),
+            Some(&d.2),
+            clone::Method::Restriction,
+            picked,
+            &clone::Primers::default(),
+            false,
+            25,
+        )
+    }
+
+    /// The same rule, reached through the OTHER molecule the plan is built from.
+    ///
+    /// `plan_at` guards the ACTIVE document's cursor, and the donor is by
+    /// construction never the active tab — `clone_donors` filters it out. So an
+    /// edit made in the donor's own tab moves the donor's log cursor and nothing
+    /// else: the panel comes back through `put_view` with `stale: false` and the
+    /// vector's unchanged `plan_at`, the guard does not fire, and `donor_mol` is
+    /// re-resolved fresh every frame only to be discarded inside the branch that
+    /// never runs.
+    ///
+    /// PROVEN TO FAIL with the `p.donor_at != donor_at` disjunct taken back out
+    /// of the guard in `clone::show`, which is where the fix for the vector left
+    /// it:
+    ///
+    /// ```text
+    /// ---- tests::an_edit_in_the_donors_tab_re_plans_the_religation_panel stdout ----
+    /// assertion `left == right` failed: the panel is offering a construct
+    /// assembled from bases the donor no longer has, and Open saves it to
+    /// GenBank under a name composed from both parents
+    /// ```
+    ///
+    /// The two lists are whole constructs, not bases: six offered against the
+    /// four the edited donor can still make.
+    ///
+    /// Open adopts `panel.plan.prods[i].mol`, so this is `adopt`'s "worst thing
+    /// this program can produce" reached through the insert instead of the
+    /// vector, with the "Insert from" row still naming the donor correctly
+    /// because the title alone is re-resolved each frame.
+    #[test]
+    fn an_edit_in_the_donors_tab_re_plans_the_religation_panel() {
+        let mut app = two_cut_app();
+        app.bench.set(Document::of_molecule(donor_mol()));
+        app.switch_tab(0);
+        let picked = bam_hi();
+        let donor = app
+            .clone_donors()
+            .into_iter()
+            .map(|(i, ..)| i)
+            .next()
+            .expect("the donor tab is not the active one");
+        let mut panel = clone::Panel::new(&picked, clone::Primers::default());
+        panel.donor = Some(donor);
+        app.clone_panel = Some(panel);
+        let ctx = test_ctx();
+
+        let before = one_clone_frame(&mut app, &ctx);
+        assert!(
+            !before.is_empty(),
+            "the fixture must subclone into something, or nothing is being checked"
+        );
+
+        // Ctrl+Tab to the donor, delete the bases spanning its second BamHI
+        // site, Ctrl+Tab back. The vector's own cursor never moves.
+        let at = app.document().expect("a document").log.cursor();
+        app.switch_tab(1);
+        assert!(
+            app.edit(pl_core::OpKind::DeleteRange { start: 21, len: 6 }),
+            "the donor's edit was refused"
+        );
+        app.switch_tab(0);
+        assert_eq!(
+            app.document().expect("a document").log.cursor(),
+            at,
+            "the premise: the ACTIVE document must be untouched, or `plan_at` alone \
+             would catch this"
+        );
+
+        let want = product_seqs(&subclone_oracle(&app, &picked, donor));
+        assert_ne!(
+            before, want,
+            "the premise: the donor's edit has to change what can be assembled"
+        );
+        assert_eq!(
+            one_clone_frame(&mut app, &ctx),
+            want,
+            "the panel is offering a construct assembled from bases the donor no longer \
+             has, and Open saves it to GenBank under a name composed from both parents"
         );
     }
 
@@ -19151,6 +21828,88 @@ mod tests {
             "the genome cost {b:.3} ms a frame against the plasmid's {a:.3}"
         );
         let _ = b_off;
+    }
+
+    /// What `clone_donors` actually copies, per frame, with a genome on the
+    /// bench.
+    ///
+    /// PROVEN TO FAIL against the bound `clone_donors`'s own doc carried until
+    /// now — "a plasmid is a few hundred kilobytes at most". Written as
+    /// `assert!(bytes <= 300 * 1024)` against this same two-tab bench, the
+    /// observed failure was, verbatim:
+    ///
+    /// ```text
+    /// PERF clone_donors: 1 donor, 4641652 seq bytes + 4641 features
+    ///   = 5011822 bytes per call, 2.792 ms/call
+    ///
+    /// thread 'tests::a_donor_clone_is_megabytes_when_a_genome_is_on_the_bench'
+    /// panicked: assertion failed: bytes <= 300 * 1024
+    /// ```
+    ///
+    /// The bound was wrong because its premise was: the bench is not restricted
+    /// to plasmids, and this file says so in three other places (`close_tab`'s
+    /// doc, `restore_session`'s, `design.rs`). The 4.6 Mb *E. coli* genome is
+    /// the molecule the rest of these perf tests are written against, and one
+    /// tab of it makes the per-frame copy 5,011,822 bytes — **16x** the 300 KB
+    /// "a few hundred kilobytes" allows.
+    ///
+    /// BYTES RATHER THAN MILLISECONDS is what is asserted, because the bytes
+    /// are a property of the bench and the time is a property of the machine:
+    /// the 2.792 ms above is a debug build, and release measures 2.112 ms/call
+    /// on the same bench — barely faster, because this is memcpy and allocation
+    /// rather than code. Run with `--nocapture` for both.
+    ///
+    /// The accounting is the heap this clone has to duplicate: the sequence,
+    /// plus every feature's name, key, segment vector and qualifiers. It
+    /// undercounts — `Molecule::notes`, `primers` and the two `String`s at the
+    /// top are not walked — so it is a floor, which is the direction that keeps
+    /// the assertion honest.
+    #[test]
+    fn a_donor_clone_is_megabytes_when_a_genome_is_on_the_bench() {
+        let mut app = perf_app(4_641_652, 1_000);
+        // A plasmid in the second tab, and `set` makes it active — so the
+        // genome is the DONOR, which is the position the cost lands in.
+        app.bench
+            .set(edited_doc("insert.fa", "AAAACCCCGGGGTTTTAAGGCCTT"));
+
+        let donors = app.clone_donors();
+        assert_eq!(donors.len(), 1, "one non-active tab");
+        let mol = &donors[0].2;
+        let feats = mol.features.len();
+        let bytes: usize = mol.seq.len()
+            + mol
+                .features
+                .iter()
+                .map(|f| {
+                    f.name.len()
+                        + f.kind.len()
+                        + f.segments.len() * std::mem::size_of::<pl_core::Segment>()
+                        + f.qualifiers
+                            .iter()
+                            .map(|(k, v)| k.len() + v.as_ref().map_or(0, |s| s.len()))
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+
+        let t = std::time::Instant::now();
+        const N: u32 = 20;
+        for _ in 0..N {
+            std::hint::black_box(app.clone_donors());
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0 / f64::from(N);
+        eprintln!(
+            "PERF clone_donors: {} donor, {} seq bytes + {feats} features\n  \
+             = {bytes} bytes per call, {ms:.3} ms/call",
+            donors.len(),
+            mol.seq.len()
+        );
+
+        assert!(feats > 4_000, "the premise: a genome's worth of CDSs");
+        assert!(
+            bytes > 4 * 1024 * 1024,
+            "one frame of the clone panel copies {bytes} bytes, and \
+             `clone_donors`'s doc has to say so"
+        );
     }
 
     /// A plasmid whose first 300 bases are one forward CDS, open on Sequence

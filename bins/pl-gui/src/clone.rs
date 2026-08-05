@@ -198,17 +198,87 @@ pub struct Panel {
     /// fragment from each digest and puts them together — subcloning, the
     /// operation the crate is named for and the one nothing could reach.
     ///
-    /// A TAB INDEX and not a molecule. The panel outlives a frame and must not
-    /// outlive its documents, and a `Molecule` copied in here would be a second
-    /// copy of a plasmid that the user can go on editing in its own tab: the
-    /// plan would then describe a sequence nobody has, silently. An index is
-    /// re-resolved every frame and can be found to be gone, which is a
+    /// A TAB REFERENCE and not a molecule. The panel outlives a frame and must
+    /// not outlive its documents, and a `Molecule` copied in here would be a
+    /// second copy of a plasmid that the user can go on editing in its own tab:
+    /// the plan would then describe a sequence nobody has, silently. A reference
+    /// is re-resolved every frame and can be found to be gone, which is a
     /// condition the panel can state.
-    pub donor: Option<usize>,
+    ///
+    /// A [`crate::bench::TabId`] AND NOT A TAB INDEX, which is what it was.
+    /// Resolution below is numeric equality against a freshly enumerated bench,
+    /// and the staleness check beside it fires only when the reference resolves
+    /// to NOTHING — never when it resolves to something DIFFERENT. A position
+    /// can do the second: `Bench::close` is a `Vec::remove` and `Bench::reopen`
+    /// pushes at the end, so tabs A,B,C,D,E with this panel on B and the donor
+    /// on C become A,C,D,E,B after one Ctrl+W and one Ctrl+Shift+T, and
+    /// `donor = Some(2)` then names D. The donor row and the Copy-report text
+    /// say D while `plan` still holds C's fragments, and Open builds the
+    /// construct from C. Closing any tab to the LEFT of the donor does the same
+    /// thing in one keystroke, and does it with the panel untouched now that
+    /// `App::close_tab` no longer scatters a default view over the tab on
+    /// screen. An id is minted once per tab and travels with it through the
+    /// reopen stack, so no reordering can move it.
+    pub donor: Option<crate::bench::TabId>,
     /// Recomputed only when the inputs change: `plan` digests and enumerates,
     /// and a redraw is not a reason to do either again.
     pub plan: Option<Plan>,
+    /// Set by whoever changes an input this panel OWNS: the method, the enzyme
+    /// set, the blunt flag, the homology, the primers, the donor.
     pub stale: bool,
+    /// Where the DOCUMENT stood when `plan` was built, compared against the
+    /// live cursor every frame — the identity `design::Panel` and
+    /// `featedit::Panel` already keep against the same hazard, and the one this
+    /// panel did not have.
+    ///
+    /// `stale` alone cannot carry the document, because this panel is not the
+    /// only thing that changes the molecule and it is not modal. `egui::Window`
+    /// is not modal; the clone panel is absent from the `designing` predicate
+    /// that stands Ctrl+Z down (`App::shortcuts`); and `App::sequence_keys`
+    /// returns early for the design panel and the feature editor and not for
+    /// this one. So Molecule ▸ Reverse complement, Molecule ▸ Make linear and
+    /// every typed base are live behind an open panel. Outside this module
+    /// `stale` was set in exactly one place — `after_the_cursor_moved`, which is
+    /// undo, redo and a seek — so a FORWARD edit left the fragment lengths, the
+    /// junction descriptions and the Copy-report text all describing the
+    /// molecule as it was, and Open then adopted `plan.prods[i].mol`: a
+    /// construct assembled from bases the document no longer has, with nothing
+    /// on screen saying so. `adopt` calls that "the worst thing this program can
+    /// produce".
+    ///
+    /// AN ID AND NOT A FLAG, because there is no one place to set a flag. The
+    /// forward routes to the log are three: `App::edit` (the Molecule menu, the
+    /// feature editor's Save), `App::settle` (a run of typing becoming one
+    /// operation) and `SeqEdit::apply_gesture` (typing over a selection,
+    /// Backspace, Delete, Paste) — and the last of those is handed a `Document`
+    /// and has no `App` to mark. Every one of them moves `log.cursor()`, so one
+    /// comparison at the draw site covers all three and anything added later.
+    ///
+    /// Content-addressed, like `featedit::Panel::stale_reason`: an edit and its
+    /// undo land back on the same id and the plan is not rebuilt for nothing.
+    pub plan_at: Option<pl_core::oplog::OpId>,
+    /// The same thing for [`Panel::donor`], because a plan has TWO parents.
+    ///
+    /// [`Panel::plan_at`] guards the ACTIVE document, and the donor is by
+    /// construction never the active one — `App::clone_donors` filters that tab
+    /// out. So every word of `plan_at`'s reasoning applies to the insert and
+    /// none of its code reached it: the user Ctrl+Tabs to the donor, deletes the
+    /// bases spanning one of its sites, Ctrl+Tabs back, and the vector's cursor
+    /// has not moved. `switch_tab` restores this panel through `put_view` byte
+    /// for byte, `stale` false and `plan_at` intact, so the guard does not fire.
+    /// `show` re-resolves the donor molecule fresh every frame and then reads it
+    /// only INSIDE the branch that never runs, which is what made the staleness
+    /// invisible: the "Insert from" row goes on naming the right plasmid because
+    /// the title is re-resolved too, while `plan` holds the pre-edit fragments
+    /// and Open adopts `plan.prods[i].mol` — a construct assembled from bases
+    /// the donor no longer has, saved to GenBank under a name composed from both
+    /// parents.
+    ///
+    /// `None` BOTH when there is no donor and when the donor has no operations
+    /// yet, and that ambiguity costs nothing: choosing a donor, changing one and
+    /// clearing one all set `stale` where the click happens, and a donor that
+    /// vanishes sets it too.
+    pub donor_at: Option<pl_core::oplog::OpId>,
     /// Set when the user asks for a product; the caller adopts it and clears it.
     pub wanted: Option<usize>,
 }
@@ -226,6 +296,8 @@ impl Panel {
             donor: None,
             plan: None,
             stale: true,
+            plan_at: None,
+            donor_at: None,
             wanted: None,
         }
     }
@@ -233,32 +305,52 @@ impl Panel {
 
 /// Draw the panel. Returns false when the user has closed it.
 ///
-/// `others` is the rest of the bench — `(tab index, title, molecule)` — so the
-/// insert can come from a plasmid the user already has open. Resolved by the
-/// caller every frame rather than held here: see [`Panel::donor`].
+/// `others` is the rest of the bench — `(tab id, title, molecule, where that
+/// molecule stands in its own history)` — so the insert can come from a plasmid
+/// the user already has open. Resolved by the caller every frame rather than
+/// held here: see [`Panel::donor`], which is also why the first element is an id
+/// and not a position. The fourth element is the donor's half of the staleness
+/// question and exists for the reason [`Panel::donor_at`] gives.
+///
+/// `at` is where `mol` stands in its own history, likewise resolved every frame.
+/// It is what makes the plan on screen a plan of the molecule on screen: see
+/// [`Panel::plan_at`].
 pub fn show(
     ctx: &egui::Context,
     p: &mut Panel,
     mol: &Molecule,
-    others: &[(usize, String, &Molecule)],
+    at: Option<pl_core::oplog::OpId>,
+    others: &[(
+        crate::bench::TabId,
+        String,
+        &Molecule,
+        Option<pl_core::oplog::OpId>,
+    )],
     dark: bool,
 ) -> bool {
     let pal = crate::theme::Palette::of(dark);
     // The donor as it stands THIS frame. A tab that has been closed since the
     // choice was made resolves to nothing, and the panel says so below rather
-    // than planning against a molecule that is no longer open.
-    let donor = p
-        .donor
-        .and_then(|t| others.iter().find(|(i, _, _)| *i == t));
+    // than planning against a molecule that is no longer open. It cannot resolve
+    // to a DIFFERENT tab, because the thing compared is an id and not a
+    // position — see [`Panel::donor`] for what it cost when it was.
+    let donor = p.donor.and_then(|t| others.iter().find(|(i, ..)| *i == t));
     if p.donor.is_some() && donor.is_none() {
         p.donor = None;
         p.stale = true;
     }
-    let donor_mol = donor.map(|(_, _, m)| *m);
-    if p.stale {
+    let donor_mol = donor.map(|(_, _, m, _)| *m);
+    let donor_at = donor.and_then(|(.., a)| *a);
+    // Either the panel's own inputs changed, or one of the two DOCUMENTS did
+    // underneath it. The second disjunct is the one that was missing and the
+    // third is the one the second left behind; [`Panel::plan_at`] and
+    // [`Panel::donor_at`] are the whole of why they are here.
+    if p.stale || p.plan_at != at || p.donor_at != donor_at {
         p.plan = Some(plan(
             mol, donor_mol, p.method, &p.enzymes, &p.primers, p.blunt, p.homology,
         ));
+        p.plan_at = at;
+        p.donor_at = donor_at;
         p.stale = false;
     }
     let mut open = true;
@@ -398,8 +490,8 @@ pub fn show(
                     ui.label(egui::RichText::new("Insert from").strong());
                     let shown = p
                         .donor
-                        .and_then(|t| others.iter().find(|(i, _, _)| *i == t))
-                        .map(|(_, name, _)| name.clone())
+                        .and_then(|t| others.iter().find(|(i, ..)| *i == t))
+                        .map(|(_, name, ..)| name.clone())
                         .unwrap_or_else(|| "— this molecule only —".to_string());
                     egui::ComboBox::from_id_salt("clone-donor")
                         .selected_text(shown)
@@ -412,7 +504,7 @@ pub fn show(
                                 p.donor = None;
                                 p.stale = true;
                             }
-                            for (i, name, _) in others {
+                            for (i, name, ..) in others {
                                 if ui.selectable_label(p.donor == Some(*i), name).clicked()
                                     && p.donor != Some(*i)
                                 {
@@ -445,7 +537,7 @@ pub fn show(
                     // list of eight bands is eight numbers, and the user has to
                     // work out from the lengths which half of it is their
                     // vector — which is the one thing they must not get wrong.
-                    let whose = match (donor.map(|(_, n, _)| n), f.parent) {
+                    let whose = match (donor.map(|(_, n, ..)| n), f.parent) {
                         (None, _) => String::new(),
                         (Some(_), 0) => format!("   {}", short(&mol.name)),
                         (Some(name), _) => format!("   {}", short(name)),

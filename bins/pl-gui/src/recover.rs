@@ -376,10 +376,12 @@ pub fn clear(path: &Path) {
 
 /// How recently a draft must have been written to be treated as maybe-live.
 ///
-/// Three times `AUTOSAVE_EVERY`. A running window with unsaved work rewrites
-/// its draft every thirty seconds, so anything inside ninety belongs to a
-/// session that is very probably still going; anything older belongs to one
-/// that stopped.
+/// Three times `AUTOSAVE_EVERY`. A running window restamps every draft it holds
+/// every thirty seconds — see `App::autosave`'s heartbeat, which exists to make
+/// this sentence true — so anything inside ninety belongs to a session that is
+/// very probably still going; anything older belongs to one that stopped. Three
+/// periods and not one, so that a heartbeat delayed by a slow disk, a blocked
+/// frame or a suspended laptop does not read as a death.
 pub const LIVE_WINDOW_SECS: u64 = 90;
 
 /// Might this draft belong to a Polylinker that is still running?
@@ -393,12 +395,77 @@ pub const LIVE_WINDOW_SECS: u64 = 90;
 ///
 /// This is a heuristic and is deliberately not dressed up as anything else. A
 /// PID probe would be exact and needs a platform crate in a binary whose whole
-/// posture is that it has almost none; freshness needs nothing, cannot say a
-/// live session is dead (the writer's own thirty-second cadence guarantees
-/// that), and errs by occasionally calling a very recent crash "maybe live" —
-/// which costs the user one deferred Discard and no data at all.
+/// posture is that it has almost none; freshness needs nothing and errs by
+/// occasionally calling a very recent crash "maybe live", which costs the user
+/// one deferred Discard and no data at all.
+///
+/// **THE CADENCE IS A REQUIREMENT ON THE WRITER, NOT AN OBSERVATION ABOUT IT.**
+/// This doc used to say a live session could not be called dead because of "the
+/// writer's own thirty-second cadence", and the writer had none: `App::autosave`
+/// skips any tab whose `(path, title, cursor)` memo is unchanged, so a window
+/// whose user stopped typing stopped stamping and its `saved_at` froze at the
+/// last edit. Ninety seconds of thinking was enough to move a running window's
+/// only crash copy into "A previous session did not close cleanly" in a second
+/// window, with Discard enabled — and the owner would not write it again,
+/// because the memo still matched. `App::autosave` now restamps every draft it
+/// holds once per period whether or not the molecule moved, and
+/// `an_idle_windows_draft_keeps_saying_it_is_alive` is what holds it to that. If
+/// that heartbeat is ever removed, this function goes back to being wrong in the
+/// one direction it is not allowed to be wrong in.
+///
+/// The trade this makes is deliberate: liveness is claimed by a file the owner
+/// keeps rewriting, so a *genuinely* crashed draft still ages out after
+/// [`LIVE_WINDOW_SECS`] and stays discardable. Nothing here can make a draft
+/// undiscardable, because nothing here is a lock — only a process that is
+/// running can keep saying it is running.
 pub fn maybe_live(saved_at: u64, now: u64) -> bool {
     saved_at != 0 && now.saturating_sub(saved_at) <= LIVE_WINDOW_SECS
+}
+
+/// How long a `.recover.tmp` must have gone untouched before it is swept.
+///
+/// One hour, the same threshold `pl_scan::store::sweep_stale_temps` uses for
+/// the index's temporaries. The number does one job: tell a temp file a live
+/// window is part way through writing from one a dead window will never finish.
+/// [`write`] creates its temp, writes, `sync_all`s and renames in a single
+/// call, so the live case is milliseconds and even a 4.6 Mb molecule on a
+/// struggling disk is nowhere near an hour — while the dead case, by
+/// definition, never touches the file again. Forty times [`LIVE_WINDOW_SECS`]
+/// because deleting a temp out from under a writer costs a draft, and keeping a
+/// dead one an extra hour costs nothing at all.
+const TEMP_SWEEP_SECS: u64 = 3600;
+
+/// Delete recovery temporaries left behind by a run that died mid-write.
+///
+/// [`write`] removes its temp on both failure paths, and neither of those is
+/// the event this module exists for: a crash DURING the write leaks
+/// `{pid}-{slot}.recover.tmp` — up to the size of the document — and nothing
+/// ever looks at it again. [`stale`] filters on `.ends_with(".recover")`, which
+/// a `.recover.tmp` does not satisfy, and [`claim`] and [`claim_next`] probe
+/// exact slot names, so the file is invisible to every listing path and no
+/// later run reuses the PID in its name. Modelled on
+/// `pl_scan::store::sweep_stale_temps`, down to the hour.
+///
+/// Best-effort and silent about individual failures: another process may hold
+/// one open, and failing a startup scan over a stale temp would be absurd.
+fn sweep_stale_temps(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let cutoff = std::time::Duration::from_secs(TEMP_SWEEP_SECS);
+    for e in entries.flatten() {
+        if !e.file_name().to_string_lossy().ends_with(".recover.tmp") {
+            continue;
+        }
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|d| d > cutoff).unwrap_or(false))
+            .unwrap_or(false);
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// Recovery files left by processes other than this one.
@@ -406,7 +473,12 @@ pub fn maybe_live(saved_at: u64, now: u64) -> bool {
 /// Returned with what could be read from each, newest first. A file whose
 /// header will not parse is still returned, with whatever [`salvage`] found,
 /// because the sequence is the part that matters.
+///
+/// Sweeps abandoned write temporaries on the way past. Here because this is the
+/// one function that walks the recovery directory and it runs at startup, which
+/// is also when the crash that leaked one has just happened.
 pub fn stale(dir: &Path) -> Vec<Found> {
+    sweep_stale_temps(dir);
     let mut out = Vec::new();
     let me = format!("{}-", std::process::id());
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -734,6 +806,49 @@ mod tests {
         let (path, mine) = claim(&dir);
         assert_eq!(path.unwrap(), recovery_path(&dir, 0));
         assert!(mine.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The temp file a crash mid-write leaks is swept; the one a live window is
+    /// mid-write on is not.
+    ///
+    /// PROVEN TO FAIL without the `sweep_stale_temps` call in `stale`: the
+    /// backdated temp is still on disk afterwards, which is the leak — a file
+    /// up to the size of the document, under a PID no later run reuses, that no
+    /// listing path can see and nothing will ever delete.
+    #[test]
+    fn a_temp_left_by_a_crash_mid_write_is_swept_and_a_live_ones_is_not() {
+        let dir = std::env::temp_dir().join(format!("pl-tmpsweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // What `write` leaves if the process dies between `File::create` and
+        // the rename.
+        let leaked = dir.join("999993-0.recover.tmp");
+        let live = dir.join("999992-0.recover.tmp");
+        for p in [&leaked, &live] {
+            std::fs::write(p, "polylinker-recovery 1\noriginal: \n").unwrap();
+        }
+        // Backdated past the threshold rather than slept past: an hour is the
+        // point of the threshold and a test may not take one.
+        let f = std::fs::File::options().write(true).open(&leaked).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(TEMP_SWEEP_SECS + 60),
+        ))
+        .unwrap();
+        drop(f);
+
+        // Neither is a recovery file to list, before or after.
+        assert!(stale(&dir).is_empty(), "a temp was offered as a draft");
+        assert!(
+            !leaked.exists(),
+            "the leaked temp is still there, and always would be"
+        );
+        assert!(
+            live.exists(),
+            "a temp another window is part way through writing was deleted, \
+             which costs that window the draft it was saving"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
