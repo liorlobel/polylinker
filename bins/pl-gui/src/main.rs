@@ -19465,7 +19465,22 @@ mod tests {
             !matches!(app.reads[0].state, reads::CompareState::Done(_)),
             "the report survived an edit that moved every base it describes"
         );
-        for _ in 0..400 {
+        // A GENEROUS BUDGET, ON PURPOSE.
+        //
+        // This used to poll 400 times at 2 ms, so it gave a background thread
+        // 800 ms of wall clock to finish and then declared the feature broken.
+        // It failed twice on ubuntu-latest on 2026-08-05 while windows-latest
+        // and macos-latest passed the same commit, which is the signature of a
+        // shared runner being busy rather than of a defect.
+        //
+        // Waiting longer weakens nothing. The assertion is that the
+        // re-comparison COMPLETES and produces the right coordinates; it is not
+        // a performance test, and nothing here asserts how quickly it finishes.
+        // The loop still exits the moment the work is done, so the common case
+        // costs the same. What changes is only how long a slow machine is
+        // allowed to be slow before it is called wrong.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             app.refresh_reads();
             if matches!(app.reads[0].state, reads::CompareState::Done(_)) {
                 break;
@@ -19473,7 +19488,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let reads::CompareState::Done(after) = &app.reads[0].state else {
-            panic!("the re-comparison never finished");
+            panic!("the re-comparison never finished within 30 s");
         };
         assert_eq!(
             after.covered,
