@@ -149,11 +149,33 @@ try {
     }
 
     # ------------------------------------------------------------- Add/Remove
-    $arp = Get-ChildItem "$hive\Software\Microsoft\Windows\CurrentVersion\Uninstall" |
-           ForEach-Object { Get-ItemProperty $_.PSPath } |
-           Where-Object { $_.DisplayName -eq 'Polylinker' }
-    if (-not $arp) { Bad 'no Add/Remove Programs entry named Polylinker after installing' }
-    else {
+    # Looked up in BOTH hives, and not merely in the expected one.
+    #
+    # The first version enumerated $hive directly and crashed when the key was
+    # absent: a fresh Windows profile has no
+    # HKCU\...\CurrentVersion\Uninstall at all until something per-user creates
+    # it, so an MSI that wrote its entry to the WRONG hive produced a
+    # PowerShell error about a missing path rather than the finding "the entry
+    # is in the wrong hive". Crashing where it should have reported is how a
+    # test wastes a CI round trip instead of answering the question.
+    function Find-Arp($root) {
+        $k = "$root\Software\Microsoft\Windows\CurrentVersion\Uninstall"
+        if (-not (Test-Path $k)) { return $null }
+        Get-ChildItem $k -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+            Where-Object { $_.DisplayName -eq 'Polylinker' }
+    }
+    $arp = Find-Arp $hive
+    $otherHive = if ($PerUser) { 'HKLM:' } else { 'HKCU:' }
+    if (-not $arp) {
+        $elsewhere = Find-Arp $otherHive
+        if ($elsewhere) {
+            Bad "the Add/Remove Programs entry is under $otherHive, but this was a $scope install and it should be under $hive"
+        } else {
+            Bad "no Add/Remove Programs entry named Polylinker after installing (looked in $hive and $otherHive)"
+        }
+    }
+    if ($arp) {
         Note "ARP: $($arp.DisplayName) $($arp.DisplayVersion), publisher '$($arp.Publisher)'"
         if (-not $arp.DisplayVersion) { Bad 'the ARP entry has no DisplayVersion' }
         if ($arp.Publisher -ne 'The Polylinker contributors') {
@@ -205,9 +227,9 @@ try {
     if ($leftovers) { Bad "uninstall left $($leftovers.Count) file(s) behind: $(($leftovers | Select-Object -First 5 -Expand Name) -join ', ')" }
     else { Note 'install directory removed' }
 
-    $arpAfter = Get-ChildItem "$hive\Software\Microsoft\Windows\CurrentVersion\Uninstall" |
-                ForEach-Object { Get-ItemProperty $_.PSPath } |
-                Where-Object { $_.DisplayName -eq 'Polylinker' }
+    # Both hives again, and for the same reason: an entry that survived in the
+    # hive this install did not use is still an entry that survived.
+    $arpAfter = @(Find-Arp $hive) + @(Find-Arp $otherHive) | Where-Object { $_ }
     if ($arpAfter) { Bad 'the Add/Remove Programs entry survived the uninstall' }
 
     if (Test-Path -LiteralPath $shortcut) { Bad 'the Start Menu shortcut survived the uninstall' }
