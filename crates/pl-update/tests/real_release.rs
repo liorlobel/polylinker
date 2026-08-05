@@ -38,11 +38,7 @@ fn the_key_compiled_in_verifies_what_ci_signed() {
         SIGNATURE.len()
     );
     assert!(
-        pl_core::ed25519::verify_slices(
-            &pl_update::RELEASE_PUBLIC_KEY,
-            MANIFEST,
-            SIGNATURE
-        ),
+        pl_core::ed25519::verify_slices(&pl_update::RELEASE_PUBLIC_KEY, MANIFEST, SIGNATURE),
         "the signature published with v0.1.2 does not verify under the public key \
          compiled into this build. Either RELEASE_PUBLIC_KEY was edited, or the \
          POLYLINKER_RELEASE_KEY secret is not the private half of it -- and in \
@@ -62,11 +58,7 @@ fn a_single_flipped_bit_anywhere_breaks_it() {
         }
         m[bit / 8] ^= 1 << (bit % 8);
         assert!(
-            !pl_core::ed25519::verify_slices(
-                &pl_update::RELEASE_PUBLIC_KEY,
-                &m,
-                SIGNATURE
-            ),
+            !pl_core::ed25519::verify_slices(&pl_update::RELEASE_PUBLIC_KEY, &m, SIGNATURE),
             "flipping bit {bit} of the manifest still verified"
         );
     }
@@ -74,11 +66,7 @@ fn a_single_flipped_bit_anywhere_breaks_it() {
         let mut s = SIGNATURE.to_vec();
         s[bit / 8] ^= 1 << (bit % 8);
         assert!(
-            !pl_core::ed25519::verify_slices(
-                &pl_update::RELEASE_PUBLIC_KEY,
-                MANIFEST,
-                &s
-            ),
+            !pl_core::ed25519::verify_slices(&pl_update::RELEASE_PUBLIC_KEY, MANIFEST, &s),
             "flipping bit {bit} of the signature still verified"
         );
     }
