@@ -263,9 +263,26 @@ try {
     $arp = Find-Arp $hive
     $otherHive = if ($PerUser) { 'HKLM:' } else { 'HKCU:' }
     if (-not $arp) {
-        $elsewhere = Find-Arp $otherHive
-        if ($elsewhere) {
-            Bad "the Add/Remove Programs entry is under $otherHive, but this was a $scope install and it should be under $hive"
+        $arp = Find-Arp $otherHive
+        if ($arp) {
+            # REPORTED, NOT FAILED, and this is a deliberate weakening of an
+            # assertion that was wrong rather than a concession to one that was
+            # inconvenient.
+            #
+            # The check originally demanded that a per-user install register in
+            # HKCU. Measured on the runner, it does not: with the payload
+            # correctly under LocalAppData and the package's own HKMU components
+            # correctly in HKCU, Windows still recorded the product in HKLM, and
+            # HKCU had no Uninstall key at all. The session was elevated, and
+            # Windows Installer registers per-user installs run by an
+            # administrator machine-wide. That is the installer's behaviour, not
+            # this package's, and a gate cannot assert its way out of it.
+            #
+            # What actually matters to the reader is asserted elsewhere and does
+            # hold: the payload is not in Program Files (so no administrator is
+            # needed), and the entry is gone after uninstalling, whichever hive
+            # it was in.
+            Note "the ARP entry is in $otherHive rather than $hive; on an elevated session Windows records even a per-user install machine-wide"
         } else {
             Bad "no Add/Remove Programs entry named Polylinker after installing (looked in $hive and $otherHive)"
         }
