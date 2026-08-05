@@ -172,8 +172,12 @@ try {
         # and MSIINSTALLPERUSER during InstallValidate, and the verbose log
         # records the values it settled on. Printing them turns "it went to the
         # wrong place" into something diagnosable without another CI round trip.
+        # Property(C) as well as Property(S): a per-user install runs entirely in
+        # the client process and never starts a server, so the (S) block that
+        # this pattern originally looked for does not exist for the very scope
+        # it was written to diagnose.
         $why = (Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
-                Select-String -Pattern 'Property\(S\): (ALLUSERS|MSIINSTALLPERUSER|APPLICATIONFOLDER|WixAppFolder|ProductToBeRegistered)' |
+                Select-String -Pattern 'Property\((C|S)\): (ALLUSERS|MSIINSTALLPERUSER|APPLICATIONFOLDER|WixAppFolder|ProductToBeRegistered) ' |
                 Select-Object -Last 8 | ForEach-Object { $_.Line.Trim() }) -join "`n        "
         Bad ("a $scope install was requested but the package registered itself in $foundIn, so it installed in the other scope." +
              $(if ($why) { "`n        the installer settled on:`n        $why" } else { '' }))
@@ -185,7 +189,35 @@ try {
         $t = Join-Path $prefix ($rel -replace '/', '\')
         if (-not (Test-Path -LiteralPath $t)) { $missing += $rel }
     }
-    if ($missing) { Bad "the MSI installed but these files are not on disk under ${prefix}: $($missing -join ', ')" }
+    if ($missing) {
+        # SAY WHERE THEY ACTUALLY WENT. "Not here" is not a diagnosis, and each
+        # guess about where they went instead costs a full release run.
+        $report = @()
+        if (Test-Path -LiteralPath $prefix) {
+            $there = Get-ChildItem -LiteralPath $prefix -Recurse -ErrorAction SilentlyContinue |
+                     Select-Object -First 25 -ExpandProperty FullName
+            $report += "what IS under ${prefix}:`n        " + (($there | ForEach-Object { $_ }) -join "`n        ")
+        } else {
+            $report += "$prefix does not exist at all"
+        }
+        # Hunt for the real one, in the two places either scope could have put it.
+        foreach ($root in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }) {
+            $hits = Get-ChildItem -LiteralPath $root -Recurse -Filter 'polylinker.exe' -ErrorAction SilentlyContinue -Depth 4 |
+                    Select-Object -First 5 -ExpandProperty FullName
+            if ($hits) { $report += "polylinker.exe found under ${root}:`n        " + ($hits -join "`n        ") }
+        }
+        $props = (Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
+                  Select-String -Pattern 'Property\((C|S)\): (APPLICATIONFOLDER|ALLUSERS|MSIINSTALLPERUSER|WixAppFolder) ' |
+                  Select-Object -Last 8 | ForEach-Object { $_.Line.Trim() })
+        if ($props) { $report += "the installer settled on:`n        " + ($props -join "`n        ") }
+        $installed = (Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
+                      Select-String -Pattern 'Installing files|InstallFiles|Directory: APPLICATIONFOLDER|action: InstallFiles' |
+                      Select-Object -Last 5 | ForEach-Object { $_.Line.Trim() })
+        if ($installed) { $report += "file-install log lines:`n        " + ($installed -join "`n        ") }
+
+        Bad ("the MSI installed but these files are not on disk under ${prefix}: $($missing -join ', ')`n        " +
+             ($report -join "`n        "))
+    }
     else { Note "all $($expected.Count) payload files present under $prefix" }
 
     # A per-user install must not have landed in Program Files: that is the
@@ -237,7 +269,15 @@ try {
         }
     }
     if ($arp) {
-        Note "ARP: $($arp.DisplayName) $($arp.DisplayVersion), publisher '$($arp.Publisher)'"
+        Note "ARP: $($arp.DisplayName) $($arp.DisplayVersion), publisher '$($arp.Publisher)', InstallLocation '$($arp.InstallLocation)'"
+        # Cross-check against where the package said it put the binary. These
+        # come from different mechanisms -- ARP is written by Windows Installer,
+        # App Paths by a component in this package -- so a disagreement means one
+        # of them is lying about the install.
+        if ($arp.InstallLocation -and $prefix -and
+            ($arp.InstallLocation.TrimEnd('\') -ne $prefix.TrimEnd('\'))) {
+            Bad "ARP says InstallLocation is '$($arp.InstallLocation)' but the package's own App Paths entry points into '$prefix'"
+        }
         if (-not $arp.DisplayVersion) { Bad 'the ARP entry has no DisplayVersion' }
         if ($arp.Publisher -ne 'The Polylinker contributors') {
             Bad "ARP Publisher is '$($arp.Publisher)'; the binaries' version resource says 'The Polylinker contributors' and the two must agree"
