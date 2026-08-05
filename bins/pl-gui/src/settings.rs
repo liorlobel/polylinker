@@ -63,6 +63,26 @@ pub struct Layout {
     /// The presets choose the number; the file records what was chosen.
     pub figure_mm: Option<f64>,
 
+    /// Ask the release page, once per run, whether a newer version exists.
+    ///
+    /// **Shipped OFF, and this is the one setting here where the default is a
+    /// promise rather than a preference.** Every other field in this struct
+    /// decides what the window looks like. This one decides whether Polylinker
+    /// contacts a server at all, and the answer out of the box has to be no:
+    /// an update check is a beacon — it tells whoever runs that hostname that
+    /// this machine exists and is running this version — and on a bench machine
+    /// holding unpublished sequence that is a real cost, paid by somebody who
+    /// never asked to pay it. So it is off until a person turns it on, having
+    /// read what the checkbox says gets sent.
+    ///
+    /// Note what it does NOT govern: `pl update`, which is a command somebody
+    /// types, needs no setting and does not read this one. This field exists
+    /// only because the desktop app has no argv to say "yes, now".
+    ///
+    /// It also does not enable downloading. The GUI checks and shows a notice;
+    /// the download is `pl update`. See `crate::update` for why.
+    pub update_check: bool,
+
     /// Resolution for the raster export, in dots per inch.
     ///
     /// Not an `Option`: unlike a printed width, a raster always has SOME
@@ -84,6 +104,7 @@ impl Default for Layout {
             code: 11,
             orf_min_aa: 30,
             restore_tabs: true,
+            update_check: false,
             figure_mm: None,
             figure_dpi: 300.0,
         }
@@ -200,6 +221,14 @@ pub fn parse(text: &str) -> Layout {
             // restoring anybody's bench and look exactly like the feature being
             // broken.
             "restore_tabs" => out.restore_tabs = v != "0",
+            // `== "1"`, the exact opposite of the line above, and for the same
+            // reason read the other way round: an unreadable value must land on
+            // the default, and this default is OFF. A `!= "0"` here would turn a
+            // truncated write, a hand-edit, or a `update_check: no` into a
+            // machine that contacts a server because its settings file was
+            // damaged. Failing closed is the only acceptable direction for a
+            // switch that governs whether anything is sent at all.
+            "update_check" => out.update_check = v == "1",
             // Same band as every other number here, and for the same reason:
             // the file is hand-editable and a `figure_mm: nan` that reached
             // `Fit::to_width_mm` would propagate through the scale into every
@@ -244,6 +273,12 @@ pub fn render(l: Layout) -> String {
     s.push_str(&format!("code: {}\n", l.code));
     s.push_str(&format!("orf_min_aa: {}\n", l.orf_min_aa));
     s.push_str(&format!("restore_tabs: {}\n", u8::from(l.restore_tabs)));
+    // Always written, including the `0`, unlike `figure_mm` which is omitted
+    // when unset. A user who wants to know whether their copy is configured to
+    // contact anything should be able to read the answer out of this file
+    // rather than infer it from a line's absence — absence is what a truncated
+    // write also looks like.
+    s.push_str(&format!("update_check: {}\n", u8::from(l.update_check)));
     // Written only when set, so an untouched file says nothing about figure size
     // rather than asserting the default as a choice.
     if let Some(mm) = l.figure_mm {
@@ -290,6 +325,11 @@ mod tests {
             code: 4,
             orf_min_aa: 12,
             restore_tabs: false,
+            // Deliberately not the default, for the same reason `figure_dpi`
+            // below is not: a field that never reached `render` would still
+            // round-trip if the value under test were the one `Default` puts
+            // back.
+            update_check: true,
             figure_mm: Some(89.0),
             // Deliberately not the default, so a `figure_dpi` that never
             // reached the file would fail here rather than round-trip through
@@ -297,6 +337,85 @@ mod tests {
             figure_dpi: 600.0,
         };
         assert_eq!(parse(&render(l)), l);
+    }
+
+    /// The update check survives a round trip in **both** directions.
+    ///
+    /// Round-tripping `true` is the weaker half and on its own it is close to a
+    /// check that cannot fail: `update_check: false` also round-trips through a
+    /// `render` that never wrote the key and a `parse` that never read it,
+    /// because both ends land on the default. So both are asserted, and the ON
+    /// case is additionally required to appear in the text — that is what says
+    /// the value is stored rather than reconstructed.
+    #[test]
+    fn the_update_check_round_trips_in_both_directions() {
+        for on in [false, true] {
+            let l = Layout {
+                update_check: on,
+                ..Default::default()
+            };
+            let text = render(l);
+            assert!(
+                text.contains(if on {
+                    "update_check: 1"
+                } else {
+                    "update_check: 0"
+                }),
+                "the file does not record update_check={on}:\n{text}"
+            );
+            assert_eq!(parse(&text).update_check, on);
+            assert_eq!(parse(&text), l);
+        }
+    }
+
+    /// Nothing a damaged file can hold switches the update check ON.
+    ///
+    /// The direction is the whole test. `restore_tabs` falls back to ON because
+    /// losing somebody's bench is the worse failure; this falls back to OFF
+    /// because the worse failure here is a machine that contacts a server its
+    /// owner did not tell it to. A truncated write, a hand-edit and a file from
+    /// a future version all have to land on silence.
+    #[test]
+    fn nothing_a_damaged_file_can_hold_switches_the_update_check_on() {
+        for bad in [
+            "update_check: yes",
+            "update_check: true",
+            "update_check: on",
+            "update_check: 2",
+            "update_check: -1",
+            "update_check:",
+            "update_check: 1x",
+            "update_check: 1 1",
+            "Update_Check: 1", // keys are matched exactly, not case-folded
+            "update_check: 0",
+        ] {
+            let l = parse(&format!("{HEADER}\n{bad}\n"));
+            assert!(
+                !l.update_check,
+                "{bad:?} switched the update check on; the default must fail closed"
+            );
+        }
+        // And the guard is not vacuous — the one spelling that really does mean
+        // on still means on. Without this the assertions above would pass
+        // against a parser that ignored the key entirely.
+        assert!(parse(&format!("{HEADER}\nupdate_check: 1\n")).update_check);
+    }
+
+    /// A file with no `update_check` line at all — every layout written before
+    /// this setting existed — leaves it off.
+    #[test]
+    fn a_layout_file_from_before_this_setting_does_not_opt_anybody_in() {
+        for older in [
+            "polylinker-layout 1\npanel_width: 560\nrestore_tabs: 1\n",
+            "polylinker-layout 1\n",
+            "",
+            "something else entirely\nupdate_check: 1\n",
+        ] {
+            assert!(
+                !parse(older).update_check,
+                "{older:?} opted an existing user in without being asked"
+            );
+        }
     }
 
     /// The one setting whose default is ON, so an unreadable value must land on

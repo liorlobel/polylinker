@@ -30,3 +30,16 @@ pl-primer.workspace = true
 pl-sanger.workspace = true
 pl-scan.workspace = true
 pl-thermo.workspace = true
+
+# The updater, reached from exactly one function: `cmd_update` in src/main.rs.
+#
+# Listed apart from the others with a comment because it is a change in kind and
+# not in degree. Every crate above is arithmetic on bytes the user already had;
+# before this one, no argv could make `pl` contact anything. Now exactly one
+# verb can, and only when that verb is the one typed.
+#
+# `tests/cli.rs`'s `only_the_update_verb_can_reach_the_network` holds the
+# "exactly one": it reads this binary's source and fails if a call into
+# `pl_update` appears outside `cmd_update`. See docs/RELEASING.md, "What exists,
+# precisely", for the decision itself.
+pl-update.workspace = true

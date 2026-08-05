@@ -26,6 +26,20 @@ pl-sanger.workspace = true
 pl-scan.workspace = true
 pl-thermo.workspace = true
 
+# The update check, reached from exactly one module: `src/update.rs`.
+#
+# Listed apart from the others with a comment because it is a change in kind.
+# Every crate above computes something about a molecule the user already had;
+# this one can open a socket. It stays inert unless `settings::Layout::
+# update_check` is switched on, which it is not out of the box, and even then it
+# only ever asks for a version number -- this binary contains no code that
+# downloads a release, on purpose.
+#
+# `only_the_update_module_can_reach_the_network` in src/main.rs's test module
+# holds the "exactly one module". See docs/RELEASING.md, "What exists,
+# precisely", for the decision.
+pl-update.workspace = true
+
 # The GUI is the one place dependencies are accepted: it is distribution, not
 # logic. The correctness crates above still have none, and everything this
 # binary decides about a molecule it asks them.

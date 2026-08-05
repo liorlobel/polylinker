@@ -1,6 +1,15 @@
 //! `pl` — inspect, convert and digest sequence files.
 //!
-//! Everything is local. No network, no account, no telemetry.
+//! Everything is local. No account, no telemetry, and nothing is ever sent
+//! about a molecule you opened.
+//!
+//! **One verb is not local, and saying so here is the point.** `pl update`
+//! makes an HTTPS request to the release page, and it is the only code path in
+//! this binary that can: the whole network surface is `cmd_update`, which runs
+//! only when `update` is the verb in argv. Every other verb in this file could
+//! not reach a socket if it wanted to. That is not an inference from reading —
+//! `tests/cli.rs`'s `only_the_update_verb_can_reach_the_network` reads this
+//! source and fails if a call into `pl_update` appears anywhere else.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +43,8 @@ USAGE:
     pl gel     <file> --cut A --cut B    will the digest be readable?
     pl methods [topic]                   what to write in your methods section
     pl licences                          who the annotation data belongs to
+    pl update  [--check]                 ask the release page for a newer version
+                                         — the one verb here that uses a network
 
     pl index   <dir>... [options]        build or refresh a folder's index
     pl find    <dir> [filters]           search it (--motif/--enzyme/--text/...)
@@ -242,6 +253,26 @@ DIGEST OPTIONS:
     --unique                     only enzymes that cut exactly once
     --non-cutters                only enzymes that do not cut
 
+UPDATE OPTIONS:
+    --check                      say whether a newer release exists, and stop.
+                                 One request, for a few hundred bytes of text
+    --to <dir>                   where to put the verified download (default:
+                                 the current directory). The directory pl is
+                                 installed in is refused, not used
+
+    WHAT THIS SENDS, because you are entitled to know before you run it. `pl
+    update` is the only part of Polylinker that opens a network connection, and
+    it does so only in the run that names this verb. It sends no sequence, no
+    file name, no identifier and no version number: an HTTPS GET to github.com
+    for the release manifest, which tells that server your IP address and that
+    somebody asked. Nothing else in this program can reach the network at all.
+
+    Without --check it also downloads the release, and keeps it only if the
+    manifest is signed by the release key compiled into this binary — a checksum
+    from the same server would prove nothing about whoever is serving it. It
+    then prints the path and stops. It installs nothing and replaces nothing;
+    running the file is yours to do, and to watch.
+
 GLOBAL:
     --json                       machine-readable output (info, digest)
 
@@ -307,14 +338,20 @@ fn main() -> ExitCode {
         "library" => cmd_library(rest),
         "bench-adapter" => cmd_bench_adapter(rest),
         "cut-adapter" => cmd_cut_adapter(rest),
+        "update" => cmd_update(rest),
         "-V" | "--version" => {
-            // The commit, not just the version. There is no auto-updater by
-            // design (docs/RELEASING.md), so this line is the whole mechanism
-            // by which anyone establishes which build they are running — and
-            // every build between two releases says 0.1.0. `build.rs` stamps
-            // it, and marks it `-dirty` when the tree it was built from had
-            // uncommitted changes, because then the commit does not describe
-            // this binary.
+            // The commit, not just the version. There is still no auto-updater
+            // by design (docs/RELEASING.md): `pl update --check` exists, but it
+            // runs when it is typed and never otherwise, so this line remains
+            // the only thing that answers "which build is this" without a
+            // network — and every build between two releases says 0.1.1.
+            // `build.rs` stamps it, and marks it `-dirty` when the tree it was
+            // built from had uncommitted changes, because then the commit does
+            // not describe this binary.
+            //
+            // It is also the more trustworthy of the two answers. `pl update
+            // --check` compares this constant against a claim by whatever is
+            // answering on that hostname; this prints what was compiled in.
             println!("pl {} ({})", env!("CARGO_PKG_VERSION"), env!("PL_COMMIT"));
             Ok(())
         }
@@ -3440,6 +3477,127 @@ SIGN-OFF: {reviewed} of {} record(s) have been reviewed by a named curator.
     Ok(())
 }
 
+/// `pl update` — ask the release page what the current version is, and, unless
+/// `--check`, download that release and verify its signature.
+///
+/// # This function is the whole network surface of `pl`
+///
+/// Everything reaching `pl_update` is spelled `pl_update::` here rather than
+/// imported at the top of the file, and that is not a style preference. An
+/// import would put the crate's name in one place and its uses in twenty
+/// others; written this way, `grep pl_update bins/pl/src/main.rs` returns every
+/// line in this binary that can open a socket, and they are all in this
+/// function. `tests/cli.rs`'s `only_the_update_verb_can_reach_the_network`
+/// turns that from a habit into a test.
+///
+/// # How the four requirements of `docs/RELEASING.md` are met from here
+///
+/// 1. **Nothing without being asked, each time.** A subcommand is the strongest
+///    available form of this. The request happens because a person typed
+///    `update`; the process then exits. There is no configuration that makes a
+///    later run check, no remembered "last checked", and no state on disk at
+///    all — so there is no run of `pl` in which a check happens and the argv
+///    does not say so.
+/// 2. **A signature, not a checksum.** `fetch_and_verify` does that one layer
+///    down, before the artifact is so much as requested. Nothing here can
+///    weaken it: the only way to get a `VerifiedManifest` is its one
+///    constructor.
+/// 3. **The key is compiled in.** `pl_update::RELEASE_PUBLIC_KEY`, in the
+///    binary that would be replaced.
+/// 4. **It never replaces a running binary.** This prints a path. There is no
+///    branch below that runs the file, copies it anywhere, or offers to.
+///
+/// # Why an available update is exit 0
+///
+/// The tempting alternative is to exit non-zero when a newer release exists, so
+/// a script can branch on it. It is refused because this file has exactly one
+/// meaning for a non-zero exit — `main` prints `pl: {e}` to stderr for it — and
+/// "your software is up to date, but not the newest" is not an error. A user
+/// who ran `pl update --check` and got a failure exit with an advisory message
+/// would reasonably conclude something broke. Scripts read the text.
+fn cmd_update(args: &[String]) -> Result<(), String> {
+    let a = parse_args(args, &["to"], &["check"])?;
+    // A stray positional here is always a mistake, and an ignored one would be
+    // the exact defect finding 62 is about: `pl update ~/Downloads` would
+    // silently write to the current directory instead, and say it had succeeded.
+    if let Some(stray) = a.files.first() {
+        return Err(format!(
+            "update takes no file arguments, and got '{}'. \
+             To choose where the download goes, use --to {}",
+            stray.display(),
+            stray.display()
+        ));
+    }
+
+    let fetch = pl_update::Curl::default();
+
+    // One request, for a few hundred bytes of text. Its answer is a CLAIM by
+    // whoever is answering on that hostname and is treated as one: the only
+    // thing it is trusted to do is be three integers, and the download below
+    // re-fetches and verifies rather than believing this.
+    let checked = pl_update::check(&fetch).map_err(|e| e.to_string())?;
+
+    if !checked.update_available() {
+        println!(
+            "pl {} is current. The release page offers {}.",
+            checked.current, checked.offered
+        );
+        return Ok(());
+    }
+
+    println!(
+        "A newer release is available: {} (this is pl {}).",
+        checked.offered, checked.current
+    );
+
+    if a.has("check") {
+        println!(
+            "Nothing was downloaded. Run `pl update` to fetch and verify it, or take it\n\
+             yourself from {}",
+            pl_update::RELEASE_BASE_URL
+        );
+        return Ok(());
+    }
+
+    // Where the file lands. The current directory by default because it is the
+    // one location a person running a command line has already chosen and can
+    // predict; `pl_update` refuses this binary's own directory, so running `pl`
+    // from its install folder is an error that says so rather than a download
+    // placed next to the thing it would replace.
+    let into = match a.get("to") {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_dir()
+            .map_err(|e| format!("could not read the current directory: {e}"))?,
+    };
+
+    let handoff =
+        pl_update::fetch_and_verify(&fetch, checked.offered, &into).map_err(|e| e.to_string())?;
+
+    // Past this line the bytes on disk are the ones the release key signed a
+    // digest for. Everything below is printing.
+    println!();
+    println!("Verified and saved:");
+    println!("  {}", handoff.path.display());
+    println!("  sha256 {}", handoff.sha256_hex);
+    println!(
+        "  signed by the release key compiled into this pl ({})",
+        pl_update::RELEASE_PUBLIC_KEY_HEX
+    );
+    println!();
+    match handoff.kind {
+        pl_update::Kind::Installer => println!(
+            "Run it when you are ready. Polylinker has not installed anything and has not\n\
+             changed the copy you are running."
+        ),
+        pl_update::Kind::Archive => println!(
+            "Unpack it when you are ready. Polylinker has not installed anything and has not\n\
+             changed the copy you are running. On macOS, the release notes say what to do\n\
+             about com.apple.quarantine."
+        ),
+    }
+    Ok(())
+}
+
 /// The paragraph a user pastes into a paper, for one operation or for all of
 /// them.
 ///
@@ -6101,6 +6259,15 @@ mod tests {
              recounted"
         );
         let members = members.len();
+        // Counted, not written down. The explanation below said "the 18
+        // members" for as long as there were eighteen, and went stale the
+        // moment one was added -- inside the very test whose job is to notice
+        // numbers going stale.
+        let free_members = format!(
+            "the same count over the {} members whose every dependency is \
+             another member of this workspace",
+            members - with_deps.len()
+        );
 
         let flat = status_blockquote(README);
         assert!(
@@ -6121,12 +6288,7 @@ mod tests {
                 lines,
                 "newline bytes in those files, i.e. `wc -l`",
             ),
-            (
-                " of it dependency-free",
-                free_lines,
-                "the same count over the 18 members whose every dependency is \
-                 another member of this workspace",
-            ),
+            (" of it dependency-free", free_lines, free_members.as_str()),
             (
                 " `.rs` files under",
                 sources.len(),

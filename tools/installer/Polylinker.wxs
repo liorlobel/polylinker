@@ -82,9 +82,27 @@
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <!--
-      No network, no updater, no service, no scheduled task, no telemetry. The
-      same refusals Install-Polylinker.ps1 makes, and the reason this file sits
-      in a directory that is scanned for them.
+      No network, no auto-updater, no service, no scheduled task, no telemetry.
+      The same refusals Install-Polylinker.ps1 makes, and the reason this file
+      sits in a directory that is scanned for them: the gate step "the installer
+      contacts nothing" in tools/ci.ps1 reads every file in this directory and
+      fails if it finds any of twelve download or scheduling facilities. The
+      twelve are named there and deliberately not here, because that scan does
+      not strip comments, so a file that listed them would fail the very check
+      it was describing.
+
+      This read "no updater" until 2026-08-06, and the word that changed carries
+      the whole distinction. Polylinker gained an update check that day: `pl
+      update`, a verb somebody types, and a box in the editor's Help menu that
+      ships unticked. Neither one is installed BY this package or by anything in
+      it. They are code inside pl.exe and polylinker.exe, which this package
+      copies and does not modify. What this MSI still puts on the machine is
+      files, a shortcut, an Add/Remove Programs entry and (opt-in) file
+      associations; nothing it installs ever runs unless a person starts it.
+      See docs/RELEASING.md, "There is no auto-updater, on purpose".
+
+      (Two hyphens in a row would make this file invalid XML, which is why
+      nothing here is punctuated with them.)
     -->
 
     <Icon Id="PolylinkerIcon" SourceFile="!(bindpath.payload)polylinker.ico" />

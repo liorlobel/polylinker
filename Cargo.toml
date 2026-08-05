@@ -17,6 +17,7 @@ members = [
     "crates/pl-py",
     "crates/pl-thermo",
     "crates/pl-fileio",
+    "crates/pl-update",
     "crates/pl-wasm",
     "bins/pl",
     "bins/pl-mcp",
@@ -46,6 +47,22 @@ pl-gel = { path = "crates/pl-gel", version = "0.1.1" }
 pl-doc = { path = "crates/pl-doc", version = "0.1.1" }
 pl-thermo = { path = "crates/pl-thermo", version = "0.1.1" }
 pl-fileio = { path = "crates/pl-fileio", version = "0.1.1" }
+# `pl-update` holds the compiled-in release public key and the updater that
+# reads it -- docs/RELEASING.md's four requirements, met and tested.
+#
+# It had no caller until 2026-08-06, and the note here said that adding one was
+# a decision rather than a plumbing change and must not arrive as one. It did
+# not: the decision was made, reviewed and written down in docs/RELEASING.md's
+# "The decision to expose it", and the two callers are `bins/pl` (the `pl
+# update` verb) and `bins/pl-gui` (a switch that ships OFF). `bins/pl-mcp` still
+# does not list it.
+#
+# What replaced "nothing calls it" as the load-bearing guarantee is narrower and
+# is enforced rather than asserted: each of those two binaries may reach the
+# network from exactly one place, and a test in each reads its own sources and
+# fails if the crate is named anywhere else. If a third consumer ever appears
+# here, it needs the same test before it needs this line.
+pl-update = { path = "crates/pl-update", version = "0.1.1" }
 
 [profile.release]
 opt-level = 3

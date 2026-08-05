@@ -199,6 +199,43 @@ Step 'pl-index and pl-scan tests' {
 Step 'pl-design tests' {
     cargo test -p pl-design --tests
 }
+# The compiled-in release public key, and the updater that reads it.
+#
+# No `--tests` filter, unlike the two steps above, and the difference is worth a
+# line because it used to have one. When this crate was three constants and no
+# code, every test it had was an integration test and `--tests` was the whole
+# suite. It now has both: unit tests inside `src/` -- where the private
+# constructors they exercise are reachable -- and integration tests in `tests/`.
+# `cargo test -p pl-update` runs both. `unit tests` above is
+# `--workspace --lib --bins` and would reach the first but not the second, so
+# filtering here would silently drop the four suites that hold requirements 1
+# and 4.
+#
+# WHAT WOULD OTHERWISE GO UNNOTICED, and it is now two things.
+#
+# `RELEASE_PUBLIC_KEY` is 32 byte literals. A wrong nibble in it compiles,
+# links, ships, and is first noticed by a user whose updater refuses a genuine
+# release -- or does not refuse a forged one. `crates/pl-update/tests/key.rs` is
+# the only thing that looks at the value.
+#
+# And `crates/pl-update/tests/handoff.rs` is the only thing that holds
+# docs/RELEASING.md's requirements 1 and 4, which are claims about what the
+# crate does NOT do -- no thread, no timer, no clock, no `Command::new` outside
+# the one file that runs `curl`, nothing that copies over or launches the file
+# it downloaded. Those cannot be caught by calling anything: a version that
+# launched the installer would pass every functional test in the crate, because
+# the file would still be in the right place with the right hash. So it reads
+# the sources, and if this step did not run it, nothing would.
+#
+# It also pins the coupling `.github/workflows/release.yml` depends on: that
+# workflow greps the key's base64 form out of `src/lib.rs` so the signature it
+# verifies is checked against the key that actually ships rather than a second
+# copy in YAML, and `exactly_one_base64_key_appears_in_the_source_the_release_
+# workflow_reads` is what stops a doc-comment edit breaking a release nobody
+# can test until the tag is already pushed.
+Step 'pl-update tests (the release key, and the updater that reads it)' {
+    cargo test -p pl-update
+}
 # Size and speed at three thousand plasmids.
 #
 # Nothing else in this gate would notice an index costing 800 MB or a query
@@ -841,13 +878,24 @@ Step 'renderers agree (rust replays it)' {
 Write-Host "`nrelease" -ForegroundColor Cyan
 # The release script runs, and its manifest verifies.
 #
-# A checksum file is the only integrity guarantee an unsigned build has, so it
+# A checksum file is the integrity guarantee an unsigned build leans on, so it
 # has to actually verify on the machine of whoever is checking it: LF endings,
 # no BOM, and the exact two-space format `sha256sum -c` expects. A file that
 # looks right in an editor and fails at the other end is worse than none.
 #
-# Signing itself cannot be checked here — see docs/RELEASING.md — because it
-# needs credentials issued to a person.
+# It said "the ONLY integrity guarantee" until 2026-08-06, and that stopped
+# being true on 2026-08-05: the release workflow now signs the combined
+# SHA256SUMS.txt with the Ed25519 release key, so a download can be traced to
+# whoever holds that key and not merely to whoever served the page. The two
+# guarantees are different and both matter. What release.ps1 writes here is
+# still the unsigned per-archive manifest, because the signature is made in the
+# publish job over the cross-platform one, after all three legs have finished.
+#
+# CODE signing still cannot be checked here — see docs/RELEASING.md — because it
+# needs credentials issued to a person. The manifest signature can be and is,
+# but in the release workflow rather than in this gate, for the same reason:
+# the private half is a GitHub Actions secret and is on no machine that runs
+# this file.
 #
 # NO LONGER GATED ON PYTHON. This step used to carry `{ Have python }`, and its
 # own comment recorded the cost: on a Rust-only machine the whole thing SKIPPED,
@@ -1416,10 +1464,16 @@ Step 'installer round trip leaves user state alone' {
 
 # The product's central claim, enforced mechanically.
 #
-# README.md's first line is "Never sends a sequence anywhere"; RELEASING.md:49-75
-# says there is no updater, on purpose, and lists four bars any future one must
-# clear. An installer is part of the product, and prose in a doc does not stop
-# anybody adding a version check to a script. This does.
+# README.md's first line is "Never sends a sequence anywhere"; RELEASING.md's
+# "There is no auto-updater, on purpose" lists the four bars any updater here
+# must clear. An installer is part of the product, and prose in a doc does not
+# stop anybody adding a version check to a script. This does.
+#
+# UNCHANGED BY the update check added on 2026-08-06, and that is the point of
+# keeping it. `pl update` and the editor's off-by-default switch are things a
+# person invokes; an installer reaching the network is a thing that happens to
+# them. This gate is what keeps the second from arriving on the coat-tails of
+# the first, so it got stricter in spirit rather than looser.
 Step 'the installer contacts nothing' {
     $banned = @(
         'Invoke-WebRequest', 'Invoke-RestMethod', 'Start-BitsTransfer', 'System.Net',
@@ -1969,9 +2023,13 @@ Step 'the release workflow assembles nothing itself' {
         $leaf = Split-Path -Leaf $required
         if ($wf -notmatch [regex]::Escape($leaf)) { $problems += "the workflow never runs $required" }
     }
-    # No auto-updater, no telemetry, no network at run time -- and nothing here
-    # that would introduce one. docs/RELEASING.md, and the same list the
-    # installer is held to.
+    # Nothing is fetched at BUILD time, which is this step's subject and is not
+    # the same question as what the shipped product does at run time. The
+    # product's answer changed on 2026-08-06 -- `pl update` and an
+    # off-by-default check in the editor -- and this list did not, because a
+    # build that downloads a dependency mid-release is how something nobody
+    # reviewed gets into an artifact everybody trusts. Same list the installer
+    # is held to; docs/RELEASING.md has the reasoning.
     foreach ($banned in 'Invoke-WebRequest', 'DownloadString', 'curl -s http', 'wget ') {
         if ($wf -match [regex]::Escape($banned)) { $problems += "the workflow fetches something at build time ($banned)" }
     }
@@ -2012,7 +2070,16 @@ Step 'the release notes still say what an unsigned build costs' {
         'xattr -d com.apple.quarantine',   # the honest macOS remedy, spelled out
         'SmartScreen',                      # named, so the user recognises the dialog
         'glibc',                            # the Linux artifact's real limit
-        'no updater',                       # the product promise
+        # The product promise, and it is worth saying what changed on
+        # 2026-08-06 and what did not. `pl update` and an off-by-default switch
+        # in the app now exist, so the old required phrase -- a bare "no
+        # updater" -- became false and this gate would have kept it in the
+        # notes. What survives is the promise that actually mattered: nothing
+        # happens on a schedule, and a new installation asks for nothing. Both
+        # halves are required here, because either one alone is the half a
+        # rewrite would keep.
+        'no auto-updater',
+        'off by default',
         'licences/'                         # where the obligation travels
     )) {
         if ($t -notmatch [regex]::Escape($required)) { $problems += "the release notes no longer mention '$required'" }

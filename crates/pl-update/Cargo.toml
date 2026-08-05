@@ -1,0 +1,32 @@
+[package]
+name = "pl-update"
+description = "The release trust anchor and the updater that uses it: a signed manifest is verified against a compiled-in Ed25519 key before any downloaded byte is kept."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `pl-core` and nothing else, ever.
+#
+# This section used to be empty and said so at length: this crate holds the one
+# value an attacker most wants to replace, and a dependency -- any dependency --
+# is a second party who could ship a build script or a proc macro that rewrites
+# the constant during compilation, with nobody reviewing `src/lib.rs` any the
+# wiser. That argument has not weakened. What changed is that the crate now has
+# to *use* the key, and the SHA-512, Ed25519 and SHA-256 it needs to do that are
+# in `pl-core`. The alternatives were to copy a verifier in here, which means
+# two verifiers to keep correct and only one of them checked against 150
+# Wycheproof and 35,000 OpenSSL cases, or to have the caller pass a verifying
+# function in, which puts the choice of verifier outside the crate that exists
+# to make that choice unforgeable.
+#
+# What the original argument bought is kept by checking the property rather than
+# the rule. `pl-core` is in this workspace, has no `build.rs` and declares no
+# dependencies of its own, so the "second party with a proc macro" this section
+# was written against still does not exist -- and `tests/key.rs`'s
+# `the_dependency_surface_is_pl_core_and_nothing_it_pulls_in` reads pl-core's
+# manifest and directory to assert exactly that, rather than trusting this
+# comment or a reviewer's memory.
+[dependencies]
+pl-core.workspace = true

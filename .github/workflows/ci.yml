@@ -127,6 +127,35 @@ jobs:
       - name: Primer design integration suites
         run: cargo test -p pl-design --tests --locked
 
+      # The compiled-in release public key, and the updater that reads it.
+      #
+      # No `--tests` filter, unlike the steps above, and it used to have one:
+      # when `crates/pl-update` was three constants and no code, every test it
+      # had was an integration test. It now has both, so the whole crate is run
+      # here. `--lib --bins` above would reach the unit tests and not the four
+      # integration suites, which are the ones holding docs/RELEASING.md's
+      # requirements 1 and 4.
+      #
+      # Nothing else in this repository reads `RELEASE_PUBLIC_KEY`, so without
+      # this a wrong nibble among its 32 byte literals compiles, links and
+      # ships, and is first noticed by a user whose updater refuses a genuine
+      # release -- or does not refuse a forged one. And `tests/handoff.rs` is
+      # the only thing anywhere that holds the two requirements which are claims
+      # about what the crate does NOT do: no thread, no timer, no clock, no
+      # program run but `curl`, nothing that copies over or launches what it
+      # downloaded. Those cannot be caught by calling anything -- a version that
+      # launched the installer would pass every functional test in the crate --
+      # so they are checked by reading the sources, here.
+      #
+      # It also pins the coupling `release.yml` relies on: that workflow greps
+      # the key's base64 form out of `crates/pl-update/src/lib.rs`, so that the
+      # signature it makes is verified against the key that actually ships
+      # rather than against a second copy pasted into YAML. A doc-comment edit
+      # adding a second base64 token would break a release that cannot be
+      # rehearsed after the tag is pushed; this says so on the pull request.
+      - name: The release key, and the updater that reads it
+        run: cargo test -p pl-update --locked
+
   wasm:
     name: wasm32 build
     runs-on: ubuntu-latest

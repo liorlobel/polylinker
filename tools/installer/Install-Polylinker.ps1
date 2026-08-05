@@ -34,8 +34,13 @@
       names of every PowerShell facility that could, and fails if one appears.
       The product's central claim is that it sends nothing anywhere, and an
       installer is part of the product.
-    * It installs no updater, no service and no scheduled task, for the same
-      reason and for the four reasons in docs/RELEASING.md:66-72.
+    * It installs no auto-updater, no service and no scheduled task: nothing it
+      puts on this machine ever runs when you did not start it. See
+      docs/RELEASING.md, "There is no auto-updater, on purpose". (Polylinker
+      does have an update check as of 2026-08-06 -- `pl update`, which you type,
+      and a switch in the editor that ships off. Neither is installed by this
+      script, because neither is a thing that gets installed: they are part of
+      the two programs you already have here.)
     * It takes no file association. Associations are opt-in (`-Associate`), are
       additive rather than destructive, and are reversible with one flag. See
       the ASSOCIATIONS section below.
@@ -1243,7 +1248,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-Polylinker.ps1
     # then followed by thirty lines of file associations.
     Head 'It will NOT:'
     Say '  contact the network -- not to check for a version, not for anything else'
-    Say '  install an updater, a service or a scheduled task'
+    # "install an updater" is the substring tools/ci.ps1 requires in this plan,
+    # so it stays; the clause after the dash is what stops it being read as a
+    # promise the product no longer keeps. `pl update` exists and the editor has
+    # an off-by-default check, but neither is INSTALLED -- they are part of two
+    # programs already in the folder, and neither ever runs unasked.
+    Say '  install an updater, a service or a scheduled task -- nothing this puts on the machine ever runs on its own'
     Say '  touch anything outside the paths listed above'
     if (-not $doAssoc) {
         Say '  register any file type, or change what opens anything'

@@ -2,7 +2,9 @@ Polylinker on Linux
 ===================
 
 Polylinker is an offline plasmid editor. It never sends a sequence anywhere, it
-has no updater, and it needs no root.
+has no auto-updater, and it needs no root. Nothing here runs on its own or
+checks for a new version by itself: the editor's update check is off until you
+switch it on under Help, and `pl update` is a command you type.
 
 There is nothing to install. The three programs in this folder run as they are.
 
@@ -107,8 +109,13 @@ UNSIGNED
 Linux has no equivalent of SmartScreen or Gatekeeper, so nothing will stop you
 running these and nothing will vouch for them either. The SHA-256 you checked in
 step 1 proves this copy is byte-for-byte the one published on the release page.
-It proves nothing about who published it. Those are different guarantees and
-only one of them is available here.
+It proves nothing about who published it. Those are different guarantees, and
+the second one is now available too: the release page publishes
+SHA256SUMS.txt.sig, an Ed25519 signature over that checksum table made by the
+release key, and prints the command to check it. The key's public half is
+compiled into pl and polylinker, which is what lets `pl update` check a
+download without trusting the page it came from. It is not code signing and
+does not pretend to be.
 
 If you are not comfortable with that, do not run it. That is a reasonable
 position and this file is not going to talk you out of it.

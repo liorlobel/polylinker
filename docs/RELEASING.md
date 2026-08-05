@@ -21,9 +21,23 @@ credentials that are issued to a person or an organisation:
 [Azure Trusted Signing]: https://learn.microsoft.com/azure/trusted-signing/
 
 Until then, `SHA256SUMS.txt` is the integrity guarantee. Publish it beside the
-binaries. It is weaker than a signature — it proves the file matches what the
-release page says, not who built it — and saying which of the two you have is
-the point.
+binaries.
+
+Since 2026-08-05 that manifest is itself **signed**, with an Ed25519 key whose
+public half is compiled into the two binaries that can check it, `pl` and
+`polylinker` — see [The manifest is
+signed](#the-manifest-is-signed). Be precise about what the two things buy,
+because they are easy to conflate and the table above is unchanged by the
+signature:
+
+* A **checksum alone** proves a download matches what the release page says. It
+  says nothing about who wrote the release page.
+* The **signed manifest** proves the checksum table came from whoever holds the
+  release key. That is a statement about origin, and it is the one an updater
+  needs, because an attacker who controls the server controls the checksums too.
+* **Code signing** — which is still absent — is what an *operating system*
+  checks. Windows and macOS have never heard of the release key and will go on
+  saying so.
 
 ### What an unsigned build costs the user
 
@@ -115,9 +129,67 @@ Every job:
 The publish job re-downloads all three, re-checks each sidecar and re-runs
 `check-archive.ps1` on the bytes that will actually be attached (an upload and a
 download sit in between), writes one cross-platform `SHA256SUMS.txt` over the
-three archives, renders `tools/release-notes.md`, and calls `gh release create
---verify-tag`. `gh` is preinstalled on the runner, so no third-party action is
-in the trust path.
+three archives and the MSI, **signs it**, renders `tools/release-notes.md`, and
+calls `gh release create --verify-tag`. `gh` is preinstalled on the runner, so
+no third-party action is in the trust path.
+
+### The manifest is signed
+
+`SHA256SUMS.txt.sig` is 64 raw bytes: an Ed25519 signature over
+`SHA256SUMS.txt`, made with the release key. It is **not** code signing. The
+executables are still unsigned and both operating systems still do not
+recognise them, for the funding reasons at the top of this file.
+
+The public half is compiled into `pl` and `polylinker`, as
+`pl_update::RELEASE_PUBLIC_KEY` in `crates/pl-update/src/lib.rs`:
+
+```
+5a53cfdab24df9b4d8e918aed8e03338bdcac10b073a6f59d21d3ee9836be3b7
+```
+
+**Those two, and not every shipped artifact.** `bins/pl-mcp`, `crates/pl-py`
+and `crates/pl-wasm` do not depend on `pl-update` at all, so they carry neither
+the key nor any code that could use it — check their `Cargo.toml` files rather
+than taking this sentence's word for it. That is the right way round: a
+read-only MCP server able to fetch and verify a release is a read-only MCP
+server able to fetch one. Prose that says "compiled into every binary" is
+therefore wrong, and was in four files here until 2026-08-06.
+
+That is requirement 3 of the four below, and the reason is in that crate's
+module doc: a key fetched from the same server as the file it checks proves
+nothing about an attacker who controls the server. The private half is a GitHub
+Actions secret, `POLYLINKER_RELEASE_KEY`, holding the base64 of its 32 raw
+bytes. It is on no developer machine and in no file in this repository, and
+`crates/pl-core/src/ed25519.rs` verifies but deliberately cannot sign.
+
+Four things about how the publish job handles it, each a rule rather than an
+implementation detail:
+
+* **No secret, no release.** The job's first step fails if
+  `POLYLINKER_RELEASE_KEY` is unset or blank. An unsigned manifest is exactly
+  the "checksum from the same server" that requirement 2 rejects, so publishing
+  one is worse than publishing nothing.
+* **The key is reconstructed into `$RUNNER_TEMP`**, outside the checkout, and
+  deleted by an `if: always()` step that then checks it is gone. It is never
+  echoed, and the derived PKCS#8 form is passed to `::add-mask::`, because
+  GitHub masks the secret's own text and knows nothing about a value computed
+  from it.
+* **The signature is verified in the same job, before publishing**, against the
+  public key read out of `crates/pl-update/src/lib.rs` — the key that ships,
+  not a second copy pasted into YAML. A signature nothing can check must not
+  reach the release page.
+* **That verification is proved able to fail**, in the same step, by re-running
+  it against a copy of the manifest with a line added. It must be refused.
+
+`cargo test -p pl-update` runs in the publish job as well, so the base64
+constant the workflow reads is established to equal the byte array the binaries
+carry on the commit being released, rather than on whatever commit last ran CI.
+
+Rotating the key means editing the constant, cutting a release, **and** every
+user installing it by hand: copies already installed trust the old key and there
+is no revocation channel, because a revocation channel is a network call. That
+cost is the subject of [There is no auto-updater, on
+purpose](#there-is-no-auto-updater-on-purpose).
 
 To review before the world sees it, add `--draft` to that call. It is not the
 default, because a draft nobody remembers to publish looks exactly like a
@@ -521,18 +593,25 @@ not before.
 
 This was a decision, not an omission.
 
-Polylinker's claim is that it runs offline and sends nothing anywhere. An
-auto-updater contradicts that twice over: it phones a server on a schedule,
-which is a beacon saying this machine exists and is running this version, and it
+Polylinker's claim is that it runs offline and sends nothing about your work
+anywhere. That is the claim as it stands after 2026-08-06, and the wording is
+deliberate: it is not "sends nothing", because `pl update` sends a request. An
+auto-updater contradicts it twice over: it phones a server on a schedule, which
+is a beacon saying this machine exists and is running this version, and it
 downloads and executes code the user did not ask for. On a lab machine that also
 holds unpublished sequence, both are worth avoiding.
 
 The update path is therefore: **the user checks when the user wants to.**
-`pl --version` prints the version and the commit. The release page lists the
-current one. That is the whole mechanism.
+`pl --version` prints the version and the commit, and asks nobody anything. The
+release page lists the current one.
 
-If an updater is ever added, the bar it has to clear is written down here so the
-question is not reopened casually:
+Since 2026-08-06 there is also a way to have that comparison made for you, and
+it is opt-in at every point: `pl update`, which is a verb somebody types, and a
+switch in the desktop app that ships off. Neither is an auto-updater and neither
+installs anything — see [What exists,
+precisely](#what-exists-precisely) and [The decision to expose
+it](#the-decision-to-expose-it). The four conditions below were written before
+any of it existed, and are the reason it is shaped the way it is:
 
 1. It downloads nothing without being asked, each time.
 2. It verifies a signature over the download before the bytes touch disk in an
@@ -544,6 +623,116 @@ question is not reopened casually:
 
 Any updater that cannot meet all four is worse than telling the user to
 download the new version themselves.
+
+The reason for building the material first is that it cannot be retrofitted.
+Requirement 3 says the trust anchor is in *the binary being replaced*, so the
+key has to be shipping in released binaries before any updater those binaries
+grow can use it; an updater added first would have nothing to check against
+except a key it downloaded, which is the failure requirement 2 names. Publishing
+signatures now costs nothing and lets a user who wants to check one do so by
+hand — the release notes give the command.
+
+### What exists, precisely
+
+As of 2026-08-06 `crates/pl-update` contains an implementation that meets all
+four, and it now has two callers: the `pl update` verb, and an off-by-default
+switch in the desktop app. The argument for wiring it in is in **[The decision
+to expose it](#the-decision-to-expose-it)** below, which is the review this
+section said would have to happen first.
+
+*What is there.* `pl_update::check` makes one request, for the latest release's
+manifest, and reads a version out of it. `pl_update::fetch_and_verify` fetches
+`SHA256SUMS.txt` and `SHA256SUMS.txt.sig` **into memory**, verifies the Ed25519
+signature against the compiled-in `RELEASE_PUBLIC_KEY`, and only then requests
+the platform artifact at all; a failed signature means the artifact is never
+asked for, nothing is written, and the error says the signature failed rather
+than that the network did. The download lands on a `.part` file, is hashed with
+SHA-256, and is renamed into place only if it matches the entry in the
+*verified* manifest. There is no path on which a checksum alone is sufficient:
+the manifest type has one constructor and it checks the signature first.
+
+The four, mapped:
+
+| # | How | Held by |
+|---|---|---|
+| 1 | Two functions, and they run when they are called. No thread, no timer, no clock, no stored "last checked" | `tests/handoff.rs` scans the sources for every one of those and fails if any appears |
+| 2 | The signature is verified in memory before the artifact is requested | `the_artifact_is_never_even_requested_when_the_signature_fails` |
+| 3 | `RELEASE_PUBLIC_KEY`, compiled in, reaching the verifier untouched | `the_verifier_is_handed_the_compiled_in_key_unaltered` |
+| 4 | It replaces nothing. It returns the *path* of a verified file for a person to run, and refuses to write into the directory it is running from | `the_last_thing_this_crate_does_is_hand_over_a_path`, `the_destination_may_not_be_the_directory_this_binary_runs_from` |
+
+It also refuses a release that is not **newer** than the running one, compared
+numerically — `0.1.2` is not an upgrade from `0.1.10` — because an older
+release is genuinely signed, and a rollback would otherwise verify perfectly.
+
+*What is still not there.* No installer, no background service, no scheduled
+task, no timer, and nothing that replaces a running binary. `pl-mcp` does not
+depend on `pl-update` at all.
+
+The decision at the top of this section is unchanged, and it is worth being
+precise about what it was against: an **auto**-updater — one that phones home on
+a schedule and installs what it finds. Nothing here does either. There is
+nothing that could run unattended, and nothing that installs: the last thing the
+crate does is name a file.
+
+### The decision to expose it
+
+**Decided 2026-08-06.** The crate is now reachable from two places, and from
+nowhere else.
+
+**`pl update`**, in `bins/pl`. `pl update --check` makes one request and reports;
+`pl update` downloads, verifies, prints a path and stops. Requirement 1 is met in
+its strongest available form — the request happens because somebody typed the
+verb, and the process then exits. There is no stored state, no "last checked",
+and no run of `pl` in which a request happens and the argv does not say so.
+
+**A switch in the desktop app**, in `bins/pl-gui`, **shipped off**. Turned on, it
+asks once per launch, on a worker thread, and shows a quiet notice with a button
+to the release page. It never downloads.
+
+Three things about that switch are the whole of why it was allowed to exist.
+
+*It is off, and off is a promise and not a preference.* A new installation has no
+layout file, so it gets `Layout::default()`, and `update_check` is `false` there.
+A damaged or hand-edited file falls back to off — `settings.rs` reads this one
+key as `== "1"` where `restore_tabs` reads `!= "0"`, because the failure to avoid
+here is a machine that contacts a server because its settings file was truncated.
+`a_first_run_contacts_nothing` and
+`nothing_a_damaged_file_can_hold_switches_the_update_check_on` hold both.
+
+*The consent is informed.* The sentence next to the checkbox says what the
+request contains and what it does not — no sequence, no file name, no
+identifier — and is displayed beside the switch rather than only on hover, so it
+cannot be agreed to without being visible. `the_update_setting_says_what_it_sends`
+fails if any clause of it is deleted.
+
+*"Once per launch" is a latch, not an intention.* `maybe_start` is called from
+the paint loop, which runs continuously, so anything short of a latch is a
+request per frame. The latch is set the first time and never cleared: a failed
+check is not retried, and unticking and reticking the box inside one run buys no
+second request. There is no clock anywhere in it.
+
+**Where the honest weakness is, stated rather than left to be found.**
+Requirement 1 says "without being asked, *each time*". The CLI meets that
+literally. The GUI switch does not: it is one act of consent that authorises one
+request per launch until it is withdrawn, which is a persisted permission rather
+than a fresh answer each time. That is a real difference and it is why the switch
+is off by default, why the sentence beside it is worded as it is, why it is one
+click to revoke, and why the app does not download. A per-launch prompt was
+considered and rejected: a dialog on every start that most people learn to
+dismiss is consent theatre, and it would train exactly the habit
+`docs/RELEASING.md` refuses to teach elsewhere in this file. Anyone who wants
+the per-invocation form has `pl update --check`.
+
+**What holds the boundary.** Neither binary may reach the network from anywhere
+else. `bins/pl`'s `only_the_update_verb_can_reach_the_network` reads
+`src/main.rs` and fails if `pl_update` appears outside `cmd_update`;
+`bins/pl-gui`'s `only_the_update_module_can_reach_the_network` reads every file
+in `src/` and fails if it appears outside `update.rs`. Both were proven by
+adding a network probe elsewhere and watching every *other* test stay green — a
+file picker with a probe bolted onto it still picks files, which is why this
+cannot be left to review. The GUI test additionally fails if `update.rs` ever
+gains `fetch_and_verify`, because a downloader in the app is the first half of
+the installer requirement 4 forbids.
 
 The installer inherits this rule and the gate enforces it: `tools/ci.ps1` fails
 if any network or scheduling facility appears anywhere in `tools/installer/`.

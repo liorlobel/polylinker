@@ -14,9 +14,49 @@ name: Release
 # list in this workflow would be a second place for that to happen, in a
 # language the local gate cannot run and on a machine nobody watches.
 #
-# Nothing here signs anything. There is no certificate for any of the three
-# platforms; see docs/RELEASING.md. The artifacts are unsigned, they say so, and
-# the release notes say what that costs the user on each platform.
+# WHAT IS SIGNED HERE AND WHAT IS NOT. The distinction is the whole point, and
+# conflating the two would be a lie in either direction.
+#
+# NOT signed: the executables. There is no code-signing certificate for any of
+# the three platforms -- no Authenticode certificate, no Apple Developer ID --
+# so SmartScreen and Gatekeeper will say what they say. docs/RELEASING.md has
+# the reasoning and the release notes tell the user what it costs on each
+# platform. Nothing in this file changes that.
+#
+# SIGNED: `SHA256SUMS.txt`, the cross-platform manifest, with the Ed25519
+# release key whose public half is compiled into every Polylinker binary as
+# `pl_update::RELEASE_PUBLIC_KEY`. That is a different claim from code signing
+# and a much narrower one: it says these bytes came from whoever holds the
+# release key, and it says nothing at all to an operating system that has never
+# heard of that key.
+#
+# It exists so that requirements 2 and 3 of the four docs/RELEASING.md sets for
+# any updater this project ever grows CAN be met -- a signature over the
+# download, checked against a key that was compiled in rather than fetched.
+# Precisely: those two are requirements on an updater, and what this produces is
+# the material one would need. Nothing HERE downloads or replaces anything.
+# Saying "this workflow meets requirements 2 and 3" would be the kind of claim
+# docs/RELEASING.md exists to stop.
+#
+# Since 2026-08-06 an updater that meets all four does exist, in
+# `crates/pl-update`, and it is reachable from two places: the `pl update` verb,
+# and a switch in the desktop app that ships off. Neither runs unattended and
+# neither installs anything. docs/RELEASING.md's "The decision to expose it" is
+# the review that allowed them, and the release notes now say "no auto-updater"
+# rather than "no updater" because the second had stopped being true. This
+# workflow's job is unchanged either way: produce the signed manifest, and be
+# able to say so without overstating it.
+#
+# ONE THING DID CHANGE HERE, and it is a change in consequence rather than in
+# code. `SHA256SUMS.txt.sig` was material nobody read; it is now the file
+# `pl update` refuses a release without. A tag published without a valid
+# signature is no longer merely undocumented -- it is a release no user can
+# update to, and the failure surfaces on their machine rather than in this log.
+#
+# The archives and the MSI are covered through the manifest rather than
+# individually: the manifest names each file and its SHA-256, so the chain from
+# the compiled-in key to a downloaded file is signature -> manifest -> digest,
+# and it is only a chain if both links are checked.
 
 on:
   push:
@@ -330,6 +370,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NO SECRET, NO RELEASE. First step in the job, deliberately.
+      #
+      # `SHA256SUMS.txt` is what a future updater checks a download against, and
+      # requirement 2 of docs/RELEASING.md is that it verifies a SIGNATURE and
+      # not a checksum -- "a checksum fetched from the same server as the file
+      # proves nothing about an attacker who controls the server". An unsigned
+      # manifest on the release page is exactly that checksum. Publishing one
+      # would not be a release with a missing extra; it would be a release the
+      # updater contract cannot be met against, and the way that failure
+      # presents itself later is a user whose updater refuses everything.
+      #
+      # So this fails the job rather than skipping the signing step. It is the
+      # first step because the ones below assemble notes and then call
+      # `gh release create`, and a release page that exists without a signature
+      # is harder to withdraw than a red job. It CANNOT run before the three
+      # builds -- `needs: build` is what this job is waiting on -- so the
+      # feedback still costs a full build. Moving it earlier means putting the
+      # secret in front of three runners on three operating systems to save
+      # twenty minutes, which is the wrong trade for a step that only ever
+      # fails when somebody has just rotated or removed the secret.
+      #
+      # The value is never used here, only measured. `-z` after stripping
+      # whitespace, because a secret pasted with a stray newline is present but
+      # a secret that is only whitespace is not, and `${{ secrets.X }}` for a
+      # secret that does not exist expands to the empty string rather than to
+      # anything that would fail on its own.
+      - name: The release signing key is configured
+        env:
+          POLYLINKER_RELEASE_KEY: ${{ secrets.POLYLINKER_RELEASE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${POLYLINKER_RELEASE_KEY//[[:space:]]/}" ]; then
+            echo "::error::the POLYLINKER_RELEASE_KEY secret is not set on this repository, so SHA256SUMS.txt cannot be signed. Requirement 2 of docs/RELEASING.md -- a signature over the download, not a checksum from the same server -- cannot be met without it, and an unsigned manifest must not be published. Set the secret to the base64 of the 32 raw Ed25519 private key bytes and re-run this job."
+            exit 1
+          fi
+          echo "the release signing key is configured (contents not shown)"
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -416,10 +493,231 @@ jobs:
           sha256sum polylinker-*.zip polylinker-*.tar.gz polylinker-*.msi | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # ------------------------------------------------------- the signature
+      #
+      # Ed25519 over the manifest, with the release key. 64 raw bytes beside it
+      # as `SHA256SUMS.txt.sig` -- raw, not PEM and not detached-CMS, because
+      # `pl_core::ed25519::verify` takes `&[u8; 64]` and the file a future
+      # updater reads should be the bytes it verifies with nothing in between.
+      #
+      # THE PRIVATE KEY NEVER ENTERS THE WORKING TREE. It is reconstructed into
+      # $RUNNER_TEMP, which is outside the checkout, and deleted by an
+      # `if: always()` step below. Writing it into the repository would put it
+      # one careless `git add -A`, one `upload-artifact` glob, or one packaging
+      # step away from being published, and this workflow has three globs that
+      # sweep whole directories. It is also never echoed: not the secret, not
+      # the PEM, not the DER. `::add-mask::` is applied to the reconstructed
+      # form as well, because GitHub masks the SECRET's own text and knows
+      # nothing about a value derived from it.
+      #
+      # WHY THE KEY IS REBUILT AT ALL, rather than stored as a PEM. The secret
+      # is the 32 raw private key bytes in base64 -- the smallest thing that IS
+      # the key, with no encoding to get wrong when it is set or rotated. An
+      # Ed25519 PKCS#8 DER is exactly that with a fixed 16-byte prefix in front
+      # (`302e020100300506032b657004220420`: SEQUENCE, version 0, the id-Ed25519
+      # AlgorithmIdentifier, and an OCTET STRING wrapping a 32-byte OCTET
+      # STRING), because the key is fixed-length and nothing in the structure
+      # varies. So the prefix can be a literal here and the whole conversion is
+      # a concatenation. `printf '\xNN'` writes the prefix rather than `xxd -r`
+      # or a hex-to-binary helper: the prefix is a constant in this file, so
+      # nothing has to parse anything, and this step gains no tool dependency
+      # beyond `openssl` and coreutils.
+      #
+      # THE SECRET IS MEASURED IN BYTES, not in base64 characters, and that is
+      # a correction rather than a preference. The obvious check -- "48 bytes of
+      # DER is exactly 64 base64 characters, so require 64" -- is wrong by one:
+      # a 31-byte secret gives 47 bytes of DER, which is also 64 characters,
+      # with a single `=` of padding. A rehearsal against a deliberately
+      # truncated key produced exactly that and sailed past the length check
+      # into `openssl`, which then said "Could not find private key" -- true,
+      # useless, and pointing at the wrong file. Decoding once to count is
+      # unambiguous and says what is actually wrong. The count of a fixed-length
+      # key is not a secret; the bytes never leave the pipe.
+      #
+      # The 64-character assertion is kept as well, but for the other half of
+      # the job: it checks the CONCATENATION -- prefix plus key, 48 bytes -- and
+      # so would catch the prefix literal above being mistyped.
+      #
+      # `-rawin` is required and is what OpenSSL 3 added for Ed25519: it signs
+      # the message itself rather than a digest of it, which is what RFC 8032
+      # specifies (Ed25519 does its own hashing internally, twice). Signing a
+      # SHA-256 of the manifest would produce a valid signature over the wrong
+      # thing, and `pl_core::ed25519::verify` would then reject every release.
+      - name: Sign the manifest
+        env:
+          POLYLINKER_RELEASE_KEY: ${{ secrets.POLYLINKER_RELEASE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/polylinker-release-key.pem"
+
+          raw_bytes=$(printf '%s' "$POLYLINKER_RELEASE_KEY" | tr -d '[:space:]' | base64 -d | wc -c) || {
+            echo "::error::POLYLINKER_RELEASE_KEY is not valid base64. It must be the base64 of the 32 RAW Ed25519 private key bytes -- not hex, not a PEM, not a PKCS#8 DER. Nothing about the value is shown here on purpose; check what was pasted into the secret."
+            exit 1
+          }
+          if [ "$raw_bytes" -ne 32 ]; then
+            echo "::error::POLYLINKER_RELEASE_KEY decodes to $raw_bytes bytes, not 32. The secret must be the base64 of the 32 RAW Ed25519 private key bytes -- not hex (that would be 64), not a PEM, not a PKCS#8 DER (that would be 48). Only the length is reported here; the value is not."
+            exit 1
+          fi
+
+          der_b64=$( { printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20'
+                       printf '%s' "$POLYLINKER_RELEASE_KEY" | tr -d '[:space:]' | base64 -d
+                     } | base64 -w0 )
+          echo "::add-mask::$der_b64"
+          if [ "${#der_b64}" -ne 64 ]; then
+            echo "::error::the 32-byte key and the 16-byte PKCS#8 prefix came to ${#der_b64} base64 characters instead of 64, so the prefix literal in this workflow is wrong"
+            exit 1
+          fi
+
+          { echo '-----BEGIN PRIVATE KEY-----'
+            echo "$der_b64"
+            echo '-----END PRIVATE KEY-----'
+          } > "$key"
+
+          openssl pkeyutl -sign -rawin -inkey "$key" \
+            -in artifacts/SHA256SUMS.txt -out artifacts/SHA256SUMS.txt.sig
+
+          # An Ed25519 signature is 64 bytes and never anything else. A short or
+          # empty file here would mean openssl succeeded at something other than
+          # what this step is named after.
+          bytes=$(wc -c < artifacts/SHA256SUMS.txt.sig)
+          if [ "$bytes" -ne 64 ]; then
+            echo "::error::the signature is $bytes bytes; an Ed25519 signature is 64"
+            exit 1
+          fi
+          echo "signed artifacts/SHA256SUMS.txt -> SHA256SUMS.txt.sig ($bytes bytes)"
+
+      # The key in the source IS the key in the binary.
+      #
+      # The step below verifies the signature against the public key it reads
+      # out of `crates/pl-update/src/lib.rs`, so that the key doing the checking
+      # is the key that ships rather than a second copy pasted into this file
+      # where it could drift. It reads the base64 constant, and what a binary
+      # actually carries is the byte array beside it. `tests/key.rs` re-encodes
+      # the array and requires the two to agree; running it here means that
+      # agreement is established on the commit being released, not on whatever
+      # commit last ran ci.yml.
+      #
+      # Cheap: `pl-update` has no dependencies and no code, and needs none of
+      # the Linux GUI libraries the build jobs install.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: The base64 key in the source is the key compiled into the binaries
+        run: cargo test -p pl-update --tests --locked
+
+      # A SIGNATURE NOTHING CAN CHECK MUST NOT SHIP.
+      #
+      # Everything above can succeed and still produce a useless file: the
+      # secret could be a valid Ed25519 key that is not THIS project's, the
+      # manifest could be rewritten between signing and publishing, `openssl`
+      # could be signing something other than what is read back. The signature
+      # is therefore verified here, before `gh release create` runs, with the
+      # public key and against the exact bytes that will be attached.
+      #
+      # THE PUBLIC KEY IS BUILT BY STRING CONCATENATION, no tools at all. An
+      # Ed25519 SubjectPublicKeyInfo is the fixed 12-byte prefix
+      # `302a300506032b6570032100` followed by the 32 public bytes, and 12 is
+      # divisible by 3 -- so base64 of the pair is base64 of the prefix,
+      # `MCowBQYDK2VwAyEA`, followed by base64 of the key with no re-encoding
+      # and no padding seam between them. That identity is why
+      # `RELEASE_PUBLIC_KEY_BASE64` is the constant this step reads and not the
+      # hex one: hex would need a hex-to-binary tool, and this needs none.
+      #
+      # `sort -u` and the count of 1: the pattern must find the key and only the
+      # key. Two different 44-character base64 tokens in that file and this step
+      # would be choosing between them, so it refuses instead. The Rust test
+      # `exactly_one_base64_key_appears_in_the_source_the_release_workflow_reads`
+      # asserts the same property on every pull request, so this fires only if
+      # somebody edited `src/lib.rs` and did not run the tests.
+      #
+      # The negative control is not decoration. A check that cannot fail proves
+      # nothing, and `openssl pkeyutl -verify` printing "Signature Verified
+      # Successfully" would look identical whether it was verifying anything or
+      # not -- a mistyped `-sigfile`, a `-verify` that silently fell back, an
+      # empty manifest. Re-running it against a manifest with one extra byte
+      # must be refused, in the same job, with the same key and signature.
+      - name: Verify the signature before anything is published
+        id: sig
+        run: |
+          set -euo pipefail
+          src=crates/pl-update/src/lib.rs
+          pub_b64=$(grep -oE '[A-Za-z0-9+/]{43}=' "$src" | sort -u)
+          found=$(printf '%s\n' "$pub_b64" | grep -c . || true)
+          if [ "$found" -ne 1 ]; then
+            echo "::error::expected exactly one base64 Ed25519 public key in $src, found $found. The release signature is verified against the key that ships in the binary, and this step will not guess which of several candidates that is. See the module doc in $src."
+            exit 1
+          fi
+
+          pem="$RUNNER_TEMP/polylinker-release-key.pub.pem"
+          { echo '-----BEGIN PUBLIC KEY-----'
+            echo "MCowBQYDK2VwAyEA$pub_b64"
+            echo '-----END PUBLIC KEY-----'
+          } > "$pem"
+          echo "the key compiled into these binaries:"
+          openssl pkey -pubin -in "$pem" -noout -text
+
+          # Is the secret this project's release key at all? The verification
+          # below already fails if it is not, but "signature verification
+          # failure" sends the reader looking at the manifest. This names the
+          # cause. Deriving the public half of a private key leaks nothing.
+          from_secret=$(openssl pkey -in "$RUNNER_TEMP/polylinker-release-key.pem" \
+                          -pubout -outform DER | tail -c 32 | base64 -w0)
+          if [ "$from_secret" != "$pub_b64" ]; then
+            echo "::error::the POLYLINKER_RELEASE_KEY secret is a valid Ed25519 key, but not the one compiled into these binaries. Its public half is $from_secret and $src carries $pub_b64. Either the secret was rotated without updating pl-update, or pl-update was updated without rotating the secret; every binary already released trusts the constant in the source, so it is the secret that has to match it."
+            exit 1
+          fi
+
+          openssl pkeyutl -verify -rawin -pubin -inkey "$pem" \
+            -in artifacts/SHA256SUMS.txt -sigfile artifacts/SHA256SUMS.txt.sig
+
+          tampered="$RUNNER_TEMP/tampered-manifest.txt"
+          cp artifacts/SHA256SUMS.txt "$tampered"
+          printf 'polylinker-evil.zip\n' >> "$tampered"
+          if openssl pkeyutl -verify -rawin -pubin -inkey "$pem" \
+               -in "$tampered" -sigfile artifacts/SHA256SUMS.txt.sig; then
+            echo "::error::the verification above accepted a manifest with a line added to it, so it is not checking anything and the release must not be published"
+            exit 1
+          fi
+          echo "signature verified, and a modified manifest was refused"
+
+          # The release notes print the verification recipe, and the key in it
+          # is this one -- the one that just verified the signature, read out of
+          # the source. Hard-coding it into the notes template would be a third
+          # copy, in the one place where being wrong is invisible until a reader
+          # tries to follow the instructions and concludes the release is
+          # forged.
+          echo "pub_b64=$pub_b64" >> "$GITHUB_OUTPUT"
+
+      # The private key leaves the runner here, whatever happened above.
+      #
+      # `if: always()` and not a trailing `rm` inside the signing step: a
+      # failure anywhere between writing the PEM and the end of the job would
+      # skip a trailing `rm`, and the runner's workspace and $RUNNER_TEMP are
+      # both still readable by anything else running in the job. The runner is
+      # ephemeral and is destroyed afterwards, which is a reason this is cheap
+      # insurance and not a reason to skip it.
+      #
+      # The removal is checked. `rm -f` cannot fail loudly by design -- that is
+      # what `-f` means -- so it would report success on a path that was never
+      # what this workflow wrote to.
+      - name: Remove the signing key from the runner
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP/polylinker-release-key.pem"
+          if [ -e "$RUNNER_TEMP/polylinker-release-key.pem" ]; then
+            echo "::error::the reconstructed private key is still on the runner"
+            exit 1
+          fi
+          echo "the reconstructed private key is gone"
+
       - name: Assemble the release notes
         env:
           VERSION: ${{ steps.check.outputs.version }}
           TAG: ${{ github.ref_name }}
+          # From the verify step, which read it out of crates/pl-update, so the
+          # key printed in the notes is the key that verified the signature.
+          RELEASE_KEY_BASE64: ${{ steps.sig.outputs.pub_b64 }}
         run: |
           set -euo pipefail
           # The template's leading HTML comment explains why it is a file and
@@ -435,6 +733,30 @@ jobs:
             echo '```'
             cat artifacts/SHA256SUMS.txt
             echo '```'
+            echo
+            # A signature nobody is told how to check is decoration. The key is
+            # printed here as well as compiled in, with the caveat that makes
+            # the difference honest: a key taken from this page is only as
+            # trustworthy as this page, which is the entire reason
+            # docs/RELEASING.md requires the updater to use the compiled-in one.
+            echo '### Signature'
+            echo
+            echo "\`SHA256SUMS.txt.sig\` is an Ed25519 signature over \`SHA256SUMS.txt\`, made by the release key. The executables themselves are **not** signed — see above — and this does not change that; it means the checksum table came from whoever holds the release key, so the table is worth checking a download against."
+            echo
+            echo 'To check it, with OpenSSL 3:'
+            echo
+            echo '```sh'
+            echo 'cat > polylinker-release.pem <<EOF'
+            echo '-----BEGIN PUBLIC KEY-----'
+            echo "MCowBQYDK2VwAyEA$RELEASE_KEY_BASE64"
+            echo '-----END PUBLIC KEY-----'
+            echo 'EOF'
+            echo 'openssl pkeyutl -verify -rawin -pubin -inkey polylinker-release.pem \'
+            echo '  -in SHA256SUMS.txt -sigfile SHA256SUMS.txt.sig'
+            echo 'sha256sum -c --ignore-missing SHA256SUMS.txt'
+            echo '```'
+            echo
+            echo "The same key is compiled into every Polylinker binary as \`pl_update::RELEASE_PUBLIC_KEY\`, and \`docs/RELEASING.md\` states it in full. Taking it from this page is better than nothing and worse than taking it from a copy of Polylinker you already trust: whoever could replace the files here could replace the key here too."
             echo
             echo "Built from \`$GITHUB_SHA\` by [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
           } >> notes.md
@@ -455,6 +777,13 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # SHA256SUMS.txt.sig is named explicitly and not swept up by a glob,
+          # for the same reason the three archives are checked by name above: a
+          # glob that matches nothing publishes a release without it, and a
+          # release page whose manifest is unsigned is one that the updater
+          # contract cannot be met against. `gh release create` fails on a
+          # named asset that does not exist, so the absence is loud.
+          test -s artifacts/SHA256SUMS.txt.sig
           gh release create "$TAG" \
             --title "Polylinker $TAG" \
             --notes-file notes.md \
@@ -463,4 +792,5 @@ jobs:
             artifacts/polylinker-*.tar.gz \
             artifacts/polylinker-*.msi \
             artifacts/polylinker-*.sha256 \
-            artifacts/SHA256SUMS.txt
+            artifacts/SHA256SUMS.txt \
+            artifacts/SHA256SUMS.txt.sig

@@ -10,8 +10,9 @@ the SmartScreen paragraph are still in here.
 
 Polylinker {{TAG}} — an offline plasmid editor.
 
-Never sends a sequence anywhere. No updater, no telemetry, no network access at
-run time at all.
+Never sends a sequence anywhere. No telemetry, no account, no auto-updater. The
+only network request Polylinker can make is an update check you asked for, and a
+fresh installation asks for nothing until you tell it to.
 
 ## Downloads
 
@@ -101,8 +102,13 @@ vouch for these either.
 
 **What the checksum does and does not prove.** It proves the copy you have is
 byte-for-byte the one published on this page. It proves nothing about who
-published it. Those are different guarantees and only the first one is available
-here.
+published it — anyone who could replace the files could replace the table.
+Those are different guarantees, and the second one is what the **Signature**
+section at the bottom of this page is for: `SHA256SUMS.txt.sig` is an Ed25519
+signature over that table, made by the release key, and that section gives the
+OpenSSL command to check it. It is still not code signing, and everything said
+above about SmartScreen and Gatekeeper is unchanged by it — those check a
+certificate, and there is none.
 
 ## Linux: check your glibc first
 
@@ -119,17 +125,34 @@ it needs Rust 1.82 and nothing exotic, and `pl` and `pl-mcp` need no system
 libraries at all. `README-LINUX.txt` inside the archive lists the shared
 libraries the editor opens at run time.
 
-## No updater, on purpose
+## No auto-updater, on purpose
 
-Polylinker will never check for a new version, because a program that phones a
+Polylinker never checks for a new version on its own. A program that phones a
 server on a schedule is a program announcing that this machine exists and is
-running this version — and on a lab machine holding unpublished sequence, that
-is worth not doing. The update path is that you check when you want to: `pl
---version` prints the version and the commit, and this page lists the current
-one.
+running this version, and on a lab machine holding unpublished sequence that is
+worth not doing. Nothing here runs on a timer, nothing remembers when it last
+looked, and nothing installs anything.
 
-`docs/RELEASING.md` records the four conditions any future updater would have to
-meet, so the question is not reopened casually.
+There are two ways to ask, and both are things you do rather than things that
+happen to you.
+
+**From the command line.** `pl update --check` makes one request and prints the
+answer. `pl update` downloads the release and keeps it only if it carries an
+Ed25519 signature made by the key compiled into the copy you are already
+running — a checksum served from the same place as the file would prove nothing
+about whoever is serving it. It then prints the path and stops: running it is
+yours to do, and to watch. `pl --version` still prints the version and the
+commit without asking anybody anything, and this page lists the current release.
+
+**In the desktop app, off by default.** Under Help there is a switch, unticked
+in every new installation, with a sentence beside it saying exactly what the
+request contains. Turned on, it asks once per launch and shows a quiet notice.
+It sends no sequence, no file name and no identifier; the request tells
+github.com your IP address and nothing about your work. The app never downloads
+a release — the notice points at this page and at `pl update`.
+
+`docs/RELEASING.md` records the four conditions this had to meet before it could
+exist, and names the test that holds each one.
 
 ## Licences
 

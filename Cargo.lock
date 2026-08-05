@@ -2263,6 +2263,7 @@ dependencies = [
  "pl-sanger",
  "pl-scan",
  "pl-thermo",
+ "pl-update",
 ]
 
 [[package]]
@@ -2366,6 +2367,7 @@ dependencies = [
  "pl-sanger",
  "pl-scan",
  "pl-thermo",
+ "pl-update",
  "rfd",
 ]
 
@@ -2426,6 +2428,13 @@ dependencies = [
 
 [[package]]
 name = "pl-thermo"
+version = "0.1.1"
+dependencies = [
+ "pl-core",
+]
+
+[[package]]
+name = "pl-update"
 version = "0.1.1"
 dependencies = [
  "pl-core",

@@ -2,7 +2,9 @@ Polylinker on macOS
 ===================
 
 Polylinker is an offline plasmid editor. It never sends a sequence anywhere, it
-has no updater, and it needs no administrator rights.
+has no auto-updater, and it needs no administrator rights. Nothing here runs on
+its own or checks for a new version by itself: the editor's update check is off
+until you switch it on under Help, and `pl update` is a command you type.
 
 There is nothing to install. The three programs in this folder run as they are.
 
@@ -110,7 +112,13 @@ What this means for you, concretely:
     Apple has not verified anybody, because nobody paid to be verified.
   * The SHA-256 you checked in step 1 proves this copy is byte-for-byte the one
     published on the release page. It proves nothing about who published it.
-    Those are different guarantees and only one of them is available here.
+    Those are different guarantees, and the second one is now available too:
+    the release page publishes SHA256SUMS.txt.sig, an Ed25519 signature over
+    that checksum table made by the release key, and prints the command to
+    check it. The key's public half is compiled into pl and polylinker, which
+    is what lets `pl update` check a download without trusting the page it came
+    from. Gatekeeper has never heard of that key and will refuse these files
+    exactly as described above; that is notarisation, and it is separate.
   * Some managed Macs refuse unsigned software by MDM policy, and clearing the
     quarantine attribute will not change that. If yours does, the correct next
     step is to ask whoever administers the machine -- not to work around it.

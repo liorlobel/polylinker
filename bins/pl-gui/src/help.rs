@@ -10,6 +10,15 @@
 //! sentence was false: the GUI displayed no version anywhere at all. A
 //! `build.rs` stamps the same `PL_COMMIT` the CLI has always carried.
 //!
+//! Since 2026-08-06 the user *can* have that comparison made for them, by a
+//! switch in the same Help menu that ships off ([`crate::update`]). The About
+//! page states what that switch does and what it does not — see [`UPDATE_NOTE`]
+//! — and `the_about_page_states_the_network_behaviour_this_binary_actually_has`
+//! is what keeps the statement attached to the code. The sentence that used to
+//! be there said the program "contacts no server", which was true on the day it
+//! was written and is the exact shape of prose this repository keeps having to
+//! fix.
+//!
 //! # The methods paragraphs
 //!
 //! `pl-doc` compiles eleven of them into this binary, each with its numbers
@@ -265,6 +274,53 @@ pub fn show(ctx: &egui::Context, p: &mut Panel, dark: bool) -> bool {
     open
 }
 
+/// What this program does about new versions, for the reader of the version
+/// number above it.
+///
+/// **Every clause here is a claim about code in this binary, and it is a
+/// constant so that a test can hold it to that.** Until 2026-08-06 this said:
+///
+/// > There is no auto-updater, on purpose. Polylinker contacts no server and
+/// > cannot tell you whether a newer version exists — check when you want to.
+///
+/// Both halves of the middle sentence stopped being true on the day the Help
+/// menu grew a "Check for new releases" box: switched on, this program does
+/// contact a server, and telling you whether a newer version exists is the
+/// only thing it asks. The first clause survived, because what was decided
+/// against was an *auto*-updater — something on a timer that installs what it
+/// finds — and there is still none of that anywhere.
+///
+/// So the claim is now conditional, and the conditions are the ones the code
+/// enforces: off in a fresh installation (`settings::Layout::default`), one
+/// request per launch (the latch in `crate::update`), and no download at all
+/// (the desktop app has no call to `fetch_and_verify`, which
+/// `only_the_update_module_can_reach_the_network` fails if it ever gains one).
+///
+/// **It says "this program" and not "Polylinker", and that is the difference
+/// between a true sentence and a nearly-true one.** The checkbox governs this
+/// binary. `pl update` is a separate program in the same folder, it contacts a
+/// server when somebody types it, and no tick anywhere permits or forbids that
+/// — so a sentence promising that Polylinker contacts nothing until this box is
+/// ticked would be the same species of comfortable overstatement as the one it
+/// replaced. The command is named in the last clause instead.
+const UPDATE_NOTE: &str = "There is no auto-updater, on purpose: nothing here runs on a timer \
+     and nothing installs itself. This program contacts no server unless you tick \"Check for new \
+     releases\" in this Help menu. It ships unticked; ticked, it asks github.com once per launch \
+     whether a newer version exists, and downloads nothing either way. Downloading is the command \
+     line's half: `pl update` fetches a release and checks its signature, and runs when you run \
+     it.";
+
+/// What is true whatever that box is set to, which is the part that never had
+/// to change.
+///
+/// The retired wording ended "No account, no telemetry, no network." The first
+/// two are as true as they ever were; the third was the unconditional claim
+/// that the update check made false, and replacing it with what is actually
+/// guaranteed — that nothing about the user's work leaves the machine — says
+/// more than the word it replaces did.
+const LOCAL_NOTE: &str = "Everything that reads or writes your files runs on this machine. No \
+     account, no telemetry, and no sequence, file name or identifier is sent anywhere, ever.";
+
 fn about(ui: &mut egui::Ui, pal: crate::theme::Palette) {
     ui.label(egui::RichText::new("Polylinker").strong().size(16.0));
     ui.add_space(2.0);
@@ -275,22 +331,9 @@ fn about(ui: &mut egui::Ui, pal: crate::theme::Palette) {
     ui.label("Apache License 2.0. Copyright 2026 The Polylinker contributors.");
     ui.add_space(8.0);
     // The one thing a user needs to know about the number above.
-    ui.label(
-        egui::RichText::new(
-            "There is no auto-updater, on purpose. Polylinker contacts no server and cannot \
-             tell you whether a newer version exists — check when you want to.",
-        )
-        .color(pal.muted)
-        .size(11.5),
-    );
+    ui.label(egui::RichText::new(UPDATE_NOTE).color(pal.muted).size(11.5));
     ui.add_space(8.0);
-    ui.label(
-        egui::RichText::new(
-            "Everything runs on this machine. No account, no telemetry, no network.",
-        )
-        .color(pal.muted)
-        .size(11.5),
-    );
+    ui.label(egui::RichText::new(LOCAL_NOTE).color(pal.muted).size(11.5));
     ui.add_space(10.0);
     ui.label(
         egui::RichText::new(
@@ -369,6 +412,100 @@ mod tests {
                 "the page a user reads does not name {owed:?}"
             );
         }
+    }
+
+    /// The About page describes the network behaviour this binary has, not the
+    /// one it used to have.
+    ///
+    /// This page is where somebody who was handed `polylinker.exe` finds out
+    /// what it does behind their back, so its two paragraphs are the load-
+    /// bearing privacy statement of the whole product — and until 2026-08-06
+    /// one of them was false, having been true when it was written. Prose that
+    /// goes stale in that direction is worse than no prose: it is a promise the
+    /// program has stopped keeping, in the place a user goes to check.
+    ///
+    /// So each clause is pinned to the thing that makes it true:
+    ///
+    /// * "ships unticked" — to `settings::Layout::default()`, so flipping the
+    ///   default to on fails here and not in review;
+    /// * the name of the control — to `main.rs`, so a renamed checkbox cannot
+    ///   leave this page pointing at a box that no longer exists;
+    /// * the two retired sentences — banned outright, so a revert to the older,
+    ///   more flattering wording is red rather than plausible.
+    ///
+    /// PROVEN TO FAIL three ways before being called done: with `UPDATE_NOTE`
+    /// restored to its pre-2026-08-06 text (fails on the banned sentence and on
+    /// four missing clauses), with `update_check: true` in `Layout::default`
+    /// (fails on "ships unticked" describing a default that is on), and with
+    /// the checkbox in `main.rs` relabelled (fails on the About page naming a
+    /// control that is not there). Every other test in this binary stays green
+    /// through all three.
+    #[test]
+    fn the_about_page_states_the_network_behaviour_this_binary_actually_has() {
+        // Off out of the box, and the sentence that says so.
+        assert!(
+            !crate::settings::Layout::default().update_check,
+            "the update check now ships ON; the About page says it ships unticked"
+        );
+        assert!(
+            UPDATE_NOTE.contains("ships unticked"),
+            "the About page no longer says the check is off in a new installation"
+        );
+
+        // The clauses that are the consent, each one a property of the code:
+        // one request per launch, no download, and the command that does
+        // download so the paragraph is not merely a refusal.
+        for required in [
+            "once per launch",
+            "downloads nothing",
+            "github.com",
+            "pl update",
+            "no auto-updater",
+        ] {
+            assert!(
+                UPDATE_NOTE.contains(required),
+                "the About page no longer says {required:?}"
+            );
+        }
+        for required in ["No account", "no telemetry", "no sequence"] {
+            assert!(
+                LOCAL_NOTE.contains(required),
+                "the About page no longer says {required:?}"
+            );
+        }
+
+        // The two sentences that were true when written and are not now. Named
+        // exactly, because the failure to guard against is not a typo but a
+        // revert: both read perfectly well and both would be lies.
+        for retired in ["contacts no server and cannot", "no telemetry, no network"] {
+            for (which, note) in [("UPDATE_NOTE", UPDATE_NOTE), ("LOCAL_NOTE", LOCAL_NOTE)] {
+                assert!(
+                    !note.contains(retired),
+                    "{which} has gone back to claiming {retired:?}, which the Help \
+                     menu's update check made false"
+                );
+            }
+        }
+
+        // And the control it names has to be the control that is there. The
+        // label is written once in `main.rs`; this page quotes it, and a quote
+        // of something that no longer exists is how a help page starts lying
+        // about the interface it describes.
+        let main = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("main.rs"),
+        )
+        .expect("bins/pl-gui/src/main.rs");
+        let label = "Check for new releases";
+        assert!(
+            main.contains(&format!("\"{label}\"")),
+            "the About page quotes a checkbox called {label:?}; main.rs has no such label"
+        );
+        assert!(
+            UPDATE_NOTE.contains(label),
+            "the About page no longer says where the switch is"
+        );
     }
 
     /// Every `pl-doc` topic is reachable, because the index is built FROM

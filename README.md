@@ -7,19 +7,19 @@ licensed database that cites every source. Publishes its own correctness. Never
 sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
-> build, Python bindings and an MCP server all work today, across 20 workspace
-> crates and 135,092 lines of Rust, 83,188 of it dependency-free (125 `.rs`
-> files under `crates/` and `bins/`), with 1,677 `#[test]` functions and a
-> 64-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
+> build, Python bindings and an MCP server all work today, across 21 workspace
+> crates and 141,030 lines of Rust, 88,307 of it dependency-free (135 `.rs`
+> files under `crates/` and `bins/`), with 1,753 `#[test]` functions and a
+> 65-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
-> implementation. Counted 2026-08-05, and recounted on every test run since:
+> implementation. Counted 2026-08-06, and recounted on every test run since:
 > tests are lines matching `^\s*#\[test\]`, the attribute at the start of a
 > line, so a `#[test]` written mid-sentence in a doc comment is prose rather
 > than a test; lines are `wc -l`; crates are the `members` of the root
 > `Cargo.toml`; **dependency-free** is a property of a crate and not a mood —
 > a member every one of whose dependencies is another member of this
-> workspace. Eighteen of the twenty are, and the two that are not are the two
-> that face outwards: `bins/pl-gui` (eframe, rfd, egui-phosphor) and
+> workspace. Nineteen of the twenty-one are, and the two that are not are the
+> two that face outwards: `bins/pl-gui` (eframe, rfd, egui-phosphor) and
 > `crates/pl-py` (pyo3). All six numbers are recomputed from the tree by
 > `the_readme_headline_counts_are_the_counts_in_the_tree` in
 > `bins/pl/src/main.rs`, which fails the gate when this paragraph disagrees
@@ -34,7 +34,13 @@ sends a sequence anywhere.
 > test reads, which is why the adjective now has a marker of its own.
 >
 > **One thing is deliberately not ready**, and it is the one that decides
-> whether you should trust the download: the builds are **unsigned**. The
+> whether you should trust the download: the builds are **unsigned** — no
+> code-signing certificate, so Windows and macOS do not recognise the
+> publisher and say so. The release *manifest* is a separate question and is
+> signed: `SHA256SUMS.txt` carries an Ed25519 signature made by a key whose
+> public half is compiled into `pl` and the editor, which is what `pl update`
+> checks before it keeps a byte. An operating system has never heard of that key, so
+> it buys you nothing at the SmartScreen dialog and everything afterwards. The
 > features database is *not* the other one any more — all 89 records carry a
 > named curator in `features/SIGNOFF.tsv`, so `pl annotate` reports by default,
 > and an approval lapses by itself the moment the row it approves changes. See
@@ -74,8 +80,8 @@ Each ships before the app, stands alone, and survives the app.
 
 | Component | State |
 |---|---|
-| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model, SEGUID checksums, sequence search), `pl-enzymes` (digestion, Type IIP and Type IIS), `pl-clone` (sticky ends, fragments, PCR, Gibson and Golden Gate), `pl-fileio` (`.dna`, GenBank, FASTA), `pl-draw` (maps as SVG, PDF, EPS and PNG), `pl-thermo` (melting temperature), `pl-primer` (binding sites), `pl-design` (choosing a primer pair, **no I/O**), `pl-abif` (Sanger traces), `pl-index` (the library: packed sequence store and queries, **no I/O**), `pl-scan` (the one crate that touches the filesystem), `pl-wasm` (browser ABI), and the `pl` command. **Zero external dependencies.** |
-| [`bins/pl-gui`](bins/pl-gui) | **The desktop app**, `polylinker.exe`. egui; one static binary, no webview. |
+| [`crates/`](crates) + [`bins/pl`](bins/pl) | **The Rust core and CLI.** `pl-core` (model, SEGUID checksums, sequence search), `pl-enzymes` (digestion, Type IIP and Type IIS), `pl-clone` (sticky ends, fragments, PCR, Gibson and Golden Gate), `pl-fileio` (`.dna`, GenBank, FASTA), `pl-draw` (maps as SVG, PDF, EPS and PNG), `pl-thermo` (melting temperature), `pl-primer` (binding sites), `pl-design` (choosing a primer pair, **no I/O**), `pl-abif` (Sanger traces), `pl-index` (the library: packed sequence store and queries, **no I/O**), `pl-scan` (the one crate that touches the filesystem), `pl-update` (the compiled-in Ed25519 key that signed release manifests are checked against, and an updater that verifies a signature before it keeps a byte — reached from `pl update`, a verb you type, and from the editor's off-by-default check, which asks and never downloads; from nowhere else, and two tests read the sources to keep it that way; see [`docs/RELEASING.md`](docs/RELEASING.md)), `pl-wasm` (browser ABI), and the `pl` command. **Zero external dependencies.** |
+| [`bins/pl-gui`](bins/pl-gui) | **The desktop app**, `polylinker.exe`. egui; one static binary, no webview. Contacts nothing unless you switch on the update check under Help, which ships off and never downloads. |
 | [`bench/`](bench/README.md) | **`polylinker-bench` v0.1** — a CC0 truth set, 176 cases, every expected value from an independent oracle. Polylinker scores **176/176, zero failures, nothing declined**. |
 | `prototype/dna-reader.html` | **Usable today.** The same Rust core compiled to wasm32 and inlined into one HTML file: opens `.dna`, GenBank and FASTA, draws maps, digests, exports GenBank/FASTA/SVG. No install, no network, no account — runs from a USB stick on a locked-down PC. Built by [`tools/build-web.ps1`](tools/build-web.ps1); not committed, because it is 257 KB of base64 that changes every rebuild. |
 | [`reference/python/dna2gb.py`](reference/python/dna2gb.py) | Bulk `.dna` → GenBank converter. Superseded by `pl convert`, which also preserves sequence case (Biopython does not — see the file's docstring). |
@@ -86,8 +92,8 @@ Each ships before the app, stands alone, and survives the app.
 | [`bins/pl-mcp`](bins/pl-mcp) | **MCP server**, read-only, no dependencies — so an assistant can ask about a plasmid without being able to overwrite one. |
 | [`crates/pl-py`](crates/pl-py) | **Python bindings** (PyO3, abi3), so a script already using Biopython can call the parts that are hard to get right without being rewritten. |
 | [`docs/AUDIT-2026-07-28.md`](docs/AUDIT-2026-07-28.md) | A 123-agent audit of the whole workspace: 90 confirmed findings, 19 refuted, 90 of 90 fixed. Kept in the repo because the findings that mattered most were **checks that could not fail**, and that is worth being public about. |
-| Windows installer | **`polylinker-<version>-windows-x64.msi`**, built by [`tools/build-msi.ps1`](tools/build-msi.ps1) from [`tools/installer/Polylinker.wxs`](tools/installer/Polylinker.wxs). Installs for you alone by default — no administrator, no elevation prompt — with "for everyone" offered for machines where you are one. No updater, no network, no service, no scheduled task. It **adds** Polylinker to the "Open with" list for eight sequence formats and takes none of them away from SnapGene or anything else you already use. The MSI carries no file list of its own: it is generated from the same `SHA256SUMS.txt` the archive is verified against, because a second list is how a licence text stops shipping. The readable [`Install-Polylinker.ps1`](tools/installer/Install-Polylinker.ps1) still ships inside the zip for anyone who would rather run something they can read. See [`docs/RELEASING.md`](docs/RELEASING.md). |
-| Signing | **Not done.** Needs a code-signing certificate and an Apple Developer ID; see [`docs/RELEASING.md`](docs/RELEASING.md). Until then `SHA256SUMS.txt` is the only integrity guarantee. |
+| Windows installer | **`polylinker-<version>-windows-x64.msi`**, built by [`tools/build-msi.ps1`](tools/build-msi.ps1) from [`tools/installer/Polylinker.wxs`](tools/installer/Polylinker.wxs). Installs for you alone by default — no administrator, no elevation prompt — with "for everyone" offered for machines where you are one. The installer itself contacts nothing, and it registers no service, no scheduled task and no auto-updater: nothing it puts on the machine ever runs on its own. ([`tools/ci.ps1`](tools/ci.ps1) fails the build if any network or scheduling facility appears anywhere under `tools/installer/`.) It **adds** Polylinker to the "Open with" list for eight sequence formats and takes none of them away from SnapGene or anything else you already use. The MSI carries no file list of its own: it is generated from the same `SHA256SUMS.txt` the archive is verified against, because a second list is how a licence text stops shipping. The readable [`Install-Polylinker.ps1`](tools/installer/Install-Polylinker.ps1) still ships inside the zip for anyone who would rather run something they can read. See [`docs/RELEASING.md`](docs/RELEASING.md). |
+| Signing | **Code signing: not done.** Needs a code-signing certificate and an Apple Developer ID; see [`docs/RELEASING.md`](docs/RELEASING.md). That is the signature an *operating system* checks, and until somebody pays for it both of them will go on saying they do not recognise the publisher. **Manifest signing: done, 2026-08-05.** `SHA256SUMS.txt` ships with an Ed25519 signature (`SHA256SUMS.txt.sig`) whose public key is compiled into the two programs that can use it, `pl` and `polylinker` (`pl-mcp`, the Python module and the wasm build do not carry it, because none of them can update anything), so a download can be traced to whoever holds the release key rather than merely to whoever served the page. Every release page prints the OpenSSL command to check it by hand, or `pl update` does it for you — it refuses everything that key did not sign. The private half is a GitHub Actions secret and is on no machine here. |
 | Features database | **89 records as of release 2026.07.28, all 89 reviewed.** Machine-assembled from public sources, then signed off row by row on 2026-07-28. A row moves past `proposed` only when `features/SIGNOFF.tsv` names it with a sha256 of its content that still matches, so an approval lapses by itself when the row changes and the shipped set shrinks without anyone deciding to shrink it. That mechanism, not the current count, is what enforces "the tool may propose and never assert". `pl licences` prints the live count and the attribution. |
 
 ### Getting your sequences out of `.dna`, today

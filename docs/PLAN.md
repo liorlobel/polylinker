@@ -211,7 +211,7 @@ These ship before the app and are separately published, separately licensed, sep
 | Accessibility pass: Okabe–Ito palette, redundant non-colour encoding, WCAG 2.2 AA, full keyboard operation, navigate-by-feature screen-reader model | 4 wk | ~1 in 12 men cannot separate a red AmpR arrow from a green CDS, and "unique cutters are bold" is currently the only non-colour channel in the entire category's design language. Also a soft procurement blocker (VPAT / EN 301 549). |
 | Autosave, crash recovery, file-association *conflict* handling, cloud-drive concurrent-edit detection | 3 wk | Losing an afternoon of annotation is a one-strike uninstall. Silently stealing the `.dna` association from an installed SnapGene will enrage exactly the user you are courting — **ask, don't take**. |
 | Docs (tutorial / how-to / reference / explanation), shipped **offline in-app**, plus a methods page per computation | 4 wk | A local-first tool whose help requires internet contradicts itself. The methods pages double as the answer to "why is your Tm different from SnapGene's." |
-| Signing, notarization, ~~updater~~, Flathub, winget, Homebrew Cask | 8 wk + permanent | See §10. **Updated 2026-08-05:** the updater is cancelled, not pending — see `docs/RELEASING.md`. Windows shipping is done: a zip plus a readable per-user PowerShell installer, `tools/installer/`. An MSI, winget and the rest wait on a certificate. |
+| Signing, notarization, updater, Flathub, winget, Homebrew Cask | 8 wk + permanent | See §10. **Updated 2026-08-06:** the *auto*-updater is cancelled, not pending, and that has not changed — but an opt-in update check now exists and is shipped: `crates/pl-update`, reached from `pl update` and from a box in the editor's Help menu that ships off. It verifies an Ed25519 signature made by a key compiled into the running binary, and it installs nothing; the four conditions it had to meet are in `docs/RELEASING.md`. (This row read "~~updater~~ … cancelled, not pending" from 2026-08-05 to 2026-08-06, which was true for a day.) Windows shipping is done: a zip plus a readable per-user PowerShell installer, `tools/installer/`, and an MSI. winget and the rest wait on a certificate. |
 | `pl-cli`, `pl-py` (PyO3 wheel), `pl-mcp` | 3 wk | Nearly free once the library is factored. Reaches the population that produces contributors. SnapGene's programmatic surface is two commands; the MCP space is empty. |
 
 **Honest v1.0 total: 12–15 months for one developer, 8–10 for two.** Not 4–6.
@@ -248,6 +248,16 @@ These ship before the app and are separately published, separately licensed, sep
 > updating, and it records that there is deliberately **no auto-updater at all**.
 > This section is kept because it is the record of how the decision was reached,
 > not a description of what exists.
+>
+> **Amended 2026-08-06.** "No auto-updater at all" is still what `RELEASING.md`
+> records, and is still exact: nothing runs on a timer and nothing installs
+> itself. What has changed is that the *signature* half of the sentence above
+> was eventually built, by hand and on this project's own terms —
+> `crates/pl-update` verifies an Ed25519 signature over the release manifest
+> against a key compiled into the running binary, and hands back a path for a
+> person to run. It is reached from `pl update` and from a Help-menu box that
+> ships off. So the row above is wrong about Tauri being the only way to get a
+> mandatory update signature, and right that this project did not take it.
 
 1. **The UI decision is forced, not chosen.** The only reusable open-source plasmid-editor UI in existence — OVE and seqviz — is React + SVG. Rewriting a virtualized sequence editor, circular map layout and chromatogram rendering in Qt or Swift is multi-person-year work producing nothing a user can see. Qt/PySide6 is licensing-fine and strategically wrong; BeeWare/Toga was still building primitives as of January 2026. Web frontend it is, which reduces the decision to *shell only*.
 2. **Tauri v2 is mature.** `tauri` 2.11.5 (2026-07-01), plugins shipping weekly, MIT/Apache-2.0, Commons Conservancy governance. It gives real filesystem access, OS file associations for `.dna`/`.gb`, native menus, and a **free, signature-mandatory auto-updater** that Electron matches only via third-party tooling — and which works even while Windows builds are still unsigned.
@@ -1002,7 +1012,7 @@ A free, unrestricted tool whose purpose is designing novel constructs and export
 ### 9. Parser as attack surface
 **Probability: low-medium. Impact: severe.**
 A `.dna` file is untrusted binary arriving by email, containing LZMA-compressed history, zlib-compressed XML attachments, BGZF/BAM trace alignments, multiple XML payloads, and attacker-controlled 4-byte length fields feeding allocations and index arithmetic. Round-trip fuzzing is planned in the research; **security fuzzing is not mentioned at all.**
-**Mitigation:** §5.5. `cargo-fuzz` in CI from week 3. Decompression caps. XXE off. Refuse-with-error rather than allocate-on-trust. Plus (**no longer applicable — there is no Tauri shell and no updater; see `docs/RELEASING.md`**) the Tauri shell threat model (CSP, IPC surface) and **updater key custody** — Tauri's update signature "cannot be disabled," so one key compromise pushes arbitrary code to every install. The key lives with the fiscal host, in a hardware-backed or CI-only secret, with a documented rotation procedure. Not in a personal GitHub account.
+**Mitigation:** §5.5. `cargo-fuzz` in CI from week 3. Decompression caps. XXE off. Refuse-with-error rather than allocate-on-trust. Plus (**half of this no longer applies and half of it now applies more than when it was written; see `docs/RELEASING.md`**) the Tauri shell threat model (CSP, IPC surface) — *not applicable: there is no Tauri shell and no webview* — and **updater key custody** — *applicable, and live since 2026-08-06*. Tauri's update signature "cannot be disabled," so one key compromise pushes arbitrary code to every install. The conclusion outlived the premise: there is now a release Ed25519 key, it is compiled into `pl` and `polylinker` (not into `pl-mcp` or the Python module, which cannot update anything), and `pl update` accepts a release only if that key signed the manifest — so one compromise pushes arbitrary code to everyone who runs it, and there is no revocation channel, by design. The private half is a GitHub Actions secret and is on no developer machine. Still owed: the fiscal host, and a documented rotation procedure. `crates/pl-update/src/lib.rs` records the non-survival of key compromise as a known cost rather than an oversight.
 
 ### 10. Windows code-signing *eligibility* (not cost)
 **Probability: medium. Impact: moderate but adoption-suppressing.**

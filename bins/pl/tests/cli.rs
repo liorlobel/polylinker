@@ -2350,3 +2350,175 @@ fn the_pixel_size_printed_for_a_png_is_the_pixel_size_in_the_file() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- `pl update`: the one verb that uses a network ---------------------------
+//
+// None of these make a request, and that is a constraint on the tests rather
+// than a gap in them. A test that fetched the real release page would be
+// testing GitHub's availability, would fail on the CI leg with no egress, and
+// would be the only thing in this suite that phones home. What can be tested
+// without a network turns out to be most of what matters: the argument
+// handling, the disclosure, and — the one that would otherwise go unnoticed —
+// which code in this binary is allowed to reach a socket at all. The flow
+// itself is tested end to end in `crates/pl-update`, against an in-memory
+// server that serves signed bytes.
+
+/// Every line in `bins/pl` that can open a socket is inside `cmd_update`.
+///
+/// PROVEN TO FAIL by hoisting the `pl_update::Curl::default()` line out of
+/// `cmd_update` into a helper above it, and separately by adding a
+/// `pl_update::curl_available()` call to `cmd_info`. Both went red here and
+/// **green everywhere else in this file** — `pl info` still summarises a file
+/// correctly with a network probe bolted onto it, which is exactly why this
+/// reads the source instead of running the binary. The shape is
+/// `crates/pl-update/tests/handoff.rs`'s and `crates/pl-design/tests/purity.rs`':
+/// a claim about what code does NOT do cannot be established by calling it.
+///
+/// The rule it enforces is also a style rule, deliberately: the crate must be
+/// spelled `pl_update::` at each use site. A `use pl_update::check;` at the top
+/// of the file would put the name outside `cmd_update` and fail here, which is
+/// the intended answer — an import is how the network surface stops being
+/// greppable.
+#[test]
+fn only_the_update_verb_can_reach_the_network() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("main.rs"),
+    )
+    .expect("bins/pl/src/main.rs");
+    let lines: Vec<&str> = src.lines().collect();
+
+    // rustfmt puts every item in this file at column 0 and closes it with a `}`
+    // at column 0. That is a sounder boundary than counting braces, which any
+    // `{}` in this function's format strings would throw off.
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with("fn cmd_update("))
+        .expect("`fn cmd_update` is gone, so this test now proves nothing");
+    let end = start
+        + 1
+        + lines[start + 1..]
+            .iter()
+            .position(|l| *l == "}")
+            .expect("cmd_update has no closing `}` at column 0");
+
+    let mut outside = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        // The prose has to be able to name the crate in order to say where it
+        // is allowed. Doc comments and ordinary comments both start `//`.
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        if line.contains("pl_update") && !(start..=end).contains(&i) {
+            outside.push(format!("{}: {}", i + 1, line.trim()));
+        }
+    }
+    assert!(
+        outside.is_empty(),
+        "`pl` may reach the network only from `cmd_update` (lines {}..={}); these are \
+         outside it:\n  {}\nIf one is a `use`, spell the call `pl_update::` at its site \
+         instead -- an import is how this stops being greppable.",
+        start + 1,
+        end + 1,
+        outside.join("\n  ")
+    );
+
+    // Not vacuous: the calls really are in there. A `cmd_update` that had
+    // stopped calling the crate entirely would satisfy every assertion above,
+    // and so would deleting the verb.
+    let body = lines[start..=end].join("\n");
+    for call in [
+        "pl_update::Curl",
+        "pl_update::check(",
+        "pl_update::fetch_and_verify(",
+    ] {
+        assert!(
+            body.contains(call),
+            "cmd_update no longer calls {call}, so the range this test guards is empty"
+        );
+    }
+}
+
+/// A mistyped flag is refused **before** anything is fetched.
+///
+/// This is not a copy of `a_mistyped_option_stops_the_run_instead_of_changing_the_answer`.
+/// There, the cost of parsing late would be a wrong answer. Here it would be a
+/// request: `pl update --chek` that parsed its argv after calling `check` would
+/// still exit non-zero with "unknown option", having already told github.com
+/// that this machine exists and runs this version. The refusal has to happen
+/// first, and the only externally visible evidence of the ordering is the
+/// absence of a transport error in a run that cannot succeed.
+#[test]
+fn a_mistyped_update_flag_is_refused_before_anything_is_fetched() {
+    let dir = scratch("update-typo");
+    for args in [
+        vec!["update", "--chek"],
+        vec!["update", "--check", "--force"],
+        vec!["update", "--to"], // valued, with the value missing
+    ] {
+        let out = run(&dir, &args);
+        assert!(!out.status.success(), "{args:?} must not succeed");
+        let err = stderr(&out);
+        assert!(
+            err.contains("unknown option") || err.contains("needs a value"),
+            "{args:?}: {err}"
+        );
+        assert!(
+            !err.contains("could not fetch") && !err.contains("curl"),
+            "{args:?} reached the network before it read its own arguments: {err}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `pl update ~/Downloads` is a mistake, and a silently ignored one would write
+/// somewhere else and report success.
+#[test]
+fn update_refuses_a_stray_positional_rather_than_downloading_elsewhere() {
+    let dir = scratch("update-positional");
+    let out = run(&dir, &["update", "somewhere"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("no file arguments"), "{err}");
+    // It names the flag that does what the user meant.
+    assert!(err.contains("--to"), "{err}");
+    assert!(
+        !err.contains("could not fetch") && !err.contains("curl"),
+        "refused only after asking the network: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What a check discloses is readable **without** running one.
+///
+/// `pl update --help` is the only place a user can find out what a check sends
+/// before choosing to send it, so these sentences going missing is a defect in
+/// the product and not a documentation nit. Every phrase below is a specific
+/// claim about the request, and this fails if any is deleted or softened away.
+#[test]
+fn the_update_verb_states_what_it_sends_before_it_is_run() {
+    let dir = scratch("update-help");
+    let out = run(&dir, &["update", "--help"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    for required in [
+        "UPDATE OPTIONS",
+        "WHAT THIS SENDS",
+        "no sequence",      // what is not in the request
+        "IP address",       // what unavoidably is
+        "installs nothing", // requirement 4, in the user's words
+    ] {
+        assert!(
+            text.contains(required),
+            "`pl update --help` no longer says {required:?}"
+        );
+    }
+    // And the verb is listed where somebody would look for it, with the fact
+    // that it is the networked one attached to the name rather than buried.
+    assert!(
+        text.contains("pl update"),
+        "the verb is not in the usage list"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -2,7 +2,10 @@ Polylinker on Windows
 =====================
 
 Polylinker is an offline plasmid editor. It never sends a sequence anywhere, it
-has no updater, and it does not need administrator rights.
+has no auto-updater, and it does not need administrator rights. Nothing it
+installs runs on its own or checks for a new version by itself: the editor's
+update check is off until you switch it on under Help, and `pl update` is a
+command you type.
 
 You do not have to install it. polylinker.exe in this folder runs as it is --
 double-click it. The installer below exists so it appears in the Start Menu and
@@ -143,7 +146,13 @@ What this means for you, concretely:
     It does not mean Windows found anything wrong with the file.
   * The SHA-256 you checked in step 1 proves this copy is byte-for-byte the one
     published on the release page. It proves nothing about who published it.
-    Those are different guarantees and only one of them is available here.
+    Those are different guarantees, and the second one is now available too:
+    the release page publishes SHA256SUMS.txt.sig, an Ed25519 signature over
+    that checksum table made by the release key, and prints the command to
+    check it. The key's public half is compiled into pl.exe and polylinker.exe,
+    which is what lets `pl update` check a download without trusting the page
+    it came from. Windows has never heard of that key and will go on showing
+    the warning above regardless -- that is code signing, and it is separate.
   * Some managed and locked-down machines refuse unsigned software outright, by
     policy. If yours does, this will not run, and the correct next step is to
     ask whoever administers the machine -- not to work around it.

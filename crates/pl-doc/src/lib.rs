@@ -22,9 +22,19 @@
 //!
 //! # Offline
 //!
-//! Compiled in. A tool that asks nothing of anyone cannot have documentation
-//! that needs a network, and a lab machine on an isolated network is a normal
-//! place for this to run.
+//! Compiled in. Every word `pl methods` and the editor's Help window can show
+//! is in the binary, so the documentation is there on a machine with no route
+//! out — and a lab machine on an isolated network is a normal place for this to
+//! run.
+//!
+//! This paragraph used to begin "a tool that asks nothing of anyone cannot have
+//! documentation that needs a network". The conclusion is unchanged and the
+//! premise stopped being true on 2026-08-06, when `pl update` and an
+//! off-by-default check in the editor arrived: Polylinker will now ask one
+//! server one question, when a person asks it to. This crate is not part of
+//! that — it has no dependency outside the workspace and does no I/O — and the
+//! reason the text is compiled in never depended on the premise anyway. Help
+//! that needs a network is help that is missing exactly when the network is.
 
 /// One documented operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

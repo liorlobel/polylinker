@@ -509,7 +509,15 @@ if ($MacIdentity -and -not $onMac) {
 }
 
 # SHA-256 over every artifact. This is what a user or an IT department can check
-# against, and it is the only integrity guarantee an unsigned build has.
+# against, and for the archive this script writes it is the only integrity
+# guarantee there is: this manifest is not signed. The one on the release page
+# is. `.github/workflows/release.yml` builds a second, cross-platform
+# SHA256SUMS.txt over the three archives and the MSI once all three legs have
+# finished, and signs THAT with the Ed25519 release key whose public half is
+# compiled into pl and polylinker (pl-mcp and the Python module do not depend
+# on pl-update and carry no key). The distinction is worth keeping straight, because
+# both files have the same name: a checksum says the bytes match what was
+# published, and only the signature says who published it.
 #
 # EVERY FILE, NOT JUST THE EXECUTABLES. Until 2026-08-05 this loop iterated
 # `$artifacts`, so the manifest covered four files out of sixteen: the eleven

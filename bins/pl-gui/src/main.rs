@@ -34,6 +34,10 @@ mod settings;
 #[cfg(test)]
 mod sfnt;
 mod theme;
+/// The opt-in update check. The only module here that can reach a network, and
+/// it does nothing at all unless `settings::Layout::update_check` is on — which
+/// it is not, until somebody switches it on.
+mod update;
 
 use std::path::{Path, PathBuf};
 
@@ -1065,6 +1069,10 @@ struct App {
     /// slightly longer list; defaulting to a subset costs someone an
     /// experiment.
     enzyme_set: pl_enzymes::EnzymeSet,
+    /// The opt-in update check: at most one per run, and none at all unless
+    /// `layout.update_check` is on. See `update.rs` for why it is off by
+    /// default and what the checkbox discloses.
+    update: update::Check,
     /// The indexed folder, if one has been opened.
     scan: Option<library::ScanState>,
     lib_mode: library::Mode,
@@ -2350,6 +2358,7 @@ impl App {
             filter: String::new(),
             status: String::new(),
             enzyme_set: pl_enzymes::EnzymeSet::All,
+            update: update::Check::default(),
             scan: None,
             lib_mode: library::Mode::Name,
             lib_query: String::new(),
@@ -4729,6 +4738,21 @@ impl eframe::App for App {
             }
             running |= s.is_running();
         }
+        // The opt-in update check, which is a no-op on all but at most one
+        // frame per run — and on every frame of every run until somebody
+        // switches it on, which is the state it ships in. `update.rs` has the
+        // argument; the latch that makes "at most one" true is tested there.
+        self.update.maybe_start(self.layout.update_check);
+        if let Some(said) = self.update.poll() {
+            // The status line, not a dialog and not a banner. A new release is
+            // worth mentioning and is not worth interrupting anybody for: they
+            // opened this window to look at a plasmid. The Help menu keeps the
+            // answer after this line has been overwritten by the next thing the
+            // app has to say.
+            self.status = said;
+            ctx.request_repaint();
+        }
+        running |= self.update.is_waiting();
         // And so is every read's comparison. Polled here rather than in the
         // Reads tab so an answer lands whichever tab the user has walked away
         // to — otherwise a comparison started on one tab appears to hang until
@@ -5346,6 +5370,72 @@ impl App {
                                 .size(10.5)
                                 .color(pal(ui).muted),
                         );
+                        // The update setting lives here, under the version it is
+                        // about. Not in Workspace, which is about documents, and
+                        // not in a preferences window this application does not
+                        // have: "which version am I running, and is there a
+                        // newer one" is one question, and the two halves of it
+                        // should not be in different menus.
+                        ui.separator();
+                        let mut on = self.layout.update_check;
+                        if ui
+                            .checkbox(&mut on, "Check for new releases")
+                            .on_hover_text(update::WHAT_IS_SENT)
+                            .changed()
+                        {
+                            self.layout.update_check = on;
+                            // Written on the click, like `restore_tabs` and for
+                            // a stronger version of the same reason: this is the
+                            // switch that decides whether anything is sent, and
+                            // a crash must never be able to revert it in either
+                            // direction — least of all silently back to on.
+                            settings::save(self.layout);
+                            self.status = if on {
+                                "Polylinker will ask github.com once per launch whether a newer \
+                                 release exists"
+                                    .into()
+                            } else {
+                                "Polylinker will not contact anything".into()
+                            };
+                        }
+                        // The sentence is on the checkbox's hover, and also
+                        // here, wrapped and always visible. A disclosure a user
+                        // has to discover by hovering is one they can consent to
+                        // without having read.
+                        ui.label(
+                            RichText::new(update::WHAT_IS_SENT)
+                                .size(10.5)
+                                .color(pal(ui).muted),
+                        );
+                        if let Some(said) = self.update.summary() {
+                            ui.separator();
+                            ui.label(RichText::new(said).size(11.0));
+                        }
+                        // The button appears only when there is somewhere worth
+                        // going. It opens the release page in a browser and
+                        // downloads nothing: this application has no code that
+                        // fetches an artifact, on purpose (`update.rs`).
+                        if self.update.offers_newer() {
+                            if ui
+                                .button("Open the release page…")
+                                .on_hover_text(update::RELEASE_PAGE)
+                                .clicked()
+                            {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(
+                                    update::RELEASE_PAGE,
+                                ));
+                                ui.close();
+                            }
+                            ui.label(
+                                RichText::new(
+                                    "Or run `pl update` from a terminal: it verifies the \
+                                     signature before it keeps a byte, and prints the path \
+                                     for you to run.",
+                                )
+                                .size(10.5)
+                                .color(pal(ui).muted),
+                            );
+                        }
                     });
                     if let Some(d) = self.document() {
                         if d.digest.is_running() {
@@ -12230,6 +12320,24 @@ fn poor_single_site_note(name: &str, sites: usize) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The update check is off in a freshly installed copy.
+    ///
+    /// The first-run promise, asserted against `Default` rather than against the
+    /// checkbox, because `Default` is what a machine with no layout file gets —
+    /// and that is every machine on the day it installs this.
+    #[test]
+    fn a_first_run_contacts_nothing() {
+        assert!(
+            !settings::Layout::default().update_check,
+            "a new installation would contact a server before anybody asked it to"
+        );
+        // And the app's own starting state has not asked anything either.
+        let app = App::blank();
+        assert!(app.update.summary().is_none());
+        assert!(!app.update.offers_newer());
+        assert!(!app.update.is_waiting());
+    }
 
     #[test]
     fn the_hand_rolled_calendar_returns_a_sane_date() {
