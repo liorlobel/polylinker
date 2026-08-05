@@ -114,8 +114,23 @@ if (-not $PlatformLabel) {
 
 # Same as tools/ci.ps1: a shell that has not sourced the profile does not have
 # the toolchain on PATH, and a release script failing on that is noise.
-$cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
-if (Test-Path $cargoBin) { $env:PATH = "$cargoBin;$env:PATH" }
+#
+# GUARDED, and the guard is the whole point. The unguarded form of these two
+# lines is what broke the first three-platform release: `$env:USERPROFILE` does
+# not exist off Windows, `Join-Path` refuses a null `-Path`, and the
+# `$ErrorActionPreference = 'Stop'` at the top of this file turns that refusal
+# into a terminating error. The Linux job died in 41 seconds, before it had
+# compiled anything, on a line whose only purpose is convenience on a
+# workstation.
+#
+# It was read during the port and called harmless, on the reasoning that
+# prepending an empty string is a no-op. That is true of the assignment and
+# irrelevant to the call that produces it. Both hosted runners put cargo on
+# PATH themselves, so off Windows the whole block is unnecessary and is skipped.
+if ($env:USERPROFILE) {
+    $cargoBin = Join-Path $env:USERPROFILE '.cargo/bin'
+    if (Test-Path $cargoBin) { $env:PATH = "$cargoBin$([IO.Path]::PathSeparator)$env:PATH" }
+}
 
 Say 'Polylinker release' Cyan
 

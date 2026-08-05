@@ -24,8 +24,15 @@ param([string]$Corpus)
 
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
-$cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
-if (Test-Path $cargoBin) { $env:PATH = "$cargoBin;$env:PATH" }
+# Guarded for the reason given at length in the step named
+# 'the cross-platform scripts touch no Windows-only environment variable
+# unguarded' near the end of this file: off Windows this variable is absent, not
+# empty, and Join-Path treats a null -Path as a terminating error. The unguarded
+# twin of these two lines killed both non-Windows legs of the first release.
+if ($env:USERPROFILE) {
+    $cargoBin = Join-Path $env:USERPROFILE '.cargo/bin'
+    if (Test-Path $cargoBin) { $env:PATH = "$cargoBin$([IO.Path]::PathSeparator)$env:PATH" }
+}
 
 # Cases polylinker-bench must still pass. Asserted, not merely printed: the
 # step used to report ok while the benchmark scored zero. Raise this when the
@@ -1764,6 +1771,87 @@ Step 'the release notes still say what an unsigned build costs' {
     }
     if ($problems) { throw ($problems -join "`n        ") }
     Write-Host '        quarantine remedy, SmartScreen, glibc floor and the checksum caveat all present' -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
+
+Step 'the cross-platform scripts touch no Windows-only environment variable unguarded' {
+    # WHY THIS EXISTS. The first three-platform release failed on both non-Windows
+    # legs at `Join-Path $env:USERPROFILE '.cargo\bin'`. Off Windows that variable
+    # is not merely empty, it is absent; `Join-Path` refuses a null `-Path`; and
+    # `$ErrorActionPreference = 'Stop'` promotes the refusal to a fatal error. The
+    # Linux job died in 41 seconds having compiled nothing.
+    #
+    # Every gate in this file runs on Windows, where the faulty line works
+    # perfectly. That is the actual defect: a Windows-only assumption in a script
+    # whose entire purpose is to run on three platforms cannot be caught by
+    # executing it here, so it has to be caught by reading it here. It was in fact
+    # read, and called harmless -- prepending an empty string is a no-op, which is
+    # true of the assignment and irrelevant to the call that produces it.
+    #
+    # A use is accepted only inside an `if` that tests the same variable, or
+    # inside one that tests the platform. Guard scope is tracked by brace depth.
+    $winOnly = 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMFILES', 'PROGRAMDATA',
+               'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'USERNAME', 'HOMEDRIVE', 'HOMEPATH'
+    $problems = @()
+
+    foreach ($rel in 'tools/release.ps1', 'tools/ci.ps1', 'tools/check-archive.ps1') {
+        $p = "$repo/$rel"
+        if (-not (Test-Path $p)) { throw "$rel is missing" }
+        $lines = Get-Content -LiteralPath $p
+        $depth = 0
+        $guards = @{}   # depth -> list of variable names guarded at that depth
+        $platformGuard = @{}
+
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            # Strip comments and single-quoted literals. A comment naming the
+            # variable is documentation, and a quoted 'USERPROFILE' is a string,
+            # not a dereference -- this very step would otherwise flag the prose
+            # above, which is the mistake the release-workflow checker already
+            # made once and had to be taught not to repeat.
+            $code = $lines[$i] -replace '(^|\s)#.*$', ''
+
+            $opensGuard = @()
+            $guardsPlatform = $false
+            if ($code -match '^\s*(\}\s*)?(else)?if\s*\(') {
+                foreach ($v in $winOnly) {
+                    if ($code -match ('\$env:' + $v + '\b')) { $opensGuard += $v }
+                }
+                if ($code -match '\$(IsWindows|onWindows|IsLinux|IsMacOS|onMac|onLinux)\b') { $guardsPlatform = $true }
+            }
+
+            # Active guards are those opened at a still-open depth.
+            $active = @()
+            $platformActive = $false
+            foreach ($d in $guards.Keys) { if ($d -le $depth) { $active += $guards[$d] } }
+            foreach ($d in $platformGuard.Keys) { if ($d -le $depth -and $platformGuard[$d]) { $platformActive = $true } }
+
+            foreach ($v in $winOnly) {
+                if ($code -notmatch ('\$env:' + $v + '\b')) { continue }
+                if ($opensGuard -contains $v) { continue }        # this line IS the guard
+                if ($active -contains $v) { continue }            # inside its own guard
+                if ($platformActive -or $guardsPlatform) { continue }  # inside a platform branch
+                # A bare assignment cannot fail; only passing it onward can.
+                if ($code -match ('^\s*\$env:' + $v + '\s*=')) { continue }
+                $problems += ("{0}:{1} uses `$env:{2} outside any guard -- that variable does not exist off Windows: {3}" -f
+                              $rel, ($i + 1), $v, $code.Trim())
+            }
+
+            $opens = ([regex]::Matches($code, '\{')).Count
+            $closes = ([regex]::Matches($code, '\}')).Count
+            if ($opensGuard.Count -or $guardsPlatform) {
+                $inner = $depth + 1
+                if ($opensGuard.Count) { $guards[$inner] = $opensGuard }
+                if ($guardsPlatform)   { $platformGuard[$inner] = $true }
+            }
+            $depth += $opens - $closes
+            if ($depth -lt 0) { $depth = 0 }
+            foreach ($d in @($guards.Keys))       { if ($d -gt $depth) { $guards.Remove($d) } }
+            foreach ($d in @($platformGuard.Keys)) { if ($d -gt $depth) { $platformGuard.Remove($d) } }
+        }
+    }
+
+    if ($problems) { throw ($problems -join "`n        ") }
+    Write-Host '        release.ps1, ci.ps1 and check-archive.ps1 are clean' -ForegroundColor DarkGray
     $global:LASTEXITCODE = 0
 }
 
