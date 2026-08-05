@@ -2246,7 +2246,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "pl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-abif",
  "pl-clone",
@@ -2267,14 +2267,14 @@ dependencies = [
 
 [[package]]
 name = "pl-abif"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
 ]
 
 [[package]]
 name = "pl-clone"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-enzymes",
@@ -2282,11 +2282,11 @@ dependencies = [
 
 [[package]]
 name = "pl-core"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "pl-design"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-clone",
  "pl-core",
@@ -2297,7 +2297,7 @@ dependencies = [
 
 [[package]]
 name = "pl-doc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-design",
@@ -2311,21 +2311,21 @@ dependencies = [
 
 [[package]]
 name = "pl-draw"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
 ]
 
 [[package]]
 name = "pl-enzymes"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
 ]
 
 [[package]]
 name = "pl-features"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-fileio",
@@ -2333,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "pl-fileio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-enzymes",
@@ -2341,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "pl-gel"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-draw",
@@ -2349,7 +2349,7 @@ dependencies = [
 
 [[package]]
 name = "pl-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "egui-phosphor",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "pl-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-enzymes",
@@ -2379,7 +2379,7 @@ dependencies = [
 
 [[package]]
 name = "pl-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-doc",
@@ -2391,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "pl-primer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-thermo",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "pl-py"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-doc",
@@ -2410,14 +2410,14 @@ dependencies = [
 
 [[package]]
 name = "pl-sanger"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
 ]
 
 [[package]]
 name = "pl-scan"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-fileio",
@@ -2426,14 +2426,14 @@ dependencies = [
 
 [[package]]
 name = "pl-thermo"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
 ]
 
 [[package]]
 name = "pl-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pl-core",
  "pl-enzymes",
