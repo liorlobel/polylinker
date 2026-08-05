@@ -1,0 +1,116 @@
+<!--
+The body of every GitHub Release. `.github/workflows/release.yml` substitutes
+{{VERSION}} and {{TAG}} and appends the checksum table.
+
+It is a file rather than a heredoc in the workflow because the honest paragraphs
+about unsigned builds are the part most likely to be quietly softened, and a file
+shows up in a diff. `tools/ci.ps1` asserts that the macOS quarantine remedy and
+the SmartScreen paragraph are still in here.
+-->
+
+Polylinker {{TAG}} — an offline plasmid editor.
+
+Never sends a sequence anywhere. No updater, no telemetry, no network access at
+run time at all.
+
+## Downloads
+
+| Platform | File | Notes |
+|---|---|---|
+| Windows 10/11, x64 | `polylinker-{{VERSION}}-windows-x64.zip` | includes a per-user installer; no admin rights needed |
+| macOS 11+, Apple Silicon **and** Intel | `polylinker-{{VERSION}}-macos-universal.tar.gz` | one universal binary for both |
+| Linux, x64, glibc 2.39 or newer | `polylinker-{{VERSION}}-linux-x64.tar.gz` | see the note below before downloading |
+
+Each archive contains `polylinker` (the editor), `pl` (the command line),
+`pl-mcp` (the MCP server), the Python extension module, the licence texts, and a
+`SHA256SUMS.txt` covering every one of them. Verify the archive against the
+checksum table at the bottom of this page before extracting it.
+
+## Every one of these is unsigned
+
+There is no code-signing certificate for any platform. That is a funding
+question — Windows certificates run £200–400 a year, an Apple Developer Program
+membership is $99 a year, and both are issued to a person or an organisation —
+and not an oversight. `docs/RELEASING.md` has the detail.
+
+It has a concrete cost on two of the three platforms, and the honest thing is to
+say what you will see and what to do about it.
+
+**macOS.** Gatekeeper will refuse to open these files and will say
+
+> "polylinker" cannot be opened because the developer cannot be verified.
+
+That message is accurate: Apple has verified nobody, because nobody paid to be
+verified. macOS tags anything a browser downloaded with an extended attribute
+named `com.apple.quarantine`, and it is that tag Gatekeeper checks. Remove it
+from the files you extracted:
+
+```sh
+xattr -d com.apple.quarantine polylinker pl pl-mcp polylinker.so
+```
+
+That is a per-file operation. Gatekeeper stays on, System Integrity Protection
+is untouched, and everything else on the machine is still checked exactly as it
+was. If the command says `No such xattr`, the files were never quarantined and
+there is nothing to do.
+
+You may see the right-click → Open trick recommended elsewhere. It works, and it
+is a worse habit: it is the same click-through for software you checked as for
+software you did not. The command above names what is being allowed and to which
+files.
+
+**Windows.** SmartScreen may show *"Windows protected your PC"* the first time
+you run `polylinker.exe`. That means Windows does not recognise the publisher.
+It does not mean Windows found anything wrong with the file. The deliberate
+omission here is the instruction to click past it: the words that usually follow
+are not in anything this project ships, because teaching a labmate to dismiss a
+security warning is a worse outcome than an awkward paragraph. Read
+`README-WINDOWS.txt` inside the zip, check the SHA-256, and decide.
+
+Some managed and locked-down machines — Windows and macOS both — refuse unsigned
+software outright by policy. If yours does, this will not run, and the right
+response is to ask whoever administers the machine rather than to work around
+it.
+
+**Linux** has no equivalent expectation. Nothing will stop you and nothing will
+vouch for these either.
+
+**What the checksum does and does not prove.** It proves the copy you have is
+byte-for-byte the one published on this page. It proves nothing about who
+published it. Those are different guarantees and only the first one is available
+here.
+
+## Linux: check your glibc first
+
+The Linux binaries are built on Ubuntu 24.04 and need **glibc 2.39 or newer**.
+glibc is backward compatible but not forward compatible, so on anything older
+they will not start at all, and the error is a bare
+``version `GLIBC_2.39' not found``. Check with `ldd --version`.
+
+- Fine: Ubuntu 24.04+, Debian 13+, Fedora 40+, RHEL 10+
+- **Will not run**: Ubuntu 22.04 (2.35), Debian 12 (2.36), RHEL 9 (2.34)
+
+There is no build for older distributions. On one of those, build from source —
+it needs Rust 1.82 and nothing exotic, and `pl` and `pl-mcp` need no system
+libraries at all. `README-LINUX.txt` inside the archive lists the shared
+libraries the editor opens at run time.
+
+## No updater, on purpose
+
+Polylinker will never check for a new version, because a program that phones a
+server on a schedule is a program announcing that this machine exists and is
+running this version — and on a lab machine holding unpublished sequence, that
+is worth not doing. The update path is that you check when you want to: `pl
+--version` prints the version and the commit, and this page lists the current
+one.
+
+`docs/RELEASING.md` records the four conditions any future updater would have to
+meet, so the question is not reopened casually.
+
+## Licences
+
+Polylinker is MIT OR Apache-2.0. It embeds nine font faces under four other
+licences, four of which require their text to accompany every copy — so
+`licences/`, `NOTICE.txt` and `features/NOTICE.txt` are inside every archive and
+are covered by its `SHA256SUMS.txt`. The feature database is CC BY 4.0 and
+carries its own attribution in `features/NOTICE.txt`.

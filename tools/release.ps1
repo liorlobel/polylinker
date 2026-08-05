@@ -30,11 +30,39 @@
 
 .PARAMETER Out
     Where the artifacts go. Default: dist/
+
+.PARAMETER BinDir
+    Where to find the compiled binaries. Default: target/release. The macOS
+    universal build is the reason this is a parameter: `lipo` writes its output
+    somewhere cargo never does, and the alternative was a second script.
+
+.PARAMETER SkipBuild
+    Do not run cargo; package what is already in -BinDir. Only legal together
+    with an explicit -BinDir, because "skip the build" with the default
+    directory is how a release gets cut from yesterday's binaries.
+
+.PARAMETER PlatformLabel
+    Overrides the platform half of the archive name -- `windows-x64`,
+    `linux-x64`, `macos-universal`. Defaults to this machine's OS and
+    architecture. The one case that needs it is a universal macOS binary, which
+    is not the architecture of the machine that built it.
+
+.PARAMETER ArchiveFormat
+    `zip` or `tar.gz`. Defaults to zip on Windows and tar.gz elsewhere, which is
+    what a release wants. It is a parameter so that `tools/ci.ps1` can exercise
+    the tar writer on the Windows machine that is the only one that ever runs
+    the gate -- an archive format whose only test is a green CI job on a runner
+    is an archive format nobody has looked at.
 #>
 param(
     [string]$WindowsCert = '',
     [string]$MacIdentity = '',
     [string]$Out = 'dist',
+    [string]$BinDir = '',
+    [string]$PlatformLabel = '',
+    [ValidateSet('', 'zip', 'tar.gz')]
+    [string]$ArchiveFormat = '',
+    [switch]$SkipBuild,
 
     # For the gate, which checks that the script runs and that its manifest
     # verifies. Nothing is suppressed that changes what is produced.
@@ -45,6 +73,44 @@ $ErrorActionPreference = 'Stop'
 function Say($msg, $colour = 'Gray') { if (-not $Quiet) { Write-Host $msg -ForegroundColor $colour } }
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+
+# WHICH PLATFORM THIS IS, AND WHY THERE IS STILL ONE SCRIPT.
+#
+# Everything genuinely platform-specific below is a name or a container format:
+# the `.exe` suffix, what CPython will load an extension module under, whether
+# there is an installer to ship, and zip versus tar.gz. Everything that is NOT
+# platform-specific is the part that has gone wrong twice -- `$notices`, the
+# version read out of Cargo.toml, and the rule that the manifest hashes whatever
+# is on disk. A second script would be a second copy of those three, and the
+# comments on `$notices` are a thirty-line record of what a second copy does.
+#
+# So: one script, three `if`s. `tools/ci.ps1` runs THIS file, so the licence set
+# that ships on Linux and macOS is the one the gate already checks, rather than
+# a parallel list nobody exercises.
+#
+# `$IsWindows`, `$IsLinux` and `$IsMacOS` are pwsh 7 automatic variables and do
+# not exist in Windows PowerShell 5.1 at all -- where they read as $null. 5.1
+# only runs on Windows, so $null means Windows.
+$onWindows = if ($null -eq $IsWindows) { $true } else { [bool]$IsWindows }
+$onMac     = [bool]$IsMacOS
+$onLinux   = [bool]$IsLinux
+$exe       = if ($onWindows) { '.exe' } else { '' }
+
+if ($SkipBuild -and -not $BinDir) {
+    throw '-SkipBuild needs an explicit -BinDir. Skipping the build against the default target/release is how a release gets cut from binaries nobody rebuilt.'
+}
+if (-not $BinDir) { $BinDir = 'target/release' }
+
+if (-not $PlatformLabel) {
+    $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+        'X64'   { 'x64' }
+        'Arm64' { 'arm64' }
+        default { throw "no archive name is defined for $_" }
+    }
+    $os = if ($onWindows) { 'windows' } elseif ($onMac) { 'macos' } elseif ($onLinux) { 'linux' }
+          else { throw 'this is not Windows, Linux or macOS, and the packaging rules below do not cover it' }
+    $PlatformLabel = "$os-$arch"
+}
 
 # Same as tools/ci.ps1: a shell that has not sourced the profile does not have
 # the toolchain on PATH, and a release script failing on that is noise.
@@ -96,8 +162,11 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 # Anything else is somebody's data and this refuses rather than guesses.
 $existing = @(Get-ChildItem -LiteralPath $Out -Force)
 if ($existing) {
+    # `polylinker$exe`, not `polylinker.exe`: on a Unix run neither sentinel
+    # existed, so a second run into a non-empty dist/ threw instead of clearing
+    # it -- a Windows-shaped test standing in for "is this ours".
     $looksLikeRelease = (Test-Path (Join-Path $Out 'SHA256SUMS.txt')) -or
-                        (Test-Path (Join-Path $Out 'polylinker.exe'))
+                        (Test-Path (Join-Path $Out "polylinker$exe"))
     if (-not $looksLikeRelease) {
         throw "$Out is not empty and does not look like a previous release. Point -Out somewhere else, or empty it yourself."
     }
@@ -107,25 +176,50 @@ if ($existing) {
     Say '  cleared the previous contents of the output directory'
 }
 
-Say '  building...'
-# `$ErrorActionPreference = 'Stop'` turns *any* stderr from a native command
-# into a terminating error, and cargo writes warnings there. A warning must not
-# abort a release — it did, on an "output filename collision" note about a PDB —
-# so the exit code is what decides, which is the only thing that actually says
-# whether the build worked.
-$prevEAP = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-cargo build --release --workspace 2>&1 | Out-Null
-$buildOk = ($LASTEXITCODE -eq 0)
-$ErrorActionPreference = $prevEAP
-if (-not $buildOk) { throw 'the release build failed' }
+if ($SkipBuild) {
+    Say "  skipping the build; packaging $BinDir as given"
+} else {
+    Say '  building...'
+    # `$ErrorActionPreference = 'Stop'` turns *any* stderr from a native command
+    # into a terminating error, and cargo writes warnings there. A warning must not
+    # abort a release — it did, on an "output filename collision" note about a PDB —
+    # so the exit code is what decides, which is the only thing that actually says
+    # whether the build worked.
+    #
+    # `--locked` since 2026-08-05, matching every cargo invocation in ci.yml. A
+    # release that let cargo rewrite Cargo.lock would be a release of a dependency
+    # graph nobody chose and nobody tested.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    cargo build --release --workspace --locked 2>&1 | Out-Null
+    $buildOk = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prevEAP
+    if (-not $buildOk) { throw 'the release build failed' }
+}
 
+# THE THREE EXECUTABLES ARE REQUIRED, NOT OPTIONAL.
+#
+# This loop used to be `if (Test-Path $p)`, over the hardcoded names `pl.exe`,
+# `polylinker.exe` and `pl-mcp.exe`, with a single `if (-not $artifacts) { throw }`
+# underneath. On Windows that is indistinguishable from a required list. On Linux
+# it was a silent hole: none of the three names matched, the `.so` fallback below
+# made `$artifacts` non-empty anyway, and the throw never fired -- so a Linux run
+# produced a "release" consisting of the Python extension, eleven correct licence
+# texts, the four Windows installer files and a zip named `windows-x64`, with none
+# of the three programs in it. Nothing anywhere asserted their presence.
+#
+# Named and required, so a missing binary is a named failure rather than a
+# smaller archive.
 $artifacts = @()
-foreach ($name in 'pl.exe', 'polylinker.exe', 'pl-mcp.exe') {
-    $p = Join-Path 'target/release' $name
+$missing = @()
+foreach ($stem in 'pl', 'polylinker', 'pl-mcp') {
+    $name = "$stem$exe"
+    $p = Join-Path $BinDir $name
     if (Test-Path $p) {
         Copy-Item $p (Join-Path $Out $name) -Force
         $artifacts += $name
+    } else {
+        $missing += $name
     }
 }
 
@@ -134,18 +228,26 @@ foreach ($name in 'pl.exe', 'polylinker.exe', 'pl-mcp.exe') {
 # correctly the DLL was built — and cargo has no say in the matter, so the
 # rename belongs here. Shipping `polylinker.dll` and expecting the user to
 # rename it is a papercut that reads as "the wheel is broken".
-$pyBuilt = Join-Path 'target/release' 'polylinker.dll'
-$pyShipped = 'polylinker.pyd'
-if (-not (Test-Path $pyBuilt)) {
-    $pyBuilt = Join-Path 'target/release' 'libpolylinker.so'
-    $pyShipped = 'polylinker.so'
-}
+#
+# macOS is the case that had no branch at all. cargo writes a cdylib there as
+# `libpolylinker.dylib`, and CPython on macOS loads extension modules named
+# `.so` -- NOT `.dylib`, which is the one intuition to distrust here. Before
+# this table the mac path fell through to the `.so` fallback, found nothing,
+# and shipped no extension.
+$pyMap = if ($onWindows) { @{ Built = 'polylinker.dll';     Shipped = 'polylinker.pyd' } }
+         elseif ($onMac)  { @{ Built = 'libpolylinker.dylib'; Shipped = 'polylinker.so' } }
+         else             { @{ Built = 'libpolylinker.so';    Shipped = 'polylinker.so' } }
+$pyBuilt = Join-Path $BinDir $pyMap.Built
 if (Test-Path $pyBuilt) {
-    Copy-Item $pyBuilt (Join-Path $Out $pyShipped) -Force
-    $artifacts += $pyShipped
+    Copy-Item $pyBuilt (Join-Path $Out $pyMap.Shipped) -Force
+    $artifacts += $pyMap.Shipped
+} else {
+    $missing += $pyMap.Built
 }
 
-if (-not $artifacts) { throw 'the build produced nothing to ship' }
+if ($missing) {
+    throw "the build produced nothing at $BinDir for: $($missing -join ', '). A release missing a binary is not a smaller release, it is a broken one."
+}
 
 # The notices have to travel with the binaries, and until 2026-07-30 they did
 # not: dist/ held four executables and a checksum file.
@@ -267,7 +369,22 @@ foreach ($n in $notices) {
 }
 Say "  notices: $($notices.Count) file(s)"
 
-# The installer.
+# The installer. WINDOWS ONLY, and deliberately not ported.
+#
+# `tools/installer/Install-Polylinker.ps1` is registry, Start Menu, PATH,
+# ProgIds and an Add/Remove Programs row: every one of those is a Win32 concept
+# and none has a counterpart to port. The Unix answer to "how do I install this"
+# is `tar xf` and, if you want it on PATH, move it somewhere already on PATH --
+# which is what README-LINUX.txt and README-MACOS.txt say, in those words. There
+# is no .deb, no .rpm, no Homebrew formula and no `curl | sh`, and inventing one
+# would be inventing a second file list for the licences to fall out of.
+#
+# What each platform DOES get is one short text file. Windows has had
+# README-WINDOWS.txt since the installer existed; the other two now have the
+# equivalent, because the thing a downloader most needs to be told -- the
+# Gatekeeper quarantine flag, and the glibc floor -- has to travel in the
+# archive. A release page can be read once and then the tarball gets copied to
+# a cluster by somebody who never saw it.
 #
 # Three text files and, if anybody has ever drawn one, an icon. They ship INSIDE
 # the payload rather than beside it, which is the point: the installer's source
@@ -281,7 +398,13 @@ Say "  notices: $($notices.Count) file(s)"
 # `.msi` asks a user to execute megabytes they cannot inspect, from a publisher
 # Windows reports as unknown. A readable script keeps the one trust affordance
 # an unsigned build still has.
-$installer = @(
+$installer = if (-not $onWindows) {
+    @(
+        @{ From = if ($onMac) { 'tools/readme/README-MACOS.txt' } else { 'tools/readme/README-LINUX.txt' }
+           To   = if ($onMac) { 'README-MACOS.txt' }            else { 'README-LINUX.txt' }
+           Required = $true }
+    )
+} else { @(
     @{ From = 'tools/installer/Install-Polylinker.ps1'; To = 'Install-Polylinker.ps1'; Required = $true }
     @{ From = 'tools/installer/Install.cmd';            To = 'Install.cmd';            Required = $true }
     @{ From = 'tools/installer/README-WINDOWS.txt';     To = 'README-WINDOWS.txt';     Required = $true }
@@ -299,7 +422,7 @@ $installer = @(
     # release that quietly dropped it would ship an installer whose shortcut has
     # no icon while the binary it points at has one.
     @{ From = 'bins/pl-gui/icon/polylinker.ico';        To = 'polylinker.ico';         Required = $true }
-)
+) }
 $installed = 0
 foreach ($i in $installer) {
     if (-not (Test-Path $i.From)) {
@@ -352,12 +475,22 @@ if ($WindowsCert) {
         if ($LASTEXITCODE -ne 0) { throw "signtool failed on $a" }
         $signed += $a
     }
-} else {
+} elseif ($onWindows) {
     Say '  NOT SIGNED: no -WindowsCert given.' Yellow
     Say '  Windows SmartScreen will warn on first run. See docs/RELEASING.md.' Yellow
+} elseif ($onMac) {
+    Say '  NOT SIGNED and NOT NOTARISED: no Developer ID identity.' Yellow
+    Say '  Gatekeeper will quarantine this download. README-MACOS.txt says what to do.' Yellow
+} else {
+    Say '  NOT SIGNED. Linux has no equivalent expectation; the checksum is the guarantee.' Yellow
 }
-if ($MacIdentity) {
+if ($MacIdentity -and -not $onMac) {
     Say '  macOS signing must run on macOS; skipping here.' Yellow
+} elseif ($MacIdentity) {
+    # Deliberately not automated. The codesign / notarytool / stapler recipe in
+    # docs/RELEASING.md needs an Apple ID and an app-specific password, and a
+    # release script that can hold those is a release script that can leak them.
+    Say '  -MacIdentity is not wired up; run the recipe in docs/RELEASING.md by hand.' Yellow
 }
 
 # SHA-256 over every artifact. This is what a user or an IT department can check
@@ -390,6 +523,10 @@ $shipped = Get-ChildItem -LiteralPath $Out -Recurse -File |
 $manifest = @()
 $manifest += "polylinker release manifest 1"
 $manifest += "version: $version"
+# Which platform's copy this is. Three archives now carry a file of this name
+# and they are not interchangeable: the same line that tells a user their
+# download is intact should tell them which download it was.
+$manifest += "platform: $PlatformLabel"
 $manifest += "built: $stamp"
 $manifest += "commit: $commit$(if ($dirty) { ' (WORKING TREE DIRTY - not reproducible)' })"
 $manifest += "rustc: $rustc"
@@ -414,69 +551,206 @@ $manifestPath = Join-Path $Out 'SHA256SUMS.txt'
     (New-Object System.Text.UTF8Encoding($false))
 )
 
-# The Windows download.
+# The download.
 #
-# A zip is the primary Windows artifact, and the installer is a file inside it
-# rather than a separate download. That ordering is the product decision: the
-# zip needs no elevation, no trust decision and no installer at all -- unzip it
-# and run polylinker.exe -- and the script inside is for the user who wants a
-# Start Menu entry and an Add/Remove Programs row. Nobody is required to run
-# anything they did not choose to.
+# ONE ARCHIVE PER PLATFORM AND NOTHING ELSE. On Windows the installer is a file
+# inside it rather than a separate download, and that ordering is the product
+# decision: the zip needs no elevation, no trust decision and no installer at
+# all -- unzip it and run polylinker.exe -- and the script inside is for the
+# user who wants a Start Menu entry and an Add/Remove Programs row. Nobody is
+# required to run anything they did not choose to.
 #
-# WRITTEN BY HAND RATHER THAN WITH Compress-Archive, so the bytes are a function
-# of the contents. `Compress-Archive` stores each file's current mtime, so
-# zipping the same sixteen files twice produces two different hashes, and a hash
-# that changes when nothing changed is a hash nobody bothers to compare. Entries
-# are sorted, timestamps are pinned to the build stamp, and compression is
-# fixed. `docs/RELEASING.md` does not claim byte-for-byte reproducibility across
+# ZIP ON WINDOWS, TAR.GZ ON THE UNIXES. That is the convention, and on the Unix
+# side it is also the only one of the two that works: a zip has no portable
+# place to record a file mode, so `unzip` clears the executable bit and the
+# first thing the user does after extracting is `chmod +x`. A tar carries the
+# mode in the header. Windows keeps the zip because Explorer opens one without
+# any additional program and does not open a .tar.gz at all.
+#
+# BOTH ARE WRITTEN BY HAND, so the bytes are a function of the contents.
+# `Compress-Archive` stores each file's current mtime, so zipping the same
+# nineteen files twice produces two different hashes, and a hash that changes
+# when nothing changed is a hash nobody bothers to compare. The same argument
+# rules out shelling out to `tar`, which additionally would put the build
+# machine's uid, gid and username into the archive. Entries are sorted,
+# timestamps and ownership are pinned, and compression is fixed.
+# `docs/RELEASING.md` does not claim byte-for-byte reproducibility across
 # MACHINES -- the binaries embed absolute paths -- but the packaging step should
 # not be a second, avoidable source of drift on top of that.
-$zipName = "polylinker-$version-windows-x64.zip"
-$zipPath = Join-Path $outFull $zipName
-$zipRoot = "polylinker-$version-windows-x64"
-Add-Type -AssemblyName System.IO.Compression | Out-Null
-Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
-if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+if (-not $ArchiveFormat) { $ArchiveFormat = if ($onWindows) { 'zip' } else { 'tar.gz' } }
+$archiveRoot = "polylinker-$version-$PlatformLabel"
+$archiveName = "$archiveRoot.$ArchiveFormat"
+$archivePath = Join-Path $outFull $archiveName
+if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
 
 # Everything the manifest covers, plus the manifest, so a copy extracted from
-# the zip can verify itself and so the installer inside it has the file it needs.
-$zipEntries = @($shipped) + @('SHA256SUMS.txt') | Sort-Object
-# A zip stores an MS-DOS date and time with no timezone, so what lands in the
-# bytes is this wall clock regardless of where the build machine is. Constructed
-# field by field rather than parsed, so no local-time conversion can creep in.
+# the archive can verify itself and so the installer inside it has the file it
+# needs.
+$entries = @($shipped) + @('SHA256SUMS.txt') | Sort-Object
+# 2000-01-01T00:00:00Z, spelled twice because the two containers count
+# differently: a zip stores an MS-DOS date and time with no timezone at all, and
+# a tar stores seconds since the Unix epoch. Constructed field by field rather
+# than parsed, so no local-time conversion can creep into either.
 $fixedTime = [System.DateTimeOffset]::new(2000, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+$fixedUnix = [long]$fixedTime.ToUnixTimeSeconds()
 
-$fs = [System.IO.File]::Open($zipPath, [System.IO.FileMode]::CreateNew)
-try {
-    $zip = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+# Which files are programs. The three executables and the extension module get
+# 0755; everything else -- licences, notices, the readme -- gets 0644. Only the
+# tar can express this, and it is the whole reason the Unixes get a tar.
+$executable = @($artifacts)
+
+function Read-Payload($rel) {
+    [System.IO.File]::ReadAllBytes(
+        (Join-Path $outFull ($rel.Replace('/', [System.IO.Path]::DirectorySeparatorChar))))
+}
+
+if ($ArchiveFormat -eq 'zip') {
+    Add-Type -AssemblyName System.IO.Compression | Out-Null
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+    $fs = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
     try {
-        foreach ($rel in $zipEntries) {
-            $entry = $zip.CreateEntry("$zipRoot/$rel", [System.IO.Compression.CompressionLevel]::Optimal)
-            $entry.LastWriteTime = $fixedTime
-            $es = $entry.Open()
-            try {
-                $bytes = [System.IO.File]::ReadAllBytes((Join-Path $outFull ($rel.Replace('/', [System.IO.Path]::DirectorySeparatorChar))))
-                $es.Write($bytes, 0, $bytes.Length)
-            } finally { $es.Dispose() }
-        }
-    } finally { $zip.Dispose() }
-} finally { $fs.Dispose() }
+        $zip = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($rel in $entries) {
+                $entry = $zip.CreateEntry("$archiveRoot/$rel", [System.IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = $fixedTime
+                $es = $entry.Open()
+                try {
+                    $bytes = Read-Payload $rel
+                    $es.Write($bytes, 0, $bytes.Length)
+                } finally { $es.Dispose() }
+            }
+        } finally { $zip.Dispose() }
+    } finally { $fs.Dispose() }
+} else {
+    # A ustar archive, written field by field.
+    #
+    # The format is a 512-byte header per member followed by the payload padded
+    # to a 512-byte boundary, and two zero blocks at the end. Every numeric
+    # field is octal ASCII. The checksum is the sum of the header's bytes with
+    # the checksum field itself read as eight spaces -- which is the one rule
+    # that cannot be inferred from a hex dump and the one that, got wrong,
+    # produces an archive GNU tar reads happily and bsdtar refuses.
+    #
+    # uid/gid 0 and empty uname/gname, so the archive does not record who built
+    # it; mtime pinned like the zip's. `tar` would have supplied all four from
+    # the build machine.
+    function Add-TarEntry {
+        # $Mode is the octal permission bits AS A STRING -- '755', '644'. Not an
+        # integer: PowerShell has no C-style octal literal, so `0755` is seven
+        # hundred and fifty-five, and pwsh 7's `0o755` is a PARSE error under
+        # Windows PowerShell 5.1, which would take the whole script down on the
+        # one platform that never reaches this branch. The field is written as
+        # octal ASCII anyway, so a string needs no conversion at all.
+        param([System.IO.Stream]$Stream, [string]$Name, [byte[]]$Data, [string]$Mode, [char]$Type)
+        # 100 bytes is ustar's name field. The longest name this ever produces is
+        # about seventy characters, but a silently truncated path in an archive
+        # nobody unpacks until release day is not a failure worth discovering then.
+        $nameBytes = [System.Text.Encoding]::ASCII.GetBytes($Name)
+        if ($nameBytes.Length -gt 100) { throw "the tar entry name '$Name' is longer than ustar's 100-byte field" }
 
-# The zip cannot contain its own hash, so the hash goes beside it. This is the
-# ONE number a user is asked to compare by hand, and it is what the three
-# numbered steps in README-WINDOWS.txt begin with.
-$zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLower()
+        $h = New-Object byte[] 512
+        $put = {
+            param($off, $text)
+            $b = [System.Text.Encoding]::ASCII.GetBytes([string]$text)
+            [Array]::Copy($b, 0, $h, $off, $b.Length)
+        }
+        # An octal field of width n holds n-1 digits and a NUL.
+        $oct = { param($v, $width) ([Convert]::ToString([long]$v, 8)).PadLeft($width - 1, '0') }
+
+        & $put 0   $Name
+        & $put 100 $Mode.PadLeft(7, '0')
+        & $put 108 (& $oct 0 8)              # uid
+        & $put 116 (& $oct 0 8)              # gid
+        & $put 124 (& $oct $Data.Length 12)
+        & $put 136 (& $oct $fixedUnix 12)
+        & $put 148 '        '                # checksum field, as spaces, for the sum below
+        & $put 156 $Type
+        & $put 257 'ustar'                   # magic, NUL-terminated
+        & $put 263 '00'                      # version
+        # uname/gname left empty: a tarball should not carry the build account's name.
+        & $put 329 (& $oct 0 8)              # devmajor
+        & $put 337 (& $oct 0 8)              # devminor
+
+        $sum = 0
+        foreach ($b in $h) { $sum += $b }
+        # Six octal digits, a NUL, then a space -- the layout every extractor
+        # accepts. The width-8 helper above would emit seven digits and no space.
+        & $put 148 (([Convert]::ToString($sum, 8)).PadLeft(6, '0') + "`0 ")
+
+        $Stream.Write($h, 0, 512)
+        if ($Data.Length -gt 0) {
+            $Stream.Write($Data, 0, $Data.Length)
+            $pad = (512 - ($Data.Length % 512)) % 512
+            if ($pad) { $Stream.Write((New-Object byte[] $pad), 0, $pad) }
+        }
+    }
+
+    $empty = New-Object byte[] 0
+    # Directory members, so an extractor never has to invent a mode for a
+    # directory it created implicitly. Every distinct parent, plus the root.
+    #
+    # ONE SORT OVER DIRECTORIES AND FILES TOGETHER, not directories first. The
+    # first version emitted every directory and then every file, which is a
+    # perfectly good tar and is not sorted -- so the archive's entry order was
+    # a function of which member happened to be a directory, and the "entries
+    # are sorted" property the zip has and `tools/check-archive.ps1` asserts did
+    # not hold. A directory name is a prefix of everything inside it, so a
+    # single sort still places each directory ahead of its own contents.
+    $tarMembers = @(
+        @($archiveRoot) + @(
+            $entries | ForEach-Object {
+                $p = Split-Path $_ -Parent
+                if ($p) { "$archiveRoot/$($p.Replace('\', '/'))" }
+            }
+        ) | Sort-Object -Unique | ForEach-Object {
+            [pscustomobject]@{ Name = "$_/"; Rel = $null; Mode = '755'; Type = '5' }
+        }
+    ) + @(
+        $entries | ForEach-Object {
+            [pscustomobject]@{
+                Name = "$archiveRoot/$_"
+                Rel  = $_
+                Mode = if ($executable -contains $_) { '755' } else { '644' }
+                Type = '0'
+            }
+        }
+    ) | Sort-Object -Property Name
+
+    $fs = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+    try {
+        # `$true` as the third argument leaves $fs open for the `finally` to
+        # close; without it the gzip stream disposes it first and the outer
+        # Dispose throws.
+        $gz = [System.IO.Compression.GZipStream]::new(
+            $fs, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+        try {
+            foreach ($m in $tarMembers) {
+                $data = if ($m.Type -eq '5') { $empty } else { Read-Payload $m.Rel }
+                Add-TarEntry $gz $m.Name $data $m.Mode $m.Type
+            }
+            # Two zero blocks: the end-of-archive marker. Without them GNU tar
+            # reads the members and then reports an unexpected end of file.
+            $gz.Write((New-Object byte[] 1024), 0, 1024)
+        } finally { $gz.Dispose() }
+    } finally { $fs.Dispose() }
+}
+
+# The archive cannot contain its own hash, so the hash goes beside it. This is
+# the ONE number a user is asked to compare by hand, and it is what the numbered
+# steps in each README begin with.
+$archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLower()
 [System.IO.File]::WriteAllText(
-    "$zipPath.sha256",
-    "$zipHash  $zipName`n",
+    "$archivePath.sha256",
+    "$archiveHash  $archiveName`n",
     (New-Object System.Text.UTF8Encoding($false))
 )
-Say ("  zip: {0}  ({1:N1} MB, {2} entries)" -f $zipName, ((Get-Item -LiteralPath $zipPath).Length / 1MB), $zipEntries.Count)
+Say ("  archive: {0}  ({1:N1} MB, {2} entries)" -f $archiveName, ((Get-Item -LiteralPath $archivePath).Length / 1MB), $entries.Count)
 
 Say ''
 if (-not $Quiet) { Get-Content $manifestPath | ForEach-Object { Write-Host "  $_" } }
 Say ''
-Say "  $zipHash  $zipName"
+Say "  $archiveHash  $archiveName"
 Say ''
 if (-not $signed) {
     Say 'This build is UNSIGNED.' Yellow

@@ -4,7 +4,10 @@
 
 `tools/release.ps1` builds the binaries, records the commit and toolchain, and
 writes `SHA256SUMS.txt`. It signs if given an identity and says loudly that it
-did not if it was not.
+did not if it was not. It runs on all three platforms and produces one archive
+per platform; `.github/workflows/release.yml` runs it on three GitHub runners
+and attaches the three results to a release. [Cutting a release](#cutting-a-release)
+is the procedure.
 
 **The builds are unsigned, and I cannot change that.** Signing needs
 credentials that are issued to a person or an organisation:
@@ -24,11 +27,208 @@ the point.
 
 ### What an unsigned build costs the user
 
-Windows SmartScreen shows "Windows protected your PC" on first run and needs
-*More info → Run anyway*. macOS Gatekeeper refuses outright and needs a
-right-click → Open, or a trip to System Settings. Neither is fatal; both look
-exactly like what malware looks like, which is the real cost. An academic tool
-asking a labmate to click past a security warning is teaching a bad habit.
+Both look exactly like what malware looks like, which is the real cost. An
+academic tool asking a labmate to click past a security warning is teaching a
+bad habit, so the shipped text does not do that on either platform.
+
+**Windows.** SmartScreen shows *"Windows protected your PC"* on first run.
+Dismissing it is one click and the words for that click appear nowhere in
+anything this project ships — not in `README-WINDOWS.txt`, not in the release
+notes. What the shipped text says instead is what the warning means (Windows
+does not recognise the publisher; it has not found anything wrong with the
+file), what the checksum does and does not prove, and that a managed machine
+refusing it outright is a question for the administrator rather than something
+to work around.
+
+**macOS.** Gatekeeper refuses a downloaded, unsigned, un-notarised binary and
+says *"cannot be opened because the developer cannot be verified"*. The dialog
+offers only *Move to Bin* and *Cancel*.
+
+The remedy that is shipped is the honest one: macOS tags browser downloads with
+an extended attribute named `com.apple.quarantine`, and that tag is what
+Gatekeeper is reacting to, so remove it from the files that were extracted.
+
+```sh
+xattr -d com.apple.quarantine polylinker pl pl-mcp polylinker.so
+```
+
+Not right-click → Open, which is the usual advice. It works, but it is one
+gesture that means "I have decided to trust this" applied identically to
+software the user checked and software they did not — the same click-through
+habit the Windows paragraph above refuses to teach, wearing a different shape.
+The command names exactly which files are being exempted and leaves Gatekeeper,
+SIP and every other program on the machine untouched. `README-MACOS.txt` and
+the release notes both carry it, with that explanation.
+
+**Linux.** No equivalent expectation, so nothing to explain away. The thing a
+Linux user does need to be told is the glibc floor, which is a different kind of
+honesty — see below.
+
+## Cutting a release
+
+One tag. Everything else follows from it.
+
+```sh
+# 1. Bump the version. There is exactly one copy of it.
+#    Cargo.toml, [workspace.package] version = "0.2.0"
+
+# 2. Green gate, locally, on the commit you are about to tag.
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+pwsh -NoProfile -File tools/ci.ps1
+
+# 3. Commit, push, and let CI go green on all three runners.
+
+# 4. Tag. This is the only step that publishes anything.
+git tag -a v0.2.0 -m "Polylinker 0.2.0"
+git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` triggers on `v*`. It also has a
+`workflow_dispatch` trigger, which runs the three builds and leaves the archives
+on the run as workflow artifacts **without** creating a release — that is how
+you answer "would this release build?" without spending a tag.
+
+### What the workflow does
+
+Three jobs in a matrix, `fail-fast: false` so one platform failing does not hide
+the other two, and a fourth job that publishes only if all three produced
+something.
+
+| Runner | Label | Archive |
+|---|---|---|
+| `windows-latest` | `windows-x64` | `polylinker-<version>-windows-x64.zip` |
+| `ubuntu-latest` | `linux-x64` | `polylinker-<version>-linux-x64.tar.gz` |
+| `macos-latest` | `macos-universal` | `polylinker-<version>-macos-universal.tar.gz` |
+
+Every job:
+
+1. **Checks the tag against `Cargo.toml`** before building anything. A `v0.2.0`
+   tag on a tree that still says `0.1.0` would publish three archives named
+   `0.1.0` under a release called `v0.2.0`, each carrying the wrong number in
+   its own manifest. This fails in a minute rather than in twenty.
+2. Builds and packages by running **`tools/release.ps1`** — the same script the
+   local gate runs.
+3. Runs **`tools/check-archive.ps1`** over the archive.
+4. Uploads the archive and its `.sha256`.
+
+The publish job re-downloads all three, re-checks each sidecar and re-runs
+`check-archive.ps1` on the bytes that will actually be attached (an upload and a
+download sit in between), writes one cross-platform `SHA256SUMS.txt` over the
+three archives, renders `tools/release-notes.md`, and calls `gh release create
+--verify-tag`. `gh` is preinstalled on the runner, so no third-party action is
+in the trust path.
+
+To review before the world sees it, add `--draft` to that call. It is not the
+default, because a draft nobody remembers to publish looks exactly like a
+release that failed.
+
+### Why one script and not two
+
+`tools/release.ps1` is platform-aware rather than split into a Windows script
+and a Unix script. Three things in it are platform-specific — the `.exe` suffix,
+the name CPython will load an extension module under, and zip versus tar.gz —
+and one thing in it is not: the `$notices` array, which is the list of licence
+texts that four licences require to accompany every copy. That list has drifted
+from what actually shipped twice, on 2026-08-03 and 2026-08-04, and the thirty
+lines of comment above it are the record. A second script is a second copy of
+that list, and `tools/ci.ps1` would exercise one of them.
+
+The same argument governs the workflow: no job in `release.yml` assembles an
+archive. `tools/ci.ps1` enforces it, by failing if `tar -c`, `Compress-Archive`
+or `zip -r` appears anywhere in that file.
+
+### macOS: one universal binary
+
+`macos-latest` is Apple Silicon. The Intel slice is cross-compiled on the same
+runner (`rustup target add x86_64-apple-darwin`, then `lipo -create`) rather
+than built on a second, Intel runner.
+
+- **Why not arm64 only.** An Intel Mac is still ordinary lab equipment, and
+  "this download does not work on my machine" is where a first release loses
+  people.
+- **Why not two artifacts.** It doubles the choice the user has to get right, on
+  a release page they are reading because they are not a software person.
+- **Why not an Intel runner.** `macos-*-intel` and the `-large` images are
+  billed even for public repositories. `lipo` on the free arm64 runner is not.
+- **What it costs.** A second full LTO build — the slowest job in the matrix by
+  some distance — and roughly double the size of the three executables. That is
+  the price of one download.
+
+`polylinker.so` is joined the same way, and is importable on both architectures.
+
+### Linux: which machines this actually runs on
+
+`ubuntu-latest` is Ubuntu 24.04, whose glibc is **2.39**. glibc is backward but
+not forward compatible, so that is a floor and not a preference:
+
+| | glibc | Runs |
+|---|---|---|
+| Ubuntu 24.04+, Debian 13+, Fedora 40+, RHEL 10+ | ≥ 2.39 | yes |
+| Ubuntu 22.04 | 2.35 | **no** |
+| Debian 12 | 2.36 | **no** |
+| RHEL 9 / Rocky 9 | 2.34 | **no** |
+
+The failure is a bare ``version `GLIBC_2.39' not found`` at exec time, which
+tells a wet-lab user nothing. So it is stated in three places, and one of them
+is inside the archive: `README-LINUX.txt` travels with the binaries, because a
+release page gets read once and a tarball gets copied onto a cluster by somebody
+who never saw it.
+
+**And it is measured rather than asserted.** The Linux job reads the highest
+`GLIBC_x.y` symbol version the four artifacts actually reference, compares it
+with the number written in `README-LINUX.txt`, and fails the release if the
+binaries need more than the file promises. A runner image upgrade raises that
+floor silently; this turns it into a red build instead of a bug report from
+somebody with an older cluster.
+
+Widening the floor means building on an older image — that is the only lever,
+and it is a deliberate change to `runs-on`, not something to discover by
+accident.
+
+**Run-time libraries.** `pl` and `pl-mcp` need nothing but libc. The GUI reaches
+X11, xkbcommon, Wayland and EGL/GL through `dlopen` rather than linking them, so
+they do not appear in `DT_NEEDED` and a missing one shows up as a failure to
+start. `README-LINUX.txt` lists them, with the Debian/Ubuntu package names.
+Notably **not** GTK: there is no gtk crate anywhere in `Cargo.lock`, and `rfd`'s
+Linux path is the XDG portal over Wayland. (`libgtk-3-dev` is still in the
+apt-install line in both workflows. It is not needed to build either; removing
+it belongs in `ci.yml`, where a wrong guess costs a red pull request instead of
+a red release.)
+
+### Archive formats
+
+`.zip` for Windows, `.tar.gz` for both Unixes — the convention, and on the Unix
+side also the only one of the two that works. A zip has no portable place to
+record a file mode, so `unzip` clears the executable bit and the first thing the
+user does is `chmod +x`; a tar carries the mode in its header. Windows keeps the
+zip because Explorer opens one with nothing installed and does not open a
+`.tar.gz` at all.
+
+Both are written by hand in `release.ps1` — entries sorted, timestamps pinned to
+2000-01-01, uid/gid zero and no `uname`/`gname`, compression fixed — so the
+archive is a function of its contents rather than of the day and the machine it
+was built on. `Compress-Archive` cannot do the first two, and shelling out to
+`tar` would additionally stamp the build account into every header.
+
+### What is checked, and where
+
+| Check | Where |
+|---|---|
+| `release.ps1` runs; its manifest is set-equal to `dist/` | `tools/ci.ps1`, locally |
+| ≥ 19 files hashed, ≥ 7 licence texts, `NOTICE.txt` / `LICENSE.txt` / `features/NOTICE.txt` by name | `tools/ci.ps1` |
+| The zip is a deterministic function of `dist/` | `tools/ci.ps1` |
+| The **archive** verifies against its own `SHA256SUMS.txt`, licence set included | `tools/check-archive.ps1`, locally and on all three runners |
+| The tar writer produces something GNU tar or bsdtar will read | `tools/ci.ps1` (forces `-ArchiveFormat tar.gz` on Windows) |
+| `release.yml` parses, covers three OSes, publishes only on a tag | `tools/ci.ps1` (PyYAML) |
+| `release.yml` packs no archive of its own, and every `tools/` path it names exists | `tools/ci.ps1` |
+| The release notes still carry the quarantine remedy, SmartScreen, the glibc floor, and the checksum caveat — and still contain no "Run anyway" | `tools/ci.ps1` |
+| The measured glibc floor matches `README-LINUX.txt` | `release.yml`, Linux job |
+
+The tar writer is forced on Windows for a specific reason: it is Unix-only code,
+this gate is the only thing that runs on a developer machine, and that machine
+is Windows. An archive format whose only exercise is a green job on a runner is
+an archive format nobody has looked at the output of.
 
 ## The Windows install path
 
@@ -232,19 +432,38 @@ revisiting the day a certificate exists.
 
 ## macOS notarisation
 
-Must run on macOS, so it is not in `release.ps1`:
+Not automated, and not because it would be hard to write. It needs an Apple ID
+and an app-specific password, and a release script that can hold those is a
+release script that can leak them — the same rule that keeps key handling out of
+the Windows path. `release.ps1 -MacIdentity` prints a pointer to this section and
+does nothing else.
+
+The day a Developer ID certificate exists, this runs on the universal binary
+after `lipo` and before packaging:
 
 ```bash
-codesign --force --options runtime --timestamp \
-  --sign "Developer ID Application: NAME (TEAMID)" dist/polylinker
-ditto -c -k --keepParent dist/polylinker dist/polylinker.zip
+for f in target/universal/pl target/universal/polylinker target/universal/pl-mcp; do
+  codesign --force --options runtime --timestamp \
+    --sign "Developer ID Application: NAME (TEAMID)" "$f"
+done
+ditto -c -k --keepParent target/universal dist/polylinker.zip
 xcrun notarytool submit dist/polylinker.zip \
   --apple-id APPLE_ID --team-id TEAMID --password APP_SPECIFIC_PASSWORD --wait
-xcrun stapler staple dist/polylinker
+xcrun stapler staple target/universal/polylinker
 ```
 
 `--options runtime` is not optional: notarisation rejects a binary without the
 hardened runtime, and the rejection message does not say so clearly.
+
+Two things change when that happens, and both should be done together: the
+`xattr` paragraph comes out of `README-MACOS.txt` and the release notes, and the
+Apple ID and password become repository secrets rather than anything a script
+constructs. `codesign` signs the individual Mach-O files; a stapled ticket
+attaches to a bundle or a disk image, so notarisation of bare executables
+verifies online at first launch rather than offline. If offline first launch
+matters — and for a tool whose pitch is that it needs no network, it does — that
+is the point at which a `.app` bundle and a `.dmg` become worth building, and
+not before.
 
 ## There is no auto-updater, on purpose
 

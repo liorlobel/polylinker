@@ -1,0 +1,363 @@
+name: Release
+
+# Cut a release for Windows, macOS and Linux from one tag.
+#
+# WHAT THIS FILE DOES NOT CONTAIN, and deliberately: any knowledge of what goes
+# into an archive. Every job below runs `tools/release.ps1`, which is the same
+# script `tools/ci.ps1` exercises on a developer machine, and then checks the
+# result with `tools/check-archive.ps1`. There is no `tar -cf` here and no file
+# list in YAML.
+#
+# That is not tidiness. Four of the licences this project ships under require
+# their text to accompany every copy, and the packaging step has dropped them
+# once already -- see the comments on `$notices` in tools/release.ps1. A file
+# list in this workflow would be a second place for that to happen, in a
+# language the local gate cannot run and on a machine nobody watches.
+#
+# Nothing here signs anything. There is no certificate for any of the three
+# platforms; see docs/RELEASING.md. The artifacts are unsigned, they say so, and
+# the release notes say what that costs the user on each platform.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Read-only by default. The one job that needs to write asks for it itself.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # NOTE THE ABSENCE OF `RUSTFLAGS: -D warnings`, which ci.yml sets at workflow
+  # level. Lint is CI's job and it has already run on this commit. Here it would
+  # mean a new warning in a dependency -- or a rustc release with a new lint --
+  # failing a release build of code that compiles and works, at the one moment
+  # when the tag has already been pushed and cannot be un-pushed.
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Three independent artifacts. One platform failing should not hide
+      # whether the other two built.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+          - os: ubuntu-latest
+            label: linux-x64
+          # macos-latest is Apple Silicon. The x86_64 slice is CROSS-COMPILED
+          # here and joined with `lipo` rather than built on a second, Intel
+          # runner: `macos-*-intel` and the `-large` images are billed even for
+          # public repositories, and a universal binary is one download that
+          # works on every Mac in a lab rather than a choice the user has to get
+          # right. It costs a second full LTO build and roughly doubles the size
+          # of the three executables. See docs/RELEASING.md.
+          - os: macos-latest
+            label: macos-universal
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # THE TAG AND Cargo.toml MUST AGREE, and this runs before anything is
+      # built so the answer arrives in one minute rather than twenty.
+      #
+      # `release.ps1` reads the version out of Cargo.toml and nowhere else, so
+      # a tag of v0.2.0 on a tree that still says 0.1.0 would publish three
+      # archives called polylinker-0.1.0-* under a release called v0.2.0, and
+      # every one of them would carry the wrong number in its own manifest.
+      - name: The tag names the version in Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $version = ''
+          foreach ($line in (Get-Content 'Cargo.toml')) {
+              if ($line -match '^\s*version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
+          }
+          if (-not $version) { throw 'could not read the version out of Cargo.toml' }
+          if ($tag -ne "v$version") {
+              throw "the tag is $tag but Cargo.toml says $version. Bump Cargo.toml and re-tag; do not rename the tag."
+          }
+          Write-Host "$tag matches Cargo.toml $version"
+
+      # No `targets:` here. The second Apple triple is added by `rustup target
+      # add` in the macOS step below instead, so the matrix does not have to
+      # carry an empty string for the two platforms that need nothing -- and so
+      # this workflow does not depend on how the action treats one.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.label }}
+
+      # eframe needs these to BUILD on Linux; the other two platforms ship
+      # their own windowing.
+      #
+      # Copied verbatim from ci.yml, INCLUDING libgtk-3-dev, which a read of
+      # Cargo.lock says is not actually needed -- there is no gtk crate anywhere
+      # in the graph, and rfd reaches the file dialog through the XDG portal
+      # over Wayland. Dropping it belongs in ci.yml, where a wrong guess costs a
+      # red build on a pull request. A release workflow is not where to test a
+      # hypothesis: the tag is already pushed by the time this runs.
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
+
+      # ---------------------------------------------------------------- macOS
+      - name: Build both macOS slices and join them
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          # Both slices are built explicitly by triple, including the runner's
+          # own, so `target/universal` is assembled from two directories that
+          # are named the same way and neither is `target/release`. PyO3's abi3
+          # feature is what makes the x86_64 half work without a matching Python
+          # interpreter on this machine: an abi3 extension links against the
+          # stable ABI and needs no target libpython.
+          cargo build --release --workspace --locked --target aarch64-apple-darwin
+          cargo build --release --workspace --locked --target x86_64-apple-darwin
+          mkdir -p target/universal
+          for f in pl polylinker pl-mcp libpolylinker.dylib; do
+            lipo -create -output "target/universal/$f" \
+              "target/aarch64-apple-darwin/release/$f" \
+              "target/x86_64-apple-darwin/release/$f"
+          done
+          for f in pl polylinker pl-mcp libpolylinker.dylib; do
+            echo "== $f"
+            lipo -info "target/universal/$f"
+          done
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: pwsh
+        # -SkipBuild is safe here and only here: the step above built both
+        # slices from this checkout thirty seconds ago, and release.ps1 refuses
+        # -SkipBuild without an explicit -BinDir precisely so it cannot be used
+        # against a stale target/release.
+        run: |
+          ./tools/release.ps1 -Out dist -BinDir target/universal -SkipBuild -PlatformLabel macos-universal
+
+      # -------------------------------------------------------- Windows/Linux
+      - name: Package
+        if: runner.os != 'macOS'
+        shell: pwsh
+        run: ./tools/release.ps1 -Out dist
+
+      # ---------------------------------------------------------------- Linux
+      #
+      # WHAT THE LINUX BINARY ACTUALLY REQUIRES, measured rather than assumed,
+      # and asserted against what README-LINUX.txt tells the user.
+      #
+      # glibc is backward but not forward compatible, so the highest GLIBC_x.y
+      # symbol version the binaries reference IS the floor: below it they do not
+      # start, and the error is a bare "version `GLIBC_2.xx' not found". That
+      # number is a property of the runner image, which GitHub upgrades on its
+      # own schedule, so a claim written into a text file goes stale silently
+      # and the first person to find out is a user on an older cluster.
+      #
+      # The claimed floor is read out of README-LINUX.txt rather than repeated
+      # here: one copy, and the file that makes the promise is the file that
+      # gets checked.
+      - name: The glibc floor, measured and checked against README-LINUX.txt
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          claimed=$(grep -oE 'glibc [0-9]+\.[0-9]+' tools/readme/README-LINUX.txt | head -1 | awk '{print $2}')
+          if [ -z "$claimed" ]; then
+            echo "::error::tools/readme/README-LINUX.txt no longer states a glibc version, so nothing here can be checked against it"
+            exit 1
+          fi
+          required=$(for f in dist/pl dist/polylinker dist/pl-mcp dist/polylinker.so; do
+              readelf -V "$f" 2>/dev/null | grep -oE 'GLIBC_[0-9]+\.[0-9]+' || true
+            done | sed 's/GLIBC_//' | sort -uV | tail -1)
+          echo "runner glibc: $(ldd --version | head -1)"
+          echo "highest GLIBC_ symbol version required by the artifacts: $required"
+          echo "README-LINUX.txt claims: $claimed"
+          if [ -z "$required" ]; then
+            echo "::error::found no GLIBC_ version references at all; this check measured nothing"
+            exit 1
+          fi
+          if [ "$(printf '%s\n%s\n' "$claimed" "$required" | sort -V | tail -1)" != "$claimed" ]; then
+            echo "::error::these binaries need glibc $required but README-LINUX.txt promises they run on $claimed. Update README-LINUX.txt, or pin the runner to an older image."
+            exit 1
+          fi
+          {
+            echo "## Linux runtime requirements"
+            echo
+            echo '```'
+            echo "glibc floor: $required  (runner: $(ldd --version | head -1))"
+            echo
+            for f in dist/pl dist/polylinker dist/pl-mcp dist/polylinker.so; do
+              echo "== $f"
+              readelf -d "$f" | grep NEEDED || echo "  (no DT_NEEDED beyond the loader)"
+            done
+            echo '```'
+            echo
+            echo "Anything the GUI opens with dlopen -- X11, xkbcommon, Wayland, EGL/GL --"
+            echo "will NOT appear above. That is the point of recording it: the DT_NEEDED"
+            echo "list is the part that is a hard link-time fact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # -------------------------------------------------------- every platform
+      #
+      # The archive is checked from the outside, as a downloader receives it:
+      # its own SHA256SUMS.txt is verified against the bytes inside it, and the
+      # licence set is asserted by name and by count. `release.ps1` builds
+      # `dist/` correctly; this is the only thing that says the ARCHIVE is what
+      # `dist/` was. That gap is where the licences went missing before.
+      - name: Check the archive
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem dist -File | Where-Object { $_.Name -match '\.(zip|tar\.gz)$' }
+          if ($archive.Count -ne 1) { throw "expected exactly one archive in dist/, found $($archive.Count)" }
+          ./tools/check-archive.ps1 -Archive $archive.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'the archive failed its check' }
+
+      - name: Show the manifest
+        shell: pwsh
+        run: Get-Content dist/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polylinker-${{ matrix.label }}
+          # The archive and its sidecar only. Everything else in dist/ is
+          # already inside the archive.
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: publish the release
+    needs: build
+    # A tag, and only a tag, publishes. `workflow_dispatch` runs the three
+    # builds and leaves the artifacts on the run, which is what you want when
+    # the question is "would this release build?" rather than "release it".
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # THREE ARCHIVES OR NOTHING.
+      #
+      # `fail-fast: false` above means one platform can fail while the others
+      # succeed, which is right for diagnosis and wrong for publishing: a
+      # release page listing Windows and Linux, with macOS quietly absent
+      # because that job went red, is worse than no release page. `needs:` alone
+      # does not cover it -- it covers the job failing, not the job producing
+      # nothing.
+      - name: Three platforms, checked again after transit
+        id: check
+        shell: pwsh
+        run: |
+          $version = ''
+          foreach ($line in (Get-Content 'Cargo.toml')) {
+              if ($line -match '^\s*version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
+          }
+          $expected = @(
+              "polylinker-$version-windows-x64.zip"
+              "polylinker-$version-linux-x64.tar.gz"
+              "polylinker-$version-macos-universal.tar.gz"
+          )
+          foreach ($name in $expected) {
+              $p = Join-Path 'artifacts' $name
+              if (-not (Test-Path -LiteralPath $p)) { throw "$name was not produced. All three platforms publish together or none do." }
+              # The sidecar, re-checked. Between release.ps1 computing it and
+              # here lie an upload and a download.
+              $side = "$p.sha256"
+              if (-not (Test-Path -LiteralPath $side)) { throw "$name has no .sha256 sidecar" }
+              $recorded = ((Get-Content $side -Raw) -split '  ')[0].Trim()
+              $actual = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()
+              if ($actual -ne $recorded) { throw "$name does not match its sidecar after transit through the artifact store" }
+              # And the whole archive check again, on the bytes that will
+              # actually be attached to the release.
+              #
+              # THE EXIT CODE IS CHECKED HERE, not left to the shell wrapper.
+              # `check-archive.ps1` reports by exiting non-zero, and `exit` in a
+              # called script returns to its caller rather than ending the job --
+              # so with three archives in a loop, only the LAST one's result
+              # survived in $LASTEXITCODE. A failure on Windows followed by two
+              # clean Unix archives would have published all three.
+              ./tools/check-archive.ps1 -Archive $p
+              if ($LASTEXITCODE -ne 0) { throw "$name failed its archive check" }
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+
+      # One manifest over the three downloads, so a user can verify the file
+      # they took without opening it first. The per-archive SHA256SUMS.txt
+      # inside each one covers the notices; this covers the archives.
+      - name: The cross-platform manifest
+        run: |
+          set -euo pipefail
+          cd artifacts
+          rm -f SHA256SUMS.txt
+          sha256sum polylinker-*.zip polylinker-*.tar.gz | sort -k2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Assemble the release notes
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # The template's leading HTML comment explains why it is a file and
+          # not a heredoc. That is for whoever edits it, not for the release
+          # page, so it is stripped rather than rendered invisibly into the body.
+          sed -e '/^<!--/,/^-->/d' \
+              -e "s/{{VERSION}}/$VERSION/g" -e "s/{{TAG}}/$TAG/g" \
+            tools/release-notes.md > notes.md
+          {
+            echo
+            echo '## Checksums'
+            echo
+            echo '```'
+            cat artifacts/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "Built from \`$GITHUB_SHA\` by [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+          } >> notes.md
+          cat notes.md
+
+      # `gh`, which is preinstalled, rather than a third-party release action.
+      # One less thing whose maintainer can push a new tag over an old one, in a
+      # project whose entire pitch is that it fetches and executes nothing.
+      #
+      # `--verify-tag` refuses to create a release for a tag that does not exist
+      # in the repository. To review before the world sees it, add `--draft`
+      # here; that is a deliberate one-word change and not the default, because
+      # a draft that nobody remembers to publish looks exactly like a release
+      # that failed.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "Polylinker $TAG" \
+            --notes-file notes.md \
+            --verify-tag \
+            artifacts/polylinker-*.zip \
+            artifacts/polylinker-*.tar.gz \
+            artifacts/polylinker-*.sha256 \
+            artifacts/SHA256SUMS.txt

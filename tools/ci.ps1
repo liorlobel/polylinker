@@ -852,6 +852,68 @@ Write-Host "`nrelease" -ForegroundColor Cyan
 $script:release = $null
 $script:releaseFiles = @()
 
+# EVERY FILE release.ps1 READS MUST BE TRACKED BY GIT.
+#
+# A release is cut from a fresh checkout on a runner, so a file that exists on
+# this machine but is not in the repository is a file that will not be there.
+# `release.ps1` throws when a notice source is missing -- which is right, and
+# which happens twenty minutes after a tag that cannot be un-pushed.
+#
+# This is not hypothetical. `README-LINUX.txt` and `README-MACOS.txt` were first
+# written to `tools/dist/`, and `.gitignore:11` is a bare `dist/` -- meant for a
+# Node build directory, with no leading slash, so it matches at EVERY depth.
+# `git check-ignore` confirmed both files were ignored: they would have been
+# invisible to `git add`, absent from the runner's checkout, and the Linux and
+# macOS jobs would have died on that throw while Windows -- whose readme lives
+# under `tools/installer/` -- sailed through. Moving them to `tools/readme/`
+# fixed those two files. This stops the next one.
+#
+# The paths are READ OUT OF release.ps1 rather than repeated here. Any string
+# literal in that script naming a file that exists is a file the release depends
+# on, so this check has no list of its own to drift.
+#
+# PARSED WITH THE POWERSHELL PARSER, NOT WITH A REGEX. The obvious
+# `'([^']+)'` finds nine strings in a file that has a hundred and twenty,
+# because release.ps1's prose is full of apostrophes -- "cargo's", "the user's",
+# "PowerShell's" -- and every one of them shifts the pairing, so most of the
+# real literals end up inside a "string" that started at a comment. The floor
+# below is what caught that; without it this step would have reported ok while
+# checking one file. A language has a parser; use it.
+Step 'every file the release reads is committed' {
+    $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot 'release.ps1'), [ref]$null, [ref]$errs)
+    if ($errs) { throw "release.ps1 does not parse: $($errs[0])" }
+    $paths = @($ast.FindAll(
+            { param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) |
+        ForEach-Object { $_.Value } |
+        Sort-Object -Unique |
+        Where-Object { $_ -match '^[\w][\w./-]*$' } |
+        # -PathType Leaf, so 'dist' and 'target/release' fall out rather than
+        # being asked whether a directory is tracked.
+        Where-Object { Test-Path -LiteralPath (Join-Path $repo $_) -PathType Leaf })
+
+    # A floor, because a regex that stopped matching would enumerate nothing and
+    # report success. Eleven notices, three installer files, the icon, two
+    # readmes and Cargo.toml is eighteen.
+    if ($paths.Count -lt 12) {
+        throw "only $($paths.Count) input file(s) found in release.ps1; this step parsed almost nothing and proved nothing"
+    }
+
+    $untracked = @()
+    foreach ($p in $paths) {
+        git ls-files --error-unmatch -- $p 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { $untracked += $p }
+    }
+    if ($untracked) {
+        throw ("the release reads files git is not tracking, so they will not exist in a fresh checkout:`n        " +
+               ($untracked -join "`n        ") +
+               "`n        Check .gitignore -- a pattern with no leading slash matches at every depth.")
+    }
+    Write-Host "        $($paths.Count) input file(s), all tracked" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+} { Test-Path (Join-Path $repo '.git') }
+
 Step 'release script and its manifest' {
     $out = Join-Path $env:TEMP ('pl-release-check-' + $PID)
     Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
@@ -1435,7 +1497,275 @@ Step 'the zip is a deterministic function of dist/' {
     } finally { $z.Dispose() }
 } { $script:release }
 
+# The archive, checked the way a downloader receives it rather than the way this
+# machine built it.
+#
+# The step above proves the zip is a deterministic function of dist/. This proves
+# the zip's own SHA256SUMS.txt verifies against the bytes inside the zip, and
+# that the licence set is in there by name and by count. Between those two
+# statements sits the packaging step, and the packaging step is where seven
+# licence texts went missing on 2026-07-30.
+#
+# The same script runs on all three runners in .github/workflows/release.yml,
+# against the archive that will actually be attached to the release, so this is
+# a local rehearsal of a check that also happens where it matters.
+Step 'the zip verifies against its own manifest' {
+    $zip = Get-ChildItem -LiteralPath $script:release -Filter '*.zip'
+    if (-not $zip) { throw 'no zip was produced' }
+    & "$PSScriptRoot/check-archive.ps1" -Archive $zip.FullName
+} { $script:release }
+
 if ($script:release) { Remove-Item -Recurse -Force $script:release -ErrorAction SilentlyContinue }
+
+Write-Host "`nrelease workflow" -ForegroundColor Cyan
+
+# THE UNIX ARCHIVE, BUILT AND CHECKED ON THIS MACHINE.
+#
+# `release.ps1` writes a tar.gz on Linux and macOS -- ustar headers and gzip,
+# both hand-written, for the same determinism reason the zip is hand-written and
+# additionally because a zip has no portable place to record a file mode, so
+# every Unix user would begin with `chmod +x`.
+#
+# None of that code would otherwise run anywhere anybody looks. This gate is the
+# only thing that runs on a developer machine, this machine is Windows, and a
+# tar writer whose only exercise is a green job on a runner is a tar writer
+# nobody has read the output of. So `-ArchiveFormat` exists and this step forces
+# it: the payload is the Windows one, which is not the point -- the container is.
+#
+# Checked twice. `check-archive.ps1` reads the tar with this project's own
+# reader, and then `tar.exe` reads it with somebody else's, which is the same
+# argument the oracle steps above make. Windows 11 ships bsdtar as
+# System32\tar.exe and Git for Windows ships GNU tar; either satisfies the
+# precondition, and between them they disagree about enough of the format to be
+# worth having.
+Step 'the tar.gz writer produces an archive two other tools can read' {
+    $out = Join-Path $env:TEMP ('pl-tar-check-' + $PID)
+    Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
+    try {
+        & "$PSScriptRoot/release.ps1" -Out $out -ArchiveFormat tar.gz -Quiet 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'release.ps1 -ArchiveFormat tar.gz failed' }
+        $tar = Get-ChildItem -LiteralPath $out -Filter '*.tar.gz'
+        if (-not $tar) { throw 'no tar.gz was produced' }
+
+        & "$PSScriptRoot/check-archive.ps1" -Archive $tar.FullName
+        if ($LASTEXITCODE -ne 0) { throw 'the tar.gz failed its own archive check' }
+
+        # An independent reader. `-t` alone would accept a header this project
+        # and that tool happen to misread the same way, so the payload is
+        # extracted and three files are compared byte for byte against dist/.
+        #
+        # RELATIVE PATHS, from inside $out. GNU tar reads `host:path` as an rsh
+        # target, so handing it `C:\Users\...\x.tar.gz` makes it try to resolve a
+        # machine called C and fail with "Cannot connect to C: resolve failed" --
+        # which is what it did here, while bsdtar in System32 accepted the same
+        # archive happily. Two readers disagreeing about the ARGUMENT is not
+        # evidence about the format, so neither gets a drive letter.
+        $tool = (Get-Command tar.exe -ErrorAction SilentlyContinue).Source
+        New-Item -ItemType Directory -Force (Join-Path $out 'extracted') | Out-Null
+        Push-Location $out
+        try {
+            & $tool -xzf $tar.Name -C extracted
+        } finally { Pop-Location }
+        if ($LASTEXITCODE -ne 0) { throw "$tool refused the archive" }
+        $root = Get-ChildItem -LiteralPath (Join-Path $out 'extracted') -Directory
+        if ($root.Count -ne 1) { throw "extracting produced $($root.Count) top-level directories" }
+        foreach ($probe in 'SHA256SUMS.txt', 'licences/Phosphor-MIT.txt', 'features/NOTICE.txt') {
+            $a = Join-Path $out ($probe.Replace('/', '\'))
+            $b = Join-Path $root[0].FullName ($probe.Replace('/', '\'))
+            if (-not (Test-Path -LiteralPath $b)) { throw "$probe did not survive a round trip through $tool" }
+            $ha = (Get-FileHash -LiteralPath $a -Algorithm SHA256).Hash
+            $hb = (Get-FileHash -LiteralPath $b -Algorithm SHA256).Hash
+            if ($ha -ne $hb) { throw "$probe came back out of the tar with different bytes" }
+        }
+        Write-Host "        tar.gz read by check-archive.ps1 and by $tool, three files compared byte for byte" -ForegroundColor DarkGray
+        $global:LASTEXITCODE = 0
+    } finally {
+        Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
+    }
+} { Have tar.exe }
+
+# The release workflow, checked without running it.
+#
+# Nothing here proves the workflow WORKS -- only a pushed tag does that, and the
+# first one will be the first time these three jobs have ever executed. What can
+# be established from a checkout is that the file is well-formed YAML, that it
+# covers three operating systems rather than the one this machine is, and that
+# every path it names exists. A typo in a runner label is a green two-platform
+# release; a typo in a path is a red job twenty minutes after a tag that cannot
+# be taken back.
+#
+# PyYAML, because PowerShell has no YAML parser and a regex is not a parse. The
+# step below does the content assertions with no interpreter at all, so a
+# Rust-only machine still checks something rather than skipping the subject.
+Step 'the release workflow parses and covers three platforms' {
+    # A here-string piped to `python -`, not a shell heredoc: `<<'PY'` is bash
+    # and PowerShell has no such operator. Single-quoted, so nothing in the
+    # Python below is interpolated on its way there.
+    $prog = @'
+import sys, yaml
+
+wf = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+
+# YAML 1.1 says the bare word `on` is a boolean, and PyYAML obeys, so the
+# trigger block comes back under the key True rather than under "on". Reading
+# wf["on"] here raises KeyError on a perfectly valid workflow -- which is the
+# kind of bug that makes a checker look broken and get deleted.
+triggers = wf.get("on", wf.get(True))
+problems = []
+
+tags = (triggers or {}).get("push", {}).get("tags") or []
+if "v*" not in tags:
+    problems.append(f"push.tags is {tags!r}; a v* tag is what cuts a release")
+if "workflow_dispatch" not in (triggers or {}):
+    problems.append("there is no workflow_dispatch trigger, so a release cannot be rehearsed without tagging")
+
+if wf.get("permissions", {}).get("contents") != "read":
+    problems.append("the workflow is not read-only by default")
+if "RUSTFLAGS" in (wf.get("env") or {}):
+    problems.append("RUSTFLAGS is set workflow-wide; a new warning would fail a release build of code that works")
+
+jobs = wf.get("jobs") or {}
+build = jobs.get("build")
+include = []
+if not build:
+    problems.append("there is no build job")
+else:
+    include = build.get("strategy", {}).get("matrix", {}).get("include") or []
+    runners = sorted(e.get("os") for e in include)
+    want = ["macos-latest", "ubuntu-latest", "windows-latest"]
+    if runners != want:
+        problems.append(f"the matrix runs on {runners}, not {want}")
+    labels = sorted(e.get("label") for e in include)
+    if labels != ["linux-x64", "macos-universal", "windows-x64"]:
+        problems.append(f"the platform labels are {labels}")
+    if build.get("strategy", {}).get("fail-fast") is not False:
+        problems.append("fail-fast is not disabled; one platform failing would hide the other two")
+
+pub = jobs.get("publish")
+if not pub:
+    problems.append("there is no publish job")
+else:
+    if pub.get("needs") != "build":
+        problems.append("publish does not depend on build")
+    if pub.get("permissions", {}).get("contents") != "write":
+        problems.append("publish cannot write a release")
+    if "refs/tags/v" not in str(pub.get("if", "")):
+        problems.append("publish is not gated on a tag, so workflow_dispatch would publish")
+
+if problems:
+    for p in problems:
+        print("  " + p)
+    sys.exit(1)
+print(f"  parses; {len(include)} platforms, publish gated on a tag")
+'@
+    $prog | python - "$repo/.github/workflows/release.yml"
+} { (HavePy 'yaml') -and (Test-Path "$repo/.github/workflows/release.yml") }
+
+# What the workflow must NOT contain, and every file it must be able to find.
+#
+# THE FIRST HALF IS THE POINT. The licence obligation survives a three-platform
+# release only because no platform assembles its own archive: all three run
+# `tools/release.ps1`, whose `$notices` array is the single list, and which
+# `tools/ci.ps1` exercises above on this machine. The moment a job in that YAML
+# builds a tarball itself -- one `tar -czf` in a run: block, for the one
+# platform where the script was inconvenient -- there is a second file list,
+# in a language this gate cannot run, and the failure of 2026-07-30 has a new
+# place to happen. So it is forbidden by name.
+#
+# No interpreter, so this runs everywhere the gate does.
+Step 'the release workflow assembles nothing itself' {
+    $wfPath = "$repo/.github/workflows/release.yml"
+    if (-not (Test-Path $wfPath)) { throw 'there is no release workflow' }
+    # COMMENTS STRIPPED FIRST. The workflow's own header explains why it packs
+    # nothing itself, and does so by naming `tar -cf` -- so the first run of
+    # this step failed on the sentence describing the rule it enforces. A
+    # checker that cannot tell code from prose will be silenced rather than
+    # satisfied. YAML comments start at `#` and run to end of line; a `#` inside
+    # a quoted scalar would survive, and none of the banned strings below is one.
+    $wf = (Get-Content -LiteralPath $wfPath | ForEach-Object { $_ -replace '(^|\s)#.*$', '' }) -join "`n"
+    $problems = @()
+
+    # Packaging facilities. `tar -c`, not `tar`, because the workflow may
+    # legitimately LIST or extract one.
+    foreach ($banned in 'Compress-Archive', 'tar -c', 'tar c', 'zip -r', '7z a', 'ditto -c') {
+        if ($wf -match [regex]::Escape($banned)) {
+            $problems += "the workflow packs an archive itself ($banned); the archive must come from tools/release.ps1 so the licence set has one source"
+        }
+    }
+    # And it must actually call the two scripts.
+    foreach ($required in 'tools/release.ps1', 'tools/check-archive.ps1') {
+        $leaf = Split-Path -Leaf $required
+        if ($wf -notmatch [regex]::Escape($leaf)) { $problems += "the workflow never runs $required" }
+    }
+    # No auto-updater, no telemetry, no network at run time -- and nothing here
+    # that would introduce one. docs/RELEASING.md, and the same list the
+    # installer is held to.
+    foreach ($banned in 'Invoke-WebRequest', 'DownloadString', 'curl -s http', 'wget ') {
+        if ($wf -match [regex]::Escape($banned)) { $problems += "the workflow fetches something at build time ($banned)" }
+    }
+
+    # Every repository path the workflow names must exist. A release workflow
+    # referring to a file that was renamed fails twenty minutes after a tag.
+    # `(?:\./)?` because the workflow invokes these as `./tools/release.ps1` --
+    # a lookbehind that also excluded `/` matched none of them, and the floor
+    # below is what caught that rather than a green step proving nothing.
+    $named = [regex]::Matches($wf, '(?<![\w.-])(?:\./)?(tools/[\w./-]+)') |
+             ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+    foreach ($p in $named) {
+        if (-not (Test-Path (Join-Path $repo $p))) { $problems += "the workflow names $p, which does not exist" }
+    }
+    if ($named.Count -lt 3) { $problems += "only $($named.Count) tools/ path(s) found in the workflow; this check parsed almost nothing" }
+
+    if ($problems) { throw ($problems -join "`n        ") }
+    Write-Host "        $($named.Count) repository paths, all present; no packaging facility in the workflow" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
+
+# The three honest paragraphs, which are the ones that erode.
+#
+# Every artifact is unsigned and will stay unsigned until somebody pays for a
+# certificate. The release notes are the only place most users will read what
+# that means, and the specific remedy for macOS -- clearing the quarantine
+# attribute on named files -- is the difference between explaining a security
+# decision and telling somebody to click through one. The Windows counterpart is
+# the ABSENCE of the click-through: `docs/RELEASING.md` states that the words
+# "More info" and "Run anyway" appear nowhere in anything shipped, and until now
+# nothing checked that.
+Step 'the release notes still say what an unsigned build costs' {
+    $notes = Join-Path $repo 'tools/release-notes.md'
+    if (-not (Test-Path $notes)) { throw 'there is no release-notes template' }
+    $t = [System.IO.File]::ReadAllText($notes)
+    $problems = @()
+    foreach ($required in @(
+        'xattr -d com.apple.quarantine',   # the honest macOS remedy, spelled out
+        'SmartScreen',                      # named, so the user recognises the dialog
+        'glibc',                            # the Linux artifact's real limit
+        'no updater',                       # the product promise
+        'licences/'                         # where the obligation travels
+    )) {
+        if ($t -notmatch [regex]::Escape($required)) { $problems += "the release notes no longer mention '$required'" }
+    }
+    # The click-through, in the shipped text and in the notes.
+    foreach ($f in @($notes, (Join-Path $repo 'tools/installer/README-WINDOWS.txt'),
+                     (Join-Path $repo 'tools/readme/README-MACOS.txt'),
+                     (Join-Path $repo 'tools/readme/README-LINUX.txt'))) {
+        $body = [System.IO.File]::ReadAllText($f)
+        foreach ($phrase in 'Run anyway', 'More info →', 'More info ->') {
+            # `More info` alone is not banned: README-WINDOWS.txt names the
+            # dialog in order to explain it. The instruction is the arrow
+            # followed by the button, which is what a reader copies.
+            if ($body -match [regex]::Escape($phrase)) {
+                $problems += "$(Split-Path -Leaf $f) tells the user to '$phrase'; docs/RELEASING.md says that habit is not taught here"
+            }
+        }
+        if ($body -notmatch 'proves nothing about who') {
+            $problems += "$(Split-Path -Leaf $f) no longer says what the checksum does NOT prove"
+        }
+    }
+    if ($problems) { throw ($problems -join "`n        ") }
+    Write-Host '        quarantine remedy, SmartScreen, glibc floor and the checksum caveat all present' -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
 
 Write-Host "`nbenchmark" -ForegroundColor Cyan
 Step 'polylinker-bench' {
