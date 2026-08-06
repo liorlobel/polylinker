@@ -288,6 +288,39 @@ fn bands(mol: &Molecule) -> Vec<Band> {
         .collect()
 }
 
+/// One place a primer anneals, as the map needs it.
+///
+/// # Why the map is told at all
+///
+/// A list of coordinates is not an answer to "where does this oligo land". The
+/// map is the picture a plasmid biologist makes decisions from, and a binding
+/// site that exists only in a side panel is a site they will not see next to the
+/// feature it lands in. That was the whole argument for putting the sequence
+/// SELECTION on the backbone (see `sel` below, and its comment), and it applies
+/// with more force here: the finding is usually that there are TWO sites, which
+/// no single selection can show.
+///
+/// # Why this is not a `Segment`
+///
+/// `pl_core::Segment` is 1-based inclusive with `end < start` for a wrap, which
+/// these fields also are — but a `Segment` carries no strand, and the strand is
+/// half the information. A forward and a reverse primer at the same coordinates
+/// prime in opposite directions and give different products.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrimerMark {
+    /// 1-based inclusive on the PLUS strand, whichever strand the primer is on.
+    /// The FOOTPRINT only: a 5' tail does not pair and has no position here.
+    pub start: u64,
+    /// 1-based inclusive; `end < start` means the footprint crosses the origin.
+    pub end: u64,
+    /// The primer reads as the minus strand, so it extends leftwards and its 3'
+    /// end is at `start`.
+    pub reverse: bool,
+    /// The row the panel has selected. Drawn thicker, and it is also the one
+    /// carrying the ordinary selection, so the two agree.
+    pub focus: bool,
+}
+
 pub struct MapResponse {
     /// Feature index under the pointer, if any.
     pub hovered: Option<usize>,
@@ -351,6 +384,9 @@ pub fn show(
     // that filter has into this picture — see `features_tab` for why the map
     // must never hide a feature because of it.
     lit: Option<&[usize]>,
+    // Where the Primers tab's oligo anneals. Empty whenever nobody has asked,
+    // which is every molecule until somebody pastes a primer.
+    primers: &[PrimerMark],
 ) -> MapResponse {
     let pal = Palette::of(ui.visuals().dark_mode);
     // Take what is LEFT of the panel, and a painter clipped to it.
@@ -445,15 +481,27 @@ pub fn show(
     // The sequence header already prints "· typing" for exactly those frames.
     let sel = sel.filter(|s| s.start <= span && s.end <= span && s.start >= 1 && s.end >= 1);
     let caret = caret.filter(|&c| c <= span);
+    // The same guard `sel` gets one line above, and for the same reason stated
+    // there: these coordinates were computed against the COMMITTED molecule, and
+    // an open typing run leaves the painter one edit ahead of them. A mark drawn
+    // from a stale coordinate is a mark in the wrong place — worse than no mark,
+    // because it looks like an answer. Filtered rather than clamped: a site is
+    // somewhere or it is not, and a clamped one would sit on base 1 claiming to
+    // be a binding site.
+    let primers: Vec<PrimerMark> = primers
+        .iter()
+        .copied()
+        .filter(|m| m.start >= 1 && m.start <= span && m.end >= 1 && m.end <= span)
+        .collect();
     if mol.topology == Topology::Circular {
         draw_circular(
             &painter, rect, span, &bands, caption, digest, mol, &pal, selected, hot, sel, caret,
-            set, lit, pointer, &mut out,
+            set, lit, &primers, pointer, &mut out,
         );
     } else {
         draw_linear(
-            &painter, rect, span, &bands, digest, mol, &pal, selected, hot, sel, caret, pointer,
-            &mut out,
+            &painter, rect, span, &bands, digest, mol, &pal, selected, hot, sel, caret, &primers,
+            pointer, &mut out,
         );
     }
 
@@ -538,6 +586,23 @@ const LANE_STEP: f32 = 13.0;
 /// Stroke of the mark a cut site puts on the ring, and the arc below which two
 /// sites are one mark. See `pl_draw::ring::bases_per_arc`.
 const TICK_STROKE: f32 = 1.5;
+
+/// Stroke of a primer binding site, and of the one the panel has selected.
+///
+/// Two widths no other stroke on this map uses, which is a legibility property
+/// before it is anything else. The backbone is 1.5, the selection arc 3.0, its
+/// end caps 2.0, the caret 1.0, a cut tick 1.0 and a leader 0.8, so
+/// neither of these can be taken by eye for a thing it is not — and in
+/// particular a primer arc must never read as the SELECTION arc, which is a
+/// different claim about the same molecule.
+///
+/// It has a second consequence worth having: it lets
+/// `every_binding_site_is_drawn_on_the_ring` count primer arcs by stroke width
+/// instead of reconstructing the ring geometry, which is the kind of oracle that
+/// passes by agreeing with the bug.
+pub const PRIMER_W: f32 = 1.25;
+/// See [`PRIMER_W`].
+pub const PRIMER_FOCUS_W: f32 = 2.5;
 
 /// An arrowhead's length along the arc, in band widths.
 ///
@@ -805,6 +870,7 @@ fn draw_circular(
     caret: Option<u64>,
     set: pl_enzymes::EnzymeSet,
     lit: Option<&[usize]>,
+    primers: &[PrimerMark],
     pointer: Option<Pos2>,
     out: &mut MapResponse,
 ) {
@@ -1614,6 +1680,85 @@ fn draw_circular(
             }
         }
     }
+
+    // -- primer binding sites, all of them ---------------------------------
+    //
+    // WHY ALL AND NOT THE SELECTED ONE. The finding, when there is one, is that
+    // there are two: a primer with a second site is a failed PCR, and it is
+    // failed before the tube goes in the block. Drawing only the row the panel
+    // has focused would put the interesting case — two arcs on one ring, one of
+    // them somewhere nobody expected — exactly where it cannot be seen. The
+    // focused site still gets the ordinary selection on the backbone, so the two
+    // channels agree without either substituting for the other.
+    //
+    // WHERE. On a ring 2 pt inside `tick_r`, which is in the annulus between
+    // `outer` and `tick_r`.
+    //
+    // THAT ANNULUS IS NOT EMPTY, and saying otherwise would be the easy lie
+    // here: the cut-site ticks run right across it from `outer` to `tick_r`, and
+    // so do the selection's end caps and the caret. What is true, and is why
+    // this is the right ring, is that everything in it is RADIAL. Nothing else
+    // on this map draws an ARC there — the outermost feature lane sits at
+    // `outer - lane_step` and is half a band wide, so the bands stop about 7 pt
+    // short of `outer`, and the backbone and the selection arc are at `r`,
+    // further in still. A primer arc is therefore told apart by ORIENTATION,
+    // which survives at any window size, rather than by owning space, which on a
+    // 40 pt radius there is none of.
+    //
+    // Crossing the cut ticks is the price and it is the right way round: a tick
+    // is 1 pt of `pal.muted` over a 6 pt gap and this is 1.25 pt of `pal.accent`
+    // across it, so neither erases the other — and "does my primer land on my
+    // BamHI site?" is a question whose answer needs both marks visible.
+    //
+    // 2 pt inside rather than on `tick_r` keeps the arc off the leader lines,
+    // which start there.
+    if !primers.is_empty() {
+        let ring = tick_r - 2.0;
+        for m in primers {
+            let w = if m.focus { PRIMER_FOCUS_W } else { PRIMER_W };
+            // Split with `pl_draw::ranges`, exactly as the selection is, and for
+            // the identical reason: interpolating from `angle_of(start)` to
+            // `angle_end(end)` when `start > end` paints the COMPLEMENT arc. A
+            // 20 nt footprint across the origin of an 8,117 bp plasmid would be
+            // drawn as 8,097 bases of it, which looks like a feature and reads
+            // as one.
+            for (a, b) in pl_draw::ranges(m.start, m.end, span, true) {
+                let (a0, mut a1) = (angle_of(a, span), angle_end(b, span));
+                if a1 <= a0 {
+                    a1 += std::f32::consts::TAU;
+                }
+                let pts = arc_points(center, ring, a0, a1);
+                if pts.len() >= 2 {
+                    p.add(Shape::line(pts, Stroke::new(w, pal.accent)));
+                }
+            }
+            // The 3' end, as a radial tick pointing out of the ring.
+            //
+            // NOT a colour and not a line style: the direction is the half of a
+            // primer that decides what gets amplified, and a 20 nt footprint on
+            // a 5 kb plasmid subtends 1.4 degrees, at which an arc is a dot and
+            // an arrowhead drawn along it is nothing at all. A radial mark is
+            // legible at any span, and its END is the answer — `angle_of(start)`
+            // for a reverse primer, whose 3' end is the LOW plus-strand
+            // coordinate because it reads backwards, and `angle_end(end)` for a
+            // forward one, because an arc ending at base N closes one base
+            // further on. Getting that pair the wrong way round would draw every
+            // primer pointing into its own product.
+            let three_prime = if m.reverse {
+                angle_of(m.start, span)
+            } else {
+                angle_end(m.end, span)
+            };
+            p.line_segment(
+                [
+                    polar(center, ring, three_prime),
+                    polar(center, ring - 5.0, three_prime),
+                ],
+                Stroke::new(w, pal.accent),
+            );
+        }
+    }
+
     // The caret. Thinner than a selection cap, which is the distinction; drawn
     // always, because at caret 0 it lands on the origin, which is where the
     // caret is, and one rule beats a special case. Without it "go to base N"
@@ -2173,6 +2318,7 @@ fn draw_linear(
     hot: Option<usize>,
     sel: Option<pl_core::Segment>,
     caret: Option<u64>,
+    primers: &[PrimerMark],
     pointer: Option<Pos2>,
     out: &mut MapResponse,
 ) {
@@ -2203,6 +2349,38 @@ fn draw_linear(
             p.line_segment(
                 [Pos2::new(x, y - 12.0), Pos2::new(x, y + 12.0)],
                 Stroke::new(2.0, pal.accent),
+            );
+        }
+    }
+    // Primer binding sites, above the axis.
+    //
+    // A LINE, not the circle's ring: there is no annulus here, so the sites go
+    // on their own rail 18 pt up, which is clear of the axis ticks (5 pt), the
+    // caret (8) and the selection caps (12) and below the forward feature lanes,
+    // which start at `y + 24` on the other side. Every FASTA opens linear and
+    // that is the state a Plasmidsaurus assembly arrives in, so this is not the
+    // rare case it looks like.
+    //
+    // A linear molecule has no origin to cross, so `find_bindings` never reports
+    // `end < start` for one; `min`/`max` is nevertheless what is drawn, because
+    // a reversed pair here would paint a zero-width line rather than the site,
+    // and silence is the failure this file spends its comments on.
+    if !primers.is_empty() {
+        let rail = y - 18.0;
+        for m in primers {
+            let (a, b) = (m.start.min(m.end), m.start.max(m.end));
+            let w = if m.focus { PRIMER_FOCUS_W } else { PRIMER_W };
+            p.line_segment(
+                [Pos2::new(x_of(a), rail), Pos2::new(x_of(b) + 1.0, rail)],
+                Stroke::new(w, pal.accent),
+            );
+            // The 3' end, as a tick. `x_of(a)` for a reverse primer — it reads
+            // backwards, so its 3' end is the LOW coordinate — and the far edge
+            // of the last base for a forward one.
+            let x = if m.reverse { x_of(a) } else { x_of(b) + 1.0 };
+            p.line_segment(
+                [Pos2::new(x, rail - 5.0), Pos2::new(x, rail)],
+                Stroke::new(w, pal.accent),
             );
         }
     }
@@ -2532,6 +2710,7 @@ mod tests {
                                 None,
                                 pl_enzymes::EnzymeSet::All,
                                 None,
+                                &[],
                             );
                         });
                 });
@@ -2891,6 +3070,7 @@ mod tests {
                             None,
                             pl_enzymes::EnzymeSet::All,
                             None,
+                            &[],
                         );
                     });
             });
@@ -3112,6 +3292,7 @@ mod tests {
                             None,
                             pl_enzymes::EnzymeSet::All,
                             None,
+                            &[],
                         );
                     });
             });
@@ -3556,6 +3737,7 @@ mod tests {
                             None,
                             pl_enzymes::EnzymeSet::All,
                             None,
+                            &[],
                         );
                     });
             });
@@ -3712,6 +3894,7 @@ mod tests {
                                 None,
                                 pl_enzymes::EnzymeSet::All,
                                 None,
+                                &[],
                             );
                         });
                 });

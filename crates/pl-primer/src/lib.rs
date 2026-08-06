@@ -51,12 +51,70 @@ impl Strand {
     }
 }
 
+/// The shortest 3' seed any caller may ask for.
+///
+/// # Why the bound lives here rather than at each caller
+///
+/// It did not, until 2026-08-07. `bins/pl`'s `cmd_primers` wrote
+/// `.filter(|n| (8..=35).contains(n))` and the message `expected 8 to 35` as
+/// two literals in one expression, and it was the only caller, so the numbers
+/// and the sentence agreeing was a property of one function. The desktop app is
+/// now a second caller offering the same control, and two independently-written
+/// ranges over the same engine parameter is the shape of a divergence: a GUI
+/// that accepts a seed of 6 does not merely differ from `pl primers`, it hands
+/// `find_bindings` a 6-base exact match that fires roughly every 4 kb of random
+/// sequence and reports the noise as binding sites.
+///
+/// So both bounds are stated once, here, beside the field they bound, and both
+/// surfaces read them. `the_seed_default_is_inside_the_bounds_every_caller_clamps_to`
+/// asserts the default sits in the range, which is the one way this pair could
+/// be internally wrong.
+///
+/// # Why eight, and why thirty-five
+///
+/// Eight is the floor at which an exact match is still evidence: a 4-base
+/// exact seed matches once every 256 bases by chance, an 8-base seed once every
+/// 65 kb, and below that the result list stops being about this primer. It is
+/// also the floor `pl_thermo::tm` is trusted at — `seqedit::TM_MIN_BP` is 8 for
+/// the same reason from the other direction, that a nearest-neighbour stack
+/// shorter than that is dominated by its initiation terms.
+///
+/// Thirty-five is the ceiling because the seed must fit inside the primer:
+/// [`find_bindings`] returns EMPTY when `primer.len() < seed_len`, and an
+/// ordinary oligo is 18-30 nt. A seed longer than the primer is not a stricter
+/// search, it is a search that cannot report anything, which is the failure
+/// mode this project spends its comments on.
+pub const SEED_MIN: usize = 8;
+/// The longest 3' seed any caller may ask for. See [`SEED_MIN`].
+pub const SEED_MAX: usize = 35;
+
+/// The range is the right way round.
+///
+/// A `const _` rather than a test, because both operands are `const` and the
+/// check therefore belongs where it fails the BUILD: clippy's
+/// `assertions_on_constants` is right that the runtime form has a constant
+/// value, and a test that cannot fail at run time proves nothing at run time.
+///
+/// It is not idle. Both callers spell their control
+/// `.range(SEED_MIN..=SEED_MAX)` or `.filter(|n| (SEED_MIN..=SEED_MAX).contains(n))`,
+/// and an inverted `RangeInclusive` is EMPTY rather than an error — `contains`
+/// answers false for every value — so swapping these two would turn `--seed`
+/// into a flag that refuses every number and the GUI's seed control into a
+/// widget that cannot be moved, with nothing anywhere saying why.
+const _: () = assert!(
+    SEED_MIN < SEED_MAX,
+    "SEED_MIN and SEED_MAX are the wrong way round, which makes the range every caller \
+     clamps to empty"
+);
+
 /// Search settings.
 #[derive(Debug, Clone, Copy)]
 pub struct Params {
     /// Length of the exactly-matched 3' seed.
     ///
     /// 14 by default. pydna uses 13; SnapGene's exact default is not published.
+    /// Callers offering this as a control must bound it by [`SEED_MIN`] and
+    /// [`SEED_MAX`] rather than writing their own numbers.
     pub seed_len: usize,
     /// Allow one mismatch inside the seed, as long as it is not the 3'-terminal
     /// base. Off by default: a seed is meant to be the part you are sure of.
@@ -784,5 +842,62 @@ mod tests {
         let b = find_bindings(b"GAATGAGAACAGAACCA", &template, false, &p());
         assert_eq!(b.len(), 2, "{b:?}");
         assert!(b[0].start < b[1].start);
+    }
+
+    /// The published bounds and the default they bound cannot contradict.
+    ///
+    /// Small, and it is the only way a `MIN`/`MAX`/`default` triple can be
+    /// internally wrong: every caller clamps a control to the range and then
+    /// starts from the default, so a default outside its own range is a control
+    /// whose starting value the same control refuses to be set back to.
+    ///
+    /// PROVEN TO FAIL: with `SEED_MIN` set to 15 — one above the default — this
+    /// reports `the default seed of 14 is outside the 15..=35 both surfaces
+    /// clamp to`. With the constants as written it passes, and it keeps passing
+    /// only while somebody changing one of the three looks at the other two.
+    #[test]
+    fn the_seed_default_is_inside_the_bounds_every_caller_clamps_to() {
+        let d = Params::default().seed_len;
+        assert!(
+            (SEED_MIN..=SEED_MAX).contains(&d),
+            "the default seed of {d} is outside the {SEED_MIN}..={SEED_MAX} both surfaces \
+             clamp to"
+        );
+        // The other half — that the range is the right way round — is the
+        // `const _` beside the constants, not an assertion here: clippy is
+        // correct that a runtime `assert!(SEED_MIN < SEED_MAX)` has a constant
+        // value, and a check on two `const`s belongs where it fails the BUILD
+        // rather than a test run.
+    }
+
+    /// A seed longer than the primer reports nothing, which is why `SEED_MAX`
+    /// exists at all.
+    ///
+    /// The guard is `primer.len() < p.seed_len` at the top of `find_bindings`,
+    /// and it returns an EMPTY vector — indistinguishable, to a caller that does
+    /// not check the lengths itself, from a primer that genuinely anneals
+    /// nowhere. Both surfaces therefore say so in words before searching, and
+    /// this pins the behaviour they are speaking about.
+    #[test]
+    fn a_seed_longer_than_the_primer_finds_nothing_silently() {
+        let template = b"TGCACGAATGAGAACAGAACCACAAATGGTG";
+        let primer = b"GAATGAGAACAGAACCA"; // 17 nt, a real perfect site
+        let params = Params {
+            seed_len: 14,
+            ..Default::default()
+        };
+        assert_eq!(
+            find_bindings(primer, template, false, &params).len(),
+            1,
+            "the fixture must have a site, or the control below proves nothing"
+        );
+        let too_long = Params {
+            seed_len: primer.len() + 1,
+            ..Default::default()
+        };
+        assert!(
+            find_bindings(primer, template, false, &too_long).is_empty(),
+            "the empty answer this silence-guard exists for did not happen"
+        );
     }
 }

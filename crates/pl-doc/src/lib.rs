@@ -353,13 +353,19 @@ pub fn methods(t: Topic) -> String {
                 "Primer binding sites were located with Polylinker {v} using a \
                  3'-anchored seed of {} bases -- exact by default, or allowing one \
                  mismatch, never at the 3' end, where that option was given -- extended \
-                 toward the 5' end. The annealing footprint and any 5' tail are \
+                 toward the 5' end through isolated mismatches, two adjacent mismatches \
+                 ending the footprint. The annealing footprint and any 5' tail are \
                  reported separately, and the melting temperature is computed from the \
-                 footprint alone.\n\n\
+                 footprint alone, with default parameters unless overridden: {}.\n\n\
                  Limits: this reports where a primer can anneal, not whether a product \
                  forms. Amplification efficiency, secondary structure, primer-dimer \
-                 formation and 3'-end mismatch tolerance are not modelled.",
-                p.seed_len
+                 formation and 3'-end mismatch tolerance are not modelled. No melting \
+                 temperature is reported for a footprint carrying a mismatch, because \
+                 the nearest-neighbour model describes a perfectly matched duplex and \
+                 has no internal-mismatch parameters; the conditions above are this \
+                 model's scale and not a PCR buffer's, which sits about 5 C higher.",
+                p.seed_len,
+                p.tm_method.describe()
             )
         }
         "design" => {
@@ -675,6 +681,70 @@ mod tests {
                 "{na:.0} mM Na+ unless a different concentration was given"
             )),
             "the salt scale is labelled as a default, since --na moves it: {m}"
+        );
+    }
+
+    /// A temperature in a methods paragraph is meaningless without its scale.
+    ///
+    /// The rule was already applied to the "tm" arm, which prints
+    /// `Method::describe` in full, and to "design", which names the table and
+    /// the sodium. It was MISSING from "primers", which said "the melting
+    /// temperature is computed from the footprint alone" and then named no
+    /// table, no salt correction and no concentration at all.
+    ///
+    /// That is the 50 mM trap in the one place it is hardest to withdraw. These
+    /// paragraphs exist to be pasted into a paper — the arm above them carries a
+    /// "Copy this paragraph" button — and the same 20 nt footprint reads 53.9 C
+    /// on this model's 50 mM Na+ scale and about five degrees higher in an
+    /// ordinary PCR buffer. A reader given the number and not the scale can
+    /// neither reproduce it nor compare it with another tool's, and, unlike a
+    /// wrong number, a missing condition does not look like anything.
+    ///
+    /// Every topic is swept rather than the three that report a Tm today, so an
+    /// arm added later has to carry its conditions to pass.
+    ///
+    /// PROVEN TO FAIL by dropping `p.tm_method.describe()` from the "primers"
+    /// arm: `primers: reports a melting temperature and names no
+    /// nearest-neighbour table`.
+    #[test]
+    fn every_paragraph_reporting_a_melting_temperature_names_its_conditions() {
+        let d = pl_thermo::Method::default();
+        let na = format!("{:.0} mM Na+", d.na_molar * 1e3);
+        // Selected by what the paragraph SAYS, not by a list of topic names
+        // here: a second list is how the sweep comes to miss the arm that was
+        // added after it.
+        let reports_a_tm =
+            |m: &str| m.to_lowercase().contains("melting temperature") || m.contains(" Tm ");
+        for t in TOPICS {
+            let m = methods(*t);
+            if !reports_a_tm(&m) {
+                continue;
+            }
+            assert!(
+                m.contains(d.table_name),
+                "{}: reports a melting temperature and names no nearest-neighbour table, so \
+                 the number cannot be reproduced or compared with another tool's -- {m}",
+                t.name
+            );
+            assert!(
+                m.contains(&na),
+                "{}: reports a melting temperature and names no sodium concentration, and \
+                 this model's 50 mM scale is not the PCR buffer the reader is standing in \
+                 front of -- {m}",
+                t.name
+            );
+        }
+        // THE CONTROL. Every assertion above is inside a `continue`, so a
+        // predicate that matched nothing would make this pass while checking
+        // nothing at all -- the shape of check this project keeps finding.
+        let seen = TOPICS
+            .iter()
+            .filter(|t| reports_a_tm(&methods(**t)))
+            .count();
+        assert_eq!(
+            seen, 3,
+            "expected the tm, primers and design paragraphs to report a temperature; matched \
+             {seen}, so the sweep is measuring something other than what it says"
         );
     }
 

@@ -2365,6 +2365,7 @@ dependencies = [
  "pl-fileio",
  "pl-gel",
  "pl-index",
+ "pl-primer",
  "pl-sanger",
  "pl-scan",
  "pl-thermo",

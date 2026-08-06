@@ -329,7 +329,24 @@ impl Panel {
 ///
 /// A footprint crossing the origin is stored `end < start`, which `Molecule`
 /// declares valid and which `format_location` expands to `join(...)` on export.
-pub fn features(pair: &pl_design::Pair, stem: &str, rank: usize) -> Vec<pl_core::Feature> {
+///
+/// `method` is the thermodynamics the pair was actually SCORED under, handed in
+/// rather than re-derived, and that is the whole reason this takes a fourth
+/// argument. It read `Constraints::default().tm_method.describe()`, which is a
+/// different expression that happens to produce the same string today because
+/// this panel puts no control on the salt or the oligo concentration. The
+/// difference is not academic: this string is written into the user's FILE as a
+/// GenBank `/note` and stays there. The day a Na+ control appears — the Primers
+/// tab has one — the note would keep asserting 50 mM beside a Tm computed at
+/// 150, and a conditions line that is wrong is worse than none, because it
+/// reads as having been checked. Passing the value makes the note true by
+/// construction instead of by coincidence.
+pub fn features(
+    pair: &pl_design::Pair,
+    stem: &str,
+    rank: usize,
+    method: &pl_thermo::Method,
+) -> Vec<pl_core::Feature> {
     let mut out = Vec::new();
     for p in [&pair.forward, &pair.reverse] {
         let mut f = pl_core::Feature::new(p.name(stem), "primer_bind");
@@ -352,7 +369,7 @@ pub fn features(pair: &pl_design::Pair, stem: &str, rank: usize) -> Vec<pl_core:
                 "Tm {:.1} C over the {} nt annealed footprint only; {}",
                 p.tm,
                 p.footprint.len(),
-                Constraints::default().tm_method.describe()
+                method.describe()
             ),
         );
         f.set_qualifier("note", format!("GC {:.1}%", p.gc));
@@ -462,8 +479,12 @@ fn body(ui: &mut Ui, panel: &mut Panel, seq: &[u8], dark: bool) {
             });
             ui.end_row();
 
-            ui.label("Tm")
-                .on_hover_text(Constraints::default().tm_method.describe());
+            // The conditions of the number this control accepts or rejects,
+            // read off the constraints THIS panel will run with rather than off
+            // `Constraints::default()`. Same string today, for the reason
+            // `features` records at length; different the moment a salt control
+            // is added, and then only one of the two is the truth.
+            ui.label("Tm").on_hover_text(panel.c.tm_method.describe());
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut panel.c.tm_min).range(0.0..=110.0));
                 ui.label("to");
@@ -771,7 +792,7 @@ mod tests {
         };
         let r = pl_design::design(&template, false, Region::new(1_001, 1_400), &c).unwrap();
         let p = &r.pairs[0];
-        let fs = features(p, "demo", 1);
+        let fs = features(p, "demo", 1, &c.tm_method);
         assert_eq!(fs.len(), 2);
         assert_eq!(fs[0].kind, "primer_bind");
         assert_eq!(fs[0].segments.len(), 1);

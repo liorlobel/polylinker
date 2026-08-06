@@ -24,6 +24,11 @@ mod gel;
 mod help;
 mod library;
 mod map;
+/// Where an oligo the user already has anneals on the molecule that is open —
+/// the Primers tab. The engine is `pl-primer`, called with the same defaults
+/// `pl primers` calls it with; see the module header for why that mattered
+/// enough to be arranged rather than asserted.
+mod primers;
 mod reads;
 mod recover;
 mod scene;
@@ -794,6 +799,7 @@ enum Tab {
     Library,
     Enzymes,
     Sequence,
+    Primers,
     Reads,
     History,
     File,
@@ -1255,6 +1261,8 @@ struct App {
     /// frame, not about the document. One-shot, because a widget that requests
     /// focus every frame cannot be tabbed away from.
     find_focus: bool,
+    /// The Primers tab for the document on screen. Parked in `bench::DocView`.
+    primers: primers::Primers,
     /// Features by position, lanes, and the enzyme cuts — see `annot.rs`.
     annot: annot::AnnotIndex,
     /// The `(version, filter, digest-is-done)` the cut list was built for.
@@ -2392,6 +2400,7 @@ impl App {
             doc_generation: 0,
             find: find::Find::default(),
             find_focus: false,
+            primers: primers::Primers::default(),
             annot: annot::AnnotIndex::default(),
             cuts_for: None,
             annot_scratch: Vec::new(),
@@ -4677,6 +4686,13 @@ impl eframe::App for App {
             self.export(false);
         }
         self.find_keys(&keys);
+        // Here, beside `find_keys`, and for its reason: `refresh_primers`
+        // settles the open typing run, which is an op-log write, and a write
+        // buried in a layout pass is a defect this file has found twice and
+        // written down both times. The marks the map and the sequence view draw
+        // are read from the result, so it has to be settled before either is
+        // painted rather than during.
+        self.refresh_primers();
         if keys.help && self.help.is_none() {
             self.help = Some(help::Panel::default());
         }
@@ -6221,6 +6237,11 @@ impl App {
                         (Tab::Library, "Library"),
                         (Tab::Enzymes, "Enzymes"),
                         (Tab::Sequence, "Sequence"),
+                        // Beside Sequence rather than at the end, because a
+                        // primer question is a sequence question: the answer is
+                        // a span of bases, and clicking a site selects it in the
+                        // view one tab to the left.
+                        (Tab::Primers, "Primers"),
                         (Tab::Reads, "Reads"),
                         (Tab::History, "History"),
                         (Tab::File, "File"),
@@ -6269,6 +6290,7 @@ impl App {
                     Tab::Features => self.features_tab(ui),
                     Tab::Enzymes => self.enzymes_tab(ui),
                     Tab::Sequence => self.sequence_tab(ui),
+                    Tab::Primers => self.primers_tab(ui),
                     Tab::History => self.history_tab(ui),
                     Tab::File => self.file_tab(ui),
                 }
@@ -8101,7 +8123,491 @@ impl App {
         }
     }
 
-    /// Start, stop or leave the ORF scan alone, and reserve its strip from the
+    /// Recompute the binding sites, if the oligo, a setting or the molecule has
+    /// moved.
+    ///
+    /// Called from `App::ui`, OUTSIDE every paint closure, for `refresh_find`'s
+    /// reason: `settle` commits the open typing run through `Document::apply`,
+    /// which is an op-log write.
+    ///
+    /// Memoised on [`primers::Primers::key`], which carries every control that
+    /// reaches the engine plus the document's `seq_version` AND this window's
+    /// `doc_generation`. The generation is not belt-and-braces: every document
+    /// opens at version 0, so without it plasmid A's key equals plasmid B's and
+    /// A's binding sites would be listed, and drawn on the map, against B.
+    fn refresh_primers(&mut self) {
+        if self.tab != Tab::Primers {
+            // Not merely an optimisation. The scan is O(template x seed) with no
+            // index, and running it every frame for a tab nobody is looking at
+            // would spend that on a molecule the user is editing in the sequence
+            // view. The memo makes a *repeat* free; this makes the first one
+            // conditional on somebody having asked.
+            //
+            // The result is deliberately KEPT rather than cleared: the marks on
+            // the map and in the sequence view are what "in place" means, and
+            // discarding them on a tab switch would make the sites visible only
+            // while the Primers tab is open — which is the one time the list
+            // beside them already says where they are.
+            //
+            // Keeping them is only safe because nothing draws them blindly:
+            // `App::primer_sites` re-checks the memo key every frame and
+            // withholds the whole list the moment the molecule moves under it,
+            // so a document edited on another tab loses its marks rather than
+            // showing them somewhere they no longer are.
+            return;
+        }
+        // The run first, or the search reads bases the user has typed and the
+        // document does not yet have, and the selection a site sets would then
+        // be measured against a molecule that is about to change under it.
+        self.settle();
+        let generation = self.doc_generation;
+        let Some(d) = self.bench.get() else { return };
+        let key = self.primers.key(d.seq_version, generation);
+        if self.primers.done.as_ref() == Some(&key) {
+            return;
+        }
+        let (seq, circular) = (
+            d.molecule().seq.clone(),
+            d.molecule().topology.is_circular(),
+        );
+        self.primers.search(&seq, circular);
+        self.primers.done = Some(key);
+    }
+
+    /// Select site `i`, so the map's arc and the sequence view follow.
+    ///
+    /// `show_hit`'s twin, and it goes through `SeqEdit::set_selection` for the
+    /// same reason: assigning `sel` behind an open run's back leaves the
+    /// highlight in place and types at the run's start.
+    ///
+    /// Only the FOOTPRINT is selected. A 5' tail does not pair with the
+    /// template, so it has no coordinates on this molecule at all — selecting
+    /// it would select template bases the oligo does not touch, which is the
+    /// exact conflation `pl-primer`'s header exists to prevent.
+    fn show_binding(&mut self, i: usize) {
+        self.primers.at = Some(i);
+        let Some(b) = self.primers.sites.get(i).cloned() else {
+            return;
+        };
+        let Some(d) = self.bench.get() else { return };
+        let n = d.molecule().span();
+        let circular = d.molecule().topology.is_circular();
+        if n == 0 {
+            return;
+        }
+        let sel = primers::selection(&b, n, circular);
+        let head = sel.head;
+        let Some(d) = self.bench.get_mut() else {
+            return;
+        };
+        self.edit.set_selection(d, sel, head);
+    }
+
+    /// The binding sites, or NOTHING if they are not about the molecule that is
+    /// on screen right now.
+    ///
+    /// The one door both painters go through, and it exists because
+    /// `refresh_primers` deliberately does not run while another tab is up.
+    /// Without it, deleting a base in the Sequence tab would leave every mark
+    /// where the PREVIOUS molecule put it — painted in the accent colour, over
+    /// the letters, asserting that a primer anneals somewhere it now does not. A
+    /// mark in the wrong place is worse than no mark, because it looks like an
+    /// answer.
+    ///
+    /// Answered from the memo key rather than by re-scanning, so it costs a
+    /// comparison per frame and never a search: if the sites were computed for
+    /// THIS document at THIS `seq_version`, they are current; otherwise they are
+    /// withheld until the Primers tab recomputes them. Nothing is discarded, so
+    /// returning to the tab shows the same oligo and the same settings, re-run
+    /// against the molecule as it now is.
+    fn primer_sites(&self) -> &[pl_primer::Binding] {
+        let Some(d) = self.bench.get() else {
+            return &[];
+        };
+        match &self.primers.done {
+            Some(k) if *k == self.primers.key(d.seq_version, self.doc_generation) => {
+                &self.primers.sites
+            }
+            _ => &[],
+        }
+    }
+
+    /// Every site, as marks for the map. See [`map::PrimerMark`].
+    ///
+    /// Built here and not in `map.rs` because `map.rs` is handed a `Molecule`
+    /// and knows nothing about a panel, and because the same list is wanted by
+    /// the sequence view — two painters, one answer, so they cannot disagree
+    /// about where a site is.
+    fn primer_marks(&self) -> Vec<map::PrimerMark> {
+        let at = self.primers.at;
+        self.primer_sites()
+            .iter()
+            .enumerate()
+            .map(|(i, b)| map::PrimerMark {
+                start: b.start,
+                end: b.end,
+                reverse: b.strand == pl_primer::Strand::Reverse,
+                focus: at == Some(i),
+            })
+            .collect()
+    }
+
+    /// The Primers tab: paste an oligo, see everywhere it anneals.
+    ///
+    /// Nothing is decided here — the search is `refresh_primers` and the
+    /// arithmetic is `primers.rs`. What this owns is the order the questions
+    /// are asked in, and one editorial decision worth stating: the SITE COUNT
+    /// is printed before the sites. A primer that binds twice is a failed PCR,
+    /// and a panel that leads with the best site answers a question nobody
+    /// asked.
+    fn primers_tab(&mut self, ui: &mut Ui) {
+        let p = pal(ui);
+        let Some(d) = self.bench.get() else { return };
+        let mol = d.molecule();
+        // Owned, because `self.primers` is borrowed mutably below and the
+        // molecule lives in the same `self`.
+        let from_file: Vec<(String, String)> = primers::document_primers(mol)
+            .into_iter()
+            .map(|(name, seq)| (name.to_string(), seq.to_string()))
+            .collect();
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Oligo").strong());
+            ui.add(
+                egui::TextEdit::singleline(&mut self.primers.query)
+                    .id(egui::Id::new("pl-primer-query"))
+                    .hint_text("paste a primer, 5' -> 3'")
+                    .font(egui::TextStyle::Monospace)
+                    // Floored, because `available_width() - 70` goes NEGATIVE
+                    // once the panel is narrow enough, and a negative extent is
+                    // the shape of defect `map.rs` records under "a pane with
+                    // nothing left in it is still a rect". `MIN_PANEL` is 300,
+                    // so it cannot happen at any splitter position today; the
+                    // floor is what keeps that true if `MIN_PANEL` moves.
+                    .desired_width((ui.available_width() - 70.0).max(80.0)),
+            );
+            if ui.button("Clear").clicked() {
+                self.primers.query.clear();
+            }
+        });
+        // The oligo's own length, beside the box. It is the number the seed
+        // control is compared against, and a pasted sequence is exactly the
+        // thing nobody counts by eye.
+        let typed = self.primers.query.trim().len();
+        if typed > 0 {
+            ui.label(
+                RichText::new(format!("{} nt as typed", fmt_int(typed as u64)))
+                    .size(10.5)
+                    .color(p.muted),
+            );
+        }
+
+        // -- primers the file itself records ------------------------------
+        //
+        // A `.dna` is usually full of them and retyping one is both work and a
+        // chance to mistype. Absent for every other format, and silently so:
+        // `document_primers` explains why a GenBank `primer_bind` is not
+        // offered here, and a permanent "this format has no primers" line under
+        // every FASTA would be noise about a thing that was never missing.
+        if !from_file.is_empty() {
+            let mut pick: Option<String> = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("From this file").size(11.0).color(p.muted));
+                egui::ComboBox::from_id_salt("pl-primer-from-file")
+                    .selected_text("pick one")
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for (name, seq) in &from_file {
+                            // The NAME and the length, not the bases: a 40 nt
+                            // oligo in a dropdown is unreadable and two oligos
+                            // that share a 3' end look identical in it. The
+                            // bases land in the box, where they can be read.
+                            let label = format!("{name}  ({} nt)", seq.len());
+                            if ui.selectable_label(false, label).clicked() {
+                                pick = Some(seq.clone());
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Primers recorded in the file itself. SnapGene .dna keeps the oligo \
+                         sequence; picking one puts it in the box above, where you can still \
+                         edit it.",
+                    );
+                ui.label(
+                    RichText::new(format!("{} recorded", from_file.len()))
+                        .size(10.5)
+                        .color(p.muted),
+                );
+            });
+            if let Some(seq) = pick {
+                self.primers.query = seq;
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+
+        // -- how the search is run ----------------------------------------
+        //
+        // THE SAME TWO CONTROLS `pl primers` EXPOSES, with the same defaults and
+        // the same bounds: `--seed` (8..=35, default 14) and `--seed-mismatch`
+        // (off), plus `--exact`, which changes the answer and would otherwise be
+        // reachable only from the CLI. The bounds are `pl_primer::SEED_MIN` and
+        // `SEED_MAX`, which is where `cmd_primers` now reads its own from, so
+        // the GUI cannot come to accept a seed the CLI refuses.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Seed").size(11.0).color(p.muted));
+            ui.add(
+                egui::DragValue::new(&mut self.primers.seed_len)
+                    .range(pl_primer::SEED_MIN..=pl_primer::SEED_MAX)
+                    .speed(0.15),
+            )
+            .on_hover_text(
+                "The 3'-anchored stretch that must match exactly. That end is the one a \
+                 polymerase extends from: a primer mismatched at its 3' base does not prime, \
+                 however well the rest of it pairs. `pl primers --seed N`.",
+            );
+            ui.checkbox(&mut self.primers.seed_mismatch, "one seed mismatch")
+                .on_hover_text(
+                    "Allow a single mismatch inside the seed, never at the 3' base. \
+                     `pl primers --seed-mismatch`.",
+                );
+            ui.checkbox(&mut self.primers.exact, "exact footprint")
+                .on_hover_text(
+                    "Stop the footprint at the first mismatch, which is what pydna and \
+                     SnapGene do. Off by default, because a site-directed mutagenesis primer \
+                     carries the change it is introducing and still anneals. \
+                     `pl primers --exact`.",
+                );
+        });
+
+        // -- the conditions the temperatures are on -------------------------
+        //
+        // ON SCREEN, not on a hover. Every Tm this app prints is on the model's
+        // 50 mM Na+ scale, and `pl design --tm`'s own help says why that is a
+        // trap: an ordinary PCR buffer sits about 5 C higher, and a Ta chosen 5
+        // degrees low costs a bench day. The sentence is here rather than in a
+        // tooltip because a scale nobody sees is a scale nobody applies.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Na+").size(11.0).color(p.muted));
+            // Displayed in mM, STORED in molar. `Method::default().na_molar` is
+            // 50e-3, and 50e-3 * 1e3 * 1e-3 is not 50e-3 — so a panel nobody had
+            // touched would compute a Tm a few femtokelvin away from
+            // `pl primers`'. See `primers::Primers::na_molar`. The write-back is
+            // guarded on `changed()` for exactly that reason.
+            let mut na_mm = self.primers.na_molar * 1e3;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut na_mm)
+                        .range(1.0..=1000.0)
+                        .speed(1.0)
+                        .suffix(" mM"),
+                )
+                .changed()
+            {
+                self.primers.na_molar = na_mm * 1e-3;
+            }
+            ui.label(RichText::new("Oligo").size(11.0).color(p.muted));
+            let mut oligo_nm = self.primers.oligo_molar * 1e9;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut oligo_nm)
+                        .range(0.1..=10_000.0)
+                        .speed(5.0)
+                        .suffix(" nM"),
+                )
+                .changed()
+            {
+                self.primers.oligo_molar = oligo_nm * 1e-9;
+            }
+            if ui.button("Reset").clicked() {
+                let d = pl_primer::Params::default().tm_method;
+                self.primers.na_molar = d.na_molar;
+                self.primers.oligo_molar = d.oligo_molar;
+            }
+        });
+        // `Method::describe` VERBATIM, never a hand-written "50 mM Na+", so a
+        // number differing from another tool's reads as a documented modelling
+        // choice rather than as a bug. `seqedit::tm_hover` and `design.rs`
+        // render the same string from the same call.
+        ui.label(
+            RichText::new(self.primers.describe())
+                .size(10.5)
+                .color(p.muted),
+        );
+        if (self.primers.na_molar - pl_primer::Params::default().tm_method.na_molar).abs() < 1e-12 {
+            ui.label(
+                RichText::new(
+                    "This is the model's scale, not your buffer's: an ordinary PCR mix sits \
+                     about 5 °C higher. Try 150 mM to work on the bench scale.",
+                )
+                .size(10.5)
+                .color(p.warn),
+            );
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+
+        // -- what was found -------------------------------------------------
+        if let Some(note) = self.primers.note.clone() {
+            ui.add_space(6.0);
+            ui.label(RichText::new(note).color(p.warn));
+        }
+        let tally = self.primers.tally();
+        if !tally.is_empty() {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(tally)
+                    .strong()
+                    // One site is a result; more than one is a finding, and the
+                    // colour is the second channel on it. Never the only
+                    // channel — the sentence says "not specific to one place"
+                    // in words.
+                    .color(if self.primers.total > 1 {
+                        p.warn
+                    } else {
+                        p.ink
+                    }),
+            );
+            ui.label(
+                RichText::new(
+                    "Tm is over the annealed footprint only; a 5' tail never contributes to it.",
+                )
+                .size(10.5)
+                .color(p.muted),
+            );
+        }
+
+        let method = self.primers.params().tm_method;
+        let mut pick: Option<usize> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("pl-primer-sites")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (i, b) in self.primers.sites.iter().enumerate() {
+                    let chosen = self.primers.at == Some(i);
+                    // The same shape `cmd_primers` prints, in the same order:
+                    // strand, span, Tm. Monospace so the columns line up down
+                    // the list, which is how a reader spots that two sites are
+                    // 12 bases apart.
+                    let head = format!(
+                        "{} {:>9}..{:<9} {}",
+                        b.strand.as_str(),
+                        fmt_int(b.start),
+                        fmt_int(b.end),
+                        match b.tm {
+                            Some(t) => format!("{t:5.1} °C"),
+                            // NEVER a blank cell. The three reasons there is no
+                            // number are not interchangeable and the full
+                            // sentence is on the row below.
+                            None => "   no Tm".to_string(),
+                        }
+                    );
+                    let r = ui.selectable_label(chosen, RichText::new(head).monospace());
+                    if r.clicked() {
+                        pick = Some(i);
+                    }
+                    // The footprint and the tail, kept visibly apart. This is
+                    // the whole feature: a 20 nt primer with a 20 nt Gibson arm
+                    // is a 40-mer whose annealing temperature is the 20-mer's,
+                    // and a tool that prints one string cannot say so.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(14.0);
+                        if b.has_tail() {
+                            ui.label(
+                                RichText::new(b.tail_str().to_lowercase())
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(p.muted),
+                            )
+                            .on_hover_text(
+                                "The 5' tail: it does not pair with this template, has no \
+                                 position on it, and is not in the Tm.",
+                            );
+                        }
+                        ui.label(
+                            RichText::new(b.footprint_str())
+                                .monospace()
+                                .size(11.0)
+                                .color(p.ink),
+                        )
+                        .on_hover_text("The annealed footprint. The Tm is this, and only this.");
+                        if !b.mismatches.is_empty() {
+                            ui.label(
+                                RichText::new(format!("{} mismatch(es)", b.mismatches.len()))
+                                    .size(10.5)
+                                    .color(p.warn),
+                            );
+                        }
+                    });
+                    if b.tm.is_none() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(14.0);
+                            ui.label(
+                                RichText::new(primers::tm_refusal(b, &method))
+                                    .size(10.5)
+                                    .color(p.warn),
+                            );
+                        });
+                    }
+                    ui.add_space(3.0);
+                }
+
+                // -- the number a user types into a thermocycler --------------
+                //
+                // Per SITE and not per primer, and `primers::anneal_advice` says
+                // why: these rows are the several places one oligo lands, so a
+                // minimum over them would let an off-target site the user is
+                // trying to avoid choose the temperature.
+                if let Some(b) = self.primers.current() {
+                    let advice = primers::anneal_advice(b);
+                    if !advice.is_empty() {
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!(
+                                "Annealing temperature for the selected site, from its {} nt \
+                                 footprint",
+                                b.footprint.len()
+                            ))
+                            .strong(),
+                        );
+                        egui::Grid::new("pl-primer-anneal")
+                            .num_columns(3)
+                            .spacing([10.0, 3.0])
+                            .show(ui, |ui| {
+                                for (name, range, note) in advice {
+                                    ui.label(RichText::new(name).monospace().size(11.0));
+                                    ui.label(RichText::new(range).monospace().size(11.0));
+                                    ui.label(RichText::new(note).size(10.5).color(p.muted));
+                                    ui.end_row();
+                                }
+                            });
+                        ui.label(
+                            RichText::new(
+                                "This is advice, not a measurement; the Tm above is the \
+                                 measurement. A Ta is a vendor's protocol rule and depends on \
+                                 the enzyme and its buffer, which is why it is not folded into \
+                                 the Tm.",
+                            )
+                            .size(10.5)
+                            .color(p.muted),
+                        );
+                    }
+                }
+            });
+
+        // After the closure, because selecting moves the caret through
+        // `&mut self` — the same order every other panel in this file applies
+        // its answer in.
+        if let Some(i) = pick {
+            self.show_binding(i);
+        }
+    }
+
     /// Start, stop or leave the ORF scan alone, and reserve its strip from the
     /// last COMPLETED answer.
     ///
@@ -8460,6 +8966,43 @@ impl App {
                     .map(|s| s.canonical(mol.len(), mol.topology.is_circular()));
                 let caret = edit.caret.min(n);
                 let run = edit.run().map(|r| r.span());
+                // Primer binding sites, converted ONCE into the caret space the
+                // rest of this painter works in — 0-based half-open `[lo, hi)`,
+                // the same convention `annot.rs` stores and for its stated
+                // reason: a ribbon one cell out is not something anyone catches
+                // in a screenshot.
+                //
+                // AND SPLIT AT THE ORIGIN HERE, not at draw time, which is
+                // `annot::AnnotIndex::build`'s rule and exists because the
+                // alternative fails silently. `pl-primer` spells an
+                // origin-crossing footprint `end < start`, so stored unsplit it
+                // makes `lo > hi`, every row's clip is empty, and the site
+                // vanishes from the sequence view while still drawing on the
+                // map — which reads as a molecule that simply has no site there.
+                //
+                // The two `bool`s are which ends are REAL. A half produced by
+                // the split has one manufactured edge, and the 3' cap must not
+                // be drawn on it: a forward primer whose footprint runs
+                // 4,995..14 ends at 14, not at the last base before the origin.
+                let prim_ivs: Vec<(u64, u64, bool, bool, bool)> = self
+                    .primer_sites()
+                    .iter()
+                    // The same guard the map applies, and it is not paranoia:
+                    // between a keystroke and the run being settled these
+                    // coordinates and `n` come from molecules one edit apart.
+                    .filter(|b| b.start >= 1 && b.start <= n && b.end >= 1 && b.end <= n)
+                    .flat_map(|b| {
+                        let rev = b.strand == pl_primer::Strand::Reverse;
+                        if b.end >= b.start {
+                            vec![(b.start - 1, b.end, rev, true, true)]
+                        } else {
+                            vec![
+                                (b.start - 1, n, rev, true, false),
+                                (0, b.end, rev, false, true),
+                            ]
+                        }
+                    })
+                    .collect();
                 let mut line = String::with_capacity(per_row as usize);
                 let tr = &self.tr;
                 let orfs = d.orfs.done();
@@ -9360,6 +9903,85 @@ impl App {
                                             egui::Stroke::NONE,
                                         ));
                                     }
+                                }
+                            }
+                        }
+
+                        // -- primer binding sites, on the strand they read ---
+                        //
+                        // ON THE LETTERS, not in a strip of their own, and that
+                        // is the decision worth stating. A forward primer reads
+                        // as the top strand and a reverse one as the bottom, so
+                        // boxing the bases the footprint covers ON THAT ROW says
+                        // which strand it anneals to without a legend, and puts
+                        // the answer on the characters the user is reading
+                        // rather than beside them. A new reserved strip would
+                        // have cost every row three points on every document,
+                        // including the ones nobody has pasted a primer into.
+                        //
+                        // With the complement row off there is only one row to
+                        // draw on, so both strands land there and the 3' cap is
+                        // the only thing distinguishing them — which is why the
+                        // cap is drawn from the strand and not from the box.
+                        //
+                        // THE TAIL IS NOT DRAWN. It does not pair with this
+                        // template and has no coordinates on it; drawing it
+                        // would mark template bases the oligo never touches,
+                        // which is the conflation `pl-primer`'s header exists to
+                        // prevent. The panel shows it, in the one place where it
+                        // is not a claim about a position.
+                        //
+                        // `!typing` for the ORF strip's reason: these
+                        // coordinates were computed against the COMMITTED
+                        // molecule and an open run leaves them one edit behind,
+                        // so during a run the marks are dropped rather than
+                        // drawn in the wrong place.
+                        if !typing {
+                            for &(lo, hi, rev, real_lo, real_hi) in &prim_ivs {
+                                let a = lo.max(start);
+                                let b = hi.min(end);
+                                if b <= a {
+                                    continue;
+                                }
+                                let yb = if rev && strips.complement {
+                                    y_comp
+                                } else {
+                                    y_text
+                                };
+                                let rr = egui::Rect::from_min_max(
+                                    egui::pos2(cx(a - start), yb),
+                                    egui::pos2(cx(b - start), yb + text_h),
+                                );
+                                painter.rect_stroke(
+                                    rr,
+                                    0.0,
+                                    egui::Stroke::new(1.0, p.accent),
+                                    egui::StrokeKind::Inside,
+                                );
+                                // The 3' end, as a solid cap: the ribbon grammar
+                                // the ORF strip already uses, so a direction on
+                                // this screen means one thing. A reverse primer
+                                // extends leftwards, so its 3' end is the LOW
+                                // coordinate — and it is only a real terminus
+                                // when this piece carries one, which an
+                                // origin-split half does not.
+                                let cap_w = 3.0f32.min(rr.width());
+                                let tip = if rev {
+                                    (real_lo && lo >= start)
+                                        .then(|| (rr.left(), rr.left() + cap_w))
+                                } else {
+                                    (real_hi && hi <= end).then(|| (rr.right(), rr.right() - cap_w))
+                                };
+                                if let Some((tx, bx)) = tip {
+                                    painter.add(egui::Shape::convex_polygon(
+                                        vec![
+                                            egui::pos2(tx, rr.center().y),
+                                            egui::pos2(bx, rr.top()),
+                                            egui::pos2(bx, rr.bottom()),
+                                        ],
+                                        p.accent,
+                                        egui::Stroke::NONE,
+                                    ));
                                 }
                             }
                         }
@@ -10992,6 +11614,15 @@ impl App {
             })
             .flatten();
         let enzyme_set = self.enzyme_set;
+        // Where the Primers tab's oligo lands, taken out of `self` before the
+        // closure borrows it — the same reason `sel_seg`, `caret_at` and `lit`
+        // are taken here. Empty until somebody pastes a primer, and it stays on
+        // the map after the tab is switched away from: a site the user has found
+        // is a fact about this molecule, and hiding the marks whenever the list
+        // describing them is off screen would remove them exactly when they are
+        // the only thing saying where the site is. `primer_sites` is what keeps
+        // that from meaning "stale".
+        let primer_marks = self.primer_marks();
 
         // Asked here, outside the paint closure, and answered from a memo.
         // Which application owns the extension is *read*, never changed —
@@ -11169,6 +11800,7 @@ impl App {
                 caret_at,
                 enzyme_set,
                 lit.as_deref(),
+                &primer_marks,
             );
             hovered_out = r.hovered;
             clicked_out = r.clicked;
@@ -11487,6 +12119,7 @@ impl App {
             hot: self.hot.take(),
             hot_shown: self.hot_shown.take(),
             find: std::mem::take(&mut self.find),
+            primers: std::mem::take(&mut self.primers),
             filter: std::mem::take(&mut self.filter),
             enz_strip: std::mem::take(&mut self.enz_strip),
             orf_strip: std::mem::take(&mut self.orf_strip),
@@ -11509,6 +12142,7 @@ impl App {
         self.hot = v.hot;
         self.hot_shown = v.hot_shown;
         self.find = v.find;
+        self.primers = v.primers;
         self.filter = v.filter;
         self.enz_strip = v.enz_strip;
         self.orf_strip = v.orf_strip;
@@ -11779,7 +12413,11 @@ impl App {
             } else if let Some(Ok(r)) = &panel.result {
                 if let Some(p) = r.pairs.get(i) {
                     let stem = design::stem_of(&panel.title);
-                    let fs = design::features(p, &stem, i + 1);
+                    // The method the pair was SCORED under, not the crate
+                    // default that happens to equal it: this string is written
+                    // into the document as a `/note` and saved. See
+                    // `design::features`.
+                    let fs = design::features(p, &stem, i + 1, &panel.c.tm_method);
                     let names: Vec<String> = fs.iter().map(|f| f.name.clone()).collect();
                     let ok: Vec<bool> = fs
                         .into_iter()
@@ -16127,6 +16765,374 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // the Primers tab
+    // -----------------------------------------------------------------------
+
+    /// A 31 bp circle carrying a perfect 19/19 primer site that CROSSES THE
+    /// ORIGIN, at 27..31 + 1..14.
+    ///
+    /// `pl-primer`'s own origin fixture, reused deliberately. Every fact this
+    /// molecule can establish — that the topology reaches the engine, that a
+    /// wrapping site is found, that its selection covers its own bases — is a
+    /// fact a linear fixture cannot: on a line there is no site here at all.
+    fn origin_circle() -> pl_core::Molecule {
+        pl_core::Molecule {
+            name: "circ".into(),
+            seq: b"CAAATGGTGTGCACGAATGAGAACAGAACCA".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        }
+    }
+
+    /// THE AGREEMENT TEST. The panel and `pl primers` answer the same question
+    /// the same way, about the same primer and the same molecule.
+    ///
+    /// The oracle is the literal expression `cmd_primers` evaluates
+    /// (`bins/pl/src/main.rs`): `pl_primer::find_bindings(primer, seq,
+    /// mol.topology.is_circular(), &params)` with `params` starting life as
+    /// `Params::default()`. If the two can ever disagree about one primer and
+    /// one molecule, that is a bug — so the assertion is on the whole `Binding`
+    /// list, field for field, and not on a count.
+    ///
+    /// WHAT IT CANNOT DO, said out loud: `bins/pl` is a different crate and its
+    /// `cmd_primers` prints to stdout, so this cannot run the CLI. It pins the
+    /// three things that can actually diverge — the settings, the topology, and
+    /// which engine function is called — and the fourth, the seed bounds, is
+    /// arranged rather than asserted: both surfaces now read
+    /// `pl_primer::SEED_MIN`/`SEED_MAX` instead of writing their own literals.
+    ///
+    /// PROVEN TO FAIL, and the observed failures are quoted rather than
+    /// paraphrased.
+    ///
+    /// Passing `false` for `circular` in `refresh_primers` — the one-word
+    /// mistake that would make the panel read every plasmid as a line:
+    ///
+    /// ```text
+    /// at the defaults, on a circle
+    ///   left:  [Binding { start: 1,  end: 14, footprint: CAAATGGTGTGCAC,
+    ///           tail: AACCA, tm: Some(39.955) }]
+    ///   right: [Binding { start: 27, end: 14, footprint: AACCACAAATGGTGTGCAC,
+    ///           tail: [],    tm: Some(51.226) }]
+    /// ```
+    ///
+    /// That is `pl-primer`'s own recorded origin defect reproduced through the
+    /// GUI: five annealing bases reported as a 5' tail and a Tm 11 °C cold, in
+    /// the direction that primes wherever it likes rather than failing loudly.
+    ///
+    /// Dropping the `!` from `p.extend_mismatches = !self.exact` in
+    /// `Primers::params` — the inversion this panel and `cmd_primers` each
+    /// perform once — fails the mutagenic case:
+    ///
+    /// ```text
+    /// at the defaults
+    ///   left:  [Binding { start: 8, end: 25, footprint: ATGAGAACAGAACCACAA,
+    ///           tail: GC, mismatches: [], tm: Some(45.032) }]
+    ///   right: [Binding { start: 6, end: 25, footprint: GCATGAGAACAGAACCACAA,
+    ///           tail: [], mismatches: [1], tm: None }]
+    /// ```
+    ///
+    /// Both halves of that are wrong in ways a screenshot would not show: a site
+    /// reported two bases downstream of where it is, and a Tm printed for a
+    /// footprint that carries a mismatch — which `pl-primer` measured at about
+    /// 10 °C hot, the direction that amplifies nothing.
+    ///
+    /// The DEFAULTS half of the same mistake is caught next door, in
+    /// `primers::tests::a_fresh_panel_holds_the_clis_defaults`, which compares
+    /// the settings rather than the results. Setting `seed_mismatch: true` in
+    /// `Primers::default` fails there and NOT here, because this fixture's
+    /// primer matches perfectly and a seed mismatch has nothing to find — which
+    /// is exactly why both tests exist.
+    #[test]
+    fn the_primers_panel_and_the_cli_agree_about_the_same_primer_and_molecule() {
+        // A panel driven to the given settings, and the sites it found.
+        let sites = |mol: &pl_core::Molecule, primer: &str, tune: fn(&mut primers::Primers)| {
+            let mut app = App::blank();
+            app.bench.set(Document::of_molecule(mol.clone()));
+            app.tab = Tab::Primers;
+            app.primers.query = primer.into();
+            tune(&mut app.primers);
+            // The call `App::ui` makes, outside every paint closure.
+            app.refresh_primers();
+            app.primers.sites.clone()
+        };
+        // The expression `cmd_primers` evaluates, with `params` built the way
+        // its own flag handling builds it.
+        let cli = |mol: &pl_core::Molecule, primer: &str, params: pl_primer::Params| {
+            pl_primer::find_bindings(
+                primer.as_bytes(),
+                &mol.seq,
+                mol.topology.is_circular(),
+                &params,
+            )
+        };
+
+        // 1. A circular plasmid whose site crosses the origin, at the defaults.
+        //    The topology has to reach the engine or this is a different
+        //    molecule; the doc comment above quotes what the failure looks like.
+        let circ = origin_circle();
+        let p1 = "AACCACAAATGGTGTGCAC";
+        let want = cli(&circ, p1, pl_primer::Params::default());
+        assert_eq!(
+            want.len(),
+            1,
+            "the fixture must have a site, or this compares two empty lists — a check that \
+             cannot fail proves nothing"
+        );
+        assert_eq!(
+            sites(&circ, p1, |_| {}),
+            want,
+            "at the defaults, on a circle"
+        );
+
+        // 2. The same, with `--seed 8 --seed-mismatch`.
+        assert_eq!(
+            sites(&circ, p1, |p| {
+                p.seed_len = 8;
+                p.seed_mismatch = true;
+            }),
+            cli(
+                &circ,
+                p1,
+                pl_primer::Params {
+                    seed_len: 8,
+                    seed_mismatch: true,
+                    ..Default::default()
+                }
+            ),
+            "`--seed 8 --seed-mismatch` means something different in the GUI"
+        );
+
+        // 3. `--exact`, on a fixture where it CHANGES THE ANSWER.
+        //
+        //    It does not change it on the plasmid above — that primer matches
+        //    perfectly, so there is no mismatch for the extension rule to reach
+        //    — and a flag test on a fixture the flag cannot move is a check that
+        //    cannot fail. `pl-primer`'s mutagenic example is where it bites:
+        //    lenient extension carries the footprint through the introduced
+        //    mismatch, `--exact` stops at it and calls the rest tail.
+        let mut_mol = pl_core::Molecule {
+            name: "mut".into(),
+            seq: b"TGCACGAATGAGAACAGAACCACAAATGGTG".to_vec(),
+            topology: pl_core::Topology::Linear,
+            ..Default::default()
+        };
+        let p2 = "GCATGAGAACAGAACCACAA";
+        let lenient = cli(&mut_mol, p2, pl_primer::Params::default());
+        let exact = cli(
+            &mut_mol,
+            p2,
+            pl_primer::Params {
+                extend_mismatches: false,
+                ..Default::default()
+            },
+        );
+        assert_ne!(
+            lenient, exact,
+            "the fixture does not distinguish --exact, so asserting about it proves nothing"
+        );
+        assert_eq!(sites(&mut_mol, p2, |_| {}), lenient, "at the defaults");
+        assert_eq!(
+            sites(&mut_mol, p2, |p| p.exact = true),
+            exact,
+            "`--exact` means something different in the GUI, and it is the INVERTED flag"
+        );
+    }
+
+    /// Paste an oligo, see BOTH its sites, click one and go there.
+    ///
+    /// Driven through the panel itself — `primers_tab` really lays out, so a
+    /// widget that panics or a borrow that cannot be taken fails here — and the
+    /// assertion is on the SELECTION, for `ctrl_f_finds_a_site_and_selects_it`'s
+    /// reason: the map's arc and the sequence view both read it, so a panel that
+    /// listed "2 sites" and moved nothing would look right in a screenshot and
+    /// be useless in the hand.
+    ///
+    /// PROVEN TO FAIL with `show_binding` reduced to `self.primers.at =
+    /// Some(i)`: `app.edit.sel` stays `None` and the map draws nothing.
+    #[test]
+    fn pasting_a_primer_shows_every_site_and_clicking_one_selects_it() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        // The same 17 bases twice, 31 bp apart: a failed PCR, and the case the
+        // panel exists to make visible.
+        let mut seq = b"TGCACGAATGAGAACAGAACCACAAATGGTG".to_vec();
+        seq.extend_from_slice(b"CCTTAGGTCTTAGG");
+        seq.extend_from_slice(b"GAATGAGAACAGAACCA");
+        app.bench.set(Document::of_molecule(pl_core::Molecule {
+            name: "two-sites".into(),
+            seq,
+            topology: pl_core::Topology::Linear,
+            ..Default::default()
+        }));
+        app.tab = Tab::Primers;
+        app.primers.query = "GAATGAGAACAGAACCA".into();
+        app.refresh_primers();
+        assert_eq!(app.primers.total, 2, "{:?}", app.primers.sites);
+        assert!(
+            app.primers.tally().contains("not specific"),
+            "the finding is not stated: {:?}",
+            app.primers.tally()
+        );
+
+        // The panel lays out for real.
+        let _ = ctx.run_ui(window(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| app.primers_tab(ui));
+        });
+
+        // Clicking the second row is what `primers_tab` does with the click.
+        let second = app.primers.sites[1].clone();
+        app.show_binding(1);
+        assert_eq!(app.primers.at, Some(1));
+        let sel = app.edit.sel.expect("clicking a site selects its bases");
+        assert_eq!(
+            (sel.anchor.min(sel.head), sel.anchor.max(sel.head)),
+            (second.start - 1, second.end),
+            "the selection is not on the site that was clicked"
+        );
+        // And the map reads the same span, which is why the selection is set at
+        // all rather than a number being reported.
+        assert_eq!(
+            app.selection_segment().map(|s| (s.start, s.end)),
+            Some((second.start, second.end)),
+            "the map would draw its arc somewhere else"
+        );
+        // Only the FOOTPRINT. A tail has no coordinates on this template.
+        assert_eq!(
+            sel.base_count(app.document().expect("open").molecule().span()),
+            second.footprint.len() as u64
+        );
+    }
+
+    /// An edit made on another tab takes the marks off the map.
+    ///
+    /// `refresh_primers` does not run while another tab is up — it would spend
+    /// an O(template x seed) scan every frame on a question nobody has asked —
+    /// so the sites in hand are one edit behind the moment the molecule moves.
+    /// Painting them anyway would put an accent-coloured box over the wrong
+    /// bases and an arc at the wrong angle, both asserting that an oligo anneals
+    /// where it no longer does. `App::primer_sites` is the guard, and this is
+    /// what it is guarding.
+    ///
+    /// PROVEN TO FAIL with `primer_marks` reading `self.primers.sites` directly:
+    /// `an edit on another tab left 1 mark on the map` — drawn at the
+    /// coordinates of a molecule that no longer exists.
+    #[test]
+    fn an_edit_elsewhere_withdraws_the_marks_rather_than_moving_them() {
+        let mut app = App::blank();
+        app.bench
+            .set(edited_doc("x.fa", "GAATGAGAACAGAACCACAAATGGTGCCCCCC"));
+        app.tab = Tab::Primers;
+        app.primers.query = "GAATGAGAACAGAACCA".into();
+        app.refresh_primers();
+        assert_eq!(app.primers.sites.len(), 1, "the fixture needs a site");
+        assert_eq!(app.primer_marks().len(), 1, "the site is not on the map");
+
+        // Leave the tab and edit the molecule, which is what a user does
+        // between pasting a primer and looking at the map.
+        app.tab = Tab::Sequence;
+        app.edit.place(app.bench.get_mut().expect("open"), 0, false);
+        app.edit
+            .type_text(app.bench.get_mut().expect("open"), "TTTT", 0.0);
+        app.settle();
+        assert!(
+            app.primer_marks().is_empty(),
+            "an edit on another tab left {} mark(s) on the map, at coordinates from a \
+             molecule that no longer exists",
+            app.primer_marks().len()
+        );
+        // And nothing was thrown away: going back re-runs the same question
+        // against the molecule as it now is, and the site has moved four bases.
+        app.tab = Tab::Primers;
+        app.refresh_primers();
+        assert_eq!(app.primers.sites.len(), 1);
+        assert_eq!(
+            app.primers.sites[0].start, 5,
+            "the four inserted bases did not move the site"
+        );
+        assert_eq!(app.primer_marks().len(), 1);
+    }
+
+    /// The marks reach the ring, and there is one per site rather than one for
+    /// the selected one.
+    ///
+    /// The list is not the feature. A primer that binds twice is a failed PCR,
+    /// and the second site is usually somewhere the user was not looking — which
+    /// is the map, not a side panel.
+    ///
+    /// Counted by stroke width, which is why [`map::PRIMER_W`] is a width
+    /// nothing else on the ring uses; see its comment. Both marks per site are
+    /// counted: the arc and the radial tick at its 3' end.
+    ///
+    /// PROVEN TO FAIL by drawing only `m.focus` marks — `three sites should be
+    /// six marks ... left: 2, right: 6` — which is the "shows you the best one"
+    /// failure this panel exists to avoid.
+    #[test]
+    fn every_binding_site_is_drawn_on_the_ring() {
+        let mol = pkov();
+        let cutters = pkov_cutters();
+        // Two sites, one of them focused, plus a third on the reverse strand.
+        let marks = [
+            map::PrimerMark {
+                start: 1_000,
+                end: 1_019,
+                reverse: false,
+                focus: true,
+            },
+            map::PrimerMark {
+                start: 4_000,
+                end: 4_019,
+                reverse: false,
+                focus: false,
+            },
+            map::PrimerMark {
+                start: 6_000,
+                end: 6_019,
+                reverse: true,
+                focus: false,
+            },
+        ];
+        let count = |shapes: &[egui::Shape]| -> usize {
+            shapes
+                .iter()
+                .filter(|s| {
+                    let w = match s {
+                        egui::Shape::Path(p) => p.stroke.width,
+                        egui::Shape::LineSegment { stroke, .. } => stroke.width,
+                        _ => return false,
+                    };
+                    (w - map::PRIMER_W).abs() < 0.01 || (w - map::PRIMER_FOCUS_W).abs() < 0.01
+                })
+                .count()
+        };
+
+        // THE CONTROL FIRST: with no primer pasted, the map must draw none of
+        // these, or the count below would be measuring something else.
+        let (plain, _) = paint_map(&mol, "pKoV", &cutters, 706.0, 756.0);
+        assert_eq!(
+            count(&plain),
+            0,
+            "something else on this map already strokes at the primer widths, so the count \
+             below cannot mean what it says"
+        );
+
+        let (drawn, _) = paint_map_full(
+            &mol,
+            "pKoV",
+            &cutters,
+            706.0,
+            756.0,
+            None,
+            pl_enzymes::EnzymeSet::All,
+            &marks,
+        );
+        assert_eq!(
+            count(&drawn),
+            6,
+            "three sites should be six marks — an arc and a 3' tick each"
+        );
+    }
+
     /// Escape closes the bar even though a text box has the keyboard.
     ///
     /// The find keys are read ABOVE `global_shortcuts`' text-box guard, which is
@@ -16697,6 +17703,8 @@ mod tests {
         app.filter = "A's filter".into();
         app.find.open = true;
         app.find.query = "GAATTC".into();
+        app.primers.query = "AAAACCCCGGGGTTTT".into();
+        app.primers.seed_len = 9;
         app.enz_strip = true;
         app.orf_strip = true;
         app.doc_code = pl_core::translate::table(4).expect("table 4");
@@ -16744,6 +17752,10 @@ mod tests {
         assert!(
             app.find.open && app.find.query == "GAATTC",
             "{whose} lost the Find query"
+        );
+        assert!(
+            app.primers.query == "AAAACCCCGGGGTTTT" && app.primers.seed_len == 9,
+            "{whose} lost the primer and the seed it was searched at"
         );
         assert!(
             app.enz_strip && app.orf_strip,
@@ -17083,6 +18095,12 @@ mod tests {
         assert!(
             !app.find.open && app.find.query.is_empty(),
             "A's search followed the tab switch, so \"3 of 7\" now sits beside a              molecule that has neither"
+        );
+        assert!(
+            app.primers.query.is_empty()
+                && app.primers.seed_len == pl_primer::Params::default().seed_len,
+            "A's oligo and the seed it was searched at followed the tab switch, so B is \
+             being told about binding sites on another plasmid"
         );
         assert!(!app.enz_strip && !app.orf_strip, "A's tracks are on B");
         assert_eq!(app.doc_code.id, 11, "A's genetic code is B's");
@@ -24703,6 +25721,24 @@ mod tests {
         sel: Option<pl_core::Segment>,
         set: pl_enzymes::EnzymeSet,
     ) -> (Vec<egui::Shape>, egui::Rect) {
+        paint_map_full(mol, caption, digest, w, h, sel, set, &[])
+    }
+
+    /// The same again, with primer binding sites marked on it.
+    ///
+    /// The innermost layer, so the wrappers above stay the short call every
+    /// existing test makes.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_map_full(
+        mol: &pl_core::Molecule,
+        caption: &str,
+        digest: &[pl_enzymes::Digest],
+        w: f32,
+        h: f32,
+        sel: Option<pl_core::Segment>,
+        set: pl_enzymes::EnzymeSet,
+        primers: &[map::PrimerMark],
+    ) -> (Vec<egui::Shape>, egui::Rect) {
         let ctx = test_ctx();
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
         let input = egui::RawInput {
@@ -24726,6 +25762,7 @@ mod tests {
                             None,
                             set,
                             None,
+                            primers,
                         );
                     });
             });
@@ -24891,6 +25928,7 @@ mod tests {
                                 None,
                                 pl_enzymes::EnzymeSet::All,
                                 None,
+                                &[],
                             );
                         });
                 });
@@ -24938,6 +25976,7 @@ mod tests {
                                 None,
                                 pl_enzymes::EnzymeSet::All,
                                 None,
+                                &[],
                             );
                         });
                 })
@@ -25005,6 +26044,7 @@ mod tests {
                             None,
                             pl_enzymes::EnzymeSet::All,
                             None,
+                            &[],
                         );
                     });
             });

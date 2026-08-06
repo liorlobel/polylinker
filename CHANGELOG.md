@@ -25,6 +25,43 @@ which.
 
 ## [Unreleased]
 
+### Added
+
+- **The desktop app can now find where an oligo binds.** Paste a primer into the
+  new **Primers** tab and it lists every place that oligo anneals on the open
+  molecule, on both strands, including sites that cross the origin of a circular
+  plasmid. Each site is drawn on the map and boxed in the sequence view, and
+  clicking one selects the bases it pairs with. This is the thing a cloner does
+  most often with a primer they already have, and until now `pl primers <file>
+  --primer SEQ` was the only way to do it: `pl-primer` reached the desktop binary
+  only *transitively*, inside `pl-design`'s off-target prefilter, so the engine
+  shipped with no caller a user could reach. The app also shipped a Help page
+  titled "Primer binding sites" describing a search it could not run — the same
+  defect, one crate over, that feature annotation had a day earlier, and it is
+  recorded as such in `bins/pl-gui/Cargo.toml` beside the dependency.
+
+- What the panel shows, and why each part is there. The **annealed footprint is
+  kept visibly apart from any 5' tail**, because a 20 nt primer with a 20 nt
+  Gibson arm is a 40-mer whose annealing temperature is the 20-mer's — the
+  melting temperature is computed over the footprint alone, and a tool that
+  prints one string cannot say so. The **number of sites is stated before the
+  list**, in a warning colour and in words, because a primer that binds twice is
+  a failed PCR and a panel that leads with the best site answers a question
+  nobody asked. No melting temperature is reported for a footprint carrying a
+  mismatch or an ambiguity code; the row says which of the two it is and what
+  that means, rather than leaving a blank cell. Annealing temperatures are
+  offered per polymerase for the selected site, over that site's footprint
+  length, and labelled as vendor advice rather than a measurement.
+
+- The panel exposes the same controls as `pl primers` — `--seed`,
+  `--seed-mismatch` and `--exact` — with the same defaults, and the seed bounds
+  are now a pair of constants in `pl-primer` that both surfaces read, so a GUI
+  that accepted a seed the CLI refuses is arranged against rather than asserted.
+  `the_primers_panel_and_the_cli_agree_about_the_same_primer_and_molecule`
+  compares whole binding lists against the expression `cmd_primers` evaluates,
+  and `the_panel_and_pl_tm_agree_about_the_footprint_and_not_the_whole_oligo`
+  does the same for the temperature against the expression `pl tm` evaluates.
+
 ### Changed
 
 - **Three things came off the roadmap on 2026-08-06, and none of them changes a
@@ -59,6 +96,28 @@ which.
   what was decided in July 2026 stands, and the note beneath it says which half
   of it stopped being planned work. Legal advice on the trademark and Israeli
   §24 questions did not stop being owed.
+
+### Fixed
+
+- **A melting temperature in a methods paragraph now always carries the
+  conditions it was computed under.** `pl methods primers` (and the same page in
+  the app's Help window) said the temperature "is computed from the footprint
+  alone" and then named no nearest-neighbour table, no salt correction and no
+  concentration at all. These paragraphs exist to be pasted into a paper — the
+  Help page has a "Copy this paragraph" button — and the same 20 nt footprint
+  reads 53.9 °C on this model's 50 mM Na+ scale and about five degrees higher in
+  an ordinary PCR buffer, so a reader given the number without the scale could
+  neither reproduce it nor compare it. The paragraph now interpolates the
+  conditions, states that no temperature is reported for a mismatched footprint
+  and why, and says the extension rule the `--exact` flag switches. A test sweeps
+  every topic and fails any paragraph that reports a temperature without naming
+  its table and its sodium.
+
+- The Design panel's conditions line and the `/note` it writes into your file
+  now read the thermodynamics the pair was actually **scored** under, instead of
+  re-deriving `Constraints::default()`. Same string today, because that panel
+  puts no control on the salt; the point is that the note is saved into the
+  document, so it had to be true by construction rather than by coincidence.
 
 ## [0.2.0] - 2026-08-06
 

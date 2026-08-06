@@ -4601,11 +4601,25 @@ fn cmd_primers(args: &[String]) -> Result<(), String> {
 
     let mut params = pl_primer::Params::default();
     if let Some(v) = a.get("seed") {
+        // The bounds come from `pl-primer`, not from two literals here.
+        //
+        // They were literals -- `(8..=35)` and the string `expected 8 to 35` --
+        // and that was sound while this was the only surface offering the
+        // control. `bins/pl-gui`'s Primers tab is now a second one, and two
+        // independently written ranges over one engine parameter is how a GUI
+        // comes to accept a seed the CLI refuses. See `pl_primer::SEED_MIN` for
+        // the argument and for why the numbers are what they are.
         params.seed_len = v
             .parse()
             .ok()
-            .filter(|n| (8..=35).contains(n))
-            .ok_or_else(|| format!("--seed {v:?}: expected 8 to 35"))?;
+            .filter(|n| (pl_primer::SEED_MIN..=pl_primer::SEED_MAX).contains(n))
+            .ok_or_else(|| {
+                format!(
+                    "--seed {v:?}: expected {} to {}",
+                    pl_primer::SEED_MIN,
+                    pl_primer::SEED_MAX
+                )
+            })?;
     }
     params.seed_mismatch = a.has("seed-mismatch");
     // `--exact` is the pydna/SnapGene rule: the footprint stops at the first

@@ -30,6 +30,26 @@ pl-features.workspace = true
 pl-fileio.workspace = true
 pl-gel.workspace = true
 pl-index.workspace = true
+
+# THE SAME DEFECT AS `pl-features` ABOVE, ONE CRATE OVER, closed the same way and
+# on the day after. `pl-primer` was already linked into this binary: `pl-design`
+# calls `find_bindings` from `specificity.rs` for the off-target prefilter, so
+# the code shipped. What it did not have was a caller a USER could reach. The app
+# could design a pair and could not answer the more ordinary question about an
+# oligo you already have -- paste it, where does it land? -- which
+# `pl primers <file> --primer SEQ` has answered since the crate was written.
+#
+# AND THE PARALLEL WITH `pl-features` IS EXACT, down to the shipped page. The
+# help panel renders every `pl_doc::TOPICS` entry (`src/help.rs:215`, from the
+# list itself rather than a hand-written one), and `pl-doc` carries a topic
+# titled "Primer binding sites" whose methods paragraph describes a 3'-anchored
+# seed of 14 bases, the footprint/tail split, and a Tm taken over the footprint
+# alone. So this binary shipped a page describing a search it could not run --
+# the same sentence the note above had to be written about feature annotation.
+#
+# So, as there: this line buys the ability to RUN the search from the Primers tab
+# (`src/primers.rs`), not the engine, which was in the .exe either way.
+pl-primer.workspace = true
 pl-sanger.workspace = true
 pl-scan.workspace = true
 pl-thermo.workspace = true

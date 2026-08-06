@@ -257,6 +257,14 @@ pub fn show(ctx: &egui::Context, p: &mut Panel, dark: bool) -> bool {
                                 .color(pal.muted)
                                 .size(11.5),
                         );
+                        // WHERE IT IS. See `where_in_the_app` for why a page
+                        // that describes an operation without saying where to
+                        // perform it is the weak form of the defect this
+                        // window has already had twice.
+                        if let Some(here) = where_in_the_app(t.name) {
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(here).color(pal.ink2).size(11.5));
+                        }
                         ui.add_space(8.0);
                         // Paragraph by paragraph, splitting on the blank line
                         // `pl-doc` itself paginates on — its comment says
@@ -279,6 +287,68 @@ pub fn show(ctx: &egui::Context, p: &mut Panel, dark: bool) -> bool {
                 });
         });
     open
+}
+
+/// Where in THIS PROGRAM a documented operation is performed, or `None`.
+///
+/// # Why the pointer is here and not in `pl-doc`
+///
+/// `pl-doc` is shared with `bins/pl`, and `pl methods primers` prints the same
+/// paragraph for somebody who has no window open. A crate that named a tab
+/// would be wrong half the time it was read. The GUI is the only place that can
+/// say where a GUI puts something, so this lives here.
+///
+/// # Why it is here at all
+///
+/// This window shipped a page titled "Primer binding sites" — describing the
+/// 3'-anchored seed, the footprint/tail split and a footprint-only Tm — while
+/// the binary had no way to find a binding site at all. The day before, it
+/// shipped "Feature annotation" under the same condition. Both operations are
+/// now reachable, and the remaining failure is quieter but the same in kind: a
+/// page that explains a method and never says the program in front of you
+/// performs it, or where, reads as documentation for the command line.
+///
+/// # `None` is most of the list, and is not laziness
+///
+/// A pointer is written here only where the destination was READ OFF THE CODE:
+/// the tab labels are `main.rs`'s own strings and the window title is
+/// `design::show`'s. Everything else returns `None` and shows nothing, because
+/// a confidently-worded direction to a panel that is not there is worse than
+/// silence — it sends a user hunting for a tab that does not exist and makes
+/// them doubt the rest of the page. `every_help_location_names_a_real_topic`
+/// holds the keys to `pl_doc::TOPICS`, so a misspelling here fails the suite
+/// rather than silently going quiet.
+fn where_in_the_app(topic: &str) -> Option<&'static str> {
+    match topic {
+        // The tab this whole module note is about. Both painters are named
+        // because "in place" is the feature: the list is the least of it.
+        "primers" => Some(
+            "In this app: the Primers tab. Paste an oligo and every place it anneals is \
+             listed, on both strands, marked on the map and boxed in the sequence view. \
+             Clicking a site selects its footprint.",
+        ),
+        "annotate" => Some(
+            "In this app: the Features tab, which lists what the built-in database found \
+             as proposals. Nothing reaches the document until you accept one.",
+        ),
+        "tm" => Some(
+            "In this app: select bases in the Sequence tab and the Tm is in the readout \
+             beneath, with these conditions on its hover. The Primers tab reports one per \
+             binding site, over the annealed footprint only.",
+        ),
+        "orfs" => Some("In this app: the ORF track under the Sequence tab."),
+        "digest" => Some("In this app: the Enzymes tab, and the cut marks on the map."),
+        "sanger" => Some("In this app: the Reads tab."),
+        // Not a menu item: the button sits beside the selection readout and is
+        // disabled until there IS a selection, so naming a menu would send a
+        // user somewhere there is nothing to click. Checked against
+        // `main.rs`'s own button label rather than remembered.
+        "design" => Some(
+            "In this app: select the region to amplify in the Sequence tab, then \
+             \"Design primers…\" beside the readout.",
+        ),
+        _ => None,
+    }
 }
 
 /// What this program does about new versions, for the reader of the version
@@ -410,6 +480,57 @@ fn about(ui: &mut egui::Ui, pal: crate::theme::Palette) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every location pointer is keyed to a topic that exists.
+    ///
+    /// [`where_in_the_app`] matches on `&str`, so a misspelled key is not a
+    /// compile error — it is a page that quietly stops saying where the
+    /// operation is, which is the exact condition the function was added to
+    /// remove and is invisible from the outside. Renaming a topic in `pl-doc`
+    /// does the same thing from the other end.
+    ///
+    /// So the keys are listed once, here, and each is required to resolve
+    /// AND to answer. Nothing asserts the reverse direction: most topics
+    /// deliberately have no pointer, and demanding one for every topic would
+    /// force somebody to invent a destination, which is the failure this is
+    /// guarding against rather than a stricter version of it.
+    ///
+    /// PROVEN TO FAIL by changing the `"primers"` arm's key to `"primer"`:
+    /// `"primers" is a real topic with no pointer written`. Note WHICH half
+    /// caught it — the topic lookup passed, because the key list here still
+    /// reads `"primers"` and that topic exists; it was the pointer coming back
+    /// `None` that failed. The two assertions catch opposite mistakes, a
+    /// renamed topic and a mistyped arm, and only one of them fires per
+    /// mistake.
+    #[test]
+    fn every_help_location_names_a_real_topic() {
+        for key in [
+            "primers", "annotate", "tm", "orfs", "digest", "sanger", "design",
+        ] {
+            assert!(
+                pl_doc::topic(key).is_some(),
+                "{key:?} is not a pl_doc topic, so the page it was written for says nothing \
+                 about where the operation is"
+            );
+            let says = where_in_the_app(key)
+                .unwrap_or_else(|| panic!("{key:?} is a real topic with no pointer written"));
+            assert!(
+                says.starts_with("In this app:"),
+                "{key:?}: the pointer does not read as one -- {says}"
+            );
+        }
+        // The topic this module note is about, named specifically: the app
+        // shipped this page while unable to perform the operation, and a
+        // pointer that stopped mentioning the tab would be the quiet half of
+        // that defect returning.
+        let p = where_in_the_app("primers").expect("the Primers page has a pointer");
+        assert!(
+            p.contains("Primers tab"),
+            "the primer page does not name the tab that does it: {p}"
+        );
+        // And a topic with no panel says nothing rather than guessing.
+        assert_eq!(where_in_the_app("checksum"), None);
+    }
 
     /// The version is stamped, and says so when it cannot be.
     ///

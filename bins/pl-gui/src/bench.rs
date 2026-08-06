@@ -55,6 +55,16 @@ pub struct DocView {
     /// neither is a sentence about another plasmid, and the selection the hit
     /// sets is an index into bases this tab may not have.
     pub find: crate::find::Find,
+    /// The Primers tab: the oligo, the search settings, and the sites found.
+    ///
+    /// PER TAB for the find bar's reason, and one more. The coordinates are
+    /// indices into one molecule, so "2 sites: this primer is not specific to
+    /// one place" carried onto another plasmid is a false sentence that is also
+    /// load-bearing — it is the sentence that stops somebody ordering the oligo.
+    /// The SETTINGS travel with it because they are a question about this
+    /// molecule too: a seed lowered to 8 to find a site on a short template
+    /// would otherwise silently loosen the search on the genome in the next tab.
+    pub primers: crate::primers::Primers,
     /// The Features tab's search box. `adopt` never reset it, so it survived a
     /// document swap lighting nothing — a bug with one document, and a leak
     /// with two.
@@ -112,6 +122,7 @@ impl Default for DocView {
             hot: None,
             hot_shown: None,
             find: crate::find::Find::default(),
+            primers: crate::primers::Primers::default(),
             filter: String::new(),
             enz_strip: false,
             orf_strip: false,
