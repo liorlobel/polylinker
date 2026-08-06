@@ -23767,36 +23767,63 @@ mod tests {
         }
         let ix = annot::AnnotIndex::build(&mol, (0, None));
 
-        // Twenty frames of forty visible rows.
-        let t = std::time::Instant::now();
-        let mut out = Vec::new();
-        let mut seen = 0usize;
-        for f in 0..20u64 {
-            for r in 0..40u64 {
-                let lo = (f * 40 + r) * 60;
-                out.clear();
-                ix.query(lo, lo + 60, &mut out);
-                seen += out.len();
+        // BEST OF FIVE, on both sides, and the reason is worth writing down.
+        //
+        // This compares two wall-clock measurements and asserts a ratio between
+        // them. Taken once each, that is a claim about how busy the machine
+        // happened to be during two particular microsecond windows — and on
+        // 2026-08-06 it failed on ubuntu-latest alone while Windows and macOS
+        // passed the same commit, which is the signature of a loaded shared
+        // runner rather than of a slow index.
+        //
+        // Repeating and taking the MINIMUM is the standard answer: scheduler
+        // noise, page faults and a neighbouring job only ever ADD time, so the
+        // fastest observed run is the one least contaminated by them. It does
+        // not weaken the assertion by a hair — the 10x margin below is
+        // untouched, and a genuinely slow index cannot produce a fast minimum.
+        // The alternative, loosening the margin, would have traded away the
+        // thing the test is for.
+        let best = |run: &mut dyn FnMut() -> usize| {
+            let mut fastest = std::time::Duration::MAX;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                let seen = run();
+                fastest = fastest.min(t.elapsed());
+                std::hint::black_box(seen);
             }
-        }
-        let twenty_frames = t.elapsed();
-        std::hint::black_box(seen);
+            fastest
+        };
+
+        // Twenty frames of forty visible rows.
+        let mut out = Vec::new();
+        let twenty_frames = best(&mut || {
+            let mut seen = 0usize;
+            for f in 0..20u64 {
+                for r in 0..40u64 {
+                    let lo = (f * 40 + r) * 60;
+                    out.clear();
+                    ix.query(lo, lo + 60, &mut out);
+                    seen += out.len();
+                }
+            }
+            seen
+        });
 
         // ONE frame done the naive way: every feature, every segment, per row.
-        let t = std::time::Instant::now();
-        let mut seen = 0usize;
-        for r in 0..40u64 {
-            let (lo, hi) = (r * 60, r * 60 + 60);
-            for f in &mol.features {
-                for sg in &f.segments {
-                    if sg.start.saturating_sub(1) < hi && sg.end > lo {
-                        seen += 1;
+        let one_naive_frame = best(&mut || {
+            let mut seen = 0usize;
+            for r in 0..40u64 {
+                let (lo, hi) = (r * 60, r * 60 + 60);
+                for f in &mol.features {
+                    for sg in &f.segments {
+                        if sg.start.saturating_sub(1) < hi && sg.end > lo {
+                            seen += 1;
+                        }
                     }
                 }
             }
-        }
-        let one_naive_frame = t.elapsed();
-        std::hint::black_box(seen);
+            seen
+        });
 
         assert!(
             twenty_frames * 10 < one_naive_frame,
