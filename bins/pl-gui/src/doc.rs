@@ -2,13 +2,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 
 use pl_core::oplog::{OpError, OpKind, OpLog};
 use pl_core::{Molecule, Topology};
 use pl_enzymes::methylation::SiteEffect;
 use pl_enzymes::Digest;
+use pl_features::annotate::Annotation;
 use pl_fileio::{snapgene, Format};
 
 /// Everything one worker produces about a molecule.
@@ -202,6 +203,172 @@ impl OrfState {
     }
 }
 
+/// Everything one annotation worker produces about a molecule.
+///
+/// **These are PROPOSALS and the document does not contain them.** Nothing here
+/// is in `OpLog`, nothing here is saved, and nothing here is drawn as a feature
+/// of the molecule. `features/SIGNOFF.tsv` gates which records a curator has
+/// approved, an approval lapses the moment the row changes, and `pl annotate`
+/// reports rather than writes; the desktop equivalent of all three is that the
+/// user accepts, one at a time or all at once, and only then does an `OpKind`
+/// exist. An implementation that wrote these into the molecule on open would
+/// demo better and would be asserting on the user's behalf.
+pub struct Proposals {
+    /// The database `hits[i].record` indexes into.
+    ///
+    /// `'static` because it is loaded once for the process — see
+    /// [`crate::featuredb`] — and carried HERE rather than looked up again at
+    /// paint time, because "which table" is half of what a record index means.
+    /// A hit found against the reviewed subset and resolved against the full
+    /// table names a different feature, plausibly, with nothing wrong-looking
+    /// on screen.
+    pub db: &'static pl_features::Db,
+    pub hits: Vec<Annotation>,
+    /// Records neither index can reach, by name.
+    ///
+    /// `pl annotate` writes these to stderr. A window has no stderr anybody
+    /// reads, and `Annotator::unseedable`'s own doc says why they must not be
+    /// swallowed: "a caller that believes it searched the whole database when
+    /// it did not will report a confident empty result."
+    pub unseedable: Vec<String>,
+    /// Whether the unreviewed rows were searched too. See
+    /// [`Document::start_proposals`].
+    pub unreviewed: bool,
+}
+
+impl Proposals {
+    /// The database row a hit came from.
+    pub fn record(&self, a: &Annotation) -> &'static pl_features::Record {
+        &self.db.records[a.record]
+    }
+
+    /// The hits worth showing, given whether partial matches are wanted.
+    ///
+    /// `pl annotate` hides `is_fragment` hits unless `--fragments` is passed,
+    /// and this is the same rule with the same default. A fragment is a hit
+    /// whose coverage fell below `Config::fragment_coverage` — a piece of a
+    /// feature, not the feature — and the commonest one is a promoter or an
+    /// origin clipped by whatever the cloning did. Worth being able to see;
+    /// wrong to offer first, because the name is the whole feature's name.
+    pub fn shown(&self, fragments: bool) -> impl Iterator<Item = &Annotation> {
+        self.hits
+            .iter()
+            .filter(move |a| fragments || !a.is_fragment)
+    }
+
+    /// How many hits the fragment rule is holding back.
+    pub fn fragments(&self) -> usize {
+        self.hits.iter().filter(|a| a.is_fragment).count()
+    }
+}
+
+/// The annotation scan, on [`OrfState`]'s shape and deliberately not on a third
+/// one.
+///
+/// Measured on this machine, release build, as whole-process `pl annotate`
+/// times less a `pl --version` floor of about 30 ms: 25 ms for a 10 kb plasmid
+/// (of which ~4 ms parses the tables and ~13 ms builds the indexes, both of
+/// which this application pays once for the process rather than once per scan),
+/// 115 ms at 400 kb, 315 ms at 1.2 Mb, and 4.2 s at 4.64 Mb.
+///
+/// Against the 58-enzyme digest this document already starts unconditionally
+/// on every open, timed the same way through `pl digest`: about 10 ms at 10 kb
+/// and 110 ms at 400 kb, so at plasmid scale the two are the same order of
+/// work. It is at genome scale that they part company, and there annotation is
+/// the more expensive: 4.2 s against the 1,712 ms this file records above for
+/// the digest at 4.6 Mb. Either way it is not work a frame may do.
+///
+/// # The one thing this cannot do that the ORF scan can
+///
+/// **STOP.** [`pl_core::orf::find_orfs_until`] takes a predicate and checks it
+/// as it goes, so a superseded ORF scan abandons the genome within a few
+/// codons. [`pl_features::annotate::Annotator::annotate`] takes no such hook,
+/// so `cancel` here is checked exactly twice — before the scan starts and
+/// before the answer is sent — and a worker superseded in between runs to
+/// completion. At 4.64 Mb that is 4.2 s of a core produced for nobody. What
+/// bounds it is the same thing that bounds the digest's spawn rate: a run of
+/// typing is ONE operation, because `App::settle` coalesces it, so the trigger
+/// is committed edits and not keystrokes. Adding the hook belongs in
+/// `pl-features` beside `find_orfs_until`'s, not here.
+///
+/// `Off` is what a document starts in and what it costs: a user who switches
+/// automatic annotation off never spawns this thread and never pays a
+/// millisecond.
+pub enum ProposalState {
+    /// Nobody has asked. Costs nothing.
+    Off,
+    Running {
+        rx: Receiver<Proposals>,
+        /// Set when a later edit supersedes this scan. See the note above for
+        /// exactly how much good it does.
+        cancel: Arc<AtomicBool>,
+    },
+    Done(Proposals),
+    /// No bases to search, with the reason — the digest's own three refusals.
+    Unavailable(String),
+    /// The worker went away without answering.
+    ///
+    /// A state the digest and the ORF scan do not have, and it is not
+    /// defensive furniture: [`pl_features::annotate::Annotator::new`] PANICS,
+    /// by documented design, on a database carrying a protein reference shorter
+    /// than its floor. A panicking worker drops its `Sender`, and
+    /// `try_recv().ok()` — which is how the other two poll — cannot tell that
+    /// from "not finished yet", so the panel would show a spinner for ever
+    /// while the reason sat in a stderr no GUI user has. `Err(Disconnected)` is
+    /// the only observable that distinguishes them.
+    Failed(String),
+}
+
+impl ProposalState {
+    pub fn done(&self) -> Option<&Proposals> {
+        match self {
+            ProposalState::Done(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn done_mut(&mut self) -> Option<&mut Proposals> {
+        match self {
+            ProposalState::Done(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn is_running(&self) -> bool {
+        matches!(self, ProposalState::Running { .. })
+    }
+    pub fn is_off(&self) -> bool {
+        matches!(self, ProposalState::Off)
+    }
+    pub fn cancel(&self) {
+        if let ProposalState::Running { cancel, .. } = self {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+    /// Collect the worker's result if it has finished. Returns true if the
+    /// state changed, so the caller knows to repaint.
+    pub fn poll(&mut self) -> bool {
+        let next = match self {
+            ProposalState::Running { rx, .. } => match rx.try_recv() {
+                Ok(v) => Some(ProposalState::Done(v)),
+                Err(TryRecvError::Empty) => None,
+                // See `Failed`. Reachable only through a worker that died,
+                // because a cancelled one is always dropped along with the
+                // receiver that would observe it.
+                Err(TryRecvError::Disconnected) => Some(ProposalState::Failed(
+                    "the annotation worker stopped without answering; the feature database \
+                     may be unreadable"
+                        .into(),
+                )),
+            },
+            _ => None,
+        };
+        if let Some(s) = next {
+            *self = s;
+            return true;
+        }
+        false
+    }
+}
+
 pub struct Document {
     pub path: Option<PathBuf>,
     pub title: String,
@@ -219,6 +386,9 @@ pub struct Document {
     pub digest: DigestState,
     /// The open-reading-frame scan, if anyone has asked for one.
     pub orfs: OrfState,
+    /// What the feature database thinks is in here — as PROPOSALS, never as
+    /// features. See [`Proposals`].
+    pub proposals: ProposalState,
     /// Bumped whenever the BASES or the topology may have moved, and left alone
     /// when only the annotations did.
     ///
@@ -236,6 +406,12 @@ pub struct Document {
     /// Kept here because `OrfState::Running` does not carry them and an edit
     /// mid-scan has to restart the same question, not the default one.
     orf_params: (u8, usize),
+    /// Whether the current or last annotation scan searched the unreviewed rows.
+    ///
+    /// `orf_params`' twin, for the same reason: `ProposalState::Running` does
+    /// not carry it, and `Running` is exactly the state in which the user can
+    /// tick the box.
+    proposal_scope: bool,
     /// How many ORF workers this document has started.
     ///
     /// Test-only, and it exists because the defect it pins is invisible to every
@@ -246,6 +422,21 @@ pub struct Document {
     /// static, because the suite runs its tests in parallel in one process.
     #[cfg(test)]
     pub orf_spawns: usize,
+    /// How many times this document has ASKED for an annotation scan.
+    ///
+    /// Asked, not started: a molecule with no bases is answered by
+    /// `spawn_proposals` without a thread, and that still counts, because the
+    /// property being measured is "one question, asked once" and re-asking a
+    /// refusal sixty times a second is the same defect with a cheaper body.
+    /// `orf_spawns` counts the same way.
+    ///
+    /// Test-only, and it exists for `orf_spawns`' reason twice over: the defect
+    /// it pins is invisible to every other observable, and THIS worker cannot
+    /// be stopped mid-scan (see [`ProposalState`]), so the same mistake here
+    /// burns a whole core per frame on a genome rather than a few codons'
+    /// worth.
+    #[cfg(test)]
+    pub proposal_spawns: usize,
     /// Records the file held. Only the first is shown, and a viewer that does
     /// not say so is indistinguishable from a file with fewer records in it.
     pub records_in_file: usize,
@@ -299,10 +490,14 @@ impl Document {
             container,
             digest,
             orfs: OrfState::Off,
+            proposals: ProposalState::Off,
             seq_version: 0,
             orf_params: (11, 30),
+            proposal_scope: false,
             #[cfg(test)]
             orf_spawns: 0,
+            #[cfg(test)]
+            proposal_spawns: 0,
             records_in_file: report.records,
             unrepresentable_locations: report.unrepresentable_locations,
             saved,
@@ -322,9 +517,12 @@ impl Document {
             title: "test".into(),
             digest: start_digest(&mol),
             orfs: OrfState::Off,
+            proposals: ProposalState::Off,
             seq_version: 0,
             orf_params: (11, 30),
+            proposal_scope: false,
             orf_spawns: 0,
+            proposal_spawns: 0,
             log: OpLog::new(mol),
             format: Format::GenBank,
             container: None,
@@ -385,6 +583,14 @@ impl Document {
     ///
     /// The ORF scan restarts only when the bases or the topology may have
     /// moved, and only if anyone had asked for one — `OrfState::Off` stays off.
+    /// The annotation scan follows exactly that rule, and its reason is
+    /// stronger than a stale strip: a proposal is a NAME AT A COORDINATE that a
+    /// user is about to click Accept on. Held across an insertion it would put
+    /// `AmpR` on bases that are no longer AmpR, and the user's own file would
+    /// then carry the wrong claim with a provenance note vouching for it. So
+    /// the old list is thrown away rather than remapped — `remap_annotations`
+    /// exists for things the document contains, and these are proposals about a
+    /// molecule that has changed.
     fn restart_scans(&mut self, bases_moved: bool) {
         self.digest.cancel();
         self.digest = start_digest(self.log.current());
@@ -397,6 +603,14 @@ impl Document {
                 #[cfg(test)]
                 {
                     self.orf_spawns += 1;
+                }
+            }
+            if !self.proposals.is_off() {
+                self.proposals.cancel();
+                self.proposals = spawn_proposals(self.log.current(), self.proposal_scope);
+                #[cfg(test)]
+                {
+                    self.proposal_spawns += 1;
                 }
             }
         }
@@ -435,6 +649,49 @@ impl Document {
         {
             self.orf_spawns += 1;
         }
+    }
+
+    /// Ask the feature database what is in this molecule, cancelling any
+    /// running scan asked at a different scope.
+    ///
+    /// `start_orfs`' contract, verbatim, and its defect is worth re-reading
+    /// before touching this: idempotent against the question IN FLIGHT and not
+    /// merely against a finished one. `main.rs`'s `refresh_proposals` calls this
+    /// on EVERY frame, and a running scan asks for a repaint every 80 ms, so a
+    /// version that only early-returned on `Done` would cancel and respawn on
+    /// every frame — and unlike the ORF worker this one cannot be stopped
+    /// mid-scan, so the superseded copies would not exit either. At 4.64 Mb,
+    /// where one scan is 4.2 s, that is a core per frame with no answer ever
+    /// arriving. `Unavailable` and `Failed` are covered by the same predicate:
+    /// both are answers, and respawning a worker to be told again that there
+    /// are no bases is the same loop with a cheaper body.
+    ///
+    /// `unreviewed` says whether the rows no curator has signed off were
+    /// searched too. It is a scope and not a filter — the two annotators index
+    /// different tables, so changing it has to re-run the scan, which is why it
+    /// is here rather than at paint time like the fragment rule.
+    pub fn start_proposals(&mut self, unreviewed: bool) {
+        if !self.proposals.is_off() && self.proposal_scope == unreviewed {
+            return;
+        }
+        self.proposal_scope = unreviewed;
+        self.proposals.cancel();
+        self.proposals = spawn_proposals(self.log.current(), unreviewed);
+        #[cfg(test)]
+        {
+            self.proposal_spawns += 1;
+        }
+    }
+
+    /// Collect a finished annotation scan. See [`ProposalState::poll`].
+    pub fn poll_proposals(&mut self) -> bool {
+        self.proposals.poll()
+    }
+
+    /// Stop scanning and forget the proposals. Nothing to hold.
+    pub fn stop_proposals(&mut self) {
+        self.proposals.cancel();
+        self.proposals = ProposalState::Off;
     }
 
     /// Collect a finished ORF scan. See [`OrfState::poll`].
@@ -628,6 +885,73 @@ fn spawn_orfs(mol: &Molecule, code_id: u8, min_aa: usize) -> OrfState {
     OrfState::Running { rx, cancel }
 }
 
+/// `spawn_orfs`' shape, with the ORF search replaced by one annotation pass.
+///
+/// Copied rather than reinvented, down to the named thread and the "send
+/// failing means the document was replaced; that is fine". Two things differ
+/// and both are written down where they matter: the cancel flag can only be
+/// read at the two ends of the scan ([`ProposalState`]), and the worker builds
+/// a MINIMAL query molecule rather than cloning the document's.
+fn spawn_proposals(mol: &Molecule, unreviewed: bool) -> ProposalState {
+    if mol.seq.is_empty() {
+        return ProposalState::Unavailable(if mol.sequence_absent() {
+            "this file declares a length but carries no bases".into()
+        } else if mol.is_annotation_track() {
+            "this is an annotation track; it has no sequence".into()
+        } else {
+            "no sequence".into()
+        });
+    }
+    // `seq` and `topology` and nothing else, which is everything
+    // `Annotator::annotate` reads. A whole `mol.clone()` would drag this
+    // document's features, primers and notes onto the worker to be ignored —
+    // and worse, it would put the CURRENT annotations in front of a function
+    // whose entire output is a proposal about them, which is the sort of
+    // accidental coupling that later reads as intent.
+    let query = Molecule {
+        seq: mol.seq.clone(),
+        topology: mol.topology,
+        ..Molecule::default()
+    };
+    let (tx, rx) = channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancel);
+    std::thread::Builder::new()
+        .name("annotate".into())
+        .spawn(move || {
+            // Before the scan, because after it is 4.2 s too late on a genome.
+            if flag.load(Ordering::Relaxed) {
+                return;
+            }
+            // The first call for the process parses the tables and builds the
+            // indexes — about 17 ms, measured — and it happens HERE, on a
+            // worker, so no frame ever pays it. Every later call is a lookup.
+            let annotator = crate::featuredb::annotator(unreviewed);
+            let hits = annotator.annotate(&query);
+            if flag.load(Ordering::Relaxed) {
+                // Superseded while scanning. Dropping the answer rather than
+                // sending it, so a list of coordinates in a molecule that has
+                // since been edited cannot reach a screen with an Accept button
+                // beside it.
+                return;
+            }
+            let unseedable = annotator
+                .unseedable()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect();
+            // Send failing means the document was replaced; that is fine.
+            let _ = tx.send(Proposals {
+                db: crate::featuredb::db(unreviewed),
+                hits,
+                unseedable,
+                unreviewed,
+            });
+        })
+        .expect("spawn annotate worker");
+    ProposalState::Running { rx, cancel }
+}
+
 fn start_digest(mol: &Molecule) -> DigestState {
     if mol.seq.is_empty() {
         return DigestState::Unavailable(if mol.sequence_absent() {
@@ -806,9 +1130,12 @@ mod tests {
             title: "test".into(),
             digest: start_digest(&mol),
             orfs: OrfState::Off,
+            proposals: ProposalState::Off,
             seq_version: 0,
             orf_params: (11, 30),
+            proposal_scope: false,
             orf_spawns: 0,
+            proposal_spawns: 0,
             log: OpLog::new(mol),
             format: Format::GenBank,
             container: None,

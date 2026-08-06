@@ -1497,6 +1497,49 @@ impl Db {
         }
     }
 
+    /// The everyday plasmid parts this database has **no row of any kind** for,
+    /// in the words a user would use.
+    ///
+    /// Today that is all three: `["promoter", "terminator", "origin of
+    /// replication"]`. `features/README.md` says why — "Promoters, origins and
+    /// terminators have no automatable source that gives a defensible boundary;
+    /// depositors disagree with each other, with 21 distinct spellings for
+    /// 'origin of replication'" — and that file is the right place for the
+    /// reason. It is the wrong place for the FACT, because nobody reads a
+    /// repository before opening a plasmid, and the inference this gap invites
+    /// is specific and wrong: a user watching `AmpR` and `lacI` light up and
+    /// no `ori` concludes their plasmid has no `ori`. The tool caused that by
+    /// having just demonstrated that it knows what features are, so the tool
+    /// owes them the sentence — in the application, and in the methods
+    /// paragraph they would publish. Both are built from this.
+    ///
+    /// **Computed, never written down**, which is the whole point: the day a
+    /// `promoter` row lands, every sentence built on this shortens by itself.
+    /// Prose still apologising for a gap somebody filled two releases ago is a
+    /// failure this repository has documented more than once.
+    ///
+    /// The probe is [`Record::genbank_key`] rather than the name or the class,
+    /// because the GenBank feature key is a controlled vocabulary: `promoter`,
+    /// `terminator` and `rep_origin` are the INSDC keys for exactly these three
+    /// things, whatever a curator called the row. Matching on names would miss
+    /// `pUC ori` and would count a CDS called "terminator protein".
+    ///
+    /// Empty when nothing common is missing, so a caller can say nothing rather
+    /// than say something empty.
+    pub fn absent_common_kinds(&self) -> Vec<&'static str> {
+        // (INSDC feature key, what a user calls it)
+        const PROBES: [(&str, &str); 3] = [
+            ("promoter", "promoter"),
+            ("terminator", "terminator"),
+            ("rep_origin", "origin of replication"),
+        ];
+        PROBES
+            .iter()
+            .filter(|(key, _)| !self.records.iter().any(|r| r.genbank_key == *key))
+            .map(|(_, word)| *word)
+            .collect()
+    }
+
     pub fn census(&self) -> BTreeMap<&'static str, usize> {
         let mut m = BTreeMap::new();
         for r in &self.records {

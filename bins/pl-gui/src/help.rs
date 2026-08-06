@@ -328,6 +328,54 @@ const UPDATE_NOTE: &str = "There is no auto-updater, on purpose: nothing here ru
 const LOCAL_NOTE: &str = "Everything that reads or writes your files runs on this machine. No \
      account, no telemetry, and no sequence, file name or identifier is sent anywhere, ever.";
 
+/// What happens by itself when a molecule is opened, and what does not.
+///
+/// This page already answers "does it phone home". Annotation is the other
+/// question a user is entitled to ask of software that starts doing something
+/// the moment a file opens, and it has two halves that must not be run
+/// together. **Nothing leaves the machine** — the database is three tables
+/// compiled into this binary. **Nothing enters the document** — what the scan
+/// finds is offered in the Features tab and is not in the file until Accept is
+/// pressed, which is `features/SIGNOFF.tsv`'s rule carried into the interface:
+/// the tool may propose and may not assert.
+///
+/// A function and not a `const`, because the record count is interpolated from
+/// the table this binary actually ships rather than typed here. That is the
+/// module header's rule about every other number on this page — a count written
+/// into prose is the first thing to go stale, and this file exists partly
+/// because a sentence about the network went stale exactly that way.
+///
+/// The clause about what the library does NOT hold is deliberately here and not
+/// only in the proposals panel. Somebody reading About is finding out what the
+/// program is; "it annotates plasmids" and "it annotates the 89 things it knows,
+/// which do not include a single promoter" are different claims, and only the
+/// second is true.
+fn annotate_note() -> String {
+    let (db, _) = pl_features::Db::builtin();
+    let reviewed = db.reviewed();
+    let gaps = match reviewed.absent_common_kinds().split_last() {
+        None => String::new(),
+        Some((last, rest)) => format!(
+            " It is not comprehensive — it holds no {} record at all — so a feature it \
+             does not offer may still be there.",
+            if rest.is_empty() {
+                (*last).to_string()
+            } else {
+                format!("{} or {last}", rest.join(", "))
+            }
+        ),
+    };
+    format!(
+        "Opening or pasting a molecule searches it against {} curated feature records \
+         compiled into this program. That search runs here and sends nothing anywhere. \
+         What it finds is offered in the Features tab as proposals, with the identity and \
+         the coverage of each match and the record it came from: nothing is added to your \
+         document until you accept it, and Ctrl+Z takes back anything you \
+         do.{gaps} Switch the search off with \"Annotate on open\" in that panel.",
+        reviewed.records.len()
+    )
+}
+
 fn about(ui: &mut egui::Ui, pal: crate::theme::Palette) {
     ui.label(egui::RichText::new("Polylinker").strong().size(16.0));
     ui.add_space(2.0);
@@ -341,6 +389,14 @@ fn about(ui: &mut egui::Ui, pal: crate::theme::Palette) {
     ui.label(egui::RichText::new(UPDATE_NOTE).color(pal.muted).size(11.5));
     ui.add_space(8.0);
     ui.label(egui::RichText::new(LOCAL_NOTE).color(pal.muted).size(11.5));
+    ui.add_space(8.0);
+    // Under the two network sentences, because the first thing it says is that
+    // this one is not a network behaviour either.
+    ui.label(
+        egui::RichText::new(annotate_note())
+            .color(pal.muted)
+            .size(11.5),
+    );
     ui.add_space(10.0);
     ui.label(
         egui::RichText::new(
@@ -488,6 +544,45 @@ mod tests {
         // The two sentences that were true when written and are not now. Named
         // exactly, because the failure to guard against is not a typo but a
         // revert: both read perfectly well and both would be lies.
+        // Annotation is the other thing this binary does on its own, and the
+        // About page has to say the two things it is not: not a network call,
+        // and not a change to the file. The count comes from the shipped table,
+        // so a library that grew and a sentence that did not cannot both be on
+        // this page.
+        let shipped = pl_features::Db::builtin().0.reviewed();
+        let note = annotate_note();
+        assert!(
+            note.contains(&format!(
+                "{} curated feature records",
+                shipped.records.len()
+            )),
+            "the About page states a record count that is not this binary's: {note}"
+        );
+        for required in [
+            "sends nothing anywhere",
+            "nothing is added to your document until you accept it",
+            "Ctrl+Z",
+            "not comprehensive",
+            "Annotate on open",
+        ] {
+            assert!(
+                note.contains(required),
+                "the About page no longer says {required:?}: {note}"
+            );
+        }
+        // And it names the gaps the shipped table really has, read from the
+        // same call the panel and the methods paragraph read.
+        for kind in shipped.absent_common_kinds() {
+            assert!(
+                note.contains(kind),
+                "the About page does not say the library holds no {kind}: {note}"
+            );
+        }
+        assert!(
+            crate::settings::Layout::default().annotate_on_open,
+            "annotation now ships OFF; the About page describes it as happening on open"
+        );
+
         for retired in ["contacts no server and cannot", "no telemetry, no network"] {
             for (which, note) in [("UPDATE_NOTE", UPDATE_NOTE), ("LOCAL_NOTE", LOCAL_NOTE)] {
                 assert!(

@@ -24,6 +24,49 @@ which guarantee is which.
 
 ### Added
 
+- **The desktop app annotates.** Opening or pasting a molecule now searches it
+  against the 89-record features database that was already compiled into
+  `polylinker.exe`, and lists what it found at the top of the Features tab.
+  Until now the app shipped a methods page *describing* an annotation it could
+  not perform: `bins/pl-gui` had no dependency on `pl-features` at all, and the
+  flagship item in `docs/PLAN.md` §v1.0 was reachable only from `pl annotate` on
+  the command line.
+
+  **They are proposals, and your document does not contain them.** Nothing is
+  added until you press Accept — one row, or all of them — and each accepted
+  feature is one undo step carrying the same provenance note
+  `pl annotate --genbank` writes, from the same function, so a `.gb` written by
+  the app and one written by the command line cannot come to say different
+  things about the same hit. That is `features/SIGNOFF.tsv`'s rule in the
+  interface: the tool may propose and may not assert. An implementation that
+  silently wrote the hits into the file on open would demo better and would be
+  asserting on somebody's behalf.
+
+  Every row shows its identity **and** its coverage, never one without the
+  other — the first 300 bp of a 600 bp marker copied perfectly is 100% identity
+  at 50% coverage, and "100%" alone reads as "this is that feature". Rows also
+  carry whether the match was nucleotide or protein, the record's `PLF:` id, and
+  whether a curator has ever checked that record; an unreviewed record is
+  marked in warning ink, and accepting it writes that caveat into your file.
+
+  Defaults match `pl annotate` exactly: reviewed rows only, partial matches
+  hidden, both one click away. The scan runs on a worker thread, is thrown away
+  rather than remapped whenever an edit moves bases, and never touches the
+  network. "Annotate on open" ships **on** — unlike the update check, which
+  ships off, there is no privacy question here, only time, and the time was
+  measured rather than assumed.
+
+- **The app says what the database has no rows for.** There is not one promoter,
+  terminator or origin of replication among the 89 records — those three classes
+  have no automatable source that gives a defensible boundary, which
+  `features/README.md` has always been candid about and which nobody reads
+  before opening a plasmid. A user who watches `AmpR` light up and sees no `ori`
+  concludes their plasmid has no `ori`, and the tool caused that by having just
+  demonstrated that it knows what features are. The proposals panel, the About
+  page and `pl methods annotate` all say so now, each computed from the shipped
+  table by one function (`Db::absent_common_kinds`) rather than written down, so
+  the sentence shortens by itself the day a `promoter` row lands.
+
 - `CHANGELOG.md` — this file.
 - `CITATION.cff`, so the repository is citable by people who have to cite their
   tools. There is no DOI; see the file.
@@ -47,6 +90,33 @@ which guarantee is which.
 
   Nothing about the published binaries changes. What changes is that the
   number a reader acts on is now compiled against on every push.
+
+- **The 200 ms annotation budget had never been measured.**
+  `docs/PLAN.md` §v1.0 item 5 has claimed "under 200 ms for a 10 kb plasmid"
+  since the plan was written, with nothing computing it — the same shape of
+  unchecked number as the `1.82` above, on a claim more people quote.
+  `crates/pl-features/tests/budget.rs` measures it now, on two 10 kb circular
+  plasmids built out of real records from the shipped table. **The budget holds:
+  11 ms and 103 ms, release build**, against 106 ms and 1,075 ms debug.
+
+  The interesting part is that the two differ by nine times, and in the
+  direction nobody would pick: the plasmid with four multi-kilobase CDSs costs
+  nine times the one carrying 37 short parts, because the cost is the aligner
+  and the aligner is the product of the two lengths. Measuring only the busy
+  plasmid — the one that looks harder — would have reported 11 ms and declared
+  the budget met with eighteen times the room it actually has.
+
+- **A GUI build spawning `curl` opened a console window on Windows.**
+  `polylinker.exe` is a windows-subsystem binary with no console of its own, so
+  Windows makes one for a console child; `curl` finishes in well under a second,
+  and what a user saw was a black window appearing and vanishing. On a tool
+  whose whole claim is that it does not touch the network unless asked, an
+  unexplained terminal flashing at launch is the worst possible thing to show.
+  `CREATE_NO_WINDOW` is now set on both `curl` invocations, which
+  `bins/pl-gui/src/recover.rs` had already been doing for its own child process
+  since long before the updater was written. Nobody had seen the flash because
+  the update check ships off: the defect was real, latent, and reserved for the
+  first person ever to switch the setting on.
 
 Nothing else has landed since v0.1.3 that changes what the programs do: a
 `cargo fmt` of the release-signature test, and a recount of the line count the

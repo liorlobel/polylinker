@@ -4022,56 +4022,15 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
         if a.has("genbank") {
             let mut out = mol.clone();
             for f in &shown {
-                let r = &db.records[f.record];
-                let mut feat = pl_core::Feature::new(r.name.clone(), r.genbank_key.clone());
-                feat.strand = f.strand;
-                feat.segments = vec![pl_core::Segment::new(f.start, f.end)];
-                // Provenance travels with the annotation. A map that cannot say
-                // where a name came from is a map nobody can check, and an
-                // unreviewed row must carry that fact into the file it lands in
-                // — otherwise the caveat stops at the terminal.
-                feat.qualifiers.push((
-                    "note".into(),
-                    Some(format!(
-                        "{} {}: {:.1}% identity, {:.0}% coverage, polylinker feature db {}{}",
-                        r.id,
-                        if f.via_protein {
-                            "protein match"
-                        } else {
-                            "nucleotide match"
-                        },
-                        f.identity * 100.0,
-                        f.coverage * 100.0,
-                        db.version,
-                        if r.review_status == pl_features::ReviewStatus::Proposed {
-                            "; PROPOSED, not reviewed by a human"
-                        } else {
-                            ""
-                        }
-                    )),
-                ));
-                // The evidence a peptide part was admitted on, carried into the
-                // written file rather than left in the terminal. A tag called
-                // by the fusion rule with no ORF drawn under it is otherwise
-                // unexplainable to whoever opens the file next.
-                if let Some(o) = f.fusion_orf {
-                    feat.qualifiers.push((
-                        "note".into(),
-                        Some(format!(
-                            "peptide reference, admitted because it lies in frame inside \
-                             a {} aa ORF at {}..{} on the {} strand",
-                            o.aa_len,
-                            o.start,
-                            o.end,
-                            if o.strand == pl_core::Strand::Reverse {
-                                "minus"
-                            } else {
-                                "plus"
-                            }
-                        )),
-                    ));
-                }
-                out.features.push(feat);
+                // The whole body of this loop used to be written out here, and
+                // it is `pl_features::annotate::to_feature` now for one reason:
+                // the desktop application acquired an Accept button for the
+                // same annotations and has to write the same provenance note.
+                // Two copies of that string is two strings, and the note is the
+                // only record a reader has of where a name on their map came
+                // from. `to_feature`'s own doc carries the argument; nothing
+                // about the output moved.
+                out.features.push(pl_features::annotate::to_feature(&db, f));
             }
             // `write_reporting`, not `write`: the plain wrapper drops the
             // writer's `Vec<String>` of items it could not carry, and this verb

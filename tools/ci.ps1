@@ -812,6 +812,28 @@ Step 'every coding record translates to its protein' {
     cargo test -p pl-features --test corpus every_coding_record 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { cargo test -p pl-features --test corpus every_coding_record }
 } { Test-Path 'features/features.tsv' }
+# `docs/PLAN.md` §v1.0 item 5 claims "under 200 ms for a 10 kb plasmid". It
+# claimed that for months with nothing computing it, which is precisely how
+# `rust-version` sat at a wrong 1.82 -- and a performance budget is the worse of
+# the two, because it is cited by everybody and checked by nobody.
+#
+# RELEASE, and the profile is the whole point of the step. The budget describes
+# what a user's machine does and no user runs an unoptimised build: the same two
+# molecules are 106 ms and 1,075 ms in debug against 11 ms and 103 ms in
+# release, so a debug run would report a tenfold miss that means nothing.
+# `budget.rs` accordingly asserts nothing at all under `debug_assertions`, and
+# would be a green tick forever if it were run the way `unit tests` runs
+# everything else.
+#
+# Named explicitly because it has to be: `unit tests` above is
+# `--workspace --lib --bins` and reaches no integration target. That is the
+# omission this file has already documented finding twice -- pl-design's six
+# suites had never been run by any gate at all, and pl-features' own corpus
+# tests are named one function at a time immediately above for the same reason.
+Step 'annotation is inside the 200 ms budget the plan claims' {
+    cargo test --release -p pl-features --test budget 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { cargo test --release -p pl-features --test budget -- --nocapture }
+}
 Step 'no SnapGene sseqid fingerprint in our ids' {
     # PLAN 8.3 rule 2: `CmR_(2)` / `KanR_(3)` is a copying fingerprint, and
     # 21.5% of their rows carry it. Ours must never look like that.

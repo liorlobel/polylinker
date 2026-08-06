@@ -89,9 +89,9 @@ const BANNED: &[(&str, &str)] = &[
         "requirement 4: the downloaded file is handed to a person, not launched",
     ),
     (
-        "CommandExt",
-        "raw_arg and creation flags are the two ways to get a string to a \
-         process without the argv escaping this crate relies on",
+        "raw_arg",
+        "raw_arg and raw_args hand a string to a process without the argv \
+         escaping this crate relies on, which is the whole basis of `audit`",
     ),
     (
         "fs::write",
@@ -295,11 +295,76 @@ fn the_shipped_code_neither_runs_on_its_own_nor_installs_anything() {
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
+/// The one Windows process flag this crate sets is the one that hides a console.
+///
+/// THIS TEST EXISTS BECAUSE A RULE WAS NARROWED. The scan above used to ban the
+/// string `CommandExt` outright, on the grounds that it is how `raw_arg` and
+/// `creation_flags` both arrive, and that `raw_arg` defeats the argv escaping
+/// `audit` depends on. That was too blunt: `creation_flags` does not touch argv
+/// at all, and banning the import blocked the fix for a real defect — a GUI
+/// build spawning `curl` makes Windows open a console window, which flashes
+/// black at launch on a tool whose entire claim is that it does not touch the
+/// network unless asked.
+///
+/// So the ban was narrowed to `raw_arg`, which is the thing that was actually
+/// dangerous, and this took over the rest of the job. Relaxing a check without
+/// replacing what it covered is how a gate quietly stops being one.
+#[test]
+fn the_only_process_flag_is_the_one_that_hides_a_console() {
+    let mut offenders = Vec::new();
+    let mut found_it = false;
+    for path in sources() {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name == "testsign.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("readable");
+        let code = shipped(&text);
+        for (i, line) in code.lines().enumerate() {
+            if line.contains("raw_arg") {
+                offenders.push(format!("{name}:{}: raw_arg bypasses argv escaping", i + 1));
+            }
+            if !line.contains("creation_flags") {
+                continue;
+            }
+            if name != "net.rs" {
+                offenders.push(format!(
+                    "{name}:{}: process flags belong in net.rs, the one file that runs anything",
+                    i + 1
+                ));
+            }
+            found_it = true;
+        }
+        // The constant, checked by value. A flag named CREATE_NO_WINDOW that was
+        // actually DETACHED_PROCESS (0x0000_0008) would read correctly and behave
+        // differently, and this file is where that would be caught.
+        if name == "net.rs" {
+            for (i, line) in code.lines().enumerate() {
+                if line.contains("const CREATE_NO_WINDOW") && !line.contains("0x0800_0000") {
+                    offenders.push(format!(
+                        "net.rs:{}: CREATE_NO_WINDOW is 0x0800_0000 and this is not it: {}",
+                        i + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+    assert!(
+        found_it,
+        "no creation_flags call found at all. Either the console-suppression fix was \
+         removed -- in which case a Windows user sees a terminal flash whenever the \
+         update check runs -- or this test is now watching nothing."
+    );
+}
+
 /// The one program this crate runs is `curl`, and it runs it without a shell.
 ///
-/// The scan above bans `Command::new` outside `net.rs`; this says what the one
-/// in `net.rs` is allowed to be. Together they are the whole claim: exactly one
-/// program, named by a constant, with its arguments as separate argv elements.
+/// The source scan above bans `Command::new` outside `net.rs`; this says what
+/// the one in `net.rs` is allowed to be. Together they are the whole claim:
+/// exactly one program, named by a constant, with its arguments as separate
+/// argv elements.
 #[test]
 fn the_only_program_this_crate_runs_is_curl() {
     let net = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/net.rs"))

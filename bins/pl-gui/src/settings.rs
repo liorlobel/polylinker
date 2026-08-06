@@ -1,7 +1,13 @@
 //! The handful of numbers a window remembers between runs.
 //!
-//! Today that is one: how wide the details panel was left. It is written on a
-//! clean exit and read once at startup.
+//! Written on a clean exit and read once at startup — except for the switches
+//! whose own doc comments say they are saved on the click, which is every one
+//! where a crash silently reverting the choice would be worse than losing it.
+//!
+//! This line used to read "Today that is one: how wide the details panel was
+//! left", and it had been false for years of fields by the time anybody read it
+//! again. No count is written here on purpose: [`Layout`] below IS the list,
+//! and a number in a header is a number nobody recomputes.
 //!
 //! # Why not eframe's `persistence`
 //!
@@ -83,6 +89,68 @@ pub struct Layout {
     /// the download is `pl update`. See `crate::update` for why.
     pub update_check: bool,
 
+    /// Ask the feature database what is in a molecule as soon as it is opened.
+    ///
+    /// **Shipped ON, and the argument is the exact opposite of
+    /// [`Layout::update_check`]'s** — which is why the two are written out
+    /// separately instead of sharing a sentence. The update check is off
+    /// because it decides whether this machine contacts a server at all, and no
+    /// default may make that choice for somebody. Annotation decides nothing of
+    /// the kind: the database is three tables compiled into the binary, the
+    /// scan runs in this process, and nothing leaves the machine. There is no
+    /// privacy cost to weigh, so the only cost left is time.
+    ///
+    /// That cost was measured rather than guessed — whole-process `pl annotate`
+    /// less a `pl --version` floor of about 30 ms — at 25 ms for a 10 kb
+    /// plasmid, 115 ms at 400 kb, 315 ms at 1.2 Mb and 4.2 s at 4.64 Mb. **None
+    /// of it is paid by the first paint**, because it happens on a worker — the
+    /// same place the 58-enzyme digest already goes, which every document
+    /// starts unconditionally on open with no setting at all. Timed the same
+    /// way, that digest is about 10 ms at 10 kb and 110 ms at 400 kb, so at
+    /// plasmid scale this adds a second scan of about the size of one the
+    /// application already runs without asking anybody. Shipping the flagship
+    /// feature off to save that would be a reflex, not a decision.
+    ///
+    /// It is at GENOME scale that the two part company, and there annotation is
+    /// the more expensive of the pair: 4.2 s against the digest's 1,712 ms at
+    /// 4.6 Mb, and unlike the digest it cannot be stopped part-way (see
+    /// `crate::doc::ProposalState`). That case is what the switch is for — that,
+    /// and the person who annotates by hand and finds a panel offering names
+    /// nothing but noise. It is not an apology for the default.
+    ///
+    /// What it does NOT govern: `pl annotate`, which is a command somebody
+    /// types; and whether anything is ever written to the document. Proposals
+    /// stay proposals until the user presses Accept, whatever this is set to.
+    pub annotate_on_open: bool,
+
+    /// Show hits that cover only part of a database feature.
+    ///
+    /// OFF, matching `pl annotate`, whose `--fragments` is the same escape
+    /// hatch. A fragment is a hit below
+    /// `pl_features::annotate::Config::fragment_coverage` — a piece of a
+    /// feature, not the feature — and it is offered under the whole feature's
+    /// name, so the first thing a user sees must not be `AmpR` against 200 bp
+    /// of it. One click away, because a clipped promoter or a truncated origin
+    /// is a real and common thing to want to see.
+    pub annotate_fragments: bool,
+
+    /// Search the rows no curator has signed off, as well as the shippable
+    /// subset.
+    ///
+    /// OFF, matching `pl annotate --include-proposed`, and this default is the
+    /// project's central rule rather than a preference:
+    /// [`pl_features::Db::reviewed`] says "A caller that wants the proposed rows
+    /// too has to ask for them by name, and owes the user that sentence." The
+    /// checkbox is the asking; the line beside it is the sentence.
+    ///
+    /// Today it changes nothing findable — all 89 shipped rows carry a sign-off
+    /// — and that is exactly why it has to exist before it matters. A
+    /// contributed row arrives `proposed`, and a sign-off lapses by itself the
+    /// moment a signed row's content changes, so the first time either happens
+    /// the difference between the two searches must already be something the
+    /// user chose rather than something that appeared.
+    pub annotate_unreviewed: bool,
+
     /// Resolution for the raster export, in dots per inch.
     ///
     /// Not an `Option`: unlike a printed width, a raster always has SOME
@@ -105,6 +173,9 @@ impl Default for Layout {
             orf_min_aa: 30,
             restore_tabs: true,
             update_check: false,
+            annotate_on_open: true,
+            annotate_fragments: false,
+            annotate_unreviewed: false,
             figure_mm: None,
             figure_dpi: 300.0,
         }
@@ -229,6 +300,22 @@ pub fn parse(text: &str) -> Layout {
             // damaged. Failing closed is the only acceptable direction for a
             // switch that governs whether anything is sent at all.
             "update_check" => out.update_check = v == "1",
+            // `!= "0"`, like `restore_tabs` above and NOT like `update_check`
+            // one line up, and the direction is the whole of the decision. The
+            // default here is ON, so a garbled value must land on ON: a
+            // truncated write or a hand-edited `annotate_on_open: yes` reading
+            // as OFF would silently stop annotating anybody's plasmids and be
+            // indistinguishable from the feature being broken. Failing OPEN is
+            // safe here for the reason it is not safe there — nothing is sent
+            // anywhere, and nothing is written to a document either way.
+            "annotate_on_open" => out.annotate_on_open = v != "0",
+            // ...and these two are `== "1"`, because their defaults are OFF and
+            // the same rule read the other way round. `annotate_unreviewed`
+            // especially: a damaged settings file must not be able to widen a
+            // search to rows no human has checked, because the row it then
+            // proposes is one the user never asked to be offered.
+            "annotate_fragments" => out.annotate_fragments = v == "1",
+            "annotate_unreviewed" => out.annotate_unreviewed = v == "1",
             // Same band as every other number here, and for the same reason:
             // the file is hand-editable and a `figure_mm: nan` that reached
             // `Fit::to_width_mm` would propagate through the scale into every
@@ -279,6 +366,23 @@ pub fn render(l: Layout) -> String {
     // rather than infer it from a line's absence — absence is what a truncated
     // write also looks like.
     s.push_str(&format!("update_check: {}\n", u8::from(l.update_check)));
+    // Always written, all three, including the values that equal the default.
+    // A user asking "why is this plasmid covered in suggestions" — or why it is
+    // not — should be able to read the answer out of this file rather than
+    // infer it from a line's absence, and absence is also what a truncated
+    // write looks like.
+    s.push_str(&format!(
+        "annotate_on_open: {}\n",
+        u8::from(l.annotate_on_open)
+    ));
+    s.push_str(&format!(
+        "annotate_fragments: {}\n",
+        u8::from(l.annotate_fragments)
+    ));
+    s.push_str(&format!(
+        "annotate_unreviewed: {}\n",
+        u8::from(l.annotate_unreviewed)
+    ));
     // Written only when set, so an untouched file says nothing about figure size
     // rather than asserting the default as a choice.
     if let Some(mm) = l.figure_mm {
@@ -330,6 +434,13 @@ mod tests {
             // round-trip if the value under test were the one `Default` puts
             // back.
             update_check: true,
+            // All three deliberately opposite to their defaults, for the reason
+            // stated above: a field that never reached `render` would still
+            // round-trip if the value under test were the one `Default` puts
+            // back.
+            annotate_on_open: false,
+            annotate_fragments: true,
+            annotate_unreviewed: true,
             figure_mm: Some(89.0),
             // Deliberately not the default, so a `figure_dpi` that never
             // reached the file would fail here rather than round-trip through
@@ -418,9 +529,108 @@ mod tests {
         }
     }
 
-    /// The one setting whose default is ON, so an unreadable value must land on
-    /// ON. Falling back to OFF would stop restoring anybody's bench and be
+    /// Each annotation switch survives a round trip in **both** directions.
+    ///
+    /// `the_update_check_round_trips_in_both_directions`, applied to the three
+    /// settings this feature added, and for its reason: round-tripping the
+    /// non-default value alone is the weaker half, because the default also
+    /// round-trips through a `render` that never wrote the key and a `parse`
+    /// that never read it — both ends land on the default and the test passes
+    /// over a field that is not stored at all. So both values are asserted, and
+    /// both are additionally required to appear in the text.
+    #[test]
+    fn the_annotation_settings_round_trip_in_both_directions() {
+        for on in [false, true] {
+            let l = Layout {
+                annotate_on_open: on,
+                annotate_fragments: on,
+                annotate_unreviewed: on,
+                ..Default::default()
+            };
+            let text = render(l);
+            let d = u8::from(on);
+            for key in [
+                "annotate_on_open",
+                "annotate_fragments",
+                "annotate_unreviewed",
+            ] {
+                assert!(
+                    text.contains(&format!("{key}: {d}")),
+                    "the file does not record {key}={on}:\n{text}"
+                );
+            }
+            assert_eq!(parse(&text), l);
+        }
+    }
+
+    /// A layout file written before annotation existed leaves it ON, and leaves
+    /// the two "show me more" switches OFF.
+    ///
+    /// The three defaults do not point the same way, so an upgrade is the one
+    /// moment all three can be got wrong at once. An existing user must not
+    /// lose the flagship feature to a file that predates it, and must not be
+    /// opted into unreviewed rows by one either.
+    #[test]
+    fn a_layout_file_from_before_annotation_gets_the_defaults() {
+        for older in [
+            "polylinker-layout 1\npanel_width: 560\nrestore_tabs: 1\n",
+            "polylinker-layout 1\n",
+            "",
+            "something else entirely\nannotate_on_open: 0\n",
+        ] {
+            let l = parse(older);
+            assert!(
+                l.annotate_on_open,
+                "{older:?} silently switched annotation off"
+            );
+            assert!(!l.annotate_fragments, "{older:?} opted into fragments");
+            assert!(
+                !l.annotate_unreviewed,
+                "{older:?} opted into rows no curator has signed off"
+            );
+        }
+    }
+
+    /// Nothing a damaged file can hold widens the search.
+    ///
+    /// The direction, again, is the test. `annotate_on_open` fails OPEN because
+    /// the worse failure is a user who quietly stops being offered anything;
+    /// the other two fail CLOSED because the worse failure is a search widened
+    /// by a corrupt settings file — most of all to rows no human has checked,
+    /// which is the one thing `features/SIGNOFF.tsv` exists to gate.
+    #[test]
+    fn a_damaged_file_cannot_widen_the_annotation_search() {
+        for bad in ["yes", "true", "on", "2", "-1", "", "1x", "1 1", "0"] {
+            let l = parse(&format!(
+                "{HEADER}\nannotate_fragments: {bad}\nannotate_unreviewed: {bad}\n"
+            ));
+            assert!(
+                !l.annotate_fragments && !l.annotate_unreviewed,
+                "{bad:?} widened the search; both must fail closed"
+            );
+            let l = parse(&format!("{HEADER}\nannotate_on_open: {bad}\n"));
+            assert!(
+                l.annotate_on_open || bad == "0",
+                "{bad:?} switched annotation off; only a literal 0 may"
+            );
+        }
+        // And neither guard is vacuous: the spellings that really do mean what
+        // they say still mean it.
+        let on = parse(&format!(
+            "{HEADER}\nannotate_fragments: 1\nannotate_unreviewed: 1\nannotate_on_open: 0\n"
+        ));
+        assert!(on.annotate_fragments && on.annotate_unreviewed && !on.annotate_on_open);
+        // Keys are matched exactly, not case-folded, here as everywhere else.
+        assert!(!parse(&format!("{HEADER}\nAnnotate_Fragments: 1\n")).annotate_fragments);
+    }
+
+    /// A setting whose default is ON, so an unreadable value must land on ON.
+    /// Falling back to OFF would stop restoring anybody's bench and be
     /// indistinguishable from the feature not working.
+    ///
+    /// This said "the one setting whose default is ON" until `annotate_on_open`
+    /// joined it — see `a_damaged_file_cannot_widen_the_annotation_search`,
+    /// which asserts the same direction for the same reason.
     #[test]
     fn a_garbled_restore_tabs_line_leaves_the_workspace_switched_on() {
         for line in ["restore_tabs: yes", "restore_tabs:", "restore_tabs: true"] {

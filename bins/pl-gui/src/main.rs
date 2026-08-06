@@ -16,6 +16,9 @@ mod clone;
 mod design;
 mod doc;
 mod featedit;
+/// The curated feature database, parsed once for the process. What is done with
+/// it — and what is deliberately NOT done with it — is `doc::Proposals`.
+mod featuredb;
 mod find;
 mod gel;
 mod help;
@@ -4716,6 +4719,18 @@ impl eframe::App for App {
             }
         }
 
+        // Third worker, same contract, and it is started HERE rather than in
+        // the Features tab. `refresh_orfs` can live in the Sequence tab because
+        // an ORF strip nobody is looking at is worth nothing; a proposal list
+        // is worth something the moment the file opens, whichever tab the user
+        // happens to be on, and the six paths that produce a new molecule —
+        // `adopt`, `settle`, `edit`, the paste dialog, undo/redo and
+        // `switch_tab` — have no single funnel to hook. One idempotent
+        // per-frame call covers all six and the seventh nobody has written yet.
+        if self.refresh_proposals() {
+            ctx.request_repaint();
+        }
+
         // The digest worker cannot wake the UI, so poll it and keep repainting
         // while it runs.
         let mut running = false;
@@ -4729,7 +4744,7 @@ impl eframe::App for App {
             if d.orfs.poll() {
                 ctx.request_repaint();
             }
-            running = d.digest.is_running() || d.orfs.is_running();
+            running = d.digest.is_running() || d.orfs.is_running() || d.proposals.is_running();
         }
         // The folder scan is the same shape and the same contract.
         if let Some(s) = &mut self.scan {
@@ -6529,8 +6544,338 @@ impl App {
         }
     }
 
+    /// The proposals the feature database has for this molecule.
+    ///
+    /// **NOTHING HERE IS IN THE DOCUMENT.** That is the whole shape of this
+    /// panel and it is not a detail of the presentation: `features/SIGNOFF.tsv`
+    /// gates which records a curator has approved, an approval lapses the
+    /// moment the row's content changes, and `pl annotate` reports rather than
+    /// writes. The desktop reading of those three is that annotation runs by
+    /// itself, shows what it found as PROPOSALS, and changes nothing until
+    /// somebody presses Accept. Writing them in on open would demo better and
+    /// would be asserting on the user's behalf — which is the one thing this
+    /// project's rules say the tool may not do.
+    ///
+    /// Drawn at the TOP of the Features tab, above the document's own list and
+    /// separated from it, so "what this file says" and "what the database
+    /// thinks" are never one list a user can read down without noticing the
+    /// join.
+    fn proposals_section(&mut self, ui: &mut Ui) {
+        // Copied out before the document is borrowed, so the closure below can
+        // write to them without holding `&mut self`.
+        let mut fragments = self.layout.annotate_fragments;
+        let mut unreviewed = self.layout.annotate_unreviewed;
+        let mut on_open = self.layout.annotate_on_open;
+        let settings_before = (fragments, unreviewed, on_open);
+        let mut accept: Option<usize> = None;
+        let mut accept_all = false;
+        let mut rescan = false;
+
+        {
+            let d = self.bench.get().expect("checked by caller");
+            // The count in the header is the count of what is BELOW it, so a
+            // fragment the rule is hiding cannot inflate it.
+            let n = d.proposals.done().map_or(0, |p| p.shown(fragments).count());
+            let title = match &d.proposals {
+                doc::ProposalState::Done(_) => format!("Proposed features ({n})"),
+                doc::ProposalState::Running { .. } => "Proposed features (searching…)".into(),
+                _ => "Proposed features".into(),
+            };
+            egui::CollapsingHeader::new(RichText::new(title).strong())
+                .default_open(true)
+                .show(ui, |ui| {
+                    // ABOVE the match, so every one of the five states can be
+                    // got out of. Under the match, "Annotate on open" appeared
+                    // only in `Done` — so switching it off left the panel in
+                    // `Off` saying annotation was off, with no control anywhere
+                    // to switch it back on.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut on_open, "Annotate on open").on_hover_text(
+                            "search this offline database whenever a molecule is opened. \
+                                 Nothing is sent anywhere and nothing is written to the \
+                                 document.",
+                        );
+                        ui.checkbox(&mut fragments, "Partial matches")
+                            .on_hover_text(
+                                "hits covering only part of a database feature, offered under the \
+                             whole feature's name — `pl annotate --fragments`",
+                            );
+                        ui.checkbox(&mut unreviewed, "Unreviewed records")
+                            .on_hover_text(
+                                "also search rows no curator has signed off — `pl annotate \
+                                 --include-proposed`",
+                            );
+                    });
+                    match &d.proposals {
+                        doc::ProposalState::Off => {
+                            ui.label(
+                                RichText::new(
+                                    "Automatic annotation is off, so nothing has been searched.",
+                                )
+                                .color(pal(ui).muted)
+                                .size(11.5),
+                            );
+                            if ui.button("Annotate now").clicked() {
+                                rescan = true;
+                            }
+                        }
+                        doc::ProposalState::Running { .. } => {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(14.0));
+                                ui.label(
+                                    RichText::new("searching the feature database…")
+                                        .color(pal(ui).muted),
+                                );
+                            });
+                        }
+                        doc::ProposalState::Unavailable(why) => {
+                            ui.label(RichText::new(why).color(pal(ui).muted));
+                        }
+                        doc::ProposalState::Failed(why) => {
+                            ui.label(RichText::new(why).color(pal(ui).warn));
+                            if ui.button("Try again").clicked() {
+                                rescan = true;
+                            }
+                        }
+                        doc::ProposalState::Done(p) => {
+                            ui.label(
+                                RichText::new(proposal_summary(
+                                    n,
+                                    p.fragments(),
+                                    p.db.records.len(),
+                                    p.unreviewed,
+                                    &p.db.version,
+                                ))
+                                .color(pal(ui).muted)
+                                .size(11.5),
+                            );
+                            // The sentence that makes the whole panel honest,
+                            // always visible and never behind a hover.
+                            ui.label(
+                                RichText::new(
+                                    "These are suggestions. Nothing is added to this document \
+                                     until you accept it, and each one carries where it came \
+                                     from.",
+                                )
+                                .color(pal(ui).muted)
+                                .size(11.5),
+                            );
+                            // What this database does NOT hold, computed from
+                            // the table it just searched. The one thing a
+                            // proposal panel cannot say by itself is what it
+                            // failed to look for, and the failure it invites is
+                            // specific: a user whose `AmpR` lit up reads the
+                            // absence of `ori` as a fact about their plasmid.
+                            // See `featuredb::coverage_note`.
+                            if let Some(note) = featuredb::coverage_note(p.db) {
+                                ui.label(RichText::new(note).color(pal(ui).muted).size(11.5));
+                            }
+                            if let Some(note) =
+                                featuredb::load_error_note(&featuredb::library().errors)
+                            {
+                                ui.label(RichText::new(note).color(pal(ui).warn).size(11.5));
+                            }
+                            if let Some(note) = featuredb::unseedable_note(&p.unseedable) {
+                                ui.label(RichText::new(note).color(pal(ui).muted).size(11.5));
+                            }
+                            ui.add_space(3.0);
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        n > 0,
+                                        egui::Button::new(format!("Accept all ({n})")),
+                                    )
+                                    .on_hover_text(
+                                        "adds every proposal below as a feature, each with its \
+                                         provenance note, in one undo step per feature",
+                                    )
+                                    .clicked()
+                                {
+                                    accept_all = true;
+                                }
+                                if ui
+                                    .button("Search again")
+                                    .on_hover_text("re-run the search over this molecule")
+                                    .clicked()
+                                {
+                                    rescan = true;
+                                }
+                            });
+                            ui.add_space(3.0);
+                            proposal_rows(ui, p, d.molecule(), fragments, &mut accept);
+                        }
+                    }
+                });
+        }
+
+        if (fragments, unreviewed, on_open) != settings_before {
+            self.layout.annotate_fragments = fragments;
+            self.layout.annotate_unreviewed = unreviewed;
+            self.layout.annotate_on_open = on_open;
+            // Written on the click, like `restore_tabs` and `update_check`: a
+            // crash must not be able to silently revert a choice about what the
+            // application searches.
+            settings::save(self.layout);
+        }
+        if rescan {
+            if let Some(d) = self.bench.get_mut() {
+                // Through `Off` and back, because `start_proposals` is
+                // deliberately idempotent and would otherwise decline.
+                d.stop_proposals();
+                d.start_proposals(unreviewed);
+            }
+        }
+        // After the closure, because every one of these needs `&mut self` and
+        // the rows above are holding a borrow of the document.
+        if accept_all {
+            self.accept_all_proposals();
+        } else if let Some(i) = accept {
+            self.accept_proposal(i);
+        }
+    }
+
+    /// Turn proposal `i` into a real feature, through the op log.
+    ///
+    /// `i` indexes `Proposals::hits`, not the filtered view, because the filter
+    /// is a paint-time decision and an index into it means something different
+    /// the moment a checkbox moves.
+    ///
+    /// Goes through [`App::edit`] like every other feature edit: one
+    /// `SetFeature { index: None }`, so it is in the history, Ctrl+Z undoes it,
+    /// and the log refuses it if the coordinates would leave the annotations
+    /// describing something the sequence does not contain.
+    fn accept_proposal(&mut self, i: usize) {
+        // BEFORE the hits are read, not after. `App::edit` settles too, but by
+        // then `hit` is already a copy of a coordinate taken from the molecule
+        // as it was — and a settled run of typing is exactly the edit that
+        // makes that coordinate wrong. Settling first means the flush drops the
+        // proposals (`restart_scans`) and the `else` below returns, which is
+        // the correct outcome: nothing written, and the panel re-scans.
+        self.settle();
+        let Some((db, hit)) = self
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .and_then(|p| p.hits.get(i).map(|a| (p.db, a.clone())))
+        else {
+            return;
+        };
+        let feature = pl_features::annotate::to_feature(db, &hit);
+        let name = feature.name.clone();
+        if self.edit(pl_core::OpKind::SetFeature {
+            index: None,
+            feature: Box::new(feature),
+        }) {
+            // Counted AFTER the edit, because `SetFeature { index: None }`
+            // pushes and the row wanted is therefore the last one. Counting
+            // before and reusing the number assumes nothing else changed the
+            // list in between, which is an assumption `App::edit` — which
+            // settles — is not entitled to make.
+            let last = self
+                .document()
+                .map(|d| d.molecule().features.len().saturating_sub(1))
+                .unwrap_or(0);
+            self.selected = Some(last);
+            // Taken up, so it must not be offered again — an Accept button that
+            // stays clickable is how the same feature lands three times.
+            if let Some(p) = self.bench.get_mut().and_then(|d| d.proposals.done_mut()) {
+                if i < p.hits.len() {
+                    p.hits.remove(i);
+                }
+            }
+            self.status = format!("added {name} from the feature database — Ctrl+Z to undo");
+        }
+    }
+
+    /// Accept every proposal currently shown.
+    ///
+    /// **One operation per feature, and the status line says so.** There is no
+    /// batch `OpKind`, and inventing one is a change to `pl-core`'s history
+    /// semantics rather than to this button; the precedent for a gesture that
+    /// is several operations is deleting across the origin, which is a rotate
+    /// plus a range op and tells the user the same way.
+    ///
+    /// **Skips a proposal whose exact span a feature already occupies**, where
+    /// accepting one by hand does not. A bulk action should be the conservative
+    /// one: the commonest thing to press this on is a file that already carries
+    /// half its annotations, and fifteen duplicate `AmpR`s is a worse outcome
+    /// than one the user has to add deliberately. See [`feature_at_span`] for
+    /// exactly how narrow that predicate is.
+    fn accept_all_proposals(&mut self) {
+        // See `accept_proposal`: the whole list is copied out below, so a
+        // pending typing run has to be flushed before the copy rather than
+        // inside the first `App::edit` after it.
+        self.settle();
+        let fragments = self.layout.annotate_fragments;
+        let Some((db, take)) = self.bench.get().and_then(|d| {
+            let p = d.proposals.done()?;
+            let mol = d.molecule();
+            let take: Vec<(usize, pl_features::annotate::Annotation)> = p
+                .hits
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| fragments || !a.is_fragment)
+                .filter(|(_, a)| !feature_at_span(mol, a))
+                .map(|(i, a)| (i, a.clone()))
+                .collect();
+            Some((p.db, take))
+        }) else {
+            return;
+        };
+        if take.is_empty() {
+            self.notice = Some(
+                "Every proposal is already a feature at exactly that span. Nothing was added."
+                    .into(),
+            );
+            return;
+        }
+        let mut done: Vec<usize> = Vec::with_capacity(take.len());
+        let mut refused = 0usize;
+        for (i, a) in &take {
+            let feature = pl_features::annotate::to_feature(db, a);
+            if self.edit(pl_core::OpKind::SetFeature {
+                index: None,
+                feature: Box::new(feature),
+            }) {
+                done.push(*i);
+            } else {
+                refused += 1;
+            }
+        }
+        // Highest index first, so the earlier ones do not shift under the
+        // removal — `Vec::remove` renumbers everything after it.
+        done.sort_unstable();
+        if let Some(p) = self.bench.get_mut().and_then(|d| d.proposals.done_mut()) {
+            for i in done.iter().rev() {
+                if *i < p.hits.len() {
+                    p.hits.remove(*i);
+                }
+            }
+        }
+        let n = done.len();
+        self.status = format!(
+            "added {n} feature(s) from the feature database — Ctrl+Z {}",
+            if n == 1 {
+                "to undo".into()
+            } else {
+                format!("{n} times to undo them all")
+            }
+        );
+        if refused > 0 {
+            // `edit` writes its own refusal into `notice` and clears it on the
+            // next success, so a refusal in the middle of a run would otherwise
+            // vanish behind the features that followed it.
+            self.notice = Some(format!(
+                "{refused} proposal(s) were refused and {n} were added. A refused annotation \
+                 would have described bases this molecule does not have."
+            ));
+        }
+    }
+
     fn features_tab(&mut self, ui: &mut Ui) {
         ui.add_space(4.0);
+        self.proposals_section(ui);
+        ui.separator();
         // `horizontal_wrapped`, NOT `horizontal`, for the same reason the tab
         // strip is: below about 357 pt of panel a `horizontal` row is painted
         // outside the clip rect and stops being clickable, which would cap the
@@ -7788,6 +8133,36 @@ impl App {
         if let Some(o) = d.orfs.done() {
             self.orf_strip = !o.orfs.is_empty() || !o.stopless.is_empty();
         }
+    }
+
+    /// Start the annotation scan if it is wanted, and collect it if it has
+    /// landed. Returns whether anything changed, so `ui` knows to repaint.
+    ///
+    /// `refresh_orfs`' shape, with one difference that is the whole of the
+    /// design: **it never stops a scan that is already under way.** The setting
+    /// is `annotate_on_open` — it governs whether a scan STARTS by itself, not
+    /// whether one may exist — so a list the user asked for with the Annotate
+    /// button survives them turning the automatic behaviour off, and the
+    /// scope checkbox re-runs it either way. `refresh_orfs` calls `stop_orfs`
+    /// in the same position because there the switch owns a strip of screen
+    /// that must go with it; here it would silently discard a scan the user
+    /// asked for by hand.
+    ///
+    /// `Document::start_proposals` is idempotent against the scan IN FLIGHT,
+    /// which is what makes calling this every frame safe. Read its doc before
+    /// changing either.
+    fn refresh_proposals(&mut self) -> bool {
+        let (want, unreviewed) = (
+            self.layout.annotate_on_open,
+            self.layout.annotate_unreviewed,
+        );
+        let Some(d) = self.bench.get_mut() else {
+            return false;
+        };
+        if want || !d.proposals.is_off() {
+            d.start_proposals(unreviewed);
+        }
+        d.poll_proposals()
     }
 
     /// The editing surface.
@@ -11700,6 +12075,259 @@ pub const HISTORY_HERE: &str = "▶";
 
 /// "There are more coordinates than the four shown", set `.monospace()`.
 pub const MORE_MARK: &str = "…";
+
+/// "98.7% identity · 100% coverage", and **never one without the other**.
+///
+/// [`pl_features::annotate::Annotation::identity`] is emphatic about why, and
+/// the sentence is worth repeating where the number is formatted: identity is a
+/// LOCAL identity over the aligned region and coverage is the fraction of the
+/// database feature reproduced, so the first 300 bp of a 600 bp marker copied
+/// perfectly is 100.0% identity at 50% coverage. "A caller that prints one of
+/// these without the other is not saying anything" — and a user reading 100%
+/// beside a name will read it as "this is that feature".
+///
+/// The same `{:.1}` / `{:.0}` the provenance note uses, so the row and the
+/// qualifier the row becomes cannot round differently.
+fn match_quality(a: &pl_features::annotate::Annotation) -> String {
+    format!(
+        "{:.1}% identity · {:.0}% coverage",
+        a.identity * 100.0,
+        a.coverage * 100.0
+    )
+}
+
+/// The word for a database row's review status, and whether it is a warning.
+///
+/// `Proposed` is spelled **unreviewed** rather than "proposed" on purpose:
+/// every row in this panel is a proposal, so the database's own word for "no
+/// human has checked this" would be the least distinguishing thing on screen.
+fn review_badge(s: pl_features::ReviewStatus) -> (&'static str, bool) {
+    match s {
+        pl_features::ReviewStatus::Proposed => ("unreviewed", true),
+        pl_features::ReviewStatus::Reviewed => ("reviewed", false),
+        pl_features::ReviewStatus::Verified => ("verified", false),
+    }
+}
+
+/// Does this molecule already carry a feature over **exactly** this span, on
+/// this strand?
+///
+/// Deliberately narrow, and the narrowness is the honest part. It is not "is
+/// this already annotated", which would need a judgement about names; it is a
+/// coordinate comparison, and the UI says so in those words. Two things it
+/// therefore does not catch, both stated rather than papered over:
+///
+/// - a feature over the same bases written as a GenBank `join(...)`, which is
+///   what an origin-crossing feature becomes on every save through
+///   `genbank::write`, has two segments and does not match;
+/// - a feature one base wider or narrower does not match either.
+///
+/// Both fall on the side of offering a proposal that turns out to duplicate
+/// something, which the user can see and decline, rather than hiding one that
+/// does not.
+fn feature_at_span(mol: &pl_core::Molecule, a: &pl_features::annotate::Annotation) -> bool {
+    mol.features.iter().any(|f| {
+        f.strand == a.strand
+            && f.segments.len() == 1
+            && f.segments[0].start == a.start
+            && f.segments[0].end == a.end
+    })
+}
+
+/// The line under the Proposed features header.
+///
+/// Says what was SEARCHED as well as what was found, because "nothing found"
+/// over the whole database and "nothing found" over a search that skipped every
+/// unreviewed row are different answers that look identical. `pl annotate`
+/// prints the same two facts — "(89 curated record(s) searched; this database
+/// is not comprehensive)" — for the same reason.
+fn proposal_summary(
+    shown: usize,
+    fragments: usize,
+    searched: usize,
+    unreviewed: bool,
+    version: &str,
+) -> String {
+    let mut s = format!(
+        "{shown} proposal(s) from {searched} {}record(s), feature database {version}.",
+        if unreviewed { "" } else { "reviewed " }
+    );
+    if fragments > 0 {
+        s.push_str(&format!(
+            " {fragments} partial match(es); tick Partial matches to see them."
+        ));
+    }
+    if searched == 0 {
+        s.push_str(
+            " No record in this database has been signed off by a curator, so the default \
+             search has nothing to look for; tick Unreviewed records to search anyway.",
+        );
+    }
+    s
+}
+
+/// One row per proposal: what it is, where, how well it matched, and whether a
+/// human has ever checked the record it came from.
+///
+/// A free function rather than a method because it holds an immutable borrow of
+/// the document for its whole body, and `App::proposals_section` needs `&mut
+/// self` afterwards to act on what was clicked.
+fn proposal_rows(
+    ui: &mut Ui,
+    p: &doc::Proposals,
+    mol: &pl_core::Molecule,
+    fragments: bool,
+    accept: &mut Option<usize>,
+) {
+    if p.shown(fragments).next().is_none() {
+        ui.label(
+            RichText::new("Nothing in this molecule matched a record in the database.")
+                .color(pal(ui).muted)
+                .size(11.5),
+        );
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .max_height(260.0)
+        .id_salt("proposals")
+        .show(ui, |ui| {
+            for (i, a) in p.hits.iter().enumerate() {
+                if !fragments && a.is_fragment {
+                    continue;
+                }
+                let r = p.record(a);
+                let (badge, warn) = review_badge(r.review_status);
+                ui.horizontal(|ui| {
+                    // Allocated FIRST, for the reason the Features list's own
+                    // rows document: a name allocated before the fixed-width
+                    // cluster sets the width of the whole side panel. These
+                    // names come from a curated table rather than from a user's
+                    // file, but the rule does not depend on where the string
+                    // came from.
+                    if ui
+                        .button("Accept")
+                        .on_hover_text("add this as a feature, with its provenance note")
+                        .clicked()
+                    {
+                        *accept = Some(i);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(strand_glyph(a.strand))
+                                .color(pal(ui).muted)
+                                .monospace()
+                                .size(11.0),
+                        );
+                        ui.label(
+                            RichText::new(format!("{}..{}", fmt_int(a.start), fmt_int(a.end)))
+                                .color(pal(ui).muted)
+                                .monospace()
+                                .size(11.0),
+                        );
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(&r.name).strong().size(12.5))
+                                    .truncate(),
+                            )
+                            .on_hover_text(&r.description);
+                        });
+                    });
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(17.0);
+                    ui.label(
+                        RichText::new(format!("{} · {}", r.class.as_str(), match_quality(a)))
+                            .color(pal(ui).muted)
+                            .size(11.0),
+                    );
+                    ui.label(
+                        RichText::new(if a.via_protein {
+                            "protein match"
+                        } else {
+                            "nucleotide match"
+                        })
+                        .color(pal(ui).muted)
+                        .size(11.0),
+                    );
+                    // The review status of the ROW BEHIND the proposal, in
+                    // warning ink when nobody has checked it. `SIGNOFF.tsv` is
+                    // the whole of this project's trust model and a panel that
+                    // did not show which side of it a name came from would be
+                    // laundering the difference away.
+                    ui.label(
+                        RichText::new(badge)
+                            .color(if warn { pal(ui).warn } else { pal(ui).muted })
+                            .size(11.0)
+                            .strong(),
+                    )
+                    .on_hover_text(if warn {
+                        "no curator has checked this record against its cited accession; \
+                         accepting it writes that caveat into the feature"
+                    } else {
+                        "a named curator checked this record against its cited accession"
+                    });
+                    if a.is_fragment {
+                        ui.label(RichText::new("partial").color(pal(ui).warn).size(11.0))
+                            .on_hover_text(
+                                "only part of the database feature is here; the name is the whole \
+                             feature's name",
+                            );
+                    }
+                    if a.wraps_origin {
+                        ui.label(
+                            RichText::new("crosses the origin")
+                                .color(pal(ui).muted)
+                                .size(11.0),
+                        );
+                    }
+                    if feature_at_span(mol, a) {
+                        ui.label(
+                            RichText::new("a feature already covers this span")
+                                .color(pal(ui).muted)
+                                .size(11.0),
+                        )
+                        .on_hover_text("Accept all skips this one; Accept still adds it");
+                    }
+                    // The evidence a peptide part was admitted on. A FLAG tag
+                    // appearing with no visible protein under it is otherwise
+                    // unexplainable, which is what `Annotation::fusion_orf`
+                    // exists to fix.
+                    if let Some(o) = a.fusion_orf {
+                        ui.label(
+                            RichText::new(format!("in frame in a {} aa ORF", o.aa_len))
+                                .color(pal(ui).muted)
+                                .size(11.0),
+                        )
+                        .on_hover_text(format!(
+                            "admitted because it lies in frame inside a {} aa ORF at {}..{} on \
+                             the {} strand",
+                            o.aa_len,
+                            o.start,
+                            o.end,
+                            if o.strand == Strand::Reverse {
+                                "minus"
+                            } else {
+                                "plus"
+                            }
+                        ));
+                    }
+                });
+                // The record id, so a proposal can be looked up in
+                // `features/features.tsv` and its boundary evidence read.
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(17.0);
+                    ui.label(
+                        RichText::new(&r.id)
+                            .color(pal(ui).faint)
+                            .monospace()
+                            .size(10.0),
+                    )
+                    .on_hover_text(&r.boundary_evidence);
+                });
+                ui.add_space(4.0);
+            }
+        });
+}
 
 fn strand_glyph(s: Strand) -> &'static str {
     match s {
@@ -25358,5 +25986,1237 @@ mod tests {
             enzymes.len(),
             opts.sites.len()
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Auto-annotation: proposals, and the line between a proposal and a claim.
+    // ---------------------------------------------------------------------
+
+    /// Records long enough to seed, taken from the shipped table rather than
+    /// copied into a literal here.
+    ///
+    /// A literal would be a second copy of a curated row, free to drift from
+    /// the one the annotator searches — and the drift would show up as this
+    /// whole group of tests quietly finding nothing, which is exactly the shape
+    /// of failure they exist to detect.
+    fn findable_records(n: usize) -> Vec<&'static pl_features::Record> {
+        let v: Vec<&pl_features::Record> = featuredb::library()
+            .reviewed
+            .records
+            .iter()
+            .filter(|r| r.reference_nt.len() >= 500)
+            .take(n)
+            .collect();
+        assert_eq!(
+            v.len(),
+            n,
+            "the shipped table no longer holds {n} long nucleotide records"
+        );
+        v
+    }
+
+    fn a_findable_record() -> &'static pl_features::Record {
+        findable_records(1)[0]
+    }
+
+    /// A document whose bases carry three database records end to end.
+    ///
+    /// THREE and not one, and the number is load-bearing rather than
+    /// decorative: `accept_all_adds_every_proposal_and_skips_a_span_already_annotated`
+    /// plants a feature over one proposal's span and then checks that the
+    /// others were still taken up, which a one-gene molecule cannot express —
+    /// with a single proposal the skip and "nothing to do" are the same
+    /// outcome, and the test passed against an Accept all that did nothing at
+    /// all.
+    fn annotatable_doc(name: &str) -> Document {
+        let seq: String = findable_records(3)
+            .iter()
+            .map(|r| String::from_utf8(r.reference_nt.clone()).expect("ASCII"))
+            .collect();
+        Document::from_bytes(format!(">x\n{seq}\n").as_bytes(), name.into(), None)
+            .expect("a FASTA of three genes loads")
+    }
+
+    /// An app with that document open and the scan finished.
+    fn app_with_proposals() -> App {
+        let mut app = App::blank();
+        app.adopt(annotatable_doc("annot.fa"));
+        wait_for_proposals(&mut app);
+        app
+    }
+
+    /// Drive `refresh_proposals` until the worker answers.
+    ///
+    /// A GENEROUS BUDGET, for the reason the read-comparison test states at
+    /// length: this asserts that the scan completes, not how fast it does, and
+    /// a busy shared CI runner being slow is not a defect.
+    fn wait_for_proposals(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            app.refresh_proposals();
+            let settled = app.bench.get().is_some_and(|d| {
+                !d.proposals.is_off() && !matches!(d.proposals, doc::ProposalState::Running { .. })
+            });
+            if settled {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the annotation scan never finished within 30 s");
+    }
+
+    /// How many proposals are on offer, at the default (fragments hidden).
+    fn n_proposals(app: &App) -> usize {
+        app.bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .map_or(0, |p| p.shown(false).count())
+    }
+
+    /// What the Features tab actually PAINTS for a proposal.
+    ///
+    /// Everything else in this group tests the state machine, which is where
+    /// the correctness is — but a panel whose state is perfect and whose rows
+    /// are never drawn is a feature nobody has. This is the check that the
+    /// proposals reach a screen, that each row carries the two numbers together
+    /// and the review status of the record behind it, and that none of it is
+    /// laid out below the window.
+    ///
+    /// PROVEN TO FAIL by deleting the `self.proposals_section(ui)` call from
+    /// `features_tab`:
+    ///
+    /// ```text
+    /// the proposal's name was never drawn: ["Features", "Library", ...]
+    /// ```
+    #[test]
+    fn the_features_tab_paints_a_proposal_with_both_numbers_and_its_status() {
+        let ctx = test_ctx();
+        let mut app = app_with_proposals();
+        app.tab = Tab::Features;
+        let name = app
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .map(|p| p.record(&p.hits[0]).name.clone())
+            .expect("a finished scan");
+        // Twice: the first frame settles the collapsing header's own state, and
+        // this test is about what a user looks at rather than about egui's
+        // first frame.
+        let _ = paint_out(&mut app, &ctx, window());
+        let out = paint_out(&mut app, &ctx, window());
+        let drawn: Vec<String> = texts(&out).into_iter().map(|(_, s)| s).collect();
+        let all = drawn.join("\n");
+
+        assert!(
+            drawn.contains(&name),
+            "the proposal's name was never drawn: {drawn:?}"
+        );
+        assert!(
+            all.contains("identity") && all.contains("coverage"),
+            "a row shows one number without the other, or neither: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|s| s == "reviewed"),
+            "no row says whether a human has checked the record it came from: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|s| s == "Accept"),
+            "there is no way to accept a proposal: {drawn:?}"
+        );
+        assert!(
+            all.contains("Accept all"),
+            "there is no way to accept them all: {drawn:?}"
+        );
+        assert!(
+            all.contains("until you accept"),
+            "the panel does not say that nothing has been written: {drawn:?}"
+        );
+        // `< 1.0` and not `== 0.0`, the same threshold and for the same reason
+        // as `the_readout_and_its_button_are_not_cut_off_at_any_split`: the
+        // panel's own bottom hairline is a 0.5 pt stroke sitting on the window
+        // edge, so a 0.5 pt overhang is the floor for any panel that fills the
+        // window and is not a row falling off the bottom.
+        let lost = drawn_below_the_window(&out, 840.0);
+        assert!(
+            lost < 1.0,
+            "{lost:.0} pt of the proposals panel is laid out below the window"
+        );
+    }
+
+    /// THE CONTRACT OF THE WHOLE FEATURE: opening a file annotates it, and
+    /// annotating it changes nothing.
+    ///
+    /// PROVEN TO FAIL two ways, and both are mistakes worth a test. Forcing
+    /// `annotate_on_open` false inside `refresh_proposals` — the same omission
+    /// as never calling it at all — leaves the scan in `Off` for ever, and the
+    /// helper says so: "the annotation scan never finished within 30 s".
+    /// Pushing the finished hits into the molecule rather than holding them
+    /// gives
+    ///
+    /// ```text
+    /// the document was modified by being looked at: 3 feature(s) appeared
+    /// ```
+    ///
+    /// which is the failure this project's rules exist to prevent, and the one
+    /// that would look BEST in a demo.
+    #[test]
+    fn opening_a_file_proposes_features_and_changes_nothing() {
+        let app = app_with_proposals();
+        assert!(
+            n_proposals(&app) > 0,
+            "opening a file proposed nothing, so the flagship feature is wired to nothing"
+        );
+        let d = app.document().expect("a document");
+        assert!(
+            d.molecule().features.is_empty(),
+            "the document was modified by being looked at: {} feature(s) appeared",
+            d.molecule().features.len()
+        );
+        assert!(
+            !d.has_history(),
+            "annotation entered the op log, so it is an edit rather than a proposal"
+        );
+    }
+
+    /// Accepting one proposal adds one feature carrying the same provenance
+    /// note `pl annotate --genbank` writes, and Ctrl+Z takes it back.
+    ///
+    /// PROVEN TO FAIL by having `accept_proposal` build the feature by hand —
+    /// `Feature::new(name, key)` with the segments and no qualifiers — which is
+    /// exactly the second implementation `to_feature` exists to prevent:
+    ///
+    /// ```text
+    /// the accepted feature is not the one `pl annotate --genbank` would write
+    ///   left:  Feature { name: "AmpR", ..., qualifiers: [] }
+    ///  right:  Feature { name: "AmpR", ..., qualifiers: [("note",
+    ///          Some("PLF:0001 nucleotide match: 100.0% identity, 100% coverage,
+    ///          polylinker feature db 2026.07.28"))] }
+    /// ```
+    ///
+    /// The undo half of the test is the guard on the OTHER way to get this
+    /// wrong: anything that puts the feature into the molecule without going
+    /// through `App::edit` leaves the history with nothing in it, and a feature
+    /// that cannot be undone is a feature the user cannot decline after the
+    /// fact.
+    #[test]
+    fn accepting_a_proposal_adds_one_undoable_feature_with_its_provenance() {
+        let mut app = app_with_proposals();
+        let (db, hit) = app
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .map(|p| (p.db, p.hits[0].clone()))
+            .expect("a finished scan with at least one hit");
+        let expected = pl_features::annotate::to_feature(db, &hit);
+        let before = n_proposals(&app);
+
+        app.accept_proposal(0);
+
+        let d = app.document().expect("a document");
+        assert_eq!(
+            d.molecule().features.len(),
+            1,
+            "Accept did not add exactly one feature"
+        );
+        let f = &d.molecule().features[0];
+        assert_eq!(
+            f, &expected,
+            "the accepted feature is not the one `pl annotate --genbank` would write"
+        );
+        let notes: Vec<&str> = f
+            .qualifiers
+            .iter()
+            .filter(|(k, _)| k == "note")
+            .filter_map(|(_, v)| v.as_deref())
+            .collect();
+        assert!(
+            !notes.is_empty(),
+            "the accepted feature carries no provenance: {:?}",
+            f.qualifiers
+        );
+        assert!(
+            notes[0].contains("identity") && notes[0].contains("coverage"),
+            "the note states one number without the other: {:?}",
+            notes[0]
+        );
+        assert!(
+            notes[0].contains(&featuredb::library().reviewed.version),
+            "the note does not say which release of the database it came from: {:?}",
+            notes[0]
+        );
+        assert_eq!(
+            n_proposals(&app),
+            before - 1,
+            "an accepted proposal is still in the list, so a second click adds it twice"
+        );
+
+        app.do_undo();
+        assert!(
+            app.document()
+                .expect("a document")
+                .molecule()
+                .features
+                .is_empty(),
+            "Ctrl+Z did not take the accepted feature back, so Accept bypassed the op log"
+        );
+    }
+
+    /// Accept all adds every proposal on offer, one undoable operation each,
+    /// and skips one whose exact span a feature already occupies.
+    ///
+    /// PROVEN TO FAIL by dropping the `feature_at_span` filter — the planted
+    /// feature's span is annotated a second time and the count comes out one
+    /// high — and by removing accepted hits in ascending rather than descending
+    /// order, since `Vec::remove` renumbers everything after it and the list
+    /// then keeps offering hits that were already taken.
+    #[test]
+    fn accept_all_adds_every_proposal_and_skips_a_span_already_annotated() {
+        let mut app = app_with_proposals();
+        let n = n_proposals(&app);
+        assert!(
+            n > 1,
+            "the premise: more than one proposal, so a skip and an empty run are \
+             distinguishable"
+        );
+
+        // Plant a feature over exactly the first proposal's span, as a file
+        // that was already half-annotated would carry.
+        let hit = app
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .map(|p| p.hits[0].clone())
+            .expect("a hit");
+        let mut planted = pl_core::Feature::new("mine", "misc_feature");
+        planted.strand = hit.strand;
+        planted.segments = vec![pl_core::Segment::new(hit.start, hit.end)];
+        app.bench
+            .get_mut()
+            .expect("a document")
+            .apply(pl_core::OpKind::SetFeature {
+                index: None,
+                feature: Box::new(planted),
+            })
+            .expect("planting a feature over real bases is an ordinary edit");
+
+        app.accept_all_proposals();
+
+        let d = app.document().expect("a document");
+        assert_eq!(
+            d.molecule().features.len(),
+            n,
+            "Accept all should have added {} and skipped the planted span, leaving {n} \
+             features in all: {:?}",
+            n - 1,
+            d.molecule()
+                .features
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            app.status.contains("Ctrl+Z"),
+            "the status does not say how to undo a multi-operation gesture: {:?}",
+            app.status
+        );
+        assert_eq!(
+            n_proposals(&app),
+            1,
+            "a skipped proposal must stay on offer, and an accepted one must go"
+        );
+    }
+
+    /// A proposal names a coordinate, so it cannot outlive the bases.
+    ///
+    /// PROVEN TO FAIL by leaving the annotation scan out of `restart_scans`:
+    /// the finished list survives a 500 bp insertion at base 1 and every
+    /// proposal in it is then 500 bases out — with an Accept button beside it,
+    /// which writes the wrong claim into the user's file under a provenance
+    /// note vouching for it. That is the worst thing this panel can do, and it
+    /// is invisible: every coordinate still looks perfectly plausible.
+    #[test]
+    fn an_edit_that_moves_bases_throws_the_proposals_away() {
+        let mut app = app_with_proposals();
+        let was: Vec<(u64, u64)> = app
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .map(|p| p.hits.iter().map(|a| (a.start, a.end)).collect())
+            .expect("a finished scan");
+        assert!(!was.is_empty(), "the premise");
+
+        app.bench
+            .get_mut()
+            .expect("a document")
+            .apply(pl_core::OpKind::InsertAt {
+                at: 1,
+                seq: "G".repeat(500),
+            })
+            .expect("an ordinary insert");
+
+        assert!(
+            app.bench
+                .get()
+                .expect("a document")
+                .proposals
+                .done()
+                .is_none(),
+            "the proposal list survived an edit that moved every base it names"
+        );
+
+        // ...and the replacement really is about the molecule as it now is.
+        wait_for_proposals(&mut app);
+        let now: Vec<(u64, u64)> = app
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .map(|p| p.hits.iter().map(|a| (a.start, a.end)).collect())
+            .expect("a finished re-scan");
+        assert_eq!(
+            now,
+            was.iter()
+                .map(|(s, e)| (s + 500, e + 500))
+                .collect::<Vec<_>>(),
+            "the re-scan did not follow the bases"
+        );
+    }
+
+    /// One question, asked once — not one per frame.
+    ///
+    /// PROVEN TO FAIL by making `Document::start_proposals` early-return only
+    /// on `Done`, which is precisely the defect `start_orfs`' doc records
+    /// having shipped: 200 spawns instead of 1. It is worse here than there,
+    /// because `Annotator::annotate` takes no cancellation hook, so the
+    /// superseded workers do not stop either — on a 4.64 Mb molecule that is a
+    /// core per frame with no answer ever arriving.
+    #[test]
+    fn the_annotation_scan_is_asked_once_and_not_once_per_frame() {
+        let mut app = App::blank();
+        app.adopt(annotatable_doc("annot.fa"));
+        for _ in 0..200 {
+            app.refresh_proposals();
+        }
+        assert_eq!(
+            app.bench.get().expect("a document").proposal_spawns,
+            1,
+            "the scan was respawned on later frames"
+        );
+        wait_for_proposals(&mut app);
+        for _ in 0..200 {
+            app.refresh_proposals();
+        }
+        assert_eq!(
+            app.bench.get().expect("a document").proposal_spawns,
+            1,
+            "a FINISHED scan was thrown away and asked again"
+        );
+    }
+
+    /// Switching the search scope re-runs the search; leaving it alone does not.
+    ///
+    /// PROVEN TO FAIL by dropping `proposal_scope` from `start_proposals`'
+    /// guard: ticking Unreviewed records leaves the previous answer on screen,
+    /// so the checkbox appears to do nothing at all.
+    #[test]
+    fn widening_the_search_to_unreviewed_rows_re_runs_it() {
+        let mut app = app_with_proposals();
+        assert_eq!(app.bench.get().expect("a document").proposal_spawns, 1);
+
+        app.layout.annotate_unreviewed = true;
+        app.refresh_proposals();
+        assert_eq!(
+            app.bench.get().expect("a document").proposal_spawns,
+            2,
+            "widening the scope did not re-run the search"
+        );
+        wait_for_proposals(&mut app);
+        assert!(
+            app.bench
+                .get()
+                .and_then(|d| d.proposals.done())
+                .is_some_and(|p| p.unreviewed),
+            "the finished scan does not know which table it searched"
+        );
+        // And it settles: the same scope asked again is not a new question.
+        for _ in 0..50 {
+            app.refresh_proposals();
+        }
+        assert_eq!(app.bench.get().expect("a document").proposal_spawns, 2);
+    }
+
+    /// With the setting off, no worker is ever started.
+    ///
+    /// PROVEN TO FAIL by having `refresh_proposals` ignore `annotate_on_open`.
+    /// The setting exists precisely so that somebody working on a genome, where
+    /// one scan is 4.2 s of a core, can decline it, and a switch that spawns
+    /// the thread anyway is a switch that does nothing.
+    #[test]
+    fn annotation_switched_off_never_starts_a_worker() {
+        let mut app = App::blank();
+        app.layout.annotate_on_open = false;
+        app.adopt(annotatable_doc("annot.fa"));
+        for _ in 0..200 {
+            app.refresh_proposals();
+        }
+        let d = app.bench.get().expect("a document");
+        assert_eq!(d.proposal_spawns, 0, "a worker was started anyway");
+        assert!(d.proposals.is_off());
+
+        // ...and an edit does not start one either, which is the path
+        // `restart_scans` could have got wrong.
+        app.bench
+            .get_mut()
+            .expect("a document")
+            .apply(pl_core::OpKind::InsertAt {
+                at: 1,
+                seq: "GGGG".into(),
+            })
+            .expect("an ordinary insert");
+        assert_eq!(app.bench.get().expect("a document").proposal_spawns, 0);
+    }
+
+    /// A molecule with no bases is told why, rather than shown an empty list.
+    ///
+    /// PROVEN TO FAIL by returning `ProposalState::Done` with no hits for an
+    /// empty sequence: "nothing matched" and "there was nothing to match
+    /// against" are different answers, and the digest and the ORF scan both
+    /// already distinguish them.
+    #[test]
+    fn a_molecule_with_no_bases_says_why_rather_than_proposing_nothing() {
+        let mut app = App::blank();
+        app.adopt(
+            Document::from_bytes(
+                b"LOCUS       x               1200 bp    DNA     linear   SYN 01-JAN-2026\n//\n",
+                "empty.gb".into(),
+                None,
+            )
+            .expect("a record with a declared length and no bases"),
+        );
+        for _ in 0..200 {
+            app.refresh_proposals();
+        }
+        let d = app.bench.get().expect("a document");
+        let doc::ProposalState::Unavailable(why) = &d.proposals else {
+            panic!("a molecule with no bases did not produce a reason");
+        };
+        assert!(!why.is_empty(), "the refusal has no reason in it");
+        // Asked ONCE. `Unavailable` is an answer, and a per-frame refresh that
+        // treated it as "not asked yet" would re-ask it sixty times a second
+        // for as long as the file stayed open.
+        assert_eq!(
+            d.proposal_spawns, 1,
+            "the refusal was re-asked on every frame"
+        );
+    }
+
+    /// A partial match is found, and is hidden until asked for.
+    ///
+    /// PROVEN TO FAIL by having `Proposals::shown` ignore its argument: the
+    /// fragment appears in the default list, offered under the whole feature's
+    /// name, which is `pl annotate`'s `--fragments` default inverted.
+    #[test]
+    fn a_partial_match_is_found_and_hidden_until_asked_for() {
+        let r = a_findable_record();
+        // A third of a record, so coverage falls well below
+        // `Config::fragment_coverage` while identity stays at 1.0 — the case
+        // `Annotation::identity`'s doc uses to explain why either number alone
+        // says nothing.
+        let third =
+            String::from_utf8(r.reference_nt[..r.reference_nt.len() / 3].to_vec()).expect("ASCII");
+        let mut app = App::blank();
+        app.adopt(
+            Document::from_bytes(format!(">x\n{third}\n").as_bytes(), "third.fa".into(), None)
+                .expect("a FASTA loads"),
+        );
+        wait_for_proposals(&mut app);
+        let p = app
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .expect("a finished scan");
+        assert!(
+            p.fragments() > 0,
+            "a third of a {} bp record was not called a fragment: {:?}",
+            r.reference_nt.len(),
+            p.hits
+                .iter()
+                .map(|a| (a.identity, a.coverage, a.is_fragment))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            p.shown(false).count() < p.shown(true).count(),
+            "the fragment rule hid nothing"
+        );
+    }
+
+    /// The two numbers are printed together, and rounded the way the provenance
+    /// note rounds them.
+    ///
+    /// PROVEN TO FAIL by dropping the coverage clause from `match_quality`,
+    /// which is the exact mistake `Annotation::identity`'s doc was written
+    /// against: a plasmid carrying the first 300 bp of a 600 bp marker would
+    /// read "100.0%" beside the marker's full name.
+    #[test]
+    fn a_row_never_shows_identity_without_coverage() {
+        let mut a = pl_features::annotate::Annotation {
+            record: 0,
+            start: 1,
+            end: 300,
+            strand: Strand::Forward,
+            identity: 1.0,
+            coverage: 0.5,
+            score: 0.0,
+            is_fragment: true,
+            via_protein: false,
+            wraps_origin: false,
+            fusion_orf: None,
+        };
+        assert_eq!(match_quality(&a), "100.0% identity · 50% coverage");
+        a.identity = 0.9873;
+        a.coverage = 1.0;
+        assert_eq!(match_quality(&a), "98.7% identity · 100% coverage");
+    }
+
+    /// An unreviewed record is marked, and marked as a warning.
+    ///
+    /// The badge cannot fire against the shipped tables today — all 89 rows
+    /// carry a sign-off — so this pins the mapping directly. It is not
+    /// hypothetical upkeep: a contributed row arrives `proposed`, and
+    /// `features/SIGNOFF.tsv` withdraws a signature by itself the moment a
+    /// signed row's content changes.
+    ///
+    /// PROVEN TO FAIL by returning `("proposed", false)` for `Proposed`, which
+    /// paints the caveat in the same muted ink as everything else on the row.
+    #[test]
+    fn an_unreviewed_record_is_marked_as_a_warning() {
+        assert_eq!(
+            review_badge(pl_features::ReviewStatus::Proposed),
+            ("unreviewed", true)
+        );
+        assert_eq!(
+            review_badge(pl_features::ReviewStatus::Reviewed),
+            ("reviewed", false)
+        );
+        assert_eq!(
+            review_badge(pl_features::ReviewStatus::Verified),
+            ("verified", false)
+        );
+        // "All 89 rows carry a sign-off" above is asserted rather than written
+        // down, so it cannot rot into a false claim in a doc comment.
+        assert!(
+            featuredb::library()
+                .reviewed
+                .records
+                .iter()
+                .all(|r| r.review_status != pl_features::ReviewStatus::Proposed),
+            "`Db::reviewed` returned an unreviewed row, which is the one thing it may not do"
+        );
+    }
+
+    /// The summary says what was SEARCHED, not only what was found.
+    ///
+    /// PROVEN TO FAIL by dropping the `searched` clause: "0 proposal(s)" over
+    /// the whole database and "0 proposal(s)" over a search that skipped every
+    /// unreviewed row are different answers rendered identically, and the
+    /// second is the one somebody would spend an afternoon on.
+    #[test]
+    fn the_summary_says_what_was_searched() {
+        let s = proposal_summary(3, 0, 89, false, "2026.07.28");
+        assert!(s.contains('3') && s.contains("89"), "{s}");
+        assert!(s.contains("reviewed"), "the scope is not stated: {s}");
+        assert!(s.contains("2026.07.28"), "the release is not stated: {s}");
+        assert!(!s.contains("partial"), "nothing was hidden: {s}");
+
+        let s = proposal_summary(3, 2, 89, false, "x");
+        assert!(s.contains("2 partial"), "hidden hits are not counted: {s}");
+
+        let s = proposal_summary(0, 0, 100, true, "x");
+        assert!(
+            !s.contains("reviewed"),
+            "a widened search still claims to be reviewed-only: {s}"
+        );
+
+        // The database with nothing signed off — `pl annotate`'s own "no
+        // records to search" case, which prints the reason rather than "no
+        // features found".
+        let s = proposal_summary(0, 0, 0, false, "x");
+        assert!(
+            s.contains("signed off"),
+            "an empty search reads as an empty molecule: {s}"
+        );
+    }
+
+    /// `feature_at_span` is a coordinate comparison and nothing more.
+    ///
+    /// PROVEN TO FAIL by comparing `f.start()`/`f.end()` instead of the single
+    /// segment: those are a min and a max over the segments, so a two-exon
+    /// `join(10..100,300..400)` answers "yes" to a proposal at 10..400 and
+    /// Accept all silently skips it.
+    #[test]
+    fn a_span_already_annotated_is_recognised_only_when_it_really_is_the_same_span() {
+        let mut mol = pl_core::Molecule {
+            seq: b"ACGT".repeat(200),
+            ..Default::default()
+        };
+        let hit = pl_features::annotate::Annotation {
+            record: 0,
+            start: 10,
+            end: 400,
+            strand: Strand::Forward,
+            identity: 1.0,
+            coverage: 1.0,
+            score: 0.0,
+            is_fragment: false,
+            via_protein: false,
+            wraps_origin: false,
+            fusion_orf: None,
+        };
+        assert!(!feature_at_span(&mol, &hit), "an empty molecule matched");
+
+        let mut f = pl_core::Feature::new("x", "misc_feature");
+        f.segments = vec![pl_core::Segment::new(10, 400)];
+        mol.features.push(f);
+        assert!(feature_at_span(&mol, &hit), "the same span was not seen");
+
+        // One base out is a different span.
+        mol.features[0].segments = vec![pl_core::Segment::new(10, 401)];
+        assert!(!feature_at_span(&mol, &hit));
+
+        // The other strand is a different feature.
+        mol.features[0].segments = vec![pl_core::Segment::new(10, 400)];
+        mol.features[0].strand = Strand::Reverse;
+        assert!(!feature_at_span(&mol, &hit));
+
+        // And a join covering 10..400 in two pieces is NOT the same span,
+        // which is the narrowness this predicate promises.
+        mol.features[0].strand = Strand::Forward;
+        mol.features[0].segments = vec![
+            pl_core::Segment::new(10, 100),
+            pl_core::Segment::new(300, 400),
+        ];
+        assert!(!feature_at_span(&mol, &hit));
+    }
+
+    // ---------------------------------------------------------------------
+    // The same feature, looked at adversarially.
+    // ---------------------------------------------------------------------
+
+    /// A GenBank record carrying real database features AND two annotations of
+    /// its own, so that "the document did not change" is a claim about
+    /// something rather than about an empty molecule.
+    ///
+    /// `opening_a_file_proposes_features_and_changes_nothing` uses a bare FASTA
+    /// and asserts `features.is_empty()`, which is the right assertion for that
+    /// fixture and a weak one in general: a molecule that starts empty cannot
+    /// tell "nothing was added" from "the two things that were there are still
+    /// there and nothing was added", and it cannot see a proposal that
+    /// overwrote an existing feature rather than appending one.
+    fn annotatable_genbank() -> Document {
+        let seq: String = findable_records(3)
+            .iter()
+            .map(|r| String::from_utf8(r.reference_nt.clone()).expect("ASCII"))
+            .collect();
+        let mut mol = pl_core::Molecule {
+            seq: seq.into_bytes(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        mol.name = "pTEST".into();
+        for (name, kind, at) in [("mine", "misc_feature", 5u64), ("yours", "CDS", 400)] {
+            let mut f = pl_core::Feature::new(name, kind);
+            f.segments = vec![pl_core::Segment::new(at, at + 90)];
+            f.qualifiers.push(("label".into(), Some(name.into())));
+            mol.features.push(f);
+        }
+        let text = pl_fileio::genbank::write(&mol, "pTEST", (1, 1, 2026));
+        // WITH a path, which is the whole point of this fixture and not an
+        // incidental: `Document::from_bytes` derives `saved` from
+        // `path.is_some()`, so a path-less document is `unsaved()` from the
+        // moment it exists and cannot tell whether annotation dirtied it. The
+        // file is never read — `from_bytes` already has the bytes — so a name
+        // that is not on disk is exactly as good as one that is.
+        Document::from_bytes(
+            text.as_bytes(),
+            "pTEST.gb".into(),
+            Some(PathBuf::from("pTEST.gb")),
+        )
+        .expect("the record this test just wrote is readable")
+    }
+
+    /// Everything about a document that a written file would show.
+    ///
+    /// The molecule itself is not comparable — `pl_core::Molecule` derives
+    /// `Clone` and `Debug` and deliberately not `PartialEq` — so the comparison
+    /// is made against the GenBank text it serialises to. That is the right
+    /// observable anyway: it is what would land in the user's file, it covers
+    /// the bases, the topology, every feature and every qualifier on them, and
+    /// a difference in it is a difference the user would see.
+    fn as_written(d: &Document) -> String {
+        pl_fileio::genbank::write(d.molecule(), &d.title, (1, 1, 2026))
+    }
+
+    /// THE PROPERTY THE WHOLE DESIGN EXISTS FOR, asserted against everything
+    /// that can observe it.
+    ///
+    /// `opening_a_file_proposes_features_and_changes_nothing` is the same claim
+    /// over a molecule with no features in it. This is the version with
+    /// something to lose: a real record with two annotations of its own, and
+    /// the comparison made against the FILE IT WOULD BE WRITTEN AS — which is
+    /// what a user would actually notice — plus the two pieces of state that a
+    /// silent write would move and a features count would not:
+    ///
+    /// * `unsaved()`, which drives the toolbar dot, the close guard and the
+    ///   autosave. Annotation making a document dirty would put a
+    ///   "you have unsaved changes" prompt in front of somebody who opened a
+    ///   file, looked at it, and closed it — and, worse, the recovery snapshot
+    ///   would then be written with the proposals in it.
+    /// * the op-log cursor, which is the document's identity. `has_history` is
+    ///   not enough on its own: it is defined over `all_ops` and so is true
+    ///   forever after the first edit, and a write followed by an undo would
+    ///   leave it true with the cursor back where it started.
+    ///
+    /// PROVEN TO FAIL by applying the finished hits through `Document::apply`
+    /// at the end of `App::refresh_proposals` — the shape of the mistake, in
+    /// which the worker holds the answers and something on the UI side
+    /// "helpfully" puts them in:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: the document changed while it was
+    /// being annotated. Nothing here may be written until the user accepts it.
+    ///   left: "LOCUS       pTEST                   2472 bp    DNA     circular
+    ///  right: "LOCUS       pTEST                   2472 bp    DNA     circular
+    /// ```
+    ///
+    /// (the two GenBank texts differ some hundreds of characters in, where the
+    /// three added `CDS` blocks are; `assert_eq!` prints both in full).
+    ///
+    /// The `unsaved` and cursor assertions below are the finer-grained half of
+    /// the same claim, and are NOT redundant with the text comparison: an
+    /// implementation that wrote the features and then quietly re-marked the
+    /// document clean would pass one of them and not the other. They are
+    /// ordered text-first because that is the assertion whose failure message
+    /// shows a human what changed.
+    #[test]
+    fn annotation_leaves_the_document_its_log_and_its_save_state_untouched() {
+        let mut app = App::blank();
+        app.adopt(annotatable_genbank());
+
+        let (before, was_unsaved, cursor_before) = {
+            let d = app.document().expect("a document");
+            (as_written(d), d.unsaved(), d.log.cursor())
+        };
+        assert!(
+            !was_unsaved,
+            "the premise: a freshly opened document is not dirty"
+        );
+
+        wait_for_proposals(&mut app);
+        assert!(
+            n_proposals(&app) > 0,
+            "the premise: this molecule really was annotated"
+        );
+
+        let d = app.document().expect("a document");
+        assert_eq!(
+            as_written(d),
+            before,
+            "the document changed while it was being annotated. Nothing here may be \
+             written until the user accepts it."
+        );
+        assert_eq!(
+            d.molecule().features.len(),
+            2,
+            "the document's own features were added to or replaced"
+        );
+        assert!(
+            !d.unsaved(),
+            "annotation marked the document unsaved, so opening a file and closing it \
+             now prompts"
+        );
+        assert_eq!(
+            d.log.cursor(),
+            cursor_before,
+            "annotation moved the op-log cursor"
+        );
+        assert!(
+            !d.has_history(),
+            "annotation entered the op log, so it is an edit rather than a proposal"
+        );
+
+        // ...and the half of the claim that makes the other half worth having:
+        // once the user DOES accept, the document changes.
+        app.accept_proposal(0);
+        let d = app.document().expect("a document");
+        assert_ne!(
+            as_written(d),
+            before,
+            "Accept changed nothing, so this test would pass against an app in which \
+             the button did not work"
+        );
+        assert!(d.unsaved(), "an accepted feature is unsaved work");
+    }
+
+    /// A one-base molecule, and a one-base molecule with a database feature's
+    /// first base in it, are annotated without panicking.
+    ///
+    /// The interesting length is 1 and not 0: 0 is caught by `spawn_proposals`
+    /// before a thread exists (see
+    /// `a_molecule_with_no_bases_says_why_rather_than_proposing_nothing`), so
+    /// 1 is the shortest input that actually reaches
+    /// `Annotator::annotate` — where the sequence is doubled for circularity,
+    /// windowed into k-mers, and sliced against seed lengths that are all
+    /// larger than it. Every one of those is a subtraction that could go
+    /// negative.
+    ///
+    /// Nothing here asserts what is FOUND, because the honest answer is
+    /// nothing, and a test that pinned it would be pinning an accident. What is
+    /// asserted is that the scan finishes and the panel has something to say.
+    ///
+    /// PROVEN TO FAIL by adding `let _ = &doubled[..3];` to
+    /// `Annotator::annotate` — a stand-in for any of the several length
+    /// subtractions in the seeding code going one step further than the input
+    /// allows. The worker dies, and BOTH halves of the design show up in the
+    /// output: the panic itself, and the fact that the panel notices rather
+    /// than spinning for ever.
+    ///
+    /// ```text
+    /// thread 'annotate' panicked at crates\pl-features\src\annotate.rs:672:25:
+    /// range end index 3 out of range for slice of length 2
+    /// ...
+    /// one.fa: a 1 bp molecule left the scan in a state with no answer in it
+    /// ```
+    #[test]
+    fn a_one_base_molecule_does_not_panic_the_scan() {
+        for (title, body) in [
+            ("one.fa", "A".to_string()),
+            ("two.fa", "AC".to_string()),
+            // The first base of a real record, which is the case that gets
+            // furthest into the seeding code before failing.
+            (
+                "head.fa",
+                String::from_utf8(a_findable_record().reference_nt[..1].to_vec()).expect("ASCII"),
+            ),
+        ] {
+            let mut app = App::blank();
+            app.adopt(
+                Document::from_bytes(format!(">x\n{body}\n").as_bytes(), title.into(), None)
+                    .expect("a one-base FASTA loads"),
+            );
+            // Circular as well as linear: a circular molecule is doubled before
+            // scanning, and 2 bp of doubled text is the other end of the same
+            // arithmetic.
+            app.bench
+                .get_mut()
+                .expect("a document")
+                .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+                .expect("circularising one base is an ordinary edit");
+            wait_for_proposals(&mut app);
+            let d = app.bench.get().expect("a document");
+            assert!(
+                d.proposals.done().is_some(),
+                "{title}: a {} bp molecule left the scan in a state with no answer in it",
+                body.len()
+            );
+            assert!(d.molecule().features.is_empty(), "{title}");
+        }
+    }
+
+    /// A scan started for one document cannot land on the next one.
+    ///
+    /// Open A, and before its scan has finished open B. A's worker is still
+    /// running and will send when it is done. The receiving end belongs to A's
+    /// `Document` and to nothing else, so B cannot see it — but the property is
+    /// worth an assertion rather than an argument, because the obvious
+    /// "optimisation" of hoisting the channel onto `App` to avoid respawning
+    /// would break it silently: B would be offered A's coordinates, all of them
+    /// plausible, each with an Accept button.
+    ///
+    /// PROVEN TO FAIL by having `App::adopt` move the outgoing tab's
+    /// `ProposalState` onto the incoming document — the "it is already running,
+    /// why start another" optimisation, written out. The three-gene molecule's
+    /// hits then appear against the 40 bp one:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: the second document was offered 3
+    /// proposal(s) about bases it does not have
+    ///   left: 3
+    ///  right: 0
+    /// ```
+    #[test]
+    fn a_scan_started_for_one_document_cannot_land_on_the_next() {
+        let mut app = App::blank();
+        app.adopt(annotatable_doc("a.fa"));
+        // One frame only: the scan for A is started and deliberately NOT
+        // waited for, which is the race this test is about.
+        app.refresh_proposals();
+        assert!(
+            app.bench.get().expect("a document").proposals.is_running(),
+            "the premise: A's scan is still in flight when B arrives"
+        );
+
+        // B: 40 bases that match nothing, so any proposal against it came from
+        // somewhere else.
+        app.adopt(
+            Document::from_bytes(
+                b">b\nTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT\n",
+                "b.fa".into(),
+                None,
+            )
+            .expect("a FASTA loads"),
+        );
+        wait_for_proposals(&mut app);
+        let n = app
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .map_or(0, |p| p.hits.len());
+        assert_eq!(
+            n, 0,
+            "the second document was offered {n} proposal(s) about bases it does not have"
+        );
+        assert!(app.document().expect("a document").molecule().len() == 40);
+    }
+
+    /// An edit landing WHILE the scan is in flight is not answered by the scan
+    /// it superseded.
+    ///
+    /// `an_edit_that_moves_bases_throws_the_proposals_away` covers the finished
+    /// case: hits exist, an insertion arrives, they go. This is the harder half
+    /// — the edit arrives while the worker is still running — and it is the one
+    /// with a wrong answer available, because the superseded worker cannot be
+    /// stopped (see `doc::ProposalState`) and WILL finish and try to send. If
+    /// its `Sender` were still connected to the state the UI polls, the
+    /// pre-insertion coordinates would arrive after the edit and sit there
+    /// looking correct.
+    ///
+    /// PROVEN TO FAIL by narrowing `restart_scans`' guard from
+    /// `!self.proposals.is_off()` to `self.proposals.done().is_some()` — which
+    /// is the reading a person makes when they think of the scan as a cached
+    /// answer rather than as a question in flight. The running worker is then
+    /// neither cancelled nor disconnected, and its pre-insertion coordinates
+    /// arrive after the edit looking entirely plausible:
+    ///
+    /// ```text
+    /// a scan of the molecule as it was before the edit answered the molecule
+    /// as it is after it: 1 vs 501
+    /// ```
+    #[test]
+    fn a_scan_superseded_mid_flight_does_not_answer_the_edited_molecule() {
+        let mut app = App::blank();
+        app.adopt(annotatable_doc("annot.fa"));
+        app.refresh_proposals();
+        assert!(
+            app.bench.get().expect("a document").proposals.is_running(),
+            "the premise: the edit lands while the scan is running"
+        );
+
+        app.bench
+            .get_mut()
+            .expect("a document")
+            .apply(pl_core::OpKind::InsertAt {
+                at: 1,
+                seq: "G".repeat(500),
+            })
+            .expect("an ordinary insert");
+
+        wait_for_proposals(&mut app);
+        let p = app
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .expect("a finished scan");
+        assert!(
+            !p.hits.is_empty(),
+            "the premise: the re-scan found something"
+        );
+        // Every hit must lie past the 500 bases that were inserted at the
+        // front. A hit from the superseded scan would start 500 lower.
+        let first = p.hits.iter().map(|a| a.start).min().expect("a hit");
+        assert!(
+            first > 500,
+            "a scan of the molecule as it was before the edit answered the molecule as \
+             it is after it: {first} vs {}",
+            first + 500
+        );
+    }
+
+    /// Accept all with nothing to accept says so and writes nothing.
+    ///
+    /// Three ways to have nothing: no scan at all, a scan that found nothing,
+    /// and a scan whose every hit is already a feature at exactly that span.
+    /// The third is the one with a button in front of it — the header count is
+    /// a count of ROWS, not of rows that would do anything, so `Accept all (3)`
+    /// is enabled and does nothing. Saying nothing at all there reads as a
+    /// broken button.
+    ///
+    /// PROVEN TO FAIL by deleting the `take.is_empty()` arm — the button then
+    /// falls through to the ordinary "added N" path with N of zero, and the one
+    /// thing the user needed to know is not said anywhere:
+    ///
+    /// ```text
+    /// Accept all did nothing and did not say so: None
+    /// ```
+    #[test]
+    fn accept_all_with_nothing_to_accept_says_so_and_writes_nothing() {
+        // No scan.
+        let mut app = App::blank();
+        app.adopt(annotatable_doc("annot.fa"));
+        app.accept_all_proposals();
+        assert!(
+            app.document()
+                .expect("a document")
+                .molecule()
+                .features
+                .is_empty(),
+            "Accept all wrote a feature with no scan to write it from"
+        );
+
+        // A finished scan whose every hit is already a feature.
+        let mut app = app_with_proposals();
+        let hits: Vec<pl_features::annotate::Annotation> = app
+            .bench
+            .get()
+            .and_then(|d| d.proposals.done())
+            .map(|p| p.hits.clone())
+            .expect("a finished scan");
+        assert!(!hits.is_empty(), "the premise");
+        for a in &hits {
+            let mut f = pl_core::Feature::new("planted", "misc_feature");
+            f.strand = a.strand;
+            f.segments = vec![pl_core::Segment::new(a.start, a.end)];
+            app.bench
+                .get_mut()
+                .expect("a document")
+                .apply(pl_core::OpKind::SetFeature {
+                    index: None,
+                    feature: Box::new(f),
+                })
+                .expect("planting over real bases is an ordinary edit");
+        }
+        let before = app
+            .document()
+            .expect("a document")
+            .molecule()
+            .features
+            .len();
+        app.accept_all_proposals();
+        let d = app.document().expect("a document");
+        assert_eq!(
+            d.molecule().features.len(),
+            before,
+            "Accept all added a duplicate of something already annotated"
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("Nothing was added")),
+            "Accept all did nothing and did not say so: {:?}",
+            app.notice
+        );
+        // The proposals are all still on offer, because none was taken up.
+        assert_eq!(n_proposals(&app), hits.len());
+    }
+
+    /// Every proposal accepted in one gesture can be taken back, one Ctrl+Z at
+    /// a time, and the status line says how many.
+    ///
+    /// `accept_all_adds_every_proposal_and_skips_a_span_already_annotated`
+    /// checks that the features arrive; this checks the sentence the status
+    /// line makes is true. "Ctrl+Z 5 times to undo them all" is a promise, and
+    /// a batch that had collapsed into one operation — or into none — would
+    /// leave the user pressing Ctrl+Z at a document that had stopped changing
+    /// four presses ago.
+    ///
+    /// PROVEN TO FAIL twice. Collapsing the status line's plural branch to a
+    /// flat `"to undo"` breaks the promise without touching the behaviour,
+    /// which is the version that would survive a review:
+    ///
+    /// ```text
+    /// the status promises something other than 3 presses: "added 3 feature(s)
+    /// from the feature database — Ctrl+Z to undo"
+    /// ```
+    ///
+    /// and stopping the accept loop after the first hit (`take.iter().take(1)`)
+    /// breaks the behaviour while leaving the sentence true of nothing:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: the premise: all 3 were accepted
+    ///   left: 1
+    ///  right: 3
+    /// ```
+    #[test]
+    fn every_feature_from_accept_all_can_be_undone_one_at_a_time() {
+        let mut app = app_with_proposals();
+        let n = n_proposals(&app);
+        assert!(n > 1, "the premise: a batch");
+        app.accept_all_proposals();
+        let added = app
+            .document()
+            .expect("a document")
+            .molecule()
+            .features
+            .len();
+        assert_eq!(added, n, "the premise: all {n} were accepted");
+        assert!(
+            app.status.contains(&format!("{n} times to undo")),
+            "the status promises something other than {n} presses: {:?}",
+            app.status
+        );
+        for _ in 0..n {
+            app.do_undo();
+        }
+        let left = app
+            .document()
+            .expect("a document")
+            .molecule()
+            .features
+            .len();
+        assert_eq!(
+            left, 0,
+            "Ctrl+Z {n} times left {left} accepted feature(s) in the document"
+        );
+    }
+
+    /// The panel tells a user, on screen, what is NOT in the database.
+    ///
+    /// `features/README.md` is candid that promoters, origins and terminators
+    /// have no cleared source yet — but `features/README.md` does not ship in
+    /// the application and nobody reads it before opening a plasmid. What they
+    /// do is open a plasmid, watch `AmpR` and `lacI` light up, see no `ori`,
+    /// and conclude there is no `ori`. That inference is wrong, and the tool
+    /// caused it by having just demonstrated that it knows what features are.
+    ///
+    /// Asserted against what is PAINTED and not against the string function,
+    /// because the failure being guarded is a true sentence nobody put on
+    /// screen.
+    ///
+    /// PROVEN TO FAIL by deleting the `coverage_note` label from
+    /// `proposals_section`:
+    ///
+    /// ```text
+    /// the panel does not say what the database has no rows for
+    /// ```
+    #[test]
+    fn the_panel_says_the_database_is_not_comprehensive() {
+        let ctx = test_ctx();
+        let mut app = app_with_proposals();
+        app.tab = Tab::Features;
+        let _ = paint_out(&mut app, &ctx, window());
+        let out = paint_out(&mut app, &ctx, window());
+        let all = texts(&out)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all.contains("not comprehensive"),
+            "the panel does not say what the database has no rows for"
+        );
+        for word in ["promoter", "terminator", "origin of replication"] {
+            assert!(
+                all.contains(word),
+                "the panel does not name {word} among the gaps"
+            );
+        }
     }
 }

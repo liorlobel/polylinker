@@ -19,6 +19,14 @@ pl-design.workspace = true
 pl-doc.workspace = true
 pl-draw.workspace = true
 pl-enzymes.workspace = true
+# THE TABLES WERE ALREADY IN THIS BINARY BEFORE THIS LINE EXISTED, and that is
+# worth knowing before anyone weighs it: `pl-doc` depends on `pl-features` and
+# its "Feature annotation" methods page calls `Db::builtin()`, so
+# `features.tsv`, `provenance.tsv` and `SIGNOFF.tsv` were already `include_str!`d
+# into polylinker.exe. The app shipped a page DESCRIBING an annotation it could
+# not perform. What this line buys is the ability to run the annotator, not the
+# data it runs over.
+pl-features.workspace = true
 pl-fileio.workspace = true
 pl-gel.workspace = true
 pl-index.workspace = true

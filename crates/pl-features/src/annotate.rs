@@ -383,6 +383,92 @@ impl Annotation {
     }
 }
 
+/// The [`pl_core::Feature`] an annotation becomes, provenance and all.
+///
+/// **ONE function because there must be ONE format.** This body lived inside
+/// `cmd_annotate`'s `--genbank` arm and had exactly one caller, which was fine
+/// until the desktop application grew an Accept button and needed to write the
+/// same thing. Two copies of a provenance string is two provenance strings: the
+/// next person to add a clause adds it to one of them, and a `.gb` written by
+/// the app then says something different from a `.gb` written by the command
+/// line about the same hit in the same database. The note is the only record a
+/// reader has of where a name on their map came from, so "the same" has to be
+/// mechanical rather than intended.
+///
+/// `db` must be the database `a.record` indexes — the same one the
+/// [`Annotator`] was built over. Passing the full table for an annotation
+/// produced against [`Db::reviewed`](crate::Db::reviewed) does not fail; it
+/// silently names a different record.
+///
+/// # What the note says, and why both numbers are in it
+///
+/// Identity and coverage always travel together, because either alone is
+/// unreadable: see [`Annotation::identity`], which is a *local* identity over
+/// the aligned region, against [`Annotation::coverage`], the fraction of the
+/// database feature reproduced. The first 300 bp of a 600 bp marker, copied
+/// perfectly, is `100.0% identity, 50% coverage` — and "100%" on its own would
+/// be read as "this is that feature".
+///
+/// # Origin-crossing hits
+///
+/// One segment, `start..end`, even when `end < start`. That is the shape
+/// [`pl_core::Feature::extent`] reads as a wrap on a circular molecule, and it
+/// is what [`Annotation::start`] and [`Annotation::end`] already mean. Turning
+/// it into a GenBank `join(...)` is the writer's business and happens on the
+/// way to the file, not here.
+pub fn to_feature(db: &Db, a: &Annotation) -> pl_core::Feature {
+    let r = &db.records[a.record];
+    let mut feat = pl_core::Feature::new(r.name.clone(), r.genbank_key.clone());
+    feat.strand = a.strand;
+    feat.segments = vec![pl_core::Segment::new(a.start, a.end)];
+    // Provenance travels with the annotation. A map that cannot say where a
+    // name came from is a map nobody can check, and an unreviewed row must
+    // carry that fact into the file it lands in — otherwise the caveat stops at
+    // the terminal.
+    feat.qualifiers.push((
+        "note".into(),
+        Some(format!(
+            "{} {}: {:.1}% identity, {:.0}% coverage, polylinker feature db {}{}",
+            r.id,
+            if a.via_protein {
+                "protein match"
+            } else {
+                "nucleotide match"
+            },
+            a.identity * 100.0,
+            a.coverage * 100.0,
+            db.version,
+            if r.review_status == crate::ReviewStatus::Proposed {
+                "; PROPOSED, not reviewed by a human"
+            } else {
+                ""
+            }
+        )),
+    ));
+    // The evidence a peptide part was admitted on, carried into the written
+    // file rather than left in the terminal. A tag called by the fusion rule
+    // with no ORF drawn under it is otherwise unexplainable to whoever opens
+    // the file next.
+    if let Some(o) = a.fusion_orf {
+        feat.qualifiers.push((
+            "note".into(),
+            Some(format!(
+                "peptide reference, admitted because it lies in frame inside \
+                 a {} aa ORF at {}..{} on the {} strand",
+                o.aa_len,
+                o.start,
+                o.end,
+                if o.strand == Strand::Reverse {
+                    "minus"
+                } else {
+                    "plus"
+                }
+            )),
+        ));
+    }
+    feat
+}
+
 /// An annotator with its indexes already built.
 ///
 /// Building the index is the expensive part and does not depend on the
@@ -3910,5 +3996,167 @@ mod tests {
         );
         assert_eq!(found[0].identity, 1.0);
         assert_eq!(found[0].coverage, 1.0);
+    }
+
+    /// One note qualifier, and it names both numbers.
+    ///
+    /// PROVEN TO FAIL by deleting the `coverage` clause from the format string:
+    ///
+    /// ```text
+    /// the note says nothing checkable: "PLF:X nucleotide match: 100.0%
+    /// identity, polylinker feature db test"
+    /// ```
+    ///
+    /// The pairing is the property under test and it is not decoration.
+    /// `identity` is a LOCAL identity over the aligned region and `coverage` is
+    /// the fraction of the database feature reproduced, so the first 300 bp of
+    /// a 600 bp marker copied perfectly is `100.0% identity, 50% coverage`.
+    /// A note carrying only the first would say "this IS that feature" about
+    /// half of one.
+    #[test]
+    fn the_provenance_note_carries_identity_and_coverage_together() {
+        let mut rng = Rng(0x51de_0000_0000_0001);
+        let gene = rng.dna(600);
+        let db = db_of(vec![rec("PLF:X", &gene, false)]);
+        // Only the first half of the record is present, so the two numbers
+        // genuinely differ and a test that printed one could not pass by
+        // reading the other.
+        let m = mol(&format!("{}{}", rng.dna(200), &gene[..300]), false);
+        let found = Annotator::new(&db, Config::default()).annotate(&m);
+        assert_eq!(found.len(), 1, "the premise: one hit: {found:?}");
+        assert!(found[0].is_fragment, "the premise: half a feature");
+
+        let feat = to_feature(&db, &found[0]);
+        assert_eq!(feat.name, "PLF:X");
+        assert_eq!(feat.kind, "CDS");
+        assert_eq!(feat.segments.len(), 1);
+        assert_eq!(
+            (feat.segments[0].start, feat.segments[0].end),
+            (found[0].start, found[0].end)
+        );
+        let notes: Vec<&str> = feat
+            .qualifiers
+            .iter()
+            .filter(|(k, _)| k == "note")
+            .filter_map(|(_, v)| v.as_deref())
+            .collect();
+        assert_eq!(notes.len(), 1, "one note for a nucleotide hit: {notes:?}");
+        assert!(
+            notes[0].contains("identity") && notes[0].contains("coverage"),
+            "the note says nothing checkable: {:?}",
+            notes[0]
+        );
+        assert_eq!(
+            notes[0],
+            "PLF:X nucleotide match: 100.0% identity, 50% coverage, polylinker \
+             feature db test; PROPOSED, not reviewed by a human",
+            "the exact string is the contract: `pl annotate --genbank` and the desktop \
+             app's Accept button both emit it, and a reader compares the two"
+        );
+    }
+
+    /// A reviewed record does NOT carry the proposed caveat, and an unreviewed
+    /// one does.
+    ///
+    /// PROVEN TO FAIL by inverting the `==` in `to_feature`: the reviewed row
+    /// gained "; PROPOSED, not reviewed by a human" and the proposed row lost
+    /// it, which is the failure that matters — a machine-assembled name landing
+    /// in somebody's file with nothing saying no human ever checked it.
+    #[test]
+    fn only_an_unreviewed_record_carries_the_caveat() {
+        let mut rng = Rng(0x51de_0000_0000_0002);
+        let gene = rng.dna(400);
+        for (status, wanted) in [
+            (ReviewStatus::Proposed, true),
+            (ReviewStatus::Reviewed, false),
+            (ReviewStatus::Verified, false),
+        ] {
+            let db = db_of(vec![Record {
+                review_status: status,
+                ..rec("PLF:Y", &gene, false)
+            }]);
+            let m = mol(&format!("{}{gene}", rng.dna(50)), false);
+            let found = Annotator::new(&db, Config::default()).annotate(&m);
+            assert_eq!(found.len(), 1, "{status:?}: the premise: {found:?}");
+            let note = to_feature(&db, &found[0]).qualifiers[0]
+                .1
+                .clone()
+                .expect("the note has a value");
+            assert_eq!(
+                note.contains("PROPOSED, not reviewed by a human"),
+                wanted,
+                "{status:?} produced {note:?}"
+            );
+        }
+    }
+
+    /// A peptide part admitted by the fusion rule gets a SECOND note saying
+    /// which ORF admitted it.
+    ///
+    /// PROVEN TO FAIL by dropping the `fusion_orf` arm: one note instead of
+    /// two, and a FLAG tag then appears on a map with no visible protein under
+    /// it and nothing anywhere explaining why it is there — which is the exact
+    /// situation `Annotation::fusion_orf`'s own doc exists to prevent.
+    #[test]
+    fn a_fused_peptide_part_says_which_orf_admitted_it() {
+        let mut rng = Rng(0x51de_0000_0000_0003);
+        let (inf, ..) = three_cases(FLAG, &mut rng);
+        let db = db_of(vec![peptide("PLF:FLAG", FLAG)]);
+        let found = Annotator::new(&db, Config::default()).annotate(&inf);
+        assert_eq!(found.len(), 1, "the premise: {found:?}");
+        assert!(found[0].fusion_orf.is_some(), "the premise: fused");
+
+        let feat = to_feature(&db, &found[0]);
+        let notes: Vec<String> = feat
+            .qualifiers
+            .iter()
+            .filter(|(k, _)| k == "note")
+            .map(|(_, v)| v.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(notes.len(), 2, "the ORF is not stated: {notes:?}");
+        assert!(
+            notes[1].starts_with("peptide reference, admitted because it lies in frame inside"),
+            "{:?}",
+            notes[1]
+        );
+        assert!(
+            notes[1].contains(" aa ORF at ") && notes[1].contains(" strand"),
+            "{:?}",
+            notes[1]
+        );
+    }
+
+    /// An origin-crossing hit becomes ONE inverted segment, not two.
+    ///
+    /// PROVEN TO FAIL by writing `Segment::new(a.start.min(a.end),
+    /// a.start.max(a.end))`, which produces a segment that looks ordinary,
+    /// covers the whole plasmid the wrong way round, and reads as a feature
+    /// spanning everything except the one it names.
+    #[test]
+    fn an_origin_crossing_hit_is_one_inverted_segment() {
+        let mut rng = Rng(0x51de_0000_0000_0004);
+        let gene = rng.dna(300);
+        let db = db_of(vec![rec("PLF:Z", &gene, false)]);
+        // The feature straddles base 1: its last 150 bases are written first.
+        let m = mol(
+            &format!("{}{}{}", &gene[150..], rng.dna(400), &gene[..150]),
+            true,
+        );
+        let found = Annotator::new(&db, Config::default()).annotate(&m);
+        assert_eq!(found.len(), 1, "the premise: {found:?}");
+        assert!(found[0].wraps_origin, "the premise: it wraps: {found:?}");
+
+        let feat = to_feature(&db, &found[0]);
+        assert_eq!(feat.segments.len(), 1, "a wrap is not a join here");
+        assert!(
+            feat.segments[0].end < feat.segments[0].start,
+            "the wrap was straightened out: {:?}",
+            feat.segments[0]
+        );
+        assert_eq!(
+            feat.extent(m.len(), true),
+            Some((found[0].start, found[0].end)),
+            "the feature no longer says where the hit was"
+        );
     }
 }

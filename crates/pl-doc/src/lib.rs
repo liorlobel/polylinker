@@ -267,6 +267,28 @@ pub fn methods(t: Topic) -> String {
             // paragraph would misdescribe the result, not just the settings.
             let code = pl_features::annotate::Config::default().code.id;
             let code_name = pl_features::annotate::Config::default().code.name();
+            // What the library has no rows for at all, read off the table by
+            // `Db::absent_common_kinds` and not written down here. A methods
+            // paragraph that names the review status of every record but not
+            // the whole categories the database has never held is describing
+            // the wrong limit: a reader of the paper has no way to know that
+            // "no origin of replication was annotated" was decided by the
+            // database's contents rather than by the plasmid's. The desktop
+            // app's proposals panel is built from the same call, so the two
+            // cannot come to disagree.
+            let kinds = db.absent_common_kinds();
+            let gaps = match kinds.split_last() {
+                None => String::new(),
+                Some((last, rest)) => format!(
+                    " The library holds no {} record of any kind, so features of those \
+                     classes are not searched for and cannot be reported.",
+                    if rest.is_empty() {
+                        (*last).to_string()
+                    } else {
+                        format!("{} or {last}", rest.join(", "))
+                    }
+                ),
+            };
             format!(
                 "Features were annotated with Polylinker {v} against its own curated \
                  library (release {}), by k-mer seeding followed by infix alignment, \
@@ -293,7 +315,9 @@ pub fn methods(t: Topic) -> String {
                  by machine from public sources and are not shipped by default; any \
                  annotation derived from them is a suggestion to check against the cited \
                  accession, not an identification. A feature boundary is a claim, and \
-                 each record states how its boundary was arrived at.",
+                 each record states how its boundary was arrived at.{gaps} The absence \
+                 of a feature from this output is therefore not evidence of its absence \
+                 from the molecule.",
                 db.version,
                 pl_features::annotate::Config::default().min_identity * 100.0,
                 pl_features::annotate::Config::default().min_coverage * 100.0,
@@ -690,6 +714,44 @@ mod tests {
             "{m}"
         );
         assert!(m.contains(&db.version), "the release is stamped: {m}");
+    }
+
+    /// The methods paragraph names the whole CLASSES the library has no rows
+    /// for, not only the review status of the rows it does have.
+    ///
+    /// A reader of a paper cannot tell "no origin of replication was
+    /// annotated" from "no origin of replication is annotatable", and the
+    /// second is the true one today. The limits paragraph naming every record's
+    /// review status and not this was describing the smaller of the two limits.
+    ///
+    /// Read from `Db::absent_common_kinds` on both sides, deliberately: the
+    /// point is that the sentence tracks the table, so a test hard-coding
+    /// "promoter" would go stale in exactly the way the sentence must not.
+    ///
+    /// PROVEN TO FAIL by dropping `{gaps}` from the format string:
+    ///
+    /// ```text
+    /// the methods do not say the library has no `promoter` rows at all: ...
+    /// ```
+    #[test]
+    fn the_annotation_methods_name_what_the_library_has_no_rows_for() {
+        let (db, _) = pl_features::Db::builtin();
+        let missing = db.reviewed().absent_common_kinds();
+        assert!(
+            !missing.is_empty(),
+            "the premise: today's table really is missing something common"
+        );
+        let m = methods(topic("annotate").unwrap());
+        for kind in &missing {
+            assert!(
+                m.contains(kind),
+                "the methods do not say the library has no `{kind}` rows at all: {m}"
+            );
+        }
+        assert!(
+            m.contains("not evidence of its absence"),
+            "the paragraph does not tell a reader what a missing feature means: {m}"
+        );
     }
 
     #[test]

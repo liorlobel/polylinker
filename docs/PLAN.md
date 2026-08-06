@@ -135,7 +135,13 @@ v1.0 ships exactly this:
 2. A circular and linear map at or above SnapGene's visual quality, exported as clean layered SVG and PDF, byte-identically on every platform.
 3. Sequence editing with inline features, ORF finding, six-frame translation, non-standard genetic codes and non-ATG starts.
 4. Restriction site display with **loud, unmissable** enzyme-set filtering, unique-cutter emphasis, methylation blocking, and an always-visible "*N additional cut sites are hidden by the current enzyme set*" badge.
-5. Auto-annotation from the Polylinker Features Database, on open/paste, offline, in under 200 ms for a 10 kb plasmid — with every call showing its source, accession, licence and percent identity.
+5. Auto-annotation from the Polylinker Features Database, on open/paste, offline, in under 200 ms for a 10 kb plasmid — with every call showing its source, accession, licence and percent identity. **Measured, and it holds: 11 ms and 103 ms** for the two shapes of 10 kb circular plasmid, release build, on the development machine.
+
+   > **The number, measured.** `crates/pl-features/tests/budget.rs` builds two 10 kb circular plasmids out of real records from the shipped table and times `Annotator::annotate` on each: a *dense* one carrying about 37 short parts, and a *large* one carrying four multi-kilobase CDSs. Release build, median of five: **11 ms dense, 103 ms large.** Debug: 106 ms and 1,075 ms. The k-mer index build, excluded because both callers pay it once per process, is a further 6 ms release / 30 ms debug.
+   >
+   > Which of the two is the expensive one was not guessable, and the first guess was wrong: the *large* plasmid, with a tenth as many hits, costs nine times as much, because the cost is the aligner and `pl-features::align` is a plain dynamic program whose cost is the product of the two lengths. A budget checked only against the dense plasmid would have reported a tenth of the real figure and passed with room to spare. Both are timed on every test run now. A debug build is deliberately not held to the budget: this document describes what a user's machine does, and nobody ships an unoptimised build.
+   >
+   > This line said "under 200 ms" with nothing measuring it. That is exactly how `rust-version` sat at a wrong `1.82` for months.
 6. Primer binding-site detection with SantaLucia NN Tm, plus a real primer-design engine.
 7. Simulate PCR and restriction digest; render on a calibrated virtual gel.
 8. Restriction cloning + homology-overlap assembly (Gibson/HiFi class) + Type IIS assembly, all non-destructively (a new document, source untouched).

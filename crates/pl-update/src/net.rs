@@ -194,7 +194,10 @@ impl Curl {
         if let Err(why) = audit(argv) {
             return Err(UpdateError::UnsafeRequest { why });
         }
-        let output = Command::new(PROGRAM).args(argv).output().map_err(|e| {
+        let mut cmd = Command::new(PROGRAM);
+        cmd.args(argv);
+        no_console(&mut cmd);
+        let output = cmd.output().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 UpdateError::CurlMissing
             } else {
@@ -405,12 +408,43 @@ pub(crate) const PROGRAM: &str = "curl";
 /// finds out by trying — a probe answers a question about a moment that has
 /// already passed by the time the real call is made.
 pub fn curl_available() -> bool {
-    Command::new(PROGRAM)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut cmd = Command::new(PROGRAM);
+    cmd.arg("--version");
+    no_console(&mut cmd);
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
+
+/// Keep Windows from opening a console window for `curl`.
+///
+/// `polylinker.exe` is built for the Windows GUI subsystem, so it has no
+/// console of its own. Spawning a console program from it makes Windows create
+/// one, and because `curl` finishes in well under a second what the user sees
+/// is a black window that appears and vanishes. On a tool whose whole claim is
+/// that it does not talk to the network unless asked, an unexplained terminal
+/// flashing at launch is precisely the wrong thing to show — it looks like
+/// exactly what a user would be right to be suspicious of.
+///
+/// This is not a new discovery in this repository. `bins/pl-gui/src/recover.rs`
+/// already carries the same flag with the same reasoning for its `assoc` call,
+/// and the note there says plainly that without it "a windowed build pops a
+/// black cmd.exe window". The updater was written months later and did not
+/// inherit it. Nobody had seen the flash because the update check is off by
+/// default, so the defect was real and latent: it would have appeared for the
+/// first user who ever switched the setting on, and it would have appeared at
+/// launch, which is the least reassuring possible moment.
+///
+/// 0x0800_0000 is CREATE_NO_WINDOW. It is written out rather than pulled from a
+/// crate because `crates/` take no dependencies.
+#[cfg(windows)]
+fn no_console(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// Nothing to do: no other platform invents a terminal for a child process.
+#[cfg(not(windows))]
+fn no_console(_cmd: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
