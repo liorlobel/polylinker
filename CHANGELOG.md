@@ -22,6 +22,10 @@ which guarantee is which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-08-06
+
 ### Added
 
 - **The desktop app annotates.** Opening or pasting a molecule now searches it
@@ -70,6 +74,19 @@ which guarantee is which.
 - `CHANGELOG.md` — this file.
 - `CITATION.cff`, so the repository is citable by people who have to cite their
   tools. There is no DOI; see the file.
+
+- **A security policy, and a way to report a flaw.** `SECURITY.md` did not
+  exist. The project now ships an embedded signing key and code that executes on
+  it, and there was no channel to report a problem in either; reports go through
+  GitHub private vulnerability reporting. It is specific rather than generic:
+  the highest-value report is named, file parsers are in scope because a plasmid
+  map arrives by email, and the key-compromise section states plainly that
+  anyone who can push to the repository, anyone who can read the Actions secret,
+  and GitHub itself can sign a release every installed copy will accept. It
+  gives a rotation procedure and then says the procedure is untested.
+
+- **`CITATION.cff`**, for an audience that cites things. There is no DOI, and
+  the file says so rather than inventing one.
 
 ### Fixed
 
@@ -121,6 +138,30 @@ which guarantee is which.
 Nothing else has landed since v0.1.3 that changes what the programs do: a
 `cargo fmt` of the release-signature test, and a recount of the line count the
 README asserts about itself.
+
+- **The MIT half of "MIT OR Apache-2.0" did not exist.** `Cargo.toml`, the
+  release notes and the npm package all offered a dual licence; only the Apache
+  text was committed, and `packages/circular-map/package.json` listed a
+  `LICENSE-MIT` in its `files` array that was not there. Anyone who chose the
+  MIT half was offered a licence they could not read. Both texts now ship in
+  every archive and the MSI, and `tools/check-archive.ps1` requires them **by
+  name** — this project has lost licence texts from a packaging step twice, and
+  a count cannot tell which one went missing.
+
+- **The README claimed a relationship with REBASE that does not exist.** It said
+  restriction-enzyme data "is REBASE, redistributed under its own terms". It is
+  not: `NOTICE` says REBASE data *will be* sourced into a separate repository,
+  and what ships is 58 enzymes transcribed from published references,
+  "not a reproduction of any database". Claiming to redistribute a database the
+  project has not licensed is the wrong direction to be wrong in.
+
+- **`Cargo.toml` pointed at a GitHub organisation that does not exist**
+  (`polylinker/polylinker`). The identical mistake shipped in the updater in
+  0.1.2 and made `pl update` fail with a 404.
+
+- **`CONTRIBUTING.md` described a different project** — "there is no build. The
+  reference implementation is Python with no dependencies beyond the standard
+  library" — against 21 workspace crates, three-OS CI and a 65-step gate.
 
 ## [0.1.3] - 2026-08-06
 
@@ -266,7 +307,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.2.0
 [0.1.3]: https://github.com/liorlobel/polylinker/releases/tag/v0.1.3
 [0.1.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.1.2
 [0.1.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.1.1
