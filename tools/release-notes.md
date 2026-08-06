@@ -45,10 +45,10 @@ checksum. Its `Install-Polylinker.ps1` does the same job in text.
 
 ## Every one of these is unsigned
 
-There is no code-signing certificate for any platform. That is a funding
-question — Windows certificates run £200–400 a year, an Apple Developer Program
-membership is $99 a year, and both are issued to a person or an organisation —
-and not an oversight. `docs/RELEASING.md` has the detail.
+There is no code-signing certificate for any platform, and there is not going to
+be one. That is a decision rather than an oversight, and not a gap waiting to be
+filled: Polylinker ships unsigned, on every platform, and no later release will
+be different. `docs/RELEASING.md` has the reasoning.
 
 It has a concrete cost on two of the three platforms, and the honest thing is to
 say what you will see and what to do about it.
@@ -57,8 +57,8 @@ say what you will see and what to do about it.
 
 > "polylinker" cannot be opened because the developer cannot be verified.
 
-That message is accurate: Apple has verified nobody, because nobody paid to be
-verified. macOS tags anything a browser downloaded with an extended attribute
+That message is accurate: Apple has verified nobody, because this project has no
+Developer ID. macOS tags anything a browser downloaded with an extended attribute
 named `com.apple.quarantine`, and it is that tag Gatekeeper checks. Remove it
 from the files you extracted:
 
@@ -89,8 +89,8 @@ Two things are worth knowing before you open it. Its default is to install for
 you alone, which needs no administrator — so on that path Windows does not show
 the yellow-banded elevation dialog reading *Publisher: Unknown*, because it does
 not ask for elevation at all. If you choose "for everyone" instead, it does, and
-that dialog will name no publisher. Nothing is wrong; nobody has paid to be
-named.
+that dialog will name no publisher. Nothing is wrong; there is no publisher to
+name, and there is not going to be one.
 
 Some managed and locked-down machines — Windows and macOS both — refuse unsigned
 software outright by policy. If yours does, this will not run, and the right

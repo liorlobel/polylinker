@@ -60,7 +60,7 @@ build is not code-signed (see UNSIGNED below), so the two things it can offer
 you are a checksum and the ability to see what it does before it does it. A
 compiled installer would keep the first and take away the second.
 
-If you would rather not read 700 lines, run it with -DryRun. It prints the
+If you would rather not read the whole thing, run it with -DryRun. It prints the
 complete list of files it will copy and registry values it will write, and then
 stops without touching anything:
 
@@ -132,12 +132,11 @@ set it for them.
 UNSIGNED
 --------
 
-This build is not code-signed, and that is a funding question rather than an
-oversight. A Windows code-signing certificate is roughly GBP 200-400 a year, or
-about USD 120 a year for Azure Trusted Signing -- and Azure Trusted Signing is
-restricted to verified businesses and self-employed individuals, which an
-unincorporated academic project may not qualify as at all. See docs/RELEASING.md
-in the source tree.
+This build is not code-signed, and it is not going to be. That is a decision
+rather than an oversight or a gap: Polylinker ships unsigned, on every platform,
+and nothing here is waiting on a certificate. What follows is permanent, not a
+description of how things are until something arrives. docs/RELEASING.md in the
+source tree has the reasoning.
 
 What this means for you, concretely:
 

@@ -100,16 +100,18 @@ The Python extension is loaded from wherever you put it:
 UNSIGNED
 --------
 
-This build is not code-signed and not notarised, and that is a funding question
-rather than an oversight. It needs Apple Developer Program membership at USD 99
-a year, issued to a person or an organisation. See docs/RELEASING.md in the
-source tree.
+This build is not code-signed and not notarised, and it is not going to be.
+That is a decision rather than an oversight or a gap: Polylinker ships unsigned,
+on every platform, and nothing here is waiting on an Apple Developer ID. What
+follows is permanent, not a description of how things are until something
+arrives. docs/RELEASING.md in the source tree has the reasoning.
 
 What this means for you, concretely:
 
   * Gatekeeper will refuse these files until you clear the quarantine flag, and
     the wording it uses -- "the developer cannot be verified" -- is accurate.
-    Apple has not verified anybody, because nobody paid to be verified.
+    Apple has verified nobody, because this project has no Developer ID and is
+    not getting one. That will not change in a later release.
   * The SHA-256 you checked in step 1 proves this copy is byte-for-byte the one
     published on the release page. It proves nothing about who published it.
     Those are different guarantees, and the second one is now available too:

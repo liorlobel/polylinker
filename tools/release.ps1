@@ -9,6 +9,12 @@
     going, because an unsigned build that says so is useful and an unsigned
     build that pretends otherwise is not.
 
+    Nothing here supplies them, and nothing is going to. Code signing came off
+    the roadmap on 2026-08-06 — see docs/RELEASING.md, "What is done, and what
+    is not" — so every release this script cuts is unsigned. -WindowsCert and
+    -MacIdentity are kept as a hook for anyone who ever reverses that decision,
+    not as a step waiting for a certificate.
+
     What this script deliberately does NOT do:
 
     * **It does not auto-update anything.** See docs/RELEASING.md. A tool whose
@@ -471,12 +477,13 @@ if ($WindowsCert) {
     #
     # It is not. The Windows SDK installs it under `Windows Kits\10\bin\<ver>\x64`
     # and puts nothing on PATH, so the bare `& signtool` that stood here would
-    # have failed with "not recognized" -- and it would have failed for the first
-    # time on the day a certificate finally arrived, which is the worst possible
-    # day to be debugging the release script. This path had never been executed
-    # end to end on any machine here, because without a certificate it never
-    # runs at all. Resolved the same way `.cargo\bin` is resolved above, and for
-    # the same reason.
+    # have failed with "not recognized" -- and it would have failed on the first
+    # day this branch was ever run, which is the worst possible day to be
+    # debugging the release script. That day is not scheduled: signing is off
+    # the roadmap and this branch has never been executed end to end on any
+    # machine here. It is fixed anyway, because a dormant branch nobody can run
+    # is not a hook, and this one is kept as a hook. Resolved the same way
+    # `.cargo\bin` is resolved above, and for the same reason.
     $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
     if (-not $signtool) {
         $kits = 'C:\Program Files (x86)\Windows Kits\10\bin'

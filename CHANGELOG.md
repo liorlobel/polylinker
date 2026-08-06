@@ -14,15 +14,51 @@ a signed rollback onto an older release with public vulnerabilities — are in
 [`crates/pl-update/src/version.rs`](crates/pl-update/src/version.rs). This is
 0.x, and no compatibility promise has been made yet.
 
-**Nothing in any of these releases is code-signed.** Windows SmartScreen and
-macOS Gatekeeper do not recognise the publisher and say so, on every version
-below. The signing described under 0.1.2 covers the release *manifest*, which is
-a different thing; [`docs/RELEASING.md`](docs/RELEASING.md) is precise about
-which guarantee is which.
+**Nothing in any of these releases is code-signed**, and nothing above them is
+going to be: code signing came off the roadmap on 2026-08-06, so this is a
+settled property of the project rather than a run of versions waiting for a
+certificate. Windows SmartScreen and macOS Gatekeeper do not recognise the
+publisher and say so, on every version below. The signing described under 0.1.2
+covers the release *manifest*, which is a different thing;
+[`docs/RELEASING.md`](docs/RELEASING.md) is precise about which guarantee is
+which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Three things came off the roadmap on 2026-08-06, and none of them changes a
+  byte that ships.** Code signing and macOS notarisation; Bar-Ilan
+  technology-transfer clearance; and the rule that v1.0 waits for a second
+  maintainer holding commit and release keys. None is planned work any more —
+  not deferred, not blocked on money, not waiting on an office or on a person.
+  They are struck rather than deleted in `docs/PLAN.md` (§4, §9.2, §10 risks 1,
+  10 and 12, §11.1, §12), because a withdrawn plan that leaves no trace is
+  indistinguishable from one that was never made. This entry exists so that a
+  reader comparing two versions finds a gate disappearing here, rather than by
+  diffing the plan.
+
+- **The builds are unsigned, exactly as before, and it costs you exactly what it
+  cost you before.** What changed is the tense: "not done yet", "outstanding"
+  and "when a certificate arrives" implied one was on its way, and none is.
+  `docs/RELEASING.md`, `SECURITY.md`, `README.md`, `README-WINDOWS.txt`,
+  `README-MACOS.txt`, `tools/release-notes.md` and `Install-Polylinker.ps1` now
+  say that plainly. Nothing was removed from any of them, and the gate in
+  `tools/ci.ps1` that reads the shipped text still passes: Windows SmartScreen
+  shows *"Windows protected your PC"* on first run and what that means is still
+  explained; macOS Gatekeeper still refuses a downloaded binary and
+  `xattr -d com.apple.quarantine` on the named files is still the remedy given;
+  the SHA-256 still proves the bytes and nothing about who produced them; the
+  Ed25519 signature over `SHA256SUMS.txt` is still a *manifest* signature and
+  still not code signing; and a managed or locked-down machine may still refuse
+  unsigned software outright, where the answer is still to ask the
+  administrator rather than work around it. `README-LINUX.txt` was not touched,
+  because it never described a future.
+
+- `PROVENANCE.md` gains a dated amendment rather than an edit: the record of
+  what was decided in July 2026 stands, and the note beneath it says which half
+  of it stopped being planned work. Legal advice on the trademark and Israeli
+  §24 questions did not stop being owed.
 
 ## [0.2.0] - 2026-08-06
 

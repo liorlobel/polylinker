@@ -1513,7 +1513,7 @@ Step 'the installer contacts nothing' {
         }
     }
     if ($hits) {
-        throw "the installer can reach the network or schedule work:`n    $($hits -join "`n    ")`nSee docs/RELEASING.md:49-75."
+        throw "the installer can reach the network or schedule work:`n    $($hits -join "`n    ")`nSee docs/RELEASING.md, 'There is no auto-updater, on purpose' -- the installer inherits that rule."
     }
     Write-Host "        $($banned.Count) forbidden facilities, none present" -ForegroundColor DarkGray
     $global:LASTEXITCODE = 0
@@ -1522,8 +1522,9 @@ Step 'the installer contacts nothing' {
 # The zip must be a deterministic function of the directory it was built from.
 #
 # NOT "two builds of the same commit produce the same zip". They cannot, and
-# docs/RELEASING.md:77-84 says so plainly: the binaries embed absolute paths, and
-# a PE file carries a link timestamp, so a second `cargo build` relinks
+# docs/RELEASING.md, "Reproducibility", declines to claim it and gives one
+# reason: the build embeds absolute paths. There is a second reason it does not
+# give -- a PE file carries a link timestamp, so a second `cargo build` relinks
 # `polylinker.pyd` into different bytes. Asserting that would be asserting a
 # property the project explicitly does not claim, and the first version of this
 # step did exactly that and failed on the `.pyd` — correctly.
@@ -2135,8 +2136,12 @@ Step 'the Rust version floor is one number, and CI installs it' {
 
 # The three honest paragraphs, which are the ones that erode.
 #
-# Every artifact is unsigned and will stay unsigned until somebody pays for a
-# certificate. The release notes are the only place most users will read what
+# Every artifact is unsigned and stays unsigned. Code signing came off the
+# roadmap on 2026-08-06, so what this step guards is permanent text and not a
+# description of an interval -- which makes it likelier to erode, not less,
+# because nothing is coming along later to replace it.
+#
+# The release notes are the only place most users will read what
 # that means, and the specific remedy for macOS -- clearing the quarantine
 # attribute on named files -- is the difference between explaining a security
 # decision and telling somebody to click through one. The Windows counterpart is

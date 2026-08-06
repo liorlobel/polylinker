@@ -3,31 +3,31 @@
 ## What is done, and what is not
 
 `tools/release.ps1` builds the binaries, records the commit and toolchain, and
-writes `SHA256SUMS.txt`. It signs if given an identity and says loudly that it
-did not if it was not. It runs on all three platforms and produces one archive
-per platform; `.github/workflows/release.yml` runs it on three GitHub runners
-and attaches the three results to a release. [Cutting a release](#cutting-a-release)
-is the procedure.
+writes `SHA256SUMS.txt`. It has a `-WindowsCert` path, which nothing here uses,
+and on every platform it prints in so many words that it signed nothing. It runs
+on all three platforms and produces one archive per platform;
+`.github/workflows/release.yml` runs it on three GitHub runners and attaches the
+three results to a release. [Cutting a release](#cutting-a-release) is the
+procedure.
 
-**The builds are unsigned, and I cannot change that.** Signing needs
-credentials that are issued to a person or an organisation:
+**The builds are unsigned, and that is a settled decision rather than a gap.**
+Code signing is not planned work here: not deferred, not blocked on money, and
+not waiting on an entity that could hold a certificate. No sentence in this file
+describes an interval before a signature arrives, because there is no such
+interval. What a certificate buys is a publisher name the operating system
+already recognises; Polylinker ships without one, and both Windows and macOS
+tell the user so in their own words.
 
-| Platform | What is needed | Roughly | Who must obtain it |
-|---|---|---|---|
-| Windows | An OV or EV code-signing certificate. EV or an [Azure Trusted Signing] subscription is what actually clears SmartScreen quickly; an OV certificate builds reputation slowly | £200–400/yr, or ~$120/yr for Azure Trusted Signing | Lior, or Bar-Ilan |
-| macOS | Apple Developer Program membership, a *Developer ID Application* certificate, and an app-specific password for `notarytool` | $99/yr | Lior |
-| Linux | Nothing. A `.tar.gz` with a checksum is the norm | — | — |
-
-[Azure Trusted Signing]: https://learn.microsoft.com/azure/trusted-signing/
-
-Until then, `SHA256SUMS.txt` is the integrity guarantee. Publish it beside the
-binaries.
+What that costs the person who downloads a build is [set out in full
+below](#what-an-unsigned-build-costs-the-user), because it is their problem and
+not the maintainer's. `SHA256SUMS.txt` is the integrity guarantee; publish it
+beside the binaries.
 
 Since 2026-08-05 that manifest is itself **signed**, with an Ed25519 key whose
 public half is compiled into the two binaries that can check it, `pl` and
 `polylinker` — see [The manifest is
 signed](#the-manifest-is-signed). Be precise about what the two things buy,
-because they are easy to conflate and the table above is unchanged by the
+because they are easy to conflate and the decision above is untouched by the
 signature:
 
 * A **checksum alone** proves a download matches what the release page says. It
@@ -35,9 +35,9 @@ signature:
 * The **signed manifest** proves the checksum table came from whoever holds the
   release key. That is a statement about origin, and it is the one an updater
   needs, because an attacker who controls the server controls the checksums too.
-* **Code signing** — which is still absent — is what an *operating system*
-  checks. Windows and macOS have never heard of the release key and will go on
-  saying so.
+* **Code signing**, which this project does not do, is what an *operating
+  system* checks. Windows and macOS have never heard of the release key and go
+  on saying so.
 
 ### What an unsigned build costs the user
 
@@ -137,8 +137,8 @@ no third-party action is in the trust path.
 
 `SHA256SUMS.txt.sig` is 64 raw bytes: an Ed25519 signature over
 `SHA256SUMS.txt`, made with the release key. It is **not** code signing. The
-executables are still unsigned and both operating systems still do not
-recognise them, for the funding reasons at the top of this file.
+executables are unsigned and neither operating system recognises them, for the
+settled reason at the top of this file.
 
 The public half is compiled into `pl` and `polylinker`, as
 `pl_update::RELEASE_PUBLIC_KEY` in `crates/pl-update/src/lib.rs`:
@@ -350,12 +350,14 @@ against the disk and the registry, uninstalls, and asserts nothing survived —
 including that a *planted* default handler for `.dna` is still intact, which is
 what turns "the associations are additive" from a hope into a measurement.
 
-**Not answered — signing.** Everything below is still true. The MSI ships
-anyway, because the standard Windows install experience was judged worth the
-cost. Two things reduce the damage: the MSI installs **for the current user by
-default**, which raises no elevation prompt at all and so never shows the
-`Publisher: Unknown` consent dialog; and the zip remains, for anyone whose
-policy refuses unsigned packages or who would simply rather read a script.
+**Not answered, and not going to be — signing.** Everything below is still true,
+and it is the permanent state rather than an interval: there is no certificate
+and none is planned. The MSI ships anyway, because the standard Windows install
+experience was judged worth the cost. Two things reduce the damage: the MSI
+installs **for the current user by default**, which raises no elevation prompt
+at all and so never shows the `Publisher: Unknown` consent dialog; and the zip
+remains, for anyone whose policy refuses unsigned packages or who would simply
+rather read a script.
 
 Because there is no certificate, and every argument for a compiled installer
 quietly assumes one.
@@ -370,7 +372,7 @@ in exactly the environments most likely to run an AppLocker or WDAC policy that
 refuses unsigned packages outright. The format aimed at IT is the format IT's
 policy blocks.
 
-So the question is what to ship in the interval, and it follows from what an
+So the question is what to ship without one, and it follows from what an
 unsigned artifact can still offer. Unsigned-and-opaque is the worst of the
 options: an Inno or NSIS stub asks the user to execute several megabytes they
 cannot inspect, from a publisher Windows says is unknown, and the only
@@ -379,11 +381,11 @@ teaching a bad habit. Unsigned-and-readable is defensible: a zip whose contents
 can be listed before anything runs, a checksum that can be checked before
 anything is extracted, and an installer that is text.
 
-Readability is the only trust affordance left when the cryptographic one is
-unaffordable, and a compiled installer is precisely the choice that discards it.
+Readability is the only trust affordance left once the cryptographic one is
+ruled out, and a compiled installer is precisely the choice that discards it.
 
-Three supporting reasons, in case the first one is ever solved and this needs
-re-deciding:
+Three supporting reasons, which stand on their own and would still stand if the
+first one were ever reversed:
 
 1. **The licences travel structurally rather than diligently.** Every compiled
    installer has a second file list — a WiX `<Component>` set, an Inno `[Files]`
@@ -403,10 +405,11 @@ re-deciding:
    third language the gate cannot reach, holding the PATH and registry surgery
    whose bugs are the destructive kind.
 
-**When a certificate arrives, sign the MSI, the three binaries and the zip.**
-That is now the only outstanding item on this list; the MSI itself arrived
-first, on 2026-08-05, and the `-AllUsers` layout below did turn out to be the
-layout it uses, so it was a port and not a redesign.
+**Nothing on this list is outstanding.** Signing was the last item on it and is
+withdrawn rather than pending: the MSI, the three binaries and the zip all ship
+unsigned and go on doing so. The MSI itself arrived on 2026-08-05, and the
+`-AllUsers` layout below did turn out to be the layout it uses, so it was a port
+and not a redesign.
 
 One thing the port deliberately did **not** carry across. The PowerShell
 installer takes the *default* handler for `.plproj` (`Install-Polylinker.ps1`,
@@ -536,9 +539,15 @@ shipped, because instructing somebody to click past a security warning is the
 habit this project does not want to teach. What the shipped text says instead is
 what the warning means (Windows does not recognise the publisher; it has not
 found anything wrong with the file), what the checksum does and does not prove
-(that this copy matches the release page; nothing about who built it), what a
-certificate costs, and that some managed machines will refuse it outright and
-the right response there is to ask the administrator rather than work around it.
+(that this copy matches the release page; nothing about who built it), that the
+build is unsigned by decision and that no later release will be different, and
+that some managed machines will refuse it outright and the right response there
+is to ask the administrator rather than work around it.
+
+That third item used to read "what a certificate costs", because
+`README-WINDOWS.txt` used to carry the price. It does not any more — a price is
+what you quote for something somebody might buy — and this sentence was
+corrected on 2026-08-06 to describe the text that actually ships.
 
 ### Deploying to several machines
 
@@ -551,19 +560,32 @@ the right response there is to ask the administrator rather than work around it.
 see what it will do. No associations are registered — each user runs
 `-Associate` for themselves if they want it.
 
-This is the case an MSI serves properly, and it is the case that is worth
-revisiting the day a certificate exists.
+This is the case an MSI serves properly, and it is also the case where shipping
+unsigned costs the most: the AppLocker or WDAC policy that refuses an unsigned
+package is likeliest to be running on exactly these machines. The zip and the
+readable script ship beside the MSI for that reason, and if the policy refuses
+those too, the answer is the administrator rather than a workaround.
 
 ## macOS notarisation
 
-Not automated, and not because it would be hard to write. It needs an Apple ID
-and an app-specific password, and a release script that can hold those is a
-release script that can leak them — the same rule that keeps key handling out of
-the Windows path. `release.ps1 -MacIdentity` prints a pointer to this section and
-does nothing else.
+**Not done, and not planned.** There is no Apple Developer Program membership
+and no *Developer ID Application* certificate, so nothing that ships is signed
+or notarised and Gatekeeper refuses a downloaded binary exactly as [What an
+unsigned build costs the user](#what-an-unsigned-build-costs-the-user)
+describes. The `xattr -d com.apple.quarantine` remedy in `README-MACOS.txt` and
+in the release notes is permanent text and not a stopgap; it is worded as a
+named command rather than a right-click for the reason given in that section.
 
-The day a Developer ID certificate exists, this runs on the universal binary
-after `lipo` and before packaging:
+It is also not automated, which is a second and independent reason. Notarisation
+needs an Apple ID and an app-specific password, and a release script that can
+hold those is a release script that can leak them — the same rule that keeps key
+handling out of the Windows path. `release.ps1 -MacIdentity` prints a pointer to
+this section and does nothing else.
+
+The recipe below is recorded because `release.ps1` points at it and because
+anyone who forks this and does hold a Developer ID will want it — not because it
+is queued here. It runs on the universal binary after `lipo` and before
+packaging:
 
 ```bash
 for f in target/universal/pl target/universal/polylinker target/universal/pl-mcp; do
@@ -579,15 +601,13 @@ xcrun stapler staple target/universal/polylinker
 `--options runtime` is not optional: notarisation rejects a binary without the
 hardened runtime, and the rejection message does not say so clearly.
 
-Two things change when that happens, and both should be done together: the
-`xattr` paragraph comes out of `README-MACOS.txt` and the release notes, and the
-Apple ID and password become repository secrets rather than anything a script
-constructs. `codesign` signs the individual Mach-O files; a stapled ticket
-attaches to a bundle or a disk image, so notarisation of bare executables
-verifies online at first launch rather than offline. If offline first launch
-matters — and for a tool whose pitch is that it needs no network, it does — that
-is the point at which a `.app` bundle and a `.dmg` become worth building, and
-not before.
+`codesign` signs the individual Mach-O files; a stapled ticket attaches to a
+bundle or a disk image, so notarisation of bare executables verifies online at
+first launch rather than offline. For a tool whose pitch is that it needs no
+network, that is the argument a signed Polylinker would face for building a
+`.app` bundle and a `.dmg` as well. None of the three exist here, and
+`README-MACOS.txt` tells the reader so rather than letting them discover it:
+what ships on macOS is three bare executables in a tarball.
 
 ## There is no auto-updater, on purpose
 
@@ -737,10 +757,11 @@ the installer requirement 4 forbids.
 The installer inherits this rule and the gate enforces it: `tools/ci.ps1` fails
 if any network or scheduling facility appears anywhere in `tools/installer/`.
 
-Note that `docs/PLAN.md` §5.1 and §10 risk 9 still describe a Tauri stack with a
-"free, signature-mandatory auto-updater" and a `bundle > windows > signCommand`,
-and the roadmap row at PLAN.md:214 was written against it. **The app is not
-Tauri** — it is eframe/egui with no webview (`bins/pl-gui/Cargo.toml`). This
+Note that `docs/PLAN.md` §5.1 still describes a Tauri stack with a "free,
+signature-mandatory auto-updater", and that §10 risk 9's `bundle > windows >
+signCommand` and the roadmap row at PLAN.md:220 — both written against it — were
+struck through there on 2026-08-06. **The app is not Tauri** — it is
+eframe/egui with no webview (`bins/pl-gui/Cargo.toml`). This
 document supersedes the updater half of that plan. The paragraphs are left in
 place because PLAN.md is a record of how the architecture was decided, not a
 description of what is built, but nobody should read them as a live intention.

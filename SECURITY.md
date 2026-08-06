@@ -59,8 +59,10 @@ ask.
 Reporters are credited by name in the release notes unless they would rather
 not. Say which.
 
-There is no bug bounty. There is no money in this project at all — the reason
-the builds are unsigned is that a code-signing certificate is unfunded.
+There is no bug bounty. There is no money in this project at all. That is not
+why the builds are unsigned: code signing came off the roadmap on 2026-08-06 and
+is not planned work, so a budget would not change it. `docs/RELEASING.md` states
+the decision and what it costs the person downloading a build.
 
 ## Supported versions
 
@@ -154,9 +156,10 @@ because they are known, documented, and not news:
 
 * **The builds are unsigned.** There is no code-signing certificate and no Apple
   Developer ID, so Windows SmartScreen and macOS Gatekeeper do not recognise the
-  publisher and say so. This is a funding problem, `docs/RELEASING.md` sets out
-  what it costs and who would have to buy it, and a report that Windows shows a
-  warning is a report that the documentation is accurate.
+  publisher and say so. That is a settled decision rather than a gap —
+  `docs/RELEASING.md` states it, and sets out what it costs the person
+  downloading a build — and a report that Windows shows a warning is a report
+  that the documentation is accurate.
 * **There is no revocation channel for the release key.** Documented below and
   in `docs/RELEASING.md:188`. The section below is the answer, such as it is.
 * **`pl update` and the desktop app's update check reveal an IP address to

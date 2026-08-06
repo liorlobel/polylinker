@@ -110,6 +110,28 @@ was opened; Dotmatics was not contacted — and they remain true.
 Item 2 is still the single highest-value contribution an outside collaborator
 could make, for the reason `CONTRIBUTING.md` gives.
 
+### Item 3, amended 2026-08-06
+
+Item 3 has two halves, and on this date one of them stopped being planned work.
+
+**Technology-transfer clearance is withdrawn.** Bar-Ilan's office was not asked,
+is not going to be asked, and nothing here is waiting on an answer from it —
+`docs/PLAN.md` §9.2 struck the same item from its "Always" list on the same day.
+The repository is public and the workspace declares `MIT OR Apache-2.0`
+(`Cargo.toml`); that is the settled position and not an interim one. A reader
+who took the paragraph above as a promise of clearance to come should stop
+taking it that way.
+
+**Legal advice is not withdrawn**, and striking the first half does not quietly
+strike the second. `docs/PLAN.md` §10 risk 12 records why: what is actually open
+is GSL Biotech's trademark position and the Israeli §24 question, neither of
+which a university IP office was ever going to answer, and both of which still
+want an Israeli IP lawyer.
+
+This section is an amendment and not a rewrite. Item 3 above is left as it was
+written, because it records what this project decided in July 2026, and that
+decision was made whatever was decided later.
+
 ---
 
 ## 2. ABIF (`.ab1`) Sanger chromatograms

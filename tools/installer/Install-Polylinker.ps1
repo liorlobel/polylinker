@@ -14,18 +14,22 @@
     ability to read it before running it. A compiled installer keeps the first
     and throws away the second -- it asks the user to execute several megabytes
     they cannot inspect, from a publisher Windows reports as unknown, and offers
-    them a click-through as the only way forward. `docs/RELEASING.md:25-31`
-    already calls that "teaching a bad habit"; wrapping it in a wizard does not
-    make it a better habit.
+    them a click-through as the only way forward. docs/RELEASING.md, "What an
+    unsigned build costs the user", already calls that "teaching a bad habit";
+    wrapping it in a wizard does not make it a better habit.
 
-    Readability is the only trust affordance left when the cryptographic one is
-    unaffordable. So: this file, in plain text, beside the binaries it installs.
+    Readability is the only trust affordance left once the cryptographic one is
+    ruled out, and it is ruled out permanently: there is no certificate for this
+    project and none is planned. So: this file, in plain text, beside the
+    binaries it installs.
 
-    The day a certificate exists, the right thing to add is an `.msi`, because
-    an MSI is what Group Policy and Intune consume and what gives an
-    administrator a product code instead of a detection script. The per-machine
-    layout below (`-AllUsers`) is deliberately the layout an MSI would use, so
-    that is a port and not a redesign. See docs/RELEASING.md.
+    An `.msi` ships too, as of 2026-08-05. It reuses the per-machine layout
+    below (`-AllUsers`), so it was a port and not a redesign, and its file list
+    is generated from the same SHA256SUMS.txt this zip is verified against
+    rather than hand-copied. It is unsigned as well, and stays that way -- so
+    the Group Policy and Intune path an MSI usually buys is the same path an
+    AppLocker or WDAC policy that refuses unsigned packages will close. That is
+    why this script still ships beside it. See docs/RELEASING.md.
 
     WHAT IT WILL NOT DO
 

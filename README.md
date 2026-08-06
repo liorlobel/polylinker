@@ -33,15 +33,19 @@ sends a sequence anywhere.
 > nothing. A number a test recomputes is not the same thing as a sentence a
 > test reads, which is why the adjective now has a marker of its own.
 >
-> **One thing is deliberately not ready**, and it is the one that decides
-> whether you should trust the download: the builds are **unsigned** — no
-> code-signing certificate, so Windows and macOS do not recognise the
-> publisher and say so. The release *manifest* is a separate question and is
+> **One thing here is a settled decision rather than an unfinished one**, and it
+> is the one that decides whether you should trust the download: the builds are
+> **unsigned**. There is no code-signing certificate and none is planned, so
+> Windows and macOS do not recognise the publisher and say so — SmartScreen's
+> *"Windows protected your PC"* on first run, a flat Gatekeeper refusal on
+> macOS, and on a managed machine a policy that may refuse to run them at all.
+> The release *manifest* is a separate question and is
 > signed: `SHA256SUMS.txt` carries an Ed25519 signature made by a key whose
 > public half is compiled into `pl` and the editor, which is what `pl update`
 > checks before it keeps a byte. An operating system has never heard of that key, so
 > it buys you nothing at the SmartScreen dialog and everything afterwards. The
-> features database is *not* the other one any more — all 89 records carry a
+> features database used to be the second entry on this list and is not any
+> more — all 89 records carry a
 > named curator in `features/SIGNOFF.tsv`, so `pl annotate` reports by default,
 > and an approval lapses by itself the moment the row it approves changes. See
 > [Where this actually is](#where-this-actually-is).
@@ -93,7 +97,7 @@ Each ships before the app, stands alone, and survives the app.
 | [`crates/pl-py`](crates/pl-py) | **Python bindings** (PyO3, abi3), so a script already using Biopython can call the parts that are hard to get right without being rewritten. |
 | [`docs/AUDIT-2026-07-28.md`](docs/AUDIT-2026-07-28.md) | A 123-agent audit of the whole workspace: 90 confirmed findings, 19 refuted, 90 of 90 fixed. Kept in the repo because the findings that mattered most were **checks that could not fail**, and that is worth being public about. |
 | Windows installer | **`polylinker-<version>-windows-x64.msi`**, built by [`tools/build-msi.ps1`](tools/build-msi.ps1) from [`tools/installer/Polylinker.wxs`](tools/installer/Polylinker.wxs). Installs for you alone by default — no administrator, no elevation prompt — with "for everyone" offered for machines where you are one. The installer itself contacts nothing, and it registers no service, no scheduled task and no auto-updater: nothing it puts on the machine ever runs on its own. ([`tools/ci.ps1`](tools/ci.ps1) fails the build if any network or scheduling facility appears anywhere under `tools/installer/`.) It **adds** Polylinker to the "Open with" list for eight sequence formats and takes none of them away from SnapGene or anything else you already use. The MSI carries no file list of its own: it is generated from the same `SHA256SUMS.txt` the archive is verified against, because a second list is how a licence text stops shipping. The readable [`Install-Polylinker.ps1`](tools/installer/Install-Polylinker.ps1) still ships inside the zip for anyone who would rather run something they can read. See [`docs/RELEASING.md`](docs/RELEASING.md). |
-| Signing | **Code signing: not done.** Needs a code-signing certificate and an Apple Developer ID; see [`docs/RELEASING.md`](docs/RELEASING.md). That is the signature an *operating system* checks, and until somebody pays for it both of them will go on saying they do not recognise the publisher. **Manifest signing: done, 2026-08-05.** `SHA256SUMS.txt` ships with an Ed25519 signature (`SHA256SUMS.txt.sig`) whose public key is compiled into the two programs that can use it, `pl` and `polylinker` (`pl-mcp`, the Python module and the wasm build do not carry it, because none of them can update anything), so a download can be traced to whoever holds the release key rather than merely to whoever served the page. Every release page prints the OpenSSL command to check it by hand, or `pl update` does it for you — it refuses everything that key did not sign. The private half is a GitHub Actions secret and is on no machine here. |
+| Signing | **Code signing: not done, and not planned.** There is no code-signing certificate and no Apple Developer ID, and obtaining them is not on the roadmap — see [`docs/RELEASING.md`](docs/RELEASING.md), which states the decision and what it costs you at the download. That is the signature an *operating system* checks, so Windows and macOS go on saying they do not recognise the publisher, and a machine under someone else's policy may refuse the binaries outright. **Manifest signing: done, 2026-08-05.** `SHA256SUMS.txt` ships with an Ed25519 signature (`SHA256SUMS.txt.sig`) whose public key is compiled into the two programs that can use it, `pl` and `polylinker` (`pl-mcp`, the Python module and the wasm build do not carry it, because none of them can update anything), so a download can be traced to whoever holds the release key rather than merely to whoever served the page. Every release page prints the OpenSSL command to check it by hand, or `pl update` does it for you — it refuses everything that key did not sign. The private half is a GitHub Actions secret and is on no machine here. |
 | Features database | **89 records as of release 2026.07.28, all 89 reviewed.** Machine-assembled from public sources, then signed off row by row on 2026-07-28. A row moves past `proposed` only when `features/SIGNOFF.tsv` names it with a sha256 of its content that still matches, so an approval lapses by itself when the row changes and the shipped set shrinks without anyone deciding to shrink it. That mechanism, not the current count, is what enforces "the tool may propose and never assert". **It is not comprehensive, and the gaps are not small: there is not one promoter, terminator or origin of replication in it** — 89 rows against SnapGene's 1,367, and those three classes have no automatable source that gives a defensible boundary, so they are curatorial work nobody has done yet ([`features/README.md`](features/README.md) enumerates the rest). The desktop app and `pl methods annotate` both say so on screen, computed from the table rather than written down, because a user who watches `AmpR` light up and sees no `ori` will otherwise conclude their plasmid has none. `pl licences` prints the live count and the attribution. |
 
 ### Getting your sequences out of `.dna`, today

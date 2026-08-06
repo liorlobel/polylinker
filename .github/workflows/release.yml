@@ -19,16 +19,21 @@ name: Release
 #
 # NOT signed: the executables. There is no code-signing certificate for any of
 # the three platforms -- no Authenticode certificate, no Apple Developer ID --
-# so SmartScreen and Gatekeeper will say what they say. docs/RELEASING.md has
-# the reasoning and the release notes tell the user what it costs on each
-# platform. Nothing in this file changes that.
+# and as of 2026-08-06 none is planned, so SmartScreen and Gatekeeper will say
+# what they say and go on saying it. docs/RELEASING.md has the reasoning and the
+# release notes tell the user what it costs on each platform. Nothing in this
+# file changes that.
 #
 # SIGNED: `SHA256SUMS.txt`, the cross-platform manifest, with the Ed25519
-# release key whose public half is compiled into every Polylinker binary as
-# `pl_update::RELEASE_PUBLIC_KEY`. That is a different claim from code signing
-# and a much narrower one: it says these bytes came from whoever holds the
-# release key, and it says nothing at all to an operating system that has never
-# heard of that key.
+# release key whose public half is compiled into `pl` and `polylinker` -- the
+# two binaries that can check it -- as `pl_update::RELEASE_PUBLIC_KEY`. Not
+# `pl-mcp`, not the Python module, not the wasm build: none of them depends on
+# `pl-update`, so none carries the key or any code that could use it, and
+# "compiled into every binary" is the sentence docs/RELEASING.md calls wrong.
+#
+# That is a different claim from code signing and a much narrower one: it says
+# these bytes came from whoever holds the release key, and it says nothing at
+# all to an operating system that has never heard of that key.
 #
 # It exists so that requirements 2 and 3 of the four docs/RELEASING.md sets for
 # any updater this project ever grows CAN be met -- a signature over the
@@ -756,7 +761,7 @@ jobs:
             echo 'sha256sum -c --ignore-missing SHA256SUMS.txt'
             echo '```'
             echo
-            echo "The same key is compiled into every Polylinker binary as \`pl_update::RELEASE_PUBLIC_KEY\`, and \`docs/RELEASING.md\` states it in full. Taking it from this page is better than nothing and worse than taking it from a copy of Polylinker you already trust: whoever could replace the files here could replace the key here too."
+            echo "The same key is compiled into \`pl\` and \`polylinker\` as \`pl_update::RELEASE_PUBLIC_KEY\` — those two and no others, because \`pl-mcp\`, the Python module and the wasm build cannot update anything and so carry neither the key nor any code that could use it. \`docs/RELEASING.md\` states it in full. Taking the key from this page is better than nothing and worse than taking it from a copy of Polylinker you already trust: whoever could replace the files here could replace the key here too."
             echo
             echo "Built from \`$GITHUB_SHA\` by [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
           } >> notes.md
