@@ -288,7 +288,7 @@ was built on. `Compress-Archive` cannot do the first two, and shelling out to
 | Check | Where |
 |---|---|
 | `release.ps1` runs; its manifest is set-equal to `dist/` | `tools/ci.ps1`, locally |
-| ≥ 19 files hashed, ≥ 7 licence texts, `NOTICE.txt` / `LICENSE.txt` / `features/NOTICE.txt` by name | `tools/ci.ps1` |
+| ≥ 20 files hashed, ≥ 7 licence texts, `NOTICE.txt` / `LICENSE.txt` / `LICENSE-MIT.txt` / `features/NOTICE.txt` by name | `tools/ci.ps1` |
 | The zip is a deterministic function of `dist/` | `tools/ci.ps1` |
 | The **archive** verifies against its own `SHA256SUMS.txt`, licence set included | `tools/check-archive.ps1`, locally and on all three runners |
 | The tar writer produces something GNU tar or bsdtar will read | `tools/ci.ps1` (forces `-ArchiveFormat tar.gz` on Windows) |

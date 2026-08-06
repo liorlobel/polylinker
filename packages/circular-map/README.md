@@ -110,4 +110,9 @@ node --experimental-strip-types examples/from-genbank.ts plasmid.gb > map.svg
 
 ## Licence
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0, at your option. Both texts are here — `LICENSE-MIT` and
+`LICENSE`, which is the Apache-2.0 one — and both are in the `files` list, so a
+published tarball carries them. Until 2026-08-06 that list named `LICENSE-MIT`
+and `LICENSE-APACHE` and neither file existed; npm drops a missing entry without
+complaining, so `npm pack` would have shipped a dual-licensed package with no
+licence in it at all.

@@ -531,9 +531,13 @@ function Test-Payload {
         }
     }
 
-    foreach ($required in 'NOTICE.txt', 'LICENSE.txt') {
+    # LICENSE.txt is Apache-2.0; LICENSE-MIT.txt is the other half of the
+    # `MIT OR Apache-2.0` this software is offered under. Both are required,
+    # because a copy carrying one of two alternatives has quietly made the
+    # choice on the recipient's behalf.
+    foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'LICENSE-MIT.txt') {
         if (-not $Manifest.Files.Contains($required)) {
-            throw "$required is not in this copy. Four of the licences Polylinker's fonts are under require their text to accompany every copy, so this is not installable."
+            throw "$required is not in this copy. Polylinker's own licence texts and the licences its fonts are under all require their text to accompany every copy, so this is not installable."
         }
     }
     $licences = @($Manifest.Files.Keys | Where-Object { $_ -like 'licences/*' })

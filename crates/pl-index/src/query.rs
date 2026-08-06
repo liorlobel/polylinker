@@ -522,10 +522,14 @@ mod tests {
                         1 => Some(Topology::Linear),
                         _ => None,
                     },
-                    min_len: if rng(&mut st) % 3 == 0 { Some(5) } else { None },
+                    min_len: if rng(&mut st).is_multiple_of(3) {
+                        Some(5)
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 },
-                absent: rng(&mut st) % 5 == 0,
+                absent: rng(&mut st).is_multiple_of(5),
                 ..Default::default()
             };
             let r = run(&rows, &packed, &q);

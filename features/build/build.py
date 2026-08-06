@@ -86,7 +86,10 @@ from lib_columns import (  # noqa: E402
     SIGNOFF_COLUMNS,
 )
 
-UA = "polylinker-features-build/0.1 (https://github.com/polylinker/polylinker)"
+# The URL in a User-Agent exists so that whoever runs the server can find out
+# who is fetching from it. `polylinker/polylinker` is not an organisation, so
+# the string that was here pointed a curious NCBI or EBI admin at a 404.
+UA = "polylinker-features-build/0.1 (https://github.com/liorlobel/polylinker)"
 
 AMR_BASE = (
     "https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/"

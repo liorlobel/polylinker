@@ -949,8 +949,8 @@ Step 'every file the release reads is committed' {
         Where-Object { Test-Path -LiteralPath (Join-Path $repo $_) -PathType Leaf })
 
     # A floor, because a regex that stopped matching would enumerate nothing and
-    # report success. Eleven notices, three installer files, the icon, two
-    # readmes and Cargo.toml is eighteen.
+    # report success. Twelve notices, three installer files, the icon, two
+    # readmes and Cargo.toml is nineteen.
     if ($paths.Count -lt 12) {
         throw "only $($paths.Count) input file(s) found in release.ps1; this step parsed almost nothing and proved nothing"
     }
@@ -1027,21 +1027,24 @@ Step 'release script and its manifest' {
     if ($unhashed) { throw "shipped but not in the manifest: $($unhashed -join ', ')" }
 
     # A floor as well, because set equality alone is satisfied by a release of
-    # nothing agreeing with a manifest of nothing. Nineteen is what the current
+    # nothing agreeing with a manifest of nothing. Twenty is what the current
     # `$artifacts` + `$notices` + installer produce; raise it when they grow.
     #
     # It read sixteen until 2026-08-05, by which time the release had been
     # eighteen files for a while: the floor had become two files of slack rather
-    # than a floor, which is the same drift it exists to catch. Nineteen is those
-    # eighteen plus polylinker.ico, which `release.ps1` began shipping that day.
-    if ($listed.Count -lt 19) { throw "only $($listed.Count) file(s) in the manifest; at least 19 are expected" }
+    # than a floor, which is the same drift it exists to catch. Nineteen was
+    # those eighteen plus polylinker.ico, which `release.ps1` began shipping that
+    # day; twenty is nineteen plus LICENSE-MIT.txt, added on 2026-08-06 because
+    # the repository had been offering `MIT OR Apache-2.0` while shipping only
+    # the Apache half.
+    if ($listed.Count -lt 20) { throw "only $($listed.Count) file(s) in the manifest; at least 20 are expected" }
 
     # And the specific obligation named in NOTICE, spelled out once here because
     # this is the assertion whose failure is a licence violation rather than a
     # papercut. Counted, not listed, for the reason above.
     $lic = @($listed | Where-Object { $_ -like 'licences/*' })
     if ($lic.Count -lt 7) { throw "only $($lic.Count) font licence text(s) shipped; NOTICE requires 7" }
-    foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'features/NOTICE.txt') {
+    foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'LICENSE-MIT.txt', 'features/NOTICE.txt') {
         if ($listed -notcontains $required) { throw "$required did not ship" }
     }
 
@@ -2048,6 +2051,63 @@ Step 'the release workflow assembles nothing itself' {
 
     if ($problems) { throw ($problems -join "`n        ") }
     Write-Host "        $($named.Count) repository paths, all present; no packaging facility in the workflow" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
+
+# The Rust version floor, in the three places it is written down.
+#
+# Only one of them is enforced by anything: `rust-version` in the root
+# Cargo.toml, which cargo refuses to build below, and which the `msrv` job in
+# `.github/workflows/ci.yml` now reads and installs so that the declaration is
+# compiled against rather than asserted. The other two are prose, and they are
+# the copies a user acts on -- `tools/readme/README-LINUX.txt` names the
+# toolchain to the reader it has just told to build from source because the
+# binaries will not start on their glibc, and `tools/release-notes.md` says the
+# same thing on the release page.
+#
+# All three read 1.82 until 2026-08-06, and 1.82 could not parse this
+# workspace's own Cargo.lock. What let that survive is that the three agreed
+# with each other and with nothing else. So this step compares the prose to the
+# manifest, and the workflow compares the manifest to a compiler; neither alone
+# is enough, and a floor raised in the manifest without touching the prose now
+# fails here rather than on somebody's laptop.
+Step 'the Rust version floor is one number, and CI installs it' {
+    $manifest = [System.IO.File]::ReadAllText("$repo/Cargo.toml")
+    if ($manifest -notmatch '(?m)^rust-version = "(\d+\.\d+(?:\.\d+)?)"') {
+        throw 'the root Cargo.toml declares no rust-version, so there is no floor to hold anything to'
+    }
+    $floor = $Matches[1]
+    $problems = @()
+
+    # `Rust ` followed by a digit, so "pure Rust and no system libraries" two
+    # lines below the number in README-LINUX.txt is prose and not a claim.
+    foreach ($f in 'tools/readme/README-LINUX.txt', 'tools/release-notes.md') {
+        $body = [System.IO.File]::ReadAllText((Join-Path $repo $f))
+        $said = @([regex]::Matches($body, 'Rust (\d+\.\d+(?:\.\d+)?)') |
+                  ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        if ($said.Count -eq 0) {
+            $problems += "$f names no Rust version at all; it is where a reader whose machine cannot run the binaries is sent to build from source"
+        }
+        foreach ($v in $said) {
+            if ($v -ne $floor) { $problems += "$f tells the reader Rust $v; Cargo.toml declares $floor" }
+        }
+    }
+
+    # And the workflow has to compile on that line rather than on a copy of it.
+    $wf = [System.IO.File]::ReadAllText("$repo/.github/workflows/ci.yml")
+    if ($wf -notmatch [regex]::Escape('rust-version = ')) {
+        $problems += 'ci.yml never reads rust-version out of Cargo.toml; a version typed into the workflow is a second copy of the number and drifts the same way the first one did'
+    }
+    if ($wf -notmatch [regex]::Escape('cargo check --workspace --locked')) {
+        $problems += 'ci.yml runs no `cargo check --workspace --locked`, so nothing compiles this tree on the floor it declares'
+    }
+    $pinned = @([regex]::Matches($wf, 'rust-toolchain@(\d[\w.]*)') | ForEach-Object { $_.Groups[1].Value })
+    foreach ($p in $pinned) {
+        $problems += "ci.yml pins dtolnay/rust-toolchain@$p; the floor comes from Cargo.toml or it is two numbers"
+    }
+
+    if ($problems) { throw ($problems -join "`n        ") }
+    Write-Host "        Rust $floor in Cargo.toml, README-LINUX.txt and release-notes.md; ci.yml installs the manifest's line" -ForegroundColor DarkGray
     $global:LASTEXITCODE = 0
 }
 

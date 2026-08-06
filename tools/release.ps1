@@ -317,9 +317,23 @@ if ($missing) {
 # Phosphor permission notice anywhere in it. Unlike the four texts above, this
 # one does NOT come out of a crate: egui-phosphor ships a licence for its own
 # Rust wrapper and none for the typeface. See NOTICE.
+#
+# BOTH HALVES OF THE OFFERED LICENCE SINCE 2026-08-06, and this is the same
+# failure as the two above wearing the project's own licence rather than
+# somebody else's. `Cargo.toml`, `tools/release-notes.md` and
+# `packages/circular-map/package.json` have all said `MIT OR Apache-2.0` since
+# the beginning, and only the Apache text existed -- so a recipient who chose
+# the MIT half received a permission notice they could not read, which is
+# precisely the position the seven font texts above are here to avoid. The MIT
+# text is now `LICENSE-MIT` at the root and ships beside `LICENSE.txt`.
+#
+# It is `LICENSE-MIT.txt` here for the same reason `NOTICE` and `LICENSE` gain
+# an extension: an extensionless file does not open on a double-click on
+# Windows.
 $notices = @(
     @{ From = 'NOTICE';        To = 'NOTICE.txt' }
-    @{ From = 'LICENSE';       To = 'LICENSE.txt' }
+    @{ From = 'LICENSE';       To = 'LICENSE.txt' }      # Apache-2.0
+    @{ From = 'LICENSE-MIT';   To = 'LICENSE-MIT.txt' }  # the other half of the choice
     @{ From = 'TRADEMARKS.md'; To = 'TRADEMARKS.md' }
     @{ From = 'bins/pl-gui/fonts/IBMPlex-OFL.txt'
        To   = 'licences/IBMPlex-OFL.txt' }                 # Plex Mono + Plex Sans

@@ -176,7 +176,7 @@ impl Tail {
              does not know. If you are making a fusion protein, check the frame yourself.",
             self.spacer.len(),
             self.enzyme.name,
-            if site % 3 == 0 {
+            if site.is_multiple_of(3) {
                 format!("{site} is divisible by 3.")
             } else {
                 format!(

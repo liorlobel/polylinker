@@ -990,7 +990,7 @@ impl OpLog {
 
         self.cursor = Some(id);
         self.current = next;
-        if self.depth() % SNAPSHOT_EVERY == 0 {
+        if self.depth().is_multiple_of(SNAPSHOT_EVERY) {
             self.snapshots.insert(self.cursor, self.current.clone());
         }
         Ok(&self.current)

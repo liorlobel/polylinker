@@ -36,9 +36,10 @@
 //!
 //! > It said the GUI had no way to state its own font attribution from inside
 //! > itself, and should have one. It has one. `bins/pl-gui/src/help.rs` is that
-//! > page. It shows NOTICE, LICENSE, TRADEMARKS.md and all seven font licence
-//! > texts whole, each from an `include_str!` rather than a summary, so what a
-//! > user reads is the committed bytes and not a restatement of them.
+//! > page. It shows NOTICE, both of this project's own licence texts,
+//! > TRADEMARKS.md and all seven font licence texts whole, each from an
+//! > `include_str!` rather than a summary, so what a user reads is the
+//! > committed bytes and not a restatement of them.
 //!
 //! **Cited by heading and by quotation, not by line number.** This paragraph
 //! said "`NOTICE` lines 443-450" until 2026-08-04; by then 443-450 was the
@@ -81,6 +82,12 @@ const SEP: &str = "
 const PAGES: &[(&str, &str)] = &[
     ("Notices (NOTICE)", include_str!("../../../NOTICE")),
     ("Apache License 2.0", include_str!("../../../LICENSE")),
+    // The other half of `MIT OR Apache-2.0`, and it was missing here for the
+    // same reason it was missing from the repository until 2026-08-06: the
+    // Apache text was the one that existed, so it was the one that got shown.
+    // This page exists for the user holding only the .exe, and that user cannot
+    // exercise a choice whose second option is not in the binary.
+    ("MIT License", include_str!("../../../LICENSE-MIT")),
     ("Trademarks", include_str!("../../../TRADEMARKS.md")),
     ("IBM Plex — OFL", include_str!("../fonts/IBMPlex-OFL.txt")),
     // A different file from the Plex OFL above -- the same licence, but
@@ -381,9 +388,13 @@ mod tests {
     /// `pl-draw` fills outlines from. They are never drawn on screen, and that
     /// is exactly why the page matters: nothing in the interface would look
     /// wrong if their licence were missing.
+    ///
+    /// 10 → 11 on 2026-08-06 with the MIT text. That one is not a third party's
+    /// at all — it is half of Polylinker's own offer, and the half that did not
+    /// exist as a file until that day.
     #[test]
     fn every_notice_this_binary_owes_is_compiled_into_it() {
-        assert_eq!(PAGES.len(), 10, "a licence page was added or lost");
+        assert_eq!(PAGES.len(), 11, "a licence page was added or lost");
         for (name, text) in PAGES {
             assert!(
                 text.len() > 400,

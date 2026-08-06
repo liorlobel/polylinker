@@ -1,0 +1,58 @@
+# Citation metadata, in Citation File Format 1.2.0.
+# Schema and field definitions: https://citation-file-format.github.io
+#
+# THERE IS NO DOI, and the `doi:` field is absent rather than empty because an
+# identifier that resolves to nothing is worse than none at all. A DOI would
+# come from archiving a release: connecting this repository to Zenodo mints one
+# per release plus a concept DOI covering all of them. Nobody has done that, so
+# nothing here can be resolved — cite the version and the repository. If it is
+# ever done, `doi:` belongs in this file and has to be updated with `version:`
+# and `date-released:` on every release thereafter.
+#
+# `version:` and `date-released:` describe the release named below, not the
+# current state of the branch. They move when a tag is cut. See CHANGELOG.md.
+
+cff-version: 1.2.0
+message: >-
+  If you use Polylinker in work you publish, please cite it using the metadata
+  in this file, and name the version you actually ran — the answers a tool gives
+  are a property of its version.
+title: Polylinker
+abstract: >-
+  A free, offline plasmid editor. It reads SnapGene .dna, GenBank and FASTA
+  files, simulates restriction digests and cloning (ligation, PCR, Gibson and
+  Golden Gate), draws publication-quality plasmid maps as SVG, PDF, EPS and PNG,
+  reads Sanger traces, and annotates from an openly licensed feature database
+  that records the source database, accession, licence and percent identity
+  behind every annotation. It never sends a sequence anywhere. One Rust core is
+  shared by a desktop application, a command line, a Python module, an MCP
+  server and a browser build. Correctness is published rather than asserted: the
+  repository carries a CC0 benchmark of (input, operation, expected checksum)
+  cases that any tool can run.
+type: software
+authors:
+  - family-names: Lobel
+    given-names: Lior
+    affiliation: Bar-Ilan University
+repository-code: https://github.com/liorlobel/polylinker
+# Both halves, because both are now genuinely available. This field read
+# Apache-2.0 alone when it was written, and that was the honest answer at that
+# moment: Cargo.toml declared `MIT OR Apache-2.0` while no MIT text existed
+# anywhere in the tree, so Apache-2.0 was the only licence a recipient could
+# actually rely on. LICENSE-MIT landed in the same change, so the dual
+# declaration is now true and this agrees with Cargo.toml, README.md and the
+# release notes. CFF 1.2.0 accepts a list here for exactly this case.
+license:
+  - MIT
+  - Apache-2.0
+version: 0.1.3
+date-released: 2026-08-06
+keywords:
+  - plasmid
+  - molecular cloning
+  - restriction digest
+  - sequence annotation
+  - plasmid map
+  - GenBank
+  - Sanger sequencing
+  - bioinformatics

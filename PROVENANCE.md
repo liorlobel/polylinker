@@ -144,6 +144,15 @@ carries a licence while the numbers do not. `docs/PLAN.md` §7.2 makes the
 equivalent call for thermodynamic parameters and names the source to avoid
 (Primer3's GPL-2.0 `oligotm.c`).
 
+**The shipped table is 58 entries today: 50 Type IIP and those 8 Type IIS.** The
+51 above is the count on the date given and is left as written, because it is
+what was checked that day. `BstXI` came out afterwards — its overhang is `NNNN`,
+a property of the DNA rather than of the enzyme, which is why `Compatibility` in
+`crates/pl-enzymes` still uses it as the example of an end that can only be
+answered "the sequence decides". `crates/pl-enzymes/src/lib.rs` and
+`reference/python/tests/validate_digest.py` both hold 58, independently, and
+`pl methods digest` prints `ENZYMES.len()` rather than a number typed into prose.
+
 This does not change the position below: production enzyme coverage means
 REBASE, under REBASE's own terms, in its own package.
 

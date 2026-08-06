@@ -101,7 +101,7 @@ fn u32le(v: &mut Vec<u8>, x: u32) {
 /// of a VS_VERSIONINFO tree is DWORD-aligned; `rc` does this and the loader
 /// assumes it.
 fn pad4(v: &mut Vec<u8>) {
-    while v.len() % 4 != 0 {
+    while !v.len().is_multiple_of(4) {
         v.push(0);
     }
 }

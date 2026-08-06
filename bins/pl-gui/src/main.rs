@@ -9831,7 +9831,7 @@ impl App {
                     which.join(", ")
                 ));
             }
-            if per_row % 3 != 0 {
+            if !per_row.is_multiple_of(3) {
                 // The drawing stays right -- the middle-base rule is computed
                 // per row from absolute coordinates -- but the codon columns
                 // walk by `per_row % 3` a row and the residues form a diagonal.
@@ -14621,7 +14621,7 @@ mod tests {
         let s = n.to_string();
         let mut out = String::new();
         for (i, c) in s.char_indices() {
-            if i > 0 && (s.len() - i) % 3 == 0 {
+            if i > 0 && (s.len() - i).is_multiple_of(3) {
                 out.push(',');
             }
             out.push(c);

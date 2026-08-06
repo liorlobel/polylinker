@@ -202,8 +202,8 @@ pub fn find_orfs_until(
     // Codons before a circular frame arrives back where it began. When 3 does
     // not divide the length that is every position, not a third of them — see
     // the module docs.
-    let per_turn = if n % 3 == 0 { n / 3 } else { n };
-    let merged = circular && n % 3 != 0;
+    let per_turn = if n.is_multiple_of(3) { n / 3 } else { n };
+    let merged = circular && !n.is_multiple_of(3);
     let frames: &[u8] = if merged { &[0] } else { &[0, 1, 2] };
 
     for strand in [Strand::Forward, Strand::Reverse] {
@@ -254,7 +254,7 @@ pub fn find_orfs_until(
                                 // coded on. See `Params::nested`.
             let mut open: Vec<(usize, [u8; 3])> = Vec::new();
             loop {
-                if k % POLL == 0 && stop() {
+                if k.is_multiple_of(POLL) && stop() {
                     return None;
                 }
                 if circular {
@@ -361,8 +361,8 @@ pub fn stopless_frames(seq: &[u8], code: Code, circular: bool) -> Vec<(Strand, u
     if !circular || n < 3 {
         return Vec::new();
     }
-    let per_turn = if n % 3 == 0 { n / 3 } else { n };
-    let merged = n % 3 != 0;
+    let per_turn = if n.is_multiple_of(3) { n / 3 } else { n };
+    let merged = !n.is_multiple_of(3);
     let frames: &[u8] = if merged { &[0] } else { &[0, 1, 2] };
     let rc = crate::iupac::reverse_complement(seq);
     let mut out = Vec::new();

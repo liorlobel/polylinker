@@ -2,7 +2,25 @@ Polylinker
 Copyright 2026 The Polylinker contributors
 
 This product includes software developed by the Polylinker project.
-Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Licensed under either of
+
+  * the MIT licence      (see LICENSE-MIT)
+  * the Apache License, Version 2.0 (see LICENSE)
+
+at your option. You need comply with only one of them. Both texts are committed
+here and both travel in every release archive, as LICENSE-MIT.txt and
+LICENSE.txt. Until 2026-08-06 only the Apache text existed while `Cargo.toml`
+had said `MIT OR Apache-2.0` from the start, so the choice was offered and one
+half of it could not be read.
+
+The file holding the Apache text is named `LICENSE` rather than
+`LICENSE-APACHE`, which is the asymmetry a reader will notice first. It is not
+renamed because the shipped name `LICENSE.txt` is asserted by name in three
+places -- `tools/ci.ps1`, `tools/check-archive.ps1` and
+`tools/installer/Install-Polylinker.ps1` -- and a rename would be a rename of
+the thing those three agree on. The contents are what matter and they are the
+standard Apache-2.0 text, unmodified.
 
 ================================================================================
 Third-party components
@@ -550,10 +568,10 @@ HOW THE OBLIGATION TRAVELS, and what is still owed.
       see the head of this section.
     - It said the GUI had no way to state its own font attribution from inside
       itself, and should have one. It has one. `bins/pl-gui/src/help.rs` is
-      that page. It shows NOTICE, LICENSE, TRADEMARKS.md and all seven font
-      licence texts whole, each from an `include_str!` rather than a summary,
-      so what a user reads is the committed bytes and not a restatement of
-      them.
+      that page. It shows NOTICE, both of this project's own licence texts,
+      TRADEMARKS.md and all seven font licence texts whole, each from an
+      `include_str!` rather than a summary, so what a user reads is the
+      committed bytes and not a restatement of them.
 
   So what is left is the CLI, and it is a real gap rather than a tidiness one
   now that `pl.exe` carries an OFL face: `pl licences` is a licence view that

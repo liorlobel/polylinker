@@ -91,7 +91,7 @@ impl std::fmt::Display for CommaSep {
         let s = self.0.to_string();
         let b = s.as_bytes();
         for (i, c) in b.iter().enumerate() {
-            if i > 0 && (b.len() - i) % 3 == 0 {
+            if i > 0 && (b.len() - i).is_multiple_of(3) {
                 write!(f, ",")?;
             }
             write!(f, "{}", *c as char)?;
@@ -450,7 +450,7 @@ fn synthetic_face() -> Vec<u8> {
     let mut loca: Vec<u32> = vec![0, 0];
     let add = |glyf: &mut Vec<u8>, loca: &mut Vec<u32>, g: &[u8]| {
         glyf.extend_from_slice(g);
-        while glyf.len() % 4 != 0 {
+        while !glyf.len().is_multiple_of(4) {
             glyf.push(0);
         }
         loca.push(glyf.len() as u32);

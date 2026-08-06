@@ -55,7 +55,7 @@ will not start on anything older. Check yours:
 
 There is no build for older distributions and this file is not going to pretend
 otherwise. On an older machine, build from source -- the toolchain requirement
-is Rust 1.82, the repository is at github.com/liorlobel/polylinker, and the
+is Rust 1.92, the repository is at github.com/liorlobel/polylinker, and the
 README there lists the build dependencies. `pl` and `pl-mcp` are pure Rust and
 build with no system libraries at all.
 

@@ -40,7 +40,7 @@ fn well_formed(svg: &str) -> Result<(), String> {
         }
         let end = svg[i..].find('>').ok_or("unclosed tag")? + i;
         let inner = &svg[i + 1..end];
-        if inner.matches('"').count() % 2 != 0 {
+        if !inner.matches('"').count().is_multiple_of(2) {
             return Err(format!("odd quote count in <{inner}>"));
         }
         if let Some(name) = inner.strip_prefix('/') {

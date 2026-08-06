@@ -46,7 +46,7 @@ pub fn pack(seq: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; seq.len().div_ceil(2)];
     for (i, &b) in seq.iter().enumerate() {
         let m = code_mask(b);
-        if i % 2 == 0 {
+        if i.is_multiple_of(2) {
             out[i / 2] = m;
         } else {
             out[i / 2] |= m << 4;
@@ -59,7 +59,7 @@ pub fn pack(seq: &[u8]) -> Vec<u8> {
 #[inline]
 pub fn mask_at(packed: &[u8], i: usize) -> u8 {
     let byte = packed[i / 2];
-    if i % 2 == 0 {
+    if i.is_multiple_of(2) {
         byte & 0x0F
     } else {
         byte >> 4

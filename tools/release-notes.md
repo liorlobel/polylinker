@@ -121,7 +121,7 @@ they will not start at all, and the error is a bare
 - **Will not run**: Ubuntu 22.04 (2.35), Debian 12 (2.36), RHEL 9 (2.34)
 
 There is no build for older distributions. On one of those, build from source —
-it needs Rust 1.82 and nothing exotic, and `pl` and `pl-mcp` need no system
+it needs Rust 1.92 and nothing exotic, and `pl` and `pl-mcp` need no system
 libraries at all. `README-LINUX.txt` inside the archive lists the shared
 libraries the editor opens at run time.
 
@@ -156,8 +156,13 @@ exist, and names the test that holds each one.
 
 ## Licences
 
-Polylinker is MIT OR Apache-2.0. It embeds nine font faces under four other
+Polylinker is MIT OR Apache-2.0, at your option — both texts are in the archive,
+`LICENSE.txt` and `LICENSE-MIT.txt`. It embeds nine font faces under four other
 licences, four of which require their text to accompany every copy — so
-`licences/`, `NOTICE.txt` and `features/NOTICE.txt` are inside every archive and
-are covered by its `SHA256SUMS.txt`. The feature database is CC BY 4.0 and
-carries its own attribution in `features/NOTICE.txt`.
+`licences/`, `NOTICE.txt` and `features/NOTICE.txt` are inside every archive too,
+and all of it is covered by its `SHA256SUMS.txt`. The feature database is CC BY
+4.0 and carries its own attribution in `features/NOTICE.txt`.
+
+No restriction-enzyme database is redistributed. The 58 enzymes in the digest
+are transcribed from published references and cross-checked against Biopython;
+REBASE is not licensed for this and is not here.

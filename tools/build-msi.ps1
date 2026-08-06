@@ -206,14 +206,33 @@ Say "  generated: Payload.wxs, $($payload.Count) components, $(($subdirs | Measu
 
 # ------------------------------------------------------------------ the EULA
 # WixUI wants RTF and the repository has none, so one is produced from the
-# committed licence text rather than a second copy of the licence being written
+# committed licence texts rather than a second copy of the licence being written
 # by hand. Only the four RTF metacharacters need escaping; the text is ASCII.
-$licenseSrc = if (Test-Path "$repo/LICENSE") { "$repo/LICENSE" } elseif (Test-Path "$repo/LICENSE.txt") { "$repo/LICENSE.txt" } else { $null }
-if (-not $licenseSrc) { throw 'no LICENSE or LICENSE.txt at the repository root to build the MSI licence page from' }
+#
+# BOTH TEXTS SINCE 2026-08-06. Polylinker is offered as `MIT OR Apache-2.0`, and
+# a licence page showing one of two alternatives has made the choice for the
+# person clicking Accept. The MIT text goes first because it is twenty lines and
+# the Apache text is four hundred: a reader who scrolls past the first screen at
+# least knows there were two.
+$mitSrc = if (Test-Path "$repo/LICENSE-MIT") { "$repo/LICENSE-MIT" } else { $null }
+$apacheSrc = if (Test-Path "$repo/LICENSE") { "$repo/LICENSE" } elseif (Test-Path "$repo/LICENSE.txt") { "$repo/LICENSE.txt" } else { $null }
+if (-not $apacheSrc) { throw 'no LICENSE or LICENSE.txt at the repository root to build the MSI licence page from' }
+if (-not $mitSrc) { throw 'no LICENSE-MIT at the repository root; the MSI would offer MIT OR Apache-2.0 and show only the Apache half' }
+$licenseSrcs = @($mitSrc, $apacheSrc)
+$header = @(
+    'Polylinker is licensed under either of the two licences below, at your',
+    'option. You need comply with only one of them.',
+    '',
+    ('=' * 76),
+    ''
+) -join "`n"
+$raw = $header + (($licenseSrcs | ForEach-Object {
+    (Get-Content -LiteralPath $_ -Raw).TrimEnd() + "`n`n" + ('=' * 76) + "`n"
+}) -join "`n")
 # Written as separate statements on purpose. Chained -replace operators with
 # backslash-heavy patterns parse in a way that is easy to get wrong and hard to
 # read, and the first attempt at this line did get it wrong.
-$esc = Get-Content -LiteralPath $licenseSrc -Raw
+$esc = $raw
 $esc = $esc.Replace('\', '\\')
 $esc = $esc.Replace('{', '\{')
 $esc = $esc.Replace('}', '\}')
@@ -222,7 +241,7 @@ $esc = $esc.Replace("`n", "\par`r`n")
 $rtf = "{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fnil\fcharset0 Segoe UI;}}`r`n\viewkind4\uc1\pard\f0\fs18 $esc\par`r`n}"
 $rtfPath = Join-Path $outFull 'LICENSE.rtf'
 Set-Content -LiteralPath $rtfPath -Value $rtf -Encoding ASCII
-Say "  generated: LICENSE.rtf from $(Split-Path -Leaf $licenseSrc) ($((Get-Item $rtfPath).Length) bytes)"
+Say "  generated: LICENSE.rtf from $(($licenseSrcs | ForEach-Object { Split-Path -Leaf $_ }) -join ' + ') ($((Get-Item $rtfPath).Length) bytes)"
 
 if ($GenerateOnly) {
     Say "  -GenerateOnly: stopping before wix build" Yellow

@@ -8,9 +8,9 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 141,133 lines of Rust, 88,410 of it dependency-free (136 `.rs`
+> crates and 141,148 lines of Rust, 88,414 of it dependency-free (136 `.rs`
 > files under `crates/` and `bins/`), with 1,757 `#[test]` functions and a
-> 65-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
+> 66-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-06, and recounted on every test run since:
 > tests are lines matching `^\s*#\[test\]`, the attribute at the start of a
@@ -209,7 +209,7 @@ Built and verified natively on Windows (MSVC 14.44, Rust 1.97.1) and on Linux.
 - Rotating a real plasmid **preserves its `cdseguid`**, checked over 36
   rotations of 9 plasmids. The restriction-site set of a circular sequence is
   invariant under rotation, tested exhaustively over every rotation of several
-  sequences and all 50 enzymes — the property `docs/PLAN.md` calls "where origin
+  sequences and all 58 enzymes — the property `docs/PLAN.md` calls "where origin
   bugs live".
 - On the 4.64 Mb *E. coli* genome (a 17.7 MB `.dna`): **70 ms** to parse and
   report and **590 ms** for a 50-enzyme digest on Linux; **103 ms** and
@@ -277,11 +277,50 @@ Where `.dna` write support is imperfect it will say so, in the save dialog, per
 block. A writer that silently drops what it does not understand is the worst
 possible outcome and will never ship here.
 
+## Citing this
+
+[`CITATION.cff`](CITATION.cff) holds the metadata, and GitHub reads it for the
+"Cite this repository" button. Name the version you ran — `pl --version` prints
+it and the commit, and [`CHANGELOG.md`](CHANGELOG.md) says what was in each one.
+
+**There is no DOI.** One would come from archiving a release to Zenodo, which
+nobody has done, so a citation here resolves to a repository and a version
+number and not to an identifier. The `doi:` field is absent from `CITATION.cff`
+rather than empty, because an identifier that resolves to nothing is worse than
+none.
+
 ## Licence
 
-Apache-2.0 for code. The features database will be CC BY 4.0 and the benchmark
-CC0, both in separate repositories with separate licences. Restriction-enzyme
-data is REBASE, redistributed under its own terms with its own `NOTICE`.
+**MIT OR Apache-2.0 for code**, at your option — `LICENSE-MIT` and `LICENSE`,
+which is the Apache-2.0 text. Both are committed and both ship inside every
+archive. Until 2026-08-06 only the Apache half was in the repository while
+`Cargo.toml`, the release notes and `packages/circular-map/package.json` all
+offered the choice, which is not a choice.
+
+The features database is **CC BY 4.0** and is in this repository, in
+[`features/`](features), with its own [`features/NOTICE`](features/NOTICE) that
+must travel with any copy of it. The benchmark is **CC0** and is in this
+repository too, in [`bench/`](bench). Neither is in a separate repository. This
+paragraph said both would be, in the future tense, after both had already
+landed here.
+
+**No restriction-enzyme database is redistributed here.** What ships is 58
+enzymes in `crates/pl-enzymes` — 50 Type IIP and the 8 Type IIS ones Golden Gate
+needs — transcribed from published references. Their sites and cut geometry were
+cross-checked against Biopython's REBASE-derived tables, which is a check and not
+a source: a cut coordinate is a measurement, and Biopython's code carries a
+licence while the numbers do not. See [`PROVENANCE.md` §3](PROVENANCE.md) and the
+Data section of [`NOTICE`](NOTICE).
+
+REBASE itself is the database real work wants — 58 enzymes is a teaching set,
+and `pl methods digest` says so in the paragraph you would paste into a paper.
+It carries terms of its own, and **it has not been licensed and is not
+distributed here.** `NOTICE` records that it would arrive in a separate package
+under those terms; that package does not exist. This paragraph said the opposite
+until 2026-08-06 — that enzyme data "is REBASE, redistributed under its own
+terms with its own `NOTICE`" — which claimed a redistribution relationship with
+a database this project has never obtained, and pointed at a `NOTICE` that says
+the reverse.
 
 ## Trademarks
 

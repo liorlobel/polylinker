@@ -1018,7 +1018,7 @@ impl<'a> Annotator<'a> {
 ///    for a reverse ORF, and for a merged circular frame (`L % 3 != 0`) it is
 ///    not a frame index at all but the offset from the origin. Comparing the
 ///    two is a category error that would be right about a third of the time.
-///    `d % 3 == 0` asks the same question in one coordinate system and is
+///    `d.is_multiple_of(3)` asks the same question in one coordinate system and is
 ///    immune to all of it — which is also why the doubled text's six frames not
 ///    being the circle's six frames never has to be reasoned about.
 /// 2. **It never branches on `Orf::wrapped`.** It is not needed.
@@ -1135,7 +1135,7 @@ fn fused_orf(
         // to 3L bases — so the same physical base is visited up to three times
         // at different codon offsets, and `d0` alone cannot say which visit the
         // tag is on. Since `laps != 0` only when `3 ∤ L`, at most one k in any
-        // three consecutive values can satisfy `d % 3 == 0`, so this is not
+        // three consecutive values can satisfy `d.is_multiple_of(3)`, so this is not
         // ambiguous.
         //
         // NOT a small-circle guard, whatever the size of the molecule suggests.
@@ -1154,7 +1154,7 @@ fn fused_orf(
         // 3/64 per position does not happen in a plasmid.
         (0..=o.laps as usize).any(|k| {
             let d = d0 + k * len;
-            d % 3 == 0                                     // in frame with the ORF
+            d.is_multiple_of(3)                                     // in frame with the ORF
                 && d + 3 * tag_aa <= coding                // inside its coding part
                 && o.aa_len >= tag_aa + PARTNER_MIN // fused to something
         })
@@ -1625,7 +1625,7 @@ mod tests {
     /// weaker guarantee is enough wherever a fixture's tag sits in a frame
     /// whose *first* start is the fixture's own initiator: an extra start in
     /// another frame produces an ORF the predicate cannot use, because
-    /// containment demands `d % 3 == 0` in the ORF's own frame, and an extra
+    /// containment demands `d.is_multiple_of(3)` in the ORF's own frame, and an extra
     /// start further into the same frame is nested and suppressed by
     /// `Params::nested: false`. It is **not** enough for a fixture that needs
     /// "no ORF covers this at all"; those must use a peptide [`encode`] can
@@ -3525,7 +3525,7 @@ mod tests {
         // encoding of it exists. The weaker guarantee is enough here because
         // frame 0 of this fixture spells no methionine after the initiator, so
         // the ORF the predicate uses is the one the ATG below opens; a start in
-        // another frame yields an ORF the predicate cannot use (`d % 3 == 0` is
+        // another frame yields an ORF the predicate cannot use (`d.is_multiple_of(3)` is
         // asked in the ORF's own frame) and a later start in this frame is
         // nested and suppressed by `Params::nested: false`.
         let tail = encode_stopless(&format!("{HIS6_CONTEXT}{HIS6}"), code, &mut rng);

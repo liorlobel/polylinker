@@ -42,7 +42,9 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 LEGAL = REPO / "legal"
 
-UA = "polylinker-legal-archive/0.1 (https://github.com/polylinker/polylinker)"
+# See build.py: this URL is how a server operator identifies the fetcher, and
+# `polylinker/polylinker` is an organisation that does not exist.
+UA = "polylinker-legal-archive/0.1 (https://github.com/liorlobel/polylinker)"
 TODAY = time.strftime("%Y-%m-%d")
 
 # (filename, url, why this exact URL and not the human-facing one)

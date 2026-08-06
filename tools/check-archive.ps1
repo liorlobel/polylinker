@@ -17,7 +17,9 @@
         whatever happens to be on disk beside it
       * nothing is in the archive that the manifest does not list
       * the licence set: seven texts under licences/, plus NOTICE.txt,
-        LICENSE.txt and features/NOTICE.txt by name
+        LICENSE.txt, LICENSE-MIT.txt and features/NOTICE.txt by name -- both
+        halves of `MIT OR Apache-2.0`, not whichever one the packager reached
+        for first
       * entries are sorted and timestamps are pinned, so the bytes are a
         function of the contents
       * on a tar, that the three programs and the extension module carry mode
@@ -242,7 +244,11 @@ if (-not $rel.ContainsKey('SHA256SUMS.txt')) {
 
         # Licensing. These are an obligation, not a courtesy: the GUI embeds
         # nine font files and cannot be redistributed without their texts.
-        'LICENSE.txt', 'NOTICE.txt', 'TRADEMARKS.md', 'features/NOTICE.txt'
+        # LICENSE.txt is Apache-2.0 and LICENSE-MIT.txt is the other half of
+        # the `MIT OR Apache-2.0` the manifest offers. Both, because an archive
+        # carrying one of two alternatives is an archive that made the choice
+        # for the recipient.
+        'LICENSE.txt', 'LICENSE-MIT.txt', 'NOTICE.txt', 'TRADEMARKS.md', 'features/NOTICE.txt'
         'licences/Hack-MIT-and-BitstreamVera.txt', 'licences/IBMPlex-OFL.txt'
         'licences/Liberation-OFL.txt', 'licences/NotoEmoji-OFL.txt'
         'licences/Phosphor-MIT.txt', 'licences/Ubuntu-UFL.txt'
@@ -285,7 +291,7 @@ if (-not $rel.ContainsKey('SHA256SUMS.txt')) {
     # drift from it exactly as dist/ did, twice, in August 2026.
     $lic = @($listed | Where-Object { $_ -like 'licences/*' })
     if ($lic.Count -lt 7) { Bad "only $($lic.Count) font licence text(s) in the archive; NOTICE requires 7" }
-    foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'features/NOTICE.txt') {
+    foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'LICENSE-MIT.txt', 'features/NOTICE.txt') {
         if ($listed -notcontains $required) { Bad "$required is not in the archive; shipping without it is a licence violation" }
     }
 }

@@ -27,9 +27,35 @@ members = [
 [workspace.package]
 version = "0.1.3"
 edition = "2021"
-rust-version = "1.82"
+# Measured on 2026-08-06, having never been measured before. This said 1.82
+# from the day the workspace was created, and nothing had ever compiled the
+# tree with 1.82: every toolchain step in both workflows is
+# `dtolnay/rust-toolchain@stable`. It was not an idle number either --
+# `tools/readme/README-LINUX.txt` quotes it to the reader whose distribution is
+# too old for the Linux binaries and who is therefore being told to build from
+# source, which is the one reader for whom it decides anything.
+#
+# 1.82 does not reach a compiler at all: `indexmap 2.14.0` in `Cargo.lock` is
+# edition 2024, and cargo 1.82 stops at the manifest with "feature
+# `edition2024` is required". The floor is 1.92, bounded from both sides on
+# x86_64-pc-windows-msvc: `cargo +1.92 check --workspace --locked` is clean
+# under `-D warnings`, and 1.91.1 refuses before compiling anything -- "rustc
+# 1.91.1 is not supported by the following packages", naming the eight egui
+# 0.35 crates that `bins/pl-gui` pulls in.
+#
+# The `msrv` job in `.github/workflows/ci.yml` reads THIS line and installs
+# exactly what it says, so the number and the compiler cannot drift apart
+# again, and `tools/ci.ps1` holds the two files that quote it to a user to the
+# same value. Raising it is a decision about whose machine can still build
+# Polylinker, so it belongs in a commit that says so.
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/polylinker/polylinker"
+# liorlobel/polylinker, and the org half is the half that has been wrong before.
+# `polylinker/polylinker` is not a typo for anything -- that organisation does
+# not exist -- and the same wrong string in `pl-update`'s RELEASE_BASE_URL
+# shipped in 0.1.2 and made `pl update` fail with a 404 against a URL that read
+# perfectly. See CHANGELOG 0.1.3.
+repository = "https://github.com/liorlobel/polylinker"
 
 [workspace.dependencies]
 pl-core = { path = "crates/pl-core", version = "0.1.3" }

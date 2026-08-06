@@ -176,7 +176,7 @@ fn rescan_always_equals_rebuild_across_every_kind_of_mutation() {
                 let seq: String = (0..10)
                     .map(|_| bases[(rng(s) % 4) as usize] as char)
                     .collect();
-                write(r, "a.gb", &gb("a", &seq, rng(s) % 2 == 0));
+                write(r, "a.gb", &gb("a", &seq, rng(s).is_multiple_of(2)));
             }),
         ),
         (
