@@ -689,10 +689,19 @@ fn results(ui: &mut Ui, panel: &mut Panel, r: &Report, pal: &crate::theme::Palet
                             !already && stale.is_none(),
                             egui::Button::new("Add to document"),
                         );
+                        // `on_disabled_hover_text` in both refusing branches, and
+                        // that is not a style choice: the button is greyed out in
+                        // exactly those two, and egui 0.35's `on_hover_text` goes
+                        // through `Tooltip::for_enabled` (response.rs:707 ->
+                        // :646), which shows nothing on a disabled widget. Same
+                        // trap, same fix, as the Copy protein button in `main.rs`'s
+                        // `sequence_readout`. The stale sentence is also printed
+                        // above the list — see `body` — but "already added" has no
+                        // second channel, so it was reaching nobody at all.
                         if let Some(why) = stale {
-                            b.on_hover_text(why);
+                            b.on_disabled_hover_text(why);
                         } else if already {
-                            b.on_hover_text("already added");
+                            b.on_disabled_hover_text("already added");
                         } else if b.clicked() {
                             panel.add_request = Some(i);
                         }
@@ -1004,5 +1013,118 @@ mod tests {
         assert_eq!(stem_of("C:/lab/pUC19-myGene.gb"), "pUC19_myGene");
         assert_eq!(stem_of("plain"), "plain");
         assert_eq!(stem_of(".gb"), "primer");
+    }
+
+    /// The Add button, greyed out because the pair is already in the document,
+    /// still says so.
+    ///
+    /// PROVEN TO FAIL with `b.on_hover_text("already added")` put back — which is
+    /// how it shipped:
+    ///
+    /// ```text
+    /// ---- design::tests::a_pair_already_added_says_so_on_the_button_it_greys_out stdout ----
+    /// the Add button is greyed out on a pair that is already in the document and
+    /// the reason reached nobody
+    /// ```
+    ///
+    /// egui 0.35's `on_hover_text` goes through `Tooltip::for_enabled`
+    /// (response.rs:707 -> :646), which opens the popup only when
+    /// `response.enabled()`. Both refusals here run *because* the button is
+    /// disabled, so both sentences were unreachable.
+    ///
+    /// "already added" and not the stale sentence, because it is the one with no
+    /// second channel: `body` prints `stale_reason` above the list as a warn
+    /// label whatever the button does. This one is on the button or nowhere.
+    #[test]
+    fn a_pair_already_added_says_so_on_the_button_it_greys_out() {
+        let seq = template(9, 3_000);
+        let mut p = Panel::open(
+            "x".into(),
+            3_000,
+            false,
+            Selection {
+                anchor: 100,
+                head: 900,
+                through_origin: false,
+            },
+        )
+        .unwrap();
+        p.run(&seq);
+        let r = p.result.clone().unwrap().unwrap();
+        assert!(!r.pairs.is_empty(), "the premise: a pair to add");
+        assert!(
+            p.stale_reason().is_none(),
+            "the premise: the report is current, so the branch under test is the \
+             `already` one"
+        );
+        p.added = vec![0];
+        p.expanded = Some(0);
+
+        // Tooltips are hover-gated and this is not a test about egui's hover
+        // delay. `set_everything_is_visible` is egui's own switch for that
+        // ("useful for testing", memory/mod.rs:1128); it short-circuits
+        // `should_show_tooltip` and leaves the `response.enabled()` gate in
+        // `for_enabled` — the thing under test — exactly where it was.
+        // `every_greyed_out_button_beside_the_readout_can_say_why` in main.rs
+        // carries the control that proves that.
+        let ctx = crate::test_ctx();
+        ctx.memory_mut(|m| m.set_everything_is_visible(true));
+        let pal = crate::theme::Palette::of(false);
+
+        // A tooltip is an `Area`, and an Area is placed from what the previous
+        // pass measured, so one frame is not enough to see one.
+        let mut out = frame(&ctx, &mut p, &r, &pal);
+        for _ in 0..2 {
+            out = frame(&ctx, &mut p, &r, &pal);
+        }
+        let painted = painted(&out);
+        assert!(
+            painted.iter().any(|t| t == "Add to document"),
+            "the row under test was not drawn, so this test is measuring nothing"
+        );
+        assert!(
+            painted.iter().any(|t| t == "already added"),
+            "the Add button is greyed out on a pair that is already in the document and \
+             the reason reached nobody"
+        );
+    }
+
+    /// One pass of the report list, on its own.
+    ///
+    /// `results` rather than `show`: it is the function that holds the button,
+    /// and `show` would also open both enzyme combo boxes — every entry in
+    /// `pl_enzymes::ENZYMES`, twice — under `everything_is_visible`.
+    fn frame(
+        ctx: &egui::Context,
+        p: &mut Panel,
+        r: &Report,
+        pal: &crate::theme::Palette,
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| results(ui, p, r, pal));
+        })
+    }
+
+    /// Every string painted in a frame, with `Shape::Vec` expanded.
+    fn painted(out: &egui::FullOutput) -> Vec<String> {
+        fn walk(s: &egui::Shape, into: &mut Vec<String>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, into)),
+                egui::Shape::Text(t) => into.push(t.galley.text().to_string()),
+                _ => {}
+            }
+        }
+        let mut v = Vec::new();
+        for cs in &out.shapes {
+            walk(&cs.shape, &mut v);
+        }
+        v
     }
 }

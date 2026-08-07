@@ -10748,7 +10748,11 @@ impl App {
                                 egui::Button::new(RichText::new("Design primers…").size(11.0)),
                             );
                             if !has_sel {
-                                b.on_hover_text("Select the region to amplify first.");
+                                // `on_disabled_hover_text`, and the same for
+                                // every greyed-out hint in this row: the Copy
+                                // protein button below carries the whole reason
+                                // `on_hover_text` shows nothing here.
+                                b.on_disabled_hover_text("Select the region to amplify first.");
                             } else if b.clicked() {
                                 design = true;
                             }
@@ -10762,7 +10766,7 @@ impl App {
                                 egui::Button::new(RichText::new("New feature…").size(11.0)),
                             );
                             if !has_sel {
-                                a.on_hover_text("Select the bases first.");
+                                a.on_disabled_hover_text("Select the bases first.");
                             } else if a.clicked() {
                                 annotate = true;
                             }
@@ -10776,7 +10780,7 @@ impl App {
                                 egui::Button::new(RichText::new("Copy rev-comp").size(11.0)),
                             );
                             if !has_sel {
-                                rc.on_hover_text("Select the bases first.");
+                                rc.on_disabled_hover_text("Select the bases first.");
                             } else {
                                 if rc
                                     .on_hover_text(
@@ -10814,6 +10818,15 @@ impl App {
                                 // is greyed out, attached in a way that cannot
                                 // be seen while it is greyed out, is the one
                                 // case where the wrong call is invisible.
+                                //
+                                // AND IT HOLDS FOR ALL FOUR BUTTONS IN THIS ROW,
+                                // which is not how it shipped: the three above
+                                // were written with `on_hover_text` and every
+                                // "here is why this is grey" sentence on them
+                                // was unreachable.
+                                // `every_greyed_out_button_beside_the_readout_can_say_why`
+                                // asks the frame rather than the source, so the
+                                // next one written the wrong way goes red.
                                 cp.on_disabled_hover_text("Select the bases first.");
                             } else if cp
                                 .on_hover_text(
@@ -25521,6 +25534,158 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every button the readout row greys out can still say why.
+    ///
+    /// PROVEN TO FAIL by putting `on_hover_text` back on the three buttons this
+    /// commit changed — which is how they shipped. All three:
+    ///
+    /// ```text
+    /// ---- tests::every_greyed_out_button_beside_the_readout_can_say_why stdout ----
+    /// assertion `left == right` failed: Design primers is greyed out and not
+    ///   saying why
+    ///   left: 0
+    ///  right: 1
+    /// ```
+    ///
+    /// and the two that share a sentence, with Design primers put back so the
+    /// count is what fires — the half a `contains` would have missed:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: "Select the bases first." is painted 1
+    ///   time(s) with nothing selected, not 3 -- a greyed-out button is not
+    ///   saying why
+    ///   left: 1
+    ///  right: 3
+    /// ```
+    ///
+    /// egui 0.35's `Response::on_hover_text` (response.rs:707) delegates to
+    /// `on_hover_ui` (:645), which builds `Tooltip::for_enabled` — and that
+    /// opens the popup only when `response.enabled()`. So the sentence
+    /// explaining why a button is greyed out, attached with `on_hover_text` in
+    /// the branch that runs *because* it is greyed out, can never be read. It is
+    /// the one wrong call that leaves nothing behind: no warning, no wrong
+    /// answer on screen, just a hint nobody can reach.
+    ///
+    /// ASKED OF A PAINTED FRAME, not of the source. A grep for `on_hover_text`
+    /// inside an `if !has_sel` block is a spelling test — it would miss the next
+    /// disabled predicate that is not spelled `has_sel`, and go red on a
+    /// tooltip that is perfectly reachable. This drives the real
+    /// `sequence_readout` with nothing selected and asks which sentences reached
+    /// the screen.
+    #[test]
+    fn every_greyed_out_button_beside_the_readout_can_say_why() {
+        // Tooltips are hover-gated, and this is not a test about egui's hover
+        // delay. `set_everything_is_visible` is egui's own switch for that
+        // ("useful for testing", memory/mod.rs:1128) and it short-circuits
+        // `Tooltip::should_show_tooltip` — but NOT the `response.enabled()` gate
+        // in `Tooltip::for_enabled`, which is the whole thing under test. The
+        // control at the bottom is what proves that gate is still live here.
+        let ctx = test_ctx();
+        ctx.memory_mut(|m| m.set_everything_is_visible(true));
+        let mut app = seq_app();
+        // The premise: nothing selected, so all four buttons are grey and all
+        // four hints are in their disabled branch.
+        app.edit.sel = None;
+
+        let readout = |app: &mut App| -> Vec<String> {
+            let mut out = ctx.run_ui(window(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| app.sequence_readout(ui));
+            });
+            // A tooltip is an `Area`, and an Area is positioned from what the
+            // previous pass measured. Two more passes for the same reason the
+            // layout test above takes three.
+            for _ in 0..2 {
+                out = ctx.run_ui(window(), |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| app.sequence_readout(ui));
+                });
+            }
+            flat_shapes(&out.shapes)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let painted = readout(&mut app);
+        let times = |needle: &str| painted.iter().filter(|t| *t == needle).count();
+
+        // The premise, asserted rather than assumed: the four buttons are on
+        // screen. Without this the hint assertions could pass by the row not
+        // being drawn at all.
+        for label in [
+            "Design primers…",
+            "New feature…",
+            "Copy rev-comp",
+            "Copy protein",
+        ] {
+            assert_eq!(
+                times(label),
+                1,
+                "{label:?} is not on the readout row, so this test is measuring nothing"
+            );
+        }
+
+        // Design primers has its own sentence; the other three share one, so
+        // this is a COUNT and not a `contains`. Copy protein was already
+        // correct, and a `contains` would have gone green on its tooltip alone
+        // while the two beside it stayed unreachable.
+        assert_eq!(
+            times("Select the region to amplify first."),
+            1,
+            "Design primers is greyed out and not saying why"
+        );
+        assert_eq!(
+            times("Select the bases first."),
+            3,
+            "\"Select the bases first.\" is painted {} time(s) with nothing selected, not 3 \
+             -- a greyed-out button is not saying why",
+            times("Select the bases first.")
+        );
+
+        // THE CONTROL, in two halves, because either alone proves nothing.
+        //
+        // `everything_is_visible` shows popups that are OPEN; it does not open
+        // one that `for_enabled` refused. So the same sentence attached the
+        // wrong way to the same kind of widget is still not painted (that is the
+        // defect), and attached the right way it is (that is the proof this
+        // harness can see a tooltip at all, so the first half is about the
+        // channel and not about the test).
+        let ctx = test_ctx();
+        ctx.memory_mut(|m| m.set_everything_is_visible(true));
+        const WRONG: &str = "attached with on_hover_text";
+        const RIGHT: &str = "attached with on_disabled_hover_text";
+        let mut out = egui::FullOutput::default();
+        for _ in 0..3 {
+            out = ctx.run_ui(window(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.add_enabled(false, egui::Button::new("wrong"))
+                        .on_hover_text(WRONG);
+                    ui.add_enabled(false, egui::Button::new("right"))
+                        .on_disabled_hover_text(RIGHT);
+                });
+            });
+        }
+        let control: Vec<String> = flat_shapes(&out.shapes)
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            control.iter().any(|t| t == RIGHT),
+            "a disabled widget's `on_disabled_hover_text` did not reach the frame, so this \
+             test cannot see a tooltip and everything above it is worthless"
+        );
+        assert!(
+            !control.iter().any(|t| t == WRONG),
+            "egui 0.35 now shows `on_hover_text` on a DISABLED widget -- the trap this test \
+             and the four call sites above it exist for is gone, and all of it should be \
+             re-read before anything is deleted"
+        );
     }
 
     /// PROVEN TO FAIL against the MUTATION named in `annot.rs`: dropping
