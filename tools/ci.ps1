@@ -2089,12 +2089,76 @@ Step 'no private key material is anywhere in the tree' {
     # Splitting the delimiter means no file is exempt, including this one, while
     # the assembled pattern still matches a genuine key block anywhere.
     $b = '-----' + 'BEGIN '
+    $x = '-----' + 'END '
     $e = '-----'
+    # THE BODY IS WHAT IS MATCHED, NOT THE HEADER, and that is the difference
+    # between this step and a string search.
+    #
+    # Matching the BEGIN delimiter alone failed on .github/workflows/release.yml,
+    # which holds no key and never has: it assembles a PEM at signing time out of
+    # the POLYLINKER_RELEASE_KEY secret, so it *writes* the header
+    # (`echo '<BEGIN>'`, then `echo "$der_b64"`) and the bytes exist only inside a
+    # runner. A header is a label. The material is the base64 between the two
+    # delimiters, and this step is named for the material.
+    #
+    # So a match now needs BEGIN, then at least 40 characters of nothing but
+    # base64 and whitespace, then END. A real leaked key -- including the one in
+    # the near-miss above, an Ed25519 key written to a file as PEM -- is exactly
+    # that shape. release.yml is not: the characters immediately before its END
+    # delimiter are `echo '`, and a quote is not base64.
+    #
+    # `$armor` is why the run does not have to start at the delimiter: a PGP
+    # block carries `Version:` headers and a blank line before its body, and a
+    # pattern demanding base64 immediately would have quietly stopped matching
+    # the one key format that has them. It cannot span a `-`, so it can never
+    # reach past an END delimiter into the next block.
+    #
+    # WHAT THIS NO LONGER CATCHES, stated rather than left to be discovered: a
+    # key pasted as a run of shell `echo` lines, where quoting interrupts the
+    # body on every line. Nothing catches that without special-casing shell
+    # syntax, and the shapes that matter -- a .pem, a .key, an id_ed25519, a
+    # secret pasted into a config or a test fixture -- are all whole blocks.
+    $armor = '[^-]{0,200}'
+    $body = '[\sA-Za-z0-9+/=]{40,}'
     $markers = @(
-        @{ Pattern = $b + '[A-Z ]*PRIVATE KEY' + $e;    What = 'a PEM private key block' }
-        @{ Pattern = $b + 'OPENSSH PRIVATE KEY' + $e;   What = 'an OpenSSH private key' }
-        @{ Pattern = $b + 'PGP PRIVATE KEY BLOCK' + $e; What = 'a PGP private key' }
+        @{ Pattern = $b + '[A-Z ]*PRIVATE KEY' + $e + $armor + $body + $x + '[A-Z ]*PRIVATE KEY' + $e
+           What = 'a PEM private key block' }
+        @{ Pattern = $b + 'OPENSSH PRIVATE KEY' + $e + $armor + $body + $x + 'OPENSSH PRIVATE KEY' + $e
+           What = 'an OpenSSH private key' }
+        @{ Pattern = $b + 'PGP PRIVATE KEY BLOCK' + $e + $armor + $body + $x + 'PGP PRIVATE KEY BLOCK' + $e
+           What = 'a PGP private key' }
     )
+    # THE CONTROL, and it is not optional now that the pattern is a shape rather
+    # than a string. A scanner that has stopped matching anything reports exactly
+    # the same green as a clean tree, and the 2026-08-05 near-miss is the reason
+    # that is not an acceptable way to fail. One synthetic block of each kind,
+    # which must match; and release.yml's shape -- a delimiter a script writes,
+    # with a shell variable where the body would be -- which must not.
+    #
+    # Assembled from the same split delimiters as the patterns, so this file
+    # still contains no whole delimiter and is still scanned like any other.
+    $fake = 'AAAA' * 16
+    $controls = @(
+        @{ Name = 'a PEM block'
+           Text = $b + 'PRIVATE KEY' + $e + "`n" + $fake + "`n" + $x + 'PRIVATE KEY' + $e }
+        @{ Name = 'an OpenSSH block'
+           Text = $b + 'OPENSSH PRIVATE KEY' + $e + "`n" + $fake + "`n" + $x + 'OPENSSH PRIVATE KEY' + $e }
+        # With the armor headers, which is the case `$armor` exists for.
+        @{ Name = 'a PGP block'
+           Text = $b + 'PGP PRIVATE KEY BLOCK' + $e + "`nVersion: GnuPG v1`n`n" + $fake + "`n" + $x + 'PGP PRIVATE KEY BLOCK' + $e }
+    )
+    foreach ($c in $controls) {
+        if (-not @($markers | Where-Object { $c.Text -match $_.Pattern }).Count) {
+            throw "$($c.Name) matched no marker, so this step is scanning for nothing"
+        }
+    }
+    $benign = $b + 'PRIVATE KEY' + $e + "'`n" + '            echo "$der_b64"' + "`n            echo '" + $x + 'PRIVATE KEY' + $e
+    foreach ($m in $markers) {
+        if ($benign -match $m.Pattern) {
+            throw "a delimiter with no body matched $($m.What); .github/workflows/release.yml would fail again"
+        }
+    }
+
     # Tracked files only: an untracked scratch file is the author's business,
     # and ignoring it is what .gitignore is for.
     $tracked = & git -C $repo ls-files
