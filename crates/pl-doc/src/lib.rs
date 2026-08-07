@@ -89,6 +89,10 @@ pub const TOPICS: &[Topic] = &[
         name: "design",
         title: "Primer design",
     },
+    Topic {
+        name: "map",
+        title: "Plasmid and construct maps",
+    },
 ];
 
 pub fn topic(name: &str) -> Option<Topic> {
@@ -439,6 +443,61 @@ pub fn methods(t: Topic) -> String {
                 c.tm_method.na_molar * 1e3,
             )
         }
+        // The figure, and the two things about it a reader of a paper needs
+        // told: which shape a molecule was drawn in, and that a map may name
+        // fewer things than the molecule has.
+        //
+        // Added when `pl-draw` grew its second figure. Until then the only
+        // honest version of this paragraph would have been "linear molecules
+        // were drawn as rings with a notch", which nobody would have pasted
+        // into a methods section — and its absence is exactly why the defect
+        // survived: there was no page for it to be wrong on.
+        "map" => {
+            let o = pl_draw::Options::default();
+            format!(
+                "Maps were drawn with Polylinker {v}. A CIRCULAR molecule is drawn as a \
+                 ring and a LINEAR one as a horizontal track; the shape follows the \
+                 molecule's own topology unless it was overridden. A circular molecule \
+                 drawn on a track has been cut open between its last base and its first, \
+                 and the figure says so in its caption. Features are drawn as boxes on a \
+                 band the backbone runs through, with an arrowhead at the end the \
+                 feature reads towards and no arrowhead at all where the file did not \
+                 say which strand it is on; a feature spanning the origin of a circular \
+                 molecule is drawn as the two spans it occupies. Restriction sites are \
+                 marked with a tick and labelled with the enzyme and its coordinate. \
+                 Defaults, unless overridden: a {w:.0} x {h:.0} unit canvas with \
+                 {fs:.0} unit type and an {rw:.0} unit feature band, a ruler, and \
+                 features covering less than {deg:.2}% of the molecule drawn as marks \
+                 across the band rather than as boxes. A unit is a point where the \
+                 figure is written at its own size; asking for a physical width scales \
+                 the whole drawing, type included. The same geometry is written to SVG, \
+                 PDF, EPS and PNG, and the output is byte-identical for identical input \
+                 on every platform.\
+                 \n\n\
+                 Limits: a map is a drawing of a file and establishes nothing about a \
+                 molecule in a tube. Where a canvas cannot hold every label, labels are \
+                 dropped rather than overprinted, and WHICH ones were dropped is \
+                 reported by the exporter rather than shown on the figure -- a map \
+                 missing three names looks exactly like a molecule with three fewer \
+                 features, so the count beside the export is part of the figure and not \
+                 decoration. A name too long for the space is shortened with an \
+                 ellipsis; the whole name survives in the SVG's title element and as a \
+                 comment in the EPS, but a PDF and a PNG carry no copy of it at all, \
+                 so there it survives only in what the exporter reports. Overlapping \
+                 features overprint in one band and \
+                 are not separated into lanes, so a dense region shows fewer distinct \
+                 boxes than it has features. On a linear figure the canvas height is a \
+                 budget for the label rows rather than the size of the drawing, and a \
+                 figure needing more rows than the budget allows will drop labels; the \
+                 caption, the feature band and the ruler are always drawn, so a figure \
+                 may come back taller than the height it was given.",
+                w = o.width,
+                h = o.height,
+                fs = o.font_size,
+                rw = o.ring_width,
+                deg = o.min_feature_degrees / 360.0 * 100.0,
+            )
+        }
         _ => String::new(),
     }
 }
@@ -506,6 +565,15 @@ pub fn help(t: Topic) -> &'static str {
             "Pick a PCR primer pair for a region, checked for a second binding \
                      site on the molecule you have open. A restriction site goes on \
                      as a 5' tail and stays out of the Tm."
+        }
+        "map" => {
+            // Both shapes named, and the cut said out loud. A track and a track
+            // are the same picture, so "linear" alone would leave a reader with
+            // no way to tell a linearised plasmid from a molecule that is a
+            // line -- which is the most consequential thing a map can get wrong.
+            "A ring for a circular molecule, a horizontal track for a linear \
+                  one, as SVG, PDF, EPS or PNG. A plasmid drawn as a track has \
+                  been cut open, and the figure says where."
         }
         _ => "",
     }

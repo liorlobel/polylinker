@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 pl-core.workspace = true
 pl-design.workspace = true
+pl-draw.workspace = true
 pl-enzymes.workspace = true
 pl-features.workspace = true
 pl-gel.workspace = true

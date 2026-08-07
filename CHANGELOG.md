@@ -27,6 +27,62 @@ which.
 
 ### Added
 
+- **Linear molecules get a linear figure.** Exporting a PCR product, a
+  linearised vector, a gene fragment or a gBlock produced a C-shaped ring with a
+  gap in it. The gap was correct about topology and was still the wrong picture:
+  every FASTA and every assembly opens linear, so this was not an edge case. A
+  linear molecule now exports as a horizontal track — features as boxes and
+  arrowheads on a band the backbone runs through, cut sites as ticks with their
+  coordinates above, a ruler beneath — in SVG, PDF, EPS and PNG, from `pl
+  export` and from the app's Map items alike. **Circular molecules are
+  untouched, byte for byte.**
+
+  It is one geometry, not a second renderer. The figure is built as the same
+  `Scene` the ring is, out of the same three primitives, so no writer changed and
+  the app's on-screen `Scene` painter can consume it; labels are packed by the
+  same isotonic regression, features resolved by the same `ranges`/`mid_base`
+  pass, and a base's position along the molecule now comes from one function that
+  the ring multiplies by a turn and the track by its width. What is new is a band
+  of label rows above the track, filled nearest-first, where a row that cannot
+  hold a label hands it to the next row out — so a polylinker's twelve cutters
+  cost nothing rather than eleven names.
+
+  The shape is `Options::shape`, which defaults to asking the molecule. Both
+  overrides have a user and neither was reachable before: `Shape::Linear` on a
+  plasmid is the cut map, and says so in the figure and in `Report::cut_open`,
+  because nothing in the geometry of a track distinguishes a linearised plasmid
+  from a molecule that really is a line. `Shape::Circular` on a linear molecule
+  is the gapped ring, unchanged.
+
+  `Options::height` is a budget on a linear figure rather than a canvas: the
+  scene comes back as tall as it needed. At the 720 × 720 default a PCR product
+  is a 138 pt drawing, not a 138 pt drawing centred in 720 pt of white that
+  `page::Fit` would print as an 89 × 89 mm block and a raster export would pay
+  for in pixels. A budget too small for the caption, the band and the ruler
+  yields a figure taller than it rather than a figure with its scale cropped
+  off.
+
+  A feature spanning the origin of a plasmid drawn cut open is **split**, one box
+  per span, at the two ends of the track — those are the bases a reader would
+  find there — and the caption saying the circle was cut at base 1 is what makes
+  two boxes under one name read as a wrap rather than as two copies.
+
+  `pl methods map` is a new methods paragraph for the figure, with the defaults
+  interpolated from `pl_draw::Options` and its limits stated: overlapping
+  features overprint in one band rather than being separated into lanes, and a
+  map missing three names looks exactly like a molecule with three fewer
+  features, so the count printed beside the export is part of the figure.
+
+- **The gate renders the same molecule from two processes and compares bytes.**
+  "Byte-identical on every platform" is on the front of this project and nothing
+  in the gate had ever compared two separate *runs* — the renderer's own
+  determinism tests loop inside one process, which holds constant every single
+  thing that varies between them: the allocator, `RandomState`'s per-process
+  seed, the environment, the locale. Demonstrated rather than assumed: a
+  `std::process::id()` term added to the linear figure's height leaves the
+  in-process test green and turns the new step red. Both shapes, all four
+  formats, no Python and no corpus, so it runs everywhere the gate runs.
+
 - **File ▸ New (Ctrl+N): a molecule that never came from a file.** Every door
   into the app was a file, so bases that arrive as bases — a gBlock in an email,
   a synthesis vendor's plain sequence, 300 bp pasted into a message — had to be
@@ -158,6 +214,35 @@ which.
   §24 questions did not stop being owed.
 
 ### Fixed
+
+- **The disclosure line on a linear figure counted a different figure from the
+  one it was printed on.** `pl export` and the app both build the "*N of M
+  cutters labelled*" line in two passes — render once to learn how many labels
+  fit, render again with a line saying so — and both carried a comment claiming
+  this cannot change what it counts. On the ring it cannot: the note reaches
+  `centre_room` → `keep_clear` → the ruler's radius and stops. On the track it
+  reached the caption, which is one of the four terms fixing how many rows of
+  labels there is room for, so drawing the note stole a row. Measured on a 6 kb
+  track with 40 cut sites at 720 × 180: the line said 33 enzymes named and 7
+  hidden, and the figure it was printed on named 24 and hid 16.
+  `debug_assert!(Disclosure::closes)` passed on both, because 24 + 16 and 33 + 7
+  both reach 40 — the arithmetic closed over numbers taken from the wrong
+  picture. The linear figure now reserves the note's line in that arithmetic
+  whether or not there is a note, which costs at most one row on a figure whose
+  height is already binding and names every label it costs.
+
+- **"in the PDF annotation" was never true.** Two comments justified shortening a
+  feature name rather than a cut coordinate by saying the whole name survives
+  "in the SVG `<title>`, in the PDF annotation and in the app's Features tab".
+  There is no PDF annotation: `pdf.rs`'s own module doc has always said an
+  annotation "would be furniture in a figure", and the writer emits no `/Annots`
+  array at all. Traced one writer at a time and written down as measured — the
+  SVG carries a real `<title>`, the EPS carries the text as a comment nothing
+  renders, and a PDF and a PNG carry no copy whatsoever, so on those two the
+  only surviving record is `Report::labels_truncated`. The conclusion the
+  comments were reaching for holds on the true premise, because a reported loss
+  is still a different thing from a silent one; a test now pins where the name
+  does and does not appear, in all four formats.
 
 - **A melting temperature in a methods paragraph now always carries the
   conditions it was computed under.** `pl methods primers` (and the same page in

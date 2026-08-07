@@ -512,15 +512,27 @@ Step 'glyph outlines vs fontTools' {
 # glyph placement, the baseline constant, anchors and colour at once.
 #
 # THE DISCRIMINATOR IS *WHERE* THE PIXELS DIFFER, not how many. Two correct
-# antialiasing implementations disagree slightly along edges and nowhere else,
-# so every grossly differing pixel must sit on a gradient; a wrong arc, a wrong
-# winding, a misplaced glyph or a hole in a stroke all put differing pixels in
-# FLAT regions, where two correct renderers must agree exactly. A count-based
-# trend was tried first and discarded: at 1x the figure has ONE grossly
-# differing pixel, so any ratio against it is noise.
+# antialiasing implementations disagree slightly along edges and nowhere else.
+# Away from every edge -- no edge in the eight neighbours -- they must agree
+# EXACTLY, so the bar there is zero differing pixels rather than a percentage,
+# and a wrong winding, a misplaced glyph or a hole in a stroke lands squarely on
+# it. Currently 0 of 71,009 to 8,151,997 flat pixels differ on each figure at
+# each scale, with 100% of the residue on an edge.
 #
-# Currently 98.3% of pixels identical at 1x and 99.5% at 4x, with 100% of the
-# residue on an edge at both.
+# A GLOBAL "95% OF ALL PIXELS IDENTICAL" WAS THE FIRST BAR AND MEASURED THE
+# WRONG THING -- how much of the canvas is blank. The ring is 720x720, mostly
+# white, and passed at 98.3%; the linear figure is 720x123 and almost entirely
+# ink, and failed at 92.2% with ZERO gross differences and 100% of its residue
+# on an edge. A threshold a correct renderer fails for being densely drawn is a
+# threshold that gets widened until it means nothing.
+#
+# BOTH FIGURES, named by `FIGURES` in the test's output directory. The ring and
+# the track are different rasterizer workloads -- arcs, thick strokes and sparse
+# text against long thin boxes, concave pentagons, hairlines and dense small
+# text -- and the ring exercises almost none of the second set. It is an oracle
+# for the RASTERIZER and not for the geometry: both images come from the same
+# SVG, so a scene that is wrong is wrong in both. Moving an arrowhead's tip by
+# 2 units leaves it clean; half a unit on the baseline constant fails 8 checks.
 Step 'the raster vs resvg' {
     # THE EXIT CODE, not just the artifacts. `Step` judges on $LASTEXITCODE
     # after the whole body, which would be Python's -- and the checkers only
@@ -536,6 +548,27 @@ Step 'the raster vs resvg' {
     }
     python reference/python/tests/xcheck_render.py .
 } { (HavePy 'resvg_py') -and (HavePy 'PIL') -and (HavePy 'numpy') }
+# Both figures, both shapes, rendered by TWO PROCESSES, byte for byte.
+#
+# "Byte-identical on every platform" is the sentence on the front of this
+# project, and until this step nothing in the gate compared two separate runs of
+# the renderer. `pl-draw`'s own determinism tests render eight times inside ONE
+# process, which holds constant every single thing that varies between
+# processes: the allocator's state, `RandomState`'s per-process seed, the
+# environment, the locale. A `HashSet` in the label path -- the exact container
+# whose iteration order this crate has had to keep out of `labels_hidden` and
+# `sites_hidden` -- is invisible to a loop and shows up here immediately.
+#
+# DEMONSTRATED, not assumed. Adding `(std::process::id() % 3) as f64` to the
+# linear figure's height leaves `the_linear_figure_is_byte_identical_for_identical_input`
+# GREEN -- the perturbation is constant inside a run -- and turns this red on
+# the first comparison. That is the whole argument for the step existing.
+#
+# NO PYTHON, no resvg, no corpus. It runs everywhere the gate runs, which for a
+# claim printed in the README is the right bar.
+Step 'the same molecule twice, from two processes' {
+    cargo test -q -p pl --test cli two_processes_render_the_same_molecule_to_the_same_bytes
+}
 # The window icon is the .ico's own 64 px frame, and both are polylinker.svg.
 #
 # THE TASKBAR BUTTON OF A RUNNING WINDOW DOES NOT COME FROM THE .EXE'S ICON.

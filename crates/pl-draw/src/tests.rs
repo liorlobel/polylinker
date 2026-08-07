@@ -1299,10 +1299,15 @@ fn an_enzyme_whose_label_was_cut_to_an_ellipsis_is_not_a_labelled_cutter() {
 ///
 /// `bins/pl` and `bins/pl-gui` both build the disclosure line by rendering once
 /// to get the counts and again to draw them. That is only honest if adding the
-/// line cannot change what it is counting, and it cannot: `note` reaches
-/// `centre_room` -> `keep_clear` -> the ruler's radius and nothing there feeds
-/// back into the reserve, the geometry or the packing. Asserted rather than left
-/// as a claim in a comment, because a comment is where that claim was.
+/// line cannot change what it is counting, and on the ring it cannot: `note`
+/// reaches `centre_room` -> `keep_clear` -> the ruler's radius and nothing there
+/// feeds back into the reserve, the geometry or the packing. Asserted rather
+/// than left as a claim in a comment, because a comment is where that claim was.
+///
+/// **The track is the reason there is a second test below this one.** This one
+/// covers the ring only, and its wording — "`note` reaches `centre_room`" — is
+/// about the ring's plumbing, so it kept passing while the same claim in the
+/// same words was false on the new figure.
 #[test]
 fn the_note_does_not_change_what_it_counts() {
     let sites: Vec<(String, u64)> = pkov_sites();
@@ -1725,4 +1730,1254 @@ fn the_pixel_budget_refuses_a_canvas_no_flag_band_bounds() {
     let e = png_budget(&sc, None, 2400.0).expect_err("720 pt at 2400 dpi was not refused");
     assert_eq!((e.w, e.h), (24000, 24000), "{e}");
     png_budget(&sc, None, 300.0).expect("the same figure at 300 dpi is 3000 px");
+}
+
+// ---------------------------------------------------------------------------
+// the linear figure
+// ---------------------------------------------------------------------------
+
+/// A strand-bearing feature, since `feat` leaves the strand at its default.
+fn feat_on(name: &str, kind: &str, start: u64, end: u64, strand: Strand) -> Feature {
+    let mut f = feat(name, kind, start, end);
+    f.strand = strand;
+    f
+}
+
+/// Every `x` a scene item touches, and every `y`.
+fn extents(sc: &Scene) -> (f64, f64, f64, f64) {
+    let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) = (
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    );
+    let mut mark = |x: f64, y: f64| {
+        lo_x = lo_x.min(x);
+        hi_x = hi_x.max(x);
+        lo_y = lo_y.min(y);
+        hi_y = hi_y.max(y);
+    };
+    for item in &sc.items {
+        match item {
+            Item::Path { segs, .. } => {
+                for s in segs {
+                    match *s {
+                        Seg::Move(x, y) | Seg::Line(x, y) => mark(x, y),
+                        Seg::Arc { cx, cy, r, .. } => {
+                            mark(cx - r, cy - r);
+                            mark(cx + r, cy + r);
+                        }
+                        Seg::Close => {}
+                    }
+                }
+            }
+            Item::Circle { cx, cy, r, .. } => {
+                mark(cx - r, cy - r);
+                mark(cx + r, cy + r);
+            }
+            // The drawn box, not the anchor: an `Anchor::Middle` label reaches
+            // half its width either side, and half its size above and below the
+            // baseline, which is the middle of the glyphs.
+            Item::Text {
+                x,
+                y,
+                size,
+                anchor,
+                text,
+                bold,
+                ..
+            } => {
+                let w = crate::pdf::text_width_in(text, *size, *bold);
+                let (a, b) = match anchor {
+                    Anchor::Start => (*x, *x + w),
+                    Anchor::Middle => (*x - w * 0.5, *x + w * 0.5),
+                    Anchor::End => (*x - w, *x),
+                };
+                mark(a, *y - size * 0.5);
+                mark(b, *y + size * 0.5);
+            }
+        }
+    }
+    (lo_x, hi_x, lo_y, hi_y)
+}
+
+/// The `Path` items carrying this `<title>`, which is how a feature is named in
+/// the scene.
+fn titled<'a>(sc: &'a Scene, name: &str) -> Vec<&'a Vec<Seg>> {
+    sc.items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Path { segs, title, .. } if title.as_deref() == Some(name) => Some(segs),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The horizontal extent of a set of segments.
+fn span_x(segs: &[Seg]) -> (f64, f64) {
+    let xs: Vec<f64> = segs
+        .iter()
+        .filter_map(|s| match *s {
+            Seg::Move(x, _) | Seg::Line(x, _) => Some(x),
+            _ => None,
+        })
+        .collect();
+    (
+        xs.iter().copied().fold(f64::INFINITY, f64::min),
+        xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    )
+}
+
+#[test]
+fn a_linear_molecule_now_gets_a_linear_figure() {
+    // The whole complaint, as an assertion. Every FASTA, every assembly, every
+    // PCR product and every gBlock opened linear and exported as a C-shaped ring
+    // with a notch in it, because `scene` read the topology only to decide
+    // whether to close the backbone.
+    let mut m = plasmid(1000, false);
+    m.features.push(feat("insert", "CDS", 100, 600));
+    let (sc, _) = scene(&m, Options::default());
+
+    assert!(
+        !sc.items.iter().any(|i| matches!(i, Item::Circle { .. })),
+        "a line drawn as a circle"
+    );
+    assert!(
+        !sc.items.iter().any(|i| match i {
+            Item::Path { segs, .. } => segs.iter().any(|s| matches!(s, Seg::Arc { .. })),
+            _ => false,
+        }),
+        "a line drawn with arcs -- the ring's geometry is still in this figure"
+    );
+    // And the backbone is one horizontal line the width of the drawing.
+    let backbone = sc
+        .items
+        .iter()
+        .find_map(|i| match i {
+            Item::Path {
+                segs, fill: None, ..
+            } if segs.len() == 2 => match (segs[0], segs[1]) {
+                (Seg::Move(x0, y0), Seg::Line(x1, y1)) if y0 == y1 && x1 - x0 > sc.width * 0.5 => {
+                    Some((x0, x1, y0))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("no horizontal backbone in a linear figure");
+    assert!(backbone.2 > 0.0 && backbone.2 < sc.height);
+
+    // The circular molecule is untouched: still a ring, still a `<circle>`.
+    let (round, _) = scene(&plasmid(1000, true), Options::default());
+    assert!(round.items.iter().any(|i| matches!(i, Item::Circle { .. })));
+
+    let (svg, _) = map_svg(&m, Options::default());
+    well_formed(&svg).expect("malformed svg");
+    assert!(svg.contains("insert"));
+    assert!(!svg.contains("<circle"), "{svg}");
+}
+
+#[test]
+fn a_circular_molecule_still_exports_exactly_the_ring_it_always_did() {
+    // The other half of the mode's contract: adding a knob must not move a
+    // single byte of any figure that already existed. `Shape::Auto` on a
+    // circular molecule and `Shape::Circular` are the same picture, and so is
+    // `Shape::Circular` on a linear one -- the gapped ring this crate has drawn
+    // for a line since the beginning.
+    for circular in [true, false] {
+        let mut m = plasmid(4000, circular);
+        for i in 0..6u64 {
+            m.features
+                .push(feat(&format!("f{i}"), "CDS", i * 500 + 1, i * 500 + 300));
+        }
+        let opts = Options {
+            sites: vec![("EcoRI".into(), 402), ("BamHI".into(), 2_205)],
+            ..Default::default()
+        };
+        let (pinned, pr) = circular_svg(&m, opts.clone());
+        if circular {
+            let (auto, ar) = map_svg(&m, opts.clone());
+            assert_eq!(auto, pinned, "Auto moved a circular figure");
+            assert_eq!(ar, pr);
+        }
+        // Pinning a ring on a line keeps the gap, and keeps it a ring.
+        let (forced, _) = linear_svg(&m, opts);
+        assert_ne!(forced, pinned);
+        assert_eq!(pinned.contains("<circle"), circular);
+    }
+}
+
+#[test]
+fn a_feature_at_the_start_at_the_end_and_across_the_whole_molecule_is_drawn_where_it_is() {
+    // The three cases a track gets wrong when the coordinate map is off by one
+    // wrap: the first base, the last base, and everything.
+    //
+    // `head` must start at the very left of the axis, `tail` must finish at the
+    // very right, and `most`, which covers 99.8% of the molecule, must reach
+    // within a base of both ends -- rather than, as the ring's `angle_past`
+    // would have it, wrapping to zero width at the origin.
+    let len = 10_000u64;
+    let mut m = plasmid(len as usize, false);
+    m.features
+        .push(feat_on("head", "CDS", 1, 400, Strand::Forward));
+    m.features
+        .push(feat_on("tail", "CDS", len - 399, len, Strand::Reverse));
+    m.features
+        .push(feat_on("most", "gene", 10, len - 10, Strand::Forward));
+    let (sc, report) = scene(&m, Options::default());
+    assert!(report.malformed.is_empty() && report.partly_drawn.is_empty());
+
+    let one_base = sc.width / len as f64;
+    let (head_lo, head_hi) = span_x(titled(&sc, "head")[0]);
+    let (tail_lo, tail_hi) = span_x(titled(&sc, "tail")[0]);
+    let (most_lo, most_hi) = span_x(titled(&sc, "most")[0]);
+
+    // The axis's own ends, taken off the widest thing on it.
+    let (x0, x1) = (head_lo, tail_hi);
+    assert!(x0 > 0.0 && x1 < sc.width, "the track is off the canvas");
+
+    assert!(
+        (head_hi - x0 - 400.0 / len as f64 * (x1 - x0)).abs() < 1.0,
+        "a 400 bp feature at base 1 is {} wide on a {} pt axis",
+        head_hi - head_lo,
+        x1 - x0
+    );
+    assert!(
+        (tail_lo - (x1 - 400.0 / len as f64 * (x1 - x0))).abs() < 1.0,
+        "the last 400 bases do not finish at the end of the track"
+    );
+    assert!(
+        most_lo - x0 < 12.0 * one_base && x1 - most_hi < 12.0 * one_base,
+        "a feature over 99.8% of the molecule spans {}..{} of {x0}..{x1}",
+        most_lo,
+        most_hi
+    );
+    assert!(
+        most_hi - most_lo > (x1 - x0) * 0.99,
+        "a near-whole-molecule feature collapsed"
+    );
+    // Strand is in the shape: forward points right, reverse points left. A
+    // pentagon has five distinct x, a rectangle four, and the arrowhead's tip is
+    // the extreme one on the side it points at.
+    let axis_y = |segs: &[Seg]| {
+        segs.iter()
+            .filter_map(|s| match *s {
+                Seg::Line(x, y) if x == head_hi || x == tail_lo => Some(y),
+                _ => None,
+            })
+            .next()
+    };
+    assert!(axis_y(titled(&sc, "head")[0]).is_some(), "no forward tip");
+    assert!(axis_y(titled(&sc, "tail")[0]).is_some(), "no reverse tip");
+}
+
+#[test]
+fn nothing_a_linear_figure_draws_leaves_its_own_canvas() {
+    // The failure this crate spends its comments on: a name that was measured to
+    // fit and then cropped by the viewBox, the /MediaBox, the %%BoundingBox and
+    // the raster canvas alike, in silence. Swept over widths, because the label
+    // band's capacity, the ruler's inset and the caption's room all change with
+    // it and only some of them bind at once.
+    let sites: Vec<(String, u64)> = [
+        ("EcoRI", 402u64),
+        ("BamHI", 1_205),
+        ("HindIII", 2_530),
+        ("NotI", 3_100),
+        ("KpnI", 3_260),
+        ("SpeI", 3_300),
+        ("NcoI", 3_340),
+    ]
+    .iter()
+    .map(|(n, p)| ((*n).to_string(), *p))
+    .collect();
+    let mut m = plasmid(4000, false);
+    m.name = "pLONGISH-NAME-FOR-A-CONSTRUCT".into();
+    for (i, n) in ["bla", "ori", "lacZ-alpha", "T7 promoter", "AmpR-promoter"]
+        .iter()
+        .enumerate()
+    {
+        m.features
+            .push(feat(n, "CDS", i as u64 * 700 + 1, i as u64 * 700 + 500));
+    }
+    for w in [200.0, 260.0, 300.0, 420.0, 720.0, 1000.0, 1600.0] {
+        for h in [180.0, 300.0, 720.0] {
+            let opts = Options {
+                width: w,
+                height: h,
+                sites: sites.clone(),
+                note: Some(ring::Disclosure {
+                    cutters: 9,
+                    labelled: 7,
+                    dual: 2,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let (sc, _) = scene(&m, opts);
+            let (lo_x, hi_x, lo_y, hi_y) = extents(&sc);
+            assert!(lo_x >= -0.01, "{w}x{h}: reaches x={lo_x}");
+            assert!(
+                hi_x <= sc.width + 0.01,
+                "{w}x{h}: reaches x={hi_x} of {}",
+                sc.width
+            );
+            assert!(lo_y >= -0.01, "{w}x{h}: reaches y={lo_y}");
+            assert!(
+                hi_y <= sc.height + 0.01,
+                "{w}x{h}: reaches y={hi_y} of {}",
+                sc.height
+            );
+        }
+    }
+}
+
+#[test]
+fn the_linear_figure_is_byte_identical_for_identical_input() {
+    // The promise the whole crate is built on, on the new path: no HashMap
+    // order, no float formatting that varies, no clock. Asserted through all
+    // four writers, because the scene being stable is necessary and each writer
+    // has its own float formatting.
+    let mut m = plasmid(6000, false);
+    m.name = "pDETERMINISM".into();
+    for i in 0..30u64 {
+        m.features
+            .push(feat(&format!("f{i}"), "CDS", i * 190 + 1, i * 190 + 150));
+    }
+    let opts = Options {
+        sites: (0..14u64)
+            .map(|i| (format!("Enz{i}"), i * 401 + 7))
+            .collect(),
+        ..Default::default()
+    };
+    let (first_svg, r1) = map_svg_at(&m, opts.clone(), Some(89.0));
+    let (first_pdf, _, _) = map_pdf_at(&m, opts.clone(), Some(89.0));
+    let (sc, _) = scene(&m, opts.clone());
+    let (first_eps, _) = eps::to_eps(&sc, page::Fit::to_width_mm(&sc, 89.0).scale);
+    let (first_png, _, _) =
+        map_png_at(&m, opts.clone(), Some(89.0), 300.0, [255, 255, 255]).expect("within budget");
+    for _ in 0..8 {
+        let (again, r2) = map_svg_at(&m, opts.clone(), Some(89.0));
+        assert_eq!(again, first_svg);
+        assert_eq!(r1, r2);
+        let (pdf, _, _) = map_pdf_at(&m, opts.clone(), Some(89.0));
+        assert_eq!(pdf, first_pdf, "the pdf moved");
+        let (sc, _) = scene(&m, opts.clone());
+        let (e, _) = eps::to_eps(&sc, page::Fit::to_width_mm(&sc, 89.0).scale);
+        assert_eq!(e, first_eps, "the eps moved");
+        let (png, _, _) =
+            map_png_at(&m, opts.clone(), Some(89.0), 300.0, [255, 255, 255]).expect("budget");
+        assert_eq!(png, first_png, "the png moved");
+    }
+    assert!(r1.labels_placed > 0);
+
+    // And again on a canvas too small to hold it, because the drop path is
+    // where an unordered container shows: `labels_hidden`, `sites_hidden` and
+    // the `dropped` list `place_rows` returns are all sequences a reader sees,
+    // and a set iterated in hash order would put them in a different order on
+    // every run without changing a single coordinate.
+    let cramped = Options {
+        width: 260.0,
+        height: 150.0,
+        ..opts.clone()
+    };
+    let (small, sr1) = map_svg(&m, cramped.clone());
+    assert!(
+        !sr1.labels_hidden.is_empty(),
+        "nothing was dropped to compare"
+    );
+    assert!(
+        !sr1.sites_hidden.is_empty(),
+        "no enzyme was dropped to compare"
+    );
+    for _ in 0..8 {
+        let (again, sr2) = map_svg(&m, cramped.clone());
+        assert_eq!(again, small);
+        assert_eq!(sr2.labels_hidden, sr1.labels_hidden);
+        assert_eq!(sr2.sites_hidden, sr1.sites_hidden);
+        assert_eq!(sr2, sr1);
+    }
+}
+
+#[test]
+fn a_circular_molecule_drawn_on_a_track_says_it_was_cut_open() {
+    // A track and a track are the same picture: nothing in the geometry
+    // distinguishes a linearised plasmid from a molecule that really is a line,
+    // and "this is not a closed molecule" is the most consequential thing a map
+    // can get wrong. So the figure says it, and `Report` carries it.
+    let m = plasmid(3000, true);
+    let (svg, report) = linear_svg(&m, Options::default());
+    assert!(report.cut_open, "the report did not record the cut");
+    assert!(
+        svg.contains("circular, shown cut open at base 1"),
+        "the figure does not say it was cut: {svg}"
+    );
+    // The wording narrows rather than being cut through with an ellipsis, and
+    // the claim survives to the narrowest form that still fits.
+    let narrow = Options {
+        width: 220.0,
+        ..Default::default()
+    };
+    let (small, small_report) = linear_svg(&m, narrow);
+    assert!(small_report.cut_open);
+    assert!(small.contains("cut circle"), "{small}");
+    assert!(!small.contains("cut ci..."), "a disclosure was cut short");
+
+    // And a molecule that really is linear claims nothing.
+    let (plain, plain_report) = map_svg(&plasmid(3000, false), Options::default());
+    assert!(!plain_report.cut_open);
+    assert!(!plain.contains("cut"), "{plain}");
+    // Nor does a circular molecule drawn as the ring it is.
+    let (round, round_report) = map_svg(&m, Options::default());
+    assert!(!round_report.cut_open);
+    assert!(!round.contains("cut"));
+}
+
+#[test]
+fn the_mode_overrides_the_topology_in_both_directions() {
+    let line = plasmid(2000, false);
+    let circle = plasmid(2000, true);
+    // An arc, not a `<circle>`: a LINEAR molecule pinned to a ring gets the
+    // GAPPED one, which is an `Item::Path` full of `Seg::Arc` and no circle at
+    // all. Asking only for the circle would pass this line while drawing a
+    // track, which is the whole thing being asserted.
+    let ring = |sc: &Scene| {
+        sc.items.iter().any(|i| match i {
+            Item::Circle { .. } => true,
+            Item::Path { segs, .. } => segs.iter().any(|s| matches!(s, Seg::Arc { .. })),
+            Item::Text { .. } => false,
+        })
+    };
+
+    // Auto asks the molecule.
+    assert!(ring(&scene(&circle, Options::default()).0));
+    assert!(!ring(&scene(&line, Options::default()).0));
+    // And each pin is obeyed against the topology.
+    let pin = |shape| Options {
+        shape,
+        ..Default::default()
+    };
+    assert!(ring(&scene(&line, pin(Shape::Circular)).0));
+    assert!(!ring(&scene(&circle, pin(Shape::Linear)).0));
+    // `Topology::default()` is Linear, so Auto must never mean "circular unless
+    // told otherwise" -- a record whose file did not say would become a ring.
+    assert!(!ring(&scene(&Molecule::default(), Options::default()).0));
+}
+
+#[test]
+fn a_linear_figure_names_every_label_it_could_not_draw() {
+    // The same accounting the ring keeps: a map missing three labels looks
+    // exactly like a molecule with three fewer features.
+    let mut m = plasmid(3000, false);
+    for i in 0..120u64 {
+        m.features.push(feat(
+            &format!("a-rather-long-feature-name-{i}"),
+            "CDS",
+            i * 20 + 1,
+            i * 20 + 15,
+        ));
+    }
+    let (_, report) = map_svg(
+        &m,
+        Options {
+            width: 300.0,
+            height: 220.0,
+            ..Default::default()
+        },
+    );
+    assert!(!report.labels_hidden.is_empty(), "nothing reported hidden");
+    assert_eq!(report.labels_placed + report.labels_hidden.len(), 120);
+}
+
+#[test]
+fn a_linear_figure_survives_every_molecule_the_ring_does() {
+    // The hostile sweep `degenerate_molecules_do_not_panic` runs through the
+    // ring, run through the track: an empty record, a 1 bp molecule, coordinates
+    // at zero and past the end, and a length off a LOCUS line at the top of the
+    // u64 range, where the ruler's `base += step` overflows and `frac`'s modulo
+    // is the only thing between a hostile file and a wrong figure.
+    let mut zero_coords = plasmid(500, false);
+    zero_coords.features.push(feat("zero", "CDS", 0, 0));
+    zero_coords.features.push(feat("past", "CDS", 900, 1200));
+    zero_coords.features.push(feat("straddle", "CDS", 0, 250));
+
+    let mut declared_max = Molecule {
+        declared_len: Some(u64::MAX),
+        topology: Topology::Linear,
+        ..Default::default()
+    };
+    declared_max.features.push(feat("w", "CDS", 1, u64::MAX));
+
+    let mut joined = plasmid(1000, false);
+    let mut j = Feature::new("split", "CDS");
+    j.segments.push(Segment::new(100, 200));
+    j.segments.push(Segment::new(5000, 6000));
+    joined.features.push(j);
+
+    let cases = [
+        Molecule::default(),
+        plasmid(0, false),
+        plasmid(1, false),
+        plasmid(2, false),
+        zero_coords,
+        declared_max,
+        joined,
+    ];
+    for (i, m) in cases.iter().enumerate() {
+        for w in [120.0, 300.0, 720.0] {
+            let (svg, _) = map_svg_at(
+                m,
+                Options {
+                    width: w,
+                    sites: vec![("EcoRI".into(), 1), ("BsaI".into(), u64::MAX)],
+                    ..Default::default()
+                },
+                Some(89.0),
+            );
+            well_formed(&svg).unwrap_or_else(|e| panic!("case {i} at {w}: {e}"));
+        }
+    }
+    // The joined feature loses a segment and is named for it, on this path too.
+    let (_, report) = map_svg(&cases[6], Options::default());
+    assert_eq!(report.partly_drawn, vec!["split".to_string()]);
+}
+
+#[test]
+fn a_feature_too_short_to_carry_an_arrowhead_is_a_mark_across_the_band() {
+    // The ring's rule and the ring's threshold: below `min_feature_degrees` an
+    // arrowhead is smaller than the outline around it and reads as dirt on the
+    // figure. `degrees` is a share of the molecule times 360, so the two figures
+    // agree about which features are marks.
+    let mut m = plasmid(100_000, false);
+    m.features.push(feat("dot", "CDS", 50_000, 50_010));
+    m.features.push(feat("real", "CDS", 10_000, 30_000));
+    let (sc, _) = scene(&m, Options::default());
+    let dot = titled(&sc, "dot");
+    assert_eq!(dot.len(), 1);
+    assert_eq!(dot[0].len(), 2, "a mark is a Move and a Line, not a box");
+    let (lo, hi) = span_x(dot[0]);
+    assert_eq!(lo, hi, "the mark is not vertical");
+    let real = titled(&sc, "real");
+    assert!(real[0].len() > 4, "a 20 kb feature drawn as a mark");
+}
+
+#[test]
+fn a_track_is_only_as_tall_as_the_figure_it_holds() {
+    // `Options::height` is the label band's budget, not the canvas. Padding out
+    // to it puts a 190 pt drawing in 530 pt of white at the 720 x 720 default,
+    // which `page::Fit` then prints as an 89 x 89 mm block and a raster export
+    // pays for in pixels.
+    let mut m = plasmid(3000, false);
+    m.features.push(feat("insert", "CDS", 100, 900));
+    let (sc, _) = scene(&m, Options::default());
+    assert_eq!(sc.width, 720.0);
+    assert!(sc.height < 200.0, "the figure came back {} tall", sc.height);
+    // More room means more rows for the labels that need them, never more white.
+    let tall = Options {
+        height: 2000.0,
+        ..Default::default()
+    };
+    let (roomy, _) = scene(&m, tall);
+    assert_eq!(roomy.height, sc.height, "empty height reached the figure");
+    // And the height that is used is a function of what is drawn.
+    let mut crowded = m.clone();
+    for i in 0..40u64 {
+        crowded
+            .features
+            .push(feat(&format!("g{i}"), "CDS", i * 70 + 1, i * 70 + 40));
+    }
+    let (deep, _) = scene(&crowded, Options::default());
+    assert!(deep.height > sc.height, "40 more labels cost no height");
+}
+
+#[test]
+fn a_name_the_figure_keeps_whole_is_a_name_the_figure_can_draw() {
+    // The invariant that makes `place_rows` terminate, and the reason
+    // `fit_label` is given `row - ROW_GAP` rather than the whole band: a label
+    // admitted at exactly the band's width costs the band its width PLUS the
+    // gutter, so every row drops it and it lands in `labels_hidden` -- measured
+    // to fit, and then not drawn, which is the silent half of the
+    // decide-in-one-unit-draw-in-another defect this crate keeps finding.
+    //
+    // Swept over lengths and widths because the window is one gutter wide, so a
+    // single name misses it.
+    for w in [220.0_f64, 260.0, 300.0, 420.0, 720.0] {
+        for n in 1..=80usize {
+            let mut m = plasmid(2000, false);
+            m.features.push(feat(&"M".repeat(n), "CDS", 100, 900));
+            let (_, report) = map_svg(
+                &m,
+                Options {
+                    width: w,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                report.labels_placed, 1,
+                "{w} pt wide, {n} characters: the only label was not drawn"
+            );
+            assert!(
+                report.labels_hidden.is_empty(),
+                "{w} pt wide, {n} characters: hidden {:?} with nothing shortened={}",
+                report.labels_hidden,
+                report.labels_truncated.is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_arrowhead_is_at_the_end_the_feature_reads_towards() {
+    // The tip is the one vertex ON the axis, and which end it is on is the only
+    // thing in the picture that says which way the feature reads. An unoriented
+    // feature has no such vertex, because a point is a directional claim and
+    // `Strand::Unoriented` is the file declining to make it.
+    let mut m = plasmid(6000, false);
+    m.features
+        .push(feat_on("fwd", "CDS", 1_000, 2_000, Strand::Forward));
+    m.features
+        .push(feat_on("rev", "CDS", 3_000, 4_000, Strand::Reverse));
+    m.features
+        .push(feat_on("flat", "CDS", 4_500, 5_500, Strand::Unoriented));
+    let (sc, _) = scene(&m, Options::default());
+
+    for (name, want) in [("fwd", Some(true)), ("rev", Some(false)), ("flat", None)] {
+        let segs = titled(&sc, name)[0];
+        let ys: Vec<f64> = segs
+            .iter()
+            .filter_map(|s| match *s {
+                Seg::Move(_, y) | Seg::Line(_, y) => Some(y),
+                _ => None,
+            })
+            .collect();
+        let mid = (ys.iter().copied().fold(f64::INFINITY, f64::min)
+            + ys.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+            * 0.5;
+        let (lo, hi) = span_x(segs);
+        let on_axis: Vec<f64> = segs
+            .iter()
+            .filter_map(|s| match *s {
+                Seg::Move(x, y) | Seg::Line(x, y) if (y - mid).abs() < 1e-9 => Some(x),
+                _ => None,
+            })
+            .collect();
+        match want {
+            None => assert!(
+                on_axis.is_empty(),
+                "{name}: an unoriented feature was given an arrowhead at {on_axis:?}"
+            ),
+            Some(forward) => {
+                assert_eq!(on_axis.len(), 1, "{name}: {on_axis:?} vertices on the axis");
+                let want_x = if forward { hi } else { lo };
+                assert!(
+                    (on_axis[0] - want_x).abs() < 1e-9,
+                    "{name}: the tip is at {} and the feature runs {lo}..{hi}",
+                    on_axis[0]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_rulers_own_numbers_never_overprint_each_other() {
+    // The ring divides by a flat twelve and can: twelve numbers around `2πr` are
+    // spread over the whole circumference. A track has only its width, and at
+    // 300 pt twelve numbers of `5,386` come 26 pt apart with 21 pt of glyphs.
+    // Overprinted digits on a scale are a cut coordinate by another route: what
+    // the reader takes off the figure is not a number the molecule has.
+    for len in [900u64, 5_386, 48_502, 4_641_652] {
+        let m = plasmid(len as usize, false);
+        for w in [200.0_f64, 260.0, 300.0, 420.0, 720.0, 1600.0] {
+            let (sc, _) = scene(
+                &m,
+                Options {
+                    width: w,
+                    ..Default::default()
+                },
+            );
+            // The ruler is the run of same-size, same-y text below the band.
+            let size = 12.0 * 0.72;
+            let mut row: Vec<(f64, f64)> = sc
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Text {
+                        x, size: s, text, ..
+                    } if (*s - size).abs() < 1e-9 => {
+                        Some((*x, crate::pdf::text_width_in(text, *s, false)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(!row.is_empty(), "{len} bp at {w} pt has no ruler at all");
+            row.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("no NaN"));
+            for pair in row.windows(2) {
+                let gap = (pair[1].0 - pair[1].1 * 0.5) - (pair[0].0 + pair[0].1 * 0.5);
+                assert!(
+                    gap >= 0.0,
+                    "{len} bp at {w} pt: two ruler numbers overlap by {}",
+                    -gap
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn what_folds_onto_one_tick_does_not_depend_on_the_type_size() {
+    // `bases_per_unit` is handed the TICK'S OWN STROKE, never a label height.
+    // Two cuts closer together than the mark that draws them are one mark, which
+    // is a fact about the picture; two cuts whose names collide are a fact about
+    // the type, and the packer already has an answer for that -- move them a row
+    // apart. With a label height the threshold grows as the type does, so
+    // enlarging the font would change what the figure claims about the molecule.
+    let sites: Vec<(String, u64)> = [
+        ("XmaI", 2_917u64),
+        ("SmaI", 2_919),
+        ("SphI", 4_000),
+        ("NsiI", 4_060),
+        ("EcoRI", 402),
+    ]
+    .iter()
+    .map(|(n, p)| ((*n).to_string(), *p))
+    .collect();
+    let m = plasmid(5386, false);
+    // A site label is the only `<title>` with two spaces in it.
+    let claims = |font: f64| -> Vec<String> {
+        let (sc, _) = scene(
+            &m,
+            Options {
+                width: 1400.0,
+                font_size: font,
+                sites: sites.clone(),
+                ..Default::default()
+            },
+        );
+        let mut v: Vec<String> = sc
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Path { title: Some(t), .. } if t.contains("  ") => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let at_twelve = claims(12.0);
+    assert!(
+        at_twelve
+            .iter()
+            .any(|t| t.contains("XmaI") && t.contains("SmaI")),
+        "two cuts 2 bp apart are one mark and should share a label: {at_twelve:?}"
+    );
+    assert!(
+        !at_twelve
+            .iter()
+            .any(|t| t.contains("SphI") && t.contains("NsiI")),
+        "two cuts 60 bp apart are two marks: {at_twelve:?}"
+    );
+    for font in [7.0, 9.0, 16.0, 24.0] {
+        assert_eq!(
+            claims(font),
+            at_twelve,
+            "{font} pt type changed what the figure says is at one tick"
+        );
+    }
+}
+
+/// The two-pass note is exact **on a track too**, which it was not.
+///
+/// PROVEN TO FAIL before `caption_for_capacity`: on a 6 kb track with 40 cut
+/// sites at 720 x 180, pass one reported 33 enzymes named and 7 hidden, and the
+/// figure that then went out with that line printed on it named 24 and hid 16.
+///
+/// The ring's version of this test could not see it and never will: on a ring
+/// the note reaches `centre_room` and stops, while on a track it landed in
+/// `caption_bottom`, one of the four terms deciding how many rows of labels
+/// there is room for, so drawing the note cost the band a row. Both callers say
+/// in a comment that this cannot happen, `debug_assert!(Disclosure::closes)`
+/// agrees with them — 24 + 16 and 33 + 7 both reach 40 — and the reader gets a
+/// count taken off a different picture from the one in front of them.
+///
+/// Swept over heights, because the row capacity only moves where `height` binds
+/// and one size cannot find that.
+#[test]
+fn the_note_does_not_change_what_it_counts_on_a_track_either() {
+    let mut m = plasmid(6000, false);
+    m.name = "pTRACK".into();
+    for i in 0..20u64 {
+        m.features.push(feat(
+            &format!("feature-{i}"),
+            "CDS",
+            i * 90 + 1,
+            i * 90 + 70,
+        ));
+    }
+    let sites: Vec<(String, u64)> = (0..40u64)
+        .map(|i| (format!("Enz{i}"), i * 140 + 11))
+        .collect();
+    let mut bound = 0;
+    for w in [420.0_f64, 720.0] {
+        for h in [
+            140.0_f64, 150.0, 160.0, 180.0, 200.0, 220.0, 240.0, 300.0, 720.0,
+        ] {
+            let base = Options {
+                width: w,
+                height: h,
+                sites: sites.clone(),
+                ..Default::default()
+            };
+            let (_, first) = scene(&m, base.clone());
+            let told = ring::Disclosure {
+                cutters: 40,
+                single: 0,
+                labelled: first.sites_named,
+                dual: 0,
+                multi: 0,
+                hidden: first.sites_dropped,
+                shortened: first.sites_shortened,
+            };
+            assert!(told.closes(), "{told:?}");
+            let (_, second) = scene(
+                &m,
+                Options {
+                    note: Some(told),
+                    ..base
+                },
+            );
+            assert_eq!(
+                first.sites_named, second.sites_named,
+                "{w}x{h}: the line says {} enzymes are named and the figure it is \
+                 printed on names {}",
+                first.sites_named, second.sites_named
+            );
+            assert_eq!(first.sites_dropped, second.sites_dropped, "{w}x{h}");
+            assert_eq!(first.sites_hidden, second.sites_hidden, "{w}x{h}");
+            assert_eq!(first.labels_placed, second.labels_placed, "{w}x{h}");
+            assert_eq!(first.labels_hidden, second.labels_hidden, "{w}x{h}");
+            if !first.labels_hidden.is_empty() {
+                bound += 1;
+            }
+        }
+    }
+    // A sweep where nothing was ever dropped would assert nothing at all: the
+    // note can only steal a row from a figure that is already short of them.
+    assert!(
+        bound >= 4,
+        "only {bound} of the sizes were actually crowded"
+    );
+}
+
+/// A feature across the origin, on a molecule cut open to be drawn flat.
+///
+/// **The answer is SPLIT, not refuse, and it is the same split `ranges` has
+/// always made for the ring.** A cut circle genuinely has that feature at both
+/// ends — those are the bases a reader would find there — so drawing one box per
+/// part states what is true, and refusing would delete a real feature from the
+/// picture on a technicality about where base 1 happens to fall. The reading
+/// that IS wrong is one box from 1,900 to 300, which on a track runs backwards.
+///
+/// What makes the split safe is the caption: the figure says the molecule is a
+/// circle shown cut open at base 1, so two boxes under one name read as a wrap
+/// and not as two copies. Without that line this test would be pinning a lie.
+#[test]
+fn a_feature_across_the_origin_is_split_and_the_figure_says_where_it_was_cut() {
+    let len = 2000u64;
+    let mut m = plasmid(len as usize, true);
+    m.name = "pORIGIN".into();
+    let mut wraps = Feature::new("wraps", "CDS");
+    wraps.segments.push(Segment::new(1_900, 300));
+    m.features.push(wraps);
+    m.features.push(feat("inside", "CDS", 600, 900));
+
+    let (sc, report) = scene(
+        &m,
+        Options {
+            shape: Shape::Linear,
+            ..Default::default()
+        },
+    );
+
+    // Two boxes, one name, nothing reported lost: a wrap is not a malformed
+    // feature and must not be counted as one.
+    let parts = titled(&sc, "wraps");
+    assert_eq!(parts.len(), 2, "an origin-spanning feature was not split");
+    assert!(report.malformed.is_empty(), "{:?}", report.malformed);
+    assert!(report.partly_drawn.is_empty(), "{:?}", report.partly_drawn);
+    assert_eq!(titled(&sc, "inside").len(), 1);
+
+    // One part ends at the right-hand end of the track and the other starts at
+    // the left-hand end — which is what "cut between the last base and the
+    // first" looks like. Bracketed against a feature that does NOT wrap, so this
+    // cannot pass by both parts landing in the middle.
+    let (a_lo, a_hi) = span_x(parts[0]);
+    let (b_lo, b_hi) = span_x(parts[1]);
+    let (whole_lo, whole_hi) = span_x(titled(&sc, "inside")[0]);
+    let (left, right) = if a_lo < b_lo {
+        ((a_lo, a_hi), (b_lo, b_hi))
+    } else {
+        ((b_lo, b_hi), (a_lo, a_hi))
+    };
+    assert!(
+        left.0 < whole_lo && right.1 > whole_hi,
+        "the two parts {left:?} {right:?} are not at the two ends"
+    );
+    // And they cover the right number of bases: 300 at the start, 101 at the
+    // end, of 2,000.
+    let axis = right.1 - left.0;
+    assert!(
+        ((left.1 - left.0) - 300.0 / len as f64 * axis).abs() < 1.0,
+        "the leading part covers {} of a {axis} pt axis",
+        left.1 - left.0
+    );
+    assert!(
+        ((right.1 - right.0) - 101.0 / len as f64 * axis).abs() < 1.0,
+        "the trailing part covers {}",
+        right.1 - right.0
+    );
+
+    // The disclosure that makes the split readable, in the figure and in the
+    // report. Without it, two boxes under one name is a molecule with two copies
+    // of that feature.
+    assert!(report.cut_open);
+    let (svg, _) = linear_svg(&m, Options::default());
+    assert!(
+        svg.contains("circular, shown cut open at base 1"),
+        "a split feature with no statement of where the cut is"
+    );
+
+    // And the label points at a base the feature actually covers: `mid_base`
+    // accumulates across the parts, so the anchor is base 100, inside the
+    // leading box, and not base 1,000, which the feature does not touch.
+    let anchored_inside = sc.items.iter().any(|i| match i {
+        Item::Path {
+            segs,
+            fill: None,
+            title: None,
+            ..
+        } if segs.len() == 3 => matches!(
+            segs[0],
+            Seg::Move(x, _) if (left.0..=left.1).contains(&x) || (right.0..=right.1).contains(&x)
+        ),
+        _ => false,
+    });
+    assert!(anchored_inside, "no leader inside the feature's own extent");
+}
+
+/// Segments the file lists out of order, which GenBank permits and `join()`
+/// uses to say which way a feature reads.
+///
+/// Both parts are drawn where their coordinates put them, and the arrowhead goes
+/// on the segment the FILE lists last rather than the one furthest right — which
+/// for `join(1500..1700,200..400)` on a forward feature is the left-hand box.
+/// That is deliberate, and it is the ring's answer too, from the same `arrow_on`
+/// in the same shared `resolve_features`: the order is how the feature reads,
+/// and re-sorting by coordinate would silently rewrite that.
+#[test]
+fn segments_out_of_order_are_drawn_where_they_are_and_read_the_way_the_file_says() {
+    let mut m = plasmid(2000, false);
+    let mut f = Feature::new("descending", "CDS");
+    f.strand = Strand::Forward;
+    f.segments.push(Segment::new(1_500, 1_700));
+    f.segments.push(Segment::new(200, 400));
+    m.features.push(f);
+    let (sc, report) = scene(&m, Options::default());
+    assert!(report.malformed.is_empty() && report.partly_drawn.is_empty());
+
+    let parts = titled(&sc, "descending");
+    assert_eq!(parts.len(), 2);
+    // In file order: part 0 is the high one.
+    assert!(
+        span_x(parts[0]).0 > span_x(parts[1]).0,
+        "the parts were re-sorted, which rewrites which one the feature ends on"
+    );
+    // The tip is the vertex on the axis, and it is on the LAST-LISTED part.
+    let tips = |segs: &[Seg]| {
+        let ys: Vec<f64> = segs
+            .iter()
+            .filter_map(|s| match *s {
+                Seg::Move(_, y) | Seg::Line(_, y) => Some(y),
+                _ => None,
+            })
+            .collect();
+        let mid = (ys.iter().copied().fold(f64::INFINITY, f64::min)
+            + ys.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+            * 0.5;
+        segs.iter()
+            .filter(|s| matches!(**s, Seg::Move(_, y) | Seg::Line(_, y) if (y - mid).abs() < 1e-9))
+            .count()
+    };
+    assert_eq!(
+        tips(parts[1]),
+        1,
+        "the last-listed segment has no arrowhead"
+    );
+    assert_eq!(tips(parts[0]), 0, "a second arrowhead on a joined feature");
+
+    // The ring makes the same choice from the same field, so the two figures
+    // cannot disagree about which end a joined feature reads towards.
+    let mut round = plasmid(2000, true);
+    round.features = m.features.clone();
+    let (ring_scene, _) = circular_scene(&round, Options::default());
+    assert_eq!(
+        titled(&ring_scene, "descending").len(),
+        2,
+        "the ring drew a different number of parts for the same feature"
+    );
+}
+
+/// Five hundred features on top of each other, all wanting the same label spot.
+///
+/// The pathological input for [`crate::place_rows`]: every label's ideal `x` is
+/// within a few points of every other's, so row after row fills, spills and
+/// fills again. It has to terminate, account for every label it did not draw,
+/// and stay inside the height it was budgeted.
+///
+/// Bounded in TIME as well, loosely — one second is roughly four hundred times
+/// what this measures, so it cannot flake on a slow machine, and it still fails
+/// outright on anything quadratic in the labels. Without the no-progress guard
+/// in `place_rows`, the sibling unit test runs past ninety seconds.
+#[test]
+fn five_hundred_overlapping_features_terminate_and_are_all_accounted_for() {
+    let mut m = plasmid(5000, false);
+    for i in 0..500u64 {
+        m.features.push(feat(
+            &format!("ov{i}"),
+            "CDS",
+            2_000 + i % 7,
+            2_400 + i % 11,
+        ));
+    }
+    for height in [120.0_f64, 200.0, 400.0, 720.0, 4000.0] {
+        let started = std::time::Instant::now();
+        let (sc, report) = scene(
+            &m,
+            Options {
+                height,
+                ..Default::default()
+            },
+        );
+        let took = started.elapsed();
+        assert!(
+            took.as_secs_f64() < 1.0,
+            "500 overlapping features took {took:?} at height {height}"
+        );
+        assert_eq!(
+            report.labels_placed + report.labels_hidden.len(),
+            500,
+            "at height {height}, {} labels went missing without being named",
+            500 - report.labels_placed - report.labels_hidden.len()
+        );
+        // Every feature is DRAWN whatever happens to its label. Overprinting in
+        // one band is the ring's answer too, and losing a box would be a feature
+        // deleted from the picture rather than a name deferred to the Features
+        // tab.
+        let boxes = sc
+            .items
+            .iter()
+            .filter(|i| {
+                matches!(i, Item::Path { title: Some(t), fill: Some(_), .. } if t.starts_with("ov"))
+            })
+            .count();
+        assert_eq!(
+            boxes, 500,
+            "at height {height}: a feature box was dropped, not just its label"
+        );
+        // And what was drawn fits the scene that claims to hold it.
+        let (_, _, _, hi_y) = extents(&sc);
+        assert!(
+            hi_y <= sc.height + 0.01,
+            "at height {height}: reaches {hi_y}"
+        );
+    }
+}
+
+/// A canvas too short for the figure at all: it comes back TALLER than the
+/// budget rather than losing its ruler.
+///
+/// [`crate::linear::scene`]'s doc says this in words, and it is the one place
+/// the height is allowed to be exceeded. The other reading — crop to `height` —
+/// takes the scale off the bottom of the drawing in silence, which is the one
+/// thing this crate refuses to do anywhere else. `Options::height` is a budget
+/// on the label rows and on nothing else; the caption, the band and the scale
+/// are not negotiable.
+#[test]
+fn a_height_too_small_for_the_figure_loses_labels_and_never_the_scale() {
+    let mut m = plasmid(3000, false);
+    for i in 0..12u64 {
+        m.features
+            .push(feat(&format!("f{i}"), "CDS", i * 240 + 1, i * 240 + 180));
+    }
+    let ruler_size = 12.0 * 0.72;
+    // The irreducible figure — caption, band, ruler, not one row of labels —
+    // measured rather than written down, so this does not have to be re-edited
+    // every time a type size moves.
+    let (floor, floor_report) = scene(
+        &m,
+        Options {
+            height: 0.0,
+            ..Default::default()
+        },
+    );
+    assert_eq!(floor_report.labels_placed, 0);
+    assert!(floor.height > 0.0, "a zero budget produced a zero figure");
+    for height in [1.0_f64, 20.0, 40.0, 80.0, 120.0] {
+        let (sc, report) = scene(
+            &m,
+            Options {
+                height,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            sc.height, floor.height,
+            "at a {height} pt budget the figure is not the irreducible one"
+        );
+        if height < floor.height {
+            assert!(
+                sc.height > height,
+                "a {height} pt budget cropped the figure to {}",
+                sc.height
+            );
+        }
+        // The scale survived: the ruler's numbers are the run of text at 0.72 em.
+        let ticks = sc
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Text { size, .. } if (*size - ruler_size).abs() < 1e-9))
+            .count();
+        assert!(ticks > 0, "at {height} pt the ruler was cropped off");
+        // What did go is named, and all of it went: there is no room for a row.
+        assert_eq!(report.labels_placed + report.labels_hidden.len(), 12);
+        assert_eq!(
+            report.labels_placed, 0,
+            "there was room for a label at {height} pt after all"
+        );
+        let (_, _, _, hi_y) = extents(&sc);
+        assert!(hi_y <= sc.height + 0.01, "at {height}: reaches {hi_y}");
+    }
+}
+
+/// A 200-character feature name, at every width the app and the command line
+/// offer.
+///
+/// The long tail of `a_name_the_figure_keeps_whole_is_a_name_the_figure_can_draw`,
+/// which sweeps 1 to 80 characters: a name this long is shortened at every width,
+/// so what is checked here is the other half of the contract — a shortened name
+/// is REPORTED as shortened, is still drawn, keeps its full text somewhere the
+/// reader can reach, and pushes no glyph past the canvas edge on the way.
+#[test]
+fn a_two_hundred_character_name_is_shortened_reported_and_still_fits() {
+    let name = "N".repeat(200);
+    for w in [120.0_f64, 200.0, 300.0, 720.0, 1600.0] {
+        let mut m = plasmid(3000, false);
+        m.features.push(feat(&name, "CDS", 100, 900));
+        m.features.push(feat("short", "CDS", 1_500, 1_600));
+        let opts = Options {
+            width: w,
+            ..Default::default()
+        };
+        let (sc, report) = scene(&m, opts.clone());
+        assert_eq!(report.labels_placed, 2, "at {w} pt a label was not drawn");
+        assert!(report.labels_hidden.is_empty(), "at {w} pt");
+        assert_eq!(
+            report.labels_truncated,
+            vec![name.clone()],
+            "at {w} pt a 200-character name was drawn whole, or cut without saying so"
+        );
+        let (lo_x, hi_x, lo_y, hi_y) = extents(&sc);
+        assert!(
+            lo_x >= -0.01 && hi_x <= sc.width + 0.01,
+            "at {w} pt: {lo_x}..{hi_x}"
+        );
+        assert!(
+            lo_y >= -0.01 && hi_y <= sc.height + 0.01,
+            "at {w} pt: {lo_y}..{hi_y}"
+        );
+        // The whole name survives where a reader can still reach it, which is
+        // what makes shortening the drawn one acceptable.
+        let (svg, _) = map_svg(&m, opts);
+        assert!(
+            svg.contains(&name),
+            "at {w} pt the full name is nowhere in the svg"
+        );
+        well_formed(&svg).expect("malformed svg");
+    }
+}
+
+/// Where a shortened feature name actually survives, writer by writer.
+///
+/// The asymmetry `widest_of` argues for — shorten a feature name, never a cut
+/// coordinate — rests on the full name surviving somewhere a reader can reach.
+/// That premise was overstated in two comments, in the same words: "in the SVG
+/// `<title>`, in the PDF annotation and in the app's Features tab". There is no
+/// PDF annotation. `pdf.rs`'s own module doc has always said so — an annotation
+/// "would be furniture in a figure" — and the writer emits no `/Annots` at all.
+///
+/// So this measures it rather than restating it, on the figure that needs the
+/// argument most. The conclusion survives on the true premise: the loss is
+/// still REPORTED, in `labels_truncated`, which is what makes it different in
+/// kind from a shortened `EcoRI  402`.
+#[test]
+fn a_shortened_name_survives_in_the_writers_that_can_carry_it_and_no_others() {
+    let name = "a-feature-with-a-name-far-too-long-for-any-of-this";
+    let mut m = plasmid(2000, false);
+    m.features.push(feat(name, "CDS", 100, 900));
+    let opts = Options {
+        width: 260.0,
+        ..Default::default()
+    };
+    let (sc, report) = scene(&m, opts.clone());
+    assert_eq!(
+        report.labels_truncated,
+        vec![name.to_string()],
+        "the name was not shortened, so there is nothing to trace"
+    );
+
+    // SVG: a real `<title>`, which a browser shows on hover.
+    let (svg, _) = map_svg(&m, opts.clone());
+    assert!(
+        svg.contains(&format!("<title>{name}</title>")),
+        "the whole name is not in the SVG"
+    );
+    // EPS: a PostScript comment. Nothing renders it and the text is there, so
+    // `eps.rs`'s "the information survives in the file for a human reading it"
+    // is exact.
+    let (eps, _) = eps::to_eps(&sc, 1.0);
+    assert!(
+        eps.contains(&format!("% {name}")),
+        "the whole name is not in the EPS"
+    );
+    // PDF: nowhere. No annotation array, and the drawn string is the shortened
+    // one. Searched over the raw bytes, since a PDF string is not UTF-8 text.
+    let (pdf, _, _) = map_pdf(&m, opts.clone());
+    assert!(
+        !pdf.windows(name.len()).any(|w| w == name.as_bytes()),
+        "the PDF carries the whole name after all -- the comments that said so \
+         were right and this test is the thing that is wrong"
+    );
+    assert!(
+        !pdf.windows(7).any(|w| w == b"/Annots"),
+        "the PDF grew an annotation array"
+    );
+    // And the shortened form IS drawn, so the name was not simply dropped.
+    let drawn: Vec<&String> = sc
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    // Three ASCII dots, not U+2026: `fit_label` uses "..." so the mark survives
+    // the WinAnsi round trip every one of these writers puts text through, and
+    // an ellipsis that encoded as a missing glyph would be reported as
+    // unencodable rather than drawn.
+    assert!(
+        drawn
+            .iter()
+            .any(|t| t.ends_with("...") && name.starts_with(t.trim_end_matches('.'))),
+        "no shortened form of the name is on the figure: {drawn:?}"
+    );
 }

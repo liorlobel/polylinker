@@ -363,6 +363,26 @@ fn where_in_the_app(topic: &str) -> Option<&'static str> {
              document. Every record names the table that produced it.",
         ),
         "digest" => Some("In this app: the Enzymes tab, and the cut marks on the map."),
+        // The SHAPE is said out loud, because the question a reader arrives at
+        // this page with is "why is my plasmid a straight line", and the answer
+        // is that the figure follows the molecule's own topology. Until
+        // 2026-08-07 the answer would have been "it is not", which is the
+        // defect this pointer was written alongside: a PCR product exported as
+        // a ring with a notch in it.
+        //
+        // "Export figure" is quoted because it IS a literal in `main.rs` and
+        // `the_help_page_quotes_button_labels_that_exist` reads that file. The
+        // leaves under it are built as `format!("{subject} as {}…")`, so
+        // quoting "Map as SVG…" would put a string in this page that no search
+        // of the source can confirm — which is how a help page starts naming
+        // buttons that were renamed.
+        "map" => Some(
+            "In this app: the Map tab, and \"Export figure\" in the toolbar, which \
+             writes SVG, PDF, EPS or PNG at a printed width. The figure is the shape \
+             the molecule is — a ring for a circular one, a track for a linear one — \
+             and a plasmid asked for as a track says in its caption that it was cut \
+             open. The line beside the export names anything the canvas could not fit.",
+        ),
         "sanger" => Some("In this app: the Reads tab."),
         // Not a menu item: the button sits beside the selection readout and is
         // disabled until there IS a selection, so naming a menu would send a

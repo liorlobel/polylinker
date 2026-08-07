@@ -45,6 +45,7 @@ pub mod deflate;
 pub mod eps;
 pub mod font;
 mod labels;
+pub mod linear;
 pub mod page;
 pub mod pdf;
 pub mod png;
@@ -53,6 +54,7 @@ pub mod ring;
 pub mod scene;
 pub mod trace;
 pub use labels::{isotonic, place_column, LabelBox, Placement};
+pub use linear::{bases_per_unit, place_rows, RowLabel, RowSlot, Rows, Track};
 pub use ring::{
     bases_per_arc, centre_room, inside_of, inward_radius, keep_clear_for, label_room, merge_sites,
     place_ring, radius, reserve_for, side_of, Disclosure, Inside, Reserve, Ring, RingGeom,
@@ -125,6 +127,8 @@ pub struct Options {
     /// arithmetic live in one place for both painters, which is the divergence
     /// this whole layer exists to close.
     pub note: Option<ring::Disclosure>,
+    /// Ring or track. See [`Shape`]; the default asks the molecule.
+    pub shape: Shape,
 }
 
 impl Default for Options {
@@ -139,6 +143,56 @@ impl Default for Options {
             title: None,
             sites: Vec::new(),
             note: None,
+            shape: Shape::Auto,
+        }
+    }
+}
+
+/// Whether a molecule is drawn as a ring or as a horizontal track.
+///
+/// # Why there is a knob at all, rather than just reading the topology
+///
+/// Both overrides have a user, and neither is expressible any other way.
+///
+/// [`Shape::Linear`] on a **circular** molecule is the cut map: a plasmid
+/// linearised in silico, or a PCR product shown against its template. Without
+/// this, reaching that figure would mean editing the molecule's topology on the
+/// way to the renderer — which corrupts the record every other part of the
+/// program then writes out.
+///
+/// [`Shape::Circular`] on a **linear** molecule is what this crate did for
+/// every linear molecule until now: a ring with a gap in it (see
+/// [`scene`]'s backbone). It is not wrong — a long phage genome reads well as a
+/// C — and naming it is what lets a test assert that the existing figures did
+/// not move.
+///
+/// # Why [`Shape::Auto`] is the default
+///
+/// All eight `Options` built in this workspace use `..Default::default()` or
+/// `..base_opts.clone()`. A required mode would make every one of them restate
+/// a fact the molecule already carries, and the first site that got it wrong
+/// would ship a ring for a FASTA — which is the defect this enum was added to
+/// fix, reintroduced at the call site.
+///
+/// `Auto` resolves as "circular if and only if the molecule is", never
+/// "circular unless told otherwise": `Topology::default()` is `Linear`, so the
+/// permissive reading would draw a ring for every record whose file did not say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shape {
+    /// Ask the molecule's own topology.
+    #[default]
+    Auto,
+    Circular,
+    Linear,
+}
+
+impl Shape {
+    /// Resolve to a ring or a track, given the molecule's topology.
+    pub fn draws_a_ring(self, molecule_is_circular: bool) -> bool {
+        match self {
+            Shape::Auto => molecule_is_circular,
+            Shape::Circular => true,
+            Shape::Linear => false,
         }
     }
 }
@@ -272,6 +326,20 @@ pub struct Report {
     /// is at least recognisable, and `Scene::title` and the SVG `<title>` still
     /// carry the whole string, but a reader of the page has neither.
     pub title_truncated: bool,
+    /// A **circular** molecule was drawn on a straight track, so the figure
+    /// shows it cut open between its last base and its first.
+    ///
+    /// Reported rather than left to the reader's eye, because a track and a
+    /// track are the same picture: nothing about the geometry of a linearised
+    /// plasmid distinguishes it from a plasmid that really is a line, and "this
+    /// is not a closed molecule" is the single most consequential thing a map
+    /// can get wrong. The figure says so too — see the caption built in
+    /// [`linear::scene`] — and this is the machine-readable half, for a caller
+    /// that wants to put it in a legend.
+    ///
+    /// False for [`Shape::Circular`] on a linear molecule, which is the mirror
+    /// case: there the *ring* carries the disclosure, as the gap in it.
+    pub cut_open: bool,
 }
 
 /// Round to two decimals. Float noise triples an SVG's size and destroys
@@ -386,12 +454,46 @@ pub fn polar(cx: f64, cy: f64, r: f64, a: f64) -> (f64, f64) {
 /// expression quietly returned 0 for every base, putting every feature on a
 /// hostile record at twelve o'clock.
 pub fn angle(base: u64, len: u64) -> f64 {
+    frac(base, len) * TAU
+}
+
+/// How far along the molecule a 1-based base sits, in `0.0..1.0`.
+///
+/// [`angle`] is this times a turn, and the linear track is this times its own
+/// width — **one** function deciding where a base goes, so a feature cannot
+/// land at a different coordinate depending on which figure it is drawn in.
+/// Extracted rather than written twice: the modulo, the base-0 rule and the
+/// `u64` arithmetic recorded on [`angle`] are the parts that were got wrong
+/// once already, and a second copy is a second chance to get them wrong.
+///
+/// The expression is `angle`'s own, unchanged, so every existing circular
+/// figure is byte-identical across this refactor.
+pub fn frac(base: u64, len: u64) -> f64 {
     if len == 0 {
         return 0.0;
     }
     // Base 0 is one step *before* the origin, i.e. the last base.
-    let frac = if base == 0 { len - 1 } else { (base - 1) % len };
-    (frac as f64 / len as f64) * TAU
+    let f = if base == 0 { len - 1 } else { (base - 1) % len };
+    f as f64 / len as f64
+}
+
+/// Where the base *after* `base` sits along a **line**, in `0.0..=1.0`.
+///
+/// The linear twin of [`angle_past`], and deliberately not the same function.
+/// A ring closes: `angle_past(len, len)` is 0, which is where an arc ending at
+/// the last base has to finish, one whole turn on. A line does **not** close,
+/// and the same modulo would put the right-hand edge of a feature that reaches
+/// the last base back at the *start* of the track — a full-length feature drawn
+/// as a zero-width sliver at base 1. So the end of the molecule is 1.0 here and
+/// the modulo is absent rather than adjusted for.
+///
+/// `ranges` clamps every segment end to `len` before this is reached, so the
+/// `min` is a belt on top of that and not the thing doing the work.
+fn frac_end(base: u64, len: u64) -> f64 {
+    if len == 0 {
+        return 0.0;
+    }
+    (base as f64 / len as f64).min(1.0)
 }
 
 /// The angle one base *past* `base` — where an arc ending at `base` closes.
@@ -527,11 +629,17 @@ const SITE_TICK_STROKE: f64 = 1.25;
 /// coordinate and a feature name are interchangeable when a column overflows.
 pub const SITE_WEIGHT: f64 = 24.0;
 
-/// One thing wanting a label on the ring: a feature, or a cut site.
+/// One thing wanting a label on the map: a feature, or a cut site.
 #[derive(Debug, Clone)]
 struct Label {
     text: String,
-    angle: f64,
+    /// How far along the molecule the label points, in `0.0..1.0`.
+    ///
+    /// The fraction and not the angle, because the ring turns it into an angle
+    /// and the track turns it into an `x`, and a label that carried an angle
+    /// would make the linear renderer divide one back out. [`Label::angle`] is
+    /// the same expression [`angle`] has always evaluated.
+    frac: f64,
     weight: f64,
     /// A restriction site rather than a feature. Sites also get a tick on the
     /// ring, because a leader alone points at a place and a tick says a cut
@@ -548,6 +656,96 @@ struct Label {
     ///
     /// Empty for a feature label, which names no enzyme.
     names: Vec<String>,
+}
+
+impl Label {
+    /// Clockwise from twelve o'clock, radians — what the ring places labels by.
+    fn angle(&self) -> f64 {
+        self.frac * TAU
+    }
+}
+
+/// A feature resolved to the parts a painter can draw.
+///
+/// Shared by both figures, because everything in it is a fact about the
+/// molecule rather than about the picture: which spans survive `ranges`, what
+/// colour the file asked for, which part carries the arrowhead. The ring reads
+/// `degrees` as degrees of arc and the track reads it as a share of its width;
+/// they are the same number, `span / len * 360`.
+struct Drawn {
+    name: String,
+    parts: Vec<(u64, u64)>,
+    colour: String,
+    degrees: f64,
+    arrow_on: isize,
+    strand: Strand,
+}
+
+/// Resolve every feature to parts and label anchors, before either figure
+/// knows how big it is.
+///
+/// The ring's radius depends on which labels land in a side column and the
+/// track's row count depends on how many labels there are, so in both cases the
+/// anchors have to exist first. Extracted from `scene` verbatim rather than
+/// copied into the linear builder: `ranges` on a per-**segment** basis, the
+/// `partly_drawn` bookkeeping and `mid_base` over the accumulated parts are
+/// each a defect this crate has already paid for once, and a second copy is a
+/// second place for them to come back.
+fn resolve_features(
+    mol: &Molecule,
+    len: u64,
+    circular: bool,
+    report: &mut Report,
+) -> (Vec<Drawn>, Vec<Label>) {
+    let mut drawn: Vec<Drawn> = Vec::new();
+    let mut anchors: Vec<Label> = Vec::new();
+
+    for f in &mol.features {
+        let mut parts: Vec<(u64, u64)> = Vec::with_capacity(f.segments.len());
+        // Counted per segment, not over the whole feature. `ranges` returns
+        // nothing for a segment lying wholly past the end, and a feature with
+        // one such segment and one good one still has a non-empty `parts` — so
+        // the all-or-nothing check below never fired for it and half of
+        // `CDS join(100..200,5000..6000)` on a 1000 bp plasmid went out as a
+        // whole 101 bp `orfX` with nothing said.
+        let mut lost_segments = 0usize;
+        for s in &f.segments {
+            let r = ranges(s.start, s.end, len, circular);
+            if r.is_empty() {
+                lost_segments += 1;
+            }
+            parts.extend(r);
+        }
+        if parts.is_empty() {
+            report.malformed.push(f.name.clone());
+            continue;
+        }
+        if lost_segments > 0 {
+            report.partly_drawn.push(f.name.clone());
+        }
+        let span: u64 = parts.iter().map(|(a, b)| b - a + 1).sum();
+        let mid = mid_base(&parts, span);
+        anchors.push(Label {
+            text: f.name.clone(),
+            frac: frac(mid, len),
+            weight: 1.0 + (1.0 + span as f64).log10(),
+            site: false,
+            names: Vec::new(),
+        });
+        drawn.push(Drawn {
+            name: f.name.clone(),
+            colour: safe_color(f.color(), colour_for(&f.kind)),
+            degrees: (span as f64 / len as f64) * 360.0,
+            arrow_on: match f.strand {
+                Strand::Forward => parts.len() as isize - 1,
+                Strand::Reverse => 0,
+                _ => -1,
+            },
+            strand: f.strand,
+            parts,
+        });
+    }
+    (drawn, anchors)
 }
 
 /// How wide a label is *assumed* to be when the ring reserves room for it.
@@ -649,13 +847,27 @@ fn fit_label(name: &str, room: f64, font_size: f64) -> Option<String> {
     }
 }
 
-/// Build the device-independent picture.
+/// Build the device-independent picture, as a ring or as a track.
 ///
-/// The one place the map's geometry lives. [`circular_svg`] and
-/// [`circular_pdf`] both render this, which is why they cannot disagree about
-/// where anything is — there is nothing above the level of ink for them to
-/// disagree about.
+/// The one place the map's geometry lives. Every writer in this crate — SVG,
+/// PDF, EPS, PNG — and the app's on-screen [`Scene`] painter consume what comes
+/// out of here, which is why they cannot disagree about where anything is:
+/// there is nothing above the level of ink for them to disagree about.
+///
+/// **Which figure comes out is [`Options::shape`]**, whose default asks the
+/// molecule. A ring is [`circular_scene`]; a track is [`linear::scene`]. Both
+/// return the same two types and both go through the same three primitives, so
+/// no caller and no back end has to know which one ran.
 pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
+    if opts.shape.draws_a_ring(mol.topology.is_circular()) {
+        circular_scene(mol, opts)
+    } else {
+        linear::scene(mol, opts)
+    }
+}
+
+/// The ring. See [`scene`], which chooses between this and [`linear::scene`].
+pub fn circular_scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     let mut report = Report::default();
     let mut items: Vec<Item> = Vec::new();
     let len = mol.span().max(1);
@@ -664,66 +876,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     let pane_min = opts.width.min(opts.height);
     let row_half = ROW_HALF_DEGREES.to_radians();
 
-    // Resolve every feature to the parts a painter can draw, *before* the ring
-    // knows how big it is. The radius depends on which labels land in a side
-    // column, and that depends on their angles, so the angles have to exist
-    // first. This loop used to sit below the radius and push labels as it went.
-    struct Drawn {
-        name: String,
-        parts: Vec<(u64, u64)>,
-        colour: String,
-        degrees: f64,
-        arrow_on: isize,
-        strand: Strand,
-    }
-    let mut drawn: Vec<Drawn> = Vec::new();
-    let mut anchors: Vec<Label> = Vec::new();
-
-    for f in &mol.features {
-        let mut parts: Vec<(u64, u64)> = Vec::with_capacity(f.segments.len());
-        // Counted per segment, not over the whole feature. `ranges` returns
-        // nothing for a segment lying wholly past the end, and a feature with
-        // one such segment and one good one still has a non-empty `parts` — so
-        // the all-or-nothing check below never fired for it and half of
-        // `CDS join(100..200,5000..6000)` on a 1000 bp plasmid went out as a
-        // whole 101 bp `orfX` with nothing said.
-        let mut lost_segments = 0usize;
-        for s in &f.segments {
-            let r = ranges(s.start, s.end, len, circular);
-            if r.is_empty() {
-                lost_segments += 1;
-            }
-            parts.extend(r);
-        }
-        if parts.is_empty() {
-            report.malformed.push(f.name.clone());
-            continue;
-        }
-        if lost_segments > 0 {
-            report.partly_drawn.push(f.name.clone());
-        }
-        let span: u64 = parts.iter().map(|(a, b)| b - a + 1).sum();
-        let mid = mid_base(&parts, span);
-        anchors.push(Label {
-            text: f.name.clone(),
-            angle: angle(mid, len),
-            weight: 1.0 + (1.0 + span as f64).log10(),
-            site: false,
-            names: Vec::new(),
-        });
-        drawn.push(Drawn {
-            name: f.name.clone(),
-            colour: safe_color(f.color(), colour_for(&f.kind)),
-            degrees: (span as f64 / len as f64) * 360.0,
-            arrow_on: match f.strand {
-                Strand::Forward => parts.len() as isize - 1,
-                Strand::Reverse => 0,
-                _ => -1,
-            },
-            strand: f.strand,
-            parts,
-        });
-    }
+    let (drawn, mut anchors) = resolve_features(mol, len, circular, &mut report);
 
     // Restriction sites, one label each to begin with. The radius is decided
     // over these, before anything is folded together, because merging may not
@@ -733,7 +886,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     // costs a quarter of the radius to gain tidiness.
     let site_label = |name: &str, pos: u64| Label {
         text: format!("{name}  {}", commas(pos)),
-        angle: angle(pos, len),
+        frac: frac(pos, len),
         weight: SITE_WEIGHT,
         site: true,
         names: vec![name.to_string()],
@@ -774,15 +927,28 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     // principled rather than convenient. `EcoRI  402` shortened to `Ec...` leaves a
     // reader planning a digest with no enzyme and no coordinate, on a page that has
     // no hover; a shortened feature name keeps its whole string in the SVG
-    // `<title>`, in the PDF annotation and in the app's Features tab, and lands in
-    // [`Report::labels_truncated`] where `pl export` prints it. The project already
+    // `<title>` and in the app's Features tab, and lands in
+    // [`Report::labels_truncated`] where `pl export` prints it.
+    //
+    // THIS SAID "in the PDF annotation" UNTIL 2026-08-07 AND THAT WAS NEVER
+    // TRUE. `pdf.rs`'s own module doc has always said the opposite in as many
+    // words — "SVG `<title>` tooltips. PDF has no equivalent short of
+    // annotations, which would be furniture in a figure. Stated here rather
+    // than quietly dropped" — and the writer emits no `/Annots` array at all.
+    // So the asymmetry is narrower than it was argued to be: on the two vector
+    // formats that are not SVG, and on the raster one, a shortened feature name
+    // survives only in `labels_truncated`. That is still a reported loss and
+    // still not the unreported one a shortened `Ec...` would be, so the
+    // conclusion holds on the true premise. The project already
+    // draws this line in three other places — `SITE_WEIGHT`, `site_room`, and
+    // [`ring::Site::label`]'s refusal to fold a range — for the same reason.
     // draws this line in three other places — `SITE_WEIGHT`, `site_room`, and
     // [`ring::Site::label`]'s refusal to fold a range — for the same reason.
     let widest_of = |labels: &[Label]| -> f64 {
         labels
             .iter()
             .filter(|l| {
-                l.site || matches!(ring::side_of(l.angle, row_half), Side::Left | Side::Right)
+                l.site || matches!(ring::side_of(l.angle(), row_half), Side::Left | Side::Right)
             })
             .map(|l| label_width(&l.text, opts.font_size))
             .fold(0.0_f64, f64::max)
@@ -825,7 +991,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
             if s.names.len() == 1 || label_width(&folded, opts.font_size) <= site_room {
                 anchors.push(Label {
                     text: folded,
-                    angle: angle(s.anchor(), len),
+                    frac: frac(s.anchor(), len),
                     weight: SITE_WEIGHT,
                     site: true,
                     names: s.names.clone(),
@@ -1085,7 +1251,7 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
         .iter()
         .zip(&texts)
         .map(|(l, t)| RingLabel {
-            angle: l.angle,
+            angle: l.angle(),
             width: t.as_deref().map_or(0.0, |t| drawn_width(t, opts.font_size)),
             height: line_h,
             weight: l.weight,
@@ -1142,8 +1308,8 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
         // A cut site gets a mark on the ring as well as a leader: a leader
         // alone points at a place, a tick says a cut happens there.
         if l.site {
-            let (sx, sy) = polar(cx, cy, ro, l.angle);
-            let (ex, ey) = polar(cx, cy, ro + 6.0, l.angle);
+            let (sx, sy) = polar(cx, cy, ro, l.angle());
+            let (ex, ey) = polar(cx, cy, ro + 6.0, l.angle());
             items.push(Item::Path {
                 segs: vec![Seg::Move(sx, sy), Seg::Line(ex, ey)],
                 fill: None,
@@ -1265,15 +1431,70 @@ pub fn scene(mol: &Molecule, opts: Options) -> (Scene, Report) {
     )
 }
 
-/// Render a molecule as a standalone SVG document.
+/// Render a molecule's map as a standalone SVG document, ring or track.
+///
+/// **The family to reach for**, and the one the app's "Map SVG…" and
+/// `pl export` go through: it honours [`Options::shape`], whose default asks
+/// the molecule. `circular_*` and `linear_*` pin the shape instead, and are for
+/// a caller that means one specific figure — a cut map of a plasmid, say.
+pub fn map_svg(mol: &Molecule, opts: Options) -> (String, Report) {
+    map_svg_at(mol, opts, None)
+}
+
+/// As [`map_svg`], at a physical width in millimetres. See [`svg_at`].
+pub fn map_svg_at(mol: &Molecule, opts: Options, width_mm: Option<f64>) -> (String, Report) {
+    let (sc, report) = scene(mol, opts);
+    (svg_at(&sc, width_mm), report)
+}
+
+/// A molecule's map as a one-page PDF, ring or track. See [`map_svg`].
+pub fn map_pdf(mol: &Molecule, opts: Options) -> (Vec<u8>, Report, pdf::Report) {
+    map_pdf_at(mol, opts, None)
+}
+
+/// As [`map_pdf`], at a physical width in millimetres. See [`pdf::pdf_at`].
+pub fn map_pdf_at(
+    mol: &Molecule,
+    opts: Options,
+    width_mm: Option<f64>,
+) -> (Vec<u8>, Report, pdf::Report) {
+    let (sc, report) = scene(mol, opts);
+    let (bytes, pdf_report) = pdf::pdf_at(&sc, width_mm);
+    (bytes, report, pdf_report)
+}
+
+/// A molecule's map as a PNG, ring or track. See [`png_at`], including why this
+/// one can fail when the vector three cannot.
+pub fn map_png_at(
+    mol: &Molecule,
+    opts: Options,
+    width_mm: Option<f64>,
+    dpi: f64,
+    background: [u8; 3],
+) -> Result<(Vec<u8>, Report, raster::Report), Oversize> {
+    let (sc, report) = scene(mol, opts);
+    let (bytes, raster_report) = png_at(&sc, width_mm, dpi, background)?;
+    Ok((bytes, report, raster_report))
+}
+
+/// Render a molecule as a standalone SVG document, **as a ring**.
+///
+/// Pins [`Shape::Circular`], so a linear molecule still comes out as the ring
+/// with a gap in it that this crate has always drawn for one — see [`Shape`]
+/// for who wants that. A caller that wants the figure the molecule asks for
+/// wants [`map_svg`].
 pub fn circular_svg(mol: &Molecule, opts: Options) -> (String, Report) {
     circular_svg_at(mol, opts, None)
 }
 
 /// As [`circular_svg`], at a physical width in millimetres. See [`svg_at`].
-pub fn circular_svg_at(mol: &Molecule, opts: Options, width_mm: Option<f64>) -> (String, Report) {
-    let (sc, report) = scene(mol, opts);
-    (svg_at(&sc, width_mm), report)
+pub fn circular_svg_at(
+    mol: &Molecule,
+    mut opts: Options,
+    width_mm: Option<f64>,
+) -> (String, Report) {
+    opts.shape = Shape::Circular;
+    map_svg_at(mol, opts, width_mm)
 }
 
 /// Render a molecule as a one-page PDF.
@@ -1288,12 +1509,11 @@ pub fn circular_pdf(mol: &Molecule, opts: Options) -> (Vec<u8>, Report, pdf::Rep
 /// As [`circular_pdf`], at a physical width in millimetres. See [`pdf::pdf_at`].
 pub fn circular_pdf_at(
     mol: &Molecule,
-    opts: Options,
+    mut opts: Options,
     width_mm: Option<f64>,
 ) -> (Vec<u8>, Report, pdf::Report) {
-    let (sc, report) = scene(mol, opts);
-    let (bytes, pdf_report) = pdf::pdf_at(&sc, width_mm);
-    (bytes, report, pdf_report)
+    opts.shape = Shape::Circular;
+    map_pdf_at(mol, opts, width_mm)
 }
 
 /// Device pixels per scene unit, for a raster export at this size and
@@ -1515,17 +1735,61 @@ pub fn png_at(
     Ok((png::encode(&img, Some(dpi)), report))
 }
 
-/// A molecule's map as a PNG. See [`png_at`], including why this can fail.
+/// A molecule's map as a PNG, **as a ring**. See [`png_at`], including why this
+/// can fail, and [`circular_svg`] for why the shape is pinned.
 pub fn circular_png_at(
     mol: &Molecule,
-    opts: Options,
+    mut opts: Options,
     width_mm: Option<f64>,
     dpi: f64,
     background: [u8; 3],
 ) -> Result<(Vec<u8>, Report, raster::Report), Oversize> {
-    let (sc, report) = scene(mol, opts);
-    let (bytes, raster_report) = png_at(&sc, width_mm, dpi, background)?;
-    Ok((bytes, report, raster_report))
+    opts.shape = Shape::Circular;
+    map_png_at(mol, opts, width_mm, dpi, background)
+}
+
+/// Render a molecule as a standalone SVG document, **as a track**.
+///
+/// Pins [`Shape::Linear`], so a circular molecule comes out cut open — the cut
+/// map — with the figure saying so in its caption and [`Report::cut_open`] set.
+/// The set and the `_at` convention are [`circular_svg`]'s, so a caller asks
+/// for a linear figure at 90 mm and 600 dpi exactly as it asks for a round one.
+pub fn linear_svg(mol: &Molecule, opts: Options) -> (String, Report) {
+    linear_svg_at(mol, opts, None)
+}
+
+/// As [`linear_svg`], at a physical width in millimetres. See [`svg_at`].
+pub fn linear_svg_at(mol: &Molecule, mut opts: Options, width_mm: Option<f64>) -> (String, Report) {
+    opts.shape = Shape::Linear;
+    map_svg_at(mol, opts, width_mm)
+}
+
+/// A molecule as a one-page PDF, **as a track**. See [`linear_svg`].
+pub fn linear_pdf(mol: &Molecule, opts: Options) -> (Vec<u8>, Report, pdf::Report) {
+    linear_pdf_at(mol, opts, None)
+}
+
+/// As [`linear_pdf`], at a physical width in millimetres. See [`pdf::pdf_at`].
+pub fn linear_pdf_at(
+    mol: &Molecule,
+    mut opts: Options,
+    width_mm: Option<f64>,
+) -> (Vec<u8>, Report, pdf::Report) {
+    opts.shape = Shape::Linear;
+    map_pdf_at(mol, opts, width_mm)
+}
+
+/// A molecule as a PNG, **as a track**. See [`png_at`], including why this can
+/// fail, and [`linear_svg`] for why the shape is pinned.
+pub fn linear_png_at(
+    mol: &Molecule,
+    mut opts: Options,
+    width_mm: Option<f64>,
+    dpi: f64,
+    background: [u8; 3],
+) -> Result<(Vec<u8>, Report, raster::Report), Oversize> {
+    opts.shape = Shape::Linear;
+    map_png_at(mol, opts, width_mm, dpi, background)
 }
 
 /// A scene as SVG.

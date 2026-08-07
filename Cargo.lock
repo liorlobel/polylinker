@@ -2302,6 +2302,7 @@ version = "0.2.0"
 dependencies = [
  "pl-core",
  "pl-design",
+ "pl-draw",
  "pl-enzymes",
  "pl-features",
  "pl-gel",

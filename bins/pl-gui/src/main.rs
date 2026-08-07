@@ -3624,13 +3624,20 @@ impl App {
         // so; of the two artefacts the figure is the one that leaves the machine
         // and reaches a reader with no Enzymes tab to check against.
         //
-        // Two passes, because the line has to name how many labels the ring
+        // Two passes, because the line has to name how many labels the figure
         // could not fit and only placing them answers that. Exact, not
-        // approximate: the note reaches `centre_room` -> `keep_clear` -> the
-        // ruler's radius and nothing there feeds back into the reserve, the
-        // geometry or the packing, so the first pass's counts describe the
-        // second pass's picture. `the_note_does_not_change_what_it_counts` holds
-        // that rather than trusting it.
+        // approximate — and exact for a different reason in each figure. On the
+        // ring the note reaches `centre_room` -> `keep_clear` -> the ruler's
+        // radius and nothing there feeds back into the reserve, the geometry or
+        // the packing. On the TRACK it reaches the caption, which is one of the
+        // four terms fixing how many rows of labels there is room for, so
+        // `pl_draw::linear::scene` reserves the note's line in that arithmetic
+        // whether or not there is a note. Without that, a crowded track reported
+        // 33 named enzymes and then drew 24 — and `Disclosure::closes` passes on
+        // both, since the arithmetic closes over numbers taken from the wrong
+        // picture. `the_note_does_not_change_what_it_counts` and its
+        // `..._on_a_track_either` sibling hold the two halves rather than
+        // trusting them.
         let mut told = Self::figure_disclosure(d.digest.results(), set);
         let (_, first) = pl_draw::scene(d.molecule(), opts.clone());
         told.labelled = first.sites_named;
@@ -3698,8 +3705,11 @@ impl App {
         };
         let set = self.enzyme_set;
         let width_mm = self.layout.figure_mm;
+        // `map_pdf_at`, not `circular_pdf_at`: the shape follows the molecule.
+        // "Map PDF…" on a PCR product used to write a gapped ring, and the map
+        // the user was looking at on screen when they clicked it was a track.
         let (bytes, drawn, font) =
-            pl_draw::circular_pdf_at(d.molecule(), Self::figure_options(d, set), width_mm);
+            pl_draw::map_pdf_at(d.molecule(), Self::figure_options(d, set), width_mm);
 
         let mut note = Self::figure_note(&drawn);
         if !font.unencodable.is_empty() {
@@ -3804,8 +3814,10 @@ impl App {
         };
         let set = self.enzyme_set;
         let width_mm = self.layout.figure_mm;
+        // See `export_map_pdf`: the shape follows the molecule, and the PNG and
+        // EPS paths already did because they go through `pl_draw::scene`.
         let (svg, drawn) =
-            pl_draw::circular_svg_at(d.molecule(), Self::figure_options(d, set), width_mm);
+            pl_draw::map_svg_at(d.molecule(), Self::figure_options(d, set), width_mm);
 
         match atomic::write(&path, svg) {
             Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
@@ -5407,6 +5419,27 @@ impl App {
                     // pixel-for-pixel the screen — `pl-draw` puts every feature
                     // on one ring and carries strand in the arrowhead, where the
                     // map stacks lanes inside and outside the backbone.
+                    //
+                    // THE SAME IS TRUE OF THE TRACK, and worth writing down
+                    // rather than leaving to be rediscovered: since 2026-08-07 a
+                    // linear molecule exports as a horizontal track instead of a
+                    // gapped ring, so the SHAPE now agrees with `map::draw_linear`
+                    // where it did not before, and the two are still two
+                    // implementations. What differs, measured against the code
+                    // rather than guessed: `map.rs` stacks features into lanes by
+                    // strand and `pl-draw` overprints them in one band; `map.rs`
+                    // writes a feature's name inside a box wider than 34 pt and
+                    // `pl-draw` always uses a leader to a row above; `map.rs`
+                    // draws a fixed eleven ruler ticks with a number on every
+                    // other one and `pl-draw` picks a round step and fits as many
+                    // as the numbers allow; `map.rs` puts every unique cutter in
+                    // ONE row of 58 pt slots while `pl-draw` folds coincident
+                    // cuts onto one tick and spills the rest to further rows; and
+                    // `map.rs` ends a feature box at the near edge of its last
+                    // base where `pl-draw` ends it at the far edge, a difference
+                    // of one base. The caption, the bp line and the disclosure
+                    // exist only in the export. Closing that is a `Scene`-on-
+                    // screen change, not a rename, and it is not done.
                     //
                     // "Export figure", not "Export map", because there are two
                     // pictures now and the menu title cannot name both. THE
@@ -18055,6 +18088,50 @@ mod tests {
     /// output" is this project's stated selling point and a GUI that produced a
     /// nearly-identical figure would break it in the way nobody notices — two
     /// panels of one figure, exported from two surfaces, that do not line up.
+    /// PROVEN TO FAIL at 6fed367: `figure_options` builds the `Options` every
+    /// map exporter uses, and a `shape` pinned there — or a default that read
+    /// "circular unless told otherwise" — would send a PCR product out as a
+    /// gapped ring from all four items on the menu at once.
+    ///
+    /// It pins the OPTIONS and the scene, not the four exporters' call sites;
+    /// `export_map_svg` and `export_map_pdf` open a file dialog and cannot be
+    /// driven from a test. Those two now call `pl_draw::map_*`, and the PNG and
+    /// EPS paths go through `pl_draw::scene` directly, so all four resolve the
+    /// shape in the one place this test covers.
+    #[test]
+    fn the_apps_figure_is_the_shape_the_molecule_is() {
+        let linear = pl_core::Molecule {
+            name: "amplicon".into(),
+            seq: b"AAAAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCCGGGG".to_vec(),
+            topology: pl_core::Topology::Linear,
+            ..Default::default()
+        };
+        let circular = pl_core::Molecule {
+            topology: pl_core::Topology::Circular,
+            ..linear.clone()
+        };
+        for (mol, want_ring) in [(linear, false), (circular, true)] {
+            let mut app = App::blank();
+            app.bench.set(Document::of_molecule(mol));
+            let d = app.document().expect("a molecule");
+            let opts = App::figure_options(d, app.enzyme_set);
+            assert_eq!(
+                opts.shape,
+                pl_draw::Shape::Auto,
+                "the app pinned a shape instead of asking the molecule"
+            );
+            let (sc, _) = pl_draw::scene(d.molecule(), opts);
+            let ring = sc.items.iter().any(|i| match i {
+                pl_draw::Item::Circle { .. } => true,
+                pl_draw::Item::Path { segs, .. } => {
+                    segs.iter().any(|s| matches!(s, pl_draw::Seg::Arc { .. }))
+                }
+                pl_draw::Item::Text { .. } => false,
+            });
+            assert_eq!(ring, want_ring, "the exported figure is the wrong shape");
+        }
+    }
+
     #[test]
     fn the_apps_figure_is_the_same_bytes_as_the_command_lines() {
         let mut app = App::blank();

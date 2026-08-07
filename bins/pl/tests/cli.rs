@@ -2522,3 +2522,163 @@ fn the_update_verb_states_what_it_sends_before_it_is_run() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// PROVEN TO FAIL at 6fed367, on every one of the four formats.
+///
+/// `pl export` named the circle in the call — `circular_svg`, `circular_pdf`,
+/// `circular_png_at` — so a PCR product, a linearised vector, a gene fragment,
+/// a gBlock, every FASTA and every assembly came out as a C-shaped ring with a
+/// gap in it. The gap is honest about topology and is still the wrong picture
+/// for a construct laid out end to end.
+///
+/// EPS is in here because it is the one format that would have diverged
+/// silently: it has always gone through `pl_draw::scene` and so followed the
+/// topology the moment `scene` learned to, while the other three would have
+/// kept drawing rings — `--eps` and `--pdf` of the same file, different shapes.
+#[test]
+fn a_linear_molecule_exports_a_linear_figure_in_every_format() {
+    let dir = scratch("export-linear");
+    // A FASTA, because that is the population: every FASTA opens linear.
+    write(
+        &dir,
+        "product.fa",
+        &format!(">amplicon\n{}\n", "ACGTAGCTAGCTAGGCTA".repeat(60)),
+    );
+    write(&dir, "vector.gb", &one_site_plasmid());
+
+    let svg = run(&dir, &["export", "product.fa", "--stdout"]);
+    assert!(svg.status.success(), "{}", stderr(&svg));
+    let svg = stdout(&svg);
+    assert!(
+        !svg.contains("<circle"),
+        "a PCR product was exported as a circle"
+    );
+    // No arc command in any path. Scanned inside the `d` attributes rather than
+    // over the whole document, because the root's `font-family` names Arial and
+    // a bare search for "A" finds it.
+    for d in svg.split("d=\"").skip(1) {
+        let d = d.split('"').next().unwrap_or("");
+        assert!(
+            !d.contains('A') && !d.contains('a'),
+            "a PCR product was exported with an arc in its path data: {d:.80}"
+        );
+    }
+
+    // The circular control, in the same run: it must be untouched.
+    let round = run(&dir, &["export", "vector.gb", "--stdout"]);
+    assert!(round.status.success(), "{}", stderr(&round));
+    assert!(
+        stdout(&round).contains("<circle"),
+        "a plasmid stopped being drawn as a ring"
+    );
+
+    // EPS and PDF are binary-ish, so they are judged on shape rather than text:
+    // the ring's arcs reach `curveto` in PostScript and `c` in PDF, both of
+    // which a track has no use for. Written to a file, since `--stdout` is one
+    // stream and these are two runs.
+    let eps = run(&dir, &["export", "product.fa", "--eps", "--stdout"]);
+    assert!(eps.status.success(), "{}", stderr(&eps));
+    let eps = stdout(&eps);
+    assert!(
+        !eps.contains("curveto"),
+        "the EPS of a linear molecule still has arcs in it"
+    );
+    assert!(eps.contains("%!PS-Adobe"), "not an EPS at all");
+
+    for fmt in ["--pdf", "--png"] {
+        let o = run(&dir, &["export", "product.fa", fmt, "--outdir", "."]);
+        assert!(o.status.success(), "{fmt}: {}", stderr(&o));
+    }
+    let pdf = std::fs::read(dir.join("product.pdf")).expect("the pdf");
+    assert!(pdf.starts_with(b"%PDF-"), "not a PDF");
+    assert!(std::fs::read(dir.join("product.png"))
+        .expect("the png")
+        .starts_with(&[0x89, b'P']));
+}
+
+/// The same input, rendered by two separate PROCESSES, is the same bytes.
+///
+/// `crates/pl-draw` asserts this inside one process, over eight renders in a
+/// loop. That is the weaker half: everything a process shares with itself — a
+/// warmed allocator, one `RandomState` seed, one CPU's floating-point mode, one
+/// environment and locale — is held constant by construction, so a figure that
+/// depended on any of it would pass. Two `pl export` runs share none of it. A
+/// `HashSet` anywhere in the label path reseeds per process and would show here
+/// and nowhere else.
+///
+/// BOTH SHAPES, all four formats. The track is the newer path and the one with
+/// a packer that re-offers what a row dropped, but the ring is here too: a
+/// determinism check covering only the new code says nothing about a regression
+/// in the old one.
+///
+/// `--sites all` on a deliberately cramped canvas, so the runs go through the
+/// DROP paths. `labels_hidden`, `sites_hidden` and the spill `place_rows`
+/// returns are lists a reader sees and an unordered container would reorder
+/// without moving one coordinate; a figure with room for everything never
+/// reaches them.
+#[test]
+fn two_processes_render_the_same_molecule_to_the_same_bytes() {
+    let dir = scratch("export-determinism");
+    // A circle and a line out of the same bases, so the only difference between
+    // the two figures is the one under test.
+    let mut seq = "ACGT".repeat(300);
+    for (i, site) in ["GAATTC", "GGATCC", "AAGCTT", "GCGGCCGC", "CTCGAG", "GTCGAC"]
+        .iter()
+        .enumerate()
+    {
+        let at = 200 + i * 180;
+        seq.replace_range(at..at + site.len(), site);
+    }
+    write(&dir, "round.gb", &genbank("pDETERM", &seq, true));
+    write(&dir, "flat.gb", &genbank("pDETERM", &seq, false));
+    for out in ["a", "b"] {
+        std::fs::create_dir_all(dir.join(out)).expect("an output directory");
+    }
+
+    for stem in ["round", "flat"] {
+        let input = format!("{stem}.gb");
+        for (flag, ext) in [
+            ("", "svg"),
+            ("--pdf", "pdf"),
+            ("--eps", "eps"),
+            ("--png", "png"),
+        ] {
+            let mut wrote: Vec<Vec<u8>> = Vec::new();
+            let mut said: Vec<String> = Vec::new();
+            for out in ["a", "b"] {
+                let mut args: Vec<&str> = vec![
+                    "export", &input, "--sites", "all",
+                    // Cramped on purpose: this is what reaches the drop paths.
+                    "--width", "300", "--height", "220", "--outdir", out,
+                ];
+                if !flag.is_empty() {
+                    args.push(flag);
+                }
+                let o = run(&dir, &args);
+                assert!(o.status.success(), "{stem} {ext}: {}", stderr(&o));
+                // stderr carries the disclosure line, whose counts are read off
+                // the figure, so it is part of what has to be stable.
+                said.push(stderr(&o));
+                wrote.push(
+                    std::fs::read(dir.join(out).join(format!("{stem}.{ext}")))
+                        .unwrap_or_else(|e| panic!("{out}/{stem}.{ext}: {e}")),
+                );
+            }
+            assert!(!wrote[0].is_empty(), "{stem} {ext} wrote nothing");
+            assert_eq!(said[0], said[1], "{stem} {ext}: what it said moved");
+            assert_eq!(
+                wrote[0],
+                wrote[1],
+                "{stem} {ext}: two processes wrote {} and {} bytes and they differ",
+                wrote[0].len(),
+                wrote[1].len()
+            );
+        }
+    }
+    // And the two shapes really were two different pictures, so the loop above
+    // did not compare one figure with itself twice.
+    let round = std::fs::read(dir.join("a").join("round.svg")).expect("round");
+    let flat = std::fs::read(dir.join("a").join("flat.svg")).expect("flat");
+    assert_ne!(round, flat, "the ring and the track came out identical");
+    let _ = std::fs::remove_dir_all(&dir);
+}

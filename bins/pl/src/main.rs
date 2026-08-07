@@ -1893,13 +1893,21 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             ..base_opts.clone()
         };
         // Built in two passes, because the line has to name how many labels the
-        // ring could not fit and only placing them answers that.
+        // figure could not fit and only placing them answers that.
         //
-        // Exact rather than approximate, and provably so: the note reaches only
-        // `centre_room` -> `keep_clear` -> the ruler's radius, and nothing there
-        // feeds back into the reserve, the geometry or the packing. So pass one's
-        // counts describe pass two's picture. `the_note_does_not_change_what_it_counts`
-        // asserts that rather than leaving it as a claim in a comment.
+        // Exact rather than approximate, and for a DIFFERENT reason in each of
+        // the two figures. On the ring the note reaches only `centre_room` ->
+        // `keep_clear` -> the ruler's radius, and nothing there feeds back into
+        // the reserve, the geometry or the packing. On the track it reaches the
+        // caption, which is one of the four terms deciding how many rows of
+        // labels there is room for — so `linear::scene` reserves the note's line
+        // in that arithmetic whether or not a note exists, which is the one
+        // thing in that figure deliberately not measured from what is drawn.
+        // Without the reservation, pass one on a 6 kb track at 720 x 180 counted
+        // 33 named enzymes and the figure that went out named 24, with
+        // `Disclosure::closes` passing on both. Both halves are asserted, by
+        // `the_note_does_not_change_what_it_counts` and its `..._on_a_track_either`
+        // sibling, rather than left as a claim in a comment.
         let note = {
             let (_, first) = pl_draw::scene(&mol, opts.clone());
             let d = pl_draw::ring::Disclosure {
@@ -1922,6 +1930,14 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         }
         opts.note = note;
 
+        // `map_*`, NOT `circular_*`: the figure is whichever shape the molecule
+        // is. Every FASTA, every assembly and every PCR product is linear, and
+        // until `pl_draw::linear` existed all four formats wrote them as a ring
+        // with a notch in it. The EPS branch has always gone through
+        // `pl_draw::scene` and so followed the topology the moment `scene`
+        // learned to; the other three named the circle in the call and would
+        // have kept drawing one, which would have made `--eps` a different
+        // picture from `--pdf` of the same file.
         let as_pdf = a.has("pdf");
         let as_eps = a.has("eps");
         let as_png = a.has("png");
@@ -1931,7 +1947,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             let (text, f) = pl_draw::eps::to_eps(&scene, fit.map_or(1.0, |f| f.scale));
             (text.into_bytes(), d, Some(f))
         } else if as_pdf {
-            let (b, d, f) = pl_draw::circular_pdf(&mol, opts.clone());
+            let (b, d, f) = pl_draw::map_pdf(&mol, opts.clone());
             (b, d, Some(f))
         } else if as_png {
             // White, matching the background `--check-contrast` audits against
@@ -1945,9 +1961,8 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             // error carries the dimensions, the ceiling and a dpi that fits.
             // The whole run stops rather than this one file, because the flags
             // that caused it are the same for every input.
-            let (b, d, r) =
-                pl_draw::circular_png_at(&mol, opts.clone(), width_mm, dpi, [255, 255, 255])
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
+            let (b, d, r) = pl_draw::map_png_at(&mol, opts.clone(), width_mm, dpi, [255, 255, 255])
+                .map_err(|e| format!("{}: {e}", path.display()))?;
             // Neither of these is allowed to be silent. A label that lost a
             // glyph and a colour that did not parse are both defects in the
             // picture that nothing downstream will mention.
@@ -1965,7 +1980,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             }
             (b, d, None)
         } else {
-            let (s, d) = pl_draw::circular_svg(&mol, opts.clone());
+            let (s, d) = pl_draw::map_svg(&mol, opts.clone());
             (s.into_bytes(), d, None)
         };
 
