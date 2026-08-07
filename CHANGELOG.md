@@ -25,6 +25,10 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-08-07
+
 ### Added
 
 - **Linear molecules get a linear figure.** Exporting a PCR product, a
@@ -547,7 +551,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.0
 [0.2.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.2.0
 [0.1.3]: https://github.com/liorlobel/polylinker/releases/tag/v0.1.3
 [0.1.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.1.2
