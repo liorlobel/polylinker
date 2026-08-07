@@ -8,8 +8,8 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 153,782 lines of Rust, 92,252 of it dependency-free (141 `.rs`
-> files under `crates/` and `bins/`), with 1,893 `#[test]` functions and a
+> crates and 154,069 lines of Rust, 92,252 of it dependency-free (141 `.rs`
+> files under `crates/` and `bins/`), with 1,895 `#[test]` functions and a
 > 68-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-07, and recounted on every test run since:
