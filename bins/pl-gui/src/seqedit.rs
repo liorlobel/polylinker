@@ -744,19 +744,39 @@ impl PasteReport {
         if let Some(s) = &self.suspect {
             lines.push(s.clone());
         }
-        if !self.rejected.is_empty() {
-            lines.push("Characters that are not nucleotide codes:".into());
-            lines.extend(self.rejected.iter().take(12).map(|r| {
-                format!(
-                    "U+{:04X} '{}' ×{}, first at position {}",
-                    r.ch as u32, r.ch, r.count, r.first_at
-                )
-            }));
-            if self.rejected_kinds > 12 {
-                lines.push(format!("and {} more kinds", self.rejected_kinds - 12));
-            }
+        if let Some(q) = self.rejected_question() {
+            lines.push(q);
         }
         lines.join("\n")
+    }
+
+    /// The characters that are not nucleotide codes, each named with the
+    /// position it first appears at.
+    ///
+    /// Split out of [`PasteReport::consent_question`] because File ▸ New asks a
+    /// DIFFERENT question about the same finding. A paste into an open document
+    /// offers to insert the bases and discard the rest, because the user is
+    /// looking at a molecule and can undo; `newdoc` refuses outright, because
+    /// there is no document yet, the text is still in the box, and creating a
+    /// molecule with characters quietly removed from it is a molecule nobody
+    /// can check afterwards. One formatter for both, so the two cannot start
+    /// quoting positions differently — the position is the only part of this
+    /// message a user can act on.
+    pub fn rejected_question(&self) -> Option<String> {
+        if self.rejected.is_empty() {
+            return None;
+        }
+        let mut lines = vec!["Characters that are not nucleotide codes:".to_string()];
+        lines.extend(self.rejected.iter().take(12).map(|r| {
+            format!(
+                "U+{:04X} '{}' ×{}, first at position {}",
+                r.ch as u32, r.ch, r.count, r.first_at
+            )
+        }));
+        if self.rejected_kinds > 12 {
+            lines.push(format!("and {} more kinds", self.rejected_kinds - 12));
+        }
+        Some(lines.join("\n"))
     }
 }
 
@@ -856,6 +876,104 @@ fn genbank_origin_line(text: &str) -> Option<usize> {
     (header || terminated).then_some(oi)
 }
 
+/// How many digit characters this text carries, if every line of it is a
+/// coordinate followed by bases — a GenBank `ORIGIN` block with its header,
+/// its `ORIGIN` line and its `//` gone.
+///
+/// It is GenBank's own layout with the surrounding record taken away:
+/// `genbank::write_reporting` emits a right-aligned position in the first nine
+/// columns and then groups of ten bases, and dragging over the sequence in a
+/// record without also taking the `ORIGIN` line above it or the `//` below it
+/// leaves exactly this on the clipboard — with nothing left in the text to say
+/// the numbers are coordinates. `genbank_origin_line` above cannot help, because
+/// what it corroborates on is precisely the part that is no longer there.
+///
+/// CORROBORATED ON EVERY LINE, the way [`genbank_origin_line`] is corroborated
+/// and for a sharper reason: the plain-text branch below deliberately REJECTS
+/// digits, because "`ACGT1234` is junk or a truncated identifier". Switching
+/// that off needs a fact about the whole paste rather than about one character,
+/// so one line that is not `<number> <bases>` means the digits here are not
+/// coordinates and nothing is stripped. `ACGT1234` has no leading number and is
+/// unaffected either way.
+///
+/// The EMBL layout, which puts its count at the END of the line, is NOT
+/// recognised. It would have to accept a trailing number after the bases, which
+/// is also the shape of `ACGT 1234` — the one case the paragraph above exists to
+/// protect — and a rule that cannot tell those apart is worse than a rule that
+/// declines to try.
+///
+/// # And the numbers have to COUNT, or a list of oligos becomes a chimera
+///
+/// The shape test alone accepts
+///
+/// ```text
+/// 1 GAATTCACGT
+/// 2 GGATCCACGT
+/// ```
+///
+/// which is not a listing at all: it is a numbered list of two DIFFERENT
+/// oligos, and reading its digits as coordinates concatenates them into one
+/// 20-mer. That is the same fabricated chimera [`sanitise_paste`] refuses two
+/// FASTA records for, arrived at by inference instead of by concatenation, and
+/// it would arrive with an explanatory `dropped` line rather than a refusal.
+///
+/// So each number is checked against the one before it: a position is a
+/// position, so line `k+1` must begin exactly `bases on line k` further along.
+/// A real block satisfies this by construction — `1`, then `21` after twenty
+/// bases — whatever the group size or how the last line ends, and it does not
+/// require the first number to be 1, because a drag through the middle of a
+/// record starts wherever it starts. `1, 2, 3` fails on the first pair and the
+/// digits go back to being rejected characters, which is the conservative
+/// answer: the user is asked rather than second-guessed.
+fn numbered_listing(text: &str) -> Option<usize> {
+    let mut digits = 0usize;
+    let mut lines = 0usize;
+    // Where the NEXT line must start, once one line has been read.
+    let mut expect: Option<u64> = None;
+    for l in text.lines().filter(|l| !l.trim().is_empty()) {
+        lines += 1;
+        let t = l.trim_start();
+        let n = t.chars().take_while(|c| c.is_ascii_digit()).count();
+        if n == 0 {
+            return None;
+        }
+        // The number is ASCII digits, so `n` is a byte count as well as a
+        // character count and this slice cannot split a character.
+        let rest = &t[n..];
+        // A SEPARATOR IS REQUIRED. `1acgt` is a single token, and reading its
+        // leading digit as a coordinate is the guess this whole function is
+        // arranged to avoid.
+        if !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+            return None;
+        }
+        // Bases and layout only after it. A second number on the line (the
+        // EMBL form, or a range like `1 100 acgt`) fails here, which is the
+        // conservative answer: nothing is stripped and the digits are reported
+        // as rejected characters, so the user is told rather than second-guessed.
+        if !rest.chars().all(|c| is_base(c) || c.is_ascii_whitespace()) {
+            return None;
+        }
+        // ...and there has to be something for the number to be numbering.
+        let count = rest.chars().filter(|&c| is_base(c)).count() as u64;
+        if count == 0 {
+            return None;
+        }
+        // A coordinate no `u64` can hold is not a coordinate on any molecule
+        // anyone has, so it is declined rather than saturated: a `parse` that
+        // fell back to a default would make the arithmetic below agree with
+        // itself about a number that was never read.
+        let at: u64 = t[..n].parse().ok()?;
+        if let Some(want) = expect {
+            if at != want {
+                return None;
+            }
+        }
+        expect = Some(at.checked_add(count)?);
+        digits += n;
+    }
+    (lines > 0).then_some(digits)
+}
+
 /// Everything a pasted string would put into the sequence, and everything it
 /// would not.
 ///
@@ -882,6 +1000,12 @@ pub fn sanitise_paste(text: &str) -> PasteReport {
     // about the surrounding format and not about the digit.
     let fasta_headers = text.lines().filter(|l| l.starts_with('>')).count();
     let mut strip_digits = false;
+    // Whether the text SAID what it is. Separate from `strip_digits`, which the
+    // two were until a numbered listing became recognised structure: a listing
+    // strips digits and declares nothing, because its shape is a layout and not
+    // a claim about the alphabet. The prose guard at the end of this function
+    // asks this one, so a listing of English words is still questioned.
+    let mut declared = false;
     let body: String = if fasta_headers > 1 {
         report.refused = Some(format!(
             "That is {fasta_headers} FASTA records. Concatenating them would fabricate a \
@@ -935,6 +1059,7 @@ pub fn sanitise_paste(text: &str) -> PasteReport {
         // (`genbank.rs`: drop ASCII whitespace and ASCII digits). Reusing the
         // rule rather than restating it is the point — a second copy drifts.
         strip_digits = true;
+        declared = true;
         let block: Vec<&str> = text
             .lines()
             .skip(oi + 1)
@@ -979,6 +1104,19 @@ pub fn sanitise_paste(text: &str) -> PasteReport {
         // says they are coordinates. `ACGT1234` is junk or a truncated
         // identifier, and unconditional digit-stripping is how a number in a
         // pasted note vanishes with nothing to notice.
+        //
+        // A numbered listing is the one plain-text shape where the structure
+        // does say so, on every line and about the whole paste rather than
+        // about one character — see `numbered_listing`, which is where that
+        // argument is written out.
+        if let Some(d) = numbered_listing(&text) {
+            strip_digits = true;
+            report.dropped.push(format!(
+                "read as a numbered sequence listing; {} position number character{}",
+                fmt_int(d as u64),
+                if d == 1 { "" } else { "s" }
+            ));
+        }
         let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
         if lines > 1 {
             // A wrapped body copied out of Word and a spreadsheet column of
@@ -1057,9 +1195,11 @@ pub fn sanitise_paste(text: &str) -> PasteReport {
     kinds.truncate(MAX_REJECTED_KINDS);
     report.rejected = kinds;
 
-    // Is this sequence at all? Only asked of plain text: a FASTA record and an
-    // ORIGIN block have already said what they are.
-    if !strip_digits && fasta_headers == 0 {
+    // Is this sequence at all? Only asked where nothing has said so: a FASTA
+    // record and an ORIGIN block have already declared themselves. A NUMBERED
+    // LISTING HAS NOT, and is asked — its shape is a layout, and a numbered list
+    // of English words is exactly as much prose as an unnumbered one.
+    if !declared && fasta_headers == 0 {
         let n = report.bases.len();
         if n >= AMBIGUITY_FLOOR && (report.ambiguous as f64) > AMBIGUITY_LIMIT * n as f64 {
             report.suspect = Some(format!(

@@ -336,7 +336,32 @@ fn where_in_the_app(topic: &str) -> Option<&'static str> {
              beneath, with these conditions on its hover. The Primers tab reports one per \
              binding site, over the annealed footprint only.",
         ),
-        "orfs" => Some("In this app: the ORF track under the Sequence tab."),
+        // TWO HALVES, because the page is titled "Open reading frames and
+        // TRANSLATION" and only the first half had a pointer. The second half
+        // stopped being read-only on 2026-08-07: the reader of a methods
+        // paragraph about genetic codes is exactly the reader who wants the
+        // letters, and until that day the only way to get them was to retype
+        // them off the screen.
+        //
+        // All three doors are named because they give three DIFFERENT readings
+        // of the same bases, and the difference is the thing this page's own
+        // Limits clause is about. A feature carries its own `/transl_table` and
+        // `/codon_start`; a selection carries neither and is read under the
+        // document's table. Naming one door would have made the other two look
+        // like the same answer arrived at differently.
+        //
+        // The labels are quoted from `main.rs` rather than remembered, and
+        // `the_help_page_quotes_button_labels_that_exist` reads that file — the
+        // same guard the "Check for new releases" sentence is under, for the
+        // reason `where_in_the_app`'s own header gives about "Design primers…".
+        "orfs" => Some(
+            "In this app: the ORF track under the Sequence tab, and the amino-acid track \
+             beside it. To take the residues away: \"Copy protein\" beside the sequence \
+             readout (Ctrl+Shift+P) reads the selection, \"Copy protein\" in the Features \
+             toolbar reads the selected feature under its own /transl_table and \
+             /codon_start, and \"Protein FASTA…\" under Save writes every reading in the \
+             document. Every record names the table that produced it.",
+        ),
         "digest" => Some("In this app: the Enzymes tab, and the cut marks on the map."),
         "sanger" => Some("In this app: the Reads tab."),
         // Not a menu item: the button sits beside the selection readout and is
@@ -530,6 +555,88 @@ mod tests {
         );
         // And a topic with no panel says nothing rather than guessing.
         assert_eq!(where_in_the_app("checksum"), None);
+    }
+
+    /// Every control this page names by its label is a control that exists.
+    ///
+    /// `where_in_the_app`'s own header claims the destinations were "READ OFF
+    /// THE CODE" and the `design` arm says its label is "checked against
+    /// `main.rs`'s own button label rather than remembered". **Nothing checked
+    /// it.** The About page has had exactly this guard for "Check for new
+    /// releases" since it was written, and the pointers underneath it — which
+    /// are the sentences that send a user hunting — had none, which is the
+    /// same species of comfortable prose this whole module exists to correct.
+    ///
+    /// A user told to click something that is not there is worse off than one
+    /// told nothing: they go looking, and the app is the thing that lied.
+    ///
+    /// **THE COMMENTS ARE STRIPPED FIRST, and that is not fussiness.** The
+    /// first version of this searched `main.rs` whole, and renaming the real
+    /// button from `"Protein FASTA…"` to `"Export proteins…"` left it GREEN:
+    /// `main.rs:3303` is a doc comment that quotes the old label, so a check
+    /// meant to prove a control exists was satisfied by prose about the
+    /// control. That is the same defect one level up, and it would have made
+    /// this test the thing that certified the lie. `"Copy protein"` has the
+    /// identical shape — three comments name it and two `ui.button` /
+    /// `Button::new` calls create it.
+    ///
+    /// Line-based, dropping lines whose trimmed start is `//`: both `//` and
+    /// `///` go, a string containing `//` mid-line does not, and this crate has
+    /// no `/* */` anywhere. The label search then runs over code only.
+    ///
+    /// PROVEN TO FAIL twice, once for each half, with the whole module re-run
+    /// each time. Renaming the button in `main.rs` and leaving this page alone:
+    ///
+    /// ```text
+    /// ---- help::tests::the_help_page_quotes_button_labels_that_exist stdout ----
+    /// the "orfs" pointer sends a user to "Protein FASTA…"; no widget in
+    ///   main.rs carries that label
+    /// ```
+    ///
+    /// ...and the other way, changing the pointer to name `"Export protein…"`:
+    ///
+    /// ```text
+    /// the "orfs" pointer stopped quoting "Protein FASTA…": In this app: the
+    ///   ORF track under the Sequence tab, and the amino-acid track beside it…
+    /// ```
+    #[test]
+    fn the_help_page_quotes_button_labels_that_exist() {
+        let main = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("main.rs"),
+        )
+        .expect("bins/pl-gui/src/main.rs");
+        let code: String = main
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (topic, label) in [
+            ("design", "Design primers…"),
+            ("orfs", "Copy protein"),
+            ("orfs", "Protein FASTA…"),
+        ] {
+            let says = where_in_the_app(topic).expect("a pointer");
+            assert!(
+                says.contains(&format!("\"{label}\"")),
+                "the {topic:?} pointer stopped quoting {label:?}: {says}"
+            );
+            assert!(
+                code.contains(&format!("\"{label}\"")),
+                "the {topic:?} pointer sends a user to {label:?}; no widget in main.rs \
+                 carries that label"
+            );
+        }
+        // The chord as well as the labels. It is decided in `sequence_keys` and
+        // written nowhere a string search can reach, so this asserts the two
+        // halves that make the chord what it is rather than a literal.
+        let orfs = where_in_the_app("orfs").expect("a pointer");
+        assert!(orfs.contains("Ctrl+Shift+P"), "{orfs}");
+        assert!(
+            main.contains("egui::Key::P if cmd && shift"),
+            "the Help page advertises Ctrl+Shift+P and nothing in main.rs binds it"
+        );
     }
 
     /// The version is stamped, and says so when it cannot be.

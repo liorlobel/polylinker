@@ -27,6 +27,66 @@ which.
 
 ### Added
 
+- **File ▸ New (Ctrl+N): a molecule that never came from a file.** Every door
+  into the app was a file, so bases that arrive as bases — a gBlock in an email,
+  a synthesis vendor's plain sequence, 300 bp pasted into a message — had to be
+  written out as a FASTA in a text editor before Polylinker would look at them.
+  The dialog takes a name and a block of bases and makes a document: line breaks
+  and indentation, a FASTA header line, the coordinates off a numbered sequence
+  listing, lower case and U are all accepted, and it says on screen what it
+  ignored rather than dropping characters quietly. Anything that is not a
+  nucleotide is **refused**, with the character and the position it first appears
+  at, instead of being silently removed — a molecule with a hole in it is one
+  nobody can check afterwards. **Circular or linear is chosen at creation**,
+  because it changes the digest, the origin-crossing features and the gel, and
+  because FASTA has no field to say it in. The bases go in through the same
+  content-sniffed loader every file uses, so the new document undoes, autosaves,
+  gets annotated on open and prompts for a location when you save it, exactly
+  like one read from disk.
+
+- **You can take the protein out of the desktop app.** It has painted a
+  six-frame amino-acid track since 0.2.0 and there was no way to get a residue
+  string onto the clipboard or into a file — so the most routine downstream step
+  there is, pasting a protein into BLAST or a structure predictor or a
+  colleague's email, ran through retyping it off the screen. There are now three
+  doors, and they share one translator with the track rather than adding a
+  second: **Copy protein** beside the sequence readout (Ctrl+Shift+P) takes the
+  selection's reading, **Copy protein** in the Features toolbar takes the
+  selected feature's, and **Save ▸ Protein FASTA…** writes every reading the
+  document has plus the selection, one record each, through the same atomic
+  writer every other save uses.
+
+  **The genetic code travels with the protein.** Polylinker offers all 27 NCBI
+  tables with a per-feature `/transl_table` override, and thirteen of the 27 do
+  not treat `TGA` as a stop — so a residue string on its own does not determine
+  its own bases, and a protein produced under table 11 and pasted somewhere that
+  assumes table 1 is a wrong answer that looks right. Every header carries
+  `transl_table=`, GenBank's own spelling of the number, alongside the reading's
+  location in GenBank's own notation: `location=complement(join(1976..3310,3311..3397))`
+  says the strand, the bases and the fact that there is more than one piece. The
+  clipboard gets a FASTA record for the same reason rather than bare letters —
+  it is the only form in which the number can travel, and everything that takes
+  a protein takes FASTA.
+
+  **The awkward cases are stated rather than guessed at.** A selection whose
+  length is not a multiple of three says how many bases were left over; a
+  reverse-strand or multi-segment reading says so in its location and again in
+  words; an internal stop codon is counted and its residues named; a partial CDS
+  running off the end of a linear molecule says how many bases the annotation
+  claims that the molecule does not have, which was previously clamped in
+  silence and read as a merely shorter protein; and an initiator that does not
+  spell M — `GTG` under table 11, `V` under table 1 — says that the letter is a
+  substitution and not what the codon spells.
+
+  Help ▸ "Open reading frames and translation" now says where all three doors
+  are, which is the half of that page that had a method and no location. Its
+  methods paragraph — the one written to be pasted into a paper — also states
+  the residue convention for the first time: the first codon of a reading is
+  written `M` wherever the code permits initiation there whatever the codon
+  spells, and a termination codon is written `*`. Both `pl orfs` and the desktop
+  app have always done that, through the same `translate_cds`, and neither said
+  so.
+
 - **The desktop app can now find where an oligo binds.** Paste a primer into the
   new **Primers** tab and it lists every place that oligo anneals on the open
   molecule, on both strands, including sites that cross the origin of a circular

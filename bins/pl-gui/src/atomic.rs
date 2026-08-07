@@ -13,9 +13,12 @@
 //! document stays dirty and in memory, so a retry survives; the file that was
 //! being overwritten does not.
 //!
-//! Eight picker-driven save sites exist today — `grep -c '\.save_file()'` over
-//! `main.rs` — and all eight come here. Seven of them predate this module; the
-//! eighth, `export_map_png`, was written against it.
+//! Nine picker-driven save sites exist today — `grep -c '\.save_file()'` over
+//! `main.rs` — and all nine come here. Seven of them predate this module; the
+//! eighth, `export_map_png`, and the ninth, `export_protein`, were written
+//! against it. The number is not maintained by hand:
+//! `every_picker_driven_save_in_this_file_goes_through_atomic_write` recounts
+//! it and goes red when this paragraph goes stale.
 //!
 //! # What this does instead
 //!

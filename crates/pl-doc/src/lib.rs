@@ -221,7 +221,10 @@ pub fn methods(t: Topic) -> String {
                  so, because the two settings do not report the same ORFs. On circular \
                  molecules the search was synchronised to a termination codon before \
                  scanning, so results do not depend on where the sequence was \
-                 linearised.\n\n\
+                 linearised. Residues were written in the convention a CDS record \
+                 uses: the first codon of a reading is written M wherever the code \
+                 permits initiation there whatever that codon spells, and a \
+                 termination codon is written as an asterisk.\n\n\
                  Limits: all {n} NCBI codes are available and the code must be chosen \
                  correctly — {readthrough} of them do not treat TGA as a termination \
                  codon, so the wrong table silently reads through a stop or ends a \
@@ -636,6 +639,20 @@ mod tests {
             m.contains("stop-to-stop"),
             "and the option that removes it is named: {m}"
         );
+        // The residue convention, added 2026-08-07 when the desktop app grew a
+        // way to take the letters away and a reader could put them in a figure.
+        // Asserted against `translate_cds` itself and not only quoted, because
+        // this is a claim about what the letters ARE: `GTG` initiates under
+        // table 11 and does not under table 1, so the same three bases carry
+        // the whole sentence.
+        assert!(
+            m.contains("written M wherever the code permits initiation there"),
+            "the paragraph does not state the initiator convention: {m}"
+        );
+        let t11 = pl_core::translate::table(11).expect("table 11");
+        let t1 = pl_core::translate::table(1).expect("table 1");
+        assert_eq!(t11.translate_cds(b"GTGAAATAA"), b"MK*".to_vec());
+        assert_eq!(t1.translate_cds(b"GTGAAATAA"), b"VK*".to_vec());
 
         // `pl primers --seed-mismatch` allows one mismatch in the seed.
         let m = methods(topic("primers").unwrap());

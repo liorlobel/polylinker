@@ -101,26 +101,48 @@ pub fn parse_all(text: &str) -> Vec<Molecule> {
 /// export would append another copy to the description it just parsed, which is
 /// the grow-for-ever failure `genbank::is_generated_colour_note` exists to stop.
 pub fn write(mol: &Molecule, title: &str, line_width: usize) -> String {
-    let width = line_width.max(1);
     let stem = title.rsplit_once('.').map(|(a, _)| a).unwrap_or(title);
+    let ident = if mol.name.trim().is_empty() {
+        stem
+    } else {
+        &mol.name
+    };
+    write_record(
+        ident,
+        &mol.description,
+        &String::from_utf8_lossy(&mol.seq),
+        line_width,
+    )
+}
+
+/// One FASTA record: `>ident description`, then `seq` wrapped at `line_width`.
+///
+/// Split out of [`write`] because a FASTA record is not necessarily a
+/// `Molecule`. The GUI's protein export writes residues, which have no molecule
+/// to belong to and a header that has to carry the genetic code — and the one
+/// thing it must not do is grow a second answer to "how is a header escaped"
+/// or "where does a line break". Both rules are here, once.
+///
+/// `description` is free text and may hold anything; `ident` may not. Both are
+/// sanitised here rather than by callers, for the reason the field split is
+/// unforgiving: everything past the first space in a header **is** the
+/// description, and a newline anywhere in either field ends the header line and
+/// turns the rest of it into sequence.
+pub fn write_record(ident: &str, description: &str, seq: &str, line_width: usize) -> String {
+    let width = line_width.max(1);
     // The identifier may not contain whitespace — everything past the first
     // space is the description — so a name that does is joined with `_` rather
     // than truncated at the space, which would have made the tail read back as
     // prose. Control characters are dropped for the same reason a newline is:
     // one would end the header line and the rest would be read as bases.
-    let ident: String = if mol.name.trim().is_empty() {
-        stem.chars().filter(|c| !c.is_control()).collect()
-    } else {
-        mol.name
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join("_")
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect()
-    };
-    let desc: String = mol
-        .description
+    let ident: String = ident
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let desc: String = description
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
@@ -140,8 +162,7 @@ pub fn write(mol: &Molecule, title: &str, line_width: usize) -> String {
     // U+FFFD: one character in, two replacement characters out, and a sequence
     // three bytes longer than it started. Wrapping decoded characters cannot
     // split one.
-    let decoded = String::from_utf8_lossy(&mol.seq);
-    let mut chars = decoded.chars().peekable();
+    let mut chars = seq.chars().peekable();
     while chars.peek().is_some() {
         let line: String = chars.by_ref().take(width).collect();
         out.push_str(&line);
@@ -297,6 +318,52 @@ mod tests {
             "the character was split across two lossy decodes:\n{text}"
         );
         assert_eq!(parse(&text).seq, seq, "the exported sequence changed");
+    }
+
+    /// `write_record` is the escaping and the wrapping, for callers that have
+    /// no `Molecule` — the GUI's protein export is the first.
+    ///
+    /// The two fields are the whole risk. A space in the identifier moves its
+    /// tail into the description; a newline in either ends the header line and
+    /// everything after it is read as sequence. `decR his` is a real feature
+    /// name in the user's own plasmid, and a protein record called `decR` with
+    /// `his` as the first word of its description is a record that BLASTs under
+    /// the wrong name.
+    ///
+    /// PROVEN TO FAIL against the obvious implementation,
+    /// `format!(">{ident} {desc}\n")` with the sequence appended whole:
+    ///
+    /// ```text
+    /// ---- fasta::tests::write_record_escapes_both_header_fields_and_wraps stdout ----
+    /// assertion `left == right` failed: the identifier was cut at the space
+    ///   left: ">decR"
+    ///  right: ">decR_his"
+    /// ```
+    #[test]
+    fn write_record_escapes_both_header_fields_and_wraps() {
+        let text = write_record("decR his", "transl_table=11\nnot a new line", "MKRGC*", 4);
+        let mut lines = text.lines();
+        let header = lines.next().expect("a header");
+        assert_eq!(
+            header.split_whitespace().next(),
+            Some(">decR_his"),
+            "the identifier was cut at the space: {header:?}"
+        );
+        assert_eq!(
+            header, ">decR_his transl_table=11 not a new line",
+            "a newline in the description ended the header line"
+        );
+        assert_eq!(lines.collect::<Vec<_>>(), vec!["MKRG", "C*"]);
+        // Everything after the header is sequence, so a header that spilled
+        // would show up here as extra bases.
+        assert_eq!(parse(&text).seq, b"MKRGC".to_vec());
+
+        // An empty identifier still names something, as `write` has always
+        // done for a molecule with neither a name nor a usable file stem.
+        assert_eq!(
+            write_record("", "", "ACGT", 70).lines().next(),
+            Some(">sequence")
+        );
     }
 
     #[test]

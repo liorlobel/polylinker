@@ -24,6 +24,9 @@ mod gel;
 mod help;
 mod library;
 mod map;
+/// File ▸ New: the one door into this program that is not a file. See the
+/// module header for why the bases travel through the file path regardless.
+mod newdoc;
 /// Where an oligo the user already has anneals on the molecule that is open —
 /// the Primers tab. The engine is `pl-primer`, called with the same defaults
 /// `pl primers` calls it with; see the module header for why that mattered
@@ -1158,6 +1161,11 @@ struct App {
     abandoned_unsaved: bool,
     /// A `.dna` write waiting on the lossiness question.
     pending_dna: Option<PendingDna>,
+    /// File ▸ New: the box, and whether it is up.
+    ///
+    /// Not an `Option`, so Cancel and Escape keep what was typed. See
+    /// [`newdoc::New`].
+    newdoc: newdoc::New,
     /// When the last autosave PASS ran, for the thirty-second throttle.
     ///
     /// Session-wide, unlike the memo beside it: one pass covers every tab, so
@@ -2388,6 +2396,7 @@ impl App {
             let_it_go: false,
             abandoned_unsaved: false,
             pending_dna: None,
+            newdoc: newdoc::New::default(),
             last_autosave: None,
             last_touch: None,
             dna_owner: None,
@@ -3288,6 +3297,120 @@ impl App {
         }
     }
 
+    /// Every reading this document can produce right now, in the order the
+    /// surfaces offer them: the file's own translations, then the selection.
+    ///
+    /// ONE list, so "Protein FASTA…" writes exactly the set the two Copy
+    /// buttons can produce and there is no third notion of what a protein is
+    /// here. The selection is included because it is the one reading the FILE
+    /// does not contain — it is why `+ selection` exists — and it is LAST
+    /// rather than first so that a document's own proteins keep their file
+    /// order in the record list.
+    fn protein_paths(&mut self) -> Vec<aa::Path> {
+        // The Save menu is reachable from every tab and `self.tr` is built by
+        // the Sequence tab's refresh, so without this a document opened
+        // straight onto the Map has no readings at all — and the refusal below
+        // would blame the molecule for it. See `refresh_index`.
+        self.refresh_index();
+        let mut out: Vec<aa::Path> = self.tr.paths().to_vec();
+        out.extend(self.selection_path());
+        out
+    }
+
+    /// Those readings, translated, with the ones that produce no residues
+    /// dropped.
+    ///
+    /// A reading with no residues is a selection shorter than a codon, or a
+    /// `/codon_start` that ate everything: real, and not a record. Dropped here
+    /// rather than by the writer so the count in the status line is the count
+    /// in the file.
+    fn proteins_now(&mut self) -> Vec<aa::Protein> {
+        let paths = self.protein_paths();
+        paths
+            .iter()
+            .filter_map(|p| self.protein_of(p))
+            .filter(|p| !p.residues.is_empty())
+            .collect()
+    }
+
+    /// The reading the Features tab's `Copy protein` button acts on.
+    ///
+    /// `&mut self` because it refreshes: the same tab-independence rule as
+    /// [`App::protein_paths`], and the reason the button's enable predicate
+    /// goes through here rather than reading `self.tr` directly.
+    fn feature_protein_path(&mut self, i: usize) -> Option<aa::Path> {
+        self.refresh_index();
+        self.tr.for_feature(i as u32).cloned()
+    }
+
+    /// Save the proteins as FASTA.
+    ///
+    /// # This does not save the document
+    ///
+    /// [`App::export`] clears the dirty state on a faithful write and points
+    /// `Document::path` at the file. Neither happens here and neither may: a
+    /// protein FASTA holds no bases, no features and no topology, so a document
+    /// marked clean by one would be a document whose sequence exists nowhere on
+    /// disk. The hover on the menu item says so too, because a file dialog
+    /// under a "Save" menu is exactly where that assumption gets made.
+    ///
+    /// `.faa` and not `.fa`, deliberately: `pick_file`'s filters list `fa`,
+    /// `fasta` and `fna` and none of them is `faa`, so this file cannot be
+    /// reopened by accident as a nucleotide molecule whose every base is an
+    /// amino-acid letter — which the FASTA reader would accept without a word.
+    fn export_protein(&mut self) {
+        self.settle();
+        // Built BEFORE the picker, so a document with nothing to translate is
+        // refused with a sentence instead of with an empty file. `export`
+        // raises its dialog first because there is always a molecule to write;
+        // here there may be no protein at all.
+        let proteins = self.proteins_now();
+        let Some(d) = self.bench.get() else { return };
+        let stem = pl_fileio::genbank::locus_name(&d.title);
+        if proteins.is_empty() {
+            self.status = "nothing in this document is translated, and no selection reads as a \
+                           protein — mark a CDS, tick `aa` in the feature editor, or select at \
+                           least three bases"
+                .into();
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{stem}.faa"))
+            .add_filter("protein FASTA", &["faa", "fa", "fasta"])
+            .save_file()
+        else {
+            return;
+        };
+
+        let text = protein_fasta(&proteins);
+        let mut tables: Vec<u8> = proteins.iter().map(|p| p.code.id).collect();
+        tables.sort_unstable();
+        tables.dedup();
+        let flagged = proteins.iter().filter(|p| !p.notes.is_empty()).count();
+        let mut note = format!(
+            "{} protein(s) · table{} {}",
+            proteins.len(),
+            if tables.len() == 1 { "" } else { "s" },
+            tables
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if flagged > 0 {
+            note.push_str(&format!(
+                "; {flagged} of them carry a note in the header about how they must be read"
+            ));
+        }
+        // `atomic::write`, not `fs::write`, for that module's stated reason: an
+        // export that fails partway must not have already truncated the file it
+        // was overwriting.
+        match atomic::write(&path, text) {
+            Ok(()) => self.wrote(&path, &note),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
     /// Write the molecule as a SnapGene `.dna`.
     ///
     /// `snapgene::from_molecule_reporting` has existed, tested, since the writer
@@ -3991,7 +4114,18 @@ impl App {
     /// unsaved-changes prompt, was here too until the bench made opening
     /// non-destructive and there stopped being anything to park.
     fn asking(&self) -> bool {
-        self.edit.pending_paste.is_some() || self.pending_dna.is_some() || self.closing
+        self.edit.pending_paste.is_some()
+            || self.pending_dna.is_some()
+            || self.closing
+            // File ▸ New. Listed for the reason the paragraph above gives —
+            // `egui::Modal` dims the screen and blocks widgets, and neither
+            // `global_shortcuts` nor `sequence_keys` goes through a widget — and
+            // with a sharper consequence than the other three have: this dialog
+            // has TEXT BOXES in it. Ctrl+O left live under it pops a native file
+            // picker out of a box somebody is pasting a gBlock into, and a
+            // second Ctrl+N would be read while the first one's dialog is still
+            // on screen.
+            || self.newdoc.open
     }
 
     /// The window close, held back until the user has been asked.
@@ -4676,6 +4810,9 @@ impl eframe::App for App {
         if keys.open {
             self.pick_file();
         }
+        if keys.new_doc {
+            self.newdoc.show();
+        }
         if keys.undo {
             self.do_undo();
         }
@@ -4818,6 +4955,11 @@ impl eframe::App for App {
         // about. Lossiness first: it is raised BY the unsaved-changes modal's
         // save button, and `unsaved_modal` stands down while it is up so the
         // two are never stacked.
+        // BELOW the three questions about work at risk, and it stands down
+        // for each of them: see `new_dialog`. Drawn last of the four so that if
+        // that guard were ever wrong it would be visibly wrong rather than
+        // silently underneath.
+        self.new_dialog(&ctx);
         self.dna_lossiness_modal(&ctx);
         self.unsaved_modal(&ctx);
         // The hover echo is one frame behind by construction, so ask for that
@@ -4848,6 +4990,18 @@ impl eframe::App for App {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Shortcuts {
     open: bool,
+    /// Ctrl+N: the New dialog.
+    ///
+    /// The chord every document application uses, and it is bound here beside
+    /// `open` rather than anywhere nearer the dialog so it inherits the same
+    /// guards from the same place: a Ctrl+N typed into the Features filter must
+    /// no more raise a dialog than a Ctrl+O there may raise a file picker.
+    ///
+    /// It takes `cmd` and NOT `edits`, exactly as `open` does. The design-panel
+    /// guard exists because an undo underneath the panel changes the bases the
+    /// panel is describing, and creating a second document changes nothing about
+    /// the first — the new one arrives in its own tab beside it.
+    new_doc: bool,
     undo: bool,
     redo: bool,
     /// Ctrl+S: save the molecule, defaulting to GenBank.
@@ -5004,6 +5158,7 @@ impl App {
             let edits = cmd && !designing;
             Shortcuts {
                 open: cmd && i.key_pressed(egui::Key::O),
+                new_doc: cmd && i.key_pressed(egui::Key::N),
                 undo: edits && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
                 redo: edits
                     && (i.key_pressed(egui::Key::Y)
@@ -5083,6 +5238,19 @@ impl App {
                 // verb, and the platform's name for a menu holding Undo and Redo
                 // — still could not come back, because it named the wrong thing
                 // and the caret does not fix a wrong word.
+                // FIRST, and it carries no ellipsis. Both follow rules already
+                // written down four paragraphs up: this run is "what goes in and
+                // out as a molecule", and "…" is this toolbar's signal that a
+                // button reaches `rfd::FileDialog`. New reaches a modal of our
+                // own and touches no path at all, so an ellipsis here would be
+                // the same small lie as "Export map" over a gel.
+                if ui
+                    .button("New")
+                    .on_hover_text("Ctrl+N — a molecule from bases you paste in")
+                    .clicked()
+                {
+                    self.newdoc.show();
+                }
                 if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
                     self.pick_file();
                 }
@@ -5194,6 +5362,27 @@ impl App {
                             .clicked()
                         {
                             self.export(true);
+                            ui.close();
+                        }
+                        // Below a separator, because it is the one item in this
+                        // menu that does not write the molecule and therefore
+                        // does not save the document. The three above it are a
+                        // descending-fidelity list of the same thing; this is a
+                        // different thing, and the hover says so rather than
+                        // leaving a user to infer it from a dirty dot that
+                        // stayed put.
+                        ui.separator();
+                        if ui
+                            .button("Protein FASTA…")
+                            .on_hover_text(
+                                "The translations, not the molecule — every reading in this \
+                                 document plus the selection, one record each, with \
+                                 `transl_table=` in every header. This does NOT save your \
+                                 document.",
+                            )
+                            .clicked()
+                        {
+                            self.export_protein();
                             ui.close();
                         }
                     })
@@ -6906,6 +7095,17 @@ impl App {
         let mut open_edit = None;
         let mut duplicate = None;
         let mut remove = None;
+        let mut copy_feature_protein = None;
+        // Computed before the closure, which borrows `self`: whether the
+        // selected feature is one `Translations::build` gave a reading to. That
+        // is the same test the track uses, so a feature with a `Copy protein`
+        // button is exactly a feature with residues drawn over it — and it goes
+        // through `feature_protein_path` rather than reading `self.tr` here, so
+        // the button and the copy cannot disagree about a stale index.
+        let protein_here = self
+            .selected
+            .and_then(|i| self.feature_protein_path(i))
+            .is_some();
         ui.horizontal_wrapped(|ui| {
             let has_sel = self.selected.is_some();
             if ui
@@ -6933,7 +7133,47 @@ impl App {
                     remove = self.selected;
                 }
             });
+            // OUTSIDE the `add_enabled_ui`, with its own predicate, because
+            // "a feature is selected" is not the question this button asks.
+            // A promoter has no protein and never will; greying the button on
+            // `has_sel` alone would have offered it on one and refused it on
+            // nothing.
+            //
+            // THE FEATURE'S OWN READING, not the sequence selection's — and
+            // this is the whole reason the button is here rather than only
+            // beside the readout. A CDS carries `/transl_table`, `/codon_start`,
+            // its strand and its `join()`; a selection over the same bases
+            // carries none of them, so the two readings genuinely differ and
+            // the surface the user clicked on is what says which they meant.
+            ui.add_enabled_ui(protein_here, |ui| {
+                let b = ui.button("Copy protein");
+                if protein_here {
+                    if b.on_hover_text(
+                        "The selected feature's translation, on the clipboard as FASTA with \
+                         `transl_table=` in the header — this feature's own table, its \
+                         /codon_start and its strand, not the selection's.",
+                    )
+                    .clicked()
+                    {
+                        copy_feature_protein = self.selected;
+                    }
+                } else {
+                    // The disabled channel — see the Copy protein button in
+                    // `sequence_readout` for why `on_hover_text` shows nothing
+                    // on a widget that is greyed out.
+                    b.on_disabled_hover_text(
+                        "Nothing selected here is translated. A feature gets a reading when it \
+                         is a CDS or a segment is ticked `aa`, and only when it has a strand.",
+                    );
+                }
+            });
         });
+        if let Some(i) = copy_feature_protein {
+            let p = self.feature_protein_path(i);
+            if let Some(s) = self.do_copy_protein(p) {
+                ui.ctx().copy_text(s);
+            }
+        }
         let needle = self.filter.to_lowercase();
         // Matched here so the count beside the box and the rows below cannot
         // disagree, and matched on QUALIFIER VALUES as well as name and kind,
@@ -7871,6 +8111,51 @@ impl App {
     /// rectangles for Ctrl+A. A contiguous base range meets a row in a
     /// contiguous span, so a selection contributes at most one rectangle per
     /// visible row: about forty, whatever the molecule.
+    /// The annotation index and the translations, both keyed on the document
+    /// version.
+    ///
+    /// Split out of [`App::refresh_annotations`] because it is needed OFF the
+    /// Sequence tab. Outside the test module `refresh_annotations` has exactly
+    /// one caller — the top of the sequence view — so on a document whose
+    /// Sequence tab has never been painted, which is every document, since they
+    /// open on the Map, `self.tr` was `Translations::default()`: the Features tab's
+    /// `Copy protein` button was disabled on a CDS that plainly has a reading,
+    /// and `Save > Protein FASTA...` refused a document full of them with
+    /// "nothing in this document is translated". Both are answers about what
+    /// the MOLECULE holds, and neither may depend on which tab the user has
+    /// looked at.
+    ///
+    /// Idempotent and keyed, so calling it from three places costs one build
+    /// per document version rather than three: the `if` is the whole guard.
+    /// The cut list stays in `refresh_annotations` because it is keyed on the
+    /// digest and the enzyme filter as well, which are the Sequence and
+    /// Enzymes tabs' business.
+    fn refresh_index(&mut self) {
+        let want = match self.document() {
+            Some(d) => (self.doc_generation, d.log.cursor()),
+            None => return,
+        };
+        if self.annot.version == want {
+            return;
+        }
+        let (ix, tr) = {
+            let d = self.document().expect("checked above");
+            (
+                annot::AnnotIndex::build(d.molecule(), want),
+                // Once per document version, beside the index and on the same
+                // key. A `TranslationPath` is a handful of ranges; measured
+                // against `AnnotIndex::build`'s 0.60 ms over 9,001 features on
+                // the 4.6 Mb genome, this is noise. Materialising the residues
+                // instead would be 1.3 million entries for MG1655, thrown away
+                // by one keystroke.
+                aa::Translations::build(d.molecule(), self.doc_code),
+            )
+        };
+        self.annot = ix;
+        self.tr = tr;
+        self.cuts_for = None;
+    }
+
     /// Rebuild the annotation index if the document moved, and the cut list if
     /// the digest finished or the filter changed.
     ///
@@ -7879,28 +8164,11 @@ impl App {
     /// because a lazy rebuild inside the closure would need interior
     /// mutability this file does not otherwise use.
     fn refresh_annotations(&mut self) {
+        self.refresh_index();
         let want = match self.document() {
             Some(d) => (self.doc_generation, d.log.cursor()),
             None => return,
         };
-        if self.annot.version != want {
-            let (ix, tr) = {
-                let d = self.document().expect("checked above");
-                (
-                    annot::AnnotIndex::build(d.molecule(), want),
-                    // Once per document version, beside the index and on the
-                    // same key. A `TranslationPath` is a handful of ranges;
-                    // measured against `AnnotIndex::build`'s 0.60 ms over
-                    // 9,001 features on the 4.6 Mb genome, this is noise.
-                    // Materialising the residues instead would be 1.3 million
-                    // entries for MG1655, thrown away by one keystroke.
-                    aa::Translations::build(d.molecule(), self.doc_code),
-                )
-            };
-            self.annot = ix;
-            self.tr = tr;
-            self.cuts_for = None;
-        }
 
         let done = matches!(
             self.document().expect("checked above").digest,
@@ -9011,65 +9279,24 @@ impl App {
                 // directly above it cannot disagree while somebody is typing.
                 let read = |i: u64| edit.byte_at(mol, i);
 
-                // The ad-hoc translation of the selection: a VIEW of the bases
-                // the user pointed at, with no `OpKind` behind it and nothing
-                // written to the molecule. It is the front door for "is my His
-                // tag in frame?" on a feature the file never marked translated,
-                // which is exactly what pKoV's `decR his` is.
+                // The ad-hoc translation of the selection, built by
+                // `App::selection_path` so that the track and the clipboard
+                // cannot read the same gesture two ways.
                 //
-                // The strand is the one the drag went in. A selection dragged
-                // right to left asks for the reverse reading, which is the only
-                // gesture available that carries the fact — and it is only
-                // OFFERED when the complement row is on, so a reverse
-                // translation never appears without the strand it reads.
-                //
-                // XOR THE WRAP BIT, and this line read `s.head < s.anchor` alone
-                // until a reviewer dragged through the origin. For an ordinary
-                // selection the caret ordering IS the direction of travel; for a
-                // wrapping one it is inverted, because the arc is
-                // `[hi, n) ∪ [0, lo)` and travelling FORWARD across the origin
-                // therefore ends at a caret BELOW the one it started from —
-                // which is exactly the state the drag handler builds (`wrapped`
-                // requires `to < anchor`). So every left-to-right wrap-drag was
-                // read as reverse: on a 120 bp circle the arc 116..13 spells
-                // MKRGC* on the strand the pointer ran along, and the track drew
-                // LATAFH in the reverse lane. With the complement row off the
-                // same gesture drew nothing at all and said nothing.
+                // THE COMPLEMENT GATE IS APPLIED HERE AND NOT THERE, and the
+                // asymmetry is the point. A reverse reading is only *drawn*
+                // when the complement row is on, because under a top-strand
+                // view it would run C-terminus to N-terminus left to right —
+                // that is a fact about painting residues over a row of bases.
+                // A clipboard has no left to right: `Protein::residues` is in
+                // N-to-C order whatever the strand, and the header says
+                // `complement(...)`. Refusing to copy it because a *view*
+                // toggle is off would withhold a correct answer over a drawing
+                // problem the clipboard does not have.
                 let sel_path = (self.layout.aa_track == aa::TrackMode::Selection)
-                    .then_some(edit.sel)
+                    .then(|| self.selection_path())
                     .flatten()
-                    .filter(|s| !s.is_empty(mol.len()))
-                    .and_then(|s| {
-                        let reverse = (s.head < s.anchor) != s.through_origin;
-                        if reverse && !complement {
-                            return None;
-                        }
-                        let c = s.canonical(mol.len(), mol.topology.is_circular());
-                        // One arc, or two when it crosses the origin —
-                        // `Selection` already says which, and the path takes
-                        // both pieces in reading order.
-                        let mut parts = if c.through_origin {
-                            vec![(c.hi(), n), (0, c.lo())]
-                        } else {
-                            vec![(c.lo(), c.hi())]
-                        };
-                        if reverse {
-                            parts.reverse();
-                        }
-                        Some(aa::Path {
-                            feat: aa::SELECTION,
-                            name: "selection".into(),
-                            reverse,
-                            code: self.doc_code,
-                            parts,
-                            skip: 0,
-                            // The first free lane on this strand, never one a
-                            // file translation owns. See the reservation above.
-                            lane: if reverse { tr.rev_lanes } else { tr.fwd_lanes },
-                            from_flag: false,
-                            bad_codon_start: None,
-                        })
-                    });
+                    .filter(|p| complement || !p.reverse);
 
                 if debug_geometry() {
                     eprintln!(
@@ -10449,6 +10676,7 @@ impl App {
         let mut design = false;
         let mut annotate = false;
         let mut copy_rc = false;
+        let mut copy_protein = false;
 
         let readout =
             egui::Panel::bottom(egui::Id::new("seq-readout"))
@@ -10528,6 +10756,42 @@ impl App {
                                 {
                                     copy_rc = true;
                                 }
+                            }
+                            // The protein, out of the same selection, in the
+                            // one place the selection is already described.
+                            // Beside Copy rev-comp and not gated on
+                            // `can_design` for the same reason it is not: it
+                            // changes nothing about the document.
+                            //
+                            // Enabled on `has_sel` alone, not on "the selection
+                            // is a multiple of three". A selection that is not
+                            // is the case worth ANSWERING — `copy_protein` says
+                            // how many bases could not make a codon — and a
+                            // greyed-out button says nothing at all.
+                            let cp = ui.add_enabled(
+                                has_sel,
+                                egui::Button::new(RichText::new("Copy protein").size(11.0)),
+                            );
+                            if !has_sel {
+                                // `on_disabled_hover_text`, not `on_hover_text`:
+                                // egui 0.35's `on_hover_text` goes through
+                                // `Tooltip::for_enabled` (response.rs:707 ->
+                                // :646), so on a DISABLED widget it shows
+                                // nothing at all. A hint explaining why a button
+                                // is greyed out, attached in a way that cannot
+                                // be seen while it is greyed out, is the one
+                                // case where the wrong call is invisible.
+                                cp.on_disabled_hover_text("Select the bases first.");
+                            } else if cp
+                                .on_hover_text(
+                                    "Ctrl+Shift+P — the selection read as protein, on the \
+                                     clipboard as FASTA so the genetic code travels with it. \
+                                     Frame 1 from the start of the selection, with the document's \
+                                     table; drag right-to-left for the reverse strand.",
+                                )
+                                .clicked()
+                            {
+                                copy_protein = true;
                             }
                             // The explicit way to flip a bit that Shift+click cannot infer,
                             // because a click has no direction of travel. Both lengths are
@@ -10621,6 +10885,12 @@ impl App {
         }
         if copy_rc {
             if let Some(s) = self.do_copy_rc() {
+                ui.ctx().copy_text(s);
+            }
+        }
+        if copy_protein {
+            let p = self.selection_path();
+            if let Some(s) = self.do_copy_protein(p) {
                 ui.ctx().copy_text(s);
             }
         }
@@ -11098,6 +11368,164 @@ impl App {
         }
     }
 
+    /// The ad-hoc reading of the sequence selection, in the coordinates the
+    /// molecule is stored in.
+    ///
+    /// ONE expression of "which bases, read which way", shared by the track
+    /// that paints it and the two surfaces that take it away, because the whole
+    /// class of defect this replaces is two readers of one gesture disagreeing
+    /// and neither picture looking wrong.
+    ///
+    /// The strand is the one the drag went in. A selection dragged right to
+    /// left asks for the reverse reading, which is the only gesture available
+    /// that carries the fact.
+    ///
+    /// XOR THE WRAP BIT, and this line read `s.head < s.anchor` alone until a
+    /// reviewer dragged through the origin. For an ordinary selection the caret
+    /// ordering IS the direction of travel; for a wrapping one it is inverted,
+    /// because the arc is `[hi, n) ∪ [0, lo)` and travelling FORWARD across the
+    /// origin therefore ends at a caret BELOW the one it started from — which
+    /// is exactly the state the drag handler builds (`wrapped` requires
+    /// `to < anchor`). So every left-to-right wrap-drag was read as reverse: on
+    /// a 120 bp circle the arc 116..13 spells MKRGC* on the strand the pointer
+    /// ran along, and the track drew LATAFH in the reverse lane.
+    ///
+    /// The **document's** table, never a feature's: a selection is not a
+    /// feature and has no `/transl_table` of its own. That is a real difference
+    /// from the reading a CDS gets, and it is why the FASTA header names the
+    /// number rather than leaving it to be assumed.
+    ///
+    /// No complement gate here — see the caller in the sequence view for why
+    /// that belongs to the painter and not to this.
+    fn selection_path(&self) -> Option<aa::Path> {
+        let d = self.document()?;
+        let mol = d.molecule();
+        let n = mol.len();
+        let s = self.edit.sel.filter(|s| !s.is_empty(n))?;
+        let reverse = (s.head < s.anchor) != s.through_origin;
+        let c = s.canonical(n, mol.topology.is_circular());
+        // One arc, or two when it crosses the origin — `Selection` already says
+        // which, and the path takes both pieces in reading order.
+        let mut parts = if c.through_origin {
+            vec![(c.hi(), n), (0, c.lo())]
+        } else {
+            vec![(c.lo(), c.hi())]
+        };
+        if reverse {
+            parts.reverse();
+        }
+        Some(aa::Path {
+            feat: aa::SELECTION,
+            name: "selection".into(),
+            reverse,
+            code: self.doc_code,
+            parts,
+            skip: 0,
+            // The first free lane on this strand, never one a file translation
+            // owns. `Translations::{fwd,rev}_lanes` is already capped at
+            // `MAX_AA_LANES`, so it is both the number of file lanes drawn and
+            // the first free index.
+            lane: if reverse {
+                self.tr.rev_lanes
+            } else {
+                self.tr.fwd_lanes
+            },
+            from_flag: false,
+            bad_codon_start: None,
+            // A selection cannot name a base the molecule does not have:
+            // `Selection::canonical` clamps to `n` before this is built.
+            past_end: 0,
+        })
+    }
+
+    /// One reading, translated over the bases the sequence view is SHOWING.
+    ///
+    /// `effective` + `byte_at`, not `Molecule::seq`, for the reason
+    /// `aa::Path::codon_at` gives at length: mid-typing-run the committed
+    /// sequence is one edit behind the letters on screen, so a clipboard fed
+    /// the molecule would hand out the PRE-edit protein while the track under
+    /// the pointer draws the post-edit one. Two answers, and the wrong one is
+    /// the one that leaves the program.
+    fn protein_of(&self, path: &aa::Path) -> Option<aa::Protein> {
+        let d = self.document()?;
+        let mol = d.molecule();
+        let edit = &self.edit;
+        let p = path.effective(edit.run().map(|r| r.span()));
+        Some(p.protein(&|i| edit.byte_at(mol, i)))
+    }
+
+    /// The status line for a protein that has just gone somewhere.
+    ///
+    /// Names the table in the same breath as the count, because that is the one
+    /// fact a residue string cannot carry on its own and the status line is the
+    /// only place the user sees it without opening the file.
+    fn protein_said(p: &aa::Protein, where_to: &str) -> String {
+        let mut s = format!(
+            "{} · {} residues · table {} · {}",
+            p.name,
+            p.residues.chars().count(),
+            p.code.id,
+            where_to
+        );
+        // The awkward cases travel with the protein in the FASTA header; this
+        // repeats the first of them on screen so a user who is about to paste
+        // an out-of-frame reading finds out before they paste it, not after.
+        if let Some(first) = p.notes.first() {
+            s.push_str(" — ");
+            s.push_str(first);
+            if p.notes.len() > 1 {
+                s.push_str(&format!(" (+{} more in the header)", p.notes.len() - 1));
+            }
+        }
+        s
+    }
+
+    /// Put one protein on the clipboard, as FASTA.
+    ///
+    /// **As FASTA, and not as bare residues**, which is the whole of
+    /// requirement 3 landing on the clipboard. This program offers 27 genetic
+    /// codes with a per-feature override; a bare residue string cannot say
+    /// which one produced it, and a protein read under table 11 and pasted
+    /// somewhere that assumes table 1 is a wrong answer that looks right.
+    /// A FASTA record can say it, in the header, and every destination that
+    /// takes a protein — BLAST's query box, a structure predictor, an email —
+    /// takes FASTA.
+    /// Returns the text rather than writing it, exactly as [`App::do_copy`] and
+    /// [`App::do_copy_rc`] do. The clipboard is written by the caller — that is
+    /// the established shape in this file, and it is what makes this whole
+    /// decision reachable from a test that has no `egui::Context`.
+    fn do_copy_protein(&mut self, path: Option<aa::Path>) -> Option<String> {
+        let Some(path) = path else {
+            self.edit.say("Nothing is selected.");
+            return None;
+        };
+        let p = self.protein_of(&path)?;
+        if p.residues.is_empty() {
+            // Fewer than three bases to read, or a `/codon_start` that ate them
+            // all. Said with the number, because "nothing happened" is what a
+            // silent no-op looks like — and this is the smallest case of "a
+            // length that is not a multiple of three", not a separate one.
+            let said = format!(
+                "{} base(s) is not a whole codon, so there is no protein to copy",
+                fmt_int(path.bases())
+            );
+            self.status = said.clone();
+            self.edit.say(said);
+            return None;
+        }
+        // BOTH channels, from one string. `edit.notice` is drawn in the
+        // sequence readout, under the button that is there; the Features tab's
+        // `Copy protein` is on a different tab entirely, and its user would
+        // have seen no acknowledgement at all. `self.status` is in the top bar
+        // and is visible from every tab, which is what makes it the right one
+        // for a surface-independent action — and composing the sentence once
+        // means the two cannot say different things.
+        let said = Self::protein_said(&p, "on the clipboard as FASTA");
+        self.status = said.clone();
+        self.edit.say(said);
+        Some(p.fasta(60))
+    }
+
     /// Ctrl+X.
     ///
     /// The delete speaks first, and what it has to say outranks the count. This
@@ -11309,6 +11737,17 @@ impl App {
                         // neither half of the chord misfires.
                         egui::Key::R if cmd && shift => {
                             if let Some(s) = self.do_copy_rc() {
+                                ui.ctx().copy_text(s);
+                            }
+                        }
+                        // Shifted for the same reason R is, and NOT on plain
+                        // Ctrl+P: that is Print on every desktop platform, and
+                        // this application does not print — a chord that is
+                        // bound to nothing here is still a chord a user expects
+                        // to mean something else.
+                        egui::Key::P if cmd && shift => {
+                            let p = self.selection_path();
+                            if let Some(s) = self.do_copy_protein(p) {
                                 ui.ctx().copy_text(s);
                             }
                         }
@@ -12645,6 +13084,262 @@ impl App {
             }
         }
     }
+
+    /// File ▸ New: a name, a block of bases, and a topology.
+    ///
+    /// `egui::Modal`, matching the three questions this app already asks, and
+    /// here the reason recorded at `paste_dialog` is doubled: this dialog owns
+    /// two text boxes, and a non-modal window would leave the document behind it
+    /// live while somebody types into them.
+    ///
+    /// # It stands down rather than stacking
+    ///
+    /// The window-close guard, the `.dna` lossiness question and the paste
+    /// consent all decide whether work SURVIVES. This decides whether work
+    /// begins. So when one of those is up this one is not drawn — its state is
+    /// untouched and it comes back afterwards with the text still in it — rather
+    /// than painting a second dialog over the one that matters. `unsaved_modal`
+    /// makes the same argument from the other side and is deliberately not
+    /// taught about this dialog, because it has to win.
+    fn new_dialog(&mut self, ctx: &egui::Context) {
+        if !self.newdoc.open {
+            return;
+        }
+        if self.closing || self.pending_dna.is_some() || self.edit.pending_paste.is_some() {
+            return;
+        }
+        // TAKEN OUT for the frame, because the closure below needs `&mut` on the
+        // name and on the bases and would otherwise hold `self` borrowed while
+        // `pal` and the palette are also wanted. Put back before anything reads
+        // `self` again.
+        let mut n = std::mem::take(&mut self.newdoc);
+        // Read ONCE, before the boxes are drawn, and only the small parts are
+        // copied out: a `Draft` carries the bases, and cloning a 20 kb insert
+        // once a frame to print a one-line summary is the memo in
+        // `newdoc::New::draft` being paid for and then thrown away.
+        let (creatable, bases, refusal, summary, suspect, locus, title) = {
+            let d = n.draft();
+            (
+                d.creatable(),
+                d.report.bases.len() as u64,
+                d.refusal.clone(),
+                d.report.summary(),
+                d.report.suspect.clone(),
+                d.locus.clone(),
+                d.title.clone(),
+            )
+        };
+        let mut cancel = false;
+        let mut create = false;
+        egui::Modal::new(egui::Id::new("pl-new-document")).show(ctx, |ui| {
+            ui.set_max_width(560.0);
+            ui.heading("New molecule");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut n.name)
+                        .desired_width(300.0)
+                        .hint_text(newdoc::UNTITLED),
+                );
+            });
+            // WHAT IT WILL ACTUALLY BE CALLED, when that is not what was typed.
+            // A GenBank LOCUS name is sixteen columns of [A-Za-z0-9_.-] and
+            // overrunning it shifts every field after it, so the rename is real
+            // and the molecule carries it into every figure exported from it.
+            // Disclosed here rather than discovered later; silence would be the
+            // same defect as a silently dropped base.
+            if locus != title {
+                ui.label(
+                    RichText::new(format!(
+                        "the molecule will be named {locus} — a GenBank LOCUS name is sixteen \
+                         characters of letters, digits, _ - and ."
+                    ))
+                    .color(pal(ui).muted)
+                    .size(11.0),
+                );
+            }
+            ui.add_space(6.0);
+            ui.label("Bases");
+            // Inside a bounded scroll area. `TextEdit::multiline` grows to its
+            // content, and a gBlock pasted into an unbounded one makes a modal
+            // taller than the screen with its own buttons off the bottom of it.
+            //
+            // WHAT A HUGE PASTE COSTS, measured rather than feared, because the
+            // scroll area bounds the HEIGHT and not the work: `TextEdit` lays
+            // out the whole string into one galley whatever is visible. Release
+            // build, one frame of this dialog, `Context::run_ui` plus
+            // `Context::tessellate`, by characters in the box:
+            //
+            // ```text
+            //     1,000    1.6 ms then 0.15 ms
+            //    10,000    2.8 ms then 0.8 ms
+            //   100,000     27 ms then 0.08 ms
+            // 1,000,000    186 ms then 0.3 ms
+            // 10,000,000   1.99 s then 12 ms
+            // ```
+            //
+            // So the answer for a whole small genome pasted at once is a
+            // two-second hitch on the frame that receives it and then about
+            // 12 ms a frame, NOT a hang: the galley is cached after the first
+            // layout, and the tessellated vertex count is flat at ~4,190 across
+            // all five sizes, so what is painted is the visible rows and not the
+            // molecule. That is why there is no size cap here. A cap would have
+            // to refuse or truncate a paste to save two seconds, and silently
+            // shortening somebody's sequence is the one thing this whole dialog
+            // is arranged not to do.
+            egui::ScrollArea::vertical()
+                .id_salt("pl-new-bases")
+                .max_height(200.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut n.text)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(8)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text(
+                                "Paste bases here. Line breaks, spaces, a FASTA header line, \
+                                 the numbers off a sequence listing, lower case and U are all \
+                                 fine.",
+                            ),
+                    );
+                });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                // TWO BUTTONS, not a checkbox labelled "circular". A default is
+                // an answer, and this one changes the digest, the
+                // origin-crossing features and the gel — every downstream answer
+                // this program gives. Making the user say which costs one click
+                // and cannot be got wrong by not looking.
+                ui.label("Topology");
+                ui.selectable_value(&mut n.circular, false, "Linear")
+                    .on_hover_text("a fragment, a gBlock, a PCR product");
+                ui.selectable_value(&mut n.circular, true, "Circular")
+                    .on_hover_text("a plasmid — the ends join, and every coordinate wraps");
+            });
+            ui.add_space(6.0);
+            // The accounting, live. Everything removed on the way in is said
+            // BEFORE the document exists, which is the whole of the rule
+            // `sanitise_paste` is built around.
+            if bases > 0 {
+                ui.label(RichText::new(&summary).size(11.0).color(pal(ui).ink2));
+            }
+            if let Some(s) = &suspect {
+                // A WARNING AND NOT A REFUSAL. Sixteen of the twenty-six letters
+                // are IUPAC codes, so this fires on prose — and it fires just as
+                // readily on a genuinely degenerate oligo, which is a real thing
+                // to want a document of. Refusing it would be this program
+                // telling a user their NNK library is not DNA.
+                ui.label(RichText::new(s).size(11.0).color(pal(ui).warn));
+            }
+            if let Some(why) = &refusal {
+                ui.label(RichText::new(why).size(11.5).color(pal(ui).warn));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                // Cancel first, and it is what Escape does — the order the other
+                // two modals in this file already use.
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                let label = if bases > 0 {
+                    format!("Create {} bp {}", fmt_int(bases), topology_word(n.circular))
+                } else {
+                    "Create".to_string()
+                };
+                if ui
+                    .add_enabled(creatable, egui::Button::new(label))
+                    .on_disabled_hover_text(
+                        "there is nothing to make a molecule out of yet — paste some bases",
+                    )
+                    .clicked()
+                {
+                    create = true;
+                }
+            });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        // Re-asked against the text as it stands, not against the copy taken at
+        // the top of this function. The button's enabled state is a claim made
+        // by one frame's layout; this is the claim a document gets built on, and
+        // `featedit`'s Save draws the same distinction for the same reason.
+        let mut made: Option<(Document, String)> = None;
+        let mut bug: Option<String> = None;
+        if create {
+            let circular = n.circular;
+            let plan = {
+                let d = n.draft();
+                d.creatable().then(|| {
+                    (
+                        d.title.clone(),
+                        d.record(circular, today()),
+                        d.report.summary(),
+                    )
+                })
+            };
+            if let Some((title, record, summary)) = plan {
+                match Document::from_bytes(record.as_bytes(), title, None) {
+                    Ok(doc) => {
+                        let status = format!(
+                            "{}  —  {summary}  —  not saved to any file",
+                            describe(doc.molecule(), doc.format)
+                        );
+                        // Only now, after the bytes have been read back: the one
+                        // thing that must not be lost on this path is the paste,
+                        // and clearing the box before the document exists would
+                        // throw it away in order to report a failure.
+                        n.done();
+                        made = Some((doc, status));
+                    }
+                    // The writer and the reader are both ours, so this is a bug
+                    // and not a bad file — `clone_panel` says the same about the
+                    // same detour. `notice` and never `error`: `error` paints a
+                    // full-screen takeover, which would hide the dialog that is
+                    // deliberately still open with the user's text in it.
+                    Err(e) => {
+                        bug = Some(format!(
+                            "those bases could not be re-read after being written: {e}"
+                        ))
+                    }
+                }
+            }
+        } else if cancel {
+            n.hide();
+        }
+        // BEFORE `take_over`, which reads and writes most of `self`.
+        self.newdoc = n;
+        if let Some(e) = bug {
+            self.notice = Some(e);
+        }
+        if let Some((doc, status)) = made {
+            // Through `take_over`, like every other document that arrives from
+            // somewhere other than a file. It settles the open typing run and
+            // funnels into `adopt`, so the new molecule gets its own tab, its
+            // own recovery slot and a bumped `doc_generation` — and the
+            // annotation scan, if that setting is on, because
+            // `refresh_proposals` runs per frame against whatever document is
+            // there rather than off a hook at the point of opening.
+            self.take_over(doc, status, None);
+        }
+    }
+}
+
+/// "circular" or "linear", asked of `pl-core` rather than written out here.
+///
+/// The New dialog's Create button names the topology it is about to build, and
+/// `Topology::as_str` is the molecule model's own word for it — so the button
+/// and the molecule cannot come to disagree by way of a literal in this file
+/// that somebody forgot to change. It is not a claim about `doc::describe`,
+/// which keeps its own two literals for the status line.
+fn topology_word(circular: bool) -> &'static str {
+    if circular {
+        pl_core::Topology::Circular.as_str()
+    } else {
+        pl_core::Topology::Linear.as_str()
+    }
 }
 
 /// The line under the welcome text naming whoever currently owns `.dna`.
@@ -12699,6 +13394,50 @@ fn not_copied(skipped: usize) -> String {
         " · {} byte(s) are not nucleotide codes and were left out",
         fmt_int(skipped as u64)
     )
+}
+
+/// A multi-record protein FASTA, with the identifiers made unique.
+///
+/// A free function so a test can hold the bytes the app writes without opening
+/// a native save dialog — the same split, and the same reason, as
+/// `App::map_png`.
+///
+/// **The identifiers are uniqued and the descriptions are not touched.** The
+/// first token of a header is what every downstream tool keys on, and a file
+/// whose records are all called `ORF` is one nobody can read a BLAST report
+/// against. The comparison is on the name as stored rather than on what
+/// `write_record` will make of it, so `orf a` and `orf_a` still collide — the
+/// `location=` token in the description tells those two apart, and a second
+/// copy of that function's escaping rule here would be the worse trade.
+///
+/// # The suffix has to be checked against the names that are already there
+///
+/// This kept a `(name, count)` list and appended `_{count}` on a repeat, which
+/// leaves the DERIVED name unchecked: `orf`, `orf`, `orf_2` — the exact shape an
+/// ORF annotator produces, and a shape this program produces itself, since the
+/// second `orf` is renamed `orf_2` — emitted `orf`, `orf_2`, `orf_2`. Two
+/// records answering to one identifier is the precise failure the uniquing
+/// exists to prevent, arrived at by the uniquing. So every name that is ISSUED
+/// goes into the set, derived ones included, and a candidate that is taken is
+/// bumped again.
+fn protein_fasta(proteins: &[aa::Protein]) -> String {
+    let mut issued: Vec<String> = Vec::new();
+    let mut text = String::new();
+    for p in proteins {
+        let mut p = p.clone();
+        if issued.contains(&p.name) {
+            // From 2 rather than from 1: the record that took the bare name is
+            // the first of them, so the next is the second.
+            let mut k = 2usize;
+            while issued.contains(&format!("{}_{k}", p.name)) {
+                k += 1;
+            }
+            p.name = format!("{}_{k}", p.name);
+        }
+        issued.push(p.name.clone());
+        text.push_str(&p.fasta(60));
+    }
+    text
 }
 
 /// The History tab's cursor on the current state, set `.monospace()`.
@@ -20115,10 +20854,11 @@ mod tests {
     /// `atomic.rs`'s opening line, counted instead of asserted in prose.
     ///
     /// "One writer for every file the user asked this program to produce", and
-    /// the module doc backs it with a number — "eight picker-driven save sites
-    /// exist today, `grep -c '\.save_file()'` over `main.rs`, and all eight
-    /// come here". That number was seven when the module was written and eight
-    /// by the end of the day, and a wrong one is exactly how `save_project`
+    /// the module doc backs it with a number — "nine picker-driven save sites
+    /// exist today, `grep -c '\.save_file()'` over `main.rs`, and all nine
+    /// come here". That number was seven when the module was written, eight
+    /// by the end of the day and nine when `export_protein` landed, and a wrong
+    /// one is exactly how `save_project`
     /// stayed unconverted: the header claimed seven `fs::write` sites, an
     /// auditor counted six at 713bd3b, and the mismatch sent them looking for a
     /// miscount rather than for a save reaching `fs::write` through another
@@ -20209,7 +20949,7 @@ mod tests {
 
         let pickers = count(".save_file()");
         assert_eq!(
-            pickers, 8,
+            pickers, 9,
             "`atomic.rs`'s module doc states the number of picker-driven saves \
              and it is now {pickers}; update both together"
         );
@@ -25583,6 +26323,417 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Taking the protein away: the clipboard and the protein FASTA
+    // -----------------------------------------------------------------------
+
+    /// What `pl_core` says about the same bases, assembled independently of the
+    /// walk `aa::Path::protein` uses.
+    ///
+    /// Slices `Molecule::seq` and reverse-complements with `pl_core::iupac`,
+    /// where `protein` goes coordinate by coordinate through `aa::Path::residue`.
+    /// The point of the duplication is that the two cannot share a mistake.
+    fn core_says(mol: &pl_core::Molecule, p: &aa::Path) -> String {
+        let mut bases: Vec<u8> = Vec::new();
+        for &(lo, hi) in &p.parts {
+            let piece = &mol.seq[lo as usize..hi as usize];
+            if p.reverse {
+                bases.extend(pl_core::iupac::reverse_complement(piece));
+            } else {
+                bases.extend_from_slice(piece);
+            }
+        }
+        String::from_utf8(p.code.translate_cds(&bases[p.skip as usize..])).expect("ascii")
+    }
+
+    /// The residue lines of a FASTA record, joined.
+    fn residues_of(record: &str) -> String {
+        record.lines().skip(1).collect::<String>()
+    }
+
+    /// The clipboard gets `pl_core`'s protein, on the strand the drag went in,
+    /// and it gets it as FASTA with the table in the header.
+    ///
+    /// Both directions in one test because the direction rule is one
+    /// expression: a drag right to left asks for the reverse reading, and
+    /// `App::selection_path` is the only place that decides so. A
+    /// forward-only test would pass against a `selection_path` that ignored the
+    /// caret ordering entirely.
+    ///
+    /// PROVEN TO FAIL against `selection_path` hardcoding `let reverse = false`
+    /// — the version that exists before anyone thinks about the direction of
+    /// travel. The WHOLE module was re-run, not this test by name:
+    ///
+    /// ```text
+    /// test tests::the_clipboard_protein_is_pl_cores_on_the_strand_the_drag_went_in ... FAILED
+    /// assertion `left == right` failed: right-to-left drag
+    ///   left: false
+    ///  right: true
+    /// test result: FAILED. 601 passed; 3 failed
+    /// ```
+    ///
+    /// The strand assertion fires before the residues, which is why the diff is
+    /// a bool: the point is that the reading would have been the top strand's
+    /// and the header would have said `location=41..61` about it.
+    #[test]
+    fn the_clipboard_protein_is_pl_cores_on_the_strand_the_drag_went_in() {
+        let mut app = seq_app();
+        let n = app.document().unwrap().molecule().len();
+        assert!(n > 100);
+        // 21 bases, so both readings are whole codons and neither is ragged.
+        for (label, anchor, head, reverse) in [
+            ("left-to-right drag", 40u64, 61u64, false),
+            ("right-to-left drag", 61, 40, true),
+        ] {
+            app.edit.sel = Some(seqedit::Selection {
+                anchor,
+                head,
+                through_origin: false,
+            });
+            let path = app.selection_path().expect("a selection is a reading");
+            assert_eq!(path.reverse, reverse, "{label}");
+            assert_eq!(path.parts, vec![(40, 61)], "{label}");
+
+            let record = app
+                .do_copy_protein(Some(path.clone()))
+                .expect("21 bases are seven codons");
+            let want = {
+                let mol = app.document().unwrap().molecule();
+                core_says(mol, &path)
+            };
+            assert_eq!(residues_of(&record), want, "{label}");
+            // And the code travels. `seq_app` opens a FASTA, which carries no
+            // `/transl_table` anywhere, so this is the document default — the
+            // number a reader would otherwise have to guess.
+            let header = record.lines().next().unwrap();
+            assert!(
+                header.contains(&format!("transl_table={}", app.doc_code.id)),
+                "{label}: {header:?}"
+            );
+            // The strand is in the header too, in GenBank's own notation, which
+            // is the only channel a bare residue string does not have.
+            assert_eq!(
+                header.contains("location=complement(41..61)"),
+                reverse,
+                "{label}: {header:?}"
+            );
+        }
+    }
+
+    /// The protein taken is the protein on screen, not the one in the file.
+    ///
+    /// `SeqEdit::byte_at` applies the pending typing run and `Molecule::seq`
+    /// does not, so a clipboard fed the committed molecule hands out the
+    /// PRE-edit protein while the track under the pointer draws the post-edit
+    /// one. That is the highest-probability defect in this whole feature,
+    /// because both proteins are plausible and the screenshot looks perfect —
+    /// it is the same trap `aa::Path::codon_at` documents for the track.
+    ///
+    /// PROVEN TO FAIL against `protein_of` reading the molecule directly —
+    /// `p.protein(&|i| mol.seq.get(i as usize).copied().unwrap_or(b' '))` in
+    /// place of the `byte_at` closure — with the whole module re-run:
+    ///
+    /// ```text
+    /// test tests::the_protein_follows_the_typing_run_the_track_is_drawing ... FAILED
+    /// assertion `left == right` failed: the clipboard has the pre-edit protein
+    ///   left: "MKR*"
+    ///  right: "M*TL"
+    /// test result: FAILED. 603 passed; 1 failed
+    /// ```
+    ///
+    /// `MKR*` is a perfectly plausible protein. It is the one this molecule had
+    /// before the keystroke, handed out while the track above the caret drew
+    /// `M*TL`.
+    #[test]
+    fn the_protein_follows_the_typing_run_the_track_is_drawing() {
+        let mut app = App::blank();
+        app.adopt(
+            Document::from_bytes(b">p\nATGAAACGCTAA\n", "p.fa".into(), None).expect("a molecule"),
+        );
+        app.tab = Tab::Sequence;
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 0,
+            head: 12,
+            through_origin: false,
+        });
+        let before = app
+            .do_copy_protein(app.selection_path())
+            .expect("four codons");
+        assert_eq!(residues_of(&before), "MKR*");
+
+        // One base typed into the reading, at gap 3, with the run still open.
+        app.edit.caret = 3;
+        app.edit.sel = None;
+        {
+            let d = app.bench.get_mut().unwrap();
+            app.edit.type_text(d, "T", 0.0);
+        }
+        assert!(app.edit.run().is_some(), "the run must still be open");
+
+        // The selection grows over the typed base exactly as the ribbon does.
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 0,
+            head: 13,
+            through_origin: false,
+        });
+        let after = app
+            .do_copy_protein(app.selection_path())
+            .expect("four codons");
+        // `ATGAAACGCTAA` with a `T` at gap 3 is `ATGTAAACGCTAA`: the frame
+        // shifts and every downstream residue changes, which is the whole
+        // reason this track exists. Fed `Molecule::seq` instead, the same call
+        // returns `MKR*` — the protein of a molecule the user has already
+        // edited.
+        assert_eq!(
+            residues_of(&after),
+            "M*TL",
+            "the clipboard has the pre-edit protein"
+        );
+        assert_ne!(residues_of(&after), residues_of(&before));
+    }
+
+    /// A selection too short to be a codon is refused with the number, and it
+    /// is a different sentence from no selection at all.
+    ///
+    /// This is the smallest case of "a length that is not a multiple of three",
+    /// and it is the one where staying quiet is indistinguishable from a broken
+    /// button.
+    #[test]
+    fn a_selection_shorter_than_a_codon_says_so_rather_than_doing_nothing() {
+        let mut app = seq_app();
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 10,
+            head: 12,
+            through_origin: false,
+        });
+        assert!(app.do_copy_protein(app.selection_path()).is_none());
+        let said = app.edit.notice.clone().expect("a sentence, not silence");
+        assert!(
+            said.contains("2 base(s)") && said.contains("not a whole codon"),
+            "{said:?}"
+        );
+
+        app.edit.sel = None;
+        assert!(app.selection_path().is_none());
+        assert!(app.do_copy_protein(None).is_none());
+        assert_eq!(app.edit.notice.as_deref(), Some("Nothing is selected."));
+    }
+
+    /// The file gets every reading the app can produce, each under its own
+    /// identifier, each carrying the table that produced it.
+    ///
+    /// Two CDS features with the SAME name, which is what an ORF-annotated file
+    /// looks like, plus a selection — so the record list exercises the uniquing
+    /// and the "the selection is in there too" rule at once.
+    ///
+    /// PROVEN TO FAIL against a `protein_fasta` that appends `p.fasta(60)` for
+    /// each protein without uniquing, which is the obvious loop. Whole module:
+    ///
+    /// ```text
+    /// test tests::a_protein_fasta_gives_every_record_its_own_identifier ... FAILED
+    /// assertion `left == right` failed: two records answer to `>orf`
+    ///   left: [">orf", ">orf", ">selection"]
+    ///  right: [">orf", ">orf_2", ">selection"]
+    /// ```
+    #[test]
+    fn a_protein_fasta_gives_every_record_its_own_identifier() {
+        let mut app = App::blank();
+        app.adopt(
+            Document::from_bytes(b">p\nATGAAACGCTAAATGTGCGGTTAA\n", "p.fa".into(), None)
+                .expect("a molecule"),
+        );
+        app.tab = Tab::Sequence;
+        for (start, end) in [(1u64, 12u64), (13, 24)] {
+            let mut f = pl_core::Feature::new("orf", "CDS");
+            f.strand = Strand::Forward;
+            f.segments.push(pl_core::Segment::new(start, end));
+            assert!(app.edit(pl_core::OpKind::SetFeature {
+                index: None,
+                feature: Box::new(f),
+            }));
+        }
+        app.tr = aa::Translations::build(app.document().unwrap().molecule(), app.doc_code);
+        app.edit.sel = Some(seqedit::Selection {
+            anchor: 0,
+            head: 12,
+            through_origin: false,
+        });
+
+        let paths = app.protein_paths();
+        assert_eq!(paths.len(), 3, "two file readings and the selection");
+        assert_eq!(paths[2].feat, aa::SELECTION, "the selection is last");
+
+        let text = protein_fasta(&app.proteins_now());
+        let idents: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with('>'))
+            .map(|l| l.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(
+            idents,
+            vec![">orf", ">orf_2", ">selection"],
+            "two records answer to `>orf`"
+        );
+        // Every record names the code that produced it — the requirement the
+        // whole header exists for, checked over the file rather than over one
+        // record.
+        assert_eq!(
+            text.lines().filter(|l| l.contains("transl_table=")).count(),
+            3
+        );
+        // And the file reads back as three records with the residues intact.
+        let back = pl_fileio::fasta::parse_all(&text);
+        assert_eq!(back.len(), 3);
+        assert_eq!(
+            back[0].seq,
+            b"MKR".to_vec(),
+            "the `*` is dropped by the reader, and nothing else is"
+        );
+        assert_eq!(back[1].seq, b"MCG".to_vec());
+    }
+
+    /// The uniquing must not collide with its own output.
+    ///
+    /// `orf`, `orf`, `orf_2` is not a contrived list: it is what an ORF
+    /// annotator writes, and it is what THIS FUNCTION writes — the second `orf`
+    /// becomes `orf_2`, so any file that already has an `orf_2` in it now has
+    /// two. The suffix was appended from a per-name counter and never checked
+    /// against the names already issued.
+    ///
+    /// `orf_2_2` and not `orf_3` for the third record, because the suffix is
+    /// derived from the name the record actually carries. It is uglier and it
+    /// is the honest one: `orf_3` would take a name no record has asked for,
+    /// and the fourth record — which is another `orf` — is the one that is
+    /// entitled to it.
+    ///
+    /// PROVEN TO FAIL against the `(name, count)` version. The whole pl-gui
+    /// suite was re-run, not this test by name; 606 passed and this one:
+    ///
+    /// ```text
+    /// test tests::the_uniquing_does_not_collide_with_a_name_it_invented ... FAILED
+    /// assertion `left == right` failed: `orf_2` was issued twice
+    ///   left: [">orf", ">orf_2", ">orf_2", ">orf_3"]
+    ///  right: [">orf", ">orf_2", ">orf_2_2", ">orf_3"]
+    /// ```
+    #[test]
+    fn the_uniquing_does_not_collide_with_a_name_it_invented() {
+        let one = |name: &str| aa::Protein {
+            name: name.into(),
+            residues: "MKR*".into(),
+            code: pl_core::translate::table(11).expect("table 11"),
+            reverse: false,
+            location: "1..12".into(),
+            notes: Vec::new(),
+        };
+        let text = protein_fasta(&[one("orf"), one("orf"), one("orf_2"), one("orf")]);
+        let idents: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with('>'))
+            .map(|l| l.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(
+            idents,
+            vec![">orf", ">orf_2", ">orf_2_2", ">orf_3"],
+            "`orf_2` was issued twice"
+        );
+        // Said as the property rather than only as the list, because the list
+        // above is one arrangement and the rule is about all of them.
+        let mut sorted = idents.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), idents.len());
+    }
+
+    /// A protein is a fact about the molecule, not about which tab was painted.
+    ///
+    /// `App::tr` is built by `refresh_annotations`, which is called from
+    /// exactly one place: the top of the sequence view. So on a document opened
+    /// straight onto the Map — which is where every document opens — the
+    /// Features tab's `Copy protein` button was disabled on a CDS that plainly
+    /// has a reading, and `Save > Protein FASTA...` refused a document full of
+    /// them with "nothing in this document is translated". Both surfaces are
+    /// reachable without ever visiting the Sequence tab.
+    ///
+    /// This fixture paints NOTHING. `app.tr` is `Translations::default()` on
+    /// the line above each call, which is the state the two surfaces really
+    /// saw.
+    ///
+    /// PROVEN TO FAIL by taking `refresh_index` back out of `protein_paths` and
+    /// `feature_protein_path` — which is the code as first written. The whole
+    /// module was re-run:
+    ///
+    /// ```text
+    /// test tests::a_protein_does_not_depend_on_which_tab_was_painted_last ... FAILED
+    /// assertion `left == right` failed: the Save menu found no readings in a
+    ///   document with two CDS features
+    ///   left: 0
+    ///  right: 2
+    /// ```
+    #[test]
+    fn a_protein_does_not_depend_on_which_tab_was_painted_last() {
+        let mut app = App::blank();
+        app.adopt(
+            Document::from_bytes(
+                b">p
+ATGAAACGCTAAATGTGCGGTTAA
+",
+                "p.fa".into(),
+                None,
+            )
+            .expect("a molecule"),
+        );
+        for (start, end) in [(1u64, 12u64), (13, 24)] {
+            let mut f = pl_core::Feature::new("orf", "CDS");
+            f.strand = Strand::Forward;
+            f.segments.push(pl_core::Segment::new(start, end));
+            assert!(app.edit(pl_core::OpKind::SetFeature {
+                index: None,
+                feature: Box::new(f),
+            }));
+        }
+        // The state both surfaces were reached in: nothing has been painted, so
+        // nothing has built the translations.
+        assert!(
+            app.tr.is_empty(),
+            "the fixture must start with a stale index"
+        );
+
+        assert_eq!(
+            app.proteins_now().len(),
+            2,
+            "the Save menu found no readings in a document with two CDS features"
+        );
+
+        let mut app = {
+            // A second, equally unpainted app, so the assertion above cannot be
+            // what makes the one below pass.
+            let mut a = App::blank();
+            a.adopt(
+                Document::from_bytes(
+                    b">p
+ATGAAACGCTAA
+",
+                    "p.fa".into(),
+                    None,
+                )
+                .expect("a molecule"),
+            );
+            let mut f = pl_core::Feature::new("orf", "CDS");
+            f.strand = Strand::Forward;
+            f.segments.push(pl_core::Segment::new(1, 12));
+            assert!(a.edit(pl_core::OpKind::SetFeature {
+                index: None,
+                feature: Box::new(f),
+            }));
+            a
+        };
+        assert!(app.tr.is_empty());
+        assert!(
+            app.feature_protein_path(0).is_some(),
+            "the Features tab would have greyed out Copy protein on a CDS"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // The plasmid map: the label ring, the ruler's band, and the caption
     //
     // These paint real frames and assert on the shapes that came back, because
@@ -28285,5 +29436,316 @@ mod tests {
                 "the panel does not name {word} among the gaps"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // File ▸ New
+    // -----------------------------------------------------------------------
+
+    /// One frame of the New dialog, and what it drew.
+    ///
+    /// `flat_shapes`, not `out.shapes` directly: a `Modal` nests its content in
+    /// `Shape::Vec`, so a filter over the top level finds a backdrop and nothing
+    /// else — and an assertion that finds nothing passes as readily as one that
+    /// finds the right thing.
+    fn new_frame(
+        app: &mut App,
+        ctx: &egui::Context,
+        input: egui::RawInput,
+    ) -> Vec<(String, egui::Rect)> {
+        let out = ctx.run_ui(input, |ui| {
+            let c = ui.ctx().clone();
+            app.new_dialog(&c);
+        });
+        flat_shapes(&out.shapes)
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some((
+                    t.galley.text().to_string(),
+                    egui::Rect::from_min_size(t.pos, t.galley.size()),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the dialog draws, after the pass that measures it.
+    ///
+    /// TWO passes, and the first is not test style: an `egui::Modal` is an
+    /// `Area`, and an area whose size is not yet known is laid out on the pass
+    /// that measures it and painted on the next. Measured on this dialog, pass 0
+    /// emits six shapes and no text whatever, so a one-pass assertion that the
+    /// dialog says something would fail and a one-pass assertion that it says
+    /// nothing would pass for the wrong reason.
+    fn new_texts(app: &mut App, ctx: &egui::Context) -> Vec<(String, egui::Rect)> {
+        let _ = new_frame(app, ctx, window());
+        new_frame(app, ctx, window())
+    }
+
+    /// Press and release the primary button on the widget whose label starts
+    /// with `label`, driving the dialog for real rather than reaching into it.
+    ///
+    /// Returns whether such a label was drawn at all. A REAL click, because the
+    /// interesting part of this dialog is not the string handling — `newdoc`'s
+    /// own tests cover that — but whether the button is reachable, whether it is
+    /// enabled when it should be, and what happens to `App` when it fires.
+    fn click_in_new_dialog(app: &mut App, ctx: &egui::Context, label: &str) -> bool {
+        let drawn = new_texts(app, ctx);
+        let Some((_, r)) = drawn.iter().find(|(s, _)| s.starts_with(label)) else {
+            return false;
+        };
+        // Inside the glyphs rather than at their corner: `Rect::min` is the
+        // galley's top-left, and a click a pixel above or left of it is on the
+        // button's padding at best and outside it at worst.
+        let at = r.center();
+        let _ = new_frame(app, ctx, pointer_button(at, true));
+        let _ = new_frame(app, ctx, pointer_button(at, false));
+        true
+    }
+
+    /// THE GAP THIS CLOSES. PROVEN TO FAIL against the working tree as handed
+    /// over, where `App` had no `newdoc` field, no `new_dialog` and no toolbar
+    /// button — there was no way whatever to make a molecule that had not come
+    /// from a file, so bases in an email had to be written out as a FASTA by
+    /// hand first.
+    #[test]
+    fn a_molecule_can_be_made_from_pasted_bases_without_a_file() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        app.newdoc.show();
+        app.newdoc.name = "gBlock 1".into();
+        // Wrapped, indented, and with the vendor's FASTA header still on it —
+        // what actually arrives in an email.
+        app.newdoc.text = ">gBlock from the vendor\n  gaattc acgt\n  ggatcc\n".into();
+        app.newdoc.circular = true;
+
+        assert!(
+            click_in_new_dialog(&mut app, &ctx, "Create"),
+            "the dialog drew no Create button"
+        );
+
+        let d = app.document().expect("a document arrived");
+        assert_eq!(
+            d.molecule().seq,
+            b"gaattcacgtggatcc",
+            "the bases, case kept, layout and header gone"
+        );
+        assert!(
+            d.molecule().topology.is_circular(),
+            "the topology chosen at creation did not survive"
+        );
+        assert_eq!(d.title, "gBlock 1");
+        assert_eq!(app.bench.len(), 1, "it arrived as a tab like anything else");
+
+        // It came from no file, so it is unsaved from the moment it exists and
+        // every write has to ask where — `export` and `save_dna` both go through
+        // a picker, and `path` is what a default file name would come from.
+        assert!(d.path.is_none());
+        assert!(d.unsaved());
+
+        // Said out loud rather than silently done: the header is in the status
+        // line the document arrived carrying.
+        assert!(
+            app.status.contains("header"),
+            "nothing said the FASTA header was dropped: {:?}",
+            app.status
+        );
+
+        // And the box is emptied, because the offer to resume is over.
+        assert!(!app.newdoc.open);
+        assert!(app.newdoc.text.is_empty() && app.newdoc.name.is_empty());
+
+        // Undo works on it exactly as on a document read from disk.
+        app.bench
+            .get_mut()
+            .unwrap()
+            .apply(pl_core::OpKind::SetTopology(pl_core::Topology::Linear))
+            .unwrap();
+        assert!(!app.document().unwrap().molecule().topology.is_circular());
+        app.bench.get_mut().unwrap().undo().unwrap();
+        assert!(
+            app.document().unwrap().molecule().topology.is_circular(),
+            "undo did not reach a document that came from no file"
+        );
+    }
+
+    /// A document with nothing on disk behind it is exactly the one a crash
+    /// destroys, so it has to be in the autosave pass like any other.
+    #[test]
+    fn a_new_document_is_protected_by_the_autosave() {
+        let ctx = test_ctx();
+        let (mut app, recovery) = app_with_recovery("newdoc");
+        app.newdoc.show();
+        app.newdoc.name = "pNew".into();
+        app.newdoc.text = "GAATTCACGTGGATCC".into();
+        assert!(click_in_new_dialog(&mut app, &ctx, "Create"));
+        assert!(app.document().is_some(), "the premise");
+
+        app.autosave(true);
+        assert!(
+            recovery.exists(),
+            "a document that exists in no file at all got no crash copy"
+        );
+        let (mol, title) = autosaved(&recovery);
+        assert_eq!(mol.seq, b"GAATTCACGTGGATCC");
+        assert_eq!(title, "pNew");
+    }
+
+    /// Refused, on screen, with the character named and located — and nothing
+    /// created, and the text left in the box to be fixed.
+    #[test]
+    fn a_character_that_is_not_a_base_is_refused_in_the_dialog() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        app.newdoc.show();
+        // An alignment row, gaps and all: the commonest thing to paste by
+        // mistake, and the one that must not quietly become a shorter molecule.
+        app.newdoc.text = "ACGT-ACGT".into();
+
+        // The button is drawn and disabled, so this clicks it and nothing may
+        // happen. Clicking a button that is not there would prove nothing.
+        assert!(
+            click_in_new_dialog(&mut app, &ctx, "Create"),
+            "the Create button vanished rather than being disabled"
+        );
+        assert!(
+            app.document().is_none(),
+            "a molecule was created with a character silently removed from it"
+        );
+        assert!(app.newdoc.open, "the dialog closed on a refusal");
+        assert_eq!(app.newdoc.text, "ACGT-ACGT", "the text was taken away");
+
+        let said = new_texts(&mut app, &ctx)
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            said.contains("U+002D"),
+            "the character is not named: {said}"
+        );
+        assert!(
+            said.contains("position 5"),
+            "the position is not given, so there is nothing to go and look at: {said}"
+        );
+    }
+
+    /// The question about work at risk wins; this one waits, with its text.
+    ///
+    /// PROVEN TO FAIL by deleting the `self.closing` arm of `new_dialog`'s
+    /// stand-down: the New dialog then paints on top of the unsaved-changes
+    /// guard, which is the one dialog in this application that decides whether
+    /// somebody's edits survive.
+    #[test]
+    fn the_new_dialog_stands_down_for_the_questions_that_can_lose_work() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        app.newdoc.show();
+        app.newdoc.text = "ACGTACGT".into();
+        assert!(
+            !new_texts(&mut app, &ctx).is_empty(),
+            "the premise: it draws when nothing else is being asked"
+        );
+
+        for arm in ["closing", "dna", "paste"] {
+            let mut app = App::blank();
+            app.newdoc.show();
+            app.newdoc.text = "ACGTACGT".into();
+            match arm {
+                "closing" => app.closing = true,
+                "dna" => {
+                    app.bench
+                        .set(Document::from_bytes(b">a\nACGT\n", "a.fa".into(), None).unwrap());
+                    app.pending_dna = app.plan_dna("x.dna".into(), None);
+                    assert!(app.pending_dna.is_some(), "the premise for {arm}");
+                }
+                _ => {
+                    app.edit.pending_paste = Some((seqedit::sanitise_paste("ACGT!"), None));
+                }
+            }
+            assert!(
+                new_texts(&mut app, &ctx).is_empty(),
+                "the New dialog painted over the {arm} question"
+            );
+            assert!(
+                app.newdoc.open && app.newdoc.text == "ACGTACGT",
+                "standing down cost the user their text ({arm})"
+            );
+        }
+    }
+
+    /// Ctrl+N, behind the guards its neighbours are behind, and a modal that
+    /// stands the rest of them down.
+    ///
+    /// PROVEN TO FAIL against the working tree as handed over: `Shortcuts` had
+    /// no `new_doc` field at all, so nothing here compiles, and once it did,
+    /// omitting `newdoc.open` from `asking()` leaves Ctrl+O popping a native
+    /// file picker out from underneath a modal somebody is pasting into.
+    #[test]
+    fn ctrl_n_opens_the_dialog_and_is_guarded_like_ctrl_o() {
+        let mut app = App::blank();
+        assert!(shortcuts_with(&app, egui::Key::N, None).new_doc);
+        // A Ctrl+N typed into the Features filter belongs to that box, exactly
+        // as a Ctrl+O there does.
+        for who in ["features filter", "library query"] {
+            assert!(
+                !shortcuts_with(&app, egui::Key::N, Some(who)).new_doc,
+                "Ctrl+N raised a dialog out of {who}"
+            );
+        }
+
+        // And with the dialog up, the application-wide chords stand down: it is
+        // a modal with two text boxes in it.
+        app.newdoc.show();
+        assert!(
+            app.asking(),
+            "the New dialog is not a question `asking` knows"
+        );
+        assert!(!shortcuts_with(&app, egui::Key::O, None).open);
+        assert!(!shortcuts_with(&app, egui::Key::N, None).new_doc);
+        assert!(!shortcuts_with(&app, egui::Key::S, None).save);
+    }
+
+    /// The action is where the other file actions are, and it comes first.
+    ///
+    /// PROVEN TO FAIL against the working tree as handed over: `grep -n '"New'`
+    /// over this file found only comments, and this assertion found no such
+    /// button.
+    #[test]
+    fn the_toolbar_offers_new_before_open() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        // Twice: the first pass sizes the widgets, and a one-pass layout puts
+        // things at the wrong x.
+        let mut drawn: Vec<(String, egui::Rect)> = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(window(), |ui| app.top_bar(ui));
+            drawn = flat_shapes(&out.shapes)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some((
+                        t.galley.text().to_string(),
+                        egui::Rect::from_min_size(t.pos, t.galley.size()),
+                    )),
+                    _ => None,
+                })
+                .collect();
+        }
+        let find = |want: &str| {
+            drawn
+                .iter()
+                .find(|(s, _)| s == want)
+                .unwrap_or_else(|| panic!("no {want:?} in the toolbar: {drawn:?}"))
+                .1
+        };
+        let new = find("New");
+        let open = find("Open…");
+        assert!(
+            new.left() < open.left(),
+            "New must open the run that takes molecules in and out, not follow it"
+        );
+        // No ellipsis, and that is the toolbar's own documented rule: "…" means
+        // this button reaches `rfd::FileDialog`, and New reaches a modal of ours.
+        assert!(!drawn.iter().any(|(s, _)| s == "New…"));
     }
 }

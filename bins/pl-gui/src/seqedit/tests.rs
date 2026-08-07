@@ -1608,6 +1608,121 @@ fn a_genbank_paste_counts_the_bases_it_dropped_above_the_origin_line() {
     );
 }
 
+/// PROVEN TO FAIL before `numbered_listing` existed: the plain-text branch
+/// rejects digits, so every coordinate in a listing became a rejected character
+/// and pasting the sequence out of a record viewer raised a consent dialog
+/// naming '1', '2', '3'… as characters that are not nucleotide codes.
+#[test]
+fn a_numbered_sequence_listing_has_its_coordinates_read_as_coordinates() {
+    // A GenBank ORIGIN block with the header, the ORIGIN line and the `//`
+    // gone — which is what selecting the sequence in a viewer gives you.
+    let r = sanitise_paste("        1 gaattcacgt ggatccacgt\n       21 aaaacccc\n");
+    assert_eq!(r.bases, "gaattcacgtggatccacgtaaaacccc");
+    assert!(r.rejected.is_empty(), "{:?}", r.rejected);
+    assert!(
+        r.dropped.iter().any(|d| d.contains("numbered sequence")),
+        "the coordinates went without a word: {:?}",
+        r.dropped
+    );
+
+    // THE CONTROL, and it is the whole reason the rule is corroborated on every
+    // line: one line that is not `<number> <bases>` means the digits in this
+    // text are not coordinates, and none of them may be stripped.
+    let r = sanitise_paste("        1 gaattcacgt\nACGT1234\n");
+    assert!(
+        r.rejected.iter().any(|x| x.ch == '1'),
+        "a listing was inferred from one numbered line among others: {:?}",
+        r.rejected
+    );
+
+    // And a number welded to its bases is one token, not a coordinate.
+    let r = sanitise_paste("1acgtacgt\n");
+    assert!(r.rejected.iter().any(|x| x.ch == '1'), "{:?}", r.rejected);
+
+    // The block need not begin at 1: a drag through the middle of a record
+    // starts wherever the pointer went down, and refusing that would send the
+    // commonest partial copy back to being rejected digits.
+    let r = sanitise_paste("       61 gaattcacgt\n       71 ggatccacgt\n");
+    assert_eq!(r.bases, "gaattcacgtggatccacgt");
+    assert!(r.rejected.is_empty(), "{:?}", r.rejected);
+}
+
+/// A numbered LIST of oligos is not a numbered listing of one sequence.
+///
+/// The shape rule alone — `<number> <bases>` on every line — accepts a list of
+/// separate oligos and reads its item numbers as coordinates, which
+/// concatenates them. That is the same fabricated chimera `sanitise_paste`
+/// refuses two FASTA records for, and it would have arrived quietly, with a
+/// `dropped` line explaining that the coordinates had been read as coordinates.
+///
+/// The numbers have to COUNT: line `k+1` must begin exactly `bases on line k`
+/// further along. `1, 2` fails on the first pair.
+///
+/// **The bases are the same string either way**, and that is the point rather
+/// than a weakness in the test: `report.bases` is every base character in the
+/// text, and what the listing rule decides is whether the DIGITS are structure
+/// or are characters the user has to be told about. Recognised, the paste goes
+/// in silently with an explanatory `dropped` line; declined, `rejected` names
+/// them, Ctrl+V asks before inserting anything and File ▸ New refuses outright.
+/// So the assertions are on `rejected` and `dropped`, which are what the two
+/// surfaces read.
+///
+/// PROVEN TO FAIL against the shape-only version. The WHOLE `seqedit` module
+/// was re-run, not this test by name:
+///
+/// ```text
+/// ---- seqedit::tests::a_numbered_list_of_oligos_is_not_a_listing_of_one_sequence stdout ----
+/// two 10-mers were fused into one 20-mer with nothing said: []
+/// ```
+///
+/// The empty list is the whole defect: nothing was rejected, so nothing asked.
+#[test]
+fn a_numbered_list_of_oligos_is_not_a_listing_of_one_sequence() {
+    let r = sanitise_paste("1 GAATTCACGT\n2 GGATCCACGT\n");
+    assert!(
+        r.rejected.iter().any(|x| x.ch == '1'),
+        "two 10-mers were fused into one 20-mer with nothing said: {:?}",
+        r.rejected
+    );
+    assert!(
+        !r.dropped
+            .iter()
+            .any(|d| d.contains("numbered sequence listing")),
+        "a list of oligos was announced as a sequence listing: {:?}",
+        r.dropped
+    );
+
+    // A block whose arithmetic is off is declined for the same reason: a line
+    // was lost on the way to the clipboard, and joining what is left would
+    // delete bases from the middle of a molecule without saying so.
+    let r = sanitise_paste("        1 gaattcacgt\n       21 ggatccacgt\n");
+    assert!(
+        r.rejected.iter().any(|x| x.ch == '2'),
+        "a gap in the coordinates was joined over in silence: {:?}",
+        r.dropped
+    );
+}
+
+/// A numbered listing is a LAYOUT, not a declaration that this is DNA, so the
+/// prose guard still runs over it.
+///
+/// PROVEN TO FAIL by setting the ORIGIN branch's `declared` in the listing
+/// branch as well — which is what a single `strip_digits` flag amounted to:
+/// "1 that was a bad hack" then pasted 15 bases, 47% of them ambiguity codes,
+/// with no dialog at all.
+#[test]
+fn a_numbered_listing_of_prose_is_still_questioned() {
+    let r = sanitise_paste("1 that was a bad hack\n");
+    assert_eq!(
+        r.bases, "thatwasabadhack",
+        "the digit was still a coordinate"
+    );
+    assert!(
+        r.suspect.is_some(),
+        "a numbered list of English words was taken for sequence"
+    );
+}
+
 #[test]
 fn prose_pasted_from_a_document_is_confirmed_rather_than_inserted() {
     // Sixteen of the twenty-six letters are IUPAC codes, so ordinary English

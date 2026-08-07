@@ -235,6 +235,19 @@ pub struct Path {
     /// A `/codon_start` that is present and is not 1, 2 or 3. Said, not
     /// silently clamped.
     pub bad_codon_start: Option<String>,
+    /// Bases the annotation claims that this molecule does not have.
+    ///
+    /// [`Translations::build`] clamps a segment to `Molecule::len`, because a
+    /// path that walked off the end would read `b' '` for every base past it
+    /// and paint a run of `X`. Clamping is right and it is INVISIBLE: a CDS
+    /// annotated `1..1500` on a 1,400 bp linear fragment — the ordinary partial
+    /// feature at the end of a sequencing read — simply produces a shorter
+    /// protein, and nothing about the shorter protein says a hundred bases of
+    /// it were never there. Recorded here so [`Path::protein`] can say it.
+    ///
+    /// Zero for every path built from bases that exist, which is all of them on
+    /// a well-formed file.
+    pub past_end: u64,
 }
 
 /// The feature index of the ad-hoc translation of the selection.
@@ -452,6 +465,261 @@ impl Path {
             ..self.clone()
         }
     }
+
+    /// Where these bases are, in the only notation that says it without a
+    /// legend: GenBank's, 1-based inclusive.
+    ///
+    /// `complement(join(1976..3310,3311..3397))` is pKoV's SacB, and it carries
+    /// three facts a bare residue string cannot — which strand, which bases,
+    /// and that there is more than one piece. It goes in the FASTA header for
+    /// exactly that reason.
+    ///
+    /// The segments are put back in the order the FILE listed them, which for a
+    /// reverse reading is the reverse of [`parts`](Self::parts) — see
+    /// [`Translations::build`], which reverses them into transcription order on
+    /// the way in. They are **not sorted**: a forward reading that crosses the
+    /// origin is `join(8110..8117,1..40)` in reading order and GenBank spells it
+    /// that way round, so sorting would rewrite the reading as well as the
+    /// notation.
+    pub fn location(&self) -> String {
+        let mut spans = self.parts.clone();
+        if self.reverse {
+            spans.reverse();
+        }
+        let inner: Vec<String> = spans
+            .iter()
+            .map(|&(lo, hi)| format!("{}..{}", lo + 1, hi))
+            .collect();
+        let joined = if inner.len() == 1 {
+            inner.into_iter().next().unwrap_or_default()
+        } else {
+            format!("join({})", inner.join(","))
+        };
+        if self.reverse {
+            format!("complement({joined})")
+        } else {
+            joined
+        }
+    }
+
+    /// The residues, materialised, with everything that changes how they must
+    /// be read.
+    ///
+    /// **The same walk the track paints**, residue by residue through
+    /// [`residue`](Self::residue), and that is the point of it being here
+    /// rather than in the surface that copies it: a second translator would be
+    /// a second answer to which three bases residue `k` is, and the first
+    /// screenshot in which the two disagree looks perfect.
+    ///
+    /// This one IS materialised, unlike the path it comes from — see the type
+    /// doc on [`Path`] for why paths are not. A `Protein` is built on a click,
+    /// one at a time, because the user asked for the letters.
+    pub fn protein(&self, read: &dyn Fn(u64) -> u8) -> Protein {
+        let n = self.aa_len();
+        let mut residues = String::with_capacity(n);
+        let mut inside: Vec<usize> = Vec::new();
+        let mut ambiguous_stops: Vec<usize> = Vec::new();
+        let mut ambiguous = 0usize;
+        let mut split = 0usize;
+        let mut initiator: Option<[u8; 3]> = None;
+        let mut ends_in_stop = false;
+        for k in 0..n {
+            // `break` and not `continue`: `residue` returns `None` only when a
+            // coordinate is off the end of the path, and every later `k` is
+            // further off. Skipping one would put residue k+1 where k should be
+            // and shift the rest of the protein one place left.
+            let Some(r) = self.residue(k, read) else {
+                break;
+            };
+            residues.push(r.aa as char);
+            if !r.contiguous {
+                split += 1;
+            }
+            match r.mark {
+                Mark::StopInside => inside.push(k + 1),
+                // Assigned by `residue` at any position, so the last-codon test
+                // is made here rather than assumed from the mark.
+                Mark::AmbiguousStop => {
+                    ambiguous_stops.push(k + 1);
+                    ends_in_stop |= k + 1 == n;
+                }
+                // `residue` only ever assigns this to the last codon.
+                Mark::StopEnd => ends_in_stop = true,
+                Mark::Initiator => initiator = Some(r.codon),
+                Mark::Ambiguous => ambiguous += 1,
+                Mark::Plain => {}
+            }
+        }
+
+        let mut notes: Vec<String> = Vec::new();
+        if let Some(c) = initiator {
+            // The letter on screen is not the letter the codon spells, and this
+            // is the only channel that survives leaving the program. `tet(A)`
+            // starts GTG: table 11 initiates there and table 1 does not, so the
+            // same three bases are M in one export and V in another.
+            notes.push(format!(
+                "the first codon is {} and does not spell M; table {} initiates there, so it is \
+                 written M",
+                String::from_utf8_lossy(&c),
+                self.code.id
+            ));
+        }
+        if self.skip > 0 {
+            notes.push(format!(
+                "/codon_start: the first {} base(s) of the annotation are not part of a codon and \
+                 were not translated",
+                self.skip
+            ));
+        }
+        if !inside.is_empty() {
+            notes.push(format!(
+                "{} internal stop codon(s), at residue {}",
+                inside.len(),
+                first_few(&inside)
+            ));
+        }
+        if !ambiguous_stops.is_empty() {
+            notes.push(format!(
+                "{} codon(s) both terminate and encode in table {}, at residue {} — only context \
+                 decides which, and this file does not carry it",
+                ambiguous_stops.len(),
+                self.code.id,
+                first_few(&ambiguous_stops)
+            ));
+        }
+        // Only for a reading the FILE claims is a protein. An ad-hoc
+        // translation of a selection is a question about a frame, not a claim
+        // that the bases are a gene, and "does not end in a stop codon" is true
+        // of very nearly every selection anyone will ever make — a sentence
+        // that fires on almost every use is one that gets read past, including
+        // on the CDS where it means something.
+        if !ends_in_stop && self.feat != SELECTION {
+            notes.push("the reading does not end in a stop codon".into());
+        }
+        if ambiguous > 0 {
+            notes.push(format!(
+                "{ambiguous} codon(s) did not resolve to one residue and are written X"
+            ));
+        }
+        let ragged = self.ragged();
+        if ragged > 0 {
+            notes.push(format!(
+                "the last {ragged} base(s) are not a whole codon and were not translated"
+            ));
+        }
+        if self.past_end > 0 {
+            notes.push(format!(
+                "the annotation names {} base(s) past the end of this molecule; they do not exist \
+                 and were not translated",
+                self.past_end
+            ));
+        }
+        if self.parts.len() > 1 {
+            notes.push(format!(
+                "{} segments, translated in transcription order",
+                self.parts.len()
+            ));
+        }
+        if split > 0 {
+            // Not three adjacent bases. `Residue::contiguous` is the same bit
+            // the track uses to stop a reader taking the three cells under a
+            // glyph for the codon.
+            notes.push(format!(
+                "{split} codon(s) are not three adjacent bases: they span a segment boundary or \
+                 the origin"
+            ));
+        }
+        if let Some(b) = &self.bad_codon_start {
+            notes.push(b.clone());
+        }
+
+        Protein {
+            name: self.name.clone(),
+            residues,
+            code: self.code,
+            reverse: self.reverse,
+            location: self.location(),
+            notes,
+        }
+    }
+}
+
+/// At most six of them, then a count. A note naming 400 internal stops is a
+/// note nobody reads, and the first few are enough to find the frameshift.
+fn first_few(k: &[usize]) -> String {
+    let shown: Vec<String> = k.iter().take(6).map(|x| x.to_string()).collect();
+    if k.len() > shown.len() {
+        format!("{} and {} more", shown.join(", "), k.len() - shown.len())
+    } else {
+        shown.join(", ")
+    }
+}
+
+/// A translation the user can take away.
+///
+/// The residues are exactly what the track draws: `*` for **every** stop
+/// including a terminal one, `X` for a codon that did not resolve, `M`
+/// substituted for an initiator that does not spell one. A protein whose length
+/// disagrees with the picture it was copied from is a support question, and
+/// dropping only the terminal `*` needs a rule that differs between records —
+/// which is how an INTERNAL stop eventually gets dropped too. What is done
+/// about it instead is that [`notes`](Self::notes) says so, and the header
+/// carries the count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Protein {
+    pub name: String,
+    pub residues: String,
+    pub code: Code,
+    pub reverse: bool,
+    /// GenBank's own spelling of where these bases are, 1-based inclusive.
+    pub location: String,
+    /// Everything about this reading that changes how the residues must be
+    /// read. Empty only when there is genuinely nothing to say.
+    pub notes: Vec<String>,
+}
+
+impl Protein {
+    /// The FASTA description field: the machine-readable facts, then the words.
+    ///
+    /// # The genetic code travels or the protein is worthless
+    ///
+    /// This program offers 27 NCBI tables and a per-feature `/transl_table`
+    /// override, so a residue string on its own does not determine its own
+    /// bases and cannot be checked. Thirteen of the 27 do not treat `TGA` as a
+    /// stop; a reading produced under table 4 and re-derived by a colleague
+    /// under table 1 ends 200 residues early, and both proteins look entirely
+    /// plausible. `transl_table=` is GenBank's own spelling of the number,
+    /// which is what makes it unambiguous rather than merely present.
+    ///
+    /// The tokens come first and hold no spaces, so the whole of the useful
+    /// part survives a header that some other program truncates; the free text
+    /// is after a `|` because the table names have commas in them.
+    pub fn description(&self) -> String {
+        let mut s = format!(
+            "transl_table={} location={} residues={}",
+            self.code.id,
+            self.location,
+            self.residues.chars().count()
+        );
+        s.push_str(" | ");
+        s.push_str(self.code.name());
+        for n in &self.notes {
+            s.push_str(" | ");
+            s.push_str(n);
+        }
+        s
+    }
+
+    /// This protein as one FASTA record.
+    ///
+    /// `pl_fileio::fasta::write_record` and not a `format!` here: the header
+    /// escaping and the line wrapping are that function's, and a second copy of
+    /// either is a second thing to get wrong. A name with a space in it —
+    /// `decR his`, which is a real feature in the user's own plasmid — would
+    /// otherwise put `his` in the description field.
+    pub fn fasta(&self, width: usize) -> String {
+        pl_fileio::fasta::write_record(&self.name, &self.description(), &self.residues, width)
+    }
 }
 
 /// Every translation this document offers, and how many lanes they need.
@@ -568,6 +836,10 @@ impl Translations {
             // origin-crossing segment the way `annot::AnnotIndex::build` does.
             // Order is preserved: GenBank's `join(a,b)` means a then b.
             let mut parts: Vec<(u64, u64)> = Vec::new();
+            // What the clamps below threw away. See `Path::past_end`: a partial
+            // CDS at the end of a linear fragment is clamped into range and
+            // then reads as a merely shorter protein.
+            let mut past_end = 0u64;
             for s in f.segments.iter().filter(|s| !flagged || s.translated) {
                 let lo = s.start.saturating_sub(1);
                 if s.end < s.start {
@@ -590,6 +862,11 @@ impl Translations {
                     continue;
                 }
                 let hi = s.end.min(n);
+                // `n.max(lo)` and not `n`, so a segment lying ENTIRELY past the
+                // end counts its whole length rather than only the part above
+                // `n`: `1500..1600` on a 1,400 bp molecule is 101 bases that do
+                // not exist, not 200.
+                past_end += s.end.saturating_sub(n.max(lo));
                 if hi > lo {
                     parts.push((lo, hi));
                 }
@@ -634,6 +911,7 @@ impl Translations {
                 lane: 0,
                 from_flag: flagged,
                 bad_codon_start,
+                past_end,
             });
             by_feat[fi] = Some(paths.len() as u32 - 1);
         }
@@ -1363,5 +1641,456 @@ mod tests {
         let (skip, why) = feature_codon_start(&f);
         assert_eq!(skip, 0);
         assert!(why.expect("said").contains("not 1, 2 or 3"));
+    }
+
+    // ---- the protein the user takes away -------------------------------
+
+    fn read_of(seq: &[u8]) -> impl Fn(u64) -> u8 + '_ {
+        move |i: u64| seq.get(i as usize).copied().unwrap_or(b' ')
+    }
+
+    /// `Path::protein` is `pl_core`'s answer, on all three awkward shapes at
+    /// once — one segment, a reverse `join`, and a reading round the origin.
+    ///
+    /// The oracle is `Code::translate_cds` over bases assembled independently
+    /// of the walk, which is what makes this a check and not a restatement: it
+    /// slices `Molecule::seq` and reverse-complements with `pl_core::iupac`,
+    /// while `protein` goes coordinate by coordinate through `Path::residue`.
+    ///
+    /// PROVEN TO FAIL against `protein` reading the segments in coordinate
+    /// order rather than in transcription order — dropping the `parts.reverse()`
+    /// in `Translations::build`, which is the mistake this shape exists to
+    /// catch. The WHOLE module was re-run and not this test by name, and three
+    /// went red rather than one:
+    ///
+    /// ```text
+    /// test aa::tests::the_awkward_cases_are_stated_rather_than_left_to_be_noticed ... FAILED
+    /// test aa::tests::the_protein_is_what_pl_core_says_for_every_shape ... FAILED
+    /// test aa::tests::a_two_segment_cds_reads_its_segments_in_transcription_order ... FAILED
+    ///
+    /// assertion `left == right` failed: reverse join
+    ///   left: "GC*MKR"
+    ///  right: "MKRGC*"
+    /// ```
+    ///
+    /// `GC*MKR` is the protein back to front across the segment boundary — the
+    /// signal peptide at the C terminus, which is the failure
+    /// [`Translations::build`] records against pKoV's SacB and which no
+    /// screenshot would show.
+    #[test]
+    fn the_protein_is_what_pl_core_says_for_every_shape() {
+        // A named struct rather than a five-tuple: clippy calls the tuple's
+        // type complex and it is right — `(&str, &str, bool, Strand, &[..])`
+        // has two `&str`s in it and no reader can tell which is the label.
+        struct Case {
+            label: &'static str,
+            seq: &'static str,
+            circular: bool,
+            strand: Strand,
+            /// 1-based inclusive, as a `Segment` is.
+            segs: &'static [(u64, u64)],
+            /// A `/transl_table` on the feature; `None` leaves the document's.
+            table: Option<&'static str>,
+            /// A `/codon_start` on the feature.
+            codon_start: Option<&'static str>,
+            want: &'static str,
+            /// The table the letters must be produced under, and named under.
+            id: u8,
+        }
+        let cases = [
+            Case {
+                label: "one segment",
+                seq: "TTATGAAACGCGGTTGCTAAGG",
+                circular: false,
+                strand: Strand::Forward,
+                segs: &[(3, 20)],
+                table: None,
+                codon_start: None,
+                want: "MKRGC*",
+                id: 11,
+            },
+            Case {
+                label: "reverse join",
+                seq: "GGTTTAGCAACCGCGTTTCATAGG",
+                circular: false,
+                strand: Strand::Reverse,
+                segs: &[(4, 12), (13, 21)],
+                table: None,
+                codon_start: None,
+                want: "MKRGC*",
+                id: 11,
+            },
+            Case {
+                label: "round the origin",
+                seq: "GAAACGCGGTTGCTAATTTTAT",
+                circular: true,
+                strand: Strand::Forward,
+                segs: &[(21, 16)],
+                table: None,
+                codon_start: None,
+                want: "MKRGC*",
+                id: 11,
+            },
+            // A GTG initiator, on the reverse strand, across a `join`, read
+            // under table 11 — the three shapes at once, and the initiator is
+            // the half the three cases above cannot check. Every one of them
+            // begins ATG, so all three pass against a walk that writes M
+            // unconditionally; `Path::residue` substitutes it only where
+            // `Code::is_start` says the codon initiates, and table 11 is why
+            // this one does.
+            Case {
+                label: "GTG start, reverse join, table 11",
+                seq: "GGTTTAGCAACCGCGTTTCACAGG",
+                circular: false,
+                strand: Strand::Reverse,
+                segs: &[(4, 12), (13, 21)],
+                table: None,
+                codon_start: None,
+                want: "MKRGC*",
+                id: 11,
+            },
+            // The SAME bases with `/transl_table=1` on the feature, which does
+            // not initiate at GTG. One letter differs and it is the first, so
+            // this is "the feature's table beats the document's" landing in a
+            // RESIDUE and not only in a header. The oracle is asked under the
+            // feature's table as well — it reads `p.code` — so a `feature_code`
+            // that handed back the default would be checked against itself and
+            // only `want` would catch it.
+            Case {
+                label: "the same GTG under the feature's own table 1",
+                seq: "GGTTTAGCAACCGCGTTTCACAGG",
+                circular: false,
+                strand: Strand::Reverse,
+                segs: &[(4, 12), (13, 21)],
+                table: Some("1"),
+                codon_start: None,
+                want: "VKRGC*",
+                id: 1,
+            },
+            // `/codon_start=2`: the frame the FILE asks for. One base out and
+            // every residue is wrong while the picture looks perfect.
+            Case {
+                label: "codon_start 2",
+                seq: "CATGAAACGCGGTTGCTAAG",
+                circular: false,
+                strand: Strand::Forward,
+                segs: &[(1, 19)],
+                table: None,
+                codon_start: Some("2"),
+                want: "MKRGC*",
+                id: 11,
+            },
+        ];
+        for Case {
+            label,
+            seq,
+            circular,
+            strand,
+            segs,
+            table,
+            codon_start,
+            want,
+            id,
+        } in cases
+        {
+            let m = {
+                let mut m = mol(seq, circular);
+                let mut f = cds("p", strand, segs);
+                if let Some(t) = table {
+                    f.qualifiers.push(("transl_table".into(), Some(t.into())));
+                }
+                if let Some(c) = codon_start {
+                    f.qualifiers.push(("codon_start".into(), Some(c.into())));
+                }
+                m.features.push(f);
+                m
+            };
+            let t = Translations::build(&m, code());
+            let p = &t.paths()[0];
+            let got = p.protein(&read_of(&m.seq));
+            assert_eq!(got.residues, oracle(&m, p), "{label}");
+            // And the same string the track's own walk produces, so the two
+            // readers of one path cannot drift apart.
+            assert_eq!(got.residues, protein(p, &m.seq), "{label}");
+            assert_eq!(got.residues, want, "{label}");
+            assert_eq!(got.code.id, id, "{label}");
+            // The number that produced those letters travels in the record that
+            // leaves the program, which is the only place it can travel.
+            assert!(
+                got.description().contains(&format!("transl_table={id}")),
+                "{label}: {}",
+                got.description()
+            );
+        }
+    }
+
+    /// The table travels, and it is the table that produced the letters.
+    ///
+    /// The one requirement a protein export cannot be allowed to fail: a
+    /// reading made under table 4 and pasted somewhere assuming table 1 is a
+    /// wrong answer that looks right. `TGA` is tryptophan in 4 and a stop in
+    /// 11, so the same twelve bases give two different proteins here, and the
+    /// header has to name the one that was used — the FEATURE's, not the
+    /// document default, which is the asymmetry `feature_code` exists for.
+    ///
+    /// PROVEN TO FAIL against `Protein::description` naming a table handed in
+    /// from the document rather than `self.code.id`: replacing `self.code.id`
+    /// with `11` — the default this molecule is built with — leaves the
+    /// residues `MWK*` under a header reading `transl_table=11`, which is the
+    /// silently-wrong-and-plausible case in one line:
+    ///
+    /// ```text
+    /// ---- aa::tests::the_header_names_the_table_that_produced_the_letters stdout ----
+    /// the header must name table 4: "transl_table=11 location=1..12
+    ///   residues=4 | Mold Mitochondrial, Protozoan Mitochondrial, …"
+    /// ```
+    ///
+    /// Note what the broken header looks like: the NUMBER says 11 and the NAME
+    /// beside it says Mold Mitochondrial, because only the number was hardcoded.
+    /// Nothing downstream reads the name.
+    #[test]
+    fn the_header_names_the_table_that_produced_the_letters() {
+        let mut f = cds("mito", Strand::Forward, &[(1, 12)]);
+        f.qualifiers.push(("transl_table".into(), Some("4".into())));
+        let m = {
+            let mut m = mol("ATGTGAAAATAA", false);
+            m.features.push(f);
+            m
+        };
+        let t = Translations::build(&m, code());
+        let p = t.paths()[0].protein(&read_of(&m.seq));
+        assert_eq!(p.residues, "MWK*", "table 4 reads TGA as tryptophan");
+        let d = p.description();
+        assert!(
+            d.contains("transl_table=4"),
+            "the header must name table 4: {d:?}"
+        );
+        assert!(
+            !d.contains("transl_table=11"),
+            "the header named the document default, which reached no residue: {d:?}"
+        );
+        // The same bases under the document's own table are a DIFFERENT
+        // protein, which is what makes the header load-bearing rather than
+        // decorative.
+        let mut plain = t.paths()[0].clone();
+        plain.code = code();
+        assert_eq!(plain.protein(&read_of(&m.seq)).residues, "M*K*");
+    }
+
+    /// Every awkward case named in one place, each said rather than guessed.
+    ///
+    /// PROVEN TO FAIL against a `protein` that returns the residues and
+    /// `notes: Vec::new()` — the version anyone writes first, which is exactly
+    /// the silence this test exists to forbid. The whole module was re-run and
+    /// two went red, this one and the initiator disclosure below, both
+    /// reporting the empty list:
+    ///
+    /// ```text
+    /// test aa::tests::an_initiator_substitution_travels_with_the_protein ... FAILED
+    /// test aa::tests::the_awkward_cases_are_stated_rather_than_left_to_be_noticed ... FAILED
+    /// panicked at bins\pl-gui\src\aa.rs: []
+    /// ```
+    ///
+    /// The residues were byte-for-byte correct in that run, which is the point:
+    /// nothing about a correct-looking protein says which of these five things
+    /// happened on the way to it.
+    #[test]
+    fn the_awkward_cases_are_stated_rather_than_left_to_be_noticed() {
+        let says =
+            |p: &Protein, needle: &str| -> bool { p.notes.iter().any(|n| n.contains(needle)) };
+
+        // 1. A length that is not a multiple of three. 20 bases, 6 codons, 2
+        //    over — the shape of every hand-made selection.
+        let m = mol("TTATGAAACGCGGTTGCTAAGG", false);
+        let sel = Path {
+            feat: SELECTION,
+            name: "selection".into(),
+            reverse: false,
+            code: code(),
+            parts: vec![(2, 22)],
+            skip: 0,
+            lane: 0,
+            from_flag: false,
+            bad_codon_start: None,
+            past_end: 0,
+        };
+        let p = sel.protein(&read_of(&m.seq));
+        assert_eq!(p.residues.chars().count(), 6);
+        assert!(
+            says(&p, "the last 2 base(s) are not a whole codon"),
+            "{:?}",
+            p.notes
+        );
+        // And a reading the FILE did not claim is a protein is not nagged
+        // about its missing stop codon — see `Path::protein`.
+        assert!(!says(&p, "does not end in a stop codon"), "{:?}", p.notes);
+
+        // 2. A reverse-strand, multi-segment reading: the location says both,
+        //    in the notation GenBank uses, and the join is called out.
+        let m2 = {
+            let mut m = mol("GGTTTAGCAACCGCGTTTCATAGG", false);
+            m.features
+                .push(cds("s", Strand::Reverse, &[(4, 12), (13, 21)]));
+            m
+        };
+        let t2 = Translations::build(&m2, code());
+        let p2 = t2.paths()[0].protein(&read_of(&m2.seq));
+        assert_eq!(
+            p2.location, "complement(join(4..12,13..21))",
+            "the segments must be given back in the order the FILE listed them"
+        );
+        assert!(p2.reverse);
+        assert!(says(&p2, "2 segments, translated in transcription order"));
+        // And NOT the straddle note. Both segments here are nine bases, so the
+        // seam falls exactly on a codon boundary and no codon spans it — a note
+        // that fired on every join regardless would be a note nobody reads by
+        // the time it means something.
+        assert!(
+            !says(&p2, "not three adjacent bases"),
+            "nothing straddles this seam: {:?}",
+            p2.notes
+        );
+
+        // 2b. A reading that really does straddle: round the origin, where the
+        //     first codon is coordinates 21, 22, 1 and the three cells under
+        //     the glyph are not the codon.
+        let m2b = {
+            let mut m = mol("GAAACGCGGTTGCTAATTTTAT", true);
+            m.features.push(cds("o", Strand::Forward, &[(21, 16)]));
+            m
+        };
+        let t2b = Translations::build(&m2b, code());
+        let p2b = t2b.paths()[0].protein(&read_of(&m2b.seq));
+        assert_eq!(p2b.location, "join(21..22,1..16)");
+        assert!(
+            says(&p2b, "1 codon(s) are not three adjacent bases"),
+            "{:?}",
+            p2b.notes
+        );
+
+        // 3. An internal stop, which is the loudest thing this can say.
+        let m3 = {
+            let mut m = mol("ATGTAAAAACGCTAA", false);
+            m.features.push(cds("broken", Strand::Forward, &[(1, 15)]));
+            m
+        };
+        let t3 = Translations::build(&m3, code());
+        let p3 = t3.paths()[0].protein(&read_of(&m3.seq));
+        assert_eq!(p3.residues, "M*KR*");
+        assert!(
+            says(&p3, "1 internal stop codon(s), at residue 2"),
+            "{:?}",
+            p3.notes
+        );
+        // The terminal one is not counted as internal, and a reading that ends
+        // in a stop does not get the missing-stop note.
+        assert!(!says(&p3, "does not end in a stop codon"), "{:?}", p3.notes);
+
+        // 4. A partial feature at the end of a linear molecule. The annotation
+        //    claims 1..30 and there are 15 bases, so 15 of them do not exist —
+        //    and `Translations::build` clamps, which without this note reads as
+        //    a merely shorter protein.
+        let m4 = {
+            let mut m = mol("ATGAAACGCGGTTGC", false);
+            m.features.push(cds("partial", Strand::Forward, &[(1, 30)]));
+            m
+        };
+        let t4 = Translations::build(&m4, code());
+        assert_eq!(t4.paths()[0].past_end, 15);
+        let p4 = t4.paths()[0].protein(&read_of(&m4.seq));
+        assert_eq!(p4.residues, "MKRGC");
+        assert!(
+            says(&p4, "15 base(s) past the end of this molecule"),
+            "{:?}",
+            p4.notes
+        );
+        assert!(says(&p4, "does not end in a stop codon"), "{:?}", p4.notes);
+    }
+
+    /// An initiator that does not spell M is disclosed, because the letter on
+    /// screen is not the letter the codon spells.
+    ///
+    /// `GTG` initiates under table 11 and does not under table 1, so the same
+    /// three bases leave this program as `M` or as `V` depending on a number
+    /// the residue string cannot carry.
+    #[test]
+    fn an_initiator_substitution_travels_with_the_protein() {
+        let m = {
+            let mut m = mol("GTGAAACGCTAA", false);
+            m.features.push(cds("tet", Strand::Forward, &[(1, 12)]));
+            m
+        };
+        let t = Translations::build(&m, code());
+        let p = t.paths()[0].protein(&read_of(&m.seq));
+        assert_eq!(p.residues, "MKR*");
+        assert!(
+            p.notes
+                .iter()
+                .any(|n| n.contains("the first codon is GTG") && n.contains("table 11")),
+            "{:?}",
+            p.notes
+        );
+        // Under table 1 the same codon is not an initiator, so there is no
+        // substitution to disclose and the letter is the one the codon spells.
+        let mut t1 = t.paths()[0].clone();
+        t1.code = translate::table(1).expect("table 1");
+        let p1 = t1.protein(&read_of(&m.seq));
+        assert_eq!(p1.residues, "VKR*");
+        assert!(
+            !p1.notes.iter().any(|n| n.contains("the first codon is")),
+            "{:?}",
+            p1.notes
+        );
+    }
+
+    /// The record is a FASTA record: one header line, and residues that survive
+    /// a round trip through this program's own reader.
+    ///
+    /// `decR his` is a real feature in the user's own plasmid and its name has
+    /// a space in it, which in a FASTA header is the identifier/description
+    /// boundary — so `his` would become the first word of the description and
+    /// the record would be called `decR`. That is `write_record`'s escaping,
+    /// exercised through the path that will actually meet such a name.
+    ///
+    /// PROVEN TO FAIL against `Protein::fasta` building the header with
+    /// `format!(">{} {}\n…")` instead of going through `write_record`:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: the identifier was cut at the space
+    ///   left: ">decR"
+    ///  right: ">decR_his"
+    /// ```
+    #[test]
+    fn the_record_is_one_header_line_and_residues_that_read_back() {
+        let m = {
+            let mut m = mol("TTATGAAACGCGGTTGCTAAGG", false);
+            m.features
+                .push(cds("decR his", Strand::Forward, &[(3, 20)]));
+            m
+        };
+        let t = Translations::build(&m, code());
+        let p = t.paths()[0].protein(&read_of(&m.seq));
+        let record = p.fasta(4);
+
+        let mut lines = record.lines();
+        let header = lines.next().expect("a header");
+        assert_eq!(
+            header.split_whitespace().next(),
+            Some(">decR_his"),
+            "the identifier was cut at the space: {header:?}"
+        );
+        assert!(header.contains("transl_table=11"), "{header:?}");
+        assert!(header.contains("location=3..20"), "{header:?}");
+        assert!(header.contains("residues=6"), "{header:?}");
+        assert_eq!(
+            lines.collect::<Vec<_>>(),
+            vec!["MKRG", "C*"],
+            "the residues did not wrap at the requested width"
+        );
+        // `fasta::parse` drops the `*` terminator, which is exactly what it is
+        // documented to do; what matters is that everything else comes back.
+        let back = pl_fileio::fasta::parse(&record);
+        assert_eq!(back.name, "decR_his");
+        assert_eq!(back.seq, b"MKRGC".to_vec());
     }
 }
