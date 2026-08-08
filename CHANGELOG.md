@@ -25,6 +25,27 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.1] - 2026-08-08
+
+### Fixed
+
+- **Four greyed-out buttons could not say why they were greyed out.** They
+  attached their explanation with `on_hover_text`, which on a *disabled*
+  widget shows nothing at all: egui 0.35 routes it through
+  `Tooltip::for_enabled`, and that opens the popup only when the response is
+  enabled. So every one of those sentences was written in the branch that
+  runs precisely *because* the button is grey, and could never be read.
+
+  It is the shape of mistake that leaves nothing behind — no warning, no
+  wrong answer on screen, just a hint nobody can reach. The user hovers the
+  grey button asking what to do, and the app says nothing back. Now
+  `on_disabled_hover_text`, in "Design primers…", "New feature…", "Copy
+  rev-comp" and the primer designer's "Add to document". "Copy protein" in
+  the same row was already right, and carried the comment explaining the
+  trap that its three neighbours had fallen into.
+
 ### Changed
 
 - **The feature-database gate no longer depends on anyone else's uptime.** The
@@ -597,7 +618,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.1
 [0.3.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.0
 [0.2.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.2.0
 [0.1.3]: https://github.com/liorlobel/polylinker/releases/tag/v0.1.3
