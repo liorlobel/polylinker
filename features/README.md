@@ -70,7 +70,7 @@ right name.
 |---|---|
 | `features.tsv` | One line per feature. The biology. |
 | `provenance.tsv` | One line per `(record, field)`. Where each field came from. |
-| `SIGNOFF.tsv` | One line per **signed** record: who, when, what they checked, and a sha256 of the row's content at the time. A missing, stale or malformed sign-off can only remove trust, never add it. The build reads it and never writes it, and CI proves that. |
+| `SIGNOFF.tsv` | One line per **signed** record: who, when, what they checked, and a sha256 of the row's content at the time. A missing, stale or malformed sign-off can only remove trust, never add it. The build reads it and never writes it, and `build/check_writer.py` proves both halves on every push — offline, so the proof does not depend on any upstream server being reachable. |
 | `SOURCING.md` | Which sources were cleared, with quoted licence evidence. |
 | `NOTICE` | Attributions required by the sources in use. |
 | `build/build.py` | The harness: id allocation, validation, the id-stability audit, both writers. §8.3 rule 5: *publish the build script, not just the output.* |
@@ -79,12 +79,14 @@ right name.
 | `build/stage_rfam.py` | Stage 3. Rfam seed alignments, with the miRBase and Wikipedia exclusions enforced at parse time. |
 | `build/stage_curated.py` | Stage 5. Hand-curated designed parts, one citation each, and two routes: codons sliced out of a natural parent, or a peptide verified against a wwPDB polymer entity. Six of 28 are still held; see *Honest coverage*. |
 | `build/check_signoff.py` | Proves no row asserts more than a human signed — and proves the check itself can fail, in both directions. |
+| `build/check_writer.py` | Proves the build's writer *reads* `SIGNOFF.tsv` and never writes it, over the real shipped rows and with no network. Plants five misbehaving writers and requires itself to catch each, then requires itself to pass a clean one. |
 
 Rebuild, then verify:
 
 ```bash
 PLF_BUILD_DATE=2026-07-28 python features/build/build.py
 python features/build/check_signoff.py
+python features/build/check_writer.py
 python features/build/taint_gate.py
 python features/build/archive_legal.py --check
 cargo test -p pl-features
@@ -96,6 +98,13 @@ uses today's date, which is written into `#!version`, into every row's
 sources rebuilt on a different calendar day produce a different file. Pin it to
 the release date to reproduce a release byte for byte.
 
+`PLF_OFFLINE=1` uses the cache and never the network. Cached files are still
+verified against their recorded sha256, so this is "do not fetch", not "trust
+whatever is lying around": a stage whose sources are absent reports its source
+unavailable and contributes no rows, and the build exits 3. With a warm cache it
+reproduces the full table with no network at all, which is how CI audits the
+writer without any upstream server's uptime deciding whether the gate is green.
+
 The id-stability audit defaults to auditing against the file it is about to
 overwrite, which is the *published* table only on a clean checkout. After one
 local build it compares the output with itself and cannot fail. Pass
@@ -106,6 +115,18 @@ which is any time a row is deliberately re-pinned.
 `features.tsv` it writes is always loadable — rejected rows are reported and left
 out — so a non-zero exit means the build is incomplete, not that the output is
 broken.
+
+| Exit | What it means |
+|---|---|
+| 0 | Complete. |
+| 1 | A row was rejected or a stage raised. Incomplete, and it is this repository's problem. |
+| 2 | A published id would change meaning. **Nothing is written.** |
+| 3 | A stage could not reach its upstream host. Incomplete, and it is *not* this repository's problem — re-run when the host is back. |
+
+Exit 3 is separated from exit 1 for the same reason `taint_gate.py` separates
+`taint-gate-unavailable` from a finding: *could not check* and *checked and found
+wanting* are different answers, and a build that reports someone else's outage as
+its own defect sends whoever reads it looking for a bug that is not there.
 
 ### How ids are allocated
 

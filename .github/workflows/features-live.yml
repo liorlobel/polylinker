@@ -1,0 +1,128 @@
+name: features (live sources)
+
+# THIS IS NOT A GATE, AND IT IS IN ITS OWN FILE SO THAT IT CANNOT BECOME ONE BY
+# ACCIDENT.
+#
+# Everything in ci.yml is hermetic: it runs on synthetic or committed data and
+# its answer depends on this repository and nothing else. This workflow is the
+# exception. It fetches from ftp.ncbi.nlm.nih.gov, rest.uniprot.org,
+# www.ebi.ac.uk, ftp.ebi.ac.uk and data.rcsb.org -- five services nobody here
+# operates -- so its colour is partly a statement about their afternoon.
+#
+# It exists because the hermetic checks buy their reliability with a real
+# narrowing. `check_writer.py` drives the writer with rows read back off disk,
+# and the offline end-to-end run drives it with no rows at all. Neither notices
+# an upstream record that moved, a UniProt schema change, an accession that was
+# withdrawn, or a stage that has quietly stopped producing anything. Those are
+# real and they need to be found -- just not by failing a pull request that did
+# not cause them.
+#
+# The rule for anything added here: if a step's result would still be true
+# tomorrow with the network unplugged, it belongs in ci.yml instead.
+
+on:
+  schedule:
+    # 05:40 UTC daily. Off the hour deliberately: GitHub queues every cron that
+    # fires on the hour together, and a job that waits an hour to start is a job
+    # whose timeouts measure the queue.
+    - cron: "40 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: the build against its real sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # `--out` is a scratch directory, so the committed tables are never
+      # touched. `PLF_BUILD_DATE` is pinned so that a rebuild differs from the
+      # shipped table only where the DATA differs -- date_added is stamped from
+      # the clock and is outside the content digest for exactly this reason.
+      - name: Build from live sources
+        id: build
+        run: |
+          set +e
+          PLF_BUILD_DATE=1970-01-01 python features/build/build.py --out /tmp/plf-live
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      # Exit 3 is `build-source-unavailable`: build.py reached a host and the
+      # host did not answer. That is not a result about this repository, and
+      # reporting it as one is the whole failure this workflow was split out to
+      # stop. It is announced and the job stops -- NOT passed off as a success,
+      # and not silently swallowed either. taint_gate.py spends an exit code on
+      # the same distinction, and for the same reason: "could not check" and
+      # "checked and clean" are different answers.
+      # Reported, not failed, and NOT quietly passed either. GitHub offers a step
+      # pass or a step failure and nothing in between, so "not checked" is
+      # written where a human will read it -- a warning annotation on the run and
+      # a line in the run summary -- rather than encoded in a badge colour that
+      # cannot express it. Failing here would rebuild, on a smaller stage, the
+      # exact thing this split was meant to end: a red that says nothing about
+      # the code and trains people to skip past red.
+      - name: An outage is not a finding
+        if: steps.build.outputs.rc == '3'
+        run: |
+          echo "::warning::NOT CHECKED — a source was unreachable, so today's live build probed nothing."
+          {
+            echo "### features (live sources): **not checked**"
+            echo
+            echo "\`build.py\` exited 3 (\`build-source-unavailable\`): it reached an upstream"
+            echo "host and the host did not answer. Nothing about this repository needs fixing,"
+            echo "and nothing about it was verified either."
+            echo
+            echo "The checks that gate \`main\` are in \`ci.yml\` and are hermetic; they ran."
+            echo "This job is a freshness probe, and today it did not get to probe."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Everything else IS a result about this repository, and the rest of the
+      # job is the same set of assertions the hermetic steps make -- restated
+      # here against rows that came off the wire ten seconds ago, which is the
+      # one thing the offline checks structurally cannot do.
+      - name: The writer never wrote the sign-off, on live rows
+        if: steps.build.outputs.rc != '3'
+        run: |
+          test -e /tmp/plf-live/features.tsv \
+            || { echo "::error::the build never reached its writer, so this step checked nothing"; exit 1; }
+          rows=$(grep -c '^PLF:' /tmp/plf-live/features.tsv || true)
+          test "$rows" -gt 0 \
+            || { echo "::error::the live build produced no rows at all; every stage is failing for a reason that is not an outage"; exit 1; }
+          echo "the live build produced $rows row(s)"
+          found=$(find /tmp/plf-live -iname 'SIGNOFF.tsv' -print -quit)
+          test -z "$found" \
+            || { echo "::error::the build emitted $found into its output directory"; exit 1; }
+          git ls-files --error-unmatch features/SIGNOFF.tsv >/dev/null 2>&1 \
+            || { echo "::error::features/SIGNOFF.tsv is not tracked by git, so the diff below would prove nothing"; exit 1; }
+          git diff --exit-code -- features/SIGNOFF.tsv \
+            || { echo "::error::the build modified features/SIGNOFF.tsv; a sign-off comes from a human, not from a program"; exit 1; }
+
+      # The freshness question this workflow is actually for: does the shipped
+      # table still describe what upstream says today? A difference is NOT a
+      # failure -- upstream moving is normal and the answer is a curated rebuild,
+      # not a red badge -- so it is reported and the step stays green. What would
+      # be a failure is nobody finding out for six months.
+      #
+      # Compared with `git diff --no-index` rather than a checksum so that the
+      # log says WHICH rows moved. date_added is excluded by the pinned build
+      # date above.
+      - name: Does the shipped table still match upstream?
+        if: steps.build.outputs.rc != '3'
+        continue-on-error: true
+        run: |
+          if git diff --no-index --stat -- features/features.tsv /tmp/plf-live/features.tsv; then
+            echo "the shipped table still reproduces from live sources, row for row"
+          else
+            echo "::warning::a rebuild from live sources differs from features/features.tsv."
+            echo "That is upstream moving, not a defect. A curator rebuilds, re-reads the"
+            echo "changed rows and re-signs them: every signature over a changed row has"
+            echo "already lapsed by content digest, so nothing ships on a stale approval."
+            git diff --no-index -- features/features.tsv /tmp/plf-live/features.tsv | head -200 || true
+          fi
