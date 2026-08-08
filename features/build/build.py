@@ -44,9 +44,12 @@ Usage
     python features/build/build.py            # build from cache, fetching what is missing
     python features/build/build.py --refresh  # re-fetch everything
 
-Exit status is 1 if any row was rejected or any stage failed. The TSV written is
-always loadable — rejected rows are reported and left out — but a non-zero exit
-means the build is incomplete and something needs a human.
+Exit status is 1 if any row was rejected or any stage failed, 2 if a published
+id changed meaning (nothing is written), and 3 if a stage could not reach its
+upstream host. The TSV written is always loadable — rejected rows are reported
+and left out — but a non-zero exit means the build is incomplete and something
+needs a human. Exit 3 is the one that says the human to fetch is not a
+maintainer of this repository; see `SourceUnavailable`.
 """
 
 from __future__ import annotations
@@ -90,6 +93,25 @@ from lib_columns import (  # noqa: E402
 # who is fetching from it. `polylinker/polylinker` is not an organisation, so
 # the string that was here pointed a curious NCBI or EBI admin at a 404.
 UA = "polylinker-features-build/0.1 (https://github.com/liorlobel/polylinker)"
+
+# Retry budget for one URL: sleeps of 3, 6 and 12 seconds around four attempts.
+# Tuned against the failure that motivated it -- two consecutive CI runs lost to
+# EBI read timeouts on 2026-08-07 -- and deliberately not larger, because the
+# circuit breaker below is what handles a real outage. Retrying is for a blip.
+RETRIES = 4
+BACKOFF = 3
+TIMEOUT = 60
+
+# Hosts this process has already proven unreachable, host -> what happened.
+#
+# Without this a genuine outage costs RETRIES * TIMEOUT *per accession*, and
+# stage_curated alone asks ENA for hundreds. The build would not fail fast, it
+# would hang for hours and then fail, which on a CI runner is indistinguishable
+# from a hang. One host is probed once; every later fetch from it gives up
+# immediately with the reason the first one recorded. Per host, not global:
+# EBI being down says nothing about NCBI, and the stages that can still work
+# should still work.
+_UNREACHABLE: dict[str, str] = {}
 
 AMR_BASE = (
     "https://ftp.ncbi.nlm.nih.gov/pathogen/Antimicrobial_resistance/"
@@ -227,6 +249,34 @@ def check_fetch_host(url: str) -> None:
         )
 
 
+class SourceUnavailable(BaseException):
+    """Upstream could not be reached. Deliberately NOT an `Exception`.
+
+    Every stage wraps its per-item work in `except Exception` so that one bad
+    record does not kill the stage -- stage_uniprot's "an unfetchable xref is
+    reported, not fatal" is the pattern. A network failure is not one bad
+    record. It is a condition under which the stage's whole input is unknown,
+    and absorbing it per-item is precisely how a *partial* table gets written
+    with confident-looking notes on it, which is the failure `fetch`'s own
+    docstring exists to describe. So this inherits from BaseException, exactly
+    as the SystemExit it replaces did, and blows through every per-item handler
+    in the stages to reach main().
+
+    What changes is only WHERE it stops. SystemExit killed the interpreter, so
+    an EBI timeout and a SOURCING.md violation had the same effect: the build
+    never reached its writer. Those are not the same event. `check_fetch_host`
+    raising SystemExit means someone pointed the build at a source no licence
+    covers, and that must stop everything; a read timeout means EBI was busy.
+    main() now tells them apart -- see the stage loop.
+
+    Being outside `Exception` also fixes a latent false pass: stage_rfam's
+    `self_test.must_fail` catches SystemExit to assert that a gate REFUSED its
+    input, so a fetch that died inside one of those closures was recorded as
+    "PASS ... refused". A gate that was never reached now cannot report itself
+    as having held.
+    """
+
+
 def fetch(url: str, name: str, refresh: bool = False) -> bytes:
     """Fetch `url`, caching it, and never trust a cache we cannot verify.
 
@@ -252,16 +302,58 @@ def fetch(url: str, name: str, refresh: bool = False) -> bytes:
         # should not be hard-blocked, they should just pay for one download.
         print(f"  cache for {name} is unverified or stale; re-fetching")
 
+    # PLF_OFFLINE: use the cache, never the network. The cache check above still
+    # runs and still verifies its sha256, so this is "no fetching", not "trust
+    # anything lying around".
+    #
+    # This is what makes the CI writer audit hermetic BY CONSTRUCTION rather than
+    # by hoping EBI is up. A run with an empty cache contributes no rows and
+    # still exercises every code path between argv and write_outputs; a run with
+    # a warm cache exercises the same paths over the full table. The check
+    # therefore gets STRONGER where a cache exists and never weaker, and no
+    # third party's uptime moves it either way. If the ENA and RCSB legs are
+    # ever committed under their licences (features/SOURCING.md §1: INSDC
+    # free-and-unrestricted, CC0 respectively), they raise this floor with no
+    # change to CI at all.
+    if os.environ.get("PLF_OFFLINE"):
+        raise SourceUnavailable(f"{url}: PLF_OFFLINE is set and this is not cached")
+
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host in _UNREACHABLE:
+        raise SourceUnavailable(
+            f"{url}: not attempted, {host} already failed this run ({_UNREACHABLE[host]})"
+        )
+
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    for attempt in range(4):
+    for attempt in range(RETRIES):
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                 data = r.read()
             break
+        except urllib.error.HTTPError as e:
+            # A 4xx is upstream telling us the REQUEST is wrong, and retrying an
+            # answer that will not change wastes the runner's time and EBI's.
+            # More to the point it is a different kind of event from an outage:
+            # a withdrawn or mistyped accession is this repository's defect and
+            # must not be excused as "the source was down", so it stays fatal
+            # and is not laundered into a skip. 408 and 429 are 4xx by number
+            # and transient by meaning -- 429 is the rate limit SOURCING.md
+            # §2 warns about -- so they fall through to the retry.
+            if 400 <= e.code < 500 and e.code not in (408, 429):
+                raise SystemExit(
+                    f"refusing to continue: {url} returned HTTP {e.code} {e.reason}. "
+                    f"That is a statement about the request, not about the network; "
+                    f"the accession is wrong, withdrawn, or no longer served."
+                ) from e
+            if attempt == RETRIES - 1:
+                _UNREACHABLE[host] = f"HTTP {e.code} {e.reason}"
+                raise SourceUnavailable(f"{url}: HTTP {e.code} {e.reason}") from e
+            time.sleep(BACKOFF * 2 ** attempt)
         except (urllib.error.URLError, TimeoutError) as e:
-            if attempt == 3:
-                raise SystemExit(f"failed to fetch {url}: {e}")
-            time.sleep(2 * (attempt + 1))
+            if attempt == RETRIES - 1:
+                _UNREACHABLE[host] = str(e)
+                raise SourceUnavailable(f"{url}: {e}") from e
+            time.sleep(BACKOFF * 2 ** attempt)
 
     # Metadata first, then an atomic rename of the payload. In that order a
     # crash can leave an orphaned meta file (harmless -- the payload is absent,
@@ -2357,7 +2449,7 @@ def main() -> int:
     print("\nSelf-test -- every gate in build.py, against input that must trip it")
     print("\n".join(self_test()))
 
-    rows, defects = [], []
+    rows, defects, unreachable = [], [], []
     for n, stage in enumerate(STAGES, start=1):
         print(f"\nStage {n} — {stage.title}  [PLF:{stage.base:04d}"
               f"..PLF:{stage.base + stage.size - 1:04d}]")
@@ -2368,7 +2460,28 @@ def main() -> int:
             continue
         try:
             raw_rows, second = fn(args.refresh)
+        except SourceUnavailable as e:
+            # "Could not reach the source" is not "the build is broken", and it
+            # is not "the source said no" either. It is the one failure here
+            # that says nothing about this repository, so it is the one failure
+            # that must not be reported as this repository's. The stage drops
+            # out and the build carries on to its writer.
+            #
+            # Nothing is lost by continuing. What stops a truncated table being
+            # published is not this abort -- it never was -- it is audit_ids
+            # below, which sees the rows this stage used to contribute go
+            # missing against the baseline and refuses to write at all. Read
+            # that function's docstring before weakening this: on a scratch
+            # --out there IS no baseline, which is exactly why it downgrades
+            # itself to a warning rather than claiming a pass.
+            print(f"  !! {stage.key} could not reach its source: {e}")
+            defects.append(f"{stage.key}: source unreachable, contributed no rows")
+            unreachable.append(f"{stage.key}: {e}")
+            continue
         except SystemExit:
+            # A sourcing decision, not an outage: check_fetch_host refusing a
+            # host no licence covers, or a 4xx saying the accession is wrong.
+            # Both are this repository's problem and both still stop everything.
             raise
         except Exception:  # noqa: BLE001 — one stage's failure must not erase the rest
             print(f"  !! {stage.key} raised while building:")
@@ -2465,6 +2578,22 @@ def main() -> int:
     else:
         print("\nAll rows are 'proposed'. Db::reviewed() will ship none of them until")
         print("a curator signs each one off in features/SIGNOFF.tsv.")
+    # "Could not check" and "checked and found wanting" are different results,
+    # and taint_gate.py already spends an exit code saying so. Same convention
+    # here: exit 3 and a `build-source-unavailable` line mean the table below is
+    # short because an upstream host was down, not because this repository
+    # regressed. It is a LOUDER result than exit 1, not a quieter one -- nothing
+    # is auto-passed, the build is still incomplete, and the id audit above has
+    # already refused to overwrite a published table. What it buys is that a
+    # reader, human or CI, can tell whose problem it is.
+    if unreachable:
+        print(f"\nexit 3: build-source-unavailable — {len(unreachable)} stage(s) "
+              f"could not reach an upstream host:")
+        for u in unreachable:
+            print(f"  - {u}")
+        print("This build is INCOMPLETE and must not be published. Re-run when the")
+        print("host is back; nothing about the repository needs fixing.")
+        return 3
     if defects:
         print(f"\nexit 1: {len(defects)} defect(s) above. features.tsv holds only the")
         print("rows that passed, so it loads -- but this build is incomplete.")
@@ -2473,4 +2602,24 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # HAND OVER TO THE IMPORTED COPY OF THIS FILE, AND DO NOT SIMPLIFY THIS TO
+    # `raise SystemExit(main())`. It was that, and the bug it hid took a CI
+    # simulation to find rather than a reading.
+    #
+    # `python features/build/build.py` loads this file as `__main__`. Every stage
+    # module then does `from build import fetch`, which loads THE SAME FILE AGAIN
+    # under the name `build` -- two module objects, two of every class defined
+    # here. `fetch` running inside a stage therefore raises `build.
+    # SourceUnavailable`, while the `except SourceUnavailable` in `main()` names
+    # `__main__.SourceUnavailable`, and one does not catch the other. The stage
+    # handler silently stopped working and the build died with a traceback on
+    # the first unreachable host -- precisely the behaviour it was written to
+    # end.
+    #
+    # Nothing caught it before because the class used to be `SystemExit`, which
+    # is a builtin and therefore identical in both copies. Any exception type
+    # defined in this file has this hazard; running `main()` in the canonical
+    # module is what removes it, for this and for anything added later.
+    import build as _canonical
+
+    raise SystemExit(_canonical.main())

@@ -25,7 +25,53 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The feature-database gate no longer depends on anyone else's uptime.** The
+  CI step that proves the build never writes `features/SIGNOFF.tsv` did it by
+  running the real build against live EBI, NCBI, UniProt and RCSB. On
+  2026-08-07 EBI timed out twice in a row and main went red twice, both times
+  for a reason no commit under test had caused. The step was not wrong to fail —
+  the build had died before reaching the writer, so it had genuinely checked
+  nothing — but a red gate that says nothing about the code teaches people to
+  ignore red gates, which costs more than the check is worth.
+
+  The rule is unchanged and is now proved twice, offline, on every push.
+  `features/build/check_writer.py` drives the real writer over the real shipped
+  rows with the real signatures applied; the end-to-end run sets `PLF_OFFLINE=1`
+  so `fetch` refuses the network instead of hoping for it. Neither can be turned
+  red by a third party, and both now run in `tools/ci.ps1` too, which they could
+  not when they needed a network.
+
+  The check got stricter in three places on the way. It now also proves the
+  build *reads* the sign-off — the step was named "The build reads SIGNOFF.tsv
+  and never writes it" and only ever tested the second clause, so a build that
+  ignored the file entirely passed it. It looks for a stray `SIGNOFF.tsv` at any
+  depth and in any case, where the old `test ! -e` saw neither a subdirectory nor
+  `signoff.tsv` on a case-insensitive filesystem. And it plants five misbehaving
+  writers and requires itself to catch each one before it will certify the real
+  one, then requires itself to pass a writer that does nothing wrong — because a
+  check that fires on everything proves as little as one that fires on nothing.
+
+  Verification against live sources still happens, in a new scheduled
+  `features (live sources)` workflow that also reports whether the shipped table
+  still reproduces from upstream. It is not a gate, and an unreachable source
+  there is reported as *not checked* rather than as a failure.
+
+- **`build.py` tells an outage apart from a defect.** A failed fetch raised
+  `SystemExit`, which killed the interpreter before `write_outputs` ran and was
+  indistinguishable from `check_fetch_host` refusing a source no licence covers.
+  It now raises `SourceUnavailable`, the stage drops out, the build reaches its
+  writer and exits **3** with `build-source-unavailable`. A sourcing violation
+  still stops everything, and an HTTP 4xx — a withdrawn or mistyped accession,
+  which *is* this repository's defect — is now fatal instead of being retried
+  four times and then excused as an outage. Nothing can ship from a short build:
+  the id-stability audit already refuses to overwrite a published table when rows
+  go missing, and that, not the abort, was always what protected it.
+
+  A per-host circuit breaker stops a real outage costing four timeouts on every
+  one of the hundreds of accessions `stage_curated` requests; the first failure
+  against a host is remembered and the rest give up at once.
 
 ## [0.3.0] - 2026-08-07
 

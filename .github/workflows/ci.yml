@@ -378,21 +378,70 @@ jobs:
       # That is the distinction Db::audit's own comment draws about the NO_GO
       # list: discipline is not a control.
       #
-      # The build is run into a scratch directory, so the committed tables are
-      # not touched either. It may well exit non-zero here — `features/build/
-      # .cache/` is gitignored, so on a clean runner every stage re-fetches and
-      # some may fail — and that is fine, because `write_outputs` runs
-      # regardless and it is the WRITER being audited. The existence of
-      # `features.tsv` in the scratch directory is what proves the writer ran;
-      # without that check this step would pass vacuously whenever the build
-      # died early, which is a check that cannot fail.
-      - name: The build reads SIGNOFF.tsv and never writes it
+      # THIS STEP USED TO NEED THE NETWORK, AND THAT WAS A DEFECT IN THE GATE
+      # RATHER THAN A COST OF IT. It ran the real build against live EBI, NCBI,
+      # UniProt and RCSB. On 2026-08-07 EBI timed out twice in a row -- first on
+      # AAB47270.1, then on AAB59737.1 -- and both times the build died inside a
+      # stage, never reached `write_outputs`, and tripped this step's own
+      # vacuity guard. The guard was right to fire: nothing had been checked. But
+      # main went red twice for a reason no commit under test had anything to do
+      # with, which is the worst thing a gate can do, because a red that means
+      # nothing teaches people that red means nothing.
+      #
+      # The property is unchanged and is now checked TWICE, both times offline:
+      #
+      #   1. `check_writer.py` runs the real `write_outputs` over the real 89
+      #      shipped rows with the real signatures applied, and proves it emits
+      #      no SIGNOFF.tsv at any depth, leaves features/SIGNOFF.tsv
+      #      byte-identical, and writes exactly the statuses the sign-off
+      #      granted. It plants five misbehaving writers first and requires
+      #      itself to catch each one, so it cannot pass by doing nothing. It
+      #      also checks the clause this step is NAMED for and never tested:
+      #      that the build *reads* the file at all.
+      #
+      #   2. The step below runs the whole program end to end, which is the part
+      #      1 cannot cover -- `write_outputs` being clean says nothing about
+      #      some other code path in build.py reaching for the file.
+      #
+      # What was genuinely lost: the live build no longer proves on every push
+      # that the writer behaves when driven by freshly fetched rows. That runs
+      # on a schedule instead, in the `features-live` job below, where an EBI
+      # outage costs a notification rather than a false accusation against a
+      # commit.
+      - name: The build's writer reads SIGNOFF.tsv and never writes it
+        run: python features/build/check_writer.py
+
+      # End to end, with PLF_OFFLINE set so `fetch` refuses the network instead
+      # of hoping for it. On a clean runner the cache is empty (features/build/
+      # .cache/ is gitignored), so every stage reports its source unavailable and
+      # the build exits 3 having contributed no rows -- and `write_outputs` still
+      # runs, which is the whole point. This is hermetic BY CONSTRUCTION: the
+      # result is identical whether or not EBI is up.
+      #
+      # The existence of features.tsv is still what proves the writer ran, and it
+      # still cannot pass vacuously when the build dies early. Only now it cannot
+      # be made to die early by somebody else's outage.
+      - name: The build program emits no SIGNOFF.tsv, offline
         run: |
-          PLF_BUILD_DATE=1970-01-01 python features/build/build.py --out /tmp/plf-out || true
+          # `rc=0; cmd || rc=$?`, not `cmd; rc=$?`. GitHub runs this under
+          # `bash -e`, so a non-zero exit that is not part of a condition kills
+          # the step at that line -- and offline the build exits 3 by design, so
+          # the naive form would never reach a single assertion below and the
+          # step would fail while reporting nothing. Exactly the vacuity this
+          # step is built to refuse, arriving through the shell instead.
+          rc=0
+          PLF_OFFLINE=1 PLF_BUILD_DATE=1970-01-01 \
+            python features/build/build.py --out /tmp/plf-out || rc=$?
+          echo "the build exited $rc (3 = build-source-unavailable, expected offline)"
           test -e /tmp/plf-out/features.tsv \
             || { echo "::error::the build never reached its writer, so this step checked nothing"; exit 1; }
-          test ! -e /tmp/plf-out/SIGNOFF.tsv \
-            || { echo "::error::the build emitted a SIGNOFF.tsv into its output directory"; exit 1; }
+          # At any depth, and case-insensitively: the runner is ext4 but half the
+          # contributors are on NTFS, where signoff.tsv IS SIGNOFF.tsv. The old
+          # `test ! -e /tmp/plf-out/SIGNOFF.tsv` saw neither a subdirectory nor a
+          # rename of case.
+          found=$(find /tmp/plf-out -iname 'SIGNOFF.tsv' -print -quit)
+          test -z "$found" \
+            || { echo "::error::the build emitted $found into its output directory"; exit 1; }
           # `git diff` says NOTHING about a path git is not tracking, so while
           # features/SIGNOFF.tsv is untracked the check below exits 0 whatever
           # the build did to it. That is this step's third vacuity mode, and it

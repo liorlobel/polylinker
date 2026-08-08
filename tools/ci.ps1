@@ -2347,6 +2347,24 @@ Step 'bench regenerates identically' {
     else { $global:LASTEXITCODE = 0 }
 } { (HavePy 'seguid') -and (HavePy 'pydna') }
 
+# The feature-database rules. Both of these lived only in .github/workflows/
+# ci.yml, so the local gate could not tell you that you had broken them and you
+# found out from a red badge after pushing -- which is the same complaint this
+# file's own header makes about anything that only runs somewhere else.
+#
+# They are here NOW because they are hermetic now. The writer audit used to mean
+# running the real build against live EBI and NCBI, which is not something a
+# local pre-push gate can honestly depend on; `check_writer.py` drives the same
+# writer over the committed tables and touches no network, so it runs anywhere,
+# offline, in about a second.
+Write-Host "`nfeature database" -ForegroundColor Cyan
+Step 'no feature row asserts more than a human signed' {
+    python features/build/check_signoff.py --quiet
+} { Have python }
+Step 'the build''s writer reads SIGNOFF.tsv and never writes it' {
+    python features/build/check_writer.py --quiet
+} { Have python }
+
 $elapsed = (Get-Date) - $started
 Write-Host ''
 if ($script:skipped) {
