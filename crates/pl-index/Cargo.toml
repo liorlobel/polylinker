@@ -13,7 +13,8 @@ repository.workspace = true
 # build for wasm32, or a platform-specific std API, is added. It does not fail
 # on a hand-written `std::fs` call -- wasm32-unknown-unknown compiles those
 # through its `unsupported` platform layer -- so `tests/purity.rs` reads the
-# source and fails on those. All I/O lives in `pl-scan`.
+# source and fails on those. The I/O under crates/ lives in `pl-scan` and
+# `pl-update`, and nowhere else.
 [dependencies]
 pl-core.workspace = true
 

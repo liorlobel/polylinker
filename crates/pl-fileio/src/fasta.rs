@@ -162,11 +162,58 @@ pub fn write_record(ident: &str, description: &str, seq: &str, line_width: usize
     // U+FFFD: one character in, two replacement characters out, and a sequence
     // three bytes longer than it started. Wrapping decoded characters cannot
     // split one.
+    let mut body = String::new();
     let mut chars = seq.chars().peekable();
     while chars.peek().is_some() {
         let line: String = chars.by_ref().take(width).collect();
-        out.push_str(&line);
-        out.push('\n');
+        body.push_str(&line);
+        body.push('\n');
+    }
+    // No line of the body may *begin* with `>`. That is the record separator,
+    // and this loop had no test for it: a 95 bp molecule whose sequence held a
+    // stray `>` at offset 70 exported, at width 70, to a file whose second line
+    // was `>evilcccccccccccccccccccc` — two records, the first holding 70
+    // bases, twenty-five bases reassigned to a fabricated record called `evil`,
+    // exit 0 and nothing on stderr. The byte reaches `Molecule::seq` from an
+    // ordinary malformed file: `parse_all` above keeps everything that is not
+    // whitespace or `*`, and `genbank::parse_record`'s ORIGIN loop will read a
+    // following FASTA header as bases when a record's `//` is missing.
+    //
+    // A leading space, rather than dropping the byte, substituting `N`, or
+    // moving the wrap: leading whitespace on a sequence line is filtered out by
+    // `parse_all` above and by Biopython, so the `>` still comes back and the
+    // round trip stays exact — where a substitution would invent a base this
+    // molecule does not have, and shifting the wrap by one would only move the
+    // same problem to the next boundary. Being lossless is also why this needs
+    // no report channel, which is the one thing `write` does not have.
+    //
+    // Checked against Biopython 1.87 as an outside reader, on the file this
+    // now writes for that 95 bp molecule: one record of 95 bases ending
+    // `aaaaa>evilcccccccccccccccccccc`. The same file without the space is two
+    // records to it as well — `('x', 70)` and `('evilcccc...', 0)` — so this is
+    // not a rule only our own parser honours.
+    //
+    // Applied per line rather than per wrapped chunk, so a `>` that follows a
+    // line break already inside the sequence is covered by the same rule.
+    //
+    // This belongs in the writer and not in the reader. `Molecule` is built by
+    // `pl-py`, by the GUI's sequence editor and by `pl-clone` as well as by the
+    // parsers here, and a reader-side rule would leave all of those writing the
+    // broken file; refusing the byte on load would also cost the user the other
+    // ninety bases of a file `pl info` opens today and already flags as
+    // `N base(s) outside ACGT`.
+    if !body.is_empty() {
+        // `split('\n')` and not `lines()`: `lines()` also strips a `\r` before
+        // the break, which would change bytes this function was not asked to
+        // change. The trailing break is popped and re-added per line.
+        body.pop();
+        for line in body.split('\n') {
+            if line.starts_with('>') {
+                out.push(' ');
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
     }
     out
 }
@@ -373,5 +420,67 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse(&write(&m, "x", 70)).seq, m.seq);
+    }
+
+    /// PROVEN TO FAIL against the unfixed wrapper, which pushed each wrapped
+    /// line out with no test of what it starts with:
+    ///
+    /// ```text
+    /// ---- fasta::tests::a_sequence_line_never_opens_a_second_record stdout ----
+    /// assertion `left == right` failed: the export split into two records:
+    /// >x
+    /// aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    /// >evilcccccccccccccccccccc
+    ///
+    ///   left: 2
+    ///  right: 1
+    /// ```
+    #[test]
+    fn a_sequence_line_never_opens_a_second_record() {
+        // `parse_all` above keeps every byte that is not whitespace and not
+        // `*`, so a `>` reaches `Molecule::seq` from an ordinary malformed
+        // file — a GenBank record whose `//` is missing runs its ORIGIN loop
+        // into the next record's FASTA header. Landing on a wrap boundary it
+        // used to open a second record, and twenty-five bases of this molecule
+        // were reassigned to a fabricated record called `evil`.
+        let mut seq = b"a".repeat(70);
+        seq.extend_from_slice(b">evil");
+        seq.extend_from_slice(&b"c".repeat(20));
+        let m = Molecule {
+            seq: seq.clone(),
+            ..Default::default()
+        };
+        let text = write(&m, "x.fa", 70);
+        assert_eq!(
+            parse_all(&text).len(),
+            1,
+            "the export split into two records:\n{text}"
+        );
+        // Lossless, not merely safe: leading whitespace on a sequence line is
+        // dropped by every FASTA reader including this one, so the `>` itself
+        // still comes back.
+        assert_eq!(parse(&text).seq, seq, "a base was lost:\n{text}");
+
+        // The same rule covers a `>` that follows a line break already inside
+        // the sequence rather than one the wrap put there.
+        let broken = Molecule {
+            seq: b"acgt\n>evilcccc".to_vec(),
+            ..Default::default()
+        };
+        let text = write(&broken, "x.fa", 70);
+        assert_eq!(parse_all(&text).len(), 1, "{text}");
+        // The line break is not a base and does not come back — the reader
+        // drops whitespace — but nothing is *reassigned*, which is the loss
+        // this guards.
+        assert_eq!(parse(&text).seq, b"acgt>evilcccc".to_vec(), "{text}");
+
+        // An ordinary sequence is wrapped exactly as before.
+        let plain = Molecule {
+            seq: b"a".repeat(140),
+            ..Default::default()
+        };
+        let text = write(&plain, "x.fa", 70);
+        assert_eq!(text.lines().count(), 3, "{text}");
+        assert!(text.lines().skip(1).all(|l| l.len() == 70), "{text}");
     }
 }

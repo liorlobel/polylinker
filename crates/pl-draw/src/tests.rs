@@ -2981,3 +2981,86 @@ fn a_shortened_name_survives_in_the_writers_that_can_carry_it_and_no_others() {
         "no shortened form of the name is on the figure: {drawn:?}"
     );
 }
+
+/// The crate header may not guarantee for the whole crate what [`raster`]
+/// declines for itself.
+///
+/// PROVEN TO FAIL at c44757b, on both halves at once. `lib.rs`'s
+/// "# What is guaranteed" section read "**Byte-identical output for identical
+/// input**, on every platform" with no carve-out and no mention of the raster,
+/// and `Cargo.toml` repeated the unqualified form in the description a package
+/// index would publish:
+///
+/// ```text
+/// the guarantee section never mentions the raster, whose own header declines
+/// the cross-platform claim this section makes for the whole crate
+/// ```
+///
+/// `include_str!` rather than a file read: the paths resolve at compile time
+/// relative to this file, so the test cannot pass by failing to find a file.
+/// The same reason `pl-features`' README check gives.
+#[test]
+fn the_crate_header_does_not_promise_what_the_raster_declines() {
+    const LIB: &str = include_str!("lib.rs");
+    const RASTER: &str = include_str!("raster.rs");
+    const MANIFEST: &str = include_str!("../Cargo.toml");
+    // The one cross-process check this project has. Included, not merely cited:
+    // a citation nobody can follow is how the paragraph this test guards went
+    // wrong in the first place, so renaming that test has to turn this red.
+    const CLI: &str = include_str!("../../../bins/pl/tests/cli.rs");
+
+    // The premise, read out of `raster.rs` rather than written down here. If
+    // the raster ever buys cross-platform identity — a deterministic trig
+    // module is the open decision in its own header — this line is what says
+    // the guarantee section may be widened again.
+    assert!(
+        RASTER.contains("does not claim byte-identical output across platforms"),
+        "raster.rs no longer declines the cross-platform claim; the paragraph \
+         in lib.rs that this test constrains was written around that sentence"
+    );
+
+    let heading = "//! # What is guaranteed";
+    let at = LIB
+        .find(heading)
+        .expect("lib.rs still has a guarantee section");
+    let after = &LIB[at + heading.len()..];
+    let section = &after[..after.find("\n//! # ").unwrap_or(after.len())];
+    assert!(
+        section.contains("raster.rs"),
+        "the guarantee section says nothing about raster.rs, whose own header \
+         declines the cross-platform claim this section makes for the whole \
+         crate: {section}"
+    );
+    for name in [
+        "the_linear_figure_is_byte_identical_for_identical_input",
+        "two_processes_render_the_same_molecule_to_the_same_bytes",
+    ] {
+        assert!(
+            section.contains(name),
+            "the guarantee section does not say where the reader can check it: \
+             {name} is missing"
+        );
+    }
+    // And the two named checks exist where the section says they do.
+    assert!(
+        THIS_FILE.contains("fn the_linear_figure_is_byte_identical_for_identical_input"),
+        "the header cites a test this file no longer has"
+    );
+    assert!(
+        CLI.contains("fn two_processes_render_the_same_molecule_to_the_same_bytes"),
+        "the header cites a test bins/pl/tests/cli.rs no longer has"
+    );
+
+    assert!(
+        !MANIFEST.contains("byte-identical across platforms"),
+        "the package description repeats, to anyone reading the manifest, the \
+         unqualified claim raster.rs declines"
+    );
+}
+
+/// This file, for the citation checks in
+/// [`the_crate_header_does_not_promise_what_the_raster_declines`]. A named
+/// constant because `include_str!("tests.rs")` written inside `tests.rs` reads
+/// the file from disk at compile time rather than recursing, which is easy to
+/// misread as the latter.
+const THIS_FILE: &str = include_str!("tests.rs");

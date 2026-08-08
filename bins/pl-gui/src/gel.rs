@@ -40,11 +40,18 @@
 //! deliberately is still drawn — hiding it would be the map's old silent filter
 //! — with the methylase named in the disclosure strip AND in the picture's own
 //! note, so the exported figure carries it too.
+//!
+//! "Blocked" here means at EVERY site, which is the same test the tab strikes a
+//! row through on. An enzyme with one blocked site out of four still gives a
+//! three-cut digest and is still a defensible default; what its lane owes the
+//! reader is a caveat that counts — see [`View::methylation_notes`] and
+//! [`crate::doc::Methylated`].
 
 use std::collections::BTreeSet;
 
+use crate::doc::Methylated;
 use pl_core::Topology;
-use pl_enzymes::methylation::{Effect, SiteEffect};
+use pl_enzymes::methylation::Effect;
 
 /// How the ticked enzymes become lanes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -126,8 +133,9 @@ impl Default for View {
 /// The label IS the enzyme list — `EcoRI` or `EcoRI+BamHI`, exactly as
 /// `pl gel --lane` spells it — so there is no second copy of the names to fall
 /// out of step with it. `names` is that same list unjoined, because the
-/// methylation verdict is per enzyme and splitting the label back apart on `+`
-/// would be a second parse of a string we already had in pieces.
+/// methylation caveat is written per enzyme — see [`View::methylation_notes`] —
+/// and splitting the label back apart on `+` would be a second parse of a
+/// string we already had in pieces.
 pub struct Spec {
     pub label: String,
     pub names: Vec<String>,
@@ -245,49 +253,71 @@ impl View {
     ///
     /// `verdicts` is parallel to `results`, exactly as `DigestState::verdict`
     /// serves the Enzymes tab, so the gel and the tab read the SAME answer and
-    /// cannot disagree about a row. Like the tab's, it is the verdict at that
-    /// enzyme's FIRST site: every rule is a property of the (enzyme, methylase)
-    /// pair plus local context, so a per-site answer is what the model gives,
-    /// and claiming "2 of 2 sites are blocked" would be claiming more than was
-    /// computed.
+    /// cannot disagree about a row. It covers every one of that enzyme's sites
+    /// — see [`crate::doc::Methylated`] for why the verdict at the first one
+    /// was an answer that changed when the plasmid was rotated.
     fn verdict_for(
         results: &[pl_enzymes::Digest],
-        verdicts: &[Option<SiteEffect>],
+        verdicts: &[Option<Methylated>],
         name: &str,
-    ) -> Option<SiteEffect> {
+    ) -> Option<Methylated> {
         let i = results.iter().position(|d| d.enzyme.name == name)?;
         verdicts.get(i).copied().flatten()
     }
 
     /// What has to be said about a lane whose enzymes are methylation-sensitive.
     ///
-    /// Named methylase, named enzyme, and what the bands therefore assume. The
-    /// tab's own hover says the site "would cut in an unmethylated preparation";
-    /// these sentences are the gel's half of that same fact.
+    /// Named methylase, named enzyme, HOW MANY OF HOW MANY SITES, and what the
+    /// bands therefore assume. The tab's own hover says the site "would cut in
+    /// an unmethylated preparation"; these sentences are the gel's half of that
+    /// same fact.
+    ///
+    /// The bands themselves are unchanged, deliberately — see
+    /// `a_methylation_blocked_enzyme_is_never_seeded_and_never_drawn_in_silence`
+    /// clause (b). Dropping a blocked enzyme's fragments would be the map's old
+    /// silent filter. What the picture owes the reader is the caveat, and a
+    /// caveat saying "blocked" about an enzyme with three live sites out of
+    /// four is as wrong as no caveat at all.
     fn methylation_notes(
         spec: &Spec,
         results: &[pl_enzymes::Digest],
-        verdicts: &[Option<SiteEffect>],
+        verdicts: &[Option<Methylated>],
     ) -> Vec<String> {
         let mut out = Vec::new();
         for name in &spec.names {
             let Some(v) = View::verdict_for(results, verdicts, name) else {
                 continue;
             };
-            let m = v.methylase.name();
-            out.push(match v.effect {
+            let m = v.worst.methylase.name();
+            out.push(match v.worst.effect {
+                Effect::Blocked if v.all_blocked() => format!(
+                    "{name} is blocked by {m} methylation in this preparation, at {}, so \
+                     these bands are what an UNMETHYLATED template would give. A plasmid \
+                     grown in an ordinary {m}+ strain will not give them.",
+                    v.of_sites(v.blocked)
+                ),
+                // PARTIAL, and the difference is what a reader acts on: the
+                // enzyme still cuts, so the lane is not empty — it is a
+                // DIFFERENT pattern from fewer cuts, which is far harder to
+                // spot on a gel than no bands at all.
                 Effect::Blocked => format!(
-                    "{name} is blocked by {m} methylation in this preparation, so these \
-                     bands are what an UNMETHYLATED template would give. A plasmid grown \
-                     in an ordinary {m}+ strain will not give them."
+                    "{m} methylation blocks {} of {name}'s {} sites in this preparation, so \
+                     these bands are what an UNMETHYLATED template would give. A plasmid \
+                     grown in an ordinary {m}+ strain cuts at the remaining {} and gives a \
+                     different pattern.",
+                    v.blocked,
+                    v.total,
+                    v.live()
                 ),
                 Effect::Impaired => format!(
-                    "{name} cleaves poorly when the site is {m}-methylated, and this lane \
-                     assumes the digest went to completion. Expect partials."
+                    "{name} cleaves poorly when the site is {m}-methylated, at {}, and this \
+                     lane assumes the digest went to completion. Expect partials.",
+                    v.of_sites(v.affected)
                 ),
                 Effect::Unknown => format!(
-                    "sources disagree about whether {m} methylation affects {name} here; \
-                     this lane assumes it cuts."
+                    "sources disagree about whether {m} methylation affects {name} at {}; \
+                     this lane assumes it cuts.",
+                    v.of_sites(v.affected)
                 ),
             });
         }
@@ -299,7 +329,7 @@ impl View {
         &self,
         mol: &pl_core::Molecule,
         results: &[pl_enzymes::Digest],
-        verdicts: &[Option<SiteEffect>],
+        verdicts: &[Option<Methylated>],
         set: pl_enzymes::EnzymeSet,
         title: &str,
     ) -> Built {
@@ -534,7 +564,7 @@ impl View {
         &mut self,
         mol: &pl_core::Molecule,
         results: &[pl_enzymes::Digest],
-        verdicts: &[Option<SiteEffect>],
+        verdicts: &[Option<Methylated>],
         set: pl_enzymes::EnzymeSet,
     ) {
         self.seeded = true;
@@ -545,12 +575,19 @@ impl View {
         // straight into tier 1 and the gel opened on a lane the Enzymes tab was
         // striking through three inches away. Ticked by hand it still draws —
         // see `methylation_notes` — but nothing should CHOOSE it.
+        //
+        // BLOCKED AT EVERY SITE, which is the question this filter is really
+        // asking: an enzyme with one blocked site out of four still gives a
+        // three-cut digest, and excluding it would be refusing to open on a
+        // perfectly good lane. `all_blocked` is also the same test the Enzymes
+        // tab strikes a row through on, so the two surfaces still cannot
+        // disagree about which enzymes are dead here.
         let admitted: Vec<&pl_enzymes::Digest> = results
             .iter()
             .filter(|d| {
                 set.admits(d)
                     && View::verdict_for(results, verdicts, d.enzyme.name)
-                        .is_none_or(|v| v.effect != Effect::Blocked)
+                        .is_none_or(|v| !v.all_blocked())
             })
             .collect();
 
@@ -653,31 +690,22 @@ mod tests {
         pl_enzymes::digest_all(mol)
     }
 
-    /// The verdict table `doc::DigestState` hands the Enzymes tab, computed the
-    /// same way its worker does — at each enzyme's FIRST site, because a site
-    /// that wraps the origin does not map back from a cut position.
-    fn verdicts(mol: &Molecule) -> Vec<Option<SiteEffect>> {
+    /// The verdict table `doc::DigestState` hands the Enzymes tab, through the
+    /// function its worker calls — not a second copy of the arithmetic, so a
+    /// lane and a row cannot count one molecule differently.
+    fn verdicts(mol: &Molecule) -> Vec<Option<Methylated>> {
         pl_enzymes::ENZYMES
             .iter()
             .map(|e| {
-                pl_enzymes::cut_sites(&mol.seq, mol.topology, e)
-                    .first()
-                    .and_then(|s| {
-                        pl_enzymes::methylation::site_effect(
-                            e,
-                            &mol.seq,
-                            (s.site_start - 1) as usize,
-                            mol.topology,
-                            &mol.methylation,
-                        )
-                    })
+                let sites = pl_enzymes::cut_sites(&mol.seq, mol.topology, e);
+                crate::doc::methylation_at(e, &mol.seq, mol.topology, &mol.methylation, &sites).1
             })
             .collect()
     }
 
     /// No methylation at all — the shape every test that is not about
     /// methylation wants.
-    fn clean(results: &[pl_enzymes::Digest]) -> Vec<Option<SiteEffect>> {
+    fn clean(results: &[pl_enzymes::Digest]) -> Vec<Option<Methylated>> {
         vec![None; results.len()]
     }
 
@@ -947,8 +975,16 @@ mod tests {
         // The fixture depends on this: BclI is the one unconditional Dam block
         // in the table, at TGATCA.
         let bcli = View::verdict_for(&results, &v, "BclI").expect("BclI is Dam-blocked");
-        assert_eq!(bcli.effect, Effect::Blocked);
-        assert_eq!(bcli.methylase, pl_enzymes::methylation::Methylase::Dam);
+        assert_eq!(bcli.worst.effect, Effect::Blocked);
+        assert_eq!(
+            bcli.worst.methylase,
+            pl_enzymes::methylation::Methylase::Dam
+        );
+        // Unconditional, so every one of its sites is blocked. That is the
+        // property this fixture rests on: it is the ONE case in which per-site
+        // and per-enzyme cannot differ, which is why it never caught the defect
+        // `doc::Methylated` exists for and why the test below it does.
+        assert!(bcli.all_blocked(), "{bcli:?}");
         assert!(
             results
                 .iter()
@@ -1034,6 +1070,61 @@ mod tests {
         let mut seeded = View::default();
         seeded.seed(&plain, &plain_results, &plain_v, pl_enzymes::EnzymeSet::All);
         assert!(seeded.picked.contains("BclI"), "{:?}", seeded.picked);
+    }
+
+    /// PROVEN TO FAIL before this change, and it is the sentence a reader acts
+    /// on that was wrong.
+    ///
+    /// With the verdict taken at the enzyme's FIRST site, this plasmid — whose
+    /// lower ClaI site is the live one — produced no methylation note at all,
+    /// so the lane was drawn as fact. Rotated, it produced the *fully* blocked
+    /// sentence: "a plasmid grown in an ordinary Dam+ strain will not give
+    /// them", about a plasmid that gives ClaI bands perfectly well. Both are
+    /// wrong, and the second is worse: it tells someone their digest cannot
+    /// work when it can.
+    ///
+    /// The bands are unchanged — see clause (b) above; drawing them is the
+    /// stated design and hiding them would be the map's old silent filter —
+    /// so the caveat is the entire safety net, and it has to count.
+    #[test]
+    fn a_partly_blocked_enzyme_gets_the_partial_sentence_and_is_still_a_default() {
+        let mol = crate::doc::tests::two_clai_sites_one_dam_blocked();
+        let results = digest(&mol);
+        let v = verdicts(&mol);
+        let m = View::verdict_for(&results, &v, "ClaI").expect("Dam blocks one ClaI site");
+        assert_eq!((m.total, m.blocked), (2, 1), "{m:?}");
+        assert!(!m.all_blocked());
+
+        let hand = view(&["ClaI"]);
+        let built = hand.build(&mol, &results, &v, pl_enzymes::EnzymeSet::All, "t");
+        let said = built.disclosure.join(" | ");
+        assert!(said.contains("blocks 1 of ClaI's 2 sites"), "{said}");
+        assert!(said.contains("cuts at the remaining 1"), "{said}");
+        // NOT the fully-blocked sentence. This template does give ClaI bands in
+        // a Dam+ prep — different ones, from one cut instead of two.
+        assert!(!said.contains("will not give them"), "{said}");
+        // And the picture carries it too, so an exported figure is not the
+        // honest half of a pair.
+        let in_picture = texts(&built.scene).join(" ");
+        assert!(in_picture.contains("Dam"), "{in_picture}");
+
+        // STILL SEEDED. `all_blocked` is the seeding rule, and an enzyme that
+        // cuts is not a dead default; excluding it would refuse to open on a
+        // perfectly good lane. Under the old rule the ROTATED copy of this same
+        // molecule was excluded and this one was not.
+        let mut rotated = mol.clone();
+        rotated.seq.rotate_left(1_900);
+        for (label, m) in [("as linearised", &mol), ("rotated", &rotated)] {
+            let r = digest(m);
+            let v = verdicts(m);
+            let mut seeded = View::default();
+            seeded.seed(m, &r, &v, pl_enzymes::EnzymeSet::All);
+            assert!(
+                seeded.picked.contains("ClaI"),
+                "{label}: {:?}",
+                seeded.picked
+            );
+        }
     }
 
     /// PROVEN TO FAIL before this change: the ladder was pushed in as `lanes[0]`

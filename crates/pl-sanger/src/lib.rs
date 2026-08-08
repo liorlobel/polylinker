@@ -202,10 +202,40 @@ pub fn compare_reporting(
     circular: bool,
     p: &Params,
 ) -> Result<Report, Unplaced> {
+    compare_reporting_until(read, quality, reference, circular, p, &|| false)
+        .expect("a comparison that is never asked to stop always finishes")
+}
+
+/// [`compare_reporting`], abandonable.
+///
+/// `None` the first time `stop` says true; see
+/// [`align::semiglobal_within_until`] for where it is polled and why the
+/// alignment fill is the part that needed the hook.
+///
+/// # Why this exists
+///
+/// A GUI holds several reads against one construct and re-compares all of them
+/// whenever the construct changes — an edit, an undo, or a click onto another
+/// document tab. Without this, each superseded comparison runs to the last
+/// cell: the receiver has gone, so its `send` fails, but only *afterwards*.
+/// [`Params::max_traceback_bytes`] bounds one comparison's memory and says
+/// nothing about how many of them are in flight, and the seeds-failed fallback
+/// — the ordinary outcome of a failed sequencing reaction, which is the file a
+/// user is most anxious about — is the expensive branch. `bins/pl-gui/src/doc.rs`
+/// records what the same omission cost the enzyme digest: 30 workers spawned,
+/// 16 live at once, 29 of them producing an answer nobody could still read.
+pub fn compare_reporting_until(
+    read: &[u8],
+    quality: &[u8],
+    reference: &[u8],
+    circular: bool,
+    p: &Params,
+    stop: &dyn Fn() -> bool,
+) -> Option<Result<Report, Unplaced>> {
     let m = read.len();
     let n = reference.len();
     if m == 0 || n == 0 {
-        return Err(Unplaced::Empty);
+        return Some(Err(Unplaced::Empty));
     }
 
     // A read crossing the origin is ordinary on a plasmid; doubling the
@@ -226,21 +256,40 @@ pub fn compare_reporting(
     // an alignment.
     let mut refused: Option<AlignError> = None;
     for (seq, reversed) in [(read, false), (rc.as_slice(), true)] {
+        // BOTH ORIENTATIONS ARE ALIGNED, one after the other, so a stopped
+        // comparison must be able to give up between them as well as inside
+        // one: the reverse pass costs everything the forward pass did.
+        // `locate` is not polled — it is bounded to a 4 MiB reference by
+        // `align::locate`'s own MAX_SEED_REFERENCE, and it is the unbounded DP
+        // below it that this hook exists for.
+        if stop() {
+            return None;
+        }
         // Place the read cheaply first, then align inside that window. Falling
         // back to the whole reference when the seeds do not agree keeps a poor
         // read slow rather than unplaced — up to the point where "slow" stops
         // being the cost. The windowed path is bounded by the window (a read's
         // length plus 200), so only the fallback can exceed the budget.
         let a = match align::locate(seq, target, p.seed_k, 100) {
-            Some((lo, hi)) => {
-                align::semiglobal_within(seq, &target[lo..hi], &p.scoring, p.max_traceback_bytes)
-                    .map(|mut a| {
-                        a.ref_start += lo;
-                        a.ref_end += lo;
-                        a
-                    })
-            }
-            None => align::semiglobal_within(seq, target, &p.scoring, p.max_traceback_bytes),
+            Some((lo, hi)) => align::semiglobal_within_until(
+                seq,
+                &target[lo..hi],
+                &p.scoring,
+                p.max_traceback_bytes,
+                stop,
+            )?
+            .map(|mut a| {
+                a.ref_start += lo;
+                a.ref_end += lo;
+                a
+            }),
+            None => align::semiglobal_within_until(
+                seq,
+                target,
+                &p.scoring,
+                p.max_traceback_bytes,
+                stop,
+            )?,
         };
         match a {
             Ok(a) => {
@@ -257,10 +306,10 @@ pub fn compare_reporting(
     let (alignment, reversed) = match best {
         Some(b) => b,
         None => {
-            return Err(match refused {
+            return Some(Err(match refused {
                 Some(e) => Unplaced::RefusedTooLarge(e),
                 None => Unplaced::NotFound,
-            })
+            }))
         }
     };
 
@@ -352,7 +401,7 @@ pub fn compare_reporting(
         (alignment.ref_start % n) as u64 + 1,
         ((alignment.ref_end + n - 1) % n) as u64 + 1,
     );
-    Ok(Report {
+    Some(Ok(Report {
         identity: alignment.identity(),
         reliable: reliable_window(quality, p),
         alignment,
@@ -360,7 +409,7 @@ pub fn compare_reporting(
         wrapped,
         discrepancies,
         covered,
-    })
+    }))
 }
 
 /// The stretch of a read its qualities stand behind — Mott trimming.
@@ -677,5 +726,62 @@ mod tests {
             .expect("a seeded read is not affected by the fallback budget");
         assert!(placed.clean());
         assert_eq!(placed.covered.0, 41);
+    }
+
+    /// PROVEN TO FAIL before this change: there was no `stop` at all, so a
+    /// superseded comparison ran to its last Gotoh cell whatever the caller
+    /// wanted. `bins/pl-gui/src/reads.rs` created an `AtomicBool` for exactly
+    /// this and had nowhere to hand it, which made its "Close read" button a
+    /// store into a flag nothing loaded.
+    ///
+    /// Asserted on the SEEDS-FAILED path, because that is the expensive one:
+    /// the windowed path is bounded by the read's length plus 200 and would
+    /// pass this test by being too small to matter.
+    #[test]
+    fn a_comparison_can_be_stopped_and_the_stop_is_polled_while_it_runs() {
+        let junk = vec![b'C'; 300];
+        let p = Params::default();
+        // The premise: no seeds, so both orientations take the whole-reference
+        // fallback rather than a window.
+        assert!(align::locate(&junk, REF, p.seed_k, 100).is_none());
+
+        // Already stopped: no report, and — the reason the hook is before the
+        // allocation — nothing was asked of the allocator to find that out.
+        assert!(compare_reporting_until(&junk, &[], REF, true, &p, &|| true).is_none());
+
+        // It is polled DURING the work, not merely once at the door. A
+        // predicate that never says true must be consulted more times than
+        // there are calls into the aligner, or "stop" would only ever be
+        // honoured between orientations.
+        let polls = std::cell::Cell::new(0usize);
+        let got = compare_reporting_until(&junk, &[], REF, true, &p, &|| {
+            polls.set(polls.get() + 1);
+            false
+        })
+        .expect("never asked to stop");
+        assert!(
+            polls.get() > 2 * junk.len(),
+            "the aligner polled {} times for a {} nt read against two orientations \
+             — that is not once per row",
+            polls.get(),
+            junk.len()
+        );
+
+        // And the answer is the same one the un-abandonable entry point gives:
+        // the hook must not change what a comparison says.
+        let want = compare_reporting(&junk, &[], REF, true, &p);
+        assert_eq!(got.map(|r| r.covered), want.map(|r| r.covered));
+
+        // A stop part-way through is still a stop, not a partial report. The
+        // predicate lets the forward orientation finish and then refuses.
+        let seen = std::cell::Cell::new(0usize);
+        assert!(
+            compare_reporting_until(&junk, &[], REF, true, &p, &|| {
+                seen.set(seen.get() + 1);
+                seen.get() > junk.len()
+            })
+            .is_none(),
+            "a comparison stopped mid-alignment must produce no report at all"
+        );
     }
 }

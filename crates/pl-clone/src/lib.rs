@@ -275,9 +275,44 @@ pub fn cut(seq: &Dseq, enzyme: &Enzyme) -> Vec<Dseq> {
 
 /// Cut with every enzyme in turn: a double digest.
 ///
-/// Which is also what the tube does — the enzymes are in it together and the
-/// order they happen to reach a site in does not change the pieces — so this is
-/// the same operation repeated rather than a new one.
+/// **The caller's order is discarded.** The enzymes are sorted before anything
+/// is cut, so `digest(m, [SmaI, XmaI])` and `digest(m, [XmaI, SmaI])` are one
+/// question with one answer. That has to be arranged, and this doc used to
+/// assume it instead: it said the tube does not care which enzyme reaches a
+/// site first, so neither does this. The tube does not care *when the sites are
+/// separate*. When they overlap it cares very much, and so did this function.
+///
+/// `Dseq::new("AAAAAAAAAACCCGGGAAAAAAAAAA", true)` is a 26 bp circle holding
+/// one CCCGGG. SmaI reads it CCC^GGG and XmaI reads it C^CCGGG, so whichever
+/// arrives first destroys the other's site — and cutting in the caller's order,
+/// `[SmaI, XmaI]` returned a blunt 26-mer while `[XmaI, SmaI]` returned a
+/// 26-mer carrying a CCGG overhang at each end. [`ligate::ligate`] then
+/// answered "no product" for the first and one circle for the second, because
+/// it refuses blunt joins by default. Same molecule, same two enzymes, opposite
+/// biology, decided by an argument order no caller thinks is significant.
+///
+/// Both of those answers are real molecules. The tube holds a mixture of them,
+/// and any function returning one `Vec<Dseq>` returns one member of that
+/// mixture; the defect was only in *which* member came back. So the order is
+/// fixed here, by name — arbitrary, but total, stable across runs and
+/// platforms, and out of the caller's hands. It is also the order the one
+/// production caller already used (`bins/pl-gui/src/clone.rs` carries the
+/// ticked enzymes in a `BTreeSet<String>`), so no answer anyone is being shown
+/// today changes.
+///
+/// # Why not gather every enzyme's cuts against the original duplex instead
+///
+/// Because that fabricates molecules, and an arbitrary choice between two real
+/// answers beats a manufactured third one. It was tried on the circle above,
+/// where SmaI nicks the top strand at 13 and XmaI at 11. Handing both nicks to
+/// one split gives `{watson: "CC", crick: "", ovhg: -4}` — a fragment with not
+/// one base pair, the exact object
+/// `no_double_digest_produces_a_fragment_with_no_base_pairs` exists to forbid —
+/// and then, with that piece dropped as a non-duplex, a single fragment whose
+/// crick strand is 28 nt long: two bases longer than the entire 26 bp circle it
+/// was cut from, because its two ends come from cuts that cannot both have
+/// happened. Cutting in sequence cannot produce either, for the reason the
+/// enzyme itself supplies — the first cut takes the site away.
 ///
 /// An enzyme that does not cut a piece leaves it whole, and one that cuts
 /// nothing at all leaves the molecule as it was. The result is therefore never
@@ -288,6 +323,13 @@ pub fn cut(seq: &Dseq, enzyme: &Enzyme) -> Vec<Dseq> {
 /// needs the same thing, and a digest performed one way in the GUI and another
 /// way in the engine is two answers to "what are the fragments".
 pub fn digest<'a>(seq: &Dseq, enzymes: impl IntoIterator<Item = &'a Enzyme>) -> Vec<Dseq> {
+    // Name first, then the rest of the definition. Name alone would leave a
+    // stable sort holding the caller's order for two `Enzyme`s that share a
+    // name and differ in where they cut, which is the one remaining way the
+    // argument order could still pick the answer.
+    let mut enzymes: Vec<&Enzyme> = enzymes.into_iter().collect();
+    enzymes.sort_by_key(|e| (e.name, e.site, e.fst5, e.ovhg));
+
     let mut frags = vec![seq.clone()];
     for e in enzymes {
         let mut next = Vec::with_capacity(frags.len() + 1);
@@ -965,10 +1007,18 @@ mod tests {
             "the EcoRI end of the second piece was flattened to blunt"
         );
 
-        // ORDER MUST NOT MATTER, because in the tube it does not. Cutting with
-        // BamHI first and EcoRI second is the same digest, and a fix that only
-        // repaired the second cut's outer ends would give two different answers
-        // to one question.
+        // ORDER MUST NOT MATTER. Cutting with BamHI first and EcoRI second is
+        // the same digest, and a fix that only repaired the second cut's outer
+        // ends would give two different answers to one question.
+        //
+        // THIS PAIR CANNOT SEE THAT BREAK, which is worth saying out loud since
+        // the assertion below reads as though it could. The two sites here are
+        // 20 bp apart, so neither enzyme's cut lands anywhere near the other's
+        // site and the order is irrelevant however `digest` is written — this
+        // held even while `digest` was order-dependent. The property is really
+        // tested by
+        // [`two_enzymes_racing_for_one_site_answer_the_same_in_either_order`],
+        // on sites that overlap.
         let other = digest(&m, [bam, eco]);
         let mut a: Vec<(usize, End, End)> = twice
             .iter()
@@ -981,6 +1031,133 @@ mod tests {
         a.sort_by_key(|x| x.0);
         b.sort_by_key(|x| x.0);
         assert_eq!(a, b, "the two enzymes gave different answers in each order");
+    }
+
+    /// A digest is the same digest whichever order its enzymes are named in,
+    /// including when they are racing for one site.
+    ///
+    /// SmaI and XmaI are the sharpest case there is: isoschizomers, both
+    /// reading CCCGGG, cutting different bonds inside it. Whichever gets there
+    /// first leaves the other nothing to bind, so a fold over the caller's list
+    /// answered with whichever molecule the caller happened to name first.
+    #[test]
+    fn two_enzymes_racing_for_one_site_answer_the_same_in_either_order() {
+        let sma = by_name("SmaI").expect("in the table");
+        let xma = by_name("XmaI").expect("in the table");
+        // 26 bp circle, one CCCGGG at 0-based 10.
+        let m = Dseq::new("AAAAAAAAAACCCGGGAAAAAAAAAA", true);
+
+        let forward = digest(&m, [sma, xma]);
+        let backward = digest(&m, [xma, sma]);
+        assert_eq!(
+            shape(&forward),
+            shape(&backward),
+            "the same two enzymes gave different fragments in each order"
+        );
+
+        // And the answer is one enzyme's whole answer rather than a blend of
+        // the two: the molecule SmaI alone makes, all 26 bases of it. Which of
+        // the two it is, is the arbitrary part; that it is a real single-cut
+        // product is the part that matters, and a merged digest does not have
+        // it — see `digest`'s own doc for what that produced instead.
+        assert_eq!(shape(&forward), shape(&cut(&m, sma)));
+        assert_eq!(forward.len(), 1, "one cut in a circle linearises it");
+        assert_eq!(forward[0].len(), m.len(), "no bases gained or lost");
+
+        // The consequence the order used to decide, at the end a user sees.
+        // `ligate` refuses blunt-to-blunt by default, so the XmaI answer
+        // religates and the SmaI answer does not; before the sort, which of
+        // those the religation panel reported was chosen by the argument order.
+        let opts = ligate::Options::default();
+        assert!(!opts.blunt, "the premise: blunt joins are off by default");
+        let a = ligate::ligate(&forward, &opts).expect("a religation search");
+        let b = ligate::ligate(&backward, &opts).expect("a religation search");
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "religation answered differently for the two orders: {} and {}",
+            a.len(),
+            b.len()
+        );
+    }
+
+    /// The real pUC19 polylinker, all eleven of its enzymes, read each way.
+    ///
+    /// Not a constructed pair. This is the sequence people actually digest, and
+    /// it carries two overlapping cases at once: in GGTACCCGGG, KpnI and XmaI
+    /// nick the *same* bond, and SmaI nicks two bases from XmaI. Reading the
+    /// enzyme list in the order the sites occur and reading it backwards by
+    /// name used to give 10 pieces and 9, and to disagree about the ends around
+    /// that cluster — a 6-mer with a GTAC end and a blunt end in the first, a
+    /// CCGG end in the second.
+    ///
+    /// WHAT THIS ASSERTS IS AGREEMENT, NOT CORRECTNESS, and the distinction is
+    /// real here rather than pedantic. In the answer the orders now agree on,
+    /// KpnI and SmaI have *both* cut GGTACCCGGG, and they cannot: their sites
+    /// overlap by two bases, so the KpnI cut leaves the C at the start of
+    /// SmaI's CCCGGG on the crick strand only, and there is no duplex site left
+    /// to bind. `try_cut`'s duplex filter does not catch it because it tests the
+    /// two NICKS against the fragment's duplex bounds, and SmaI's nick lands
+    /// inside those bounds even though its site does not — the limitation the
+    /// comment at the filter already names ("a recognition site is not a site
+    /// there"), enforced only as far as the nicks. That is a different defect
+    /// from this one, it predates it, and fixing it would change which
+    /// fragments a real polylinker digest returns; this test is written so that
+    /// it keeps passing either way.
+    #[test]
+    fn a_whole_polylinker_digests_the_same_read_either_way() {
+        const MCS: &str = "GAATTCGAGCTCGGTACCCGGGGATCCTCTAGAGTCGACCTGCAGGCATGCAAGCTT";
+        let names = [
+            "EcoRI", "SacI", "KpnI", "XmaI", "SmaI", "BamHI", "XbaI", "SalI", "PstI", "SphI",
+            "HindIII",
+        ];
+        let es: Vec<&pl_enzymes::Enzyme> = names.iter().filter_map(|n| by_name(n)).collect();
+        assert_eq!(
+            es.len(),
+            names.len(),
+            "the shipped table lost an MCS enzyme"
+        );
+
+        let m = Dseq::new(&format!("{MCS}{}", "A".repeat(60)), true);
+
+        // Three orders a caller might plausibly hand over: the order the sites
+        // occur in, and both alphabetical directions. `BTreeSet` gives the
+        // second; a list typed out by hand gives the first.
+        let mut by_name_up = es.clone();
+        by_name_up.sort_by_key(|e| e.name);
+        let mut by_name_down = by_name_up.clone();
+        by_name_down.reverse();
+
+        let expected = shape(&digest(&m, es.clone()));
+        for (what, order) in [
+            ("name ascending", by_name_up),
+            ("name descending", by_name_down),
+        ] {
+            let got = digest(&m, order);
+            assert_eq!(
+                shape(&got),
+                expected,
+                "{what} gave {} fragments where the polylinker's own order gave {}",
+                got.len(),
+                expected.len()
+            );
+        }
+    }
+
+    /// Fragments as (length, left end, right end), in a total order.
+    ///
+    /// A digest is a set of pieces, not a list: `digest` is free to emit them
+    /// rotated, and on a circle it does. Sorting on the length alone is not
+    /// enough for a polylinker, where several pieces are the same size and a
+    /// stable sort would then compare them in emission order — which is the
+    /// very thing under test.
+    fn shape(fs: &[Dseq]) -> Vec<String> {
+        let mut v: Vec<String> = fs
+            .iter()
+            .map(|f| format!("{}|{:?}|{:?}", f.len(), f.left_end(), f.right_end()))
+            .collect();
+        v.sort();
+        v
     }
 
     /// A recognition site lying in a single-stranded overhang is not a site.

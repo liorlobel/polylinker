@@ -16,9 +16,18 @@
 //!
 //! A methods paragraph that only lists strengths is not a methods paragraph.
 //! Each [`Topic`] carries a `limits` line, and the limits here are real ones:
-//! the feature database ships nothing reviewed, the gel model is not a
-//! measurement, Golden Gate fidelity is not computed because the matrices are
-//! not ours to ship.
+//! an annotation is a suggestion to check against the record's cited accession
+//! and not an identification, the gel model is not a measurement, Golden Gate
+//! fidelity is not computed because the matrices are not ours to ship.
+//!
+//! The first of those named an empty sign-off table until 2026-08-09. It was
+//! written on the morning of 2026-07-28 and was false by that evening, when the
+//! tables were signed; the `annotate` arm below had been reading the live count
+//! out of `pl_features::Db::reviewed` the whole time, which is why the drift
+//! was in the prose alone and is the rule for this crate — name the shape of a
+//! limit in the header, and let the paragraph read the number.
+//! `nothing_here_calls_the_shipped_database_unreviewed` now holds this
+//! paragraph to it.
 //!
 //! # Offline
 //!
@@ -471,8 +480,10 @@ pub fn methods(t: Topic) -> String {
                  across the band rather than as boxes. A unit is a point where the \
                  figure is written at its own size; asking for a physical width scales \
                  the whole drawing, type included. The same geometry is written to SVG, \
-                 PDF, EPS and PNG, and the output is byte-identical for identical input \
-                 on every platform.\
+                 PDF, EPS and PNG, and one build of the program gives byte-identical \
+                 output for identical input. The vector formats round their coordinates \
+                 on the way out, which is intended to hold that between machines as \
+                 well; the raster is not promised to.\
                  \n\n\
                  Limits: a map is a drawing of a file and establishes nothing about a \
                  molecule in a tube. Where a canvas cannot hold every label, labels are \
@@ -856,9 +867,12 @@ mod tests {
 
     #[test]
     fn the_annotation_methods_report_how_many_records_are_actually_reviewed() {
-        // The number that matters most and is easiest to leave stale. It is
-        // zero today, and the paragraph has to say so rather than describe a
-        // library nobody has checked as though it were curated.
+        // The number that matters most and is easiest to leave stale: whatever
+        // it is, the paragraph has to read it out of the tables rather than
+        // describe from memory a library nobody has checked. This comment said
+        // "It is zero today" until 2026-08-09 — written the morning before the
+        // tables were signed, which is the same drift, inside the rationale of
+        // the check against it.
         let (db, _) = pl_features::Db::builtin();
         let m = methods(topic("annotate").unwrap());
         assert!(
@@ -934,5 +948,103 @@ mod tests {
         let m = methods(topic("gel").unwrap());
         assert!(m.contains("not** a basis for sizing"), "{m}");
         assert!(m.contains("Fritsch"), "the interpolation is cited: {m}");
+    }
+
+    /// Does `text` make `claim` in its own voice, rather than quoting it?
+    ///
+    /// An occurrence whose nearest preceding non-space character opens a
+    /// quotation — `"`, `“` or a backtick — is somebody being quoted, and a
+    /// correction that says what a sentence *used* to say has to be able to
+    /// print the old sentence. The same six lines are in
+    /// `crates/pl-scan/src/lib.rs` and `bins/pl-mcp/src/main.rs`, which guard
+    /// the same class of stale claim in their own files; sharing them would
+    /// mean a new workspace member existing only to hold one predicate.
+    fn asserts(text: &str, claim: &str) -> bool {
+        text.match_indices(claim).any(|(i, _)| {
+            !matches!(
+                text[..i].chars().rev().find(|c| !c.is_whitespace()),
+                Some('"') | Some('\u{201c}') | Some('`')
+            )
+        })
+    }
+
+    /// Nothing in this file may describe the shipped database as unreviewed
+    /// while [`pl_features::Db::reviewed`] returns records.
+    ///
+    /// PROVEN TO FAIL at c44757b, in two places at once — the crate header's
+    /// list of limits and the rationale of the very test that guards the
+    /// generated number:
+    ///
+    /// ```text
+    /// crates/pl-doc/src/lib.rs says "nothing reviewed" while 89 of 89 records
+    /// are signed off
+    /// ```
+    ///
+    /// Both sentences were written on the morning of 2026-07-28 and were false
+    /// by that evening, when `c8436d5` signed the tables. Neither was covered:
+    /// `pl-features`' README check reads `README.md` and `features/README.md`
+    /// and searches for the literal "0 reviewed", which this file's wording
+    /// does not contain and this file is not in the list for. The whole file is
+    /// scanned, not just the header, because the stale claim had spread from
+    /// one to the other.
+    #[test]
+    fn nothing_here_calls_the_shipped_database_unreviewed() {
+        const SELF: &str = include_str!("lib.rs");
+        let (db, errors) = pl_features::Db::builtin();
+        assert!(errors.is_empty(), "{errors:?}");
+        let signed = db.reviewed().records.len();
+        assert!(
+            signed > 0,
+            "the premise: if the shipped tables really are unsigned again, this \
+             test and the sentences it constrains both describe the new state"
+        );
+        for claim in [
+            "nothing reviewed",
+            "none reviewed",
+            "0 reviewed",
+            "no reviewed records",
+            "entirely unreviewed",
+            "It is zero today",
+        ] {
+            assert!(
+                !asserts(SELF, claim),
+                "this file says {claim:?} while {signed} of {} records carry a \
+                 curator sign-off",
+                db.records.len()
+            );
+        }
+    }
+
+    /// The map methods paragraph is written into somebody's paper, so it may
+    /// not promise across platforms what `pl-draw`'s raster declines.
+    ///
+    /// PROVEN TO FAIL at c44757b:
+    ///
+    /// ```text
+    /// the map methods promise identical bytes "on every platform" while
+    /// crates/pl-draw/src/raster.rs declines that claim for the PNG
+    /// ```
+    ///
+    /// The paragraph named all four writers — "SVG, PDF, EPS and PNG" — and
+    /// then made one promise for the lot. `crates/pl-draw/src/lib.rs` carried
+    /// the same overclaim in its own header; that one is a reader's problem,
+    /// and this one is a reviewer's.
+    #[test]
+    fn the_map_methods_do_not_promise_bytes_across_platforms() {
+        const RASTER: &str = include_str!("../../pl-draw/src/raster.rs");
+        assert!(
+            RASTER.contains("does not claim byte-identical output across platforms"),
+            "pl-draw's raster no longer declines the cross-platform claim; \
+             re-read the sentence this test constrains"
+        );
+        let m = methods(topic("map").unwrap());
+        assert!(
+            !m.contains("on every platform"),
+            "the map methods promise bytes across platforms: {m}"
+        );
+        assert!(
+            m.contains("byte-identical"),
+            "and the identity that does hold is still stated: {m}"
+        );
     }
 }

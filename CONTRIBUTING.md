@@ -146,8 +146,14 @@ write anything for that crate: it reads the crate's own sources and rejects
 `std::fs`, `std::env`, `std::process`, `std::net`, the ambient clocks,
 `HashMap`/`HashSet` (`RandomState` is seeded per process, so a report ordered by
 hash iteration differs between runs) and `partial_cmp`. `crates/pl-index` and
-`crates/pl-design` do no I/O at all; `crates/pl-scan` is the one crate that
-touches the filesystem.
+`crates/pl-design` do no I/O at all; `crates/pl-scan` and `crates/pl-update` are
+the two crates that do — the library index on one side, and the downloaded
+release archive plus the `curl` it is fetched with on the other. This paragraph
+named `pl-scan` alone until 2026-08-09, three days after `pl-update` landed, and
+a contributor reading it would have concluded that adding a file write to
+`pl-update` broke a house rule. `pl-scan`'s own header is where that list is
+kept, and `the_io_claim_names_every_crate_that_does_io` checks that this
+sentence agrees with it.
 
 ### Prove your test can fail
 

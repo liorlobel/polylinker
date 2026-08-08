@@ -1,10 +1,20 @@
 //! Walking a folder, and keeping its index on disk.
 //!
-//! **This is the only crate under `crates/` that performs I/O.** That is an
-//! invariant stronger than the written rule (`pl-core` has no I/O) and it was
-//! emergent rather than stated, so it is stated here: the search engine in
-//! `pl-index` is pure and provable, and the exception has its own crate whose
-//! name announces it.
+//! **This is one of the two crates under `crates/` that perform I/O.** The
+//! other is `pl-update`, which creates a directory, writes a partial file,
+//! renames it into place and runs `curl`. That is an invariant stronger than
+//! the written rule (`pl-core` has no I/O) and it was emergent rather than
+//! stated, so it is stated here: the search engine in `pl-index` and the primer
+//! chooser in `pl-design` are pure and provable — each has a `tests/purity.rs`
+//! that reads its own sources and refuses `std::fs` — and the exceptions have
+//! their own crates, whose names announce them.
+//!
+//! This paragraph said "the only crate" from 2026-07-27 until 2026-08-09. It
+//! was true when it was written and stopped being true on 2026-08-06, when
+//! `pl-update` landed; four places said it and nothing could go red for any of
+//! them, so nothing did. `the_io_claim_names_every_crate_that_does_io`, at the
+//! foot of this file, now reads all seven sites that make the claim and
+//! `pl-update`'s own sources.
 //!
 //! It lives here rather than in `bins/pl` because two binaries need
 //! byte-identical crash-safety semantics, and the CLI must be able to exercise
@@ -645,5 +655,121 @@ ORIGIN
         assert_eq!(total, bases.len() as u64);
         let packed = nibble::pack(&bases);
         assert_eq!(packed.len(), bases.len().div_ceil(2));
+    }
+
+    /// Does `text` make `claim` in its own voice, rather than quoting it?
+    ///
+    /// An occurrence whose nearest preceding non-space character opens a
+    /// quotation — `"`, `“` or a backtick — is somebody being quoted, and a
+    /// correction that says what a sentence *used* to say has to be able to
+    /// print the old sentence. `pl-index`'s purity test exempts comments for
+    /// the same reason: prose has to be able to name the thing it is denying.
+    ///
+    /// The same six lines are in `crates/pl-doc/src/lib.rs` and
+    /// `bins/pl-mcp/src/main.rs`, which guard the same class of stale claim in
+    /// their own files. Sharing them would mean a new workspace member existing
+    /// only to hold one predicate.
+    fn asserts(text: &str, claim: &str) -> bool {
+        text.match_indices(claim).any(|(i, _)| {
+            !matches!(
+                text[..i].chars().rev().find(|c| !c.is_whitespace()),
+                Some('"') | Some('\u{201c}') | Some('`')
+            )
+        })
+    }
+
+    /// Whatever says which crates under `crates/` do I/O must name all of them.
+    ///
+    /// PROVEN TO FAIL at c44757b on every site at once:
+    ///
+    /// ```text
+    /// crates/pl-scan/src/lib.rs claims "only crate under", and
+    /// crates/pl-update writes files and runs curl
+    /// ```
+    ///
+    /// The audit that raised this named four sites — this file's header,
+    /// `crates/pl-scan/Cargo.toml`, `CONTRIBUTING.md` and `README.md`. Three
+    /// more said the same thing in other words and are here too: the `std::fs`
+    /// rejection message in both `tests/purity.rs` files, which called the
+    /// filesystem "only pl-scan's" and is the sentence a developer reads when
+    /// that gate goes red, and `crates/pl-index/Cargo.toml` ("All I/O lives in
+    /// `pl-scan`").
+    ///
+    /// The ban list below is in the file it scans, so every phrase in it would
+    /// match itself; the quotation rule in [`asserts`] is what makes that
+    /// harmless, and it is also why the sentence above puts its quotation marks
+    /// where it does.
+    ///
+    /// The claim was true when it was written (2026-07-27) and stopped being
+    /// true when `crates/pl-update` landed on 2026-08-06, which is the whole
+    /// reason it is checked here rather than reread: no test could go red for
+    /// it, so nothing did.
+    ///
+    /// `include_str!` rather than a file read: the paths resolve at compile
+    /// time relative to this file, so the test cannot pass by failing to find
+    /// a file — the reason `pl-features`' README check gives for the same
+    /// choice.
+    #[test]
+    fn the_io_claim_names_every_crate_that_does_io() {
+        const SCAN_LIB: &str = include_str!("lib.rs");
+        const SCAN_MANIFEST: &str = include_str!("../Cargo.toml");
+        const CONTRIBUTING: &str = include_str!("../../../CONTRIBUTING.md");
+        const README: &str = include_str!("../../../README.md");
+        const INDEX_MANIFEST: &str = include_str!("../../pl-index/Cargo.toml");
+        const INDEX_PURITY: &str = include_str!("../../pl-index/tests/purity.rs");
+        const DESIGN_PURITY: &str = include_str!("../../pl-design/tests/purity.rs");
+        // The premise, read out of the crate that contradicts the claim rather
+        // than written down here. If `pl-update` ever stops touching the disk
+        // and spawning a process, these two lines are what say the shorter
+        // sentence may come back.
+        const UPDATE_FLOW: &str = include_str!("../../pl-update/src/flow.rs");
+        const UPDATE_NET: &str = include_str!("../../pl-update/src/net.rs");
+
+        assert!(
+            UPDATE_FLOW.contains("std::fs::rename(") && UPDATE_FLOW.contains("create_dir_all("),
+            "pl-update no longer writes files; re-read the four sentences this \
+             test constrains"
+        );
+        assert!(
+            UPDATE_NET.contains("Command::new(PROGRAM)"),
+            "pl-update no longer spawns a subprocess; re-read the four \
+             sentences this test constrains"
+        );
+
+        let sites = [
+            ("crates/pl-scan/src/lib.rs", SCAN_LIB),
+            ("crates/pl-scan/Cargo.toml", SCAN_MANIFEST),
+            ("CONTRIBUTING.md", CONTRIBUTING),
+            ("README.md", README),
+            ("crates/pl-index/Cargo.toml", INDEX_MANIFEST),
+            ("crates/pl-index/tests/purity.rs", INDEX_PURITY),
+            ("crates/pl-design/tests/purity.rs", DESIGN_PURITY),
+        ];
+        // The exact wordings that shipped, and the near spellings of the same
+        // claim. Matching phrases and not the bare word "I/O": a check that
+        // some initialism occurs somewhere is a check that cannot fail.
+        let stale = [
+            "only crate under",
+            "only crate that performs I/O",
+            "only crate doing I/O",
+            "one crate under crates/ that performs I/O",
+            "one crate that touches the filesystem",
+            "only pl-scan's",
+            "All I/O lives in",
+        ];
+        for (name, text) in sites {
+            for claim in stale {
+                assert!(
+                    !asserts(text, claim),
+                    "{name} claims {claim:?}, and crates/pl-update writes files \
+                     and runs curl"
+                );
+            }
+            assert!(
+                text.contains("pl-update"),
+                "{name} says which crates under crates/ do I/O and never \
+                 mentions pl-update, which is the other one"
+            );
+        }
     }
 }

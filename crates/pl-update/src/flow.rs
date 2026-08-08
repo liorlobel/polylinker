@@ -300,6 +300,7 @@ pub struct Handoff {
 ///    Nothing has been written and the artifact has not been requested.
 /// 6. Look this platform's file up in the verified manifest. Not there: stop.
 /// 7. Download the artifact to a `.part` file in the destination directory.
+///    If the transfer fails part-way, delete the `.part` file and stop.
 /// 8. Hash it and compare with the verified digest. On a mismatch, delete the
 ///    `.part` file and stop.
 /// 9. Only now, rename it to its real name, and hand back the path.
@@ -378,12 +379,29 @@ fn fetch_and_verify_with(
     // filesystem and cannot fail halfway with the bytes on the wrong volume.
     // The process id keeps two Polylinkers from writing the same partial file.
     let partial = into.join(format!("{file_name}.{}.part", std::process::id()));
-    fetch.download(&url, &partial)?;
 
-    let outcome = hash_and_place(&partial, into, &file_name, &expected);
+    // ONE cleanup, and it covers the *transport* failure as well as the digest
+    // failure. The two used to be separated by a `?`, and the transport half
+    // was the one that leaks: `curl` keeps whatever bytes arrived when it exits
+    // non-zero, so an ordinary interrupted download — a dropped link, a closed
+    // lid, `ARTIFACT_MAX_TIME_SECS` firing on a hotel connection — left a
+    // `.part` file in the directory the user chose, and nothing here or in
+    // `bins/pl` ever removed it. One per attempt, because the name carries the
+    // pid, so a flaky connection left a trail of them.
+    //
+    // Not `--remove-on-error`. `net.rs` runs whatever `curl` is on `PATH` and
+    // has no way to know which one that is, and curl refuses an option it does
+    // not recognise outright — `curl --disable --frobnicate --url ...` exits 2
+    // with "option --frobnicate: is unknown", checked on the curl this was
+    // written against — so a flag some system's curl lacks would trade a leaked
+    // partial file for an update that cannot run at all there. Removing the
+    // file here needs no flag, and it also covers a [`Fetch`] that is not curl.
+    let outcome = fetch
+        .download(&url, &partial)
+        .and_then(|()| hash_and_place(&partial, into, &file_name, &expected));
     if outcome.is_err() {
-        // A download that did not verify is not left lying about to be found
-        // later and run by hand.
+        // A download that did not finish, or did not verify, is not left lying
+        // about to be found later and run by hand.
         let _ = std::fs::remove_file(&partial);
     }
     let (path, actual_hex) = outcome?;
@@ -549,6 +567,39 @@ mod tests {
             std::fs::write(to, body).map_err(|e| UpdateError::Io {
                 what: format!("could not write {}", to.display()),
                 detail: e.to_string(),
+            })
+        }
+    }
+
+    /// A transport that fails the way a real one fails: with bytes already on
+    /// disk.
+    ///
+    /// [`Server`] cannot express this and that is why it had to be added.
+    /// `Server::download` looks the URL up *before* it writes anything, so its
+    /// only failure is a 404 that creates no file — which means every "leaves
+    /// nothing behind" assertion in this module was, without anyone choosing
+    /// it, an assertion about the digest path only. `curl` is the opposite: it
+    /// keeps what arrived when it exits non-zero, so a timeout or a dropped
+    /// link at byte 4096 of a 40 MB artifact leaves 4096 bytes named `.part`.
+    /// That shape had no double at all, which is exactly why the missing
+    /// cleanup was invisible.
+    struct Interrupted {
+        inner: Server,
+        /// How much had arrived before it gave up.
+        wrote: usize,
+    }
+
+    impl Fetch for Interrupted {
+        fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, UpdateError> {
+            self.inner.get(url, limit)
+        }
+
+        fn download(&self, url: &str, to: &Path) -> Result<(), UpdateError> {
+            self.inner.asked.borrow_mut().push(url.to_string());
+            std::fs::write(to, vec![b'x'; self.wrote]).expect("the partial write");
+            Err(UpdateError::Transport {
+                url: url.to_string(),
+                detail: "curl exited 28: Operation timed out".to_string(),
             })
         }
     }
@@ -980,6 +1031,58 @@ mod tests {
             "neither the artifact nor a .part file may survive a digest \
              mismatch, found {:?}",
             scratch.entries()
+        );
+    }
+
+    /// A transfer that dies part-way leaves nothing behind, and does not claim
+    /// more than that.
+    ///
+    /// Two defects in one place, and they are the same defect seen from each
+    /// side. The cleanup sat *below* the `?` on `fetch.download`, so it ran for
+    /// a digest mismatch and never for a transport failure: every ordinary
+    /// interrupted download — closed lid, dropped link, the 900-second
+    /// `ARTIFACT_MAX_TIME_SECS` on a slow line — left its `.part` file in the
+    /// user's chosen directory, a fresh one per attempt because the name
+    /// carries the pid. And the message said "Nothing was written" while those
+    /// bytes were sitting there.
+    ///
+    /// The message is asserted as well as the directory because the directory
+    /// alone would let the sentence stay: a future edit that moves the cleanup
+    /// back below the `?` breaks the first assertion, and one that restores the
+    /// old wording breaks the second, which is the point of having both.
+    #[test]
+    fn an_interrupted_download_leaves_no_partial_file_and_says_nothing_it_cannot_keep() {
+        let v = newer();
+        if artifact_file_name(&v).is_none() {
+            return;
+        }
+        let scratch = Scratch::new();
+        let fetch = Interrupted {
+            inner: serving(&v),
+            wrote: 4096,
+        };
+
+        let got = fetch_and_verify_with(&fetch, v, scratch.path(), verify_with_the_test_key);
+        let err = match got {
+            Err(e @ UpdateError::Transport { .. }) => e,
+            other => panic!("expected a transport failure, got {other:?}"),
+        };
+
+        assert!(
+            scratch.entries().is_empty(),
+            "an interrupted transfer must not leave its .part file behind, found {:?}",
+            scratch.entries()
+        );
+
+        let text = err.to_string();
+        assert!(
+            !text.to_lowercase().contains("nothing was written"),
+            "4096 bytes were written before this failed, so the message must not \
+             say otherwise: {text}"
+        );
+        assert!(
+            text.contains("No update was made"),
+            "the message must still say the operation did not happen: {text}"
         );
     }
 

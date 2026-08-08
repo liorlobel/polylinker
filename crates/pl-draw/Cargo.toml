@@ -1,6 +1,8 @@
 [package]
 name = "pl-draw"
-description = "Plasmid maps as SVG. Pure, deterministic, byte-identical across platforms."
+# The description says "from one build" because the raster declines the
+# stronger claim in its own header; see `src/lib.rs`, "What is guaranteed".
+description = "Plasmid maps as SVG, PDF, EPS and PNG. Pure and deterministic: identical input gives identical bytes from one build."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

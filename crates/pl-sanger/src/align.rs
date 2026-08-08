@@ -203,6 +203,54 @@ pub fn semiglobal_within(
     sc: &Scoring,
     budget: usize,
 ) -> Result<Alignment, AlignError> {
+    semiglobal_within_until(read, reference, sc, budget, &|| false)
+        .expect("an alignment that is never asked to stop always finishes")
+}
+
+/// [`semiglobal_within`], abandonable.
+///
+/// `stop` is polled once before the traceback matrices are allocated and once
+/// per row of the fill, and the answer is `None` the first time it says true.
+/// A row is `reference.len() + 1` cells, so on the widest reference this will
+/// align — the [`DEFAULT_TRACEBACK_BUDGET`] admits about 175 kb against a 1 kb
+/// read — a row is the whole check interval, and the check itself is one
+/// relaxed poll per hundred thousand cells.
+///
+/// The budget bounds MEMORY and nothing bounds TIME: 512 MiB of traceback is
+/// about 180 M Gotoh cells, and a caller that re-runs this on every keystroke
+/// accumulates workers each of which will finish that whether or not anyone
+/// still wants the answer. Dropping the caller's channel does not help — the
+/// send fails, but only after the last cell.
+///
+/// `&dyn Fn() -> bool` rather than an `AtomicBool`, matching
+/// [`pl_core::orf::find_orfs_until`]: the flag belongs to whatever is
+/// coordinating the workers, and this crate does not need to know it is a flag.
+///
+/// The traceback walk itself is NOT polled. It is `O(read + reference)` steps
+/// over memory already allocated, against the `O(read × reference)` fill above
+/// it, so a poll there would buy nothing measurable.
+pub fn semiglobal_within_until(
+    read: &[u8],
+    reference: &[u8],
+    sc: &Scoring,
+    budget: usize,
+    stop: &dyn Fn() -> bool,
+) -> Option<Result<Alignment, AlignError>> {
+    // `Result<Option<_>, _>` inside and `transpose` at the door, so every `?`
+    // below reads exactly as it did before the hook was added. Reversing the
+    // two — `Option<Result<_, _>>` all the way down — costs a `match` at each
+    // of the five failure points and buys nothing.
+    fill(read, reference, sc, budget, stop).transpose()
+}
+
+/// [`semiglobal_within_until`]'s body. `Ok(None)` is "asked to stop".
+fn fill(
+    read: &[u8],
+    reference: &[u8],
+    sc: &Scoring,
+    budget: usize,
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<Alignment>, AlignError> {
     let m = read.len();
     let n = reference.len();
     if m == 0 || n == 0 {
@@ -228,6 +276,14 @@ pub fn semiglobal_within(
         });
     }
 
+    // BEFORE the allocation, not only inside the fill. `need` is up to 512 MiB
+    // and this is the request a caller's cancel flag most wants to stop: a
+    // superseded worker that has not started yet must not take half a gigabyte
+    // away from the one somebody is actually waiting for.
+    if stop() {
+        return Ok(None);
+    }
+
     // Traceback, one byte per cell per matrix. 0 = came from M, 1 = from X
     // (gap in the read), 2 = from Y (gap in the reference).
     let w = n + 1;
@@ -246,6 +302,15 @@ pub fn semiglobal_within(
     let (mut cm, mut cx, mut cy) = (vec![NEG; w], vec![NEG; w], vec![NEG; w]);
 
     for i in 1..=m {
+        // Once per row. The inner loop below is `n` cells, so this is one
+        // relaxed poll per reference length rather than per cell, and the
+        // matrices are freed on the way out.
+        // Once per row. The inner loop below is `n` cells, so this is one
+        // relaxed poll per reference length rather than per cell, and the
+        // matrices are freed on the way out.
+        if stop() {
+            return Ok(None);
+        }
         cm[0] = NEG;
         cx[0] = NEG;
         // The read hanging off the start of the reference: charged, so the
@@ -357,12 +422,12 @@ pub fn semiglobal_within(
         .iter()
         .filter(|o| matches!(o, Op::Match | Op::Mismatch | Op::Deletion))
         .count();
-    Ok(Alignment {
+    Ok(Some(Alignment {
         ref_start: j,
         ref_end: j + consumed,
         score: best,
         ops,
-    })
+    }))
 }
 
 /// Case-insensitive, and `N` matches nothing in particular.

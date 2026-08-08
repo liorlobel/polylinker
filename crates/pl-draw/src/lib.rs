@@ -28,11 +28,35 @@
 //!
 //! # What is guaranteed
 //!
-//! **Byte-identical output for identical input**, on every platform. Nothing
-//! here reads a clock, a font, a locale or the filesystem: text width is
-//! estimated from a constant, floats are rounded before formatting, and
-//! iteration order is fixed. That is what makes the output diffable in CI and
-//! usable as a figure that does not move between machines.
+//! **Byte-identical output for identical input, from one build of this crate.**
+//! Nothing here reads a clock, a locale, the filesystem or a font file at run
+//! time: the faces are `include_bytes!`d by [`font`], text is measured against
+//! the compiled-in Helvetica width tables in [`pdf`] rather than against a
+//! system face, floats are rounded before formatting, and iteration order is
+//! fixed. That is what makes the output diffable in CI, and it is measured
+//! rather than asserted — `the_linear_figure_is_byte_identical_for_identical_input`
+//! renders eight times through all four writers, and
+//! `two_processes_render_the_same_molecule_to_the_same_bytes`
+//! (`bins/pl/tests/cli.rs`) renders in two separate processes, which is the one
+//! that can see a per-process hash seed.
+//!
+//! **BETWEEN PLATFORMS IT IS AN ARGUMENT AND NOT A MEASUREMENT, and it is a
+//! weaker argument for the raster than for the rest.** Nothing in the gate
+//! compares a figure built on Windows against the same figure built on Linux;
+//! the three-platform CI matrix runs the suite on each, which is a different
+//! claim. What the vector writers have is a rounding step in front of the file
+//! — [`n`] for the SVG, and the same three lines copied privately into `pdf.rs`
+//! and `eps.rs` — cutting a coordinate to two decimals before it is formatted,
+//! so a `sin` differing in its last bit between two libms has to land one
+//! within a hair of a rounding boundary to move a byte. [`raster`] has no such
+//! step and its own header
+//! declines the cross-platform claim outright — see `raster.rs`, "Determinism,
+//! stated rather than claimed", which also records what buying the stronger
+//! claim would cost. Until 2026-08-09 this paragraph promised identical bytes
+//! "on every platform" for the whole crate with no carve-out, while the raster
+//! module had said the opposite since it was written; `pl-draw`'s package
+//! description said it too. Do not build a cross-platform golden-file gate on
+//! this paragraph, and do not read the rounding as a proof.
 //!
 //! Conventions match the TypeScript renderer and the field: base 1 at twelve
 //! o'clock, coordinates increasing **clockwise**, 1-based inclusive.

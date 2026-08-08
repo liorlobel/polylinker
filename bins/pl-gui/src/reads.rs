@@ -36,8 +36,19 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
+
+/// What the panel says about a report that was computed against a molecule
+/// other than the one on screen.
+///
+/// A `Report` names a reference, and every number in it — `covered`, the
+/// identity, every `ref_pos` on every discrepancy row — is a coordinate in
+/// THAT reference. Printing any of them beside a different molecule is the
+/// confident-wrong-answer defect `App::refresh_reads` exists to prevent, and
+/// the honest thing to say is that the answer is being made again.
+pub const SUPERSEDED: &str =
+    "the construct changed under this comparison, so it is being made again";
 
 /// Where a read's comparison has got to.
 ///
@@ -49,12 +60,29 @@ use std::sync::Arc;
 /// — UNDER the budget, so it runs, on whatever thread called it. That is a
 /// multi-second freeze on a FAILED sequencing reaction, which is the file a
 /// user is most anxious about.
+///
+/// The flag is CLONED INTO THE WORKER, and the whole point is that it is read
+/// there. It was not, once: this type carried the flag for shape parity with
+/// `doc::DigestState` while `pl_sanger::compare_reporting` had no hook to check
+/// it with, so both stores — the one `compare` makes when it supersedes a scan
+/// and the one behind the Close-read button — wrote to an `Arc` that nothing
+/// loaded. Every superseded comparison ran to its last Gotoh cell, and clicking
+/// between two document tabs multiplied the live workers rather than replacing
+/// them.
 pub enum CompareState {
     Running {
         rx: Receiver<Result<pl_sanger::Report, pl_sanger::Unplaced>>,
         cancel: Arc<AtomicBool>,
     },
-    Done(pl_sanger::Report),
+    /// The report, and the reference length it is ABOUT.
+    ///
+    /// The length travels with the report because the panel is handed the
+    /// length of whatever molecule is open at paint time, and those are not the
+    /// same number for one frame after a toolbar edit — see [`Read::verdict`].
+    Done {
+        report: pl_sanger::Report,
+        reference_len: u64,
+    },
     /// The read produced no report, with the reason. The three read
     /// differently on purpose — see [`unplaced_sentence`].
     Unplaced(pl_sanger::Unplaced),
@@ -72,6 +100,10 @@ pub struct Read {
     pub name: String,
     pub trace: pl_abif::Trace,
     pub state: CompareState,
+    /// Length of the reference the running comparison was handed, so that the
+    /// answer can be labelled with it when it lands. Meaningless — and unread —
+    /// in every state but `Running`.
+    compared_against: u64,
 }
 
 impl Read {
@@ -81,6 +113,7 @@ impl Read {
             name,
             trace,
             state: CompareState::NoReference,
+            compared_against: 0,
         }
     }
 
@@ -91,18 +124,35 @@ impl Read {
         }
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
         // The worker owns copies: the reference can be edited underneath it,
         // and an alignment against a sequence that has since changed is the
         // stale-answer defect `Document::apply`'s unconditional re-digest
         // exists to prevent.
         let read = self.trace.sequence.clone();
         let qual = self.trace.quality.clone();
+        let reference_len = reference.len() as u64;
         let reference = reference.to_vec();
         let spawned = std::thread::Builder::new()
             .name("sanger".into())
             .spawn(move || {
                 let p = pl_sanger::Params::default();
-                let r = pl_sanger::compare_reporting(&read, &qual, &reference, circular, &p);
+                let answer = pl_sanger::compare_reporting_until(
+                    &read,
+                    &qual,
+                    &reference,
+                    circular,
+                    &p,
+                    // Once per alignment row, which is where the cost is. See
+                    // `pl_sanger::compare_reporting_until`.
+                    &|| flag.load(Ordering::Relaxed),
+                );
+                let Some(r) = answer else {
+                    // Superseded. Drop `tx` WITHOUT sending: `poll` reads the
+                    // hang-up and the state stops being `Running`, so a read
+                    // that was stopped never sits at "comparing…" for ever.
+                    return;
+                };
                 // Send failing means the document was replaced; that is fine.
                 let _ = tx.send(r);
             });
@@ -113,25 +163,44 @@ impl Read {
                 "this read was not compared: no worker thread could be started ({e}).                  Nothing about it was ruled out."
             )),
         };
+        self.compared_against = reference_len;
     }
 
     /// Collect the worker's answer if it has arrived. True when something
     /// changed, so the caller knows to repaint.
     pub fn poll(&mut self) -> bool {
-        let done = match &self.state {
-            CompareState::Running { rx, .. } => rx.try_recv().ok(),
+        let got = match &self.state {
+            CompareState::Running { rx, .. } => Some(rx.try_recv()),
             _ => None,
         };
-        match done {
-            Some(Ok(r)) => {
-                self.state = CompareState::Done(r);
+        let reference_len = self.compared_against;
+        match got {
+            Some(Ok(Ok(report))) => {
+                self.state = CompareState::Done {
+                    report,
+                    reference_len,
+                };
                 true
             }
-            Some(Err(u)) => {
+            Some(Ok(Err(u))) => {
                 self.state = CompareState::Unplaced(u);
                 true
             }
-            None => false,
+            // The worker hung up with no answer. Since the cancel flag reached
+            // it, that is what an abandoned comparison looks like — and it is
+            // also what a worker that panicked looks like, which used to leave
+            // the panel saying "comparing…" and asking for a repaint for ever.
+            // Neither ruled anything out about the read, so neither may be
+            // spelled like `Unplaced`.
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.state = CompareState::Failed(
+                    "this comparison was stopped before it finished, so nothing about this \
+                     read was ruled out."
+                        .into(),
+                );
+                true
+            }
+            Some(Err(TryRecvError::Empty)) | None => false,
         }
     }
 
@@ -149,6 +218,37 @@ impl Read {
     /// of what the panel can honestly show in that state.
     pub fn reliable(&self) -> Option<(u64, u64)> {
         pl_sanger::reliable_window(&self.trace.quality, &pl_sanger::Params::default())
+    }
+
+    /// The finished report, but ONLY if it is about a molecule of this length.
+    ///
+    /// Every caller that draws a number out of a `Report` — the coverage span,
+    /// the identity, the `ref 970` on each discrepancy row, the base the row
+    /// jumps the caret to — is drawing a coordinate in the reference the report
+    /// was computed against. Handing those to a reader beside a different
+    /// molecule is a confident wrong answer, so the length is compared here
+    /// rather than assumed, once, in the place the report is fetched.
+    ///
+    /// The LENGTH, not the sequence: the panel is handed a length, keeping a
+    /// copy of the reference per read to compare against would cost a megabyte
+    /// per open read, and a same-length edit is caught one level up —
+    /// `App::reads_tab` re-checks `App::reads_for`, which is the exact
+    /// `(doc_generation, seq_version)` key `App::refresh_reads` re-arms on.
+    /// This is the arithmetic's precondition; that is the panel's freshness
+    /// rule, and neither replaces the other.
+    ///
+    /// Zero is refused with the rest: it cannot occur — `compare_reporting`
+    /// answers `Unplaced::Empty` for an empty reference, so no `Done` can carry
+    /// it — but it is the divisor of the coverage percentage, and `inf%` is not
+    /// a thing to leave one invariant away from the screen.
+    pub fn report_for(&self, reference_len: u64) -> Option<&pl_sanger::Report> {
+        match &self.state {
+            CompareState::Done {
+                report,
+                reference_len: n,
+            } if *n == reference_len && *n > 0 => Some(report),
+            _ => None,
+        }
     }
 
     /// The facts the file carries, which are true whether or not anything has
@@ -218,6 +318,26 @@ impl Read {
     /// Never a bare identity percentage. 100% identity over 200 aligned columns
     /// on a 5,386 bp plasmid says nothing about the other 5,186 bases, and the
     /// two numbers side by side are the only honest form.
+    ///
+    /// # `reference_len` is the CALLER's molecule, and it can disagree
+    ///
+    /// The panel is handed the length of whatever document is open at paint
+    /// time, and for one frame after a toolbar edit that is not the molecule
+    /// the report was computed against: `App::ui` runs `refresh_reads` before
+    /// `top_bar`, and the toolbar's Undo and Redo buttons shrink the molecule
+    /// and bump `seq_version` from inside that same frame. (Ctrl+Z is safe only
+    /// by an accident of ordering — it is handled above `refresh_reads`.)
+    ///
+    /// The arithmetic below is TOTAL, not merely guarded: `reference_len - a`
+    /// on `u64` used to be reachable with `a > reference_len`, and an
+    /// origin-crossing read on a plasmid that has just been shortened is
+    /// exactly that shape. In a test or debug build that panics with "attempt
+    /// to subtract with overflow" and takes the window with it; the shipped
+    /// release profile sets no `overflow-checks`, so it wraps instead and the
+    /// label reads *covers 5,600..90 of 2,686 bp (686899662262076800%)*.
+    /// Neither is a coverage figure, so neither is printed: a report whose ends
+    /// do not lie on this molecule is not a statement about this molecule at
+    /// all, and [`SUPERSEDED`] is what there is to say about it.
     pub fn verdict(&self, reference_len: u64) -> String {
         match &self.state {
             CompareState::NoReference => {
@@ -228,18 +348,26 @@ impl Read {
             CompareState::Running { .. } => "comparing…".into(),
             CompareState::Unplaced(u) => unplaced_sentence(u),
             CompareState::Failed(why) => why.clone(),
-            CompareState::Done(r) => {
+            // The report's OWN reference length, not the caller's, and they are
+            // compared rather than trusted.
+            CompareState::Done { .. } => {
+                let Some(r) = self.report_for(reference_len) else {
+                    return SUPERSEDED.into();
+                };
                 let (a, b) = r.covered;
+                // `covered` is 1-based inclusive on the reference it was built
+                // against — `pl_sanger` reduces both ends modulo that length —
+                // and `describes` has just established that this is that
+                // reference. So `a` and `b` are both in `1..=reference_len`,
+                // the subtractions below cannot go negative, and the sum cannot
+                // exceed `2 * reference_len`.
                 let span = if b >= a {
                     b - a + 1
                 } else {
+                    // Wrapped: `a` to the end, then 1 through `b`.
                     reference_len - a + 1 + b
                 };
-                let pct = if reference_len == 0 {
-                    0.0
-                } else {
-                    100.0 * span as f64 / reference_len as f64
-                };
+                let pct = 100.0 * span as f64 / reference_len as f64;
                 let high = r.count(pl_sanger::Confidence::High);
                 let unknown = r.count(pl_sanger::Confidence::Unknown);
                 let low = r.count(pl_sanger::Confidence::Low);
@@ -586,7 +714,7 @@ pub mod tests {
             done(&mut r);
             let want =
                 pl_sanger::compare_reporting(seq, &q, &mol.seq, circular, &p).expect("it places");
-            let CompareState::Done(got) = &r.state else {
+            let CompareState::Done { report: got, .. } = &r.state else {
                 panic!("{label}: {}", r.verdict(n));
             };
             assert_eq!(got.reversed, want.reversed, "{label}");
@@ -622,7 +750,7 @@ pub mod tests {
         let mut r = Read::new("rev".into(), None, t);
         r.compare(&mol.seq, circular);
         done(&mut r);
-        let CompareState::Done(rep) = &r.state else {
+        let CompareState::Done { report: rep, .. } = &r.state else {
             panic!("it places")
         };
         let d = &rep.discrepancies[0];
@@ -653,7 +781,7 @@ pub mod tests {
         let want =
             pl_sanger::compare_reporting(&junk, &vec![45u8; junk.len()], &mol.seq, circular, &p);
         match (&r.state, &want) {
-            (CompareState::Done(got), Ok(w)) => {
+            (CompareState::Done { report: got, .. }, Ok(w)) => {
                 assert_eq!(got.discrepancies, w.discrepancies);
                 assert_eq!(got.covered, w.covered);
                 assert!(
@@ -665,7 +793,7 @@ pub mod tests {
             (a, b) => panic!(
                 "the panel and pl_sanger disagree: {} vs {b:?}",
                 match a {
-                    CompareState::Done(_) => "Done",
+                    CompareState::Done { .. } => "Done",
                     CompareState::Unplaced(_) => "Unplaced",
                     CompareState::Running { .. } => "Running",
                     CompareState::NoReference => "NoReference",
@@ -725,7 +853,7 @@ pub mod tests {
         let mut r = Read::new("tail".into(), None, t);
         r.compare(&mol.seq, circular);
         done(&mut r);
-        let CompareState::Done(rep) = &r.state else {
+        let CompareState::Done { report: rep, .. } = &r.state else {
             panic!("it places: {}", r.verdict(mol.len()))
         };
         // The fixture has to be the case this is about: exactly one difference,
@@ -808,6 +936,157 @@ pub mod tests {
         let mut v = b"ABIF".to_vec();
         v.extend_from_slice(&[0u8; 64]);
         v
+    }
+
+    /// PROVEN TO FAIL against the shipped verdict, which panicked.
+    ///
+    /// The wrapped arm was `reference_len - a + 1 + b` on `u64` with
+    /// `reference_len` supplied by the CALLER — the molecule open at paint time
+    /// — and `a` taken from a report about a different one. `a > reference_len`
+    /// is reachable in one frame (see `Read::verdict`), and an origin-crossing
+    /// read is precisely the shape that takes the branch: a test or debug build
+    /// panics with "attempt to subtract with overflow" and the window dies,
+    /// while the release profile — which sets no `overflow-checks` — wraps and
+    /// prints a coverage of 686899662262076800%.
+    ///
+    /// `saturating_sub` would stop the panic and still print a fabricated
+    /// span, so the report carries the length it is ABOUT instead and the two
+    /// are compared: with the precondition in the data the subtraction cannot
+    /// underflow for any input, which is what total means here.
+    #[test]
+    fn a_report_never_prints_a_coverage_of_a_molecule_it_is_not_about() {
+        let mol = demo();
+        let n = mol.len();
+        assert!(mol.topology.is_circular(), "the wrapped arm needs a circle");
+        // ACROSS THE ORIGIN, so `covered` really is `b < a` and the else
+        // branch — the one that subtracts — is the one taken.
+        let mut seq: Vec<u8> = mol.seq[mol.seq.len() - 150..].to_vec();
+        seq.extend_from_slice(&mol.seq[..150]);
+        let q = vec![45u8; seq.len()];
+        let t = pl_abif::parse(&ab1(&seq, &q)).expect("well-formed");
+        let mut r = Read::new("wrapped".into(), None, t);
+        r.compare(&mol.seq, true);
+        done(&mut r);
+        let CompareState::Done { report: rep, .. } = &r.state else {
+            panic!("it places: {}", r.verdict(n))
+        };
+        let (a, b) = rep.covered;
+        assert!(
+            b < a,
+            "the fixture must wrap the origin: covered = {a}..{b}"
+        );
+        assert!(rep.wrapped);
+
+        // Against its OWN molecule the coverage is the honest one, and the
+        // wrapped span is the walk from `a` over the origin to `b`.
+        let v = r.verdict(n);
+        assert!(v.contains(&format!("covers {a}..{b} of {n} bp")), "{v}");
+        assert!(v.contains("crosses the origin"), "{v}");
+        assert!(
+            v.contains(&format!("({:.0}%)", 100.0 * 300.0 / n as f64)),
+            "300 of {n} bases: {v}"
+        );
+
+        // TOTAL. Every length a caller could hand this, including the ones that
+        // used to underflow, and including lengths on both sides of both ends.
+        for len in [
+            0,
+            1,
+            b - 1,
+            b,
+            b + 1,
+            a - 1,
+            a,
+            a + 1,
+            n / 2,
+            n - 1,
+            n + 1,
+            n * 2,
+            u64::MAX,
+        ] {
+            let v = r.verdict(len);
+            if len == n {
+                continue;
+            }
+            assert_eq!(
+                v, SUPERSEDED,
+                "verdict({len}) against a report about {n} bp"
+            );
+        }
+    }
+
+    /// PROVEN TO FAIL before this change: the `Arc<AtomicBool>` was created,
+    /// stored in `Running` and never cloned into the worker, so `Read::cancel`
+    /// — the Close-read button, and the store `compare` makes when it supersedes
+    /// a scan — wrote to a flag nothing loaded. Every superseded comparison ran
+    /// to its last Gotoh cell.
+    ///
+    /// Two assertions, and the first is the mechanism rather than a symptom:
+    /// the worker must be holding the same flag. The second is what that buys —
+    /// a stopped comparison produces no report at all.
+    #[test]
+    fn a_cancelled_comparison_stops_instead_of_running_to_the_last_cell() {
+        // 8 kb circular, so the reference is doubled to 16 kb, and a read the
+        // seeds cannot place, so both orientations take the whole-reference
+        // fallback: 3 x 901 x 16,001 = 43 MB of traceback and about 14 M Gotoh
+        // cells per orientation. Well inside the 512 MB budget, so it RUNS —
+        // which is the whole hazard — and far too much of it to be finished by
+        // the time the next statement executes.
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        let mut rand = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            b"ACGT"[(s >> 33) as usize & 3]
+        };
+        let reference: Vec<u8> = (0..8_000).map(|_| rand()).collect();
+        let read: Vec<u8> = (0..900).map(|_| rand()).collect();
+        let doubled = [reference.clone(), reference.clone()].concat();
+        assert!(
+            pl_sanger::align::locate(&read, &doubled, pl_sanger::Params::default().seed_k, 100)
+                .is_none(),
+            "the fixture needs the seeds to fail, or the cheap windowed path is taken"
+        );
+
+        let t = pl_abif::parse(&ab1(&read, &vec![45u8; read.len()])).expect("well-formed");
+        let mut r = Read::new("unplaceable".into(), None, t);
+        r.compare(&reference, true);
+        let CompareState::Running { cancel, .. } = &r.state else {
+            panic!("a comparison this size cannot already be finished");
+        };
+        assert!(
+            Arc::strong_count(cancel) >= 2,
+            "the worker never received the cancel flag, so cancelling it is a no-op"
+        );
+
+        // The user's explicit stop. It must reach the thread.
+        r.cancel();
+        // Generously bounded for the same reason
+        // `an_edit_re_arms_every_read_rather_than_leaving_a_stale_report` is:
+        // this is not a performance test. Either way the loop ends — a worker
+        // that ignored the flag simply finishes and reports — so what is being
+        // pinned is WHICH state it ends in.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
+            if r.poll() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        match &r.state {
+            CompareState::Failed(why) => {
+                // Nothing was ruled out, and it must not read like `Unplaced`.
+                assert!(
+                    why.contains("nothing about this read was ruled out"),
+                    "{why}"
+                );
+                assert!(!why.contains("does not match"), "{why}");
+            }
+            CompareState::Done { .. } | CompareState::Unplaced(_) => {
+                panic!("the cancelled comparison ran to completion and reported anyway")
+            }
+            _ => panic!("the cancelled comparison never finished"),
+        }
     }
 
     /// A damaged file's sentence, pinned on the same 68 bytes the indexer

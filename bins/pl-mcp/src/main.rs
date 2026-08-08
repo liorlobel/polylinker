@@ -11,11 +11,24 @@
 //! # It says what it does not know
 //!
 //! The results carry the same caveats the CLI prints. Feature annotation
-//! reports how many database records have actually been reviewed — currently
-//! none — rather than returning names as facts, and the gel says it is a model
-//! and not a measurement. An assistant will repeat whatever it is handed, so
-//! anything hedged in the terminal has to be hedged here too, or the hedge is
-//! lost exactly where it matters most.
+//! reports how many of the records it searched a named curator has signed off,
+//! and searches only those unless `include_proposed` asks for the rest, rather
+//! than returning names as facts; the gel says it is a model and not a
+//! measurement. An assistant will repeat whatever it is handed, so anything
+//! hedged in the terminal has to be hedged here too, or the hedge is lost
+//! exactly where it matters most.
+//!
+//! That first sentence gave the reviewed count as "currently none" from
+//! 2026-07-28 until 2026-08-09. It was written on the morning the sign-off
+//! table was still empty and was false by that evening, when the rows were
+//! signed — the same sentence this project has since corrected in `README.md`,
+//! `features/SIGNOFF.tsv`, `Db::builtin`'s rustdoc and the `annotate` tool
+//! schema below. No count is written here in its place, for the reason
+//! `Db::builtin`'s rustdoc gives: ask `pl_features::Db::review_counts`, and do
+//! not believe a count written into a doc comment. A `//!` block crosses no
+//! wire, so what this misled was not an assistant but whoever opened the file
+//! to check the project's central trust claim, and
+//! `the_module_header_describes_the_database_that_ships` now reads it.
 //!
 //! # No dependencies
 //!
@@ -1009,6 +1022,91 @@ mod tests {
              {signed} of {} rows are signed: {annotate:?}",
             db.records.len()
         );
+    }
+
+    /// Does `text` make `claim` in its own voice, rather than quoting it?
+    ///
+    /// An occurrence whose nearest preceding non-space character opens a
+    /// quotation — `"`, `“` or a backtick — is somebody being quoted, and a
+    /// correction that says what a sentence *used* to say has to be able to
+    /// print the old sentence. The same six lines are in
+    /// `crates/pl-scan/src/lib.rs` and `crates/pl-doc/src/lib.rs`, which guard
+    /// the same class of stale claim in their own files; sharing them would
+    /// mean a new workspace member existing only to hold one predicate.
+    fn asserts(text: &str, claim: &str) -> bool {
+        text.match_indices(claim).any(|(i, _)| {
+            !matches!(
+                text[..i].chars().rev().find(|c| !c.is_whitespace()),
+                Some('"') | Some('\u{201c}') | Some('`')
+            )
+        })
+    }
+
+    /// The module header describes the database that ships, not the one that
+    /// shipped the morning it was written.
+    ///
+    /// PROVEN TO FAIL at c44757b:
+    ///
+    /// ```text
+    /// the module header says "currently none" while 89 of 89 rows are signed
+    /// ```
+    ///
+    /// [`the_schema_descriptions_match_what_the_tools_do`] above reads the live
+    /// tool schema, which is why the same sentence was found and corrected
+    /// there — it is the second arm of that test's own PROVEN TO FAIL record,
+    /// against `713bd3b` — and left standing 940 lines higher, in this file's
+    /// front matter, where nothing looked. A `//!` block never crosses the
+    /// wire, so no assistant was misled
+    /// by it — the reader it misleads is whoever opens this file to check the
+    /// project's central trust claim, which is what a front matter is for.
+    ///
+    /// Whitespace-normalised before searching, because the claim wrapped across
+    /// two comment lines — "reviewed — currently" / "none — rather than" — and
+    /// a line-by-line `contains` would never have seen it.
+    #[test]
+    fn the_module_header_describes_the_database_that_ships() {
+        const SELF: &str = include_str!("main.rs");
+        let (db, errors) = pl_features::Db::builtin();
+        assert!(errors.is_empty(), "{errors:?}");
+        let signed = db.reviewed().records.len();
+        assert!(
+            signed > 0,
+            "the premise: if the shipped tables really are unsigned again, this \
+             test and the header it constrains both describe the new state"
+        );
+
+        let header: String = SELF
+            .lines()
+            .take_while(|l| l.starts_with("//!") || l.trim().is_empty())
+            // The `//!` goes before the join, not after: leaving it in puts a
+            // marker between every pair of words that wrapped, and this claim
+            // wrapped. A first draft of this test kept the prefixes, found
+            // "currently //! none" where it was looking for "currently none",
+            // and passed against the very sentence it was written for.
+            .map(|l| l.trim_start_matches("//!"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let header: String = header.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            header.contains("read-only"),
+            "the header no longer starts where this test thinks it does: \
+             {header}"
+        );
+        for claim in [
+            "currently none",
+            "nothing reviewed",
+            "none reviewed",
+            "0 reviewed",
+            "no reviewed records",
+            "entirely unreviewed",
+        ] {
+            assert!(
+                !asserts(&header, claim),
+                "the module header says {claim:?} while {signed} of {} records \
+                 carry a curator sign-off",
+                db.records.len()
+            );
+        }
     }
 
     #[test]

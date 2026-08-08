@@ -37,7 +37,13 @@ pub enum UpdateError {
     /// say so and stop.
     CurlMissing,
     /// `curl` ran and did not come back with the bytes: no route, DNS failure,
-    /// timeout, TLS refusal, 404, 500. Retrying may help. Nothing was written.
+    /// timeout, TLS refusal, 404, 500. Retrying may help.
+    ///
+    /// It does **not** mean nothing was written. A transfer that fails part-way
+    /// through the artifact has already put bytes on disk; `flow.rs` deletes
+    /// that `.part` file, but the deletion is best-effort and the writing
+    /// happened either way. What this variant does mean is what the module
+    /// header says of all of them: no update.
     Transport { url: String, detail: String },
     /// The server sent more than the caller was willing to hold in memory.
     /// Refused rather than truncated — a truncated manifest is a manifest.
@@ -126,9 +132,17 @@ impl fmt::Display for UpdateError {
                  macOS, and with every mainstream Linux distribution. Install curl, \
                  or download the release by hand from the releases page"
             ),
+            // "Nothing was written" is what this used to say, and it was false
+            // whenever the artifact transfer was the thing that failed: `curl`
+            // had already written every byte that arrived before the timeout or
+            // the dropped link. `flow.rs` now removes that partial file, but a
+            // best-effort `remove_file` is not grounds for a flat claim about
+            // the user's disk either. "No update was made" is the thing this
+            // type can always keep — see the module header: every variant here
+            // means no update — so that is what it says.
             UpdateError::Transport { url, detail } => write!(
                 f,
-                "could not fetch {}: {}. Nothing was written",
+                "could not fetch {}: {}. No update was made",
                 tidy(url),
                 tidy(detail)
             ),

@@ -1221,6 +1221,15 @@ struct App {
     /// memory leak shaped like a feature — a user who closes fifty tabs in a
     /// session is not going to reopen the first.
     ///
+    /// "NOTHING IS DESTROYED" IS A CLAIM ABOUT THE WHOLE SESSION, not about the
+    /// keystroke, and for a long time it stopped being true one gesture later.
+    /// Everything that makes work durable — the quit guard, `autosave`,
+    /// `record_session`, `on_exit` — walks the BENCH, and this field is not on
+    /// it, so a tab closed with unsaved edits was invisible to all four: Ctrl+W
+    /// then quit exited with no dialog and dropped the document. What makes the
+    /// sentence true is [`App::reclaim_unsaved_closed`], which puts anything in
+    /// here that is still at risk back on the bench before the guard reads it.
+    ///
     /// THE SENTENCE ABOVE WAS FALSE UNTIL THE BOUND EXISTED. It was written when
     /// this field was added and described an intention; `close_tab` only ever
     /// pushed. A doc comment that states an invariant the code does not hold is
@@ -2122,6 +2131,29 @@ impl App {
         self.recovery_dir.is_some() && (!self.autosave_off || self.bench.any_armed())
     }
 
+    /// Every recovery slot this window is holding — the bench, AND the closed
+    /// tabs that kept theirs.
+    ///
+    /// `Bench::slots` was the whole answer for as long as a closed tab's draft
+    /// was deleted the moment it closed. It is not any more: a tab closed with
+    /// unsaved work keeps its slot for as long as Ctrl+Shift+T can bring it back,
+    /// and `claim_next`'s contract is that it is told every name this process
+    /// holds — its own doc says a slot handed to a tab that has not written yet
+    /// "is not on disk, so `claim` would hand the same name to the next tab and
+    /// the two would write over each other".
+    ///
+    /// `claim_next` also refuses any slot whose FILE exists, which covers the
+    /// ordinary closed-tab case on its own. This covers the one existence cannot
+    /// see: the name is owned but the file is not there — a draft whose write
+    /// failed, or a temp directory swept out from under a long-running window.
+    /// Without it that slot is handed to a new tab, and reopening the closed one
+    /// puts two documents on one file.
+    fn held_slots(&self) -> Vec<PathBuf> {
+        let mut held = self.bench.slots();
+        held.extend(self.closed.iter().filter_map(|t| t.recovery.clone()));
+        held
+    }
+
     /// Write the current document to the recovery file, if it is time.
     ///
     /// Never writes to the file the user opened. An editor that quietly
@@ -2199,7 +2231,7 @@ impl App {
             .unwrap_or(0);
         let day = today();
         let abandoned = self.abandoned_unsaved;
-        let mut held = self.bench.slots();
+        let mut held = self.held_slots();
         let mut failed: Option<String> = None;
         let mut off: Option<String> = None;
         let mut wrote = false;
@@ -3545,17 +3577,18 @@ impl App {
                     &p.path,
                     "the cut-site cache is not written; SnapGene rebuilds it",
                 );
-                // Raised by the unsaved-changes guard's Save button. Only a save
-                // that actually cleared `unsaved()` may proceed to the discard —
-                // a guard that closed the window after a failed write would have
-                // done the exact damage it was added to prevent.
+                // Raised by the unsaved-changes guard's Save button. Preserved:
+                // these bytes are on disk, so no recovery draft is kept and the
+                // next launch says nothing about them.
+                //
+                // WHETHER THAT ANSWER MAY CLOSE THE WINDOW IS NOT DECIDED HERE.
+                // It used to be, and it was decided on `self.document()` — the
+                // tab `mark_saved` had cleared four lines up, so the test could
+                // not fail and saving one tab took every other dirty tab down
+                // with it. `resolve_guard` holds both save arms to the same
+                // bench-wide rule now; see there.
                 if let Some(why) = p.then {
-                    if self.document().is_none_or(|d| !d.unsaved()) {
-                        // Preserved: the bytes are on disk. No recovery draft is
-                        // kept and the next launch says nothing, because nothing
-                        // happened here that a user needs warning about.
-                        self.resolve_guard(why, true);
-                    }
+                    self.resolve_guard(why, true);
                 }
             }
             Err(e) => self.error = Some(e),
@@ -4179,11 +4212,75 @@ impl App {
             // is right rather than an oversight: a run is uncommitted work
             // living on `App`, so only the active tab can have one, and
             // `switch_tab` settles as it leaves.
+            //
+            // AND A TAB CLOSED WITH Ctrl+W IS STILL WORK. `any_unsaved` walks
+            // the bench and `close_tab` moves the whole tab OFF the bench into
+            // the reopen stack, so every durability mechanism in this file —
+            // this guard, `autosave`, `record_session`, `on_exit` — stopped
+            // seeing it. Type four hundred bases into pKoV.gb, Ctrl+W, quit: no
+            // dialog, no session entry, no draft, and the `Document` dropped
+            // with the process. Three ordinary gestures.
+            //
+            // `close_tab`'s own doc is what makes this line mandatory rather
+            // than optional. It justifies having no guard of its own with "the
+            // question is asked once, at the point where work really does go
+            // away — closing the window", and that sentence was not true.
+            self.reclaim_unsaved_closed();
             if self.bench.any_unsaved() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.closing = true;
             }
         }
+    }
+
+    /// Put every closed tab that still holds unsaved work back on the bench.
+    ///
+    /// COUNTING THEM WHERE THEY LAY WAS NOT AN OPTION, and that is the whole
+    /// design question here. The guard does not just decide, it ASKS: the modal
+    /// names a document, says how many edits are not in any file, and offers to
+    /// save it. None of those three is possible for a tab that is not on the
+    /// bench — `unsaved_modal` reaches its subject through `bench.first_unsaved`
+    /// and `bench.get`, and the Save button saves the ACTIVE document. Teaching
+    /// each of them about a second collection would be three more places to get
+    /// a data-loss predicate wrong, which is the defect this file has now made
+    /// twice. Putting the tab back reuses machinery that is already correct.
+    ///
+    /// It is also the honest reading of the gesture. The user is about to be
+    /// asked to decide about work they had put down, so the work is put back in
+    /// front of them; and if they Cancel, it stays open, which is where anything
+    /// they still have to deal with belongs.
+    ///
+    /// The caller has already settled. That matters: `take_view` lifts the whole
+    /// of `App`'s per-document state, an open typing run included, and a run
+    /// carried into another tab's view is somebody else's keystrokes.
+    fn reclaim_unsaved_closed(&mut self) {
+        if !self.closed.iter().any(|t| t.doc.unsaved()) {
+            return;
+        }
+        // The view dance `close_tab` and Ctrl+Shift+T both do, for the reason
+        // `take_view` gives: the active tab's view lives on `App`, so it has to
+        // be put down before anything else can be made active, or the caret, the
+        // religation plan and the feature editor of the tab on screen end up
+        // describing the tab that came back.
+        let v = self.take_view();
+        self.bench.store(v);
+        // Oldest first, so the strip reads in the order they were closed. A
+        // clean closed tab stays closed: it is on disk, nobody has to be asked
+        // about it, and reopening it would be a window full of tabs the user
+        // did not ask for.
+        let mut i = 0;
+        while i < self.closed.len() {
+            if self.closed[i].doc.unsaved() {
+                let t = self.closed.remove(i);
+                self.bench.reopen(t);
+            } else {
+                i += 1;
+            }
+        }
+        if let Some(v) = self.bench.take_active_view() {
+            self.put_view(v);
+        }
+        self.doc_generation = self.doc_generation.wrapping_add(1);
     }
 
     /// The state on screen is not in any file, and something is about to
@@ -4357,18 +4454,19 @@ impl App {
                 // full disk or a permission error all leave the document dirty,
                 // and a guard that proceeded anyway would have done the exact
                 // damage it exists to prevent. Only a write that actually
-                // cleared `unsaved()` goes on.
+                // cleared the bench goes on.
                 //
-                // AND ONLY WHEN THE WHOLE BENCH IS CLEAN. Asking the active
-                // document was right when it was the only one; with tabs, saving
-                // the file the dialog happens to be showing would resolve the
-                // guard and take every other dirty tab down with it. The modal
-                // stays up instead and `unsaved_modal` moves to the next tab
-                // that is still at risk, so the guard walks the bench rather
-                // than sampling it — one question per document that needs one.
-                if !self.bench.any_unsaved() {
-                    self.resolve_guard(why, true);
-                }
+                // The `if !self.bench.any_unsaved()` that used to stand here was
+                // right, and being right in ONE of the two save arms is what let
+                // the other one ship a data-loss bug: the `.dna` arm kept its own
+                // copy of the rule, sampled `document()` instead, and closed the
+                // window over every other dirty tab. The condition has moved into
+                // `resolve_guard`, which is the only place both arms pass
+                // through. When it declines, the modal stays up and
+                // `unsaved_modal` moves to the next tab that is still at risk, so
+                // the guard walks the bench rather than sampling it — one
+                // question per document that needs one.
+                self.resolve_guard(why, true);
             }
         }
     }
@@ -4382,7 +4480,41 @@ impl App {
     /// subsequent launch by "You closed Polylinker with unsaved changes" —
     /// naming work that was saved. Crying wolf on the one answer the guard
     /// exists to encourage is worse than not asking at all.
+    ///
+    /// `preserved` is also a CLAIM, and this is where it is checked — see the
+    /// first statement below.
     fn resolve_guard(&mut self, why: Losing, preserved: bool) {
+        // "The work reached a file" is a sentence about THE WHOLE BENCH, not
+        // about the tab the dialog happens to be showing, and this is the one
+        // place that can hold every caller to it.
+        //
+        // Both save answers used to decide it for themselves and they did not
+        // agree. The GenBank arm asked `bench.any_unsaved()`; the `.dna` arm
+        // asked `self.document()`, four lines after `mark_saved` had cleared
+        // exactly that document — a check that could not fail. So saving one tab
+        // resolved the guard for the window, and because `preserved = true` is
+        // precisely the answer that says no recovery draft is needed, `on_exit`
+        // then deleted every other dirty tab's draft on the way out. Total,
+        // silent, unrecoverable loss of the tabs the dialog had just finished
+        // telling the user about.
+        //
+        // This file had already written that lesson down — "`any_unsaved` in one
+        // place and `document()` in the other reads as a fix and behaves as a
+        // hole" — and then shipped it again one arm over. A guard with two halves
+        // needs both to agree; the way to make halves agree is to have one.
+        //
+        // Declining is not a dead end and must not be read as one: `closing`
+        // stays latched, so `unsaved_modal` comes back on the next frame and
+        // walks to the next tab that is still at risk. The user is asked once per
+        // document that needs asking, which is what the dialog's own "Another tab
+        // also has unsaved work." sentence promises.
+        //
+        // The DISCARD answer is deliberately not conditional on anything. That
+        // one is the user saying the work may go, and it is the answer that KEEPS
+        // the recovery draft.
+        if preserved && self.bench.any_unsaved() {
+            return;
+        }
         match why {
             Losing::Close => {
                 // The promise the dialog just made, made true — for the discard
@@ -4574,10 +4706,16 @@ impl App {
 /// Are these two paths the same file?
 ///
 /// Copied deliberately from `bins/pl/src/main.rs`'s `same_file` rather than
-/// shared: `bins/pl-gui` cannot depend on `bins/pl`, and it cannot move into
-/// `crates/` because `recover.rs` records that `pl-scan` is meant to be the
-/// only crate doing I/O — and this canonicalises, which is I/O. The duplication
-/// is therefore deliberate and findable rather than discovered.
+/// shared: `bins/pl-gui` cannot depend on `bins/pl`. That is the whole of the
+/// argument, and this note used to carry a second half that was two things
+/// wrong at once — "it cannot move into `crates/` because `recover.rs` records
+/// that `pl-scan` is meant to be the only crate doing I/O". `recover.rs`
+/// records no such thing (grep it), and `crates/pl-update` has written files
+/// and run `curl` since 2026-08-06, so the rule it named had already stopped
+/// being the rule. The door it called shut is open: `pl-scan` is an I/O crate,
+/// both binaries already depend on it, and it would take this function. Two
+/// copies is the choice while there are two callers; a third goes there. The
+/// duplication is deliberate and findable rather than discovered.
 fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     if a == b {
         return true;
@@ -4651,6 +4789,16 @@ impl eframe::App for App {
         // EVERY tab's slot, not one: the sweep has to be as wide as the walk
         // that wrote them, or a clean quit leaves the background tabs' drafts
         // behind and the next launch reports a crash that did not happen.
+        //
+        // The reopen stack needs no sweep of its own, and that is an invariant
+        // rather than an oversight: `close_tab` clears the slot of a tab it
+        // closes CLEAN, and `close_request` — which runs on the frame that lets
+        // this exit happen — moves every closed tab that is still dirty back onto
+        // the bench, where this loop finds it. So nothing in `self.closed` holds
+        // a slot by the time we are here. The one exception is deliberate and is
+        // the reason this is not written as a belt-and-braces second loop: a tab
+        // evicted past `REOPENABLE` keeps its draft on purpose, because that file
+        // is the last copy of work the eviction freed.
         if !self.abandoned_unsaved {
             for tab in self.bench.each() {
                 if let Some(p) = &tab.recovery {
@@ -7578,11 +7726,10 @@ impl App {
             ui.add_space(6.0);
         }
 
-        // The methylation verdict for each shown enzyme, computed at that
-        // enzyme's first site: every rule here is a property of the (enzyme,
-        // methylase) pair plus local context, so a per-site answer is what the
-        // model gives — this shows the first, which is exact for the unique
-        // cutters that matter most and indicative for the rest.
+        // The methylation verdict for each shown enzyme, over ALL of its sites
+        // and reported as a count of them: every rule here is a property of the
+        // (enzyme, methylase) pair plus local context, so a per-site answer is
+        // what the model gives, and one site's answer is not the enzyme's.
         //
         // Read off the worker's answer rather than recomputed. This used to
         // call `cut_sites` over the whole molecule once per shown row, to
@@ -7777,20 +7924,49 @@ impl App {
         ui.separator();
 
         let ref_len = self.document().map(|d| d.molecule().len());
+        // THE MEMO KEY, RE-CHECKED AT PAINT TIME, exactly as `App::primer_sites`
+        // re-checks its own every frame.
+        //
+        // `refresh_reads` runs at the top of `App::ui` and re-arms every read
+        // when this key moves — but `top_bar` runs AFTER it and its Undo and
+        // Redo buttons call `do_undo`/`do_redo` from inside the same frame,
+        // each of which reaches `Document::restart_scans(true)` and bumps
+        // `seq_version`. So by the time this panel paints, the reports can be
+        // about a molecule that no longer exists, and it is `reads_for` — the
+        // key the re-arm actually keys on — that says so. Ctrl+Z is handled
+        // above `refresh_reads` and so was never affected; the buttons were.
+        let superseded = (
+            self.doc_generation,
+            self.document().map_or(0, |d| d.seq_version),
+        ) != self.reads_for;
         let trace_seq = self.reads[self.read_shown].trace.sequence.clone();
         let window = self.read_window;
         let r = &self.reads[self.read_shown];
+        // A report the panel may still speak for. `None` withholds every number
+        // that is a coordinate in a reference — see `reads::Read::report_for`.
+        let report = if superseded {
+            None
+        } else {
+            r.report_for(ref_len.unwrap_or(0))
+        };
 
         // THE VERDICT LINE, which always carries coverage. Never a bare
         // identity percentage, and the panel renders NO single-glyph verdict
         // for the construct as a whole: 100% identity over 200 aligned columns
         // on a 5,386 bp plasmid says nothing about the other 5,186 bases.
-        ui.label(RichText::new(r.verdict(ref_len.unwrap_or(0))).size(12.0));
+        ui.label(
+            RichText::new(if superseded {
+                reads::SUPERSEDED.to_string()
+            } else {
+                r.verdict(ref_len.unwrap_or(0))
+            })
+            .size(12.0),
+        );
         ui.add_space(4.0);
         for line in r.header() {
             ui.label(RichText::new(line).size(11.0).color(pal(ui).muted));
         }
-        if matches!(r.state, reads::CompareState::Done(_)) {
+        if report.is_some() {
             ui.label(
                 RichText::new(r.which_sequence())
                     .size(11.0)
@@ -7927,7 +8103,7 @@ impl App {
         // reference coordinates; evidenced by the TRACE, so double-clicking one
         // puts the caret on that base in the Sequence tab — where the aa track
         // above it says whether it changes a residue.
-        if let reads::CompareState::Done(report) = &r.state {
+        if let Some(report) = report {
             if report.discrepancies.is_empty() {
                 ui.label(
                     RichText::new("no differences at all over the aligned columns")
@@ -12021,7 +12197,7 @@ impl App {
         let results = d.digest.results();
         // The same table the Enzymes tab reads, so a row and a lane cannot give
         // opposite answers about one enzyme.
-        let verdicts: Vec<Option<pl_enzymes::methylation::SiteEffect>> =
+        let verdicts: Vec<Option<doc::Methylated>> =
             (0..results.len()).map(|i| d.digest.verdict(i)).collect();
         if !self.gel.seeded {
             self.gel
@@ -12328,31 +12504,10 @@ impl App {
         // finding 5.
         if let (Some(pane), Some(d)) = (pane_out, self.document()) {
             let tip = if let Some(sites) = &site_out {
-                let mut lines: Vec<String> = Vec::new();
-                for (name, pos) in sites {
-                    // One line per enzyme carrying its OWN coordinate, never
-                    // `XmaI/SmaI  6,917`: XmaI leaves a 4-base 5' overhang and
-                    // SmaI is blunt, and `ring::Site::label` refuses to collapse
-                    // the range for exactly that reason.
-                    let mut l = format!("{name}  {}", fmt_int(*pos));
-                    if let Some(e) = pl_enzymes::by_name(name) {
-                        l.push_str(&format!("\n{}", e.site));
-                    }
-                    if let Some(i) = d
-                        .digest
-                        .results()
-                        .iter()
-                        .position(|x| x.enzyme.name == name.as_str())
-                    {
-                        // The SAME tag the Enzymes tab prints, from the same
-                        // field. `verdict` exists because recomputing it cost 58
-                        // full-molecule scans per frame.
-                        if let Some(b) = d.digest.verdict(i) {
-                            l.push_str(&format!(" · {} {}", b.methylase.name(), b.effect.as_str()));
-                        }
-                    }
-                    lines.push(l);
-                }
+                let lines: Vec<String> = sites
+                    .iter()
+                    .map(|(name, pos)| site_tip_line(&d.digest, name, *pos))
+                    .collect();
                 Some(lines.join("\n"))
             } else {
                 hovered_out
@@ -12506,6 +12661,15 @@ impl App {
     /// the point where work really does go away — closing the window — and
     /// asking it twice is how a guard becomes a reflex click.
     ///
+    /// THAT LAST SENTENCE WAS A PROMISE THIS FUNCTION DID NOT KEEP. Closing the
+    /// window asked `bench.any_unsaved()`, and the tab this function has just
+    /// moved into `self.closed` is not on the bench, so a Ctrl+W followed by a
+    /// quit went without a dialog and took the document with it. Both halves of
+    /// the promise are honoured elsewhere now and neither belongs here:
+    /// [`App::reclaim_unsaved_closed`] puts a still-dirty closed tab back before
+    /// the guard reads the bench, and the draft below outlives the tab so a
+    /// crash in between is survivable too.
+    ///
     /// THE STORE IS UNCONDITIONAL, and the `if i == self.bench.active()` it
     /// replaces was a data-loss bug on every BACKGROUND close. The
     /// `take_active_view` and `put_view` pair below always ran; for a background
@@ -12546,21 +12710,39 @@ impl App {
         let v = self.take_view();
         self.bench.store(v);
         if let Some(mut t) = self.bench.close(i) {
-            // The slot goes back, and the draft with it.
+            // THE SLOT GOES BACK ONLY WHEN THERE IS NOTHING LEFT TO PROTECT.
             //
             // A recovery file answers "what was open when this stopped?", and a
-            // closed tab was not open. Keeping it would also make the slot
-            // unreusable for as long as the reopen stack held the tab, and there
-            // are sixty-four slots.
+            // closed tab was not open — which is the whole of the argument for
+            // deleting it here, and it is worth less than the work. A tab closed
+            // with unsaved edits holds the ONLY copy of them: it sits in
+            // `self.closed` in memory, waiting for a Ctrl+Shift+T that a crash
+            // may reach first. Deleting the draft made that window unsurvivable,
+            // and the window is as long as the rest of the session.
             //
-            // This is not a regression on the reopen stack: Ctrl+Shift+T reads
-            // memory and never read this file, and before per-tab slots the next
-            // autosave overwrote the closed document's draft anyway. What a
-            // crash loses here is exactly what it lost before.
-            if let Some(p) = t.recovery.take() {
-                recover::clear(&p);
+            // The comment that stood here justified the deletion with "before
+            // per-tab slots the next autosave overwrote the closed document's
+            // draft anyway. What a crash loses here is exactly what it lost
+            // before." That was checked and it is false under this file's own
+            // allocator: `recover::claim_next` only ever returns a slot whose
+            // file does NOT exist, so a kept draft is skipped, never overwritten.
+            //
+            // What keeping it really costs is a slot for as long as the tab is
+            // reopenable — at most `REOPENABLE` of the sixty-four, and only for
+            // tabs with work at risk. That is the same rule `autosave` already
+            // applies to open tabs: a clean tab consumes no slot. A tab closed
+            // clean gives its slot straight back, which is the ordinary case.
+            //
+            // The draft is as fresh as the last periodic write and nothing will
+            // refresh it, which is not the decay it looks like: a closed document
+            // cannot change, so the gap is the same up-to-`AUTOSAVE_EVERY` that
+            // was already at risk one frame before Ctrl+W.
+            if !t.doc.unsaved() {
+                if let Some(p) = t.recovery.take() {
+                    recover::clear(&p);
+                }
+                t.autosaved = None;
             }
-            t.autosaved = None;
             // The panels went into `t` with the view, so there is nothing here
             // to close: what belonged to the closed molecule left with it, and
             // Ctrl+Shift+T brings the religation plan back along with the tab.
@@ -12571,6 +12753,14 @@ impl App {
             // nothing will ever free. `remove(0)` rather than a ring buffer
             // because the order is the interface: Ctrl+Shift+T pops the end, so
             // what has to go is the front.
+            //
+            // The evicted tab's `Document` goes with it, unsaved edits included,
+            // and NOTHING CLEARS ITS DRAFT — deliberately, and it is the one
+            // place in this function where the draft outliving its tab is the
+            // point rather than a cost. That file is now the last copy of work
+            // this line is about to free, and the next launch offers it through
+            // the Recover banner. Reclaiming the slot here would be the trade
+            // this function has just refused, made at the moment it costs most.
             while self.closed.len() > Self::REOPENABLE {
                 self.closed.remove(0);
             }
@@ -13886,7 +14076,7 @@ struct GelKey {
     inverted: bool,
     set: pl_enzymes::EnzymeSet,
     /// The methylation verdicts, which change what a lane may claim.
-    blocked: Vec<Option<pl_enzymes::methylation::SiteEffect>>,
+    blocked: Vec<Option<doc::Methylated>>,
     /// The seeder's own disclosure line. It only ever changes in the same
     /// breath as `picked`, so it is here for completeness rather than because
     /// it is reachable on its own — and a key that is complete for a reason
@@ -13895,7 +14085,7 @@ struct GelKey {
 }
 
 impl GelKey {
-    fn of(app: &App, verdicts: &[Option<pl_enzymes::methylation::SiteEffect>]) -> GelKey {
+    fn of(app: &App, verdicts: &[Option<doc::Methylated>]) -> GelKey {
         let c = app.gel.conditions;
         GelKey {
             doc: app.doc_generation,
@@ -14159,11 +14349,17 @@ fn gel_pane(ui: &mut Ui, built: &gel::Built, methods: &mut bool, show_all: &mut 
 /// One enzyme, with whatever qualifies the answer — and the ONE place an
 /// enzyme is chosen for the gel.
 ///
-/// `blocked` is the methylation verdict: `docs/PLAN.md` §7.1 requires such
-/// sites be "struck through, not hidden". A site that will not cut is still a
-/// site — it exists in the sequence, appears on everyone else's map, and cuts
-/// the moment the plasmid goes through a dam- strain. Hiding it produces a map
-/// that disagrees with every other tool for reasons the user cannot see.
+/// `blocked` is the methylation verdict over ALL of this enzyme's sites:
+/// `docs/PLAN.md` §7.1 requires such sites be "struck through, not hidden". A
+/// site that will not cut is still a site — it exists in the sequence, appears
+/// on everyone else's map, and cuts the moment the plasmid goes through a dam-
+/// strain. Hiding it produces a map that disagrees with every other tool for
+/// reasons the user cannot see.
+///
+/// The STRIKE is the enzyme's, so it is drawn only when every one of its sites
+/// is blocked; the chip beside it says how many of how many. `docs/PLAN.md`'s
+/// rule is per site, and one site's answer had been standing in for the
+/// enzyme's — see [`doc::Methylated`].
 ///
 /// `in_gel` is the whole gel picker. There is deliberately no second enzyme
 /// control in the gel view: `App::enzyme_set` governs which enzymes can be
@@ -14272,7 +14468,7 @@ fn enzyme_row(
     site: &str,
     positions: &[u64],
     unique: bool,
-    blocked: Option<pl_enzymes::methylation::SiteEffect>,
+    blocked: Option<doc::Methylated>,
     poor_single_site: Option<&'static str>,
     end: &EndNote,
     in_gel: &mut bool,
@@ -14284,7 +14480,11 @@ fn enzyme_row(
             .monospace()
             .size(11.5)
             .color(if unique { pal(ui).ink } else { pal(ui).ink2 });
-        if blocked.is_some_and(|b| b.effect == pl_enzymes::methylation::Effect::Blocked) {
+        // STRUCK THROUGH ONLY WHEN IT DOES NOT CUT AT ALL. The strike says
+        // "this enzyme is not available on this plasmid"; an enzyme with one
+        // blocked site out of four still cuts three times and still gives a
+        // real digest. `all_blocked` is that question, asked of every site.
+        if blocked.is_some_and(|b| b.all_blocked()) {
             label = label.strikethrough();
         }
         ui.label(label);
@@ -14295,14 +14495,20 @@ fn enzyme_row(
                 .color(pal(ui).muted),
         );
         if let Some(b) = blocked {
-            ui.label(
-                RichText::new(format!("{} {}", b.methylase.name(), b.effect.as_str()))
-                    .size(10.5)
-                    .color(pal(ui).warn),
-            )
-            .on_hover_text(
-                "Methylation of this plasmid affects cleavage here. The site is real                  and is shown; it would cut in an unmethylated preparation.",
-            );
+            ui.label(RichText::new(b.chip()).size(10.5).color(pal(ui).warn))
+                .on_hover_text(if b.all_blocked() {
+                    "Methylation of this plasmid affects cleavage here. The site is real                      and is shown; it would cut in an unmethylated preparation."
+                        .to_string()
+                } else {
+                    format!(
+                        "Methylation of this plasmid affects cleavage at {}. The other {} \
+                         cut normally, so this enzyme still digests this molecule — the \
+                         affected sites are real and are shown, and would cut in an \
+                         unmethylated preparation.",
+                        b.of_sites(b.affected),
+                        b.total - b.affected
+                    )
+                });
         }
         if let Some(note) = poor_single_site {
             ui.label(RichText::new("1-site").size(10.5).color(pal(ui).warn))
@@ -14330,6 +14536,34 @@ fn enzyme_row(
             );
         });
     });
+}
+
+/// One line of the map's site tooltip: the enzyme, THIS cut's coordinate, its
+/// recognition site, and what methylation does AT THIS CUT.
+///
+/// One line per enzyme carrying its OWN coordinate, never `XmaI/SmaI  6,917`:
+/// XmaI leaves a 4-base 5' overhang and SmaI is blunt, and `ring::Site::label`
+/// refuses to collapse the range for exactly that reason.
+///
+/// The methylation tag is `DigestState::site_verdict` and not the enzyme-wide
+/// `verdict`, because this line has already named a position. With the
+/// enzyme-wide answer, hovering the LIVE site of a ClaI plasmid whose other
+/// site is Dam-blocked printed `ClaI  2,000 / ATCGAT · Dam blocked` — a false
+/// statement bound to a coordinate, which is worse than no statement.
+///
+/// A named function rather than a closure inside the paint path so that the
+/// sentence can be asserted without hovering a pixel.
+fn site_tip_line(digest: &doc::DigestState, name: &str, pos: u64) -> String {
+    let mut l = format!("{name}  {}", fmt_int(pos));
+    if let Some(e) = pl_enzymes::by_name(name) {
+        l.push_str(&format!("\n{}", e.site));
+    }
+    if let Some(i) = digest.results().iter().position(|x| x.enzyme.name == name) {
+        if let Some(b) = digest.site_verdict(i, pos) {
+            l.push_str(&format!(" · {} {}", b.methylase.name(), b.effect.as_str()));
+        }
+    }
+    l
 }
 
 /// The chromatogram palette for the field it will be painted on.
@@ -19027,17 +19261,28 @@ mod tests {
         );
     }
 
-    /// Closing a tab gives its slot back, and takes its draft with it.
+    /// Closing a tab that is ON DISK gives its slot back, and takes its draft
+    /// with it.
     ///
-    /// The reopen stack is unbounded, so a slot held for as long as a closed tab
-    /// might come back is a slot leaked for the rest of the session: sixty-four
-    /// opens and closes and autosave is off for everything after. This is also
-    /// the honest answer to what a recovery file means — "what was open when
-    /// this stopped" — and it costs nothing that was not already lost, since
-    /// Ctrl+Shift+T reads memory and the single-slot autosave overwrote a closed
-    /// document's draft on its next pass anyway.
+    /// A slot held for as long as a closed tab might come back is a slot spent:
+    /// sixty-four opens and closes and autosave is off for everything after. A
+    /// recovery file's honest meaning — "what was open when this stopped" — says
+    /// the same thing.
+    ///
+    /// THIS USED TO BE ASSERTED OF EVERY CLOSED TAB, DIRTY OR NOT, and it was
+    /// justified by a claim that is false: that the deletion "costs nothing that
+    /// was not already lost, since Ctrl+Shift+T reads memory and the single-slot
+    /// autosave overwrote a closed document's draft on its next pass anyway".
+    /// `recover::claim_next` only ever returns a slot whose file does NOT exist,
+    /// so under per-tab slots nothing overwrites a kept draft — and deleting the
+    /// draft of a tab whose edits exist nowhere else destroyed the only copy.
+    /// The test now says what is actually true of the two cases, and
+    /// `closing_a_dirty_tab_keeps_its_draft_and_still_stops_the_window` covers
+    /// the other one.
+    ///
+    /// The `mark_saved` is the whole difference: edit, autosave, save, close.
     #[test]
-    fn closing_a_tab_returns_its_recovery_slot() {
+    fn closing_a_clean_tab_returns_its_recovery_slot() {
         let (mut app, first) = app_with_recovery("closed");
         let dir = first
             .parent()
@@ -19046,9 +19291,15 @@ mod tests {
         app.bench.set(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
         app.autosave(false);
         assert!(first.exists(), "the premise: slot 0 is taken and written");
+        // The user's own file holds it now, so the draft is no longer the only
+        // copy and the slot is free to go back.
+        app.bench.get_mut().unwrap().mark_saved();
 
         app.close_tab(0);
-        assert!(!first.exists(), "the draft outlived the tab it belonged to");
+        assert!(
+            !first.exists(),
+            "a saved tab's draft outlived the tab it belonged to"
+        );
 
         // And the slot is free again: the next document gets slot 0 rather than
         // slot 1, which is what stops the leak.
@@ -19056,6 +19307,154 @@ mod tests {
         app.last_autosave = None;
         app.autosave(false);
         assert_eq!(autosaved(&first).1, "c.fa", "the freed slot was not reused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl+W, then quit. The three gestures that destroyed a session's work.
+    ///
+    /// PROVEN TO FAIL at c44757b (v0.3.1), where it fails on the first assertion
+    /// after the close and then on the second:
+    ///
+    /// ```text
+    /// ---- tests::closing_a_dirty_tab_keeps_its_draft_and_still_stops_the_window stdout ----
+    /// assertion failed: the only copy of the closed tab's work was deleted with the tab
+    /// ```
+    ///
+    /// `close_tab` deleted the tab's recovery draft (its comment said a crash
+    /// "loses exactly what it lost before", which is not so) and moved the whole
+    /// `Tab` off the bench into `self.closed`. Every mechanism that makes work
+    /// durable walks the bench — `close_request`'s `any_unsaved`, `autosave`,
+    /// `session_now`, `on_exit` — so from that instant the document was invisible
+    /// to all of them. Quitting closed the window with no dialog at all and
+    /// dropped the `Document`; a crash in between found no draft on disk either.
+    /// Neither half left anything to recover from.
+    ///
+    /// Driven through `close_request` with a real `ViewportEvent::Close`, not
+    /// through `unsaved_modal`: the defect is that the guard never ARMS, and a
+    /// test that set `app.closing` by hand would assume away the whole failure.
+    #[test]
+    fn closing_a_dirty_tab_keeps_its_draft_and_still_stops_the_window() {
+        let (mut app, slot) = app_with_recovery("ctrl-w-quit");
+        let dir = slot.parent().expect("a slot has a directory").to_path_buf();
+        // A SECOND TAB, CLEAN, THAT STAYS OPEN. The bench must not be empty when
+        // the window closes, or "there is nothing on the bench" would be enough
+        // to explain the guard arming and this test would pass against a fix
+        // that never looked at the reopen stack at all. It is also the ordinary
+        // shape of the failure: a workspace with other files in it.
+        let keep = temp_file("ctrl-w-keep", "fa", PLASMID_B);
+        app.load(keep.clone());
+        app.bench.set(edited_doc("pKoV.fa", "AAAACCCCGGGGTTTTAAGG"));
+        // `adopt` restarts the autosave period when a document opens, so the
+        // `load` above put the clock thirty seconds out of reach. The throttle is
+        // a separate question from this one.
+        app.last_autosave = None;
+        app.autosave(false);
+        assert!(
+            slot.exists(),
+            "the premise: the edited tab has a crash draft"
+        );
+
+        // Ctrl+W on the edited one. No dialog, by design: the tab is kept and
+        // Ctrl+Shift+T puts it back. What must NOT happen is the draft going too.
+        app.close_tab(1);
+        assert_eq!(
+            (app.bench.len(), app.closed.len()),
+            (1, 1),
+            "the premise: the tab moved to the reopen stack, the clean one stayed"
+        );
+        assert!(
+            !app.bench.any_unsaved(),
+            "the premise: nothing the guard can see is at risk"
+        );
+        assert!(
+            slot.exists(),
+            "the only copy of the closed tab's work was deleted with the tab"
+        );
+
+        // And now the window. This is the point `close_tab`'s own doc promises
+        // the question is asked at.
+        let ctx = test_ctx();
+        let close = egui::RawInput {
+            viewports: std::iter::once((
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: vec![egui::ViewportEvent::Close],
+                    ..Default::default()
+                },
+            ))
+            .collect(),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(close, |_| {});
+        app.close_request(&ctx);
+        assert!(
+            app.closing,
+            "the window closed without asking about a tab that was closed with unsaved work"
+        );
+        assert!(
+            !app.close_now && !app.let_it_go,
+            "the window is on its way out with unsaved work in the session"
+        );
+        // The guard can only ask about what it can show, so the tab is back —
+        // beside the clean one, which was never closed and must not have moved.
+        assert_eq!((app.bench.len(), app.closed.len()), (2, 0));
+        assert_eq!(app.document().unwrap().title, "pKoV.fa");
+        assert!(app.document().unwrap().unsaved(), "and still at risk");
+
+        // "Close without saving" is the answer that KEEPS the draft — and now
+        // there is one to keep, holding the edit, for the next launch to offer.
+        app.resolve_guard(Losing::Close, false);
+        eframe::App::on_exit(&mut app, None);
+        let (mol, title) = autosaved(&slot);
+        assert_eq!(title, "pKoV.fa");
+        assert!(
+            mol.topology.is_circular(),
+            "the draft does not hold the closed tab's edit"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&keep);
+    }
+
+    /// A closed tab still OWNS its slot, and the allocator has to be told.
+    ///
+    /// PROVEN TO FAIL against this change's own first draft, which kept the
+    /// closed tab's draft but left `autosave` building its held list from
+    /// `bench.slots()` alone: the second document was handed slot 0, slot 1 was
+    /// never written, and `autosaved` panicked with "a recovery file".
+    ///
+    /// `claim_next` refuses any slot whose FILE exists, which covers the ordinary
+    /// closed-tab case without help. The case it cannot see is a name that is
+    /// owned with nothing at it — a draft whose write failed, or a temp directory
+    /// swept out from under a window that has been open for a week — and then two
+    /// documents share one file, with the loser's edits gone and nothing saying
+    /// so. That is the collision `Bench::slots`' own doc exists to prevent, and
+    /// its list stopped being the whole answer when closed tabs began keeping
+    /// slots.
+    #[test]
+    fn a_closed_tabs_slot_is_not_handed_to_the_next_tab() {
+        let (mut app, slot0) = app_with_recovery("held-slots");
+        let dir = slot0
+            .parent()
+            .expect("a slot has a directory")
+            .to_path_buf();
+        let slot1 = recover::recovery_path(&dir, 1);
+        app.bench.set(edited_doc("kept.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.autosave(false);
+        assert!(slot0.exists(), "the premise: slot 0 is taken and written");
+        app.close_tab(0);
+        assert!(slot0.exists(), "the premise: the closed tab kept its draft");
+
+        // The file goes; the ownership does not.
+        std::fs::remove_file(&slot0).expect("a removable draft");
+
+        app.bench.set(edited_doc("next.fa", "TTTTGGGGCCCCAAAATTGG"));
+        app.last_autosave = None;
+        app.autosave(false);
+        assert_eq!(
+            autosaved(&slot1).1,
+            "next.fa",
+            "the new tab was given a slot the reopen stack still owns"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -19654,10 +20053,17 @@ mod tests {
     /// greeted on every subsequent launch by "You closed Polylinker with unsaved
     /// changes", naming work that is saved. Crying wolf on the one answer the
     /// guard exists to encourage is worse than not asking at all.
+    ///
+    /// The `mark_saved` is what the scenario's own first sentence describes —
+    /// the file appeared on disk — and it was missing. Passing `preserved = true`
+    /// over a document that is still dirty is a state the app can no longer
+    /// reach: `resolve_guard` now refuses that claim, because taking it on trust
+    /// is how the `.dna` save arm closed the window over other people's tabs.
     #[test]
     fn answering_the_guard_by_saving_leaves_no_abandoned_draft() {
         let (mut app, recovery) = app_with_recovery("saved-answer");
         app.bench.set(edited_doc("x.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.get_mut().unwrap().mark_saved();
         app.closing = true;
         app.resolve_guard(Losing::Close, true);
         assert!(
@@ -20364,6 +20770,98 @@ mod tests {
         );
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+
+    /// The same lesson, one save arm over, and this is the arm that shipped it.
+    ///
+    /// PROVEN TO FAIL at c44757b (v0.3.1):
+    ///
+    /// ```text
+    /// ---- tests::saving_one_tab_does_not_close_the_window_over_another_dirty_one stdout ----
+    /// assertion failed: saving one tab closed the window over another that was still dirty
+    /// ```
+    ///
+    /// The test above pins `unsaved_modal`'s early-out. Its SAVE button was the
+    /// hole. The GenBank arm asked `!self.bench.any_unsaved()` before resolving;
+    /// the `.dna` arm kept its own copy of the rule and asked
+    /// `self.document().is_none_or(|d| !d.unsaved())` — the active tab, four
+    /// lines after `mark_saved` had cleared exactly that document. A check that
+    /// cannot fail. So the user, doing precisely what the dialog asked, saved the
+    /// tab it was showing and the window went, discarding every other dirty tab
+    /// with no second question; and because `preserved = true` is the answer that
+    /// says no recovery draft is needed, `on_exit` then deleted their drafts too.
+    /// The dialog had said "Another tab also has unsaved work." on the way in.
+    ///
+    /// Driven through `write_dna` because `save_dna` raises a native picker: this
+    /// is the whole of what the picker's Save button reaches, with `then` carried
+    /// verbatim from `save_dna` through `plan_dna`.
+    #[test]
+    fn saving_one_tab_does_not_close_the_window_over_another_dirty_one() {
+        let (mut app, slot_a) = app_with_recovery("save-over-tabs");
+        let dir = slot_a
+            .parent()
+            .expect("a slot has a directory")
+            .to_path_buf();
+        let slot_b = recover::recovery_path(&dir, 1);
+
+        // Two dirty tabs, each with a crash draft of its own.
+        app.bench.set(edited_doc("a.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench.set(edited_doc("b.fa", "TTTTGGGGCCCCAAAATTGG"));
+        app.autosave(false);
+        assert!(
+            slot_a.exists() && slot_b.exists(),
+            "the premise: both tabs are covered"
+        );
+
+        // The guard has latched and the dialog is showing tab A. Its Save button
+        // lands here.
+        app.switch_tab(0);
+        app.closing = true;
+        let path = temp_file("save-over-tabs", "dna", "");
+        let (dna, unwritable) =
+            pl_fileio::snapgene::from_molecule_reporting(app.document().unwrap().molecule());
+        app.write_dna(PendingDna {
+            path: path.clone(),
+            bytes: dna,
+            unwritable,
+            history: false,
+            notes: Vec::new(),
+            overwriting_source: false,
+            dest_lost: Vec::new(),
+            source_lost: Vec::new(),
+            then: Some(Losing::Close),
+        });
+
+        assert!(
+            !app.document().unwrap().unsaved(),
+            "the premise: tab A's bytes reached the disk"
+        );
+        assert!(
+            app.bench.any_unsaved(),
+            "the premise: tab B is still the only copy of its own work"
+        );
+        assert!(
+            !app.close_now && !app.let_it_go,
+            "saving one tab closed the window over another that was still dirty"
+        );
+        assert!(
+            app.closing,
+            "the guard disarmed itself with unsaved work left in the session"
+        );
+
+        // The second half of the same defect: the exit it let through swept every
+        // tab's slot, because `preserved` is exactly the answer that says none is
+        // needed. Run only when the guard actually released the window, so that
+        // what is asserted below is what the application would really have done.
+        if app.close_now {
+            eframe::App::on_exit(&mut app, None);
+        }
+        assert!(
+            slot_b.exists(),
+            "one tab's save deleted another tab's crash draft"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// PROVEN TO FAIL at 528dcd9: `load`'s Ok arm called `adopt` directly, with
@@ -22025,12 +22523,12 @@ mod tests {
         for _ in 0..400 {
             app.refresh_reads();
             let _ = paint_out(&mut app, &ctx, window());
-            if matches!(app.reads[0].state, reads::CompareState::Done(_)) {
+            if matches!(app.reads[0].state, reads::CompareState::Done { .. }) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let reads::CompareState::Done(before) = &app.reads[0].state else {
+        let reads::CompareState::Done { report: before, .. } = &app.reads[0].state else {
             panic!("the first comparison never finished: {:?}", app.reads_for);
         };
         let covered = before.covered;
@@ -22046,7 +22544,7 @@ mod tests {
         // re-running or already replaced, and never the one computed before.
         app.refresh_reads();
         assert!(
-            !matches!(app.reads[0].state, reads::CompareState::Done(_)),
+            !matches!(app.reads[0].state, reads::CompareState::Done { .. }),
             "the report survived an edit that moved every base it describes"
         );
         // A GENEROUS BUDGET, ON PURPOSE.
@@ -22066,18 +22564,184 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             app.refresh_reads();
-            if matches!(app.reads[0].state, reads::CompareState::Done(_)) {
+            if matches!(app.reads[0].state, reads::CompareState::Done { .. }) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let reads::CompareState::Done(after) = &app.reads[0].state else {
+        let reads::CompareState::Done { report: after, .. } = &app.reads[0].state else {
             panic!("the re-comparison never finished within 30 s");
         };
         assert_eq!(
             after.covered,
             (covered.0 + 10, covered.1 + 10),
             "the report still describes where the bases used to be"
+        );
+    }
+
+    /// PROVEN TO FAIL against the shipped panel, which painted the stale report
+    /// and — for an origin-crossing read — underflowed on the way.
+    ///
+    /// THE ORDERING IS THE DEFECT. `App::ui` runs `refresh_reads` (main.rs) and
+    /// only then `top_bar`, and the toolbar's Undo and Redo buttons call
+    /// `do_undo`/`do_redo` from inside that same frame; both reach
+    /// `Document::restart_scans(true)`, which bumps `seq_version`. `side_panel`
+    /// paints afterwards. So for the remainder of that frame the reports are
+    /// about a molecule that no longer exists while the panel reads the length
+    /// of the one that does — and neither `rearm_reads` call site is on the
+    /// undo path, so nothing in between corrects it. Ctrl+Z is handled ABOVE
+    /// `refresh_reads` and so was never affected, which is why only the buttons
+    /// reached it.
+    ///
+    /// This reproduces that frame exactly: `paint_out` calls `side_panel`
+    /// directly, without `refresh_reads`, which is the same order the toolbar
+    /// path produces.
+    #[test]
+    fn the_reads_panel_never_paints_a_report_about_a_molecule_that_is_gone() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        let seq = app.document().unwrap().molecule().seq.clone();
+        let n = seq.len();
+        // ACROSS THE ORIGIN, which is the shape that took the subtracting
+        // branch: `covered` comes back as `b < a`.
+        let mut read: Vec<u8> = seq[n - 150..].to_vec();
+        read.extend_from_slice(&seq[..150]);
+        let path = std::env::temp_dir().join(format!("pl-gui-wrap-{}.ab1", std::process::id()));
+        std::fs::write(&path, reads::tests::ab1(&read, &[45u8; 300])).unwrap();
+        app.load(path.clone());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(app.reads.len(), 1);
+        app.tab = Tab::Reads;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            app.refresh_reads();
+            if matches!(app.reads[0].state, reads::CompareState::Done { .. }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let reads::CompareState::Done { report, .. } = &app.reads[0].state else {
+            panic!("the comparison never finished");
+        };
+        let (a, b) = report.covered;
+        assert!(b < a, "the fixture must wrap the origin: {a}..{b}");
+        // It paints honestly while it IS about this molecule.
+        let out = paint_out(&mut app, &ctx, window());
+        let said = texts(&out)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(said.contains(&format!("of {n} bp")), "{said}");
+
+        // STAGE 1: AN EDIT THAT KEEPS THE LENGTH. Every `ref …` row still
+        // names a base that exists and the coverage still adds up, so no
+        // arithmetic notices — and every one of those coordinates is now about
+        // different bases. Only the memo key says so.
+        let d = app.bench.get_mut().expect("a document");
+        d.apply(pl_core::OpKind::ReplaceRange {
+            start: 1,
+            len: 20,
+            seq: "TTTTTTTTTTTTTTTTTTTT".into(),
+        })
+        .expect("a same-length replacement");
+        assert_eq!(d.molecule().len(), n as u64, "the fixture keeps the length");
+        let out = paint_out(&mut app, &ctx, window());
+        let said = texts(&out)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            said.contains(reads::SUPERSEDED),
+            "a same-length edit left the old report on screen: {said}"
+        );
+
+        // Let it settle again, so stage 2 starts from a report that IS current.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            app.refresh_reads();
+            if matches!(app.reads[0].state, reads::CompareState::Done { .. }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(matches!(
+            app.reads[0].state,
+            reads::CompareState::Done { .. }
+        ));
+
+        // STAGE 2, the toolbar's frame: the molecule shrinks to under `a` and
+        // `seq_version` moves, with no `refresh_reads` in between.
+        let d = app.bench.get_mut().expect("a document");
+        d.apply(pl_core::OpKind::DeleteRange {
+            start: 1,
+            len: n as u64 / 2,
+        })
+        .expect("an ordinary delete");
+        let short = d.molecule().len();
+        assert!(
+            short < a,
+            "the fixture needs the molecule to end before `a`"
+        );
+
+        // In a debug build the old arithmetic panicked here and took the window
+        // with it; release wrapped and printed a span of 18,446,744,073,709,548,793.
+        let out = paint_out(&mut app, &ctx, window());
+        let said = texts(&out)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(said.contains(reads::SUPERSEDED), "{said}");
+        // And nothing from the report it no longer speaks for: no coverage
+        // figure, and no `ref …` row pointing into a molecule half of whose
+        // bases are gone.
+        assert!(!said.contains("covers"), "{said}");
+        assert!(!said.contains(&format!("of {short} bp")), "{said}");
+        assert!(!said.contains("% identity"), "{said}");
+        assert!(!said.contains("ref "), "{said}");
+    }
+
+    /// PROVEN TO FAIL before this change: the tooltip printed the enzyme-wide
+    /// verdict beside a coordinate it had just named, so hovering the LIVE ClaI
+    /// site of this plasmid read `ClaI  2,001 / ATCGAT · Dam blocked` — the
+    /// blocked site being the other one, 1,700 bases away. A true-sounding
+    /// sentence attached to the wrong position is worse than a missing one,
+    /// because there is nothing about it for a reader to distrust.
+    #[test]
+    fn the_map_tooltip_reports_methylation_at_the_site_it_names() {
+        let mol = doc::tests::two_clai_sites_one_dam_blocked();
+        let mut d = Document::of_molecule(mol);
+        while d.digest.is_running() {
+            d.digest.poll();
+            std::thread::yield_now();
+        }
+        let i = d
+            .digest
+            .results()
+            .iter()
+            .position(|x| x.enzyme.name == "ClaI")
+            .expect("ClaI ships");
+        let cuts = d.digest.results()[i].positions.clone();
+        assert_eq!(cuts.len(), 2, "the fixture needs two ClaI sites");
+        let lines: Vec<String> = cuts
+            .iter()
+            .map(|p| site_tip_line(&d.digest, "ClaI", *p))
+            .collect();
+        // Every line names its own cut, and exactly one of them carries the
+        // Dam tag.
+        for (line, p) in lines.iter().zip(&cuts) {
+            assert!(
+                line.starts_with(&format!("ClaI  {}", fmt_int(*p))),
+                "{line}"
+            );
+            assert!(line.contains("ATCGAT"), "{line}");
+        }
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("Dam blocked")).count(),
+            1,
+            "{lines:?}"
         );
     }
 

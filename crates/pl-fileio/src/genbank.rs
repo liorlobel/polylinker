@@ -472,8 +472,13 @@ fn decode_quoted(s: &str) -> (String, bool) {
 fn parse_location(loc: &str) -> (Vec<Segment>, Strand, Vec<String>) {
     let mut s = loc.trim();
     let mut strand = Strand::Forward;
+    // Which of the two reverse spellings this is. They order their exons
+    // differently and the segment order below depends on knowing which arrived
+    // — see the `segs.reverse()` at the bottom.
+    let mut outer_complement = false;
     if let Some(inner) = s.strip_prefix("complement(") {
         strand = Strand::Reverse;
+        outer_complement = true;
         s = inner.strip_suffix(')').unwrap_or(inner);
     }
     // `order` is read as a join, because `Feature` has no operator to hold, and
@@ -598,6 +603,47 @@ fn parse_location(loc: &str) -> (Vec<Segment>, Strand, Vec<String>) {
             loc.trim(),
             if strand.is_reverse() { "minus" } else { "plus" }
         ));
+    }
+
+    // `join(complement(a),complement(b))` and `complement(join(a,b))` are not
+    // the same feature, and this model has room for only one of them.
+    //
+    // `Feature::segments` is stored in join order and a Reverse feature is read
+    // back to front — `bins/pl-gui/src/aa.rs` reverses the parts before
+    // translating, checked there against pKoV's stored `/translation` for SacB,
+    // and `crates/pl-draw` and `crates/pl-wasm` read the same order. So
+    // `complement(join(a,b))` splices rc(b) then rc(a), while the per-part
+    // spelling splices rc(a) then rc(b): in that spelling file order IS
+    // transcription order, and the parts have to be stored reversed to mean the
+    // same thing.
+    //
+    // Without this, both spellings were stored in file order and `join_parts`
+    // re-emitted them as `complement(join(...))` — so an INSDC-legal location
+    // came back naming a different spliced product, with an empty report and
+    // exit 0. Measured on a 60 bp record carrying
+    // `join(complement(1..12),complement(31..42))`: the input splices
+    // ATGAAACGCGGT+TGCTGGTGCTAA and the exported file splices them the other way
+    // round, so a start codon ends up in the middle of the protein. pl's own
+    // amino-acid track read the input that way too, before any save.
+    //
+    // Reversing here rather than reporting it as unrepresentable, because it IS
+    // representable: `complement(join(31..42,1..12))` is exactly the input's
+    // meaning, which is what the writer now emits. Nothing is reinterpreted, so
+    // unlike the `order()` and mixed-strand branches above there is nothing to
+    // report.
+    //
+    // Both conditions are load-bearing:
+    //
+    // - `!outer_complement` — `complement(join(complement(a),complement(b)))` is
+    //   a double negation that this reader already flattens to one Reverse
+    //   feature. Reordering on top of that would be a second guess about a form
+    //   no emitter writes.
+    // - `!saw_forward_part` — a mixed-strand join is already reported above as a
+    //   reinterpretation; reordering it as well would change the file's claim
+    //   twice over, and its exon order is not derivable from a spelling that
+    //   contradicts itself.
+    if saw_reverse_part && !saw_forward_part && !outer_complement {
+        segs.reverse();
     }
     (segs, strand, unparsable)
 }
@@ -831,6 +877,86 @@ fn flatten_value(v: &str) -> String {
     out
 }
 
+/// Flatten a string that is about to be interpolated into a GenBank *line*,
+/// and say so when it had to be changed.
+///
+/// [`flatten_value`] already did this for every qualifier value; the header
+/// lines were interpolated raw, and they are the ones where it matters most.
+/// GenBank reads column 1 as a keyword, so a line break inside `DEFINITION`
+/// puts the text after it at column 1: a `.dna` whose `<Description>` reads
+/// `Constitutive mNeonGreen vector.` / `ORIGIN of replication swapped for p15A`
+/// — three ordinary lines a person typed into SnapGene's description box —
+/// exported to a GenBank whose third line is `ORIGIN` at column 1. Our own
+/// reader then took that as the start of the bases, and a 20 bp plasmid
+/// re-read as 226 bp of `ACCESSION.VERSION.KEYWORDS.SOURCEsynthetic...`, at
+/// exit 0 with an empty report. `mol.description` is assigned straight from
+/// the note by `snapgene.rs` and `parse_notes` keeps interior control
+/// characters, so no hostile encoding is needed to reach this.
+///
+/// The repair is here in the writer and not in the reader, for the same reason
+/// [`fasta::write_record`](crate::fasta::write_record) sanitises its header
+/// fields rather than asking the parser to refuse the input: `Molecule` is
+/// built by `pl-py`, by the GUI's editor and by `pl-clone` as well as by the
+/// parsers in this crate, and only the writer sees every one of them. Refusing
+/// to *load* such a file would also cost the user the twenty bases that are
+/// perfectly fine.
+///
+/// Reported rather than silently flattened, because the `.dna` writer keeps
+/// the same string exactly (`xml::escape` turns a break into `&#10;`), so a
+/// `.gb` and a `.dna` of one document disagree and nothing else would say
+/// which one changed.
+fn header_text(raw: &str, field: &str, unwritable: &mut Vec<String>) -> String {
+    if raw.chars().any(|c| (c as u32) < 0x20) {
+        unwritable.push(format!(
+            "{field} contains a control character, which GenBank cannot hold — column 1 of a \
+             line is a keyword — so it was written as a space (.dna keeps it exactly)"
+        ));
+    }
+    flatten_value(raw)
+}
+
+/// Sanitise a feature key, and say so when it had to be changed.
+///
+/// A feature key is one token in columns 6-20 and the whole feature table's
+/// structure rests on it. It arrives from the `.dna`'s `type=` attribute,
+/// which is file-controlled and validated nowhere on the way in, so
+/// `type="CDS&#10;ORIGIN"` used to emit `     CDS` followed by
+/// `ORIGIN      1..12` at column 1 — a forged keyword that swallowed the rest
+/// of the feature table as bases.
+///
+/// Illegal characters are mapped to `_` rather than the feature being dropped:
+/// this is the same trade [`locus_name`] makes for the name column, and losing
+/// an annotation is worse than renaming its key. The legal set is INSDC's —
+/// alphanumerics, `_`, `-` and `'` — which keeps real keys such as `3'UTR`,
+/// `-10_signal` and `misc_feature` untouched. A key with no alphanumeric left
+/// is not a key at all, so it falls back the way `locus_name` does.
+fn feature_key(kind: &str, name: &str, unwritable: &mut Vec<String>) -> String {
+    // Truncated by character, not by byte: a key that is not ASCII must not
+    // panic here.
+    let cut: String = kind.chars().take(15).collect();
+    let cleaned: String = cut
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '\'' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let key = if cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
+        cleaned
+    } else {
+        "misc_feature".to_string()
+    };
+    if key != cut {
+        unwritable.push(format!(
+            "feature {name:?}: {kind:?} is not a GenBank feature key; it was written as {key:?}"
+        ));
+    }
+    key
+}
+
 /// The LOCUS line, in the columns the specification names.
 ///
 /// ```text
@@ -907,11 +1033,15 @@ pub fn write_reporting(
     } else {
         mol.description.as_str()
     };
+    let def = header_text(def, "DEFINITION", &mut unwritable);
     out.push_str(&format!("DEFINITION  {def}.\n"));
     out.push_str("ACCESSION   .\nVERSION     .\nKEYWORDS    .\n");
     out.push_str("SOURCE      synthetic DNA construct\n  ORGANISM  synthetic DNA construct\n");
     out.push_str("COMMENT     Converted by Polylinker.\n");
     if let Some(uuid) = mol.note("UUID") {
+        // Same treatment as DEFINITION and for the same reason: this is a
+        // continuation of COMMENT, so a break in it reaches column 1 too.
+        let uuid = header_text(uuid, "the COMMENT source document UUID", &mut unwritable);
         out.push_str(&format!("            Source document UUID: {uuid}\n"));
     }
     out.push_str("FEATURES             Location/Qualifiers\n");
@@ -939,9 +1069,7 @@ pub fn write_reporting(
         } else {
             &f.kind
         };
-        // Truncate by character. A feature key is normally ASCII, but this must
-        // not panic on one that is not.
-        let key: String = kind.chars().take(15).collect();
+        let key = feature_key(kind, &f.name, &mut unwritable);
         let Some(loc) = format_location(f, n, &mut unwritable) else {
             // Every segment was unwritable and each one has already been named
             // above. Writing the feature key with an empty location would
@@ -1053,6 +1181,50 @@ pub fn write_reporting(
     // Counting the base index in characters rather than bytes follows from the
     // same decision, and is identical for the ASCII every real file holds.
     let decoded = String::from_utf8_lossy(&mol.seq);
+
+    // Whitespace and digits cannot come back out of an ORIGIN block, so they
+    // must not go into one.
+    //
+    // `parse_record`'s base loop filters exactly `!is_ascii_whitespace() &&
+    // !is_ascii_digit()`, because the block's own line numbers and group
+    // spacing are made of them. So those two classes are precisely the
+    // characters that do not survive a round trip, and a line break is the
+    // dangerous one: written raw it ends the line, and whatever follows sits
+    // at column 1 where `LOCUS` opens a second record. Measured on a 129 bp
+    // `.dna` whose block 0 payload held a break and a LOCUS line — the
+    // SnapGene reader assigns that payload to `Molecule::seq` verbatim — the
+    // export re-read as two records, the first holding 10 bases. 119 bases
+    // gone, exit 0, empty report.
+    //
+    // Written as `n` rather than dropped: `n` is IUPAC for an unknown base and
+    // claims nothing, and dropping would change the length the LOCUS line
+    // above already declares from `mol.span()` — every feature location in the
+    // file was computed against that same number, so a shorter ORIGIN would
+    // move every annotation relative to the bases it names. Once no whitespace
+    // is left, every emitted line begins with its own index, which is what
+    // makes it impossible for sequence content to reach column 1 at all.
+    //
+    // Reported for the same reason the qualifier path reports `flatten_value`:
+    // the `.dna` writer keeps these bytes exactly, so the two exports of one
+    // document differ and only this line says which one changed.
+    let mut substituted = 0usize;
+    let decoded: String = decoded
+        .chars()
+        .map(|c| {
+            if c.is_ascii_whitespace() || c.is_ascii_digit() {
+                substituted += 1;
+                'n'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if substituted > 0 {
+        unwritable.push(format!(
+            "ORIGIN: {substituted} character(s) of the sequence are whitespace or digits, which \
+             a GenBank ORIGIN block cannot carry; each was written as `n` (.dna keeps them exactly)"
+        ));
+    }
     let mut chars = decoded.chars().peekable();
     let mut pos = 0usize;
     while chars.peek().is_some() {
@@ -2354,5 +2526,318 @@ ORIGIN
         assert!(lines[1].starts_with("        1 "));
         assert_eq!(lines[1].split_whitespace().count(), 7); // index + 6 groups
         assert!(lines[2].starts_with("       61 "));
+    }
+
+    /// A `.dna` note reaches DEFINITION and COMMENT verbatim, and GenBank reads
+    /// column 1 as a keyword.
+    ///
+    /// PROVEN TO FAIL against the unfixed writer, which interpolated
+    /// `mol.description` and `note("UUID")` with `format!`:
+    ///
+    /// ```text
+    /// ---- genbank::tests::a_control_character_in_a_header_field_cannot_forge_a_keyword_line stdout ----
+    /// assertion `left == right` failed: the header was read as bases:
+    ///   left: [65, 67, 67, 69, 83, 83, 73, 79, 78, 46, 86, 69, ...]
+    ///  right: [97, 99, 103, 116, 97, 99, 103, 116, ...]
+    /// ```
+    ///
+    /// `left` is `ACCESSION.VERSION...`: the forged `ORIGIN` sat above those
+    /// keywords, so the whole header below it came back as bases.
+    #[test]
+    fn a_control_character_in_a_header_field_cannot_forge_a_keyword_line() {
+        // Not a hand-built molecule: `snapgene::parse` assigns
+        // `molecule.description` straight from the `<Description>` note and
+        // `parse_notes` keeps interior control characters, so an ordinary
+        // lab description typed over three lines arrives here intact. The
+        // lines it lands on are column-significant — `parse_record` takes the
+        // FIRST line starting `ORIGIN` and its base loop has no stop
+        // condition, so everything below the forged keyword became bases.
+        let mut mol = Molecule {
+            description: "Constitutive mNeonGreen vector.\nORIGIN of replication swapped for p15A"
+                .into(),
+            seq: b"acgtacgtacgtacgtacgt".to_vec(),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.notes.push(pl_core::Note::new("UUID", "abc\nORIGIN"));
+
+        let (text, report) = write_reporting(&mol, "vector.gb", (1, 0, 2026));
+        let back = parse_all(&text);
+        assert_eq!(
+            back.len(),
+            1,
+            "the export forged a record boundary:\n{text}"
+        );
+        assert_eq!(
+            back[0].seq, mol.seq,
+            "the header was read as bases:\n{text}"
+        );
+        assert_eq!(
+            back[0].description,
+            "Constitutive mNeonGreen vector. ORIGIN of replication swapped for p15A",
+            "the description did not survive:\n{text}"
+        );
+        assert_eq!(
+            report.len(),
+            2,
+            "the writer's own report channel said nothing: {report:?}"
+        );
+        assert!(
+            report.iter().any(|r| r.contains("DEFINITION")),
+            "{report:?}"
+        );
+        assert!(report.iter().any(|r| r.contains("UUID")), "{report:?}");
+
+        // The ordinary case still reports nothing at all.
+        let plain = Molecule {
+            description: "Cloning vector pUC19c, complete sequence".into(),
+            seq: b"acgtacgtacgtacgtacgt".to_vec(),
+            ..Default::default()
+        };
+        let (_, quiet) = write_reporting(&plain, "p.gb", (1, 0, 2026));
+        assert!(quiet.is_empty(), "{quiet:?}");
+    }
+
+    /// PROVEN TO FAIL against the unfixed writer, which wrote `f.kind` raw.
+    /// The record count survives — the forged keyword is `ORIGIN`, not
+    /// `LOCUS` — so what fails is the sequence:
+    ///
+    /// ```text
+    /// ---- genbank::tests::a_feature_key_that_is_not_a_key_does_not_break_the_table stdout ----
+    /// assertion `left == right` failed: the feature table became bases:
+    /// ...
+    ///      source          1..12
+    ///                      /organism="synthetic DNA construct"
+    ///                      /mol_type="other DNA"
+    ///      CDS
+    /// ORIGIN      1..12
+    ///                      /label="gene of interest"
+    /// ORIGIN
+    ///         1 acgtacgtac gt
+    /// //
+    ///
+    ///   left: [47, 108, 97, 98, 101, 108, 61, 34, ...]
+    ///  right: [97, 99, 103, 116, 97, 99, 103, 116, ...]
+    /// ```
+    ///
+    /// `left` is `/label="gene of interest"ORIGINacgt...`: the feature's own
+    /// qualifier line became part of the molecule.
+    #[test]
+    fn a_feature_key_that_is_not_a_key_does_not_break_the_table() {
+        // `f.kind` is the `.dna`'s `type=` attribute, which is file-controlled
+        // and never validated on the way in, so `type="CDS&#10;ORIGIN"` used to
+        // emit `     CDS` followed by `ORIGIN      1..12` at column 1.
+        let mut f = Feature::new("gene of interest", "CDS\nORIGIN");
+        f.segments.push(Segment::new(1, 12));
+        let mol = Molecule {
+            seq: b"acgtacgtacgt".to_vec(),
+            features: vec![f],
+            ..Default::default()
+        };
+        let (text, report) = write_reporting(&mol, "x.gb", (1, 0, 2026));
+        let back = parse_all(&text);
+        assert_eq!(
+            back.len(),
+            1,
+            "the export forged a record boundary:\n{text}"
+        );
+        assert_eq!(
+            back[0].seq, mol.seq,
+            "the feature table became bases:\n{text}"
+        );
+        assert_eq!(back[0].features.len(), 1, "the feature was lost:\n{text}");
+        assert_eq!(
+            back[0].features[0].segments,
+            vec![Segment::new(1, 12)],
+            "{text}"
+        );
+        assert_eq!(back[0].features[0].name, "gene of interest");
+        assert!(
+            report.iter().any(|r| r.contains("CDS")),
+            "the key was changed in silence: {report:?}"
+        );
+
+        // A real key with a character the format allows is untouched, and
+        // reports nothing.
+        let mut ok = Feature::new("utr", "3'UTR");
+        ok.segments.push(Segment::new(1, 12));
+        let m2 = Molecule {
+            seq: b"acgtacgtacgt".to_vec(),
+            features: vec![ok],
+            ..Default::default()
+        };
+        let (t2, quiet) = write_reporting(&m2, "x.gb", (1, 0, 2026));
+        assert!(t2.contains("     3'UTR"), "{t2}");
+        assert!(quiet.is_empty(), "{quiet:?}");
+    }
+
+    /// PROVEN TO FAIL against the unfixed ORIGIN writer:
+    ///
+    /// ```text
+    /// ---- genbank::tests::sequence_bytes_the_origin_block_cannot_carry_are_not_written_raw stdout ----
+    /// assertion `left == right` failed: a second record was forged:
+    /// ...
+    /// ORIGIN
+    ///         1 acgtacgtac
+    /// LOCUS        EVIL                          6 bp    DN
+    ///        61 A     line ar   SYN 0 1-JAN-2026
+    /// ggggggggg gggggggggg g
+    /// //
+    ///
+    ///   left: 2
+    ///  right: 1
+    /// ```
+    ///
+    /// The base index kept counting through the break, which is why `61`
+    /// appears in the middle of the injected line.
+    #[test]
+    fn sequence_bytes_the_origin_block_cannot_carry_are_not_written_raw() {
+        // `snapgene.rs` assigns block 0's payload to `Molecule::seq` verbatim,
+        // so a corrupt container puts a line break in the middle of the bases.
+        // Written raw it starts a new line at column 1, where `LOCUS` opens a
+        // second record: a 129 bp molecule exported to a file whose first
+        // record holds 10 bases, at exit 0 with an empty report.
+        let mut seq = b"acgtacgtac".to_vec();
+        seq.extend_from_slice(
+            b"\nLOCUS       EVIL                       6 bp    DNA     linear   SYN 01-JAN-2026\n",
+        );
+        seq.extend_from_slice(&b"g".repeat(20));
+        let mol = Molecule {
+            seq: seq.clone(),
+            ..Default::default()
+        };
+
+        let (text, report) = write_reporting(&mol, "x.gb", (1, 0, 2026));
+        let back = parse_all(&text);
+        assert_eq!(back.len(), 1, "a second record was forged:\n{text}");
+        // Whitespace and digits are what the reader's own ORIGIN filter drops,
+        // so they are the bytes that cannot come back; each is written as `n`,
+        // which keeps every coordinate in the file pointing at the base it did.
+        let expected: Vec<u8> = seq
+            .iter()
+            .map(|b| {
+                if b.is_ascii_whitespace() || b.is_ascii_digit() {
+                    b'n'
+                } else {
+                    *b
+                }
+            })
+            .collect();
+        assert_eq!(back[0].seq, expected, "the sequence changed:\n{text}");
+        assert_eq!(
+            back[0].seq.len(),
+            seq.len(),
+            "the length no longer matches the LOCUS line"
+        );
+        assert!(
+            report.iter().any(|r| r.contains("ORIGIN")),
+            "the substitution went unreported: {report:?}"
+        );
+
+        // An ordinary sequence is written exactly as before and says nothing.
+        let plain = Molecule {
+            seq: b"acgtacgtacgtacgtacgt".to_vec(),
+            ..Default::default()
+        };
+        let (t2, quiet) = write_reporting(&plain, "x.gb", (1, 0, 2026));
+        assert!(quiet.is_empty(), "{quiet:?}");
+        assert_eq!(parse(&t2).seq, plain.seq);
+    }
+
+    /// PROVEN TO FAIL against the unfixed reader:
+    ///
+    /// ```text
+    /// ---- genbank::tests::a_per_part_complement_join_keeps_its_exons_in_transcription_order stdout ----
+    /// assertion `left == right` failed: the exons were read in the wrong order
+    ///   left: "tgctggtgctaaatgaaacgcggt"
+    ///  right: "atgaaacgcggttgctggtgctaa"
+    /// ```
+    #[test]
+    fn a_per_part_complement_join_keeps_its_exons_in_transcription_order() {
+        // `join(complement(a),complement(b))` splices rc(a) then rc(b);
+        // `complement(join(a,b))` splices rc(b) then rc(a). They are different
+        // products, and the writer only ever emits the second spelling, so the
+        // reader has to store the parts in the order that spelling means.
+        //
+        // The model's convention: `Feature::segments` is in join order and a
+        // Reverse feature is read back to front — bins/pl-gui/src/aa.rs:878-886,
+        // pinned there by `a_two_segment_cds_reads_its_segments_in_transcription_order`
+        // and checked against pKoV's stored /translation for SacB.
+        fn spliced(m: &Molecule, f: &Feature) -> String {
+            let mut segs: Vec<&Segment> = f.segments.iter().collect();
+            if f.strand.is_reverse() {
+                segs.reverse();
+            }
+            let mut out = Vec::new();
+            for s in segs {
+                let bases = m.subseq(s.start, s.end).expect("segment is in range");
+                if f.strand.is_reverse() {
+                    out.extend(bases.iter().rev().map(|b| match b {
+                        b'a' => b't',
+                        b't' => b'a',
+                        b'c' => b'g',
+                        b'g' => b'c',
+                        other => *other,
+                    }));
+                } else {
+                    out.extend(bases);
+                }
+            }
+            String::from_utf8(out).expect("ascii")
+        }
+
+        let origin = "accgcgtttcat".to_string()   //  1..12
+            + &"a".repeat(18)                     // 13..30
+            + "ttagcaccagca"                      // 31..42
+            + &"t".repeat(18); // 43..60
+        assert_eq!(origin.len(), 60);
+        let record = |loc: &str| {
+            format!(
+                "LOCUS       jc                        60 bp    DNA     linear   SYN 01-JAN-2026\n\
+                 FEATURES             Location/Qualifiers\n\
+                 \x20    CDS             {loc}\n\
+                 \x20                    /gene=\"test\"\n\
+                 ORIGIN\n\
+                 \x20       1 {origin}\n//\n"
+            )
+        };
+
+        let src = record("join(complement(1..12),complement(31..42))");
+        let (mols, warnings) = parse_all_reporting(&src);
+        let m = &mols[0];
+        assert_eq!(m.seq.len(), 60, "the test record lost bases");
+        assert_eq!(m.features.len(), 1);
+        // rc(1..12) then rc(31..42): the order the file names.
+        let want = "atgaaacgcggttgctggtgctaa";
+        assert_eq!(
+            spliced(m, &m.features[0]),
+            want,
+            "the exons were read in the wrong order"
+        );
+        // Re-spelling a location the model can hold exactly is not a
+        // reinterpretation, so there is nothing to report.
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // ...and the file this writes says the same thing, in the one spelling
+        // the writer has.
+        let out = write(m, "jc.gb", (1, 0, 2026));
+        assert!(
+            out.contains("complement(join(31..42,1..12))"),
+            "the written location swapped the exons:\n{out}"
+        );
+        let round = parse(&out);
+        assert_eq!(
+            spliced(&round, &round.features[0]),
+            want,
+            "a save changed the spliced product"
+        );
+
+        // The other spelling of the same product is unchanged, both ways.
+        let plain = parse(&record("complement(join(31..42,1..12))"));
+        assert_eq!(spliced(&plain, &plain.features[0]), want);
+        assert_eq!(
+            plain.features[0].segments, round.features[0].segments,
+            "the two spellings must land on one model"
+        );
     }
 }

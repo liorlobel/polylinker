@@ -65,19 +65,37 @@ jobs:
       - name: Build release
         run: cargo build --workspace --release --locked
 
-      # The corpus tests are expected to skip here. Running them anyway proves
-      # they skip cleanly rather than failing when PL_CORPUS is unset.
-      - name: Corpus tests (skip without a corpus)
-        run: cargo test -p pl-fileio --test corpus --locked -- --nocapture
+      # ALL of pl-fileio's integration targets, not just `corpus`.
+      #
+      # This named `--test corpus` alone, and `tests/notes_report.rs` was
+      # therefore run by nothing -- not here, and not in tools/ci.ps1, whose
+      # pl-fileio step was corpus-gated and skipped on any machine without the
+      # lab drive. Its four tests are the only cover for lib.rs:221, the line
+      # that carries the unrepresentable-notes report from `Document` to
+      # `LoadReport`; the file's own header records that replacing it with
+      # `Vec::new()` left `cargo test --workspace` green, and `pl info` and
+      # `pl convert` would then silently stop telling the user which part of a
+      # .dna's Notes block was dropped.
+      #
+      # `--tests` rather than a second `--test` name, so the next file added
+      # under tests/ is run the day it is written. The corpus tests still skip
+      # cleanly with PL_CORPUS unset, which running them here still proves.
+      - name: File I/O integration suites (corpus cases skip without a corpus)
+        run: cargo test -p pl-fileio --tests --locked -- --nocapture
 
       # `--lib --bins` above excludes every integration suite, and this is the
       # one that independently validates the shipped data: the nt->aa
       # translation of every coding row, and the schema, duplicate and
       # licensed-provenance audit. Both were green locally and absent from CI,
       # and the gap widened five-fold when the table grew from 8 rows to 70.
-      # Two of its four tests are PL_CORPUS-gated and skip cleanly here, the
-      # same pattern as the step above; the other two read features.tsv
+      # Two of its five tests are PL_CORPUS-gated and skip cleanly here, the
+      # same pattern as the step above; the other three read features.tsv
       # directly and do the work.
+      #
+      # No name filter, here or in tools/ci.ps1. The local gate used to run this
+      # target twice with one filter each, and one of those filters named a test
+      # that had been renamed, so it selected nothing and printed ok --
+      # `cargo test` exits 0 when a filter matches nothing.
       - name: Feature database, against the shipped table
         run: cargo test -p pl-features --test corpus --locked -- --nocapture
 
@@ -106,8 +124,22 @@ jobs:
       # `tools/ci.ps1` then judge. Running them here does not run those checks;
       # it proves the writers themselves work on all three platforms, which is
       # where a raster is most likely to differ.
+      #
+      # `memory` was missing from this list and named nowhere else either: a
+      # grep for it over .github/ and tools/ returned nothing, so the one test
+      # that measures what a PNG export really asks the allocator for was run by
+      # no gate. What it holds is `PNG_BYTES_PER_PIXEL` (lib.rs:1566), which
+      # every other mention of is prose: deflate.rs's per-input-byte arithmetic,
+      # and the refusal `MAX_PIXELS` hands the user, which multiplies by it to
+      # say the export "would need about N GB of memory" (lib.rs:1624, 1633).
+      # A counting allocator across a real png_at is the only thing that
+      # measures it.
+      #
+      # Every other pl-draw suite is named on this line, which is exactly how
+      # one of them goes unnoticed. tools/ci.ps1 now carries a step that refuses
+      # the next such omission by reading the tree instead of a list.
       - name: Drawing, compression and PNG integration suites
-        run: cargo test -p pl-draw --test agreement --test zstream --test pngfile --test glyphs --test render --locked
+        run: cargo test -p pl-draw --test agreement --test zstream --test pngfile --test glyphs --test render --test memory --locked
 
       # The same gap a third time, and this one had gone all the way: a grep
       # for `pl-design` over `.github/` and `tools/` returned zero hits, so
@@ -155,6 +187,28 @@ jobs:
       # rehearsed after the tag is pushed; this says so on the pull request.
       - name: The release key, and the updater that reads it
         run: cargo test -p pl-update --locked
+
+      # The binary, from the outside. `bins/pl/tests/cli.rs`, all 53 tests.
+      #
+      # This workflow never tested package `pl` at all -- it only built it --
+      # and the single line in tools/ci.ps1 that reached the target passed a
+      # name filter selecting one test. So 52 ran on no machine in any gate.
+      #
+      # What that left unenforced is not hypothetical. `bins/pl/Cargo.toml`
+      # names `only_the_update_verb_can_reach_the_network` (cli.rs:2383) as the
+      # mechanism holding the project's promise that exactly one verb touches
+      # the network: it reads the binary's own source and fails if a call into
+      # `pl_update` appears outside `cmd_update`. Nothing else holds it --
+      # pl-update's `handoff.rs` reads only its own crate. Adding
+      # `let _ = pl_update::curl_available();` to `cmd_info` compiles, passes
+      # clippy, builds a release, and was green in both gates. The same file is
+      # the regression suite for the previous audit's data-loss findings, each
+      # of which shipped once.
+      #
+      # Cheap and portable: no corpus, no Python, no node, 13s locally, and the
+      # tests write only under `std::env::temp_dir()`.
+      - name: The pl binary, from the outside
+        run: cargo test -p pl --test cli --locked
 
   # The oldest toolchain this workspace claims to build on, actually building it.
   #

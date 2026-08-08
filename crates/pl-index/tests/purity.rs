@@ -47,7 +47,11 @@ use std::path::{Path, PathBuf};
 /// Spellings that would mean a storage, environment, subprocess or clock
 /// concern had grown inside the pure layer, and why each one matters here.
 const BANNED: &[(&str, &str)] = &[
-    ("std::fs", "the filesystem is pl-scan's, and only pl-scan's"),
+    (
+        "std::fs",
+        "the filesystem under crates/ belongs to pl-scan and pl-update, and to \
+         nothing else",
+    ),
     (
         "std::env",
         "an answer that depends on the environment is not provable",

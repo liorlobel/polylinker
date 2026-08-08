@@ -99,6 +99,45 @@ function HavePy($mod) {
     return $LASTEXITCODE -eq 0
 }
 
+# `cargo test`, with the number of tests it ran PRINTED and asserted non-zero.
+#
+# The fourth way a step here reported ok while measuring nothing, and the one
+# the sentinel in `Step` cannot see. `cargo test <filter>` exits 0 when the
+# filter matches nothing -- "running 0 tests / test result: ok. 0 passed;
+# 0 failed; N filtered out" -- so a genuine 0 comes back from a real command and
+# every check above is satisfied. Two live instances on 2026-08-09:
+# 'every coding record translates to its protein' filtered on a name that had
+# been renamed away and ran nothing at all, and 'the same molecule twice, from
+# two processes' named 1 of the 53 tests in `bins/pl/tests/cli.rs` while the
+# other 52 were run by no gate on any platform. A step that runs 0 tests and a
+# step that runs 53 are the same green line in this log; that is how both
+# survived. Now they are not: the count is read out of libtest's own summary,
+# one line per test binary, and zero is a failure.
+#
+# It counts `passed`, not `filtered out`: an all-ignored target would otherwise
+# look like work. Ignored tests are not run, so they are not counted, and a
+# target that is entirely #[ignore]d fails here -- which is the right answer for
+# a gate step whose whole claim is that it executed something.
+function CargoTest {
+    $out = & cargo test @args 2>&1
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        $out | ForEach-Object { Write-Output $_ }
+        $global:LASTEXITCODE = $code
+        return
+    }
+    $ran = 0
+    foreach ($line in $out) {
+        if ("$line" -match '^test result: ok\. (\d+) passed') { $ran += [int]$Matches[1] }
+    }
+    if ($ran -eq 0) {
+        throw ("cargo test " + ($args -join ' ') + " ran 0 tests and still exited 0, so this step proved nothing. " +
+               'A name filter that matches nothing is the usual cause -- check the test has not been renamed.')
+    }
+    Write-Host ("        {0} test(s) ran" -f $ran) -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
+
 Write-Host "`nPolylinker CI gate" -ForegroundColor Cyan
 Write-Host ("rustc {0}" -f (rustc --version))
 
@@ -109,10 +148,40 @@ Step 'clippy'   { cargo clippy --workspace --all-targets -- -D warnings }
 Write-Host "`ntests" -ForegroundColor Cyan
 Step 'unit tests'    { cargo test --workspace --lib --bins }
 Step 'release build' { cargo build --workspace --release }
-Step 'corpus tests' {
-    $env:PL_CORPUS = (Resolve-Path $Corpus).Path
-    cargo test -p pl-fileio --test corpus -- --nocapture
-} { -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
+# pl-fileio's integration targets, ALL of them, corpus or no corpus.
+#
+# This step named `--test corpus` and was preconditioned on -Corpus, so on a
+# machine without the lab drive it SKIPPED -- and `crates/pl-fileio/tests/
+# notes_report.rs`, the only cover for the line that carries the unrepresentable-
+# notes report from `Document` to `LoadReport` (lib.rs:221), was run by nothing,
+# here or in `.github/workflows/ci.yml`. Its own header records the injection:
+# replacing that assignment with `Vec::new()` left `cargo test --workspace`
+# green, because the unit tests call `parse_notes` directly and the corpus test
+# reads `Document`. `pl info` and `pl convert` would then stop telling the user
+# which part of a .dna's Notes block was dropped, silently.
+#
+# `--tests`, not two named targets: a new file under tests/ is picked up the day
+# it is written rather than the day somebody remembers this line. The corpus
+# target skips itself when PL_CORPUS is unset (it prints "skipping: set
+# PL_CORPUS" under --nocapture), which is why the precondition could go: running
+# it unconditionally also proves it skips cleanly, the same argument
+# .github/workflows/ci.yml makes for keeping it in a corpus-less CI.
+#
+# `--tests` also re-runs pl-fileio's lib tests, which `unit tests` above already
+# ran. That is 0.04 seconds and one fewer list to keep correct.
+Step 'pl-fileio tests (corpus cases skip without -Corpus)' {
+    if (-not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus)) {
+        $env:PL_CORPUS = (Resolve-Path $Corpus).Path
+    }
+    # `'--'` IS QUOTED ON PURPOSE. PowerShell's parameter binder treats a bare
+    # `--` as its own end-of-parameters marker and removes it from $args, so
+    # `CargoTest ... -- --nocapture` reaches cargo as `--nocapture` and cargo
+    # refuses it ("unexpected argument '--nocapture' found"). Measured, not
+    # guessed: a function printing $args gets 4 arguments for the bare form and
+    # 5 for this one. The plain `cargo test` lines elsewhere in this file are a
+    # native command invocation, where the rule does not apply.
+    CargoTest -p pl-fileio --tests '--' --nocapture
+}
 
 Write-Host "`nwasm" -ForegroundColor Cyan
 $hasWasm = (rustup target list --installed) -contains 'wasm32-unknown-unknown'
@@ -248,6 +317,234 @@ Step 'pl-update tests (the release key, and the updater that reads it)' {
 # $BenchFloor.
 Step 'index size and speed at 3,000 plasmids' {
     cargo test -p pl-index --test scale --release
+}
+
+# The test names in one integration target, in declaration order.
+#
+# A line scan rather than one regex over the file: `#[test]` is followed by
+# `#[ignore]`, `#[should_panic]` and doc comments often enough that a
+# fixed-width lookahead would miss those functions and a greedy one would run
+# past into the next.
+function Get-TestNames($Path) {
+    $names = @()
+    $armed = $false
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ($line -match '^\s*#\[test\]') { $armed = $true; continue }
+        if ($armed -and $line -match '^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)') {
+            $names += $Matches[1]
+            $armed = $false
+        }
+    }
+    # Returned plainly and wrapped in @() by every caller, NOT with the unary
+    # comma used elsewhere in this file. `, $names` survives the pipeline
+    # unflattened, and `@(, $names)` is then an array holding one array -- which
+    # cost an hour here: the one-test target (pl-draw's memory.rs) came back as
+    # a nested array whose .Contains() is IList's exact match, silently turning
+    # the substring test below into an equality test.
+    $names
+}
+
+# Every `cargo test` a gate file runs, and what each one actually selects.
+#
+# COMMENTS AND SINGLE-QUOTED LITERALS ARE STRIPPED FIRST, because both carry the
+# words this looks for: the note above `pl-index and pl-scan tests` explains the
+# `--lib --bins` rule in prose, and each of the four pl-draw oracle steps below
+# prints its own 'cargo test --test X failed; re-running it visibly'. A
+# checker that cannot tell code from prose gets silenced rather than satisfied --
+# 'the release workflow assembles nothing itself' below made exactly that
+# mistake on its first run.
+#
+# `CargoTest` counts as `cargo test`, because it is: it is the wrapper defined at
+# the top of this file that runs the same command and asserts the number of
+# tests that came back.
+#
+# A token beginning with `$` or `@` makes the invocation Dynamic -- a splatted
+# argument list cannot be read statically, so nothing is claimed about it and it
+# covers nothing. `CargoTest`'s own body is the one such line here.
+function Get-CargoTestInvocations($Path) {
+    $found = [System.Collections.Generic.List[object]]::new()
+    $lines = Get-Content -LiteralPath $Path
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $code = $lines[$i] -replace '(^|\s)#.*$', '' -replace "'[^']*'", ''
+        if ($code -notmatch '(?:^|\s)(?:cargo\s+test|CargoTest)\b(.*)$') { continue }
+        $tail = $Matches[1]
+        # Where the command ends and the shell resumes.
+        foreach ($stop in '|', '2>&1', ';', '}') {
+            $k = $tail.IndexOf($stop)
+            if ($k -ge 0) { $tail = $tail.Substring(0, $k) }
+        }
+        $inv = [pscustomobject]@{
+            File = $Path; Line = $i + 1
+            Packages = @(); Targets = @(); Filters = @()
+            Dynamic = $false; LibBins = $false
+        }
+        $tok = @($tail -split '\s+' | Where-Object { $_ })
+        for ($j = 0; $j -lt $tok.Count; $j++) {
+            $t = $tok[$j]
+            if ($t -match '^[@$]') { $inv.Dynamic = $true }
+            elseif (($t -eq '-p' -or $t -eq '--package') -and $j + 1 -lt $tok.Count) { $inv.Packages += $tok[++$j] }
+            elseif ($t -eq '--test' -and $j + 1 -lt $tok.Count) { $inv.Targets += $tok[++$j] }
+            elseif ($t -eq '--lib' -or $t -eq '--bins' -or $t -eq '--doc') { $inv.LibBins = $true }
+            elseif ($t.StartsWith('-')) { }      # any other flag, and `--` itself
+            else { $inv.Filters += $t }          # a positional is a name filter
+        }
+        $found.Add($inv)
+    }
+    $found.ToArray()   # plainly, for the reason Get-TestNames gives
+}
+
+# Which integration targets a set of invocations RUNS, whole.
+function Get-SuitesRun($Invocations, $Targets) {
+    $runs = @{}
+    foreach ($inv in $Invocations) {
+        # A FILTERED invocation runs part of a target, so it does not count as
+        # running the target. That is the finding this whole step exists for.
+        if ($inv.Dynamic -or $inv.Filters.Count -gt 0) { continue }
+        foreach ($t in $Targets) {
+            if ($inv.Packages.Count -gt 0 -and $inv.Packages -notcontains $t.Package) { continue }
+            if ($inv.Targets.Count -gt 0) {
+                if ($inv.Targets -notcontains $t.Target) { continue }
+            } elseif ($inv.LibBins) {
+                continue   # --lib/--bins builds no tests/ target
+            }
+            $runs["$($t.Package)/$($t.Target)"] = "$(Split-Path -Leaf $inv.File):$($inv.Line)"
+        }
+    }
+    $runs
+}
+
+# IS EVERY INTEGRATION SUITE IN THIS TREE ACTUALLY RUN BY A GATE?
+#
+# Four times now the answer has been no, and every time it was found by an audit
+# rather than by a red gate, because there is nothing to see: `unit tests` is
+# `--workspace --lib --bins`, which builds no `tests/` target at all, so a suite
+# nobody names simply never runs and no line in the log says so.
+#
+#   * pl-index / pl-scan  -- fixed by naming them, above.
+#   * pl-design           -- six suites, 45 tests, run by no gate on any
+#                            platform from the day they were written.
+#   * bins/pl/tests/cli.rs -- 52 of 53, including the only enforcement of
+#                            "exactly one verb reaches the network".
+#   * pl-fileio/tests/notes_report.rs and pl-draw/tests/memory.rs -- never named
+#                            anywhere in tools/ or .github/.
+#
+# Each fix was a line naming one more suite, which is the same list to forget
+# the next one from. So this reads the tree instead: one target per `.rs`
+# directly under a crate's `tests/` (no manifest here sets `autotests = false`
+# or declares a `[[test]]` section, so the files ARE the targets), and every one
+# of them must be run, whole, by tools/ci.ps1 or by .github/workflows/ci.yml.
+#
+# EITHER GATE, NOT BOTH. CONTRIBUTING.md is explicit that ci.yml "does not
+# invoke this script, so it is a second list of steps rather than the same one";
+# `pl-features/tests/schema_pin.rs` is in ci.yml by design and in no step here,
+# and `pl-features/tests/budget.rs` is here (it must run --release, and asserts
+# nothing under debug_assertions) and deliberately not there. Requiring both
+# would be requiring a duplication the project has reasoned its way out of.
+#
+# WHAT IT DOES NOT PROVE: that a step's preconditions hold on the machine you
+# are reading this on. Four of pl-draw's suites are named inside Python-gated
+# steps here, and are unconditional in ci.yml. This says a suite is RUN BY A
+# GATE, not that it ran today -- for which the count `CargoTest` prints is the
+# evidence.
+#
+# It also refuses a name filter that matches no test, which is how
+# 'every coding record translates to its protein' spent weeks running zero tests
+# and printing ok after the test it named was renamed.
+Step 'every integration suite is run by a gate' {
+    $targets = @()
+    foreach ($dir in 'crates', 'bins') {
+        foreach ($crate in Get-ChildItem -LiteralPath (Join-Path $repo $dir) -Directory) {
+            $manifest = Join-Path $crate.FullName 'Cargo.toml'
+            $tdir = Join-Path $crate.FullName 'tests'
+            if (-not (Test-Path $manifest) -or -not (Test-Path $tdir)) { continue }
+            # The package name out of [package], not the directory name: cargo
+            # is given `-p <name>`, and the two need not agree.
+            $pkg = $null
+            $section = ''
+            foreach ($line in Get-Content -LiteralPath $manifest) {
+                if ($line -match '^\s*\[([^\]]+)\]') { $section = $Matches[1]; continue }
+                if ($section -eq 'package' -and $line -match '^\s*name\s*=\s*"([^"]+)"') { $pkg = $Matches[1]; break }
+            }
+            if (-not $pkg) { throw "$dir/$($crate.Name)/Cargo.toml declares no [package] name" }
+            foreach ($f in Get-ChildItem -LiteralPath $tdir -Filter '*.rs' -File) {
+                $targets += [pscustomobject]@{ Package = $pkg; Target = $f.BaseName; Path = $f.FullName }
+            }
+        }
+    }
+    # A floor, because a glob that stopped matching would enumerate nothing and
+    # report success -- the failure mode three other steps in this file record.
+    if ($targets.Count -lt 20) {
+        throw "only $($targets.Count) integration target(s) found under crates/*/tests and bins/*/tests; this step enumerated almost nothing and proved nothing"
+    }
+
+    $gates = 'tools/ci.ps1', '.github/workflows/ci.yml'
+    $invocations = @()
+    foreach ($g in $gates) {
+        $p = Join-Path $repo $g
+        if (-not (Test-Path $p)) { throw "$g is missing" }
+        $invocations += @(Get-CargoTestInvocations $p)
+    }
+    if ($invocations.Count -lt 12) {
+        throw "only $($invocations.Count) cargo test invocation(s) parsed out of the two gate files; the parser is broken and this step proved nothing"
+    }
+
+    $problems = @()
+    $runs = Get-SuitesRun $invocations $targets
+    foreach ($t in $targets) {
+        $key = "$($t.Package)/$($t.Target)"
+        if (-not $runs.ContainsKey($key)) {
+            $problems += ("crates or bins: $key is run by no gate. Add it to tools/ci.ps1 or " +
+                          ".github/workflows/ci.yml -- --lib --bins does not build a tests/ target, so nothing else will reach it.")
+        }
+    }
+
+    # And no step may filter on a name no test carries.
+    foreach ($inv in $invocations) {
+        if ($inv.Dynamic -or $inv.Filters.Count -eq 0 -or $inv.Targets.Count -eq 0) { continue }
+        foreach ($f in $inv.Filters) {
+            $hit = $false
+            foreach ($t in $targets) {
+                if ($inv.Targets -notcontains $t.Target) { continue }
+                if ($inv.Packages.Count -gt 0 -and $inv.Packages -notcontains $t.Package) { continue }
+                foreach ($n in @(Get-TestNames $t.Path)) {
+                    if ($n.Contains($f)) { $hit = $true }
+                }
+            }
+            if (-not $hit) {
+                $problems += "$(Split-Path -Leaf $inv.File):$($inv.Line) filters on '$f', which is a substring of no test name in $($inv.Targets -join ', '); cargo exits 0 having run nothing"
+            }
+        }
+    }
+
+    # THIS CHECKER CAN FAIL, shown on planted input rather than asserted -- the
+    # rule the oracles in this file are held to. Both halves are green above
+    # only because both were fixed; without a probe there would be nothing left
+    # to distinguish a working checker from one whose regex stopped matching.
+    #
+    # `cargo test` is not written as one literal here, because tools/ci.ps1 is
+    # one of the two files the scanner reads and a complete invocation in this
+    # string would be collected as a real one -- carrying, by design, a filter
+    # no test has.
+    $verb = 'cargo ' + 'test'
+    $probe = Join-Path ([System.IO.Path]::GetTempPath()) "pl-gate-probe-$PID.txt"
+    Set-Content -LiteralPath $probe -Value @(
+        "$verb -p pl --test cli a_name_no_test_carries",
+        "$verb -p pl-fileio --tests"
+    )
+    $planted = @(Get-CargoTestInvocations $probe)
+    Remove-Item -LiteralPath $probe -Force
+    if ($planted.Count -ne 2) { throw "the invocation parser found $($planted.Count) of 2 planted commands" }
+    if ($planted[0].Filters -notcontains 'a_name_no_test_carries') { throw 'the parser did not see a planted name filter' }
+    foreach ($n in @(Get-TestNames ($targets | Where-Object { $_.Package -eq 'pl' -and $_.Target -eq 'cli' }).Path)) {
+        if ($n.Contains('a_name_no_test_carries')) { throw 'the planted filter matched a real test; pick another' }
+    }
+    $plantedRuns = Get-SuitesRun $planted $targets
+    if ($plantedRuns.ContainsKey('pl/cli')) { throw 'a filtered invocation was counted as running its whole target' }
+    if (-not $plantedRuns.ContainsKey('pl-fileio/notes_report')) { throw 'an unfiltered --tests invocation was not counted as running the suite' }
+
+    if ($problems) { throw ($problems -join "`n        ") }
+    Write-Host ("        $($targets.Count) integration suite(s), all run; $($invocations.Count) cargo test invocation(s) in $($gates.Count) gate files") -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
 }
 
 # Does the index agree with the files it was built from?
@@ -548,26 +845,49 @@ Step 'the raster vs resvg' {
     }
     python reference/python/tests/xcheck_render.py .
 } { (HavePy 'resvg_py') -and (HavePy 'PIL') -and (HavePy 'numpy') }
-# Both figures, both shapes, rendered by TWO PROCESSES, byte for byte.
+# What the BINARY does when you run it: all 53 tests in bins/pl/tests/cli.rs.
 #
+# THIS STEP RAN ONE OF THEM until 2026-08-09. It was called 'the same molecule
+# twice, from two processes' and passed
+# `two_processes_render_the_same_molecule_to_the_same_bytes` as a name filter,
+# and it was the only line in tools/ or .github/ that reached the target at all:
+# `unit tests` above is `--workspace --lib --bins`, which builds no tests/
+# target, and .github/workflows/ci.yml never tested package `pl` at all. So 52
+# tests were run by no gate, on any platform.
+#
+# WHAT WAS UNENFORCED, and it is the reason this is not a tidying commit.
+# `bins/pl/Cargo.toml` names `only_the_update_verb_can_reach_the_network`
+# (cli.rs:2383) as the mechanism holding the promise that exactly one verb
+# touches the network: it reads this binary's own source and fails if a call
+# into `pl_update` appears outside `cmd_update`. It is the only thing anywhere
+# that holds it -- `crates/pl-update/tests/handoff.rs` reads only its own
+# crate's sources, and Step 'the installer contacts nothing' below scopes to
+# tools/installer/. Adding `let _ = pl_update::curl_available();` to `cmd_info`
+# compiles, clippy is silent, the release build is silent, and both gates stayed
+# green. cli.rs is also the regression suite for the previous audit's data-loss
+# findings -- `converting_never_writes_over_a_file_that_is_still_an_input`
+# (cli.rs:70) and `a_raster_too_big_to_hold_is_refused_before_it_is_allocated`
+# (cli.rs:2229) among them -- every one of which was reproduced against the
+# release binary before it was fixed.
+#
+# THE TWO-PROCESS TEST is still the reason this runs on every machine rather
+# than behind a Python precondition, so its argument is kept here.
 # "Byte-identical on every platform" is the sentence on the front of this
-# project, and until this step nothing in the gate compared two separate runs of
-# the renderer. `pl-draw`'s own determinism tests render eight times inside ONE
+# project, and nothing else in the gate compares two separate runs of the
+# renderer: `pl-draw`'s own determinism tests render eight times inside ONE
 # process, which holds constant every single thing that varies between
-# processes: the allocator's state, `RandomState`'s per-process seed, the
-# environment, the locale. A `HashSet` in the label path -- the exact container
-# whose iteration order this crate has had to keep out of `labels_hidden` and
-# `sites_hidden` -- is invisible to a loop and shows up here immediately.
+# processes -- the allocator's state, `RandomState`'s per-process seed, the
+# environment, the locale. A `HashSet` in the label path is invisible to a loop
+# and shows up here immediately. Demonstrated, not assumed: adding
+# `(std::process::id() % 3) as f64` to the linear figure's height leaves
+# `the_linear_figure_is_byte_identical_for_identical_input` GREEN -- the
+# perturbation is constant inside a run -- and turns this red on the first
+# comparison.
 #
-# DEMONSTRATED, not assumed. Adding `(std::process::id() % 3) as f64` to the
-# linear figure's height leaves `the_linear_figure_is_byte_identical_for_identical_input`
-# GREEN -- the perturbation is constant inside a run -- and turns this red on
-# the first comparison. That is the whole argument for the step existing.
-#
-# NO PYTHON, no resvg, no corpus. It runs everywhere the gate runs, which for a
-# claim printed in the README is the right bar.
-Step 'the same molecule twice, from two processes' {
-    cargo test -q -p pl --test cli two_processes_render_the_same_molecule_to_the_same_bytes
+# NO PYTHON, no resvg, no corpus, 13 seconds. It runs everywhere the gate runs,
+# and .github/workflows/ci.yml now runs it on all three platforms too.
+Step 'the pl binary, from the outside (bins/pl/tests/cli.rs)' {
+    CargoTest -p pl --test cli
 }
 # The window icon is the .ico's own 64 px frame, and both are polylinker.svg.
 #
@@ -837,13 +1157,27 @@ Step 'rust reader vs python reader' {
 } { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
 
 Write-Host "`nannotation database" -ForegroundColor Cyan
-Step 'features.tsv satisfies its own schema' {
-    cargo test -p pl-features --test corpus the_shipped_database 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { cargo test -p pl-features --test corpus the_shipped_database }
-} { Test-Path 'features/features.tsv' }
-Step 'every coding record translates to its protein' {
-    cargo test -p pl-features --test corpus every_coding_record 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { cargo test -p pl-features --test corpus every_coding_record }
+# The shipped table, against its own schema and its own translations.
+#
+# ONE STEP, NO NAME FILTER, where there were two filtered ones. The second was
+# called 'every coding record translates to its protein' and filtered on
+# `every_coding_record`, which is the name the test had before
+# crates/pl-features/tests/corpus.rs:125 records renaming it to
+# `every_record_carrying_both_sequences_translates_from_one_to_the_other`. A
+# filter that matches nothing is not an error to cargo -- "0 passed; 0 failed;
+# 5 filtered out", exit 0 -- so the step printed ok having executed no
+# assertion, and the retry on the next line could never fire. It had been dead
+# since the rename.
+#
+# Two filters are also two runs of one test binary for less coverage than one
+# unfiltered run: the target holds 5 tests, the pair selected 1. This now runs
+# all of them, which is what .github/workflows/ci.yml's step 'Feature database,
+# against the shipped table' does, and `CargoTest` prints the number so a
+# future rename cannot quietly shrink it again.
+# Two of the five need a corpus and skip cleanly without one; PL_CORPUS is
+# already set for this process if -Corpus was given.
+Step 'the shipped feature database (schema, provenance, nt->aa)' {
+    CargoTest -p pl-features --test corpus
 } { Test-Path 'features/features.tsv' }
 # `docs/PLAN.md` §v1.0 item 5 claims "under 200 ms for a 10 kb plasmid". It
 # claimed that for months with nothing computing it, which is precisely how

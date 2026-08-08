@@ -1,6 +1,6 @@
 [package]
 name = "pl-scan"
-description = "Walking a folder and keeping a library index on disk. The one crate under crates/ that performs I/O."
+description = "Walking a folder and keeping a library index on disk. One of the two crates under crates/ that perform I/O; pl-update is the other."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

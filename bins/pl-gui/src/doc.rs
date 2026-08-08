@@ -16,17 +16,17 @@ use pl_fileio::{snapgene, Format};
 ///
 /// The verdicts live here rather than being derived at paint time. The Enzymes
 /// tab draws one row per cutting enzyme and each row shows a methylation
-/// verdict; computing that verdict needs the enzyme's first [`pl_enzymes::CutSite`],
-/// and asking `cut_sites` for it in the row builder put a full-molecule scan
+/// verdict; computing that verdict needs the enzyme's [`pl_enzymes::CutSite`]s,
+/// and asking `cut_sites` for them in the row builder put a full-molecule scan
 /// back on the UI thread — 58 of them per frame, measured at 1.58 s per frame
 /// on the 4.6 Mb NC_000913.3, which is the whole of the work this worker exists
 /// to take away. The worker already had those sites in hand and threw them
 /// away.
 pub struct Digested {
     pub results: Vec<Digest>,
-    /// Parallel to `results`: the methylation verdict at that enzyme's first
-    /// site, or `None` if it does not cut or nothing methylates its site.
-    verdicts: Vec<Option<SiteEffect>>,
+    /// Parallel to `results`: what methylation does to that enzyme's sites, or
+    /// `None` if it does not cut or nothing methylates any of them.
+    verdicts: Vec<Option<Methylated>>,
     /// Parallel to `results`: every match, with the cut it produced.
     ///
     /// Kept for the same reason the verdicts are. The sequence view draws the
@@ -38,6 +38,180 @@ pub struct Digested {
     /// `position - fst5` is the wrong answer for half the hits. The worker
     /// already had these in hand and threw them away.
     sites: Vec<Vec<pl_enzymes::CutSite>>,
+    /// Parallel to `sites`, entry for entry: what methylation does to THAT
+    /// site. See [`Methylated`] for why one verdict per enzyme was not enough.
+    site_effects: Vec<Vec<Option<SiteEffect>>>,
+}
+
+/// What methylation does to one enzyme's sites on one molecule.
+///
+/// # PER SITE, and then summarised — never one site standing in for the enzyme
+///
+/// `methylation.rs` states the rule as *for each candidate site*, and it has to
+/// be per site: whether Dam blocks a ClaI site depends on the base beside it
+/// (`ATCGAT` preceded by `G`, or followed by `C`, makes an overlapping `GATC` —
+/// about 44% of random sites), so two sites of one enzyme on one plasmid
+/// routinely disagree.
+///
+/// This used to be the verdict at `sites.first()`, and `cut_sites` returns
+/// forward matches in ascending coordinate, so *first* meant *lowest*. On a
+/// circle the origin is an arbitrary cut: `Edit → Set origin here`, or opening
+/// the same plasmid from a differently linearised file, permutes which site is
+/// lowest and so flipped every answer the app gave — the strikethrough on the
+/// Enzymes row, the "Dam blocked" chip, whether the gel would seed that lane,
+/// and the caveat printed under the lane. Same molecule, two contradictory
+/// bench predictions, decided by where the file happened to be cut. The mirror
+/// case was as bad: an enzyme with four sites of which only the lowest was
+/// blocked was struck through as if it did not cut at all.
+///
+/// `bins/pl/src/main.rs`' `pl design` tail path already did this per site, with
+/// `let live = cuts - dead`; this is the same arithmetic for the GUI's four
+/// surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Methylated {
+    /// The most severe thing methylation does to any one of these sites.
+    ///
+    /// Reduced with a TOTAL ORDER over (effect, methylase) rather than by
+    /// taking the first — see [`Digested`]'s history. A rule that depended on
+    /// which site the scan met first would have reintroduced exactly the
+    /// origin-dependence this type exists to remove.
+    pub worst: SiteEffect,
+    /// Sites this enzyme reads on the molecule. Never zero: nothing builds a
+    /// `Methylated` for an enzyme with no affected site.
+    pub total: usize,
+    /// Of those, how many will not cut at all in this preparation.
+    pub blocked: usize,
+    /// Of those, how many methylation touches in any way — blocked, impaired,
+    /// or sources-disagree.
+    pub affected: usize,
+}
+
+impl Methylated {
+    /// Does methylation stop this enzyme cutting the molecule at all?
+    ///
+    /// The question the strikethrough and the gel's seeding rule are actually
+    /// asking. An enzyme with one blocked site out of four still cuts, still
+    /// gives a real digest, and must not be drawn as dead.
+    pub fn all_blocked(&self) -> bool {
+        self.blocked == self.total
+    }
+
+    /// Sites that still cut in this preparation.
+    pub fn live(&self) -> usize {
+        self.total.saturating_sub(self.blocked)
+    }
+
+    /// The Enzymes-tab chip: the methylase, what it does, and TO HOW MANY OF
+    /// HOW MANY. The count is the half that was missing — "Dam blocked" beside
+    /// an enzyme with four sites, one of them blocked, is a true phrase and a
+    /// false statement.
+    pub fn chip(&self) -> String {
+        let m = self.worst.methylase.name();
+        let e = self.worst.effect.as_str();
+        let n = if self.worst.effect == pl_enzymes::methylation::Effect::Blocked {
+            self.blocked
+        } else {
+            self.affected
+        };
+        if self.total == 1 {
+            format!("{m} {e}")
+        } else if n == self.total {
+            format!("{m} {e} · all {} sites", self.total)
+        } else {
+            format!("{m} {e} · {n} of {} sites", self.total)
+        }
+    }
+
+    /// `1 of its 3 sites`, or `its only site`. One place, so the gel's four
+    /// sentences cannot count differently from each other.
+    pub fn of_sites(&self, n: usize) -> String {
+        if self.total == 1 {
+            "its only site".into()
+        } else if n == self.total {
+            format!("all {} of its sites", self.total)
+        } else {
+            format!("{n} of its {} sites", self.total)
+        }
+    }
+}
+
+/// A TOTAL order on site effects, worst last.
+///
+/// Effect first, exactly as `methylation::site_effect` ranks the rules at one
+/// site; the methylase only breaks ties, and only so that an enzyme whose sites
+/// are blocked by two different methylases names the same one however the
+/// molecule is rotated.
+fn severity(e: SiteEffect) -> (u8, u8) {
+    use pl_enzymes::methylation::{Effect, Methylase};
+    (
+        match e.effect {
+            Effect::Blocked => 2,
+            Effect::Impaired => 1,
+            Effect::Unknown => 0,
+        },
+        match e.methylase {
+            Methylase::Dam => 2,
+            Methylase::Dcm => 1,
+            Methylase::Cpg => 0,
+        },
+    )
+}
+
+/// What methylation does to each of `sites`, and the summary of that.
+///
+/// ONE implementation, called by the digest worker and by anything that checks
+/// it, so that two surfaces cannot count the same molecule differently.
+///
+/// `sites` rather than the enzyme's own scan, because the caller has already
+/// paid for the scan: `cut_sites` walks the whole molecule and is what this
+/// worker exists to keep off the UI thread.
+pub(crate) fn methylation_at(
+    e: &pl_enzymes::Enzyme,
+    seq: &[u8],
+    topology: Topology,
+    meth: &pl_core::Methylation,
+    sites: &[pl_enzymes::CutSite],
+) -> (Vec<Option<SiteEffect>>, Option<Methylated>) {
+    let effects: Vec<Option<SiteEffect>> = sites
+        .iter()
+        .map(|s| {
+            // `site_start`, not a cut position: `pl-enzymes` documents that the
+            // two strands map a match to a cut through different offsets, so
+            // `position - fst5` is the wrong answer for half the hits, and they
+            // disagree wherever a site wraps the origin.
+            pl_enzymes::methylation::site_effect(
+                e,
+                seq,
+                (s.site_start - 1) as usize,
+                topology,
+                meth,
+            )
+        })
+        .collect();
+    let summary = summarise(&effects);
+    (effects, summary)
+}
+
+/// Reduce one enzyme's per-site effects to what the surfaces need.
+///
+/// `None` when nothing is affected, which is what every consumer treats as
+/// "methylation has nothing to say about this enzyme here".
+fn summarise(effects: &[Option<SiteEffect>]) -> Option<Methylated> {
+    let worst = effects
+        .iter()
+        .flatten()
+        .copied()
+        .max_by_key(|e| severity(*e))?;
+    Some(Methylated {
+        worst,
+        total: effects.len(),
+        blocked: effects
+            .iter()
+            .flatten()
+            .filter(|e| e.effect == pl_enzymes::methylation::Effect::Blocked)
+            .count(),
+        affected: effects.iter().flatten().count(),
+    })
 }
 
 /// Digestion is O(sequence x enzymes). Measured at 1,712 ms for all 58 enzymes
@@ -72,15 +246,41 @@ impl DigestState {
             _ => &[],
         }
     }
-    /// The methylation verdict for `results()[i]`.
+    /// The methylation verdict for `results()[i]`, over ALL of its sites.
     ///
     /// A field read, deliberately. See [`Digested`] for what it cost when this
     /// was a scan.
-    pub fn verdict(&self, i: usize) -> Option<SiteEffect> {
+    pub fn verdict(&self, i: usize) -> Option<Methylated> {
         match self {
             DigestState::Done(v) => v.verdicts.get(i).copied().flatten(),
             _ => None,
         }
+    }
+
+    /// The verdict at ONE cut of `results()[i]`, for a surface that is naming
+    /// that coordinate.
+    ///
+    /// The map's tooltip prints a site's own position and then a methylation
+    /// tag beside it; with an enzyme-wide verdict there, hovering an unblocked
+    /// site read `ClaI  2,000 / ATCGAT · Dam blocked` because a *different*
+    /// site was the blocked one. A false statement bound to a named coordinate
+    /// is worse than a missing one, so this asks about that cut.
+    ///
+    /// Two sites at different starts can nick the same bond on a circle, which
+    /// is why `Digest::positions` is deduplicated; when they do, the worse of
+    /// the two verdicts is the honest answer for the bond.
+    pub fn site_verdict(&self, i: usize, position: u64) -> Option<SiteEffect> {
+        let DigestState::Done(v) = self else {
+            return None;
+        };
+        let sites = v.sites.get(i)?;
+        let effects = v.site_effects.get(i)?;
+        sites
+            .iter()
+            .zip(effects)
+            .filter(|(s, _)| s.position == position)
+            .filter_map(|(_, e)| *e)
+            .max_by_key(|e| severity(*e))
     }
     /// Every match for `results()[i]`, cut and site both. See [`Digested`].
     pub fn sites(&self, i: usize) -> &[pl_enzymes::CutSite] {
@@ -983,6 +1183,7 @@ fn start_digest(mol: &Molecule) -> DigestState {
             let mut results = Vec::with_capacity(pl_enzymes::ENZYMES.len());
             let mut verdicts = Vec::with_capacity(pl_enzymes::ENZYMES.len());
             let mut all_sites = Vec::with_capacity(pl_enzymes::ENZYMES.len());
+            let mut all_effects = Vec::with_capacity(pl_enzymes::ENZYMES.len());
             for e in pl_enzymes::ENZYMES.iter() {
                 if flag.load(Ordering::Relaxed) {
                     return;
@@ -999,30 +1200,34 @@ fn start_digest(mol: &Molecule) -> DigestState {
                 let mut positions: Vec<u64> = sites.iter().map(|c| c.position).collect();
                 positions.sort_unstable();
                 positions.dedup();
-                // The verdict is a property of the *site*, so it is asked at
-                // the first site the scan found rather than reconstructed from
-                // a cut position — the two disagree wherever a site wraps the
-                // origin.
-                verdicts.push(sites.first().and_then(|s| {
-                    pl_enzymes::methylation::site_effect(
-                        e,
-                        &seq,
-                        (s.site_start - 1) as usize,
-                        topology,
-                        &meth,
-                    )
-                }));
+                // EVERY site, not the first. The verdict is a property of the
+                // site — so it is asked with `site_start` rather than
+                // reconstructed from a cut position, which disagrees wherever a
+                // site wraps the origin — and it is asked of all of them,
+                // because two sites of one enzyme routinely differ and the
+                // lowest-coordinate one is chosen by where the file was
+                // linearised. See [`Methylated`].
+                //
+                // The cost is one `site_effect` per SITE instead of per enzyme.
+                // That is a scan of a window the width of the recognition site
+                // plus its flanks, over the handful of rules naming this enzyme;
+                // the `cut_sites` call above it, which walks the whole molecule,
+                // is what this worker is actually paying for.
+                let (effects, verdict) = methylation_at(e, &seq, topology, &meth, &sites);
+                verdicts.push(verdict);
                 results.push(Digest {
                     enzyme: e,
                     positions,
                 });
                 all_sites.push(sites);
+                all_effects.push(effects);
             }
             // Send failing means the document was replaced; that is fine.
             let _ = tx.send(Digested {
                 results,
                 verdicts,
                 sites: all_sites,
+                site_effects: all_effects,
             });
         })
         .expect("spawn digest worker");
@@ -1062,7 +1267,7 @@ pub fn fmt_int(n: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1264,12 +1469,12 @@ mod tests {
     }
 
     /// The worker derives `positions` itself instead of calling
-    /// `cut_positions`, so that it can keep the first `CutSite` from the one
-    /// scan it already pays for. This pins the derivation to the crate: the
-    /// sort and the dedup are not cosmetic — on a circle two sites at different
-    /// starts can nick the same bond — and the verdict has to be asked at the
-    /// *site*, which is not recoverable from the cut position when the site
-    /// wraps the origin.
+    /// `cut_positions`, so that it can keep the `CutSite`s from the one scan it
+    /// already pays for. This pins the derivation to the crate: the sort and
+    /// the dedup are not cosmetic — on a circle two sites at different starts
+    /// can nick the same bond — and the verdict has to be asked at the *site*,
+    /// which is not recoverable from the cut position when the site wraps the
+    /// origin.
     #[test]
     fn the_workers_positions_and_verdicts_match_the_crate() {
         // ApaI's GGGCCC starts at 0-based 15 on this 20 bp circle and runs off
@@ -1293,10 +1498,10 @@ mod tests {
                 "{} positions",
                 dg.enzyme.name
             );
-            let want = pl_enzymes::cut_sites(&mol.seq, mol.topology, dg.enzyme)
-                .into_iter()
-                .next()
-                .and_then(|s| {
+            let sites = pl_enzymes::cut_sites(&mol.seq, mol.topology, dg.enzyme);
+            let want: Vec<Option<SiteEffect>> = sites
+                .iter()
+                .map(|s| {
                     pl_enzymes::methylation::site_effect(
                         dg.enzyme,
                         &mol.seq,
@@ -1304,8 +1509,30 @@ mod tests {
                         mol.topology,
                         &mol.methylation,
                     )
-                });
-            assert_eq!(d.digest.verdict(i), want, "{} verdict", dg.enzyme.name);
+                })
+                .collect();
+            assert_eq!(
+                d.digest.verdict(i),
+                summarise(&want),
+                "{} verdict",
+                dg.enzyme.name
+            );
+            // And the per-cut answers, which is what the map's tooltip prints
+            // beside a coordinate.
+            for s in &sites {
+                assert_eq!(
+                    d.digest.site_verdict(i, s.position),
+                    sites
+                        .iter()
+                        .zip(&want)
+                        .filter(|(o, _)| o.position == s.position)
+                        .filter_map(|(_, e)| *e)
+                        .max_by_key(|e| severity(*e)),
+                    "{} at {}",
+                    dg.enzyme.name,
+                    s.position
+                );
+            }
         }
 
         let i = d
@@ -1315,8 +1542,141 @@ mod tests {
             .position(|x| x.enzyme.name == "ApaI")
             .expect("ApaI ships");
         let v = d.digest.verdict(i).expect("Dcm blocks this wrapped site");
-        assert_eq!(v.effect, pl_enzymes::methylation::Effect::Blocked);
-        assert_eq!(v.methylase, pl_enzymes::methylation::Methylase::Dcm);
+        assert_eq!(v.worst.effect, pl_enzymes::methylation::Effect::Blocked);
+        assert_eq!(v.worst.methylase, pl_enzymes::methylation::Methylase::Dcm);
+        assert_eq!((v.total, v.blocked), (1, 1), "one site, and it is blocked");
+        assert!(v.all_blocked());
+    }
+
+    /// A 3 kb circular plasmid with TWO ClaI sites, of which Dam blocks exactly
+    /// one. The fixture the first-site verdict could not describe.
+    ///
+    /// ClaI reads `ATCGAT` and Dam is `Scope::AnyOverlap`, so a site is blocked
+    /// only when a `GATC` actually overlaps it: preceded by `G`, or followed by
+    /// `C`. That is about 44% of random sites, which is why an enzyme with a
+    /// mixture of blocked and live sites is the ordinary case rather than a
+    /// contrived one.
+    ///
+    /// The filler is `A` and `C` only, so neither `ATCGAT` nor `GATC` can
+    /// appear anywhere by accident: the molecule has exactly the two sites put
+    /// into it, and the ClaI Cpg rule — which is `Scope::Unconditional` and
+    /// would block both — is off, as it is by default and in every plasmid
+    /// grown in E. coli.
+    pub(crate) fn two_clai_sites_one_dam_blocked() -> Molecule {
+        let mut seq = b"AAAAC".repeat(600);
+        // 0-based 300, as `AAA ATCGAT AAA`: no overlapping GATC, so it cuts.
+        seq[297..309].copy_from_slice(b"AAAATCGATAAA");
+        // 0-based 2000, as `AAG ATCGAT AAA`: the G in front makes `GATC` across
+        // the site's first three bases, so Dam blocks this one.
+        seq[1997..2009].copy_from_slice(b"AAGATCGATAAA");
+        let mut mol = Molecule {
+            seq,
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.methylation.dam = true;
+        mol
+    }
+
+    /// PROVEN TO FAIL before this change, in both directions and by rotation
+    /// alone.
+    ///
+    /// The verdict was `sites.first()`, and `cut_sites` returns ascending
+    /// coordinates, so *first* meant *lowest*. On this plasmid as linearised
+    /// the lowest ClaI site is the LIVE one, so the app said ClaI was
+    /// unaffected: no strikethrough, no chip, no gel caveat, and the lane drawn
+    /// as fact. Rotate the same molecule — `Edit → Set origin here`, or simply
+    /// open the same plasmid from a differently linearised file — and the
+    /// blocked site becomes the lowest, so every one of those answers inverted
+    /// and ClaI was struck through as a non-cutter. Same molecule, two
+    /// contradictory bench predictions, decided by where the file was cut.
+    #[test]
+    fn a_methylation_verdict_covers_every_site_and_does_not_move_with_the_origin() {
+        use pl_enzymes::methylation::{Effect, Methylase};
+        let plain = two_clai_sites_one_dam_blocked();
+        let mut rotated = plain.clone();
+        // Past the first site and short of the second, so the blocked site is
+        // the one with the lower coordinate afterwards and neither is split.
+        rotated.seq.rotate_left(1_900);
+
+        let mut seen: Vec<Methylated> = Vec::new();
+        for (label, mol) in [("as linearised", &plain), ("rotated", &rotated)] {
+            let mut d = Document::of_molecule(mol.clone());
+            while d.digest.is_running() {
+                d.digest.poll();
+                std::thread::yield_now();
+            }
+            let i = d
+                .digest
+                .results()
+                .iter()
+                .position(|x| x.enzyme.name == "ClaI")
+                .expect("ClaI ships");
+            let cuts = d.digest.results()[i].positions.clone();
+            assert_eq!(cuts.len(), 2, "{label}: the fixture needs two ClaI sites");
+
+            let v = d
+                .digest
+                .verdict(i)
+                .unwrap_or_else(|| panic!("{label}: Dam blocks one of the two sites"));
+            assert_eq!(
+                (v.total, v.blocked, v.affected),
+                (2, 1, 1),
+                "{label}: {v:?}"
+            );
+            assert_eq!(v.worst.effect, Effect::Blocked, "{label}");
+            assert_eq!(v.worst.methylase, Methylase::Dam, "{label}");
+            // ClaI still cuts this plasmid, once. Striking the row through, or
+            // refusing to seed the lane, would be calling a live enzyme dead.
+            assert!(!v.all_blocked(), "{label}: {v:?}");
+            assert_eq!(v.live(), 1, "{label}");
+            assert!(v.chip().contains("1 of 2 sites"), "{label}: {}", v.chip());
+
+            // AND PER CUT, because the map's tooltip prints this beside a
+            // coordinate. Exactly one of the two cuts is the blocked one, and
+            // the other must say nothing rather than inherit its neighbour's
+            // verdict.
+            let per_cut: Vec<Option<SiteEffect>> =
+                cuts.iter().map(|p| d.digest.site_verdict(i, *p)).collect();
+            assert_eq!(
+                per_cut.iter().filter(|e| e.is_some()).count(),
+                1,
+                "{label}: {per_cut:?}"
+            );
+            assert_eq!(
+                per_cut
+                    .iter()
+                    .flatten()
+                    .map(|e| e.effect)
+                    .collect::<Vec<_>>(),
+                vec![Effect::Blocked],
+                "{label}"
+            );
+            seen.push(v);
+        }
+        assert_eq!(
+            seen[0], seen[1],
+            "rotating the molecule changed what the app says about Dam blocking"
+        );
+
+        // THE CONTROL. Take the G away from in front of the second site and
+        // nothing is blocked at all, so the verdict is not boilerplate that
+        // any two-site enzyme would collect.
+        let mut live = plain.clone();
+        live.seq[1999] = b'A';
+        let mut d = Document::of_molecule(live);
+        while d.digest.is_running() {
+            d.digest.poll();
+            std::thread::yield_now();
+        }
+        let i = d
+            .digest
+            .results()
+            .iter()
+            .position(|x| x.enzyme.name == "ClaI")
+            .expect("ClaI ships");
+        assert_eq!(d.digest.results()[i].positions.len(), 2);
+        assert_eq!(d.digest.verdict(i), None);
     }
 
     /// The Enzymes tab draws one row per cutting enzyme and every row shows a
