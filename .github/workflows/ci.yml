@@ -172,7 +172,7 @@ jobs:
       # All eleven have Windows wheels; verified on the author's machine, where
       # every one of them imports and no step gated on them skipped.
       - name: Install the oracles
-        run: pip install biopython seguid pydna pillow fonttools resvg-py numpy pymupdf pypdf PyYAML
+        run: pip install biopython seguid pydna pillow fonttools resvg-py numpy scipy pymupdf pypdf PyYAML
 
       # `node --test --experimental-strip-types test/*.test.ts` needs Node 22.6
       # or newer, and `Have node` is true on any of them -- so on an image with
