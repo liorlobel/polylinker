@@ -11,8 +11,11 @@ wrong.
 Three independent things are asserted:
 
   1. **The file is a PDF.** pypdf and PyMuPDF both open it, agree on the page
-     count and the media box, and read the metadata. A wrong cross-reference
-     offset produces a file that looks fine to `strings` and opens in nothing.
+     count, and agree with the SVG about the size of the page. A wrong
+     cross-reference offset produces a file that looks fine to `strings` and
+     opens in nothing. The page size is read off the SVG rather than written
+     down here -- see `svg_size`, and the linear figures that made a literal
+     720x720 wrong.
   2. **Nothing is missing.** Every string the SVG draws appears in the PDF's
      extracted text.
   3. **Text lands in the same place.** Each string's *anchor point* is
@@ -69,6 +72,39 @@ TEXT_RE = re.compile(
     r'(?: font-weight="[^"]*")? fill="[^"]*" text-anchor="(\w+)"[^>]*>([^<]*)</text>'
 )
 
+SIZE_RE = re.compile(
+    r'<svg[^>]*\bwidth="([\d.]+)"[^>]*\bheight="([\d.]+)"'
+    r'[^>]*\bviewBox="0 0 ([\d.]+) ([\d.]+)"'
+)
+
+
+def svg_size(svg):
+    """The SVG's own page, as `(width, height)`.
+
+    THE SIZE IS TAKEN FROM THE SVG AND NOT WRITTEN DOWN HERE. This used to
+    assert a literal 720x720, which was true of every figure the project could
+    draw until `pl-draw` gained a linear renderer: a linear molecule now exports
+    as a wide, short figure -- `tests/library-fixture/asm.fa` is 720 x 89.44 --
+    and a hardcoded square failed it twice, once per reader, for being the
+    correct answer to a question nobody had asked in a while.
+
+    Asking the SVG is also strictly the stronger check. A constant asserts that
+    the PDF is some size this file happens to know; the SVG asserts that the two
+    renderings of one `Scene` agree about the page, which is the claim the rest
+    of the module makes about everything drawn *on* it.
+    """
+    m = SIZE_RE.search(svg)
+    if m is None:
+        return None
+    w, h, vw, vh = (float(g) for g in m.groups())
+    # The viewBox as well, because `width`/`height` alone would let an SVG
+    # declare a page it then scales the drawing into: user units would no longer
+    # be the PDF's points and every position below would be compared in two
+    # different coordinate systems.
+    if abs(vw - w) > 0.01 or abs(vh - h) > 0.01:
+        return None
+    return w, h
+
 
 def svg_texts(svg):
     """Every string the SVG draws, with its anchor point and which end it is.
@@ -119,6 +155,7 @@ def check(exe, src, outdir):
 
     pdf_path = os.path.join(outdir, stem + ".pdf")
     svg_path = os.path.join(outdir, stem + ".svg")
+    svg = open(svg_path, encoding="utf8").read()
 
     # --- 1. it is a PDF, per two readers -------------------------------------
     r = pypdf.PdfReader(pdf_path)
@@ -128,14 +165,28 @@ def check(exe, src, outdir):
     if doc.page_count != 1:
         problems.append(f"{src}: PyMuPDF sees {doc.page_count} pages")
     page = doc[0]
-    box = [float(v) for v in r.pages[0].mediabox]
-    if box != [0, 0, 720, 720]:
-        problems.append(f"{src}: media box {box}")
-    if abs(page.rect.width - 720) > 0.01 or abs(page.rect.height - 720) > 0.01:
-        problems.append(f"{src}: PyMuPDF rect {page.rect}")
+    size = svg_size(svg)
+    if size is None:
+        problems.append(
+            f"{src}: the SVG declares no width/height/viewBox triple that agrees "
+            f"with itself, so there is nothing to compare the page against"
+        )
+    else:
+        w, h = size
+        # A floor, because "the two agree" is satisfied by two zeroes. Both
+        # writers take the page from one Scene, so this comparison catches a
+        # writer that disagrees with its sibling and not a Scene that is wrong
+        # about the figure -- the same limit `xcheck_render.py` states about
+        # itself. `crates/pl-draw` owns the geometry; this owns the agreement.
+        if w < 1 or h < 1:
+            problems.append(f"{src}: the SVG page is {w} x {h}, which draws nothing")
+        box = [float(v) for v in r.pages[0].mediabox]
+        if any(abs(a - b) > 0.01 for a, b in zip(box, [0.0, 0.0, w, h])):
+            problems.append(f"{src}: media box {box}, SVG page [0, 0, {w}, {h}]")
+        if abs(page.rect.width - w) > 0.01 or abs(page.rect.height - h) > 0.01:
+            problems.append(f"{src}: PyMuPDF rect {page.rect}, SVG page {w} x {h}")
 
     # --- 2. nothing is missing ----------------------------------------------
-    svg = open(svg_path, encoding="utf8").read()
     wanted = svg_texts(svg)
     # PyMuPDF splits on spaces; join the page's words back into one haystack.
     got_words = page.get_text("words")
