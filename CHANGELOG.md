@@ -27,6 +27,73 @@ which.
 
 Nothing yet.
 
+## [0.3.2] - 2026-08-09
+
+A 32-agent audit raised 25 findings; 8 were refuted and 17 survived an
+independent skeptic. All 17 are fixed here, each with a test shown to fail
+against the unfixed code first.
+
+### Fixed
+
+- **Saving one tab could destroy the work in another, silently.** With two
+  documents open and both edited, answering the quit dialog's
+  "Save as .dna…" closed the window over every *other* dirty tab — and
+  deleted their crash drafts on the way out. No prompt, no draft, no way
+  back. **If you have been running 0.3.1 or earlier with more than one tab
+  open, this is the reason to update.**
+
+  The guard asked only the *active* document, which had been marked clean
+  four lines earlier, so the check could never fail. The GenBank arm of the
+  same dialog already did the right thing and its comment described this
+  exact hole; one arm had been fixed and its sibling left. The condition now
+  lives in the single place both arms pass through, because two half-guards
+  that must agree is the defect, not the asymmetry.
+
+- **Closing a tab with unsaved work then quitting lost it.** `Ctrl+W`
+  deleted the tab's crash draft and hid its edits from the quit guard, so
+  the app exited without asking. Closed-but-dirty tabs are now put back on
+  the bench before the guard reads it.
+
+- **A `.dna` file could round-trip to a different molecule.** Strings taken
+  from the input were written into GenBank lines where column position
+  carries meaning, so a name or description containing the wrong character
+  moved the fields around it. Everything interpolated into a line is now
+  flattened first, and what had to change is reported rather than done
+  quietly.
+
+- **`join(complement(a),complement(b))` was rewritten as
+  `complement(join(a,b))`.** Those name different spliced products. A
+  feature read from one file and written back out could describe a
+  construct nobody built.
+
+- **A `>` inside a sequence split an exported FASTA into two records.**
+
+- **Methylation was judged at an enzyme's first site only**, so rotating a
+  plasmid changed whether the app said Dam or Dcm blocked it. The verdict is
+  now per site, and says how many of how many are affected.
+
+- **`pl-clone::digest` gave different fragments depending on the order the
+  enzymes were passed** — blunt or sticky ends could turn on an argument
+  order the caller has no reason to think matters.
+
+- **Four buttons' explanations were unreachable**, a failed update download
+  left its partial file behind while reporting that nothing was written, and
+  a superseded Sanger comparison ran to completion because its cancel flag
+  never reached the worker.
+
+### Changed
+
+- **Gate steps that were running nothing now run something.** 52 of the 53
+  command-line integration tests were executed by no gate; one step filtered
+  on a test name that no longer existed and ran zero tests; a `pl-fileio`
+  suite was referenced nowhere. A step that runs no tests and one that runs
+  53 look identical in a green log, which is how they survived.
+
+- Four comments claimed guarantees the code no longer honoured, including
+  `pl-draw` promising byte-identical output on every platform while its own
+  raster module records that the PNG path is not.
+
+
 ## [0.3.1] - 2026-08-08
 
 ### Fixed
@@ -618,7 +685,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.2
 [0.3.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.1
 [0.3.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.0
 [0.2.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.2.0
