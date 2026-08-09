@@ -1,26 +1,43 @@
 <#
 .SYNOPSIS
-    Run the whole CI gate locally, in the same order CI runs it.
+    Run the whole CI gate, in the same order CI runs it.
 
 .DESCRIPTION
-    The repository has no remote yet, so GitHub Actions has never executed.
-    This is the same gate, runnable now, so "CI is green" means something
-    before there is anywhere to push.
+    This is THE gate. `.github/workflows/ci.yml` runs this file on
+    windows-latest; running it here runs the same list, so "CI is green" is
+    something you can know before you push rather than after.
+
+    That was not true until 2026-08-09. This script's own header used to say
+    "the repository has no remote yet, so GitHub Actions has never executed",
+    and the sentence outlived the fact by six releases: no workflow invoked it,
+    it failed on a clean tree from v0.1.2, and nothing anywhere reported that.
 
     Steps that need something the machine may not have -- a corpus, Python
     oracles, a wasm target -- are SKIPPED with a reason rather than failing.
     A gate that fails for missing optional tooling teaches people to ignore it.
+    That leniency is right for a workstation and dangerous on a runner, which
+    is what -ExpectedSkips is for.
 
 .PARAMETER Corpus
     Directory of real .dna / .gb files. Corpus tests skip without it, exactly
     as they do in CI, where the corpus cannot legally exist.
 
+.PARAMETER ExpectedSkips
+    Path to a file naming the steps that are allowed to SKIP on this machine,
+    one per line, `#` to end of line being a comment. The run FAILS on any
+    difference in either direction: a step that skipped and is not named, and a
+    step that is named and did not skip. A name matching no step in this gate
+    also fails, so a renamed step cannot drift off the list unnoticed.
+
+    Set equality, not a count: a count is satisfied by the wrong step skipping.
+
 .EXAMPLE
     .\tools\ci.ps1
     .\tools\ci.ps1 -Corpus "C:\Users\me\OneDrive\plasmids"
+    .\tools\ci.ps1 -ExpectedSkips .github/ci-expected-skips.txt
 #>
 [CmdletBinding()]
-param([string]$Corpus)
+param([string]$Corpus, [string]$ExpectedSkips)
 
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
@@ -41,10 +58,16 @@ $BenchFloor = 176
 
 $script:failed = @()
 $script:skipped = @()
+# Every step's name, whether it ran or skipped. Only -ExpectedSkips reads it,
+# and only so that a name on that list which matches nothing here is an error
+# rather than silence: a step renamed in this file while the list kept the old
+# spelling would otherwise look exactly like a step that stopped skipping.
+$script:steps = @()
 $started = Get-Date
 
 function Step {
     param([string]$Name, [scriptblock]$Body, [scriptblock]$Precondition = { $true })
+    $script:steps += $Name
     if (-not (& $Precondition)) {
         Write-Host ("  SKIP  {0}" -f $Name) -ForegroundColor DarkGray
         $script:skipped += $Name
@@ -884,8 +907,10 @@ Step 'the raster vs resvg' {
 # perturbation is constant inside a run -- and turns this red on the first
 # comparison.
 #
-# NO PYTHON, no resvg, no corpus, 13 seconds. It runs everywhere the gate runs,
-# and .github/workflows/ci.yml now runs it on all three platforms too.
+# NO PYTHON, no resvg, no corpus, 13 seconds. It runs everywhere the gate runs
+# -- which since 2026-08-09 includes windows-latest, where the `gate` job runs
+# this file -- and .github/workflows/ci.yml runs it on ubuntu-latest and
+# macos-latest. Between the two that is all three platforms.
 Step 'the pl binary, from the outside (bins/pl/tests/cli.rs)' {
     CargoTest -p pl --test cli
 }
@@ -2768,6 +2793,81 @@ Step 'no feature row asserts more than a human signed' {
 Step 'the build''s writer reads SIGNOFF.tsv and never writes it' {
     python features/build/check_writer.py --quiet
 } { Have python }
+
+# THE SKIP LIST, CHECKED -- because on a runner it is the only thing standing
+# between "the gate passed" and "the gate did not run".
+#
+# A skip costs nothing here. On a workstation that is correct and deliberate:
+# the alternative is a gate that goes red because somebody has not got SciPy,
+# which is how a gate stops being read. On a runner it inverts. Nobody watches
+# a green check for a list of grey lines, so a job that installs its oracles and
+# then silently stops installing one of them -- a wheel that stops building for
+# 3.14, a `pip install` line edited in a hurry -- goes on reporting success
+# while measuring less every month. That is the same shape as the defect this
+# whole file exists to answer: a check that cannot fail proves nothing, and a
+# check that can be skipped without anybody being told cannot fail.
+#
+# Hence set equality against a committed list, and not:
+#
+#   * a count. `$skipped.Count -eq 5` is satisfied by the WRONG five skipping,
+#     and the wrong five is the likely five: drop `scipy` and `pypdf` from the
+#     install line and set PL_CORPUS to a directory holding two .dna files, and
+#     the number is still five while three oracles have stopped running.
+#   * a subset ("no more than these"). A step on the list that stopped skipping
+#     is also news -- either somebody solved the precondition, in which case the
+#     list should say so, or the precondition is now being satisfied by
+#     something nobody intended.
+#   * a floor. Nothing to floor: the right number is exact.
+#
+# The names must also BE names. A step renamed here while the list keeps the old
+# spelling would present as "expected to skip and did not", which reads as good
+# news and is not. That is the same shape as 'every coding record translates to
+# its protein', which spent weeks running zero tests because it filtered on a
+# name that had been renamed away -- so it is checked separately and said in
+# different words.
+if ($ExpectedSkips) {
+    $checkName = 'the steps that skipped are exactly the ones this machine was told to expect'
+    $problems = @()
+    if (-not (Test-Path -LiteralPath $ExpectedSkips)) {
+        $problems += "-ExpectedSkips names $ExpectedSkips, which does not exist"
+        $expected = @()
+    } else {
+        # `(^|\s)#` and not `#`, the same rule the env-var step above uses: a
+        # step name is free to contain a '#', and only a '#' that opens a line
+        # or follows whitespace is a comment.
+        $expected = @(Get-Content -LiteralPath $ExpectedSkips |
+            ForEach-Object { ($_ -replace '(^|\s)#.*$', '').Trim() } |
+            Where-Object { $_ })
+        if ($expected.Count -eq 0 -and $script:skipped.Count -eq 0) {
+            # Not an error, but say it out loud rather than printing ok for a
+            # comparison of two empty sets.
+            Write-Host '        the list is empty and nothing skipped' -ForegroundColor DarkGray
+        }
+        foreach ($e in $expected) {
+            if ($script:steps -notcontains $e) {
+                $problems += ("`"$e`" is on the list and names no step in this gate. It has been renamed or " +
+                              'removed, and the list has been silently protecting nothing since.')
+            } elseif ($script:skipped -notcontains $e) {
+                $problems += ("`"$e`" was expected to skip here and ran. If that is the improvement it looks " +
+                              "like, delete the line from $ExpectedSkips in the same commit.")
+            }
+        }
+        foreach ($s in $script:skipped) {
+            if ($expected -notcontains $s) {
+                $problems += ("`"$s`" skipped and is not on the list. Install what it needs, or add it with the " +
+                              'reason it cannot run here -- an unannounced skip is how six releases shipped ' +
+                              'behind a gate nobody was running.')
+            }
+        }
+    }
+    if ($problems) {
+        Write-Host ("  FAIL  {0}" -f $checkName) -ForegroundColor Red
+        $problems | ForEach-Object { Write-Host "        $_" }
+        $script:failed += $checkName
+    } else {
+        Write-Host ("  ok    {0} ({1})" -f $checkName, $expected.Count) -ForegroundColor Green
+    }
+}
 
 $elapsed = (Get-Date) - $started
 Write-Host ''

@@ -264,9 +264,13 @@ The MSI is built with the WiX Toolset, which is a .NET global tool:
     dotnet tool install --global wix --version 5.0.2
     wix extension add -g WixToolset.UI.wixext/5.0.2
 
-That needs a .NET SDK, not just the runtime. CI installs it on the
-windows-latest runner; tools/ci.ps1 skips the MSI steps when it is absent so a
-machine without the SDK still runs a complete gate.
+That needs a .NET SDK, not just the runtime. Both workflows install it on their
+windows-latest runners -- ci.yml's `gate` job and release.yml's build job -- and
+tools/ci.ps1 preconditions exactly one step on it, 'the MSI installs, does what
+it says, uninstalls, and leaves nothing', so a machine without the SDK still
+runs the other sixty-nine. That skip is fine here and not on a runner:
+.github/ci-expected-skips.txt does not name that step, so a CI job that failed
+to install wix goes red instead of quietly testing less.
 '@
 }
 

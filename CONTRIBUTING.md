@@ -100,19 +100,52 @@ pwsh -NoProfile -File tools/ci.ps1
 pwsh -NoProfile -File tools/ci.ps1 -Corpus "C:\path\to\your\plasmids"
 ```
 
-65 steps, and it is the only place all of them run together.
-`.github/workflows/ci.yml` re-runs most of the same checks — a three-OS matrix
-(`ubuntu-latest`, `windows-latest`, `macos-latest`), a wasm32 job, and a job
-that installs the Python oracles — but it does **not** invoke this script, so it
-is a second list of steps rather than the same one. Some of the gate's checks
-exist only here. Run it before you submit, and "CI is green" becomes something
-you know rather than something you find out.
+70 steps. **CI runs this same file**, in the `gate` job of
+`.github/workflows/ci.yml`, on `windows-latest` — so running it here is not a
+courtesy version of CI, it is CI, and "CI is green" becomes something you know
+rather than something you find out.
+
+That was not true until 2026-08-09, and the way it was untrue is worth knowing
+because it is the failure this project keeps having. `ci.yml` mentioned this
+script six times and every mention was inside a `#` comment. No workflow
+invoked it. It had been failing on a clean tree since v0.1.2 and six releases
+were tagged with it red, while `docs/RELEASING.md` named it as the thing to run
+before tagging.
+
+What is left in `ci.yml` alongside the gate is not a second copy of it:
+
+- the `test` matrix runs on `ubuntu-latest` and `macos-latest`, the two
+  platforms this script cannot run on at all — it is a Windows script, hardcoding
+  `target/release/pl.exe`, reading PE resources, driving `msiexec`;
+- `msrv` and `wasm` are ubuntu jobs holding the toolchain floor and the wasm
+  module driven against a Linux `pl`;
+- `oracles` re-runs the differential checks on a different OS and rendering
+  stack, and holds four checks with no twin here at all — the pLannotate taint
+  gate, the content sweep behind it, the offline end-to-end features build, and
+  the GenBank round-trip through Biopython.
 
 A step whose tooling is missing **skips with a reason** rather than failing —
 no Python, no corpus, no `node`, no `wix`. That is deliberate: a gate that goes
 red for a missing optional package teaches people to ignore it. It also means a
-green run on your machine may have skipped more than a green run on a runner, so
-read the skip list.
+green run on your machine may have measured much less than a green run on a
+runner, so read the skip list.
+
+On the runner that leniency is switched off, because there it is dangerous
+rather than kind. The job passes `-ExpectedSkips .github/ci-expected-skips.txt`
+and the run **fails** on any difference in either direction: a step that skipped
+and is not named, a step named that did not skip, or a name matching no step in
+the gate at all. Set equality, not a count — a count of five is satisfied by the
+wrong five skipping. That file has five entries and they are all the same entry:
+the step needs a corpus.
+
+You can use it locally too, if you want your machine held to a standard:
+
+```powershell
+pwsh -NoProfile -File tools/ci.ps1 -ExpectedSkips .github/ci-expected-skips.txt
+```
+
+It will fail unless you have the corpus-less runner's exact tooling, and the
+failure names each step you are missing, which is the useful part.
 
 The corpus is the one thing nobody can hand you. Real `.dna` files are not
 redistributable, so the corpus suites read `PL_CORPUS` and skip cleanly without
@@ -120,10 +153,14 @@ it. Addgene distributes `.dna` files publicly if you want to build one — but s
 the EULA rule above before you do.
 
 The oracles are Python, and installing them turns on the differential steps —
-the ones that check our answers against somebody else's:
+the ones that check our answers against somebody else's. All eleven, which is
+what the `gate` job installs; the first seven are what the ubuntu `oracles` job
+needs, and the last four turn on three steps that are gate-only — the gel
+calibration spline against SciPy, the PDF-versus-SVG check against PyMuPDF and
+pypdf, and the one that parses `release.yml` with PyYAML:
 
 ```bash
-pip install biopython seguid pydna pillow fonttools resvg-py numpy
+pip install biopython seguid pydna pillow fonttools resvg-py numpy scipy pymupdf pypdf PyYAML
 ```
 
 ### The zero-dependency rule, and the two exemptions

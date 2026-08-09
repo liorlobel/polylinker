@@ -314,9 +314,12 @@ mod tests {
     /// The mistake was generalising from that. `rename` is a directory
     /// operation and POSIX does not consult the destination's mode, so this
     /// test — carrying a bare `#[test]`, in a module `main.rs:13` includes
-    /// unconditionally, run by `.github/workflows/ci.yml` on a three-OS matrix
-    /// that had never executed — would have gone red on two runners of the
-    /// first push. PROVEN TO FAIL, by running this exact file on Linux:
+    /// unconditionally, so every gate that runs `--lib --bins` runs it on every
+    /// platform it runs on — would have gone red on two runners of the first
+    /// push, at a time when CI had never executed at all. (Those platforms are
+    /// still all three: `.github/workflows/ci.yml` covers Linux and macOS, and
+    /// its `gate` job covers Windows.) PROVEN TO FAIL, by running this exact
+    /// file on Linux:
     ///
     /// ```text
     /// $ cargo test          # ~/pl-atomic-probe, #[path]-including atomic.rs

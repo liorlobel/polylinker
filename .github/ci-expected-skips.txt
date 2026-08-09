@@ -1,0 +1,47 @@
+# The steps `tools/ci.ps1` is ALLOWED to skip on the CI runner. Everything else
+# must run. `.github/workflows/ci.yml` passes this file as -ExpectedSkips, and
+# the gate fails on any difference in either direction -- a step that skipped
+# and is not named here, and a step named here that did not skip.
+#
+# THIS FILE IS NOT A DESCRIPTION OF A DEVELOPER MACHINE. A workstation without
+# SciPy, without WiX, without the wasm target skips more than this and that is
+# fine; run the gate with no -ExpectedSkips there. This is the list for a runner
+# that has been given everything a runner can be given, and its whole job is to
+# make the difference between "the gate passed" and "the gate ran" impossible to
+# miss. The gate passed on the author's machine with six steps skipped for six
+# releases and no line anywhere said so.
+#
+# Every name below is here for ONE reason, and it is the same reason: the step
+# needs -Corpus, and the corpus is real laboratory .dna and .ab1 files. Those
+# are not ours to publish -- Addgene's terms are noncommercial with an
+# anti-scraping clause, and a lab's plasmid files belong to that lab -- and
+# `.gitignore` bans `*.dna`, `*.ab1`, `*.scf` and `*.ztr` so that a stray
+# `git add -A` cannot make them ours either. So this is not a gap to be closed
+# by installing something. It is the one honest skip, five times.
+#
+# THERE IS NO ENTRY FOR A NETWORK SERVICE, and that is deliberate rather than
+# lucky. No step in the gate fetches from a third-party data source: `ci.ps1`
+# itself names no URL and makes no web call -- its only two `Invoke-WebRequest`
+# strings are inside the banned-token lists of the steps that forbid one -- and
+# the two feature-database steps it runs are the offline pair, `check_signoff`
+# and `check_writer`, over the committed tables. The live-source build moved to
+# `.github/workflows/features-live.yml` on 2026-08-07, after EBI timed out twice
+# and turned main red for a reason no commit under test had anything to do with,
+# and that file's header states the rule: if a step's result would still be true
+# tomorrow with the network unplugged, it belongs in ci.yml instead.
+#
+# So there is no step here to make non-fatal and none to declare skipped for an
+# outage. What the `gate` job does need the network for is provisioning --
+# cargo's registry, pip, npm, the WiX tool -- and that happens in its own steps,
+# before the gate, where a failure is an obvious red install step rather than a
+# silent SKIP.
+#
+# Names are matched exactly, and a name matching no step in the gate is itself a
+# failure. So renaming a step below without editing this line goes red, rather
+# than quietly reporting that the step has started running.
+
+wasm module vs native binary
+rendered chromatograms agree with their files
+chromatograms vs Biopython
+digest vs Biopython (real plasmids)
+rust reader vs python reader
