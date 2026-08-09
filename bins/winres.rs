@@ -39,10 +39,13 @@
 //!   version only   (pl)           960 bytes
 //!     6290db24e86c259edfb8b2e552179b3a91970820e37b83d44ea873e464d6e4da
 //!
-//! (`tools/ci.ps1` does not re-run `rc.exe` -- it is not on a CI runner, and a
-//! gate that needs the Windows SDK would defeat half the point of this file. It
-//! reads the resource back out of the linked `.exe` instead, which is the
-//! property that actually matters.)
+//! (`tools/ci.ps1` does not re-run `rc.exe`. A gate step that needed the
+//! Windows SDK would defeat half the point of this file, which is to produce
+//! these bytes without one. It reads the resource back out of the linked `.exe`
+//! instead, which is the property that actually matters. That sentence used to
+//! begin "it is not on a CI runner"; since 2026-08-09 the gate runs on
+//! windows-latest, and the reason above is the one that was always doing the
+//! work.)
 //!
 //! `rc.exe` caught two things this file had wrong, which is the whole argument
 //! for cross-checking rather than reasoning:
@@ -57,8 +60,8 @@
 //!
 //! Non-Windows targets and `x86_64-pc-windows-gnu` are skipped silently: a
 //! `.res` is an MSVC-linker input, and the GNU toolchain needs the same bytes
-//! fed through `windres` instead. The three-OS CI matrix therefore builds
-//! unchanged on Linux and macOS. If a `-gnu` build ever needs an icon, the fix
+//! fed through `windres` instead. CI therefore builds unchanged on its Linux
+//! and macOS runners. If a `-gnu` build ever needs an icon, the fix
 //! is to invoke `windres --input-format=rc` here, not to change these bytes.
 //!
 //! ONE COPY OF THE VERSION

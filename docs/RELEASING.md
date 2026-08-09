@@ -95,17 +95,58 @@ cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
 #    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
 #    are the two files a tag does not update and nothing checks.
 
-# 2. Green gate, locally, on the commit you are about to tag.
+# 2. Green gate, locally, on the commit you are about to tag. Optional now --
+#    see below -- but it is twenty minutes of your machine against a round trip
+#    through a runner, and the failure messages are the same ones.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 pwsh -NoProfile -File tools/ci.ps1
 
-# 3. Commit, push, and let CI go green on all three runners.
+# 3. Commit, push, and let CI go green. FIVE jobs, and the one that matters
+#    here is `the gate (tools/ci.ps1)` -- it runs the whole of step 2 on
+#    windows-latest, with the oracles, node, the wasm target and WiX installed,
+#    and it fails if any step skips that is not on
+#    .github/ci-expected-skips.txt.
 
 # 4. Tag. This is the only step that publishes anything.
 git tag -a v0.2.0 -m "Polylinker 0.2.0"
 git push origin v0.2.0
 ```
+
+### Step 2 is no longer the only thing standing between a tag and a red gate
+
+It was, for six releases, and it did not work.
+
+Until 2026-08-09 this document named `pwsh -NoProfile -File tools/ci.ps1` as
+step 2 and **no workflow ran it**. It appeared in `.github/workflows/ci.yml` six
+times, every one of them on a comment line. It had been failing on a clean tree
+since v0.1.2 — two steps asking a question the tree no longer answered — and
+v0.1.2, v0.1.3, v0.2.0, v0.3.0, v0.3.1 and v0.3.2 were all tagged with it red,
+because the only evidence either way was a terminal on one machine and nobody
+had a reason to look at it between releases.
+
+`ci.yml` now has a `gate` job. It runs this exact file, on `windows-latest`,
+with everything the gate's preconditions ask for installed first: the eleven
+Python oracles, Node 24, the `wasm32-unknown-unknown` target, the WiX Toolset,
+`packages/circular-map/node_modules`, and a `dist/` assembled by
+`tools/release.ps1` so that the two MSI steps have something to read. It passes
+`-ExpectedSkips`, so a step that skips and is not on that list turns the build
+red — which matters more than it sounds, because the gate's whole design is that
+a missing dependency is a grey SKIP rather than a failure. On a workstation that
+is right. On a runner it is how a green check comes to mean nothing, and it is
+the precise mechanism by which the gate passed for six releases **with six steps
+skipped** — the wasm-versus-native comparison, both chromatogram oracles, digest
+versus Biopython on real plasmids, the Rust-versus-Python reader, and the MSI
+install test — and no line anywhere said so.
+
+Five of those six are on the expected list, all for the same reason: they need
+real `.dna` and `.ab1` files, and a lab's plasmids are not ours to publish. The
+sixth, the MSI install test, now runs.
+
+So step 2 is a convenience and step 3 is the gate. Run step 2 anyway when you
+are about to tag — the release jobs are the expensive place to find out — but
+the number that decides whether this tree is releasable is no longer one that
+only one machine can produce.
 
 `.github/workflows/release.yml` triggers on `v*`. It also has a
 `workflow_dispatch` trigger, which runs the three builds and leaves the archives
@@ -294,12 +335,17 @@ was built on. `Compress-Archive` cannot do the first two, and shelling out to
 
 ### What is checked, and where
 
+Everything in the left column that says `tools/ci.ps1` runs on every push and
+every pull request, in the `gate` job of `.github/workflows/ci.yml`, as well as
+on whatever machine you run the gate on. It used to say "locally" on two of
+these rows, and that was the whole of the truth: nothing ran the file.
+
 | Check | Where |
 |---|---|
-| `release.ps1` runs; its manifest is set-equal to `dist/` | `tools/ci.ps1`, locally |
+| `release.ps1` runs; its manifest is set-equal to `dist/` | `tools/ci.ps1` |
 | ≥ 20 files hashed, ≥ 7 licence texts, `NOTICE.txt` / `LICENSE.txt` / `LICENSE-MIT.txt` / `features/NOTICE.txt` by name | `tools/ci.ps1` |
 | The zip is a deterministic function of `dist/` | `tools/ci.ps1` |
-| The **archive** verifies against its own `SHA256SUMS.txt`, licence set included | `tools/check-archive.ps1`, locally and on all three runners |
+| The **archive** verifies against its own `SHA256SUMS.txt`, licence set included | `tools/check-archive.ps1`, in the gate and on all three release runners |
 | The tar writer produces something GNU tar or bsdtar will read | `tools/ci.ps1` (forces `-ArchiveFormat tar.gz` on Windows) |
 | `release.yml` parses, covers three OSes, publishes only on a tag | `tools/ci.ps1` (PyYAML) |
 | `release.yml` packs no archive of its own, and every `tools/` path it names exists | `tools/ci.ps1` |
@@ -307,9 +353,10 @@ was built on. `Compress-Archive` cannot do the first two, and shelling out to
 | The measured glibc floor matches `README-LINUX.txt` | `release.yml`, Linux job |
 
 The tar writer is forced on Windows for a specific reason: it is Unix-only code,
-this gate is the only thing that runs on a developer machine, and that machine
-is Windows. An archive format whose only exercise is a green job on a runner is
-an archive format nobody has looked at the output of.
+and every machine that runs this gate — the author's, and the `gate` job's
+`windows-latest` runner — is a Windows one. An archive format whose only
+exercise is a green job on a runner that produces it for real is an archive
+format nobody has looked at the output of.
 
 ## The Windows install path
 
@@ -347,11 +394,19 @@ be. There is still exactly one file list; the MSI is a second reader of it, not
 a second copy of it.
 
 **Answered by where it runs — nothing installed on the build machine.** WiX is a
-`dotnet tool` and there is no .NET SDK here. It is therefore a *release-time*
-dependency only: the MSI is built on the `windows-latest` runner, and every MSI
-step in `tools/ci.ps1` skips itself when `wix` is absent, so a contributor
-without an SDK still runs a complete gate. `cargo build` and `cargo test`
-acquired no dependency at all.
+`dotnet tool` and there is no .NET SDK on the author's machine. It is therefore
+a *CI-time* dependency only: every MSI step in `tools/ci.ps1` skips itself when
+`wix` is absent, so a contributor without an SDK still runs the rest of the gate.
+`cargo build` and `cargo test` acquired no dependency at all.
+
+That leniency used to mean the install test ran nowhere. `wix` was absent on the
+one machine running the gate, and no machine ran the gate, so *the MSI installs,
+does what it says, uninstalls, and leaves nothing* — the only check that puts an
+actual `msiexec` against an actual registry — was skipped for six releases and
+the MSI's real oracle was `release.yml`, after the tag. The `gate` job installs
+WiX 5.0.2 and the UI extension, assembles a `dist/` for it to read, and
+`.github/ci-expected-skips.txt` does **not** name that step, so it now runs on
+every push or the build is red.
 
 **Answered by writing it in the gate's own language.** `tools/check-msi.ps1` is
 PowerShell, like the rest of the gate. It installs with `msiexec`, asserts

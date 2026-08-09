@@ -8,6 +8,64 @@ name: CI
 # (Addgene's terms are noncommercial-only with an anti-scraping clause, and lab
 # files belong to their labs), so the corpus tests skip unless PL_CORPUS points
 # somewhere. Everything below runs on synthetic or committed data.
+#
+# ---------------------------------------------------------------------------
+# HOW THE TWO GATE FILES DIVIDE THE WORK, since 2026-08-09.
+#
+# `tools/ci.ps1` is 70 steps and `docs/RELEASING.md` names it as the thing to
+# run before tagging. Until today NO WORKFLOW INVOKED IT. It appeared in this
+# file six times and every one of them was on a comment line. It had been
+# failing on a clean tree since v0.1.2 and six releases were tagged with it red,
+# because the only machine running it was the author's and the only evidence
+# either way was a terminal nobody was looking at.
+#
+# So the `gate` job below runs it, on windows-latest, with everything a runner
+# can be given installed first. The division that leaves is not "duplicate
+# everything" and not "delete the second list" — it is this:
+#
+#   * `gate` (windows-latest) is the authority. It is the list `RELEASING.md`
+#     names, run whole, with its skips asserted against a committed list.
+#   * `test` runs on ubuntu-latest and macos-latest ONLY. Those are the two
+#     platforms `tools/ci.ps1` cannot run on at all — it hardcodes
+#     `target/release/pl.exe` at twenty-one call sites, reads PE resource
+#     directories, drives `msiexec` and `HKCU`, and uses `$env:TEMP`, which is
+#     absent rather than empty off Windows. Its windows-latest leg WAS deleted,
+#     because every step in it is run by `gate` on the same runner image, and
+#     that is duplication in the strict sense rather than platform coverage.
+#   * `msrv`, `wasm` and `oracles` stay. Each holds something the gate does not:
+#     the toolchain floor, the wasm module driven against a Linux `pl`, and four
+#     checks with no twin in the gate at all — the taint gate, the content sweep
+#     behind it, the offline end-to-end features build, and the GenBank
+#     round-trip through Biopython. The rest of `oracles` is a second run of the
+#     differential checks on a different OS and a different rendering stack,
+#     which for a rasteriser is coverage and not repetition.
+#
+# WHAT DELETING THE WINDOWS LEG COST, stated rather than glossed: those steps
+# passed `--locked` and the gate does not. Lock drift is a property of the tree
+# and not of the operating system, and `test` on both remaining runners plus
+# `msrv` and `wasm` still pass `--locked` on every cargo invocation, so a
+# rewritten lockfile is still a red build on every push. `pl-draw/tests/
+# memory.rs` and `pl-features/tests/schema_pin.rs` are run by `test` and by no
+# step in the gate; both are arithmetic and file comparison with no OS in them,
+# and both still run on two platforms.
+#
+# `tools/ci.ps1` step 'every integration suite is run by a gate' is what keeps
+# that division honest: it reads the tree, and every `tests/*.rs` target under
+# `crates/` and `bins/` must be run, unfiltered, by one of these two files.
+#
+# THE NETWORK, decided rather than inherited. The `gate` job needs it only to
+# provision -- cargo's registry, pip, npm, the WiX tool -- and those are steps of
+# their own, before the gate, where an outage is a red install step and not a
+# silent SKIP. The gate itself fetches from no third-party data source, so there
+# is nothing in it to make non-fatal: the live-source build left this file on
+# 2026-08-07 for `features-live.yml`, after EBI timed out twice and turned main
+# red over commits that had nothing to do with it. The one job here that still
+# reaches a service nobody here operates is `oracles`, at its taint-gate step,
+# and that stays exactly as it is -- it fails CLOSED, on purpose, because
+# "could not check" and "checked and clean" are different results and that step
+# is the concrete evidence behind this project's central licensing claim. An
+# outage there is a false red on a rare day; making it non-fatal would be a
+# permanent false green.
 
 on:
   push:
@@ -17,16 +75,260 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # `RUSTFLAGS: -D warnings` USED TO BE HERE, AND IT SILENTLY UNDID
+  # .cargo/config.toml.
+  #
+  # Cargo does not merge the two. A `RUSTFLAGS` environment variable REPLACES
+  # `[target.<triple>] rustflags` from the config file, so setting it at workflow
+  # level discarded `-C target-feature=+crt-static` for every job here. Measured
+  # on the author's machine, building the same crate twice into separate target
+  # directories:
+  #
+  #   RUSTFLAGS unset       pl-mcp.exe imports KERNEL32.dll
+  #   RUSTFLAGS='-D warnings'  pl-mcp.exe imports VCRUNTIME140.dll AND
+  #                            api-ms-win-crt-runtime-l1-1-0.dll
+  #
+  # That is precisely the dependency `.cargo/config.toml` exists to remove: the
+  # VC++ redistributable needs administrator rights, and `docs/PLAN.md:120` names
+  # a user who does not have them. The gate step 'no C runtime redistributable is
+  # needed' has always checked for it -- but it is preconditioned on a release
+  # directory, so it was one of the seven steps that skipped when the release
+  # step died, and it had therefore NEVER RUN ON A RUNNER. The first run in which
+  # it executed, 31329432359, failed on it. Nothing was broken by that change;
+  # the check simply reached the binaries for the first time.
+  #
+  # So the variable moves down to the jobs that want it, and the `gate` job --
+  # the only one here that builds Windows binaries, and the one whose whole
+  # purpose is to check properties of the artefacts that ship -- does not set it.
+  # It is not a lint hole: `tools/ci.ps1` Step 'clippy' runs
+  # `cargo clippy --workspace --all-targets -- -D warnings`, and `-D warnings`
+  # passed to clippy denies ordinary rustc lints too, not just clippy's own.
+  # Checked: a crate whose only fault is an unused variable exits 101 under that
+  # command with RUSTFLAGS unset.
+  #
+  # `release.yml` sets no RUSTFLAGS either, and now for two reasons rather than
+  # one -- see the note in its `env:` block for the first.
 
 jobs:
+  # THE GATE. `tools/ci.ps1`, whole, with its skip list checked.
+  #
+  # windows-latest and not a matrix, because the script is a Windows script.
+  # It hardcodes `target/release/pl.exe` at twenty-one call sites and
+  # `target/release/examples/dump_spline.exe` at one; it reads PE resource
+  # directories out of the built binaries; it installs and uninstalls an MSI
+  # with `msiexec` and then reads `HKCU`; and it passes `$env:TEMP` to
+  # `Join-Path`, which off Windows is a null argument and a terminating error --
+  # the exact failure that killed both non-Windows legs of the first release.
+  # Making it portable is real work and is not this change. What this change
+  # fixes is that it ran nowhere, and a matrix here would be a fresh claim that
+  # nobody had run.
+  #
+  # 70 steps, of which 65 must run here. See `.github/ci-expected-skips.txt`.
+  gate:
+    name: the gate (tools/ci.ps1)
+    runs-on: windows-latest
+    # The gate builds the workspace in release, builds it again for a dozen
+    # integration targets, renders rasters, and installs an MSI twice. Four
+    # minutes on a warm developer machine with everything already compiled is
+    # not the number to size a cold runner on.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          # Four gate steps are preconditioned on `rustup target list
+          # --installed` containing this, and three of them are not on the
+          # expected-skip list: the wasm32 build, the wasm self-checks and the
+          # pl-index purity build. No runner image ships the target, so without
+          # this line all three SKIP and the job goes red saying so. (The
+          # fourth, the wasm-versus-native comparison, needs a corpus and is on
+          # the list.)
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # THE PROVISIONING BELOW IS THE POINT OF THE JOB, not scaffolding for it.
+      #
+      # A gate job on a stock runner would print GATE PASSED having skipped
+      # every step that needs Python, node, the wasm target, WiX or a `dist/`,
+      # which is over half of them -- a more convincing version of the failure
+      # being fixed, because it comes with a green check. Every install here
+      # turns steps from SKIP into ok, and `-ExpectedSkips` at the end is what
+      # stops that quietly going backwards.
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The `oracles` job installs the first seven. The last four are what makes
+      # three gate steps possible at all -- scipy for the gel calibration spline
+      # against SciPy, pymupdf and pypdf for 'PDF is a PDF, and matches the
+      # SVG', PyYAML for 'the release workflow parses and covers three
+      # platforms'. Those three steps are gate-only and the gate ran nowhere, so
+      # until now they had never executed in CI on any platform.
+      #
+      # All eleven have Windows wheels; verified on the author's machine, where
+      # every one of them imports and no step gated on them skipped.
+      - name: Install the oracles
+        run: pip install biopython seguid pydna pillow fonttools resvg-py numpy scipy pymupdf pypdf PyYAML
+
+      # `node --test --experimental-strip-types test/*.test.ts` needs Node 22.6
+      # or newer, and `Have node` is true on any of them -- so on an image with
+      # Node 20 the two TypeScript steps would FAIL rather than skip. Pinned to
+      # the major the fixture was generated with, because 'renderers agree
+      # (fixture is current)' regenerates `crates/pl-draw/tests/agreement.json`
+      # and compares it to the committed bytes.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # `packages/circular-map/node_modules` is gitignored, so it is absent on
+      # every fresh checkout and the `typecheck` step is preconditioned on it
+      # existing. `npm ci` installs from the committed lockfile; the only
+      # dependency is TypeScript itself.
+      - name: Install the TypeScript toolchain
+        working-directory: packages/circular-map
+        run: npm ci
+
+      # Same version and same extension as release.yml installs, deliberately:
+      # the gate step builds an MSI with `tools/build-msi.ps1` and the release
+      # builds it with the same script, and an installer that changes shape
+      # between the two would make the gate's answer worthless.
+      - name: Install the WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'installing wix failed' }
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'adding the WiX UI extension failed' }
+          wix --version
+
+      # dist/, because two gate steps are preconditioned on
+      # `dist/SHA256SUMS.txt` existing: the one proving the MSI is generated
+      # from the manifest rather than from a second file list, and the one that
+      # actually installs it. On a developer machine that directory is there
+      # because they have cut a release into it at some point. On a runner
+      # nothing creates it, so both steps would skip -- which is how the MSI
+      # install test came to be one of the six skipped for six releases.
+      #
+      # This is `tools/release.ps1` with its default `-Out dist`, which is the
+      # same invocation release.yml uses, so nothing here is a CI-only path.
+      # `/dist/` is gitignored, so the working tree stays clean underneath it.
+      - name: Assemble dist/, which the two MSI steps read
+        shell: pwsh
+        run: |
+          ./tools/release.ps1 -Out dist -Quiet
+          if (-not (Test-Path dist/SHA256SUMS.txt)) {
+            Write-Host '::error::release.ps1 produced no dist/SHA256SUMS.txt, so the two MSI steps would silently skip'
+            exit 1
+          }
+
+      # THE EXIT-CODE PATH, PROVED BEFORE IT IS RELIED ON.
+      #
+      # The whole job rests on a red gate turning into a red build, and
+      # PowerShell exit codes through a `run:` step are a genuine trap: a cmdlet
+      # does not set $LASTEXITCODE at all, so a failure that arrives as a thrown
+      # object rather than as a process exit can leave the variable holding the
+      # 0 from whatever ran before. `tools/ci.ps1` documents four distinct ways
+      # that bit it INSIDE its own step bodies -- three in the comment on `Step`
+      # and a fourth on `CargoTest` -- and every one was found by audit rather
+      # than by a red gate. Assuming the same mechanism is sound one level
+      # further out, in the shell that invokes the script, would be the same
+      # assumption that let this file reference the gate in six comments and run
+      # it in none.
+      #
+      # Two halves, because they are two different mechanisms and one probe
+      # cannot fail for both:
+      #
+      #   1. `pwsh -NoProfile -File <script>` reports the script's own `exit N`
+      #      as $LASTEXITCODE in the caller. Checked here, and a fail is a fail.
+      #   2. A `run:` step that exits non-zero is recorded as a failed step.
+      #      Checked below with a step that deliberately exits 7 under
+      #      `continue-on-error`, and a following step that fails the job unless
+      #      that step's outcome was `failure`.
+      - name: A script's exit code survives `pwsh -File`  (control 1 of 2)
+        shell: pwsh
+        run: |
+          $probe = Join-Path $env:RUNNER_TEMP 'exit-probe.ps1'
+          Set-Content -LiteralPath $probe -Value 'exit 7'
+          pwsh -NoProfile -File $probe
+          $code = $LASTEXITCODE
+          # CAPTURE, THEN CLEAR, THEN JUDGE -- and leave by an explicit exit.
+          #
+          # The first version of this step read $LASTEXITCODE directly and ended
+          # after Write-Host. It failed on run 31325299019 with its own success
+          # message in the log: `shell: pwsh` runs the block and then appends
+          # `exit $LASTEXITCODE`, so the probe's 7 was still sitting there when
+          # the step ended. The step therefore went red BECAUSE the propagation
+          # it exists to verify had worked -- a control that fails on success,
+          # which is the same species of useless as one that cannot fail at all.
+          #
+          # Clearing the variable and ending with an explicit `exit` makes this
+          # step's result depend on its own judgement rather than on how the
+          # shell derives an exit code from a variable the step is deliberately
+          # leaving dirty.
+          $global:LASTEXITCODE = 0
+          if ($code -ne 7) {
+            Write-Host "::error::a script that exited 7 came back as $code; the gate's failures would not reach this job"
+            exit 1
+          }
+          Write-Host 'a script exiting 7 arrives as 7'
+          exit 0
+
+      - name: A step that exits non-zero is a failed step  (control 2 of 2)
+        id: nonzero-exit
+        continue-on-error: true
+        shell: pwsh
+        run: exit 7
+
+      - name: ...and this job noticed it  (control 2 of 2, checked)
+        shell: pwsh
+        run: |
+          $outcome = '${{ steps.nonzero-exit.outcome }}'
+          if ($outcome -ne 'failure') {
+            Write-Host "::error::a pwsh step that exited 7 was recorded as '$outcome'; a red gate would not turn this build red"
+            exit 1
+          }
+          Write-Host 'a step exiting 7 was recorded as a failure'
+
+      # THE GATE, and the assertion that it ran.
+      #
+      # -ExpectedSkips makes the skip list a checked claim instead of grey text
+      # nobody reads: the run fails if a step skipped that is not on the list,
+      # if a step on the list did not skip, or if the list names a step this
+      # gate no longer has. Set equality, not a count -- a count of five is
+      # satisfied by the wrong five skipping.
+      #
+      # `exit $LASTEXITCODE` explicitly. GitHub appends its own
+      # `if (Test-Path variable:\LASTEXITCODE) { exit $LASTEXITCODE }` to a pwsh
+      # step, which would do the same thing here, but only for as long as the
+      # last statement in this block stays a native call. Saying it is one line
+      # and removes the dependency on nobody ever adding a `Write-Host` below.
+      - name: The gate
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/ci.ps1 -ExpectedSkips "$env:GITHUB_WORKSPACE/.github/ci-expected-skips.txt"
+          exit $LASTEXITCODE
+
   test:
     name: test / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Safe here, and this is the job that carries the deny across `cargo build`
+    # and `cargo test` rather than only across clippy. Neither runner in this
+    # matrix is Windows -- windows-latest was removed in favour of `gate` -- so
+    # there is no `[target.x86_64-pc-windows-msvc]` block for it to replace.
+    env:
+      RUSTFLAGS: -D warnings
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # windows-latest is deliberately absent: the `gate` job above runs every
+        # one of the steps below, on the same runner image, as part of the list
+        # `docs/RELEASING.md` names. See the division set out in this file's
+        # header, including what dropping it cost.
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +338,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # eframe needs system libraries on Linux; the other two ship theirs.
+      # eframe needs system libraries on Linux; macOS ships its own. The `if`
+      # stays rather than becoming unconditional: this matrix has had three
+      # entries and now has two, and a step that says which platform it is for
+      # survives the next edit to that list.
       - name: Install Linux GUI dependencies
         if: runner.os == 'Linux'
         run: |
@@ -112,18 +417,26 @@ jobs:
       # written until this step; `zstream.rs` and `pngfile.rs` would have joined
       # it there.
       #
-      # "In CI", precisely, and not the stronger sentence: the local gate does
-      # run it -- `tools/ci.ps1`, `Step 'renderers agree (rust replays it)'`,
-      # and it was there at 713bd3b too -- so it has been running on one
-      # developer's machine, on one OS, and only when `node` is installed, which
-      # is the step's precondition. Where the stronger claim is true it is
-      # written in full: see the `pl-design` note below, "had never run in CI or
-      # in the local gate, on any platform".
+      # "In CI", precisely, and not the stronger sentence: the gate does run it
+      # -- `tools/ci.ps1`, `Step 'renderers agree (rust replays it)'`, and it
+      # was there at 713bd3b too -- so until 2026-08-09 it had been running on
+      # one developer's machine, on one OS, and only when `node` is installed,
+      # which is the step's precondition. It now runs in the `gate` job as well,
+      # where `node` is installed on purpose and a skip is a failure. Where the
+      # stronger claim is true it is written in full: see the `pl-design` note
+      # below, "had never run in CI or in the local gate, on any platform".
       #
-      # These three write the artefacts that the Python cross-checks in
-      # `tools/ci.ps1` then judge. Running them here does not run those checks;
-      # it proves the writers themselves work on all three platforms, which is
-      # where a raster is most likely to differ.
+      # These write the artefacts that the Python cross-checks in `tools/ci.ps1`
+      # then judge. Running them here does not run those checks; it proves the
+      # writers themselves work on the two platforms this job covers, which
+      # together with the `gate` job on windows-latest is all three -- and a
+      # raster is where they are most likely to differ.
+      #
+      # `memory` is the exception and the only one: no step in the gate names
+      # it, so of these six suites it is the one that runs on two platforms
+      # rather than three. It counts `Layout` sizes -- what the program asked
+      # the allocator for, not what any allocator returned -- so there is no
+      # operating system in the number it measures.
       #
       # `memory` was missing from this list and named nowhere else either: a
       # grep for it over .github/ and tools/ returned nothing, so the one test
@@ -223,6 +536,12 @@ jobs:
   msrv:
     name: rust-version floor
     runs-on: ubuntu-latest
+    # Deliberate, and the note on the `cargo check` step below already explains
+    # it: an old rustc warning about code that stable accepts silently is still
+    # something a reader following README-LINUX.txt will meet. Linux, so nothing
+    # to replace.
+    env:
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
 
@@ -263,16 +582,19 @@ jobs:
       # free to pick different versions would be measuring a different floor
       # from the one that ships.
       #
-      # `RUSTFLAGS: -D warnings` from the top of this file applies here too, and
-      # that is intended: an old rustc warning about code stable accepts
-      # silently is still something a reader following README-LINUX.txt will
-      # meet.
+      # `RUSTFLAGS: -D warnings` is set on this job, and that is intended: an old
+      # rustc warning about code stable accepts silently is still something a
+      # reader following README-LINUX.txt will meet. (It was at the top of this
+      # file until 2026-08-09, where it also reached the Windows `gate` job and
+      # replaced .cargo/config.toml's rustflags there -- see the `env:` block.)
       - name: cargo check on the declared floor
         run: cargo check --workspace --locked
 
   wasm:
     name: wasm32 build
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -291,6 +613,8 @@ jobs:
   oracles:
     name: differential tests and benchmark
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

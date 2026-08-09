@@ -6075,7 +6075,8 @@ mod tests {
     /// THE TRADEOFF, stated so nobody has to rediscover it: this is a live
     /// count, so **every commit that adds a `.rs` line, a `#[test]` or a
     /// `Step` in `tools/ci.ps1` must also edit README.md**, or `cargo test
-    /// --workspace --lib --bins` (`tools/ci.ps1:103`) goes red. That is
+    /// --workspace --lib --bins` -- `Step 'unit tests'` in `tools/ci.ps1`, and
+    /// the same command in `.github/workflows/ci.yml` -- goes red. That is
     /// deliberately annoying. The alternative -- correcting the four numbers
     /// and trusting the next person to recount -- is exactly what was tried on
     /// 2026-08-04 and failed inside a day. The friction is the mechanism, and

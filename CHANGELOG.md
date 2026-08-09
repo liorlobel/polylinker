@@ -25,7 +25,58 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+Nothing here changes what Polylinker does. It changes what "CI is green" is
+worth, which is why it is written down rather than left in a commit message.
+
+### Fixed
+
+- **The gate now runs in CI.** `tools/ci.ps1` is a 70-step gate and
+  [`docs/RELEASING.md`](docs/RELEASING.md) names it as the thing to run before
+  tagging. **No workflow invoked it.** It appeared in
+  `.github/workflows/ci.yml` six times and every one of those was on a comment
+  line, so from v0.1.2 until now it had been failing on a clean tree and
+  nothing reported that: 0.1.2, 0.1.3, 0.2.0, 0.3.0, 0.3.1 and 0.3.2 were all
+  tagged with it red. `ci.yml` has a `gate` job now, on `windows-latest`, and a
+  red gate is a red build.
+
+- **The gate's skips are checked, not printed.** A step whose tooling is
+  missing SKIPs rather than failing — right on a workstation, dangerous on a
+  runner, and the reason the gate passed on the author's machine for six
+  releases *with six steps skipped*: the wasm-versus-native comparison, both
+  chromatogram oracles, digest versus Biopython on real plasmids, the
+  Rust-versus-Python reader, and the MSI install test. The job now installs
+  what a runner can be given — eleven Python oracles, Node 24, the
+  `wasm32-unknown-unknown` target, the WiX Toolset, the TypeScript toolchain,
+  and a `dist/` for the MSI steps to read — and passes `-ExpectedSkips`, a new
+  parameter that fails the run on any difference from
+  [`.github/ci-expected-skips.txt`](.github/ci-expected-skips.txt) in either
+  direction. Set equality, not a count: a count of five is satisfied by the
+  wrong five skipping, and a name matching no step in the gate is itself a
+  failure, so a renamed step cannot drift off the list unnoticed.
+
+  Five of the six skips remain, and they are one skip five times: those steps
+  need real `.dna` and `.ab1` files, and a lab's plasmids are not ours to
+  publish. The sixth, the MSI install-and-uninstall test, now runs on every
+  push — the only check that puts a real `msiexec` against a real registry, and
+  until now its first execution on any given release was after the tag.
+
+- **Three gate steps that had never run in CI at all now do**, because each
+  needs a Python package the existing `oracles` job does not install: the gel
+  calibration spline against SciPy, *PDF is a PDF, and matches the SVG* against
+  PyMuPDF and pypdf, and the step that parses `release.yml` with PyYAML.
+
+### Changed
+
+- **`ci.yml`'s `test` matrix drops `windows-latest`** and runs on
+  `ubuntu-latest` and `macos-latest`. Every step in that leg is run by the
+  `gate` job on the same runner image, which is duplication rather than
+  platform coverage — `tools/ci.ps1` is a Windows script and cannot run on the
+  other two, which is exactly why they stay. What that cost is stated in the
+  workflow: those steps passed `--locked` and the gate does not, so the
+  lockfile check now rides on the two remaining runners plus `msrv` and `wasm`
+  (lock drift is a property of the tree, not of the operating system), and
+  `pl-draw/tests/memory.rs` and `pl-features/tests/schema_pin.rs` run on two
+  platforms instead of three.
 
 ## [0.4.0] - 2026-08-09
 
