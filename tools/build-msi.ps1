@@ -86,17 +86,35 @@ if ([int]$vp[0] -gt 255 -or [int]$vp[1] -gt 255 -or [int]$vp[2] -gt 65535) {
     throw "'$Version' cannot be expressed as an MSI ProductVersion (limits are 255.255.65535)"
 }
 
-$distFull = (Resolve-Path -LiteralPath $Dist).Path
+# NORMALISED, not `Resolve-Path`. These two strings are compared for equality
+# below, and `Resolve-Path` returns whatever spelling it was handed: given
+# `-Dist C:\PROGRA~1\d -Out "C:\Program Files\d"` it produced two different
+# strings for one directory, and the guard that stops the MSI being written into
+# dist/ passed while pointing both at the same place. Measured on this machine:
+# `Resolve-Path 'C:\PROGRA~1'` is `C:\PROGRA~1`, `[IO.Path]::GetFullPath` of the
+# same is `C:\Program Files`. This is the same normaliser mismatch that broke
+# `tools/release.ps1`'s manifest on CI run 31325886841; see the long note on
+# `Get-DirectoryPrefix` there. `GetUnresolvedProviderPathFromPSPath` first,
+# because `GetFullPath` alone would resolve a relative `-Dist dist` against the
+# .NET current directory rather than the PowerShell location.
+function Get-NormalPath([string]$Path) {
+    $abs = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    return [System.IO.Path]::GetFullPath($abs).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+}
+
+$distFull = Get-NormalPath $Dist
 $manifestPath = Join-Path $distFull 'SHA256SUMS.txt'
 if (-not (Test-Path $manifestPath)) {
     throw "there is no SHA256SUMS.txt in $distFull. Run tools/release.ps1 first."
 }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
-$outFull = (Resolve-Path -LiteralPath $Out).Path
-# Checked after the directory exists, because Resolve-Path throws on one that
-# does not -- and the check is worth having: writing the MSI into dist/ is the
-# single mistake that would corrupt the archive rather than merely fail.
-if ($outFull -eq $distFull) {
+$outFull = Get-NormalPath $Out
+# The check is worth having: writing the MSI into dist/ is the single mistake
+# that would corrupt the archive rather than merely fail. Compared case-
+# insensitively because Windows paths are, and the two spellings can differ in
+# case without differing in meaning.
+if ($outFull.Equals($distFull, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'the MSI must not be written into dist/; see the comment at the top of this script'
 }
 

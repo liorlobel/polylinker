@@ -116,6 +116,24 @@ function Step {
 }
 
 function Have($cmd) { $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue) }
+
+# A DIRECTORY PATH IN THE SAME SPELLING `FileInfo.FullName` USES, with exactly
+# one trailing separator. The full reasoning is in `tools/release.ps1`, where the
+# identical function is defined and where the defect first fired; the short
+# version is that `Resolve-Path` and the FileSystemProvider disagree about 8.3
+# aliases and about trailing separators, and every `Substring`/`StartsWith` on a
+# path in this file was silently assuming they did not.
+#
+# It is duplicated rather than shared because the three files that need it --
+# this one, `release.ps1` and `installer/Install-Polylinker.ps1` -- are each
+# invoked directly and the installer additionally SHIPS ALONE, inside the release
+# zip, with nothing to dot-source. A copy in each is the cost of that.
+function Get-DirectoryPrefix([string]$Path) {
+    $abs = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $abs = [System.IO.Path]::GetFullPath($abs)
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    return $abs.TrimEnd($sep, [System.IO.Path]::AltDirectorySeparatorChar) + $sep
+}
 function HavePy($mod) {
     if (-not (Have python)) { return $false }
     python -c "import $mod" 2>$null | Out-Null
@@ -1386,7 +1404,29 @@ Step 'every file the release reads is committed' {
 Step 'release script and its manifest' {
     $out = Join-Path $env:TEMP ('pl-release-check-' + $PID)
     Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
-    & "$PSScriptRoot/release.ps1" -Out $out -Quiet 2>&1 | Out-Null
+
+    # THE TRAILING SEPARATOR IS DELIBERATE. Do not tidy it away.
+    #
+    # `release.ps1` computes every name in its manifest by subtracting the output
+    # directory's path from each file's `FullName`. That subtraction is only
+    # correct if both strings come from the same normaliser, and until 2026-08-09
+    # they did not -- which nothing on the author's machine could show, because
+    # the two spellings of `%TEMP%` there happen to be identical. A GitHub runner
+    # showed it instead: `C:\Users\RUNNER~1\...` against a real `runneradmin` is a
+    # 3-character difference, and CI run 31325886841 died with
+    # `pl-release-check-6584\84\features\NOTICE.txt`.
+    #
+    # An 8.3 alias cannot be conjured on demand -- whether a volume even has one
+    # is a per-volume setting -- so this uses the other spelling that breaks the
+    # same arithmetic and IS available everywhere. Measured: with a trailing
+    # separator the old `Substring($base.Length + 1)` cut one character too many
+    # and `a.txt` came back as `.txt`. So this line makes the defect reproduce on
+    # every machine that runs the gate, rather than only on the one that did.
+    #
+    # `$script:release` keeps the plain spelling: the point is to hand the
+    # SCRIPT an awkward argument, not to make every later step carry it.
+    $spelling = $out + [System.IO.Path]::DirectorySeparatorChar
+    & "$PSScriptRoot/release.ps1" -Out $spelling -Quiet 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'release.ps1 failed' }
     $script:release = $out
 
@@ -1434,8 +1474,29 @@ Step 'release script and its manifest' {
     #
     # The zip and its checksum sidecar are the two files that cannot be in the
     # manifest, because they are built from it.
-    $onDisk = Get-ChildItem -LiteralPath $out -Recurse -File |
-        ForEach-Object { $_.FullName.Substring($out.Length + 1).Replace('\', '/') } |
+    # `Get-DirectoryPrefix`, not `$out.Length + 1`. The same defect as in
+    # `release.ps1`, in the check that exists to audit `release.ps1` -- so with
+    # the script fixed and this line left alone, the runner would simply have
+    # failed one line further down, with all 22 files reported as "shipped but
+    # not in the manifest". A fix applied only where the failure happened to
+    # surface is how this class recurred after ci.ps1 fixed it once already
+    # (see 'installer plan covers the whole release' below).
+    #
+    # `$spelling`, the same awkward argument `release.ps1` was given, and not
+    # `$out`. `Get-DirectoryPrefix` returns the identical string for both, so
+    # this is not a behaviour change -- it is what makes the defect REACHABLE
+    # here. Against plain `$out` on a machine whose `%TEMP%` holds no 8.3 alias,
+    # the old `$out.Length + 1` is correct by accident and reverting this line
+    # changes nothing that any local run could see; only a runner would notice.
+    # Measured, and it is the whole reason the trailing separator exists above.
+    $outPrefix = Get-DirectoryPrefix $spelling
+    $onDisk = Get-ChildItem -LiteralPath $spelling -Recurse -File |
+        ForEach-Object {
+            if (-not $_.FullName.StartsWith($outPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "$($_.FullName) is not under $outPrefix, so its name cannot be compared with the manifest"
+            }
+            $_.FullName.Substring($outPrefix.Length).Replace('\', '/')
+        } |
         Where-Object { $_ -ne 'SHA256SUMS.txt' -and $_ -notlike '*.zip' -and $_ -notlike '*.zip.sha256' }
     $unhashed = @($onDisk | Where-Object { $listed -notcontains $_ })
     if ($unhashed) { throw "shipped but not in the manifest: $($unhashed -join ', ')" }
@@ -1762,9 +1823,17 @@ Step 'installer plan covers the whole release' {
     #
     # A child process with a wide `-Width` fixes both, and it is what a user
     # actually runs, so the exit code means what it says.
+    #
+    # `-Source` carries a trailing separator for the same reason the release step
+    # hands one to `release.ps1`: `Install-Polylinker.ps1` subtracts the source
+    # directory from each file's `FullName` to decide whether the copy matches
+    # its manifest, and that subtraction had the identical defect. Left alone it
+    # is not a CI curiosity -- it is a user with an 8.3 component anywhere in
+    # their extraction path being told "this copy is incomplete -- 21 file(s) the
+    # manifest lists are not here" about a perfectly good download.
     $host_ = (Get-Process -Id $PID).Path
     $out = & $host_ -NoProfile -File "$PSScriptRoot/installer/Install-Polylinker.ps1" `
-        -DryRun -Prefix $prefix -Source $script:release `
+        -DryRun -Prefix $prefix -Source ($script:release + [System.IO.Path]::DirectorySeparatorChar) `
         -RegistryRoot "HKCU\Software\Polylinker-CI-$PID" `
         -StateDir (Join-Path $env:TEMP "pl-state-$PID") `
         -StartMenuDir (Join-Path $env:TEMP "pl-startmenu-$PID") `
@@ -1790,11 +1859,22 @@ Step 'installer plan covers the whole release' {
     # above". The prose was reworded too -- a test that depends on prose not
     # containing a keyword is a test waiting to break -- but the column format
     # is the real discriminator and this is what should have keyed on it.
+    #
+    # BOTH SIDES THROUGH THE SAME NORMALISER. `$prefix` is built from `$env:TEMP`,
+    # which on a GitHub runner is `C:\Users\RUNNER~1\...`, while the destinations
+    # the installer prints are absolute paths it has normalised -- so a raw
+    # `StartsWith` here compares an 8.3 alias against its expansion and reports
+    # that a plan writing only inside the prefix writes outside it. The trailing
+    # separator `Get-DirectoryPrefix` guarantees matters too, and separately: a
+    # bare `StartsWith($prefix)` also accepts `C:\...\pl-install-plan-123-evil`
+    # as being "inside" `C:\...\pl-install-plan-123`, which is the opposite
+    # mistake and the one that would let a real escape through.
+    $prefixDir = Get-DirectoryPrefix $prefix
     foreach ($line in ($out -split "`r?`n")) {
         if ($line -match '^\s{2}(copy|write|create dir)\s{2,}(\S.*?)(\s+\(|$)') {
-            $dest = $Matches[2].Trim()
-            if (-not $dest.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "the plan writes outside the prefix: $dest"
+            $dest = Get-DirectoryPrefix ($Matches[2].Trim())
+            if (-not $dest.StartsWith($prefixDir, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "the plan writes outside the prefix: $($Matches[2].Trim())"
             }
         }
     }
@@ -2020,9 +2100,59 @@ Write-Host "`nrelease workflow" -ForegroundColor Cyan
 # Checked twice. `check-archive.ps1` reads the tar with this project's own
 # reader, and then `tar.exe` reads it with somebody else's, which is the same
 # argument the oracle steps above make. Windows 11 ships bsdtar as
-# System32\tar.exe and Git for Windows ships GNU tar; either satisfies the
-# precondition, and between them they disagree about enough of the format to be
-# worth having.
+# System32\tar.exe and Git for Windows ships GNU tar, and between them they
+# disagree about enough of the format to be worth having.
+#
+# EVERY TAR FOUND, EACH NAMED IN THE LOG. This used to take
+# `(Get-Command tar.exe).Source` -- whichever implementation happened to be first
+# on PATH -- and print it only in the success line, so the log of a passing run
+# recorded which tool had been used and the log of a failing run did not. The
+# comment above justified itself on TWO readers disagreeing while the code ran
+# exactly one of them, picked by the machine's PATH rather than by this file. On
+# the author's box that is bsdtar 3.8.4 in System32; GNU tar 1.35 is installed
+# under Git for Windows and is NOT on PATH here, so the second reader the comment
+# claimed credit for had never run. Which one a runner picks was unknowable from
+# the logs of run 31325886841, because the step died before reaching this line.
+#
+# So: PATH is searched, the two known absolute homes are probed, the list is
+# deduplicated by normalised path, and every survivor is run and reported with
+# its version banner. A machine with neither still skips, which is what the
+# precondition is for.
+function Find-Tars {
+    $found = @()
+    foreach ($c in @(Get-Command tar.exe -All -ErrorAction SilentlyContinue)) { $found += $c.Source }
+
+    # Each guarded by the variable it uses, which is the rule the step 'the
+    # cross-platform scripts touch no Windows-only environment variable
+    # unguarded' enforces over this file -- and it enforced it: the first draft
+    # of this function read all four unguarded and that step failed the gate,
+    # naming three of the four lines. Off Windows these are absent rather than
+    # empty and `Join-Path` treats a null `-Path` as a terminating error.
+    $candidates = @()
+    if ($env:SystemRoot)   { $candidates += (Join-Path $env:SystemRoot 'System32\tar.exe') }
+    if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles 'Git\usr\bin\tar.exe') }
+    if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\Git\usr\bin\tar.exe') }
+    # The one variable whose name is not a legal bare identifier, so it needs
+    # `${...}`. That step could NOT see this spelling when this line was written
+    # -- it matched `\$env:NAME` only -- so this was the one of the four it let
+    # through. The step now reads both spellings; this line is guarded because it
+    # should be, not because it was caught.
+    if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} 'Git\usr\bin\tar.exe') }
+
+    foreach ($p in $candidates) {
+        if (Test-Path -LiteralPath $p) { $found += $p }
+    }
+    # Deduplicated through the same normaliser everything else in this file uses,
+    # so `C:\PROGRA~1\...` and `C:\Program Files\...` are not counted as two tars.
+    $seen = @{}
+    $out = @()
+    foreach ($f in $found) {
+        $k = [System.IO.Path]::GetFullPath($f).ToLowerInvariant()
+        if (-not $seen.Contains($k)) { $seen[$k] = $true; $out += $f }
+    }
+    return $out
+}
+
 Step 'the tar.gz writer produces an archive two other tools can read' {
     $out = Join-Path $env:TEMP ('pl-tar-check-' + $PID)
     Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
@@ -2045,29 +2175,51 @@ Step 'the tar.gz writer produces an archive two other tools can read' {
         # which is what it did here, while bsdtar in System32 accepted the same
         # archive happily. Two readers disagreeing about the ARGUMENT is not
         # evidence about the format, so neither gets a drive letter.
-        $tool = (Get-Command tar.exe -ErrorAction SilentlyContinue).Source
-        New-Item -ItemType Directory -Force (Join-Path $out 'extracted') | Out-Null
-        Push-Location $out
-        try {
-            & $tool -xzf $tar.Name -C extracted
-        } finally { Pop-Location }
-        if ($LASTEXITCODE -ne 0) { throw "$tool refused the archive" }
-        $root = Get-ChildItem -LiteralPath (Join-Path $out 'extracted') -Directory
-        if ($root.Count -ne 1) { throw "extracting produced $($root.Count) top-level directories" }
-        foreach ($probe in 'SHA256SUMS.txt', 'licences/Phosphor-MIT.txt', 'features/NOTICE.txt') {
-            $a = Join-Path $out ($probe.Replace('/', '\'))
-            $b = Join-Path $root[0].FullName ($probe.Replace('/', '\'))
-            if (-not (Test-Path -LiteralPath $b)) { throw "$probe did not survive a round trip through $tool" }
-            $ha = (Get-FileHash -LiteralPath $a -Algorithm SHA256).Hash
-            $hb = (Get-FileHash -LiteralPath $b -Algorithm SHA256).Hash
-            if ($ha -ne $hb) { throw "$probe came back out of the tar with different bytes" }
+        $tools = Find-Tars
+        # The precondition already established there is at least one. If that
+        # ever stops being true this must say so rather than pass having read
+        # the archive with nothing.
+        if (-not $tools) { throw 'no tar.exe was found, so no independent reader checked this archive' }
+
+        $tested = @()
+        for ($i = 0; $i -lt $tools.Count; $i++) {
+            $tool = $tools[$i]
+            # WHICH TOOL, PRINTED BEFORE IT RUNS. The version banner is the whole
+            # point of naming them: "tar.exe" says nothing, `bsdtar 3.8.4` and
+            # `tar (GNU tar) 1.35` are the two different readers this step claims
+            # to be checking against.
+            $banner = (& $tool --version 2>&1 | Select-Object -First 1)
+            Write-Host "`n        reader $($i + 1)/$($tools.Count): $tool -- $banner" -ForegroundColor DarkGray
+
+            $dir = "extracted-$i"
+            New-Item -ItemType Directory -Force (Join-Path $out $dir) | Out-Null
+            Push-Location $out
+            try {
+                & $tool -xzf $tar.Name -C $dir
+            } finally { Pop-Location }
+            if ($LASTEXITCODE -ne 0) { throw "$tool ($banner) refused the archive" }
+
+            $root = Get-ChildItem -LiteralPath (Join-Path $out $dir) -Directory
+            if ($root.Count -ne 1) { throw "extracting with $tool produced $($root.Count) top-level directories" }
+            foreach ($probe in 'SHA256SUMS.txt', 'licences/Phosphor-MIT.txt', 'features/NOTICE.txt') {
+                $a = Join-Path $out ($probe.Replace('/', '\'))
+                $b = Join-Path $root[0].FullName ($probe.Replace('/', '\'))
+                if (-not (Test-Path -LiteralPath $b)) { throw "$probe did not survive a round trip through $tool ($banner)" }
+                $ha = (Get-FileHash -LiteralPath $a -Algorithm SHA256).Hash
+                $hb = (Get-FileHash -LiteralPath $b -Algorithm SHA256).Hash
+                if ($ha -ne $hb) { throw "$probe came back out of the tar with different bytes through $tool ($banner)" }
+            }
+            $tested += $banner
         }
-        Write-Host "        tar.gz read by check-archive.ps1 and by $tool, three files compared byte for byte" -ForegroundColor DarkGray
+        Write-Host "        tar.gz read by check-archive.ps1 and by $($tested.Count) tar(s): $($tested -join '; ')" -ForegroundColor DarkGray
         $global:LASTEXITCODE = 0
     } finally {
         Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
     }
-} { Have tar.exe }
+    # `Find-Tars`, not `Have tar.exe`: a machine with GNU tar installed under Git
+    # for Windows but not on PATH does have an independent reader, and used to
+    # skip as though it had none.
+} { (Find-Tars).Count -gt 0 }
 
 # The release workflow, checked without running it.
 #
@@ -2673,6 +2825,23 @@ Step 'the cross-platform scripts touch no Windows-only environment variable ungu
     # inside one that tests the platform. Guard scope is tracked by brace depth.
     $winOnly = 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMFILES', 'PROGRAMDATA',
                'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'USERNAME', 'HOMEDRIVE', 'HOMEPATH'
+
+    # BOTH SPELLINGS. `$env:NAME` and `${env:NAME}` are the same dereference, and
+    # this step used to match only the first -- so `${env:ProgramFiles(x86)}` was
+    # invisible to it. That is not hypothetical: on 2026-08-09 a new helper in
+    # this file read four Windows-only variables unguarded, this step failed the
+    # gate naming three of them, and the fourth was the one written in braces.
+    # A checker that catches three lines out of four teaches that its silence
+    # means clean.
+    #
+    # The braced form is also the ONLY way to write a variable whose name is not
+    # a bare identifier, so the names most likely to need it -- `ProgramFiles
+    # (x86)` above all -- were exactly the ones exempt.
+    #
+    # `[^}]*` after the name, so `ProgramFiles(x86)` is caught by the PROGRAMFILES
+    # entry rather than needing a list entry of its own: a variable that starts
+    # with a Windows-only name and continues is still Windows-only.
+    $ref = { param($v) '(\$env:' + $v + '\b|\$\{env:' + $v + '[^}]*\})' }
     $problems = @()
 
     foreach ($rel in 'tools/release.ps1', 'tools/ci.ps1', 'tools/check-archive.ps1') {
@@ -2695,7 +2864,7 @@ Step 'the cross-platform scripts touch no Windows-only environment variable ungu
             $guardsPlatform = $false
             if ($code -match '^\s*(\}\s*)?(else)?if\s*\(') {
                 foreach ($v in $winOnly) {
-                    if ($code -match ('\$env:' + $v + '\b')) { $opensGuard += $v }
+                    if ($code -match (& $ref $v)) { $opensGuard += $v }
                 }
                 if ($code -match '\$(IsWindows|onWindows|IsLinux|IsMacOS|onMac|onLinux)\b') { $guardsPlatform = $true }
             }
@@ -2707,12 +2876,12 @@ Step 'the cross-platform scripts touch no Windows-only environment variable ungu
             foreach ($d in $platformGuard.Keys) { if ($d -le $depth -and $platformGuard[$d]) { $platformActive = $true } }
 
             foreach ($v in $winOnly) {
-                if ($code -notmatch ('\$env:' + $v + '\b')) { continue }
+                if ($code -notmatch (& $ref $v)) { continue }
                 if ($opensGuard -contains $v) { continue }        # this line IS the guard
                 if ($active -contains $v) { continue }            # inside its own guard
                 if ($platformActive -or $guardsPlatform) { continue }  # inside a platform branch
                 # A bare assignment cannot fail; only passing it onward can.
-                if ($code -match ('^\s*\$env:' + $v + '\s*=')) { continue }
+                if ($code -match ('^\s*(\$env:' + $v + '\b|\$\{env:' + $v + '[^}]*\})\s*=')) { continue }
                 $problems += ("{0}:{1} uses `$env:{2} outside any guard -- that variable does not exist off Windows: {3}" -f
                               $rel, ($i + 1), $v, $code.Trim())
             }

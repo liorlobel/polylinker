@@ -360,8 +360,61 @@ function Set-RegValueRaw {
 # Where things go
 # ---------------------------------------------------------------------------
 
+# A DIRECTORY PATH IN THE SAME SPELLING `FileInfo.FullName` USES, with exactly
+# one trailing separator. This exists because `Resolve-Path` and the
+# FileSystemProvider disagree in two ways that this script then subtracts or
+# compares as string lengths, and both cost a real user a working install:
+#
+#   * 8.3 ALIASES. `Resolve-Path` returns the string it was handed;
+#     `Get-ChildItem` reports what the volume holds. Measured: `C:\PROGRA~1` and
+#     `C:\Program Files`, 11 characters against 16. Extract the release anywhere
+#     with an 8.3 component in its path -- which is any path a program handed to
+#     this script via a short name -- and `Test-ReleaseComplete` used to subtract
+#     the shorter string, keep the tail of the source directory on the front of
+#     every filename, match none of them against the manifest, and refuse the
+#     download with "this copy is incomplete -- 21 file(s) the manifest lists are
+#     not here". A correct copy, refused.
+#   * A TRAILING SEPARATOR. `Resolve-Path 'C:\dir\'` keeps it, and
+#     `Substring($base.Length + 1)` then cut one character too many; measured,
+#     `a.txt` came back as `.txt`.
+#
+# WHICH INVOCATIONS ARE EXPOSED, measured rather than guessed, because the first
+# draft of this comment got it wrong. The DEFAULT is safe: `$Source` falls back
+# to `$PSScriptRoot`, and PowerShell hands that over already normalised -- given
+# `-File C:\Users\alf22\SAVEDG~1\pl\t.ps1` it reports
+# `C:\Users\alf22\Saved Games\pl`, expanded and with no trailing separator, on
+# 5.1 and on 7. `Install.cmd` does not pass `-Source` at all; it passes `-File
+# "%~dp0Install-Polylinker.ps1"`, so it reaches the safe default.
+#
+# What IS exposed is an explicit `-Source`, and cmd's `%~dp0` is the obvious
+# thing a wrapper script would pass to it -- measured, that expands to
+# `C:\Users\alf22\SAVEDG~1\pl-dp0\`, which carries BOTH defects at once: the 8.3
+# alias verbatim, and a trailing backslash always. `tools/ci.ps1` now passes a
+# trailing separator on purpose so this cannot regress unnoticed.
+#
+# `GetFullPath` is what expands the alias -- on Windows PowerShell 5.1 and pwsh 7
+# alike, and even for components that do not exist yet, which is why `$Prefix`
+# can go through it before anything has been installed there. It is not enough
+# alone: it resolves a relative path against the .NET current directory, which is
+# not the PowerShell location. So the path is made absolute the way PowerShell
+# resolves it first, and expanded second.
+#
+# The same function is in `tools/release.ps1` and `tools/ci.ps1`. It is copied
+# rather than shared because this file SHIPS ALONE inside the release zip, next
+# to the payload it installs, with nothing to dot-source.
+function Get-DirectoryPrefix([string]$Path) {
+    $abs = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $abs = [System.IO.Path]::GetFullPath($abs)
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    return $abs.TrimEnd($sep, [System.IO.Path]::AltDirectorySeparatorChar) + $sep
+}
+
 if (-not $Source) { $Source = $PSScriptRoot }
-$Source = (Resolve-Path -LiteralPath $Source).Path
+if (-not (Test-Path -LiteralPath $Source)) { throw "no such source directory: $Source" }
+# TrimEnd, because everything downstream builds paths with `Join-Path $Source`
+# and prints `$Source` in prose. The prefix form, with its separator, is what the
+# arithmetic uses and it is derived at the one place that does the arithmetic.
+$Source = (Get-DirectoryPrefix $Source).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
 
 if (-not $StateDir) { $StateDir = Join-Path $env:LOCALAPPDATA $AppName }
 
@@ -378,6 +431,25 @@ if (-not $Prefix) {
         $Prefix = Join-Path (Join-Path $env:LOCALAPPDATA 'Programs') $AppName
     }
 }
+# NORMALISED THE SAME WAY `$Source` IS, and for the same reason -- but note that
+# `$Prefix` need not exist yet, which is why `Get-DirectoryPrefix` is built on
+# `GetFullPath` (which expands an alias through components that are not there)
+# rather than on `Get-Item` (which throws on them).
+#
+# Two comparisons downstream depend on this, and neither is cosmetic. An
+# uninstall decides whether to relaunch itself out of the directory it is about
+# to delete by asking whether `$PSCommandPath` is under `$Prefix`; PowerShell
+# reports `$PSCommandPath` expanded, so a short `$Prefix` said "no", the script
+# did not step aside, and it would have been deleting its own running file.
+# `Stop-IfRunning` decides whether the app is running FROM this prefix by
+# comparing `$Prefix` against `Process.Path`, which Windows also reports
+# expanded -- a mismatch there means the refusal never fires and the install
+# overwrites files mapped into a running process, which is the half-finished
+# upgrade that check exists to prevent.
+#
+# It also goes into the receipt and the Add/Remove Programs entry, where the long
+# form is what a person reading it should see.
+$Prefix = (Get-DirectoryPrefix $Prefix).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
 
 $scope = if ($AllUsers) { 'per-machine' } else { 'per-user' }
 
@@ -492,8 +564,21 @@ function Test-Payload {
     # manifest has them, so the comparison has to speak the same dialect --
     # otherwise every file "on disk" looks like a file the manifest never saw
     # and this refuses to install a perfectly good copy.
+    #
+    # `Get-DirectoryPrefix $Dir`, not `$Dir.Length + 1`: `$_.FullName` is what the
+    # FileSystemProvider says, so the string subtracted from it has to be too.
+    # See the note where that function is defined for what this cost -- an 8.3
+    # component anywhere in the extraction path made every name here come out
+    # wrong, so `$missing` below listed the entire release and a correct download
+    # was refused as incomplete.
+    $dirPrefix = Get-DirectoryPrefix $Dir
     $onDisk = Get-ChildItem -LiteralPath $Dir -Recurse -File |
-        ForEach-Object { $_.FullName.Substring($Dir.Length + 1).Replace('\', '/') }
+        ForEach-Object {
+            if (-not $_.FullName.StartsWith($dirPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "$($_.FullName) is not under $dirPrefix, so it cannot be checked against the manifest"
+            }
+            $_.FullName.Substring($dirPrefix.Length).Replace('\', '/')
+        }
 
     # Three files cannot be in the manifest, for one reason each, and none of
     # them is an exemption anybody chose:
@@ -851,8 +936,17 @@ function Invoke-Uninstall {
     # and a running script's own file cannot be removed from underneath it. So
     # the first thing an uninstall does is copy itself to TEMP and hand over.
     # The copy is written rather than copied, so it inherits no zone marking.
+    #
+    # `Get-DirectoryPrefix $Prefix` rather than `$Prefix`, so the comparison is
+    # against `C:\...\Polylinker\` and not `C:\...\Polylinker`. Without the
+    # separator a script sitting in `C:\...\Polylinker-old` counts as being
+    # inside the prefix and this relaunches for an uninstall of a different
+    # directory. `$Prefix` is already normalised at the top of this file, which
+    # is the other half: `$PSCommandPath` arrives with 8.3 aliases expanded, so
+    # a short `$Prefix` used to say "not inside" for a script that was.
+    $prefixDir = Get-DirectoryPrefix $Prefix
     if (-not $NoRelaunch -and $PSCommandPath -and
-        $PSCommandPath.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        $PSCommandPath.StartsWith($prefixDir, [StringComparison]::OrdinalIgnoreCase)) {
         $tmp = Join-Path $env:TEMP ("polylinker-uninstall-{0}.ps1" -f $PID)
         [System.IO.File]::WriteAllText($tmp, [System.IO.File]::ReadAllText($PSCommandPath), (New-Object System.Text.UTF8Encoding($false)))
         $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $tmp, '-Uninstall', '-NoRelaunch', '-Prefix', $Prefix)
@@ -1019,12 +1113,19 @@ function Stop-IfRunning {
         installer failed, some files were replaced" is a worse state than "close
         Polylinker and run this again".
     #>
+    # With the trailing separator, and against the normalised `$Prefix`: Windows
+    # reports `Process.Path` with 8.3 aliases expanded, so comparing it to a
+    # short `$Prefix` found nothing running and let the install proceed over
+    # files mapped into a live process. The separator is the second half -- a
+    # process running from `C:\...\Polylinker-2` must not count as running from
+    # `C:\...\Polylinker`.
+    $prefixDir = Get-DirectoryPrefix $Prefix
     $live = @()
     foreach ($n in 'polylinker', 'pl', 'pl-mcp') {
         foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) {
             $path = $null
             try { $path = $p.Path } catch { }
-            if ($path -and $path.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            if ($path -and $path.StartsWith($prefixDir, [StringComparison]::OrdinalIgnoreCase)) {
                 $live += ("{0} (PID {1})" -f $p.ProcessName, $p.Id)
             }
         }

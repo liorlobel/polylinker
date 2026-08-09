@@ -77,6 +77,54 @@ param(
 
 $ErrorActionPreference = 'Stop'
 function Say($msg, $colour = 'Gray') { if (-not $Quiet) { Write-Host $msg -ForegroundColor $colour } }
+
+# A DIRECTORY PATH IN THE SAME SPELLING `FileInfo.FullName` USES, with exactly
+# one trailing separator. Anything that subtracts a directory path from a
+# `FullName` -- or asks whether a `FullName` sits under one -- must go through
+# this, or it is comparing two strings that two different normalisers produced.
+#
+# There are three ways those normalisers disagree, and this repository has now
+# been bitten by two of them. All four facts below were measured on this machine
+# rather than assumed:
+#
+#   1. 8.3 ALIASES. `Resolve-Path` returns the string it was handed;
+#      `Get-ChildItem` reports the name the volume actually holds. For
+#      `C:\PROGRA~1` those are `C:\PROGRA~1` (11 chars) and `C:\Program Files`
+#      (16). This is what broke CI run 31325886841: a GitHub runner's `$env:TEMP`
+#      is `C:\Users\RUNNER~1\AppData\Local\Temp` while the profile is really
+#      `runneradmin`, so the base string was 3 characters short, `Substring` cut
+#      3 too few, and every manifest name arrived with the tail of the output
+#      directory welded to its front -- `84/features/NOTICE.txt` for an `-Out`
+#      ending `pl-release-check-6584`. It could not fire on the author's machine:
+#      no component of `C:\Users\alf22\AppData\Local\Temp` is long enough to
+#      carry an alias, so the subtraction was correct by accident.
+#   2. A TRAILING SEPARATOR. `Resolve-Path 'C:\dir\'` keeps it, and the old
+#      `Substring($base.Length + 1)` then cut one character too many: measured,
+#      `a.txt` came back as `.txt`. This one needs no 8.3 alias and reproduces on
+#      any machine, which is why `tools/ci.ps1` now hands this script an `-Out`
+#      with a trailing separator on purpose.
+#   3. CASE. The provider normalises it (`c:\users\...` comes back
+#      `C:\Users\...`) and `GetFullPath` does not. Case cannot change a length,
+#      so it does not affect the subtraction -- but it is why every comparison
+#      below is OrdinalIgnoreCase and must stay that way.
+#
+# `GetFullPath` is what expands the alias, on Windows PowerShell 5.1 and on
+# pwsh 7 alike, and it does so even for components that do not exist yet
+# (`C:\PROGRA~1\nope\deeper` -> `C:\Program Files\nope\deeper`), which is why
+# this works on a directory that has not been created. It is NOT enough on its
+# own: it resolves a relative path against the .NET current directory, which is
+# not the PowerShell location -- measured, .NET said `C:\Users\alf22\Zotero`
+# while the session was in `%TEMP%`. Since this script is invoked as
+# `release.ps1 -Out dist` by .github/workflows/ci.yml, that would have silently
+# pointed at a different `dist`. So the path is made absolute the way PowerShell
+# resolves it first, and expanded second.
+function Get-DirectoryPrefix([string]$Path) {
+    $abs = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $abs = [System.IO.Path]::GetFullPath($abs)
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    return $abs.TrimEnd($sep, [System.IO.Path]::AltDirectorySeparatorChar) + $sep
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
@@ -570,14 +618,29 @@ if ($MacIdentity -and -not $onMac) {
 # is what gets hashed, so nothing can ship unhashed; `tools/ci.ps1` asserts the
 # converse, that nothing in the manifest is missing from disk, which together
 # make it set equality.
-$outFull = (Resolve-Path -LiteralPath $Out).Path
+# The base for that subtraction comes from `Get-DirectoryPrefix` and not from
+# `Resolve-Path`, for the reasons set out in full where that function is defined:
+# `$_.FullName` below is whatever the FileSystemProvider says, and until
+# 2026-08-09 this line asked a different normaliser for the string it subtracted.
+#
+# The `StartsWith` is not decoration. The arithmetic is only valid if
+# `$_.FullName` really does sit under `$outFull`, and that assumption used to be
+# made silently -- which is why the failure presented as `Get-FileHash` refusing
+# a path nobody could see the origin of, several lines later, instead of as an
+# error naming the two strings that disagreed.
+$outFull = Get-DirectoryPrefix $Out
 $shipped = Get-ChildItem -LiteralPath $Out -Recurse -File |
     Where-Object { $_.Name -ne 'SHA256SUMS.txt' } |
-    # Forward slashes, so `sha256sum -c SHA256SUMS.txt` resolves these names on
-    # the machine of whoever is checking them. This is the first release whose
-    # manifest has any subdirectories in it at all, so it is the first one where
-    # the separator was a choice.
-    ForEach-Object { $_.FullName.Substring($outFull.Length + 1).Replace('\', '/') } |
+    ForEach-Object {
+        if (-not $_.FullName.StartsWith($outFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "$($_.FullName) is not under $outFull, so its name in the manifest cannot be computed"
+        }
+        # Forward slashes, so `sha256sum -c SHA256SUMS.txt` resolves these names
+        # on the machine of whoever is checking them. This is the first release
+        # whose manifest has any subdirectories in it at all, so it is the first
+        # one where the separator was a choice.
+        $_.FullName.Substring($outFull.Length).Replace('\', '/')
+    } |
     Sort-Object
 
 $manifest = @()
@@ -605,8 +668,16 @@ $manifestPath = Join-Path $Out 'SHA256SUMS.txt'
 # string here is read as several and written back out double-encoded: an em-dash
 # in the dirty-tree warning arrived in the manifest as three mojibake bytes.
 # There is nothing a checksum file needs that ASCII cannot spell.
+#
+# An ABSOLUTE path, because `WriteAllText` resolves a relative one against the
+# .NET current directory rather than the PowerShell location, and those are not
+# the same thing -- measured on this machine, .NET reported `C:\Users\alf22\
+# Zotero` while the session's location was `%TEMP%`. `$outFull` is the absolute
+# form already, and reusing it rather than calling `Resolve-Path` again also
+# stops this line producing `dir\\SHA256SUMS.txt` when `-Out` was given with a
+# trailing separator, which `tools/ci.ps1` now does deliberately.
 [System.IO.File]::WriteAllText(
-    (Resolve-Path -LiteralPath $Out).Path + [System.IO.Path]::DirectorySeparatorChar + 'SHA256SUMS.txt',
+    $outFull + 'SHA256SUMS.txt',
     ($manifest -join "`n") + "`n",
     (New-Object System.Text.UTF8Encoding($false))
 )
