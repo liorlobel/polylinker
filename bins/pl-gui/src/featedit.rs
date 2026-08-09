@@ -1638,14 +1638,51 @@ fn footer(ui: &mut Ui, panel: &mut Panel, refusals: &[String], pal: &Palette) {
             // is worse than not offering it: the user got a refusal instead of
             // the action the button advertised.
             let live = panel.stale_reason().is_none();
-            let del = ui.add_enabled(
-                live,
-                egui::Button::new(RichText::new("Delete feature").color(if live {
-                    pal.warn
-                } else {
-                    pal.muted
-                })),
-            );
+            // THE COLOUR GOES ON THE WIDGET STATE AND NOT ON THE STRING, and
+            // the difference is a state nobody could read.
+            //
+            // This was `Button::new(RichText::new(..).color(..))`, which pins
+            // one colour through every state the button can be in. That was
+            // free until the design-system port made `widgets.active.bg_fill`
+            // the accent: a `warn` label on the pressed fill measures
+            // **2.10:1** in dark mode and 2.21 in light, so for as long as the
+            // mouse is held the destructive verb is the one thing on screen
+            // that cannot be read. The light half is not new — egui's own
+            // `gray(165)` gave 2.02 — but the dark half is: `gray(55)` gave
+            // 4.56.
+            //
+            // Written into `inactive.fg_stroke` instead, the red says
+            // "destructive" AT REST, which is when it is read and decided on,
+            // and egui's own hovered and pressed label ink takes over the
+            // moment the pointer arrives — `Palette::ink`, 9.68:1 on the hover
+            // fill and 4.65:1 on the pressed one. The disabled colour moves to
+            // `noninteractive.fg_stroke` by the same route, and
+            // `a_stale_form_greys_the_delete_button_as_well_as_save` still
+            // reads both off the galley, because a `Button`'s text colour is
+            // exactly its state's `fg_stroke` when the string does not override
+            // it.
+            let del = ui
+                .scope(|ui| {
+                    ui.visuals_mut().widgets.inactive.fg_stroke.color = pal.warn;
+                    ui.add_enabled(
+                        live,
+                        if live {
+                            egui::Button::new("Delete feature")
+                        } else {
+                            // The DISABLED half keeps its colour in the string,
+                            // exactly as it shipped, and the asymmetry is the
+                            // argument rather than an oversight: a disabled
+                            // control is never hovered and never pressed, so
+                            // there is no state for a pinned colour to be wrong
+                            // in. It is also the half egui would otherwise draw
+                            // in `inactive.fg_stroke` — the red set above —
+                            // faded to half alpha, which is a pale red and not
+                            // the grey `Save` uses beside it.
+                            egui::Button::new(RichText::new("Delete feature").color(pal.muted))
+                        },
+                    )
+                })
+                .inner;
             if del.clicked() {
                 panel.delete = true;
             }

@@ -273,7 +273,7 @@ if ($missing) {
 # The notices have to travel with the binaries, and until 2026-07-30 they did
 # not: dist/ held four executables and a checksum file.
 #
-# This is an obligation, not a courtesy. polylinker.exe embeds NINE font files
+# This is an obligation, not a courtesy. polylinker.exe embeds TEN font files
 # under four licences, and four of those require their text to accompany every
 # copy: SIL OFL 1.1 clause 2 ("provided that each copy contains the above
 # copyright notice and this license"), the Bitstream Vera licence reached through
@@ -286,7 +286,7 @@ if ($missing) {
 # The IBM Plex faces are what forced the issue rather than what caused it: they
 # took the count of unaccompanied OFL faces from one to three.
 #
-# NINE, AND COUNTED OFF THE BINARY RATHER THAN OFF THIS ARRAY. That number read
+# TEN, AND COUNTED OFF THE BINARY RATHER THAN OFF THIS ARRAY. That number read
 # "seven" until 2026-08-04, and seven is the GUI's own font chain, not the exe:
 # the two Plex faces, Phosphor, and the four that arrive through
 # epaint_default_fonts. It missed the two faces pl-draw embeds, which is the
@@ -294,14 +294,19 @@ if ($missing) {
 # from the file you are editing sees only the crate you are thinking about.
 # Measured instead by searching a release target/release/polylinker.exe for a
 # 256-byte mid-file slice of each candidate .ttf -- mid-file so that no two
-# faces can collide on a shared sfnt header. All nine are present, including
+# faces can collide on a shared sfnt header. All ten are present, including
 # LiberationSans-Regular.ttf (410,712 bytes) and LiberationSans-Bold (414,456),
 # which the app reaches through its PNG export menu via pl_draw::png_at, and
 # Phosphor-Bold.ttf (495,308) which comes from the egui-phosphor crate and is
 # not on disk here at all. The same probe over pl.exe finds those two Liberation
-# faces and none of the other seven, so the count is a property of the artifact
+# faces and none of the other eight, so the count is a property of the artifact
 # and not of the workspace. No exe byte-count is quoted: it moves on any commit,
 # and a number that churns is a number that goes stale unnoticed.
+#
+# The tenth is Inter-SemiBold.ttf (279,408 bytes), added 2026-08-09 with the
+# design-system port. Re-probed that day rather than reasoned about: the same
+# mid-file slice search over a freshly built polylinker.exe found it and the
+# four other on-disk faces, five for five.
 #
 # EVERY FACE, NOT JUST THE TWO THIS REPOSITORY CHOSE -- six of them when this was
 # written, seven since Phosphor, and nine since Liberation. The first version of
@@ -330,7 +335,7 @@ if ($missing) {
 # `packages/circular-map/package.json` have all said `MIT OR Apache-2.0` since
 # the beginning, and only the Apache text existed -- so a recipient who chose
 # the MIT half received a permission notice they could not read, which is
-# precisely the position the seven font texts above are here to avoid. The MIT
+# precisely the position the eight font texts above are here to avoid. The MIT
 # text is now `LICENSE-MIT` at the root and ships beside `LICENSE.txt`.
 #
 # It is `LICENSE-MIT.txt` here for the same reason `NOTICE` and `LICENSE` gain
@@ -363,10 +368,21 @@ $notices = @(
     # shipped"; until now only the first half was true.
     @{ From = 'crates/pl-draw/fonts/Liberation-OFL.txt'
        To   = 'licences/Liberation-OFL.txt' }              # Liberation Sans + Bold
+    # EIGHT SINCE 2026-08-09, with Inter SemiBold: the heading face the design
+    # system port brought in. A THIRD copy of the SIL OFL, and its DIFFERENCES
+    # from the two above are the reason it is not deduplicated against them.
+    # Inter declares NO Reserved Font Name, where Plex reserves "Plex" and
+    # Liberation reserves four -- and that absence is the clause the shipped
+    # file actually depends on, because the vendored copy is a PUA-stripped
+    # subset and therefore a Modified Version, which clause 3 would otherwise
+    # forbid from keeping its name. A recipient handed only the Plex OFL cannot
+    # check the one claim that makes the file lawful. See NOTICE.
+    @{ From = 'bins/pl-gui/fonts/Inter-OFL.txt'
+       To   = 'licences/Inter-OFL.txt' }                   # Inter SemiBold
     # THE FIRST ENTRY THAT IS NOT ABOUT A FONT, and it was missing for the same
     # reason the one above it was: the array had become a list of licence texts
-    # for typefaces, so a data obligation had no shape that fitted it. All ten
-    # entries above are code notices -- three top-level files and seven font
+    # for typefaces, so a data obligation had no shape that fitted it. All eleven
+    # entries above are code notices -- three top-level files and eight font
     # licences -- and none of them had anything to do with the database.
     #
     # `crates/pl-features` `include_str!`s features.tsv and provenance.tsv, and

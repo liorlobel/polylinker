@@ -25,7 +25,71 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The desktop window has a design system.** Colour, spacing, typography,
+  rounding and shadow are ported from the author's other eframe application so
+  the two programs read as one piece of software: an orange accent taken from
+  Polylinker's own icon, softer and more downward shadows, 6 pt widgets in 10 pt
+  windows, and slightly larger body text. No panel moved, no tab was renamed and
+  no screen was reorganised. Two of the ported colours were overruled by
+  measurement rather than copied — see *Accessibility* below.
+- **The light/dark choice is remembered.** The toolbar switch has been there for
+  a while and died with the process, because this application deliberately does
+  not use `eframe`'s own persistence. It is now written to the layout file on
+  the click, and **Help ▸ Follow the desktop's theme** puts it back to following
+  the system, which egui's two-state switch offers no way to do.
+- **The minimum window is 990 × 560, up from 880 × 560.** This is the design
+  system's one measured cost and it is paid rather than hidden. The toolbar's
+  fixed run is priced in button padding and button text size, and the ported
+  values are larger than egui's on both; measured through the real toolbar at
+  880 pt, the run's right edge moves 86.9 pt and the title block it leaves room
+  for falls from 193 pt to about 48, at which point the status line is not
+  truncated but **absent** — and the status line is where an export says "this
+  drops 9 feature(s) and the topology". The width was swept in 10 pt steps: the
+  status returns at 960 and reaches the length the old minimum used to show at
+  980. The default size is unchanged at 1280 × 840.
+- **A destructive button stays legible while it is pressed.** *Delete feature*
+  carried its red in the string, which pins one colour through every widget
+  state; with the accent behind a pressed control that measured 2.10:1 in dark
+  mode. The red now lives in the widget's resting ink, and egui's own label
+  colour takes over under the pointer.
+
+### Added
+
+- **Inter SemiBold**, SIL OFL 1.1, for headings only — window and dialog titles.
+  It is in a font family of its own and in neither text chain, on purpose: its
+  capital `I` and its lowercase `l` are the same bare stem, and this
+  application's proportional text is enzyme names like `AflII` and `BspLU11III`.
+  IBM Plex Sans keeps the body. Inter Regular is not vendored at all. The
+  archive now carries eight font licence texts, and `licences/Inter-OFL.txt` is
+  required by name by the packaging gate.
+
+### Accessibility
+
+- **Every ink the window paints is now measured against every surface it is
+  painted on**, in both themes, by a test rather than by a review. Two of the
+  ported tones did not clear WCAG AA and were moved: the light striped-row
+  colour, on which the feature editor's inverted-span sentence measured
+  **4.48:1**, and the dark one, on which the tertiary text role measured
+  4.5007:1 — passing by seven ten-thousandths, which is not a margin. Both moved
+  one notch towards their own panel, to values already in the design system.
+- The accent is a pair, because one value cannot do both jobs: `#E69F00` is
+  2.25:1 on white and unusable as light-mode ink, so light mode uses
+  `rgb(140, 97, 0)` — the same colour scaled, hue unchanged — and the two swap
+  roles with the theme. Every accent fill takes its foreground by measurement.
+
+### Fixed
+
+- **Layout tests were measuring a `Style` the binary does not install.** The
+  test context installed the shipped fonts and then left egui's default spacing
+  and text sizes in place; making it honest turned eleven green tests red at
+  once, two of them against the style 0.3.2 shipped. All eleven were traced
+  rather than re-baselined: six read the sequence grid's geometry from an
+  unsettled first frame and then clicked with it, landing up to three bases
+  away; one read a window's footer before the window had finished growing; one
+  asserted a panel width egui had stopped being able to grant; one duplicated a
+  `pl-doc` invariant through a 420 pt viewport.
 
 ## [0.3.2] - 2026-08-09
 
