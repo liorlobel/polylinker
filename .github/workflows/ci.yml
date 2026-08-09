@@ -75,7 +75,39 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # `RUSTFLAGS: -D warnings` USED TO BE HERE, AND IT SILENTLY UNDID
+  # .cargo/config.toml.
+  #
+  # Cargo does not merge the two. A `RUSTFLAGS` environment variable REPLACES
+  # `[target.<triple>] rustflags` from the config file, so setting it at workflow
+  # level discarded `-C target-feature=+crt-static` for every job here. Measured
+  # on the author's machine, building the same crate twice into separate target
+  # directories:
+  #
+  #   RUSTFLAGS unset       pl-mcp.exe imports KERNEL32.dll
+  #   RUSTFLAGS='-D warnings'  pl-mcp.exe imports VCRUNTIME140.dll AND
+  #                            api-ms-win-crt-runtime-l1-1-0.dll
+  #
+  # That is precisely the dependency `.cargo/config.toml` exists to remove: the
+  # VC++ redistributable needs administrator rights, and `docs/PLAN.md:120` names
+  # a user who does not have them. The gate step 'no C runtime redistributable is
+  # needed' has always checked for it -- but it is preconditioned on a release
+  # directory, so it was one of the seven steps that skipped when the release
+  # step died, and it had therefore NEVER RUN ON A RUNNER. The first run in which
+  # it executed, 31329432359, failed on it. Nothing was broken by that change;
+  # the check simply reached the binaries for the first time.
+  #
+  # So the variable moves down to the jobs that want it, and the `gate` job --
+  # the only one here that builds Windows binaries, and the one whose whole
+  # purpose is to check properties of the artefacts that ship -- does not set it.
+  # It is not a lint hole: `tools/ci.ps1` Step 'clippy' runs
+  # `cargo clippy --workspace --all-targets -- -D warnings`, and `-D warnings`
+  # passed to clippy denies ordinary rustc lints too, not just clippy's own.
+  # Checked: a crate whose only fault is an unused variable exits 101 under that
+  # command with RUSTFLAGS unset.
+  #
+  # `release.yml` sets no RUSTFLAGS either, and now for two reasons rather than
+  # one -- see the note in its `env:` block for the first.
 
 jobs:
   # THE GATE. `tools/ci.ps1`, whole, with its skip list checked.
@@ -283,6 +315,12 @@ jobs:
   test:
     name: test / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Safe here, and this is the job that carries the deny across `cargo build`
+    # and `cargo test` rather than only across clippy. Neither runner in this
+    # matrix is Windows -- windows-latest was removed in favour of `gate` -- so
+    # there is no `[target.x86_64-pc-windows-msvc]` block for it to replace.
+    env:
+      RUSTFLAGS: -D warnings
     strategy:
       fail-fast: false
       matrix:
@@ -498,6 +536,12 @@ jobs:
   msrv:
     name: rust-version floor
     runs-on: ubuntu-latest
+    # Deliberate, and the note on the `cargo check` step below already explains
+    # it: an old rustc warning about code that stable accepts silently is still
+    # something a reader following README-LINUX.txt will meet. Linux, so nothing
+    # to replace.
+    env:
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
 
@@ -538,16 +582,19 @@ jobs:
       # free to pick different versions would be measuring a different floor
       # from the one that ships.
       #
-      # `RUSTFLAGS: -D warnings` from the top of this file applies here too, and
-      # that is intended: an old rustc warning about code stable accepts
-      # silently is still something a reader following README-LINUX.txt will
-      # meet.
+      # `RUSTFLAGS: -D warnings` is set on this job, and that is intended: an old
+      # rustc warning about code stable accepts silently is still something a
+      # reader following README-LINUX.txt will meet. (It was at the top of this
+      # file until 2026-08-09, where it also reached the Windows `gate` job and
+      # replaced .cargo/config.toml's rustflags there -- see the `env:` block.)
       - name: cargo check on the declared floor
         run: cargo check --workspace --locked
 
   wasm:
     name: wasm32 build
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -566,6 +613,8 @@ jobs:
   oracles:
     name: differential tests and benchmark
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
