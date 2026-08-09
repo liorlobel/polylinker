@@ -91,7 +91,7 @@ jobs:
     strategy:
       # Three independent artifacts. One platform failing should not hide
       # whether the other two built.
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - os: windows-latest
