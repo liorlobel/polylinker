@@ -1425,14 +1425,20 @@ Step 'release script and its manifest' {
     # those eighteen plus polylinker.ico, which `release.ps1` began shipping that
     # day; twenty is nineteen plus LICENSE-MIT.txt, added on 2026-08-06 because
     # the repository had been offering `MIT OR Apache-2.0` while shipping only
-    # the Apache half.
-    if ($listed.Count -lt 20) { throw "only $($listed.Count) file(s) in the manifest; at least 20 are expected" }
+    # the Apache half; twenty-one is twenty plus licences/Inter-OFL.txt, added
+    # on 2026-08-09 with the heading face.
+    if ($listed.Count -lt 21) { throw "only $($listed.Count) file(s) in the manifest; at least 21 are expected" }
 
     # And the specific obligation named in NOTICE, spelled out once here because
     # this is the assertion whose failure is a licence violation rather than a
     # papercut. Counted, not listed, for the reason above.
+    #
+    # Eight since 2026-08-09. Inter's OFL is the third copy of that licence in
+    # the set and is not redundant: it is the only one of the three that
+    # declares no Reserved Font Name, which is the clause the shipped face — a
+    # PUA-stripped subset, and so a Modified Version — actually relies on.
     $lic = @($listed | Where-Object { $_ -like 'licences/*' })
-    if ($lic.Count -lt 7) { throw "only $($lic.Count) font licence text(s) shipped; NOTICE requires 7" }
+    if ($lic.Count -lt 8) { throw "only $($lic.Count) font licence text(s) shipped; NOTICE requires 8" }
     foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'LICENSE-MIT.txt', 'features/NOTICE.txt') {
         if ($listed -notcontains $required) { throw "$required did not ship" }
     }

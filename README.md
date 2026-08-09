@@ -8,11 +8,11 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 156,973 lines of Rust, 93,762 of it dependency-free (141 `.rs`
-> files under `crates/` and `bins/`), with 1,918 `#[test]` functions and a
+> crates and 158,770 lines of Rust, 93,762 of it dependency-free (141 `.rs`
+> files under `crates/` and `bins/`), with 1,934 `#[test]` functions and a
 > 70-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
-> implementation. Counted 2026-08-07, and recounted on every test run since:
+> implementation. Counted 2026-08-09, and recounted on every test run since:
 > tests are lines matching `^\s*#\[test\]`, the attribute at the start of a
 > line, so a `#[test]` written mid-sentence in a doc comment is prose rather
 > than a test; lines are `wc -l`; crates are the `members` of the root
@@ -227,6 +227,42 @@ Built and verified natively on Windows (MSVC 14.44, Rust 1.97.1) and on Linux.
   implementations of an undocumented format is two things to keep correct.
 - The wasm module declares **zero imports** — no JS glue, no `wasm-bindgen`, no
   runtime to trust.
+
+### What the desktop window looks like, and why
+
+The chrome -- colour, spacing, typography, rounding, shadow -- is a design system
+shared with the author's other `eframe` application, so the two programs read as
+one piece of software. It follows your desktop's light or dark setting by
+default; the toolbar switch overrides that and is remembered, and **Help > Follow
+the desktop's theme** hands it back.
+
+Two things about it are decisions rather than taste, and both are held by tests
+in [`bins/pl-gui/src/theme.rs`](bins/pl-gui/src/theme.rs):
+
+- **The accent is the orange from the application's own icon, and it is a
+  *pair*.** `#E69F00` is 2.25:1 on white -- half of what WCAG AA asks of text --
+  so light mode uses `rgb(140, 97, 0)`, which is the same colour scaled by 0.609
+  and therefore the same hue to a hundredth of a degree. The two swap roles with
+  the theme: the bright value goes wherever it is the lighter of the two things
+  being compared. No fill anywhere hardcodes its own foreground.
+- **Every ink is measured against every surface it is actually painted on**, in
+  both themes, and the surfaces are listed per role rather than in one blanket
+  loop, so each entry can be pointed at the line of code that draws it. Two
+  colours inherited from the other application did not clear AA here and were
+  moved rather than copied.
+
+Three typefaces are compiled in and none is downloaded: **IBM Plex Mono** for
+sequence, **IBM Plex Sans** for everything else, and **Inter SemiBold** for
+window and dialog titles only. Inter is deliberately kept out of both text
+chains -- its capital `I` and its lowercase `l` are the same bare stem, and this
+application's proportional text is enzyme names, where `AflII` and `Aflll` are
+different answers. Every vendored face ships its licence beside the binary;
+[`NOTICE`](NOTICE) records the version, the byte count and the SHA-256 of each.
+
+The window opens at 1280 x 840 and will not go below **990 x 560** -- a minimum
+set by measuring the toolbar rather than by choosing a round number: below it the
+status line, which is where an export tells you what it dropped, runs out of room
+entirely.
 
 ### A note on measuring a GUI from a script
 

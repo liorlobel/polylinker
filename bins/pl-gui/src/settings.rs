@@ -30,6 +30,50 @@ use std::path::PathBuf;
 /// Format marker, so a future change can be recognised rather than guessed at.
 const HEADER: &str = "polylinker-layout 1";
 
+/// Light, dark, or whatever the desktop is set to.
+///
+/// **THREE STATES AND NOT A BOOLEAN, because "follow the system" is a real
+/// answer and not the absence of one.** Polylinker has always painted whichever
+/// theme the desktop asked for — `App::new` builds both `Style`s and lets egui
+/// choose — and a two-state toggle would have quietly ended that the first time
+/// anybody touched it: there would be no way back, and a user who changes their
+/// desktop to dark at sunset would find one application that did not follow.
+///
+/// Spelled as words in the file rather than as `0`/`1`, unlike every other
+/// switch here. Those are booleans and a digit is the honest encoding of one;
+/// this is a choice among three, and `theme: dark` is what a person hand-editing
+/// the file would write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    /// Follow the desktop. The default, and what every release before this one
+    /// did unconditionally.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    /// The spelling in the file. The same shape [`crate::aa::TrackMode`] uses,
+    /// so both round-trip through one idiom.
+    pub fn key(self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Self> {
+        match s {
+            "system" => Some(Theme::System),
+            "light" => Some(Theme::Light),
+            "dark" => Some(Theme::Dark),
+            _ => None,
+        }
+    }
+}
+
 /// What a window remembers.
 ///
 /// The sequence view's track switches live here and not in the document. They
@@ -151,6 +195,13 @@ pub struct Layout {
     /// user chose rather than something that appeared.
     pub annotate_unreviewed: bool,
 
+    /// Which way round the window is painted. See [`Theme`].
+    ///
+    /// A VIEW preference like the track switches above: one per user, never per
+    /// file, never an `OpKind`. Choosing to look at a plasmid in the dark must
+    /// not make the document dirty.
+    pub theme: Theme,
+
     /// Resolution for the raster export, in dots per inch.
     ///
     /// Not an `Option`: unlike a printed width, a raster always has SOME
@@ -176,6 +227,7 @@ impl Default for Layout {
             annotate_on_open: true,
             annotate_fragments: false,
             annotate_unreviewed: false,
+            theme: Theme::System,
             figure_mm: None,
             figure_dpi: 300.0,
         }
@@ -316,6 +368,17 @@ pub fn parse(text: &str) -> Layout {
             // proposes is one the user never asked to be offered.
             "annotate_fragments" => out.annotate_fragments = v == "1",
             "annotate_unreviewed" => out.annotate_unreviewed = v == "1",
+            // Through `Theme::from_key`, like `aa_track` above and for the same
+            // reason: the file is hand-editable, and the only values that may
+            // reach the window are the three that name a theme. Anything else
+            // keeps the default, which is `System` — the behaviour of every
+            // release before this setting existed, so a damaged or older file
+            // lands exactly where it used to be.
+            "theme" => {
+                if let Some(t) = Theme::from_key(v) {
+                    out.theme = t;
+                }
+            }
             // Same band as every other number here, and for the same reason:
             // the file is hand-editable and a `figure_mm: nan` that reached
             // `Fit::to_width_mm` would propagate through the scale into every
@@ -383,6 +446,12 @@ pub fn render(l: Layout) -> String {
         "annotate_unreviewed: {}\n",
         u8::from(l.annotate_unreviewed)
     ));
+    // Always written, including `system`, and for `figure_dpi`'s reason rather
+    // than `figure_mm`'s: there is no "unset" theme. A window is painted one
+    // way or the other on every frame, `system` is a decision about how that is
+    // chosen and not the absence of one, and writing it is what makes the file
+    // say what the application will actually do.
+    s.push_str(&format!("theme: {}\n", l.theme.key()));
     // Written only when set, so an untouched file says nothing about figure size
     // rather than asserting the default as a choice.
     if let Some(mm) = l.figure_mm {
@@ -441,6 +510,8 @@ mod tests {
             annotate_on_open: false,
             annotate_fragments: true,
             annotate_unreviewed: true,
+            // Deliberately not the default, for the reason stated above.
+            theme: Theme::Dark,
             figure_mm: Some(89.0),
             // Deliberately not the default, so a `figure_dpi` that never
             // reached the file would fail here rather than round-trip through
@@ -525,6 +596,97 @@ mod tests {
             assert!(
                 !parse(older).update_check,
                 "{older:?} opted an existing user in without being asked"
+            );
+        }
+    }
+
+    /// The theme survives a round trip in **all three** directions.
+    ///
+    /// `the_update_check_round_trips_in_both_directions`'s argument, one state
+    /// wider. Round-tripping the two non-default values alone would be the
+    /// weaker half: `System` also round-trips through a `render` that never
+    /// wrote the key and a `parse` that never read it, because both ends land
+    /// on the default and the test passes over a field that is not stored at
+    /// all. So every state is asserted, and each is additionally required to
+    /// appear in the text by name.
+    #[test]
+    fn the_theme_choice_round_trips_in_every_direction() {
+        for t in [Theme::System, Theme::Light, Theme::Dark] {
+            let l = Layout {
+                theme: t,
+                ..Default::default()
+            };
+            let text = render(l);
+            assert!(
+                text.contains(&format!("theme: {}", t.key())),
+                "the file does not record theme={:?}:\n{text}",
+                t
+            );
+            assert_eq!(parse(&text).theme, t);
+            assert_eq!(parse(&text), l);
+        }
+        // And the three keys are distinct, so the assertions above cannot be
+        // satisfied by an enum whose variants all spell the same word.
+        let keys: std::collections::BTreeSet<_> = [Theme::System, Theme::Light, Theme::Dark]
+            .iter()
+            .map(|t| t.key())
+            .collect();
+        assert_eq!(keys.len(), 3);
+    }
+
+    /// Nothing a damaged or older file can hold moves the window off the
+    /// desktop's own theme.
+    ///
+    /// The direction is the test, as it is for `update_check`. The default here
+    /// is `System`, which is what every release before this setting did
+    /// unconditionally, so an unreadable value has to land there: a truncated
+    /// write that pinned somebody to light mode would look exactly like the
+    /// application ignoring their desktop.
+    #[test]
+    fn nothing_a_damaged_file_can_hold_pins_the_window_to_one_theme() {
+        for bad in [
+            "theme: Dark", // keys are matched exactly, not case-folded
+            "theme: DARK",
+            "theme: 1",
+            "theme: true",
+            "theme:",
+            "theme: dark light",
+            "theme: darkness",
+            "theme: auto",
+            "theme: system",
+        ] {
+            let l = parse(&format!("{HEADER}\n{bad}\n"));
+            assert_eq!(
+                l.theme,
+                Theme::System,
+                "{bad:?} took the window off the desktop's theme"
+            );
+        }
+        // Not vacuous: the two spellings that really do pin a theme still do.
+        assert_eq!(
+            parse(&format!("{HEADER}\ntheme: dark\n")).theme,
+            Theme::Dark
+        );
+        assert_eq!(
+            parse(&format!("{HEADER}\ntheme: light\n")).theme,
+            Theme::Light
+        );
+    }
+
+    /// A layout file written before the theme setting existed follows the
+    /// desktop, which is what that user already had.
+    #[test]
+    fn a_layout_file_from_before_the_theme_setting_still_follows_the_desktop() {
+        for older in [
+            "polylinker-layout 1\npanel_width: 560\nrestore_tabs: 1\n",
+            "polylinker-layout 1\n",
+            "",
+            "something else entirely\ntheme: dark\n",
+        ] {
+            assert_eq!(
+                parse(older).theme,
+                Theme::System,
+                "{older:?} changed an existing user's theme without being asked"
             );
         }
     }

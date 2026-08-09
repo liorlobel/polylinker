@@ -544,9 +544,14 @@ function Test-Payload {
             throw "$required is not in this copy. Polylinker's own licence texts and the licences its fonts are under all require their text to accompany every copy, so this is not installable."
         }
     }
+    # Eight since 2026-08-09, with Inter's OFL for the heading face. This is the
+    # LAST of the four places the count lives -- release.ps1 builds the set,
+    # ci.ps1 and check-archive.ps1 gate it, and this refuses to install a copy
+    # that lost one on the way. Raise all four together, or the installer goes
+    # on accepting what the packager stopped producing.
     $licences = @($Manifest.Files.Keys | Where-Object { $_ -like 'licences/*' })
-    if ($licences.Count -lt 7) {
-        throw ("only {0} licence text(s) in this copy; a complete one has at least 7. See NOTICE.txt." -f $licences.Count)
+    if ($licences.Count -lt 8) {
+        throw ("only {0} licence text(s) in this copy; a complete one has at least 8. See NOTICE.txt." -f $licences.Count)
     }
 
     return @{ Count = $Manifest.Files.Count; Bytes = (Get-ChildItem -LiteralPath $Dir -Recurse -File | Measure-Object -Property Length -Sum).Sum }

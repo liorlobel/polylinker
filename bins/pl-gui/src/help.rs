@@ -37,7 +37,7 @@
 //! > It said the GUI had no way to state its own font attribution from inside
 //! > itself, and should have one. It has one. `bins/pl-gui/src/help.rs` is that
 //! > page. It shows NOTICE, both of this project's own licence texts,
-//! > TRADEMARKS.md and all seven font licence texts whole, each from an
+//! > TRADEMARKS.md and all eight font licence texts whole, each from an
 //! > `include_str!` rather than a summary, so what a user reads is the
 //! > committed bytes and not a restatement of them.
 //!
@@ -50,14 +50,24 @@
 //! `the_notice_passage_this_page_quotes_is_still_in_notice` now asserts the
 //! quoted words are in the NOTICE this binary ships.
 //!
-//! Seven font licence texts are in [`PAGES`] below, under four licences that
+//! Eight font licence texts are in [`PAGES`] below, under four licences that
 //! require the notice to accompany each copy: SIL OFL 1.1, MIT, the Bitstream
 //! Vera licence reached through Hack, and UFL 1.0. This said "four of the six"
-//! until 2026-08-04, one short since Liberation arrived. They travel in `dist/`
-//! as well — `tools/release.ps1` copies all seven and refuses to ship without
-//! them, which it did not do for `Liberation-OFL.txt` until 2026-08-04. A user
-//! handed the bare `.exe` still has none of that, which is what this page is
-//! for.
+//! until 2026-08-04, one short since Liberation arrived, and "seven" until
+//! 2026-08-09, when Inter arrived with the design-system port. They travel in
+//! `dist/` as well — `tools/release.ps1` copies all eight and refuses to ship
+//! without them, which it did not do for `Liberation-OFL.txt` until
+//! 2026-08-04. A user handed the bare `.exe` still has none of that, which is
+//! what this page is for.
+//!
+//! THREE OF THE EIGHT ARE THE SAME LICENCE AND NONE OF THE THREE IS REDUNDANT.
+//! Plex, Liberation and Inter are all SIL OFL 1.1 and all three texts are shown
+//! whole, because what differs between them is the part that carries weight:
+//! the copyright lines, and the Reserved Font Names. Plex reserves "Plex",
+//! Liberation reserves four, and Inter reserves none — and that absence is the
+//! clause the shipped Inter file actually depends on, being a subset and so a
+//! Modified Version. A reader shown one OFL and told the other two are "the
+//! same licence" cannot check that.
 //!
 //! **Rendered verbatim from `include_str!`, never summarised and never
 //! restated.** Hand-writing the holders into this file would make a third copy
@@ -90,6 +100,12 @@ const PAGES: &[(&str, &str)] = &[
     ("MIT License", include_str!("../../../LICENSE-MIT")),
     ("Trademarks", include_str!("../../../TRADEMARKS.md")),
     ("IBM Plex — OFL", include_str!("../fonts/IBMPlex-OFL.txt")),
+    // A third OFL file, and shown whole like the other two rather than
+    // deduplicated against them. Same licence, a different copyright line, and
+    // — unlike Plex and Liberation — no Reserved Font Name at all, which is the
+    // clause the vendored copy of this face actually depends on. A reader who
+    // was shown only the Plex OFL could not check that.
+    ("Inter — OFL", include_str!("../fonts/Inter-OFL.txt")),
     // A different file from the Plex OFL above -- the same licence, but
     // different copyright lines and different Reserved Font Names -- so it is
     // shown separately rather than deduplicated against it. These two faces
@@ -696,9 +712,14 @@ mod tests {
     /// 10 → 11 on 2026-08-06 with the MIT text. That one is not a third party's
     /// at all — it is half of Polylinker's own offer, and the half that did not
     /// exist as a file until that day.
+    ///
+    /// 11 → 12 on 2026-08-09 with Inter's OFL, for the heading face the design
+    /// system port brought in. A third copy of the same licence, and the one
+    /// whose *differences* from the other two carry the argument: no Reserved
+    /// Font Name, which is what permits the subset that ships.
     #[test]
     fn every_notice_this_binary_owes_is_compiled_into_it() {
-        assert_eq!(PAGES.len(), 11, "a licence page was added or lost");
+        assert_eq!(PAGES.len(), 12, "a licence page was added or lost");
         for (name, text) in PAGES {
             assert!(
                 text.len() > 400,

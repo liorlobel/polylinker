@@ -16,7 +16,7 @@
         the recorded hash -- computed from the archive's own bytes, not from
         whatever happens to be on disk beside it
       * nothing is in the archive that the manifest does not list
-      * the licence set: seven texts under licences/, plus NOTICE.txt,
+      * the licence set: eight texts under licences/, plus NOTICE.txt,
         LICENSE.txt, LICENSE-MIT.txt and features/NOTICE.txt by name -- both
         halves of `MIT OR Apache-2.0`, not whichever one the packager reached
         for first
@@ -45,7 +45,7 @@
     Windows-only files -- Install-Polylinker.ps1, Install.cmd,
     README-WINDOWS.txt and polylinker.ico -- and says at its installer block
     that they are deliberately not ported. A Linux archive carrying all three
-    binaries, the Python extension and all seven font licences was rejected
+    binaries, the Python extension and all eight font licences was rejected
     for being four files short of Windows.
 
     The floor is the weaker half of the check. `RequiredMembers` below is the
@@ -243,13 +243,14 @@ if (-not $rel.ContainsKey('SHA256SUMS.txt')) {
         if ($isWinArchive) { 'polylinker.pyd' } else { 'polylinker.so' }
 
         # Licensing. These are an obligation, not a courtesy: the GUI embeds
-        # nine font files and cannot be redistributed without their texts.
+        # ten font files and cannot be redistributed without their texts.
         # LICENSE.txt is Apache-2.0 and LICENSE-MIT.txt is the other half of
         # the `MIT OR Apache-2.0` the manifest offers. Both, because an archive
         # carrying one of two alternatives is an archive that made the choice
         # for the recipient.
         'LICENSE.txt', 'LICENSE-MIT.txt', 'NOTICE.txt', 'TRADEMARKS.md', 'features/NOTICE.txt'
         'licences/Hack-MIT-and-BitstreamVera.txt', 'licences/IBMPlex-OFL.txt'
+        'licences/Inter-OFL.txt'
         'licences/Liberation-OFL.txt', 'licences/NotoEmoji-OFL.txt'
         'licences/Phosphor-MIT.txt', 'licences/Ubuntu-UFL.txt'
         'licences/emoji-icon-font-MIT.txt'
@@ -289,8 +290,10 @@ if (-not $rel.ContainsKey('SHA256SUMS.txt')) {
     # accompany every copy. An archive is a copy. Counted rather than enumerated
     # -- a list here would be a fourth copy of release.ps1's `$notices` and would
     # drift from it exactly as dist/ did, twice, in August 2026.
+    #
+    # Eight since 2026-08-09, with Inter's OFL for the heading face.
     $lic = @($listed | Where-Object { $_ -like 'licences/*' })
-    if ($lic.Count -lt 7) { Bad "only $($lic.Count) font licence text(s) in the archive; NOTICE requires 7" }
+    if ($lic.Count -lt 8) { Bad "only $($lic.Count) font licence text(s) in the archive; NOTICE requires 8" }
     foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'LICENSE-MIT.txt', 'features/NOTICE.txt') {
         if ($listed -notcontains $required) { Bad "$required is not in the archive; shipping without it is a licence violation" }
     }

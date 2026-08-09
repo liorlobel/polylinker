@@ -3367,6 +3367,68 @@ mod tests {
             "one feature added {} hairlines, not the two edges of its band",
             hair(&one) as i64 - hair(&bare) as i64
         );
+
+        // AND IT IS DRAWN IN A COLOUR THAT CAN BE SEEN, which the counts above
+        // say nothing about. A hairline in the band's own fill is still a
+        // hairline and puts the white feature straight back.
+        //
+        // Every 1 pt hairline the feature added is `Palette::line`, and the two
+        // things it has to separate are the ring background it sits on and the
+        // band it outlines — worst case a WHITE band, which is the case this
+        // whole boundary exists for.
+        //
+        // The numbers, both themes, measured here rather than asserted from
+        // memory: `line` is 4.14:1 on the dark panel and 5.66:1 against a white
+        // band; 2.85:1 on the light panel and 2.92:1 against a white band. The
+        // light pair is under the 3:1 SC 1.4.11 asks of a boundary and is left
+        // alone on purpose. `line` is the backbone's own ink, so darkening it
+        // restyles the map rather than the chrome; the design-system port did
+        // not put it there (it was 2.82 and 2.92 against the old panel, so the
+        // port moved it 0.03 in the right direction); and
+        // `the_toolbar_carets_are_visible_on_every_surface_they_are_drawn_on`
+        // uses light `line` as its NEGATIVE control, so raising it above 3:1
+        // would silently retire the only demonstration in this repository that
+        // the 3:1 check can say no. The floor here is therefore a regression
+        // guard at 2.8, and the gap to 3.0 is recorded rather than hidden.
+        // `paint` drives a `test_ctx`, which reports the dark theme, so the
+        // shapes carry the dark palette. Named rather than inferred: reading
+        // this as light silently compares against a colour nothing painted.
+        let pal = Palette::of(true);
+        for cs in &one {
+            if let Shape::Path(pp) = cs {
+                if !pp.closed && (pp.stroke.width - OUTLINE_PT).abs() < 0.01 {
+                    // The ruler's own hairlines are drawn in `faint`; only the
+                    // band edges are `line`, and those are what this counts.
+                    // `PathStroke::color` is a `ColorMode`; every stroke this
+                    // file paints is `Solid`, and a `UV` one here would be a
+                    // gradient nobody asked for.
+                    let eframe::epaint::ColorMode::Solid(c) = pp.stroke.color else {
+                        panic!("a hairline is drawn with a UV gradient");
+                    };
+                    assert!(
+                        c == pal.line || c == pal.faint,
+                        "a 1 pt hairline is {c:?}, which is neither the backbone's ink nor \
+                         the ruler's — a band edge in the band's own colour is the defect \
+                         this test exists for"
+                    );
+                }
+            }
+        }
+        for dark in [true, false] {
+            let p = Palette::of(dark);
+            let mode = if dark { "dark" } else { "light" };
+            for (what, bg) in [
+                ("the ring background", crate::theme::panel_fill(dark)),
+                ("a white band", Color32::WHITE),
+            ] {
+                let got = crate::theme::contrast(p.line, bg);
+                assert!(
+                    got >= 2.8,
+                    "the band's boundary is {got:.2}:1 against {what} in {mode} mode, so a \
+                     pale feature has no edge anybody can see"
+                );
+            }
+        }
     }
 
     /// A1/A2/A3 — the body stops where the head begins, the two extents sum to the

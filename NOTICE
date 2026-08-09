@@ -26,14 +26,16 @@ standard Apache-2.0 text, unmodified.
 Third-party components
 ================================================================================
 
-No third-party CODE is vendored into this repository. Four third-party FONT FILES
-are: two under `bins/pl-gui/fonts/` since 2026-07-30, for the interface, and two
-under `crates/pl-draw/fonts/` since 2026-08-03, for the PNG raster back end.
-They are the first four entries below. Seven third-party LICENCE TEXTS are
+No third-party CODE is vendored into this repository. Five third-party FONT FILES
+are: three under `bins/pl-gui/fonts/` -- two since 2026-07-30 and Inter SemiBold
+since 2026-08-09 -- for the interface, and two under `crates/pl-draw/fonts/`
+since 2026-08-03, for the PNG raster back end.
+They are the first five entries below. Eight third-party LICENCE TEXTS are
 committed too -- one covering the two Plex faces, one covering the two Liberation
-faces, and one for each of the five that arrive through a crate -- because four
-of those licences require their text to accompany every copy, and a path into a
-Cargo registry is not something a recipient of `dist/` has.
+faces, one covering Inter, and one for each of the five that arrive through a
+crate -- because four of those licences require their text to accompany every
+copy, and a path into a Cargo registry is not something a recipient of `dist/`
+has.
 
 One third-party TEST-VECTOR FILE is vendored as well, since 2026-08-05:
 `crates/pl-core/vectors/ed25519_wycheproof.tsv`, under "Data" below. It is
@@ -48,7 +50,7 @@ uses a face from the other directory.
 Fonts embedded in the SHIPPED BINARY
 ------------------------------------
 
-Nine faces, 3,108,048 bytes, in polylinker.exe. Four are checked in here and
+Ten faces, 3,387,456 bytes, in polylinker.exe. Five are checked in here and
 five arrive through a crate.
 
 825,168 of those bytes -- the two Liberation faces, and nothing else in this
@@ -181,6 +183,102 @@ this file is the only place that notice can travel at all.
             not. A walk that answered "reachable" for everything, or for
             nothing, fails that test, which is what makes the monospace
             verdict mean something.
+
+  Inter SemiBold           279,408 bytes   typeface 4.001 (`name` ID 5)
+    Added 2026-08-09 with the design-system port. It draws `TextStyle::Heading`
+    and nothing else: window and dialog titles. It is in a font family of its
+    own, `heading`, and in NEITHER text chain -- see "Why Inter is not the
+    proportional face" below, which is a correctness argument and not a
+    preference.
+    SIL OPEN FONT LICENSE 1.1.
+      Copyright 2016 The Inter Project Authors  (`name` ID 0)
+      https://github.com/rsms/inter
+      NO RESERVED FONT NAME. This is the one fact that makes the modification
+      below permissible, and it is the difference from Plex -- see
+      "Why this copy is a Modified Version" below.
+      The committed licence text's own copyright line reads "Copyright 2020
+      The Inter Project Authors" where the font's `name` ID 0 reads 2016. Both
+      are recorded rather than reconciled: they are what the two files say.
+    File:   bins/pl-gui/fonts/Inter-SemiBold.ttf
+    sha256  47d500c1802d3df1da6f9a489f2f0849f19ac7e0d313c5dd1a89836f68adc051
+    From:   the author's other eframe application, which vendors the same
+            design system. NOT byte-for-byte any upstream release: see below.
+            Upstream version, out of `name` ID 5: "Version 4.001;git-66647c0bb".
+    Embedding: OS/2 fsType = 0, Installable Embedding, the least restrictive
+            value the specification defines -- the same machine-readable
+            permission both Plex faces carry.
+    Layout:  IT SUBSTITUTES ON PLAIN ASCII, and more freely than either Plex
+            face. GSUB advertises `calt`, `ccmp` and `locl`; GPOS advertises
+            `kern`, `mark` and `mkmk`. The reachability walk in
+            `bins/pl-gui/src/sfnt.rs` reports ALL THREE GSUB features as
+            reachable from printable ASCII, where the same walk rules out both
+            Plex faces' `ccmp` and `locl` because every one of their rules
+            needs a combining mark this application cannot emit. Inter's do
+            not. So this face is strictly more dangerous in the Monospace
+            chain than anything else here, and the family isolation is what
+            keeps it out. Accepted for headings on the same ground as Plex
+            Sans's `liga`: no title carries a position-to-index mapping.
+            Asserted by
+            `the_heading_face_ligates_and_that_is_recorded_not_denied`.
+
+  Why this copy is a Modified Version, and why that is allowed:
+    This copy maps NO Private-Use-Area codepoints at all -- counted out of its
+    own cmap: 2,104 codepoints, none of them in U+E000..U+F8FF. (The vendoring
+    project's own script puts upstream Inter's PUA coverage at roughly 745
+    codepoints; that figure is repeated as its claim and was not re-measured
+    here, no unmodified copy being available to count.)
+    They are absent because the project it was vendored from subsets them out,
+    because there Inter
+    sits at the head of the proportional chain and would otherwise shadow the
+    Phosphor icon face, whose glyphs live in the same range. Polylinker does not
+    need that -- Phosphor is in a family of its own here and nothing can shadow
+    it -- but the stripped file is strictly safer and no unmodified copy was
+    available to vendor instead.
+    OFL 1.1 makes a subset a Modified Version, since it "deletes components of
+    the Original Version". Clause 3 then forbids a Modified Version carrying a
+    RESERVED FONT NAME, and Inter declares none -- its copyright line is bare,
+    where IBM Plex's reads `with Reserved Font Name "Plex"`. That is why the two
+    faces are treated differently in this file: neither Plex face may be
+    subsetted without a rename, and this one may keep its name. Both licence
+    texts are committed, so a recipient can check the claim.
+    THE CONSEQUENCE FOR PROVENANCE IS THAT THE SHA256 ABOVE MATCHES NOTHING
+    UPSTREAM. It pins these bytes against silent replacement and nothing more,
+    which is the same position Phosphor is in below and is stated here for the
+    same reason. To reproduce the file: take Inter 4.001 Regular's SemiBold
+    weight and run fontTools' Subsetter over it keeping every codepoint outside
+    U+E000-U+F8FF, with all OpenType layout features, glyph names and the full
+    name table retained.
+
+  Why Inter is not the proportional face, only the heading one:
+    The design system this was ported from puts Inter Regular at the head of the
+    proportional chain. That half was refused, and the reason is measurable
+    rather than aesthetic. Read out of the `glyf` bounding boxes, in em:
+
+               capital I   lowercase l   ratio
+      Plex Sans   0.2800       0.1560     1.79
+      Inter Reg   0.0928       0.0879     1.06
+      Inter SemiB 0.1304       0.1270     1.03
+
+    Inter draws both as the same bare vertical stroke. This application's
+    proportional text is enzyme names -- `HindIII`, `SfiI`, `AflII`,
+    `BspLU11III` -- and each has a differently-named lookalike spelled with
+    `l`. Mis-reading one is a wrong digest, so this is legibility as
+    correctness, and it is the same defect Plex Sans was vendored to fix in the
+    first place: Ubuntu Light's `I` was a bare stem too.
+    Inter Regular is therefore NOT vendored at all. With Plex Sans keeping the
+    body it would be 278 KB of face that draws nothing, plus a licence
+    obligation for it.
+    Asserted by `the_proportional_face_tells_a_capital_i_from_a_lowercase_l`,
+    which measures the rasterised ink through the real font atlas and holds the
+    ratio at 1.4 -- clear of both faces by a wide margin in either direction.
+
+  Licence text for Inter, committed and shipped:
+    bins/pl-gui/fonts/Inter-OFL.txt            4,470 bytes
+    sha256  f14f2b95a38f4f20cad4d27f7710593f37534c046641be0348da7c28365f4e39
+    A DIFFERENT file from the Plex and Liberation OFLs beside it -- the same
+    licence, a different copyright line, and no Reserved Font Name where those
+    two have one -- so it is committed separately rather than deduplicated
+    against either.
 
   Liberation Sans          410,712 bytes   typeface 2.1.5 (`name` ID 5)
   Liberation Sans Bold     414,456 bytes   typeface 2.1.5 (`name` ID 5)
@@ -563,13 +661,13 @@ HOW THE OBLIGATION TRAVELS, and what is still owed.
       copy exactly as it does to the app's. That sentence is the reasoning path
       by which `tools/release.ps1` shipped six font licence texts for seven
       faces and none for Liberation; the array was corrected on 2026-08-04 and
-      now carries all seven.
-    - It put seven faces in polylinker.exe. Nine are there, 3,108,048 bytes;
+      now carries all eight.
+    - It put seven faces in polylinker.exe. Ten are there, 3,387,456 bytes;
       see the head of this section.
     - It said the GUI had no way to state its own font attribution from inside
       itself, and should have one. It has one. `bins/pl-gui/src/help.rs` is
       that page. It shows NOTICE, both of this project's own licence texts,
-      TRADEMARKS.md and all seven font licence texts whole, each from an
+      TRADEMARKS.md and all eight font licence texts whole, each from an
       `include_str!` rather than a summary, so what a user reads is the
       committed bytes and not a restatement of them.
 
