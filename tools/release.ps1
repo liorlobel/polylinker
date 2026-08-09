@@ -426,7 +426,7 @@ $notices = @(
     # forbid from keeping its name. A recipient handed only the Plex OFL cannot
     # check the one claim that makes the file lawful. See NOTICE.
     @{ From = 'bins/pl-gui/fonts/Inter-OFL.txt'
-       To   = 'licences/Inter-OFL.txt' }                   # Inter SemiBold
+       To   = 'Inter-OFL.txt' }                            # Inter SemiBold
     # THE FIRST ENTRY THAT IS NOT ABOUT A FONT, and it was missing for the same
     # reason the one above it was: the array had become a list of licence texts
     # for typefaces, so a data obligation had no shape that fitted it. All eleven
