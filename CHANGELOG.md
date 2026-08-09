@@ -25,6 +25,14 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] - 2026-08-09
+
+The minor number moves rather than the patch because the window looks
+different on launch, the minimum window size changed, and a font was added
+to the archive. Nothing about a file Polylinker reads or writes changed.
+
 ### Changed
 
 - **The desktop window has a design system.** Colour, spacing, typography,

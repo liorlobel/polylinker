@@ -83,8 +83,17 @@ honesty — see below.
 One tag. Everything else follows from it.
 
 ```sh
-# 1. Bump the version. There is exactly one copy of it.
-#    Cargo.toml, [workspace.package] version = "0.2.0"
+# 1. Bump the version. There are SEVENTEEN copies of it, all in Cargo.toml:
+#    [workspace.package] version, plus a version= pin on each of the sixteen
+#    intra-workspace path dependencies. This line used to read "there is
+#    exactly one copy of it", which is what a reader would conclude from the
+#    [workspace.package] key alone -- and following it literally leaves a tree
+#    where step 4's tag check passes while every crate still demands the old
+#    version. Change them together, then let the lockfile follow:
+sed -i 's/version = "0.3.2"/version = "0.4.0"/g' Cargo.toml
+cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
+#    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
+#    are the two files a tag does not update and nothing checks.
 
 # 2. Green gate, locally, on the commit you are about to tag.
 cargo fmt --all --check
