@@ -222,11 +222,28 @@ jobs:
           $probe = Join-Path $env:RUNNER_TEMP 'exit-probe.ps1'
           Set-Content -LiteralPath $probe -Value 'exit 7'
           pwsh -NoProfile -File $probe
-          if ($LASTEXITCODE -ne 7) {
-            Write-Host "::error::a script that exited 7 came back as $LASTEXITCODE; the gate's failures would not reach this job"
+          $code = $LASTEXITCODE
+          # CAPTURE, THEN CLEAR, THEN JUDGE -- and leave by an explicit exit.
+          #
+          # The first version of this step read $LASTEXITCODE directly and ended
+          # after Write-Host. It failed on run 31325299019 with its own success
+          # message in the log: `shell: pwsh` runs the block and then appends
+          # `exit $LASTEXITCODE`, so the probe's 7 was still sitting there when
+          # the step ended. The step therefore went red BECAUSE the propagation
+          # it exists to verify had worked -- a control that fails on success,
+          # which is the same species of useless as one that cannot fail at all.
+          #
+          # Clearing the variable and ending with an explicit `exit` makes this
+          # step's result depend on its own judgement rather than on how the
+          # shell derives an exit code from a variable the step is deliberately
+          # leaving dirty.
+          $global:LASTEXITCODE = 0
+          if ($code -ne 7) {
+            Write-Host "::error::a script that exited 7 came back as $code; the gate's failures would not reach this job"
             exit 1
           }
           Write-Host 'a script exiting 7 arrives as 7'
+          exit 0
 
       - name: A step that exits non-zero is a failed step  (control 2 of 2)
         id: nonzero-exit
