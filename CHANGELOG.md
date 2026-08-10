@@ -181,6 +181,24 @@ record whose feature table is SnapGene's Common Feature naming throughout with n
 `label:` tell in it. That is the blind spot at the top of this entry, biting a
 real row — caught by a rule that names no vendor and reads no `/note`.
 
+**On review, that blind spot is wider than the sentence above admits, and the
+one row it was said to spare is not spared.** `PLF:4006`, which ships, has
+exactly two corroborating submissions and **both** carry a SnapGene fingerprint
+the screen passes. `LC897329.1` is the naming case again. `OP697991.1` is
+sharper and was measured on 2026-08-10: four of its `/note`s — over the CMV
+enhancer, the CMV promoter, the ColE1 origin and the AmpR CDS — have a
+descriptive half **byte-identical** to the corresponding `/note` in
+`MH325107.1`, the record the screen does flag, in the same two-part shape ENA
+emits when it folds a `/label`, differing by the token `label: ` and nothing
+else. Neither observation refuses the row — an extent two independent
+submissions publish is attested whatever tool drew it — but "2 of 3 independent
+submissions" must not be read as "2 of 3 SnapGene-free submissions".
+`features/PROPOSED.md` and `features/SOURCING.md` §0.6 now say so, and §0.6 also
+now separates which of its four rejection grounds a reader can re-derive from
+this tree (point 1, re-measured against the pinned artifact, along with §0.5's
+figures) from which they cannot (points 3 and 4, a one-off 481-record survey
+whose record list was not preserved).
+
 **This rule is not a taint check and must not be described as one.** It cannot
 show that an extent came from SnapGene. It answers the narrower question that is
 answerable: did our own evidence force this extent, or is it one lab's opinion?

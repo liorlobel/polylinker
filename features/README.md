@@ -439,7 +439,14 @@ them are about this repository's own controls:
    κ ≤ 0.067. `PLF:4005` is the case in the open: the CMV promoter's only exact
    corroboration was `LC897329`, whose feature table is SnapGene's Common Feature
    naming throughout with no `label:` in it. It was the corroboration rule above,
-   which names no vendor at all, that refused the row. And every stage now
+   which names no vendor at all, that refused the row. **`PLF:4006` is the case
+   that is NOT in the open**, and it ships: *both* of its two corroborating
+   submissions carry a fingerprint the tell cannot see — `LC897329` again, and
+   `OP697991`, four of whose `/note`s have a descriptive half byte-identical to
+   `MH325107`'s, differing by the `label: ` token the screen matches on and by
+   nothing else (measured 2026-08-10). The row is still attested by two
+   independent submissions, which is what its `notes` claim; what it is not is
+   two submissions this screen has cleared. And every stage now
    declares what it does about this route in `INSDC_POSTURE`, with
    `features/build/insdc_posture.py` refusing one that declares nothing;
    `SOURCING.md` §0.6 is the adjudication.
