@@ -1321,7 +1321,14 @@ Step 'MCP server' {
 Step 'gel calibration spline vs SciPy' {
     cargo build --release -p pl-gel --example dump_spline 2>&1 | Out-Null
     python reference/python/tests/xcheck_spline.py "target/release/examples/dump_spline$exe"
-} { HavePy 'scipy' }
+} {
+    # INJECTION (do not merge). This step is portable and runs on all three
+    # platforms on a clean tree. Labelling it Windows-only is the cheat the
+    # skip discipline claims cannot be got away with: it makes the step stop
+    # running on two of the three legs while every leg still reports a
+    # declared, in-vocabulary, platform-consistent reason.
+    WindowsOnly { HavePy 'scipy' }
+}
 # The rendered chromatogram agrees with the file it came from.
 #
 # Nothing external renders ABIF, so the SVG is read back and asserted to have
