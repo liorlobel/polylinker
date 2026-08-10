@@ -10,44 +10,51 @@ name: CI
 # somewhere. Everything below runs on synthetic or committed data.
 #
 # ---------------------------------------------------------------------------
-# HOW THE TWO GATE FILES DIVIDE THE WORK, since 2026-08-09.
+# HOW THE TWO GATE FILES DIVIDE THE WORK, since 2026-08-09 and revised
+# 2026-08-10.
 #
-# `tools/ci.ps1` is 70 steps and `docs/RELEASING.md` names it as the thing to
-# run before tagging. Until today NO WORKFLOW INVOKED IT. It appeared in this
-# file six times and every one of them was on a comment line. It had been
+# `tools/ci.ps1` is 72 steps and `docs/RELEASING.md` names it as the thing to
+# run before tagging. Until 2026-08-09 NO WORKFLOW INVOKED IT. It appeared in
+# this file six times and every one of them was on a comment line. It had been
 # failing on a clean tree since v0.1.2 and six releases were tagged with it red,
 # because the only machine running it was the author's and the only evidence
 # either way was a terminal nobody was looking at.
 #
-# So the `gate` job below runs it, on windows-latest, with everything a runner
-# can be given installed first. The division that leaves is not "duplicate
+# It then ran on windows-latest only, which made "the gate passed" mean "passed
+# on Windows" — and no sentence anywhere said so. Since 2026-08-10 the `gate`
+# job is a three-runner matrix. The division that leaves is not "duplicate
 # everything" and not "delete the second list" — it is this:
 #
-#   * `gate` (windows-latest) is the authority. It is the list `RELEASING.md`
-#     names, run whole, with its skips asserted against a committed list.
-#   * `test` runs on ubuntu-latest and macos-latest ONLY. Those are the two
-#     platforms `tools/ci.ps1` cannot run on at all — it hardcodes
-#     `target/release/pl.exe` at twenty-one call sites, reads PE resource
-#     directories, drives `msiexec` and `HKCU`, and uses `$env:TEMP`, which is
-#     absent rather than empty off Windows. Its windows-latest leg WAS deleted,
-#     because every step in it is run by `gate` on the same runner image, and
-#     that is duplication in the strict sense rather than platform coverage.
+#   * `gate` (windows-latest, ubuntu-latest, macos-latest) is the authority. It
+#     is the list `RELEASING.md` names, run whole, on all three platforms, with
+#     its skips checked three ways: every skip must carry a reason its own
+#     precondition declared, a platform reason must agree with the platform, and
+#     the corpus skips must be exactly `.github/ci-expected-skips.txt`.
+#   * `reconcile` compares the three legs. It is the only place a step that
+#     skipped on all three can be seen, and the only place a step deleted from
+#     one leg at file level can be seen.
+#   * `test` runs on ubuntu-latest and macos-latest, and is NOT redundant with
+#     the gate now that the gate runs there too: every cargo invocation in it
+#     passes `--locked`, and no cargo invocation in the gate does, so a
+#     rewritten lockfile is a red build here and nowhere else. It also runs
+#     `pl-draw/tests/memory.rs` and `pl-features/tests/schema_pin.rs`, which no
+#     step in the gate runs. Its windows-latest leg WAS deleted in 2026-08-09,
+#     which cost `--locked` on Windows; lock drift is a property of the tree and
+#     not of the operating system, so two platforms is enough for it.
 #   * `msrv`, `wasm` and `oracles` stay. Each holds something the gate does not:
 #     the toolchain floor, the wasm module driven against a Linux `pl`, and four
 #     checks with no twin in the gate at all — the taint gate, the content sweep
 #     behind it, the offline end-to-end features build, and the GenBank
 #     round-trip through Biopython. The rest of `oracles` is a second run of the
-#     differential checks on a different OS and a different rendering stack,
-#     which for a rasteriser is coverage and not repetition.
+#     differential checks under a different Python and a different rendering
+#     stack, which for a rasteriser is coverage and not repetition.
 #
-# WHAT DELETING THE WINDOWS LEG COST, stated rather than glossed: those steps
-# passed `--locked` and the gate does not. Lock drift is a property of the tree
-# and not of the operating system, and `test` on both remaining runners plus
-# `msrv` and `wasm` still pass `--locked` on every cargo invocation, so a
-# rewritten lockfile is still a red build on every push. `pl-draw/tests/
-# memory.rs` and `pl-features/tests/schema_pin.rs` are run by `test` and by no
-# step in the gate; both are arithmetic and file comparison with no OS in them,
-# and both still run on two platforms.
+# WHAT THE MATRIX MUST NOT COST, stated up front because it is the whole risk:
+# the Windows leg is what has stood between a mistake and a published release,
+# and a port that turns one of its steps into a skip, loosens an assertion so it
+# holds everywhere, or makes an unconditional check conditional would be worse
+# than not porting at all. Seven steps are Windows-only and say so in their own
+# preconditions; every other step that ran on Windows before still runs there.
 #
 # `tools/ci.ps1` step 'every integration suite is run by a gate' is what keeps
 # that division honest: it reads the tree, and every `tests/*.rs` target under
@@ -110,23 +117,42 @@ env:
   # one -- see the note in its `env:` block for the first.
 
 jobs:
-  # THE GATE. `tools/ci.ps1`, whole, with its skip list checked.
+  # THE GATE. `tools/ci.ps1`, whole, with its skips checked.
   #
-  # windows-latest and not a matrix, because the script is a Windows script.
-  # It hardcodes `target/release/pl.exe` at twenty-one call sites and
-  # `target/release/examples/dump_spline.exe` at one; it reads PE resource
-  # directories out of the built binaries; it installs and uninstalls an MSI
-  # with `msiexec` and then reads `HKCU`; and it passes `$env:TEMP` to
-  # `Join-Path`, which off Windows is a null argument and a terminating error --
-  # the exact failure that killed both non-Windows legs of the first release.
-  # Making it portable is real work and is not this change. What this change
-  # fixes is that it ran nowhere, and a matrix here would be a fresh claim that
-  # nobody had run.
+  # A MATRIX SINCE 2026-08-10, and the sentence that used to be here is worth
+  # keeping in view: "windows-latest and not a matrix, because the script is a
+  # Windows script. It hardcodes `target/release/pl.exe` at twenty-one call
+  # sites ... reads PE resource directories ... drives `msiexec` and `HKCU` ...
+  # and passes `$env:TEMP` to `Join-Path`, which off Windows is a null argument
+  # and a terminating error." Every symptom in it was real; the count was not,
+  # and that is itself the lesson — the actual figures at the time of the port
+  # were 25 `pl.exe` sites in 18 steps and 17 unguarded `$env:TEMP` uses, both
+  # measured rather than remembered.
   #
-  # 70 steps, of which 65 must run here. See `.github/ci-expected-skips.txt`.
+  # Every one of those has now been fixed by SPELLING rather than by skipping:
+  # an `$exe` suffix, `[IO.Path]::GetTempPath()`, a three-way `.pyd`/`.so`/
+  # `.dylib` table, `tar$exe`. Seven steps genuinely cannot run off Windows --
+  # PE resources, an 8.3 short name, the registry, msiexec -- and each of those
+  # says so in its own precondition, where it is checked against `$IsWindows`
+  # rather than believed.
+  #
+  # WHAT THE MATRIX MUST NOT DO IS WEAKEN THE WINDOWS LEG, which is the leg that
+  # has been standing between a mistake and a published release since
+  # 2026-08-09. A weaker check that runs in three places is not progress over a
+  # strong one that runs in one. `fail-fast: false`, so a Linux failure does not
+  # cancel Windows and hide what it would have said.
+  #
+  # 72 steps. Five skip everywhere for want of a corpus
+  # (`.github/ci-expected-skips.txt`); seven more skip off Windows and say why.
+  # The `reconcile` job below is what checks the three legs against each other,
+  # and it is the only place a step that skipped on ALL THREE can be seen.
   gate:
-    name: the gate (tools/ci.ps1)
-    runs-on: windows-latest
+    name: the gate (tools/ci.ps1) / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     # The gate builds the workspace in release, builds it again for a dozen
     # integration targets, renders rasters, and installs an MSI twice. Four
     # minutes on a warm developer machine with everything already compiled is
@@ -170,7 +196,10 @@ jobs:
       # until now they had never executed in CI on any platform.
       #
       # All eleven have Windows wheels; verified on the author's machine, where
-      # every one of them imports and no step gated on them skipped.
+      # every one of them imports and no step gated on them skipped. They are
+      # installed identically on all three legs, deliberately: a missing wheel
+      # on one platform is a step that skips with no declared reason there, and
+      # -ExpectedSkips turns that into a red build rather than a grey line.
       - name: Install the oracles
         run: pip install biopython seguid pydna pillow fonttools resvg-py numpy scipy pymupdf pypdf PyYAML
 
@@ -196,7 +225,15 @@ jobs:
       # the gate step builds an MSI with `tools/build-msi.ps1` and the release
       # builds it with the same script, and an installer that changes shape
       # between the two would make the gate's answer worthless.
+      #
+      # WINDOWS ONLY, and this is the one conditional install in the job. The
+      # two MSI steps declare 'not windows' off Windows and skip there whatever
+      # is installed, so a `dotnet tool install` on Linux would be three minutes
+      # buying nothing. Every other install above is unconditional precisely so
+      # that a skip off Windows can only mean the platform and never the
+      # provisioning.
       - name: Install the WiX Toolset
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           dotnet tool install --global wix --version 5.0.2
@@ -216,7 +253,13 @@ jobs:
       # This is `tools/release.ps1` with its default `-Out dist`, which is the
       # same invocation release.yml uses, so nothing here is a CI-only path.
       # `/dist/` is gitignored, so the working tree stays clean underneath it.
+      #
+      # Windows only, for the same reason as WiX above: both steps that read it
+      # declare 'not windows' elsewhere. It stays a separate step rather than
+      # being folded into the gate, because a failure here should read as a red
+      # provisioning step and not as a red gate.
       - name: Assemble dist/, which the two MSI steps read
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           ./tools/release.ps1 -Out dist -Quiet
@@ -295,11 +338,16 @@ jobs:
 
       # THE GATE, and the assertion that it ran.
       #
-      # -ExpectedSkips makes the skip list a checked claim instead of grey text
-      # nobody reads: the run fails if a step skipped that is not on the list,
-      # if a step on the list did not skip, or if the list names a step this
-      # gate no longer has. Set equality, not a count -- a count of five is
+      # -ExpectedSkips turns three claims into checked ones rather than grey
+      # text nobody reads: every skip must carry a reason its own precondition
+      # declared, a platform reason must agree with the platform, and the steps
+      # that skipped for want of a corpus must be exactly the committed list --
+      # set equality in both directions, not a count, because a count of five is
       # satisfied by the wrong five skipping.
+      #
+      # -Ledger writes what this leg did, for the `reconcile` job. It is written
+      # even when the gate fails, which is why it is a separate `if: always()`
+      # upload step below rather than a second command here.
       #
       # `exit $LASTEXITCODE` explicitly. GitHub appends its own
       # `if (Test-Path variable:\LASTEXITCODE) { exit $LASTEXITCODE }` to a pwsh
@@ -309,7 +357,71 @@ jobs:
       - name: The gate
         shell: pwsh
         run: |
-          pwsh -NoProfile -File tools/ci.ps1 -ExpectedSkips "$env:GITHUB_WORKSPACE/.github/ci-expected-skips.txt"
+          pwsh -NoProfile -File tools/ci.ps1 `
+            -ExpectedSkips "$env:GITHUB_WORKSPACE/.github/ci-expected-skips.txt" `
+            -Ledger "$env:GITHUB_WORKSPACE/ledger.tsv"
+          exit $LASTEXITCODE
+
+      # ALWAYS, because a leg that went red still has a true record of what it
+      # ran -- and "did this step run anywhere" is exactly the question a failed
+      # leg can still answer. Without `always()` the reconciler would only ever
+      # see runs where nothing was wrong, which is the population in which it
+      # has nothing to find.
+      - name: Upload this leg's ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-${{ matrix.os }}
+          path: ledger.tsv
+          if-no-files-found: error
+
+  # THE THREE LEGS, AGAINST EACH OTHER.
+  #
+  # Each leg checks its own skips and cannot see the others. The case that only
+  # exists once the gate runs in three places is a step that skipped on ALL
+  # THREE -- 'not windows' on two legs is only honest if the third one ran it --
+  # and no leg can tell. `tools/reconcile-ledgers.ps1` is where that is checked,
+  # along with the three legs carrying the same step names in the same order,
+  # which is what catches a step made conditional at file level on one platform.
+  #
+  # `needs: gate` is for ordering only, and the condition is `!cancelled()`
+  # rather than `always()`: a red leg still uploads a true ledger and a Windows
+  # failure must not stop the reconciler reporting that a step ran nowhere, but
+  # a CANCELLED run has no ledgers to compare and would fail here for a reason
+  # that is not about the tree. The job has its own self-test, run first,
+  # because a reconciler whose parser stopped matching reports every push clean.
+  reconcile:
+    name: the three legs agree about what ran
+    runs-on: ubuntu-latest
+    needs: gate
+    if: ${{ !cancelled() }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The reconciler can fail
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/reconcile-ledgers.ps1 -SelfTest
+          exit $LASTEXITCODE
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ledger-*
+          path: ledgers
+
+      # `-LedgerDir`, NOT `-Ledger $found`. Under `pwsh -File` an array
+      # parameter binds only its first argument and PowerShell then rejects the
+      # rest with "a positional parameter cannot be found" -- measured against
+      # three real ledgers. `pwsh -File` is deliberate here, because it is the
+      # exit-code path the gate job's own two control steps prove, so the
+      # directory form exists in the script rather than a workaround existing
+      # here. The script counts the files it found and says so if there are not
+      # three.
+      - name: Reconcile
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/reconcile-ledgers.ps1 -LedgerDir ledgers
           exit $LASTEXITCODE
 
   test:

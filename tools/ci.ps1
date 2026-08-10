@@ -4,32 +4,55 @@
 
 .DESCRIPTION
     This is THE gate. `.github/workflows/ci.yml` runs this file on
-    windows-latest; running it here runs the same list, so "CI is green" is
-    something you can know before you push rather than after.
+    windows-latest, ubuntu-latest and macos-latest; running it here runs the
+    same list, so "CI is green" is something you can know before you push
+    rather than after.
 
     That was not true until 2026-08-09. This script's own header used to say
     "the repository has no remote yet, so GitHub Actions has never executed",
     and the sentence outlived the fact by six releases: no workflow invoked it,
     it failed on a clean tree from v0.1.2, and nothing anywhere reported that.
+    It then ran on windows-latest ONLY, which made "the gate passed" mean
+    "passed on Windows" -- and the sentence in this header did not say so.
 
     Steps that need something the machine may not have -- a corpus, Python
-    oracles, a wasm target -- are SKIPPED with a reason rather than failing.
-    A gate that fails for missing optional tooling teaches people to ignore it.
-    That leniency is right for a workstation and dangerous on a runner, which
-    is what -ExpectedSkips is for.
+    oracles, a wasm target -- are SKIPPED rather than failing. A gate that
+    fails for missing optional tooling teaches people to ignore it. That
+    leniency is right for a workstation and dangerous on a runner, which is
+    what -ExpectedSkips is for.
+
+    SEVEN STEPS CANNOT RUN OFF WINDOWS AT ALL, because their subject is a Win32
+    artefact: a PE resource directory, an 8.3 short name, the registry,
+    msiexec. Each declares it in its own precondition, as `WindowsOnly { ... }`
+    -- the one helper that owns the string 'not windows' -- and that string is
+    checked against $IsWindows rather than believed. See 'THE SKIP DISCIPLINE'
+    at the foot of this file. There is no second list of which steps are
+    Windows-only: the preconditions are the list.
 
 .PARAMETER Corpus
     Directory of real .dna / .gb files. Corpus tests skip without it, exactly
     as they do in CI, where the corpus cannot legally exist.
 
 .PARAMETER ExpectedSkips
-    Path to a file naming the steps that are allowed to SKIP on this machine,
-    one per line, `#` to end of line being a comment. The run FAILS on any
-    difference in either direction: a step that skipped and is not named, and a
-    step that is named and did not skip. A name matching no step in this gate
-    also fails, so a renamed step cannot drift off the list unnoticed.
+    Path to a file naming the steps that skip HERE FOR WANT OF A CORPUS, one
+    per line, `#` to end of line being a comment. The run FAILS on any
+    difference in either direction: a step that skipped for want of a corpus
+    and is not named, and a step that is named and did not skip for that
+    reason. A name matching no step in this gate also fails, so a renamed step
+    cannot drift off the list unnoticed.
 
     Set equality, not a count: a count is satisfied by the wrong step skipping.
+
+    Passing this switch also turns on the two rules that need no list at all:
+    every skip must carry a declared reason, and a platform reason must agree
+    with the platform. See the foot of this file.
+
+.PARAMETER Ledger
+    Where to write a tab-separated record of every step and what became of it:
+    name, `ran` or `skipped`, and the reason. `.github/workflows/ci.yml`
+    collects one of these from each of the three runners and
+    `tools/reconcile-ledgers.ps1` compares them, which is the only place a step
+    that skipped on ALL THREE platforms can be seen.
 
 .EXAMPLE
     .\tools\ci.ps1
@@ -37,17 +60,48 @@
     .\tools\ci.ps1 -ExpectedSkips .github/ci-expected-skips.txt
 #>
 [CmdletBinding()]
-param([string]$Corpus, [string]$ExpectedSkips)
+param([string]$Corpus, [string]$ExpectedSkips, [string]$Ledger)
 
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
+
+# THE PLATFORM, ONCE, IN THE SAME THREE LINES `tools/release.ps1` USES.
+#
+# `$IsWindows`, `$IsLinux` and `$IsMacOS` are pwsh 7 automatic variables and do
+# not exist in Windows PowerShell 5.1 at all -- where they read as $null. 5.1
+# only runs on Windows, so $null means Windows.
+#
+# `$exe` and `$tmp` are the two spellings that made this file Windows-only.
+# `target/release/pl.exe` appeared at twenty-five call sites and
+# `[IO.Path]::GetTempPath()` -- which is $TMPDIR off Windows, %TEMP% on it, and
+# never absent -- was already used at six while `$env:TEMP` was used at
+# seventeen more. `$env:TEMP` off Windows is ABSENT, not empty, and
+# `Join-Path $null x` is a terminating error: the exact failure that killed
+# both non-Windows legs of the first release.
+$onWindows = if ($null -eq $IsWindows) { $true } else { [bool]$IsWindows }
+$onMac     = [bool]$IsMacOS
+$onLinux   = [bool]$IsLinux
+$exe       = if ($onWindows) { '.exe' } else { '' }
+$tmp       = [System.IO.Path]::GetTempPath()
+# The release binaries, by the name they carry on this platform. Named once so
+# that a step reads `& $pl find ...` and cannot reintroduce the suffix.
+$pl        = "target/release/pl$exe"
+
 # Guarded for the reason given at length in the step named
-# 'the cross-platform scripts touch no Windows-only environment variable
+# 'the cross-platform scripts touch no environment variable
 # unguarded' near the end of this file: off Windows this variable is absent, not
 # empty, and Join-Path treats a null -Path as a terminating error. The unguarded
 # twin of these two lines killed both non-Windows legs of the first release.
 if ($env:USERPROFILE) {
     $cargoBin = Join-Path $env:USERPROFILE '.cargo/bin'
+    if (Test-Path $cargoBin) { $env:PATH = "$cargoBin$([IO.Path]::PathSeparator)$env:PATH" }
+}
+# And the Unix half of the same line, which had no twin at all: cargo's default
+# home is ~/.cargo on Linux and macOS and $env:USERPROFILE does not exist there,
+# so a runner that had not put cargo on PATH would have failed at `cargo` with
+# no explanation. $HOME is absent on Windows, hence the guard on this one too.
+if (-not $onWindows -and $env:HOME) {
+    $cargoBin = Join-Path $env:HOME '.cargo/bin'
     if (Test-Path $cargoBin) { $env:PATH = "$cargoBin$([IO.Path]::PathSeparator)$env:PATH" }
 }
 
@@ -63,16 +117,106 @@ $script:skipped = @()
 # rather than silence: a step renamed in this file while the list kept the old
 # spelling would otherwise look exactly like a step that stopped skipping.
 $script:steps = @()
+# One row per step: name, ran-or-skipped, and the reason a skip gave for
+# itself. This is what -Ledger writes and what the cross-platform reconciler
+# reads; it is also what the rules at the foot of this file are checked over.
+#
+# NOT `$script:ledger`. PowerShell variable names are case-insensitive, so that
+# spelling IS the -Ledger parameter: the first version of this line overwrote
+# the path it had been given with an array of step records, and the write at the
+# foot of the file died in Split-Path on a six-kilobyte "directory name".
+$script:stepLedger = @()
 $started = Get-Date
+
+# THE REASONS A STEP MAY GIVE FOR NOT RUNNING, and there are exactly two.
+#
+# A precondition returns $true to run, or a string to skip WITH A REASON, or
+# $false to skip with none. The string is not a label somebody attached to a
+# step: it is the return value of the test that failed, so 'not windows' cannot
+# be produced by anything except `-not $onWindows`. To write it falsely you have
+# to hand-type `WindowsOnly` into a scriptblock sitting under the step's own
+# comment, in a reviewed diff.
+#
+# AND THAT REVIEWED DIFF IS THE WHOLE OF THE DEFENCE, which this comment used to
+# deny. It said such an edit would additionally have "to survive X2 in
+# tools/reconcile-ledgers.ps1, which requires every step to have RUN on at least
+# one platform" -- true as a sentence and worthless as an obstacle, because a
+# portable step relabelled Windows-only GOES ON RUNNING ON WINDOWS and X2 asks
+# for nothing more than that. Measured, not reasoned: wrapping the precondition
+# of 'gel calibration spline vs SciPy' in `WindowsOnly` and reconciling the three
+# real ledgers of run 31359657821 with that one row changed on the Linux and
+# macOS legs gives "reconciled 3 legs, 72 steps each; every step ran on at least
+# one platform", exit 0. L1 does not fire (a reason was declared), L2 does not
+# (the platform agrees), L3 does not (it is not a corpus skip), and X1, X3 and X4
+# do not either. Two legs of coverage disappear and every check reports clean.
+#
+# So the honest statement of the boundary is this: the guard catches a step that
+# stops running for a reason NOBODY DECLARED, on any platform, which is the
+# failure that actually happens -- a wheel that stops building, a `pip install`
+# line edited in a hurry. It does not catch a human deciding to call a portable
+# step Windows-only. Nothing here can, without a second list of which steps ought
+# to run where, and `.github/ci-expected-skips.txt` sets out at length why that
+# list would be worse than the disease. What closes it is that `WindowsOnly` is
+# one identifier, greppable in seven places, and this file is reviewed.
+#
+# $false is deliberately still allowed and deliberately still fatal under
+# -ExpectedSkips: a missing SciPy, a missing node, a missing WiX has no entry
+# here, so on a runner it is red. That is exactly what the committed skip list
+# used to buy, and it now costs no list.
+$script:ReasonVocabulary = @('not windows', 'corpus')
+
+# THE ONLY PLACE THE STRING 'not windows' IS WRITTEN, and that is the point.
+# Seven steps are Windows-only; if each spelled the literal itself there would
+# be seven places to hand-write a lie, and the claim above -- that the reason is
+# the return value of the test that failed -- would be seven times weaker.
+# `$onWindows` is resolved at call time from script scope, so the string and the
+# platform test are one expression in one place and cannot drift apart.
+#
+# `-AndAlso` is the rest of the precondition and is evaluated ONLY on Windows.
+# That ordering is deliberate: off Windows the answer is already settled, and a
+# `$script:release` that was never built, or a `wix` that is not installed, must
+# not be able to turn a platform skip into an undeclared one.
+function WindowsOnly {
+    param([scriptblock]$AndAlso)
+    if (-not $onWindows) { return 'not windows' }
+    if (-not $AndAlso) { return $true }
+    $v = & $AndAlso
+    if ($v -is [System.Array]) { $v = if ($v.Count) { $v[-1] } else { $false } }
+    return [bool]$v
+}
+$script:haveCorpus = (-not [string]::IsNullOrWhiteSpace($Corpus)) -and (Test-Path $Corpus)
+function NeedsCorpus { if ($script:haveCorpus) { $true } else { 'corpus' } }
 
 function Step {
     param([string]$Name, [scriptblock]$Body, [scriptblock]$Precondition = { $true })
     $script:steps += $Name
-    if (-not (& $Precondition)) {
-        Write-Host ("  SKIP  {0}" -f $Name) -ForegroundColor DarkGray
+
+    # A scriptblock's value is a pipeline, so a precondition that emits more
+    # than one object arrives here as an array. The DECISION is its last value,
+    # which is what `-not (& $Precondition)` used to coerce to; taking [-1]
+    # rather than the whole array keeps that behaviour and makes the string
+    # case work.
+    $verdict = & $Precondition
+    if ($verdict -is [System.Array]) { $verdict = if ($verdict.Count) { $verdict[-1] } else { $false } }
+    $reason = $null
+    $run = $false
+    if ($verdict -is [string]) {
+        # Trimmed, and an ALL-WHITESPACE string counts as no reason at all
+        # rather than as a reason that prints as nothing. A blank reason would
+        # otherwise satisfy the "did it declare one" test at the foot of this
+        # file while telling a reader nothing, which is the shape of every
+        # defect this file records.
+        if ($verdict.Trim()) { $reason = $verdict.Trim() }
+    } elseif ($verdict) { $run = $true }
+
+    if (-not $run) {
+        $shown = if ($reason) { "  ({0})" -f $reason } else { '' }
+        Write-Host ("  SKIP  {0}{1}" -f $Name, $shown) -ForegroundColor DarkGray
         $script:skipped += $Name
+        $script:stepLedger += [pscustomobject]@{ Name = $Name; State = 'skipped'; Reason = $reason }
         return
     }
+    $script:stepLedger += [pscustomobject]@{ Name = $Name; State = 'ran'; Reason = '' }
     Write-Host ("  ....  {0}" -f $Name) -NoNewline
 
     # A step must PROVE it ran. Three ways this used to report ok while
@@ -241,7 +385,7 @@ Step 'wasm32 build' {
 # The wasm module's own checks: the ABI, the allocator, the string boundary.
 Step 'wasm module self-checks' {
     node crates/pl-wasm/tests/drive_wasm.mjs `
-        target/wasm32-unknown-unknown/wasm/pl_wasm.wasm target/release/pl.exe
+        target/wasm32-unknown-unknown/wasm/pl_wasm.wasm $pl
 } { $hasWasm -and (Have node) }
 
 # The same molecules through the wasm build and through the native binary.
@@ -254,9 +398,9 @@ Step 'wasm module self-checks' {
 # absence SKIPS loudly instead of passing silently.
 Step 'wasm module vs native binary' {
     node crates/pl-wasm/tests/drive_wasm.mjs `
-        target/wasm32-unknown-unknown/wasm/pl_wasm.wasm target/release/pl.exe `
+        target/wasm32-unknown-unknown/wasm/pl_wasm.wasm $pl `
         (Resolve-Path $Corpus).Path
-} { $hasWasm -and (Have node) -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
+} { if (-not ($hasWasm -and (Have node))) { $false } else { NeedsCorpus } }
 
 # `pl-index` must never touch the filesystem.
 #
@@ -624,7 +768,7 @@ Step 'the index agrees with the files' {
     $idx = Join-Path ([System.IO.Path]::GetTempPath()) 'pl-ci-index'
     if (Test-Path $idx) { Remove-Item -Recurse -Force $idx }
 
-    & target/release/pl.exe index $lab --index-at $idx 2>$null | Out-Null
+    & $pl index $lab --index-at $idx 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Host '        could not build the index'
         $global:LASTEXITCODE = 1
@@ -640,8 +784,8 @@ Step 'the index agrees with the files' {
     )
     $bad = 0
     foreach ($q in $queries) {
-        $indexed = & target/release/pl.exe find $lab @q --index-at $idx 2>$null | Out-String
-        $direct  = & target/release/pl.exe find $lab @q --no-index 2>$null | Out-String
+        $indexed = & $pl find $lab @q --index-at $idx 2>$null | Out-String
+        $direct  = & $pl find $lab @q --no-index 2>$null | Out-String
         if ($indexed -cne $direct) {
             $bad++
             Write-Host "        DIFFER: $($q -join ' ')"
@@ -651,7 +795,7 @@ Step 'the index agrees with the files' {
     }
     # A query set that matches nothing would agree trivially, so assert that
     # the fixture actually produces hits.
-    $hits = & target/release/pl.exe find $lab --motif GAATTC --index-at $idx 2>$null | Out-String
+    $hits = & $pl find $lab --motif GAATTC --index-at $idx 2>$null | Out-String
     # Parse the count rather than anchoring a regex at the start of the string:
     # `pl find` opens with the motif header, and PowerShell's -match has no
     # Multiline, so the old `^0 records matched` clause could never match and
@@ -694,13 +838,13 @@ Step 'the oracles can fail' {
 
 Step 'SEGUID vs the reference' {
     if ([string]::IsNullOrWhiteSpace($Corpus)) {
-        python reference/python/tests/xcheck_seguid.py target/release/pl.exe
+        python reference/python/tests/xcheck_seguid.py $pl
     } else {
-        python reference/python/tests/xcheck_seguid.py target/release/pl.exe "$Corpus\**\*.dna"
+        python reference/python/tests/xcheck_seguid.py $pl "$Corpus/**/*.dna"
     }
 } { HavePy 'seguid' }
 Step 'digest + PCR vs pydna' {
-    python reference/python/tests/xcheck_clone.py target/release/pl.exe
+    python reference/python/tests/xcheck_clone.py $pl
 } { (HavePy 'pydna') -and (HavePy 'Bio') }
 # Degenerate, both-strand, origin-wrapping motif search vs Biopython.
 #
@@ -711,7 +855,7 @@ Step 'digest + PCR vs pydna' {
 # cases. Verified the way this file's header asks: disabling the palindrome
 # collapse produced 107 disagreements, restoring it produced 0.
 Step 'motif vs Biopython (degenerate, both strands)' {
-    python reference/python/tests/xcheck_motif.py target/release/pl.exe
+    python reference/python/tests/xcheck_motif.py $pl
 } { HavePy 'Bio' }
 # Are our zlib streams streams anybody else can read?
 #
@@ -994,7 +1138,7 @@ Step 'the window icon is the .ico''s own frame' {
 # Verified the way this file insists: shifting the Helvetica width table by one
 # entry produced 2 disagreements, removing the y flip produced 41.
 Step 'PDF is a PDF, and matches the SVG' {
-    python reference/python/tests/xcheck_pdf.py target/release/pl.exe
+    python reference/python/tests/xcheck_pdf.py $pl
 } { (HavePy 'fitz') -and (HavePy 'pypdf') }
 # Melting temperature vs Biopython.
 #
@@ -1007,7 +1151,7 @@ Step 'PDF is a PDF, and matches the SVG' {
 # reverse), which put every palindrome out by ~8 C. Nothing hand-written here
 # noticed; 480 comparisons against Biopython did, on the first run.
 Step 'melting temperature vs Biopython' {
-    python reference/python/tests/xcheck_tm.py target/release/pl.exe
+    python reference/python/tests/xcheck_tm.py $pl
 } { HavePy 'Bio' }
 # Primer binding sites vs pydna.
 #
@@ -1020,7 +1164,7 @@ Step 'melting temperature vs Biopython' {
 # The tailed cases are the point: the footprint must come back *without* the
 # tail, or the Tm printed beside it belongs to a different oligo.
 Step 'primer binding sites vs pydna' {
-    python reference/python/tests/xcheck_primers.py target/release/pl.exe
+    python reference/python/tests/xcheck_primers.py $pl
 } { HavePy 'pydna' }
 # All 27 NCBI genetic codes, and the ORFs read with them, against Biopython.
 #
@@ -1042,7 +1186,7 @@ Step 'primer binding sites vs pydna' {
 # Starts line breaks tables 27, 28 and 31, where a codon is both a stop and an
 # amino acid.
 Step 'genetic codes and ORFs vs Biopython' {
-    python reference/python/tests/xcheck_translate.py target/release/pl.exe
+    python reference/python/tests/xcheck_translate.py $pl
 } { HavePy 'Bio' }
 # Sanger read placement vs Biopython's PairwiseAligner.
 #
@@ -1059,7 +1203,7 @@ Step 'genetic codes and ORFs vs Biopython' {
 # disagreements, and charging a gap opening without its first extension -- an
 # off-by-one invisible on any read without an indel -- gives 31.
 Step 'Sanger placement vs Biopython' {
-    python reference/python/tests/xcheck_sanger.py target/release/pl.exe
+    python reference/python/tests/xcheck_sanger.py $pl
 } { HavePy 'Bio' }
 # The gel's calibration spline vs SciPy's PchipInterpolator.
 #
@@ -1121,7 +1265,7 @@ Step 'Sanger placement vs Biopython' {
 # so the check could not fail and therefore proved nothing. The name in it is
 # real: aph(3')-Ia is what this project's own database calls KanR.
 Step 'EPS agrees with the PDF, and is valid PostScript' {
-    python reference/python/tests/xcheck_eps.py target/release/pl.exe (Get-ChildItem tests/library-fixture/*.gb, tests/export-fixture/*.gb | ForEach-Object { $_.FullName })
+    python reference/python/tests/xcheck_eps.py $pl (Get-ChildItem tests/library-fixture/*.gb, tests/export-fixture/*.gb | ForEach-Object { $_.FullName })
 } { Have python }
 
 # The Python bindings, checked from Python, against Biopython.
@@ -1140,11 +1284,32 @@ Step 'EPS agrees with the PDF, and is valid PostScript' {
 # join for every unambiguous enzyme; with those, the same injection gives 616
 # disagreements. A case that cannot distinguish the two answers proves nothing,
 # and the file says so where the cases are built.
+#
+# THE NAME CPYTHON WILL LOAD IT UNDER IS NOT THE NAME CARGO WROTE, and the two
+# differ differently on each platform. This step half-knew that until
+# 2026-08-10: it branched on Windows for the BUILT name and then hardcoded
+# `polylinker.pyd` for the SHIPPED one, which is wrong everywhere except
+# Windows -- CPython off Windows loads `.so` -- and it chose `libpolylinker.so`
+# for everything non-Windows, which is wrong on macOS, where cargo emits
+# `libpolylinker.dylib`. So the macOS leg's first red here would have been a
+# real defect rather than a portability nuisance, and the tempting fix -- make
+# the step Windows-only -- would have deleted the check on two platforms
+# instead of fixing it.
+#
+# The table is `tools/release.ps1`'s, verbatim and for the same reason it gives
+# there: `.dylib` is "the one intuition to distrust here". Two copies rather
+# than a shared module, because release.ps1 is invoked directly and this file
+# runs before it; they are three lines and the step 'shipped Python extension
+# imports' below drives release.ps1's copy over a real release, so a divergence
+# between them shows up as a failure and not as silence.
 Step 'Python bindings vs Biopython' {
     cargo build --release -p pl-py 2>&1 | Out-Null
-    $ext = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'dll' } else { 'so' }
-    $src = Join-Path 'target/release' ("$(if ($ext -eq 'dll') { '' } else { 'lib' })polylinker.$ext")
-    $dst = Join-Path $env:TEMP 'polylinker.pyd'
+    $pyMap = if ($onWindows) { @{ Built = 'polylinker.dll';       Shipped = 'polylinker.pyd' } }
+             elseif ($onMac)  { @{ Built = 'libpolylinker.dylib'; Shipped = 'polylinker.so' } }
+             else             { @{ Built = 'libpolylinker.so';    Shipped = 'polylinker.so' } }
+    $src = Join-Path 'target/release' $pyMap.Built
+    if (-not (Test-Path $src)) { throw "cargo built no $($pyMap.Built) in target/release, so there is nothing to import" }
+    $dst = Join-Path $tmp $pyMap.Shipped
     Copy-Item $src $dst -Force
     python reference/python/tests/xcheck_pybindings.py $dst
 } { HavePy 'Bio' }
@@ -1155,7 +1320,7 @@ Step 'MCP server' {
 
 Step 'gel calibration spline vs SciPy' {
     cargo build --release -p pl-gel --example dump_spline 2>&1 | Out-Null
-    python reference/python/tests/xcheck_spline.py target/release/examples/dump_spline.exe
+    python reference/python/tests/xcheck_spline.py "target/release/examples/dump_spline$exe"
 } { HavePy 'scipy' }
 # The rendered chromatogram agrees with the file it came from.
 #
@@ -1174,8 +1339,8 @@ Step 'gel calibration spline vs SciPy' {
 # `every_base_is_drawn_in_the_colour_its_own_channel_says` builds synthetic
 # traces in three channel orders and is the actual guard.
 Step 'rendered chromatograms agree with their files' {
-    python reference/python/tests/xcheck_trace_render.py target/release/pl.exe "$Corpus\**\*.ab1" $env:TEMP
-} { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
+    python reference/python/tests/xcheck_trace_render.py $pl "$Corpus/**/*.ab1" $tmp
+} { if (-not (HavePy 'Bio')) { $false } else { NeedsCorpus } }
 # Chromatograms vs Biopython, on real traces.
 #
 # Corpus-gated: 394 .ab1 files live on the lab drive and none may live here.
@@ -1189,8 +1354,8 @@ Step 'rendered chromatograms agree with their files' {
 # basecaller's) gives 217 disagreements, which is exactly the number of files
 # where a human had edited the read.
 Step 'chromatograms vs Biopython' {
-    python reference/python/tests/xcheck_abif.py target/release/pl.exe "$Corpus\**\*.ab1"
-} { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
+    python reference/python/tests/xcheck_abif.py $pl "$Corpus/**/*.ab1"
+} { if (-not (HavePy 'Bio')) { $false } else { NeedsCorpus } }
 # A second, independent digest oracle over real plasmids.
 #
 # `xcheck_clone.py` above compares fragments against pydna on synthetic cases;
@@ -1202,11 +1367,11 @@ Step 'chromatograms vs Biopython' {
 # Corpus-gated because no `.dna` may live in this repo (see the header) and the
 # script now — correctly — fails rather than passes when it compares nothing.
 Step 'digest vs Biopython (real plasmids)' {
-    python reference/python/tests/validate_digest.py target/release/pl.exe "$Corpus\**\*.dna"
-} { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
+    python reference/python/tests/validate_digest.py $pl "$Corpus/**/*.dna"
+} { if (-not (HavePy 'Bio')) { $false } else { NeedsCorpus } }
 Step 'rust reader vs python reader' {
-    python reference/python/tests/xcheck_rust.py target/release/pl.exe "$Corpus\**\*.dna"
-} { (HavePy 'Bio') -and -not [string]::IsNullOrWhiteSpace($Corpus) -and (Test-Path $Corpus) }
+    python reference/python/tests/xcheck_rust.py $pl "$Corpus/**/*.dna"
+} { if (-not (HavePy 'Bio')) { $false } else { NeedsCorpus } }
 
 Write-Host "`nannotation database" -ForegroundColor Cyan
 # The shipped table, against its own schema and its own translations.
@@ -1469,8 +1634,8 @@ $script:aliasWhy = @()
 $aliasFso = $null
 $aliasCandidates = @()
 # Guarded, each on one line with its own test, for the reason the step named 'the
-# cross-platform scripts touch no Windows-only environment variable unguarded'
-# gives at length: off Windows these are absent, not empty.
+# cross-platform scripts touch no environment variable unguarded' gives at
+# length: off Windows these are absent, not empty.
 if ($env:TEMP) { $aliasCandidates += $env:TEMP }
 if ($env:ProgramData) { $aliasCandidates += $env:ProgramData }
 if ($env:LOCALAPPDATA) { $aliasCandidates += $env:LOCALAPPDATA }
@@ -1624,7 +1789,21 @@ Step 'the helper unmangles a real 8.3 alias and the arithmetic it replaced does 
     } finally {
         Remove-Item -Recurse -Force $script:aliasSubject -ErrorAction SilentlyContinue
     }
-} { $null -ne $script:aliasSubject }
+} {
+    # An 8.3 short name is an NTFS/FAT compatibility feature and there is no
+    # such thing to unmangle off Windows -- the arithmetic this step contrasts
+    # cannot be wrong there, because Resolve-Path and GetFullPath agree.
+    #
+    # ON WINDOWS THE FALLBACK IS STILL $false, DELIBERATELY, and that is the
+    # whole point of the paragraph in .github/ci-expected-skips.txt about this
+    # step being absent from the list. $false is a skip with no declared
+    # reason, and under -ExpectedSkips a skip with no declared reason FAILS. So
+    # the day a runner's TEMP stops carrying an alias, the loss of coverage is
+    # reported instead of passing silently, exactly as before -- and there is
+    # no vocabulary entry anyone could add to quiet it without also making it
+    # legal on all three platforms.
+    WindowsOnly { $null -ne $script:aliasSubject }
+}
 if (-not $script:aliasSubject) {
     Write-Host ('        no directory here is reachable through an 8.3 alias, so the case cannot be exercised: ' +
                 ($script:aliasWhy -join '; ')) -ForegroundColor DarkGray
@@ -1663,6 +1842,11 @@ Write-Host "`nrelease" -ForegroundColor Cyan
 # variable and no build time.
 $script:release = $null
 $script:releaseFiles = @()
+# The zip the two zip steps read, and the directory it was built from. On
+# Windows both are the release above; off Windows they are a second, zip-forced
+# build, for the reason set out where they are assigned.
+$script:zip = $null
+$script:zipDir = $null
 
 # EVERY FILE release.ps1 READS MUST BE TRACKED BY GIT.
 #
@@ -1727,7 +1911,7 @@ Step 'every file the release reads is committed' {
 } { Test-Path (Join-Path $repo '.git') }
 
 Step 'release script and its manifest' {
-    $out = Join-Path $env:TEMP ('pl-release-check-' + $PID)
+    $out = Join-Path $tmp ('pl-release-check-' + $PID)
     Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
 
     # THE TRAILING SEPARATOR IS DELIBERATE. Do not tidy it away.
@@ -1797,8 +1981,83 @@ Step 'release script and its manifest' {
     # manifest says, in both directions, and `release.ps1` already refuses to
     # build a copy whose notice SOURCES are missing.
     #
-    # The zip and its checksum sidecar are the two files that cannot be in the
-    # manifest, because they are built from it.
+    # THE ARCHIVE AND ITS CHECKSUM SIDECAR are the two files that cannot be in
+    # the manifest, because they are built from it. They are found FIRST and
+    # excluded BY NAME, and both halves of that sentence are the fix for a real
+    # failure rather than tidying.
+    #
+    # This used to read `-notlike '*.zip' -and -notlike '*.zip.sha256'`, a suffix
+    # list written when the only platform the gate ran on was the only platform
+    # whose default container is a zip. On the first Linux and macOS runs of this
+    # step -- run 31359657821 -- the default container was
+    # `polylinker-0.4.0-linux-x64.tar.gz`, no `-notlike` matched it, and the set
+    # equality below reported the archive and its sidecar as "shipped but not in
+    # the manifest". A second suffix in that list would have fixed the symptom
+    # and left the next container format to find the same way, so the list is
+    # gone: `$archive` below is what `release.ps1` actually produced, and it is
+    # that name -- not a pattern that might match it -- which is excluded.
+    #
+    # The discovery moved UP from below the comparison rather than the exclusion
+    # moving down, because `$archive` is also what the two zip steps read: with
+    # the throw above them, they reported "no zip was produced" on both legs and
+    # the real defect was one line further up. A step that dies before it sets
+    # what three later steps need turns one failure into three.
+    #
+    # THE CONTAINER release.ps1 CHOOSES BY DEFAULT ON THIS PLATFORM, and the
+    # default is the thing under test rather than an inconvenience to route
+    # around: `.github/workflows/release.yml` runs `./tools/release.ps1 -Out
+    # dist` on all three runners with no -ArchiveFormat, so the default IS what
+    # ships. This line read `'*.zip'` and 'no Windows zip was produced', which
+    # was true of the only platform it ever ran on and would have been a
+    # confident lie on the other two.
+    $wantArchive = if ($onWindows) { '*.zip' } else { '*.tar.gz' }
+    $archive = @(Get-ChildItem -LiteralPath $out -Filter $wantArchive)
+    if ($archive.Count -ne 1) {
+        throw ("release.ps1's default archive format produced $($archive.Count) $wantArchive here, and " +
+               'exactly one is expected; release.yml relies on that default')
+    }
+    $archive = $archive[0]
+    if (-not (Test-Path "$($archive.FullName).sha256")) { throw 'the archive has no checksum sidecar' }
+    $notHashed = @('SHA256SUMS.txt', $archive.Name, "$($archive.Name).sha256")
+
+    # THE ZIP, WHICH OFF WINDOWS THE DEFAULT DID NOT PRODUCE.
+    #
+    # The two steps below read a zip: entry order, pinned timestamps, one root
+    # directory. None of that is a Windows property -- the zip is hand-written
+    # in release.ps1 precisely because Compress-Archive cannot pin a timestamp
+    # -- and ENTRY ORDER in particular is the one assertion whose input differs
+    # per platform, because it is the order the filesystem enumerated. So the
+    # answer here is the same one `-ArchiveFormat` was invented for one section
+    # below, where a Windows machine builds the Unix container: off Windows,
+    # build the Windows one.
+    #
+    # On Windows this is the archive already built above and costs nothing; the
+    # extra `release.ps1` run happens on Linux and macOS only, where the
+    # workspace is already built and the run is a copy, a hash and a zip.
+    #
+    # UP HERE, ABOVE EVERY ASSERTION IN THIS STEP, and that placement is a fix
+    # rather than a tidy. `$script:zip` is what the two zip steps read, so while
+    # this sat at the foot of the step ANY throw above it left them reporting
+    # "no zip was produced" -- a sentence about the zip writer, describing a
+    # defect in the manifest arithmetic twenty lines earlier. Run 31359657821
+    # showed one failure as three that way, and run 31360902875 showed it again
+    # after the first cause was fixed and a second took its place. What the zip
+    # steps check is a property of the zip; they should not be able to fail for
+    # anything else. Nothing below this line is needed to build one.
+    if ($onWindows) {
+        $script:zipDir = $out
+        $script:zip = $archive.FullName
+    } else {
+        $zipOut = Join-Path $tmp ('pl-release-zip-' + $PID)
+        Remove-Item -Recurse -Force $zipOut -ErrorAction SilentlyContinue
+        & "$PSScriptRoot/release.ps1" -Out $zipOut -ArchiveFormat zip -Quiet 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'release.ps1 -ArchiveFormat zip failed' }
+        $z = @(Get-ChildItem -LiteralPath $zipOut -Filter '*.zip')
+        if ($z.Count -ne 1) { throw "release.ps1 -ArchiveFormat zip produced $($z.Count) zip(s), and one is expected" }
+        $script:zipDir = $zipOut
+        $script:zip = $z[0].FullName
+    }
+
     # `Get-DirectoryPrefix`, not `$out.Length + 1`. The same defect as in
     # `release.ps1`, in the check that exists to audit `release.ps1` -- so with
     # the script fixed and this line left alone, the runner would simply have
@@ -1822,13 +2081,14 @@ Step 'release script and its manifest' {
             }
             $_.FullName.Substring($outPrefix.Length).Replace('\', '/')
         } |
-        Where-Object { $_ -ne 'SHA256SUMS.txt' -and $_ -notlike '*.zip' -and $_ -notlike '*.zip.sha256' }
+        Where-Object { $notHashed -notcontains $_ }
     $unhashed = @($onDisk | Where-Object { $listed -notcontains $_ })
     if ($unhashed) { throw "shipped but not in the manifest: $($unhashed -join ', ')" }
 
     # A floor as well, because set equality alone is satisfied by a release of
-    # nothing agreeing with a manifest of nothing. Twenty is what the current
-    # `$artifacts` + `$notices` + installer produce; raise it when they grow.
+    # nothing agreeing with a manifest of nothing. Twenty-one is what the current
+    # `$artifacts` + `$notices` + installer produce ON WINDOWS; raise it when they
+    # grow.
     #
     # It read sixteen until 2026-08-05, by which time the release had been
     # eighteen files for a while: the floor had become two files of slack rather
@@ -1838,7 +2098,28 @@ Step 'release script and its manifest' {
     # the repository had been offering `MIT OR Apache-2.0` while shipping only
     # the Apache half; twenty-one is twenty plus licences/Inter-OFL.txt, added
     # on 2026-08-09 with the heading face.
-    if ($listed.Count -lt 21) { throw "only $($listed.Count) file(s) in the manifest; at least 21 are expected" }
+    #
+    # EIGHTEEN OFF WINDOWS, AND NOT TWENTY-ONE EVERYWHERE MINUS SLACK. This was a
+    # bare `21` and the macOS leg of run 31360902875 failed on it with "only 18
+    # file(s) in the manifest" -- correctly, because the Windows release carries
+    # three files no other platform gets: `Install-Polylinker.ps1`, `Install.cmd`
+    # and `polylinker.ico`, the installer set `release.ps1` ships behind
+    # `if ($onWindows)` and says at that block is deliberate rather than an
+    # oversight. (The read-me is a fourth Windows-only NAME but not a fourth
+    # file: README-WINDOWS.txt is swapped for README-LINUX.txt or
+    # README-MACOS.txt, one either way.)
+    #
+    # The tempting repair is to lower the number until it holds everywhere. That
+    # would buy a green macOS leg with three files of permanent slack on the
+    # platform the installer actually ships to, which is the platform whose
+    # release this floor exists to protect -- a weaker check running in three
+    # places instead of a strong one running in one. So the floor is exact on
+    # each platform and the difference between the two numbers is the list of
+    # files above, the same shape as `$floor` in the tar step below.
+    $minFiles = if ($onWindows) { 21 } else { 18 }
+    if ($listed.Count -lt $minFiles) {
+        throw "only $($listed.Count) file(s) in the manifest; at least $minFiles are expected here"
+    }
 
     # And the specific obligation named in NOTICE, spelled out once here because
     # this is the assertion whose failure is a licence violation rather than a
@@ -1854,11 +2135,8 @@ Step 'release script and its manifest' {
         if ($listed -notcontains $required) { throw "$required did not ship" }
     }
 
-    $zip = Get-ChildItem -LiteralPath $out -Filter '*.zip'
-    if (-not $zip) { throw 'no Windows zip was produced' }
-    if (-not (Test-Path "$($zip.FullName).sha256")) { throw 'the zip has no checksum sidecar' }
-
-    Write-Host "        $($listed.Count) file(s) hashed, $($lic.Count) licence texts, manifest verified" -ForegroundColor DarkGray
+    Write-Host ("        $($listed.Count) file(s) hashed, $($lic.Count) licence texts, manifest verified; " +
+                "default container $($archive.Name)") -ForegroundColor DarkGray
     $global:LASTEXITCODE = 0
 }
 
@@ -2057,7 +2335,14 @@ Step 'the built binaries carry their icon and version resource' {
 
     Write-Host "        version $version on 2 binaries, $count icon frames byte-identical to polylinker.ico" -ForegroundColor DarkGray
     $global:LASTEXITCODE = 0
-} { $script:release }
+} {
+    # A version block and an RT_GROUP_ICON are entries in a PE image's resource
+    # directory. An ELF and a Mach-O have no such section, VersionInfo comes
+    # back empty off Windows, and the release there ships no .ico at all
+    # (release.ps1 sends a README instead of the installer set), so there is
+    # nothing here to port rather than a spelling to fix.
+    WindowsOnly { [bool]$script:release }
+}
 
 # The Python extension must be shipped under a name CPython will load.
 # A correctly built `polylinker.dll` cannot be imported on Windows at
@@ -2112,7 +2397,14 @@ Step 'no C runtime redistributable is needed' {
     if ($checked -lt 4) { throw "only $checked binary(ies) checked; expected at least 4" }
     Write-Host "        $checked binaries, none needs the VC++ redistributable" -ForegroundColor DarkGray
     $global:LASTEXITCODE = 0
-} { $script:release }
+} {
+    # VCRUNTIME140.dll is a Windows redistributable and the scan is over the
+    # PE import directory of .exe/.pyd/.dll files. Off Windows none of those
+    # four names can appear and none of those three extensions exists, so the
+    # step would assert the absence of something that cannot be present -- a
+    # check that cannot fail, which this file treats as worse than no check.
+    WindowsOnly { [bool]$script:release }
+}
 
 Write-Host "`ninstaller" -ForegroundColor Cyan
 
@@ -2136,7 +2428,7 @@ Step 'installer PATH edits' {
 # and this proves the installer actually copies them rather than a curated
 # subset of them.
 Step 'installer plan covers the whole release' {
-    $prefix = Join-Path $env:TEMP ('pl-install-plan-' + $PID)
+    $prefix = Join-Path $tmp ('pl-install-plan-' + $PID)
     # A CHILD PROCESS, not `& script.ps1`.
     #
     # Two reasons, both of which bit. The plan is printed with `Write-Host`,
@@ -2160,8 +2452,8 @@ Step 'installer plan covers the whole release' {
     $out = & $host_ -NoProfile -File "$PSScriptRoot/installer/Install-Polylinker.ps1" `
         -DryRun -Prefix $prefix -Source ($script:release + [System.IO.Path]::DirectorySeparatorChar) `
         -RegistryRoot "HKCU\Software\Polylinker-CI-$PID" `
-        -StateDir (Join-Path $env:TEMP "pl-state-$PID") `
-        -StartMenuDir (Join-Path $env:TEMP "pl-startmenu-$PID") `
+        -StateDir (Join-Path $tmp "pl-state-$PID") `
+        -StartMenuDir (Join-Path $tmp "pl-startmenu-$PID") `
         -AddToPath -Associate 2>&1 | Out-String -Width 4096
     if ($LASTEXITCODE -ne 0) { throw "the dry run failed:`n$out" }
     if (-not $out.Trim()) { throw 'the dry run printed nothing, so this step would assert nothing' }
@@ -2185,8 +2477,9 @@ Step 'installer plan covers the whole release' {
     # containing a keyword is a test waiting to break -- but the column format
     # is the real discriminator and this is what should have keyed on it.
     #
-    # BOTH SIDES THROUGH THE SAME NORMALISER. `$prefix` is built from `$env:TEMP`,
-    # which on a GitHub runner is `C:\Users\RUNNER~1\...`, while the destinations
+    # BOTH SIDES THROUGH THE SAME NORMALISER. `$prefix` is built from the
+    # temporary directory, which on a GitHub runner is
+    # `C:\Users\RUNNER~1\AppData\Local\Temp`, while the destinations
     # the installer prints are absolute paths it has normalised -- so a raw
     # `StartsWith` here compares an 8.3 alias against its expansion and reports
     # that a plan writing only inside the prefix writes outside it. The trailing
@@ -2209,7 +2502,13 @@ Step 'installer plan covers the whole release' {
     }
     Write-Host "        $($script:releaseFiles.Count) file(s) in the plan, none outside the prefix" -ForegroundColor DarkGray
     $global:LASTEXITCODE = 0
-} { $script:release }
+} {
+    # `Install-Polylinker.ps1` is a Windows installer -- HKCU, a Start Menu
+    # .lnk, ProgIds, an Add/Remove Programs row -- and `release.ps1` says so in
+    # its own words where it ships a README instead of it off Windows. There is
+    # no Unix installer to plan, so there is no plan to check.
+    WindowsOnly { [bool]$script:release }
+}
 
 # A real install, into a scratch prefix and a scratch registry root, then a real
 # uninstall — with a sentinel planted in the state directory that must survive.
@@ -2220,9 +2519,9 @@ Step 'installer plan covers the whole release' {
 # the only thing that makes it a promise in fact.
 Step 'installer round trip leaves user state alone' {
     $tag = "pl-rt-$PID"
-    $prefix = Join-Path $env:TEMP "$tag-prefix"
-    $state  = Join-Path $env:TEMP "$tag-state"
-    $menu   = Join-Path $env:TEMP "$tag-menu"
+    $prefix = Join-Path $tmp "$tag-prefix"
+    $state  = Join-Path $tmp "$tag-state"
+    $menu   = Join-Path $tmp "$tag-menu"
     $regRoot = "HKCU\Software\Polylinker-CI-$PID"
     $regProv = "HKCU:\Software\Polylinker-CI-$PID"
     try {
@@ -2288,7 +2587,11 @@ Step 'installer round trip leaves user state alone' {
         Remove-Item -Recurse -Force $prefix, $state, $menu -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $regProv -ErrorAction SilentlyContinue
     }
-} { $script:release }
+} {
+    # Same subject as the plan above, and the same answer: this one drives the
+    # real thing, so it additionally writes to HKCU and reads a .lnk back.
+    WindowsOnly { [bool]$script:release }
+}
 
 # The product's central claim, enforced mechanically.
 #
@@ -2336,11 +2639,16 @@ Step 'the installer contacts nothing' {
 # disk, the zip must come out the same. That reduces to three properties, and
 # `Compress-Archive` fails the first two, which is why the zip is written by
 # hand in release.ps1.
+#
+# IT RUNS ON ALL THREE PLATFORMS, and property 1 is the reason that is worth
+# the second `release.ps1` run this needs off Windows. "Entry order is sorted"
+# is an assertion about overriding whatever order the FILESYSTEM enumerated,
+# and NTFS, ext4 and APFS enumerate differently -- so on Windows alone the
+# check was being fed one of the three inputs it exists to be robust to.
 Step 'the zip is a deterministic function of dist/' {
-    $zip = Get-ChildItem -LiteralPath $script:release -Filter '*.zip'
-    if (-not $zip) { throw 'no zip was produced' }
+    if (-not $script:zip) { throw 'no zip was produced' }
     Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
-    $z = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+    $z = [System.IO.Compression.ZipFile]::OpenRead($script:zip)
     try {
         $names = @($z.Entries | ForEach-Object { $_.FullName })
         if ($names.Count -lt 16) { throw "the zip has only $($names.Count) entries" }
@@ -2376,16 +2684,20 @@ Step 'the zip is a deterministic function of dist/' {
         if ($roots.Count -ne 1) { throw "the zip has $($roots.Count) top-level entries: $($roots -join ', ')" }
 
         # And the contents really are the release, byte for byte.
+        # `$rel` unconverted: a zip entry name is always `/`-separated, and
+        # Join-Path is happy to be handed one on Windows. `Replace('/', '\')`
+        # would have named a nonexistent file off Windows, where a backslash is
+        # an ordinary character in a file name.
         foreach ($e in $z.Entries) {
             $rel = $e.FullName.Substring($roots[0].Length + 1)
-            $onDisk = Join-Path $script:release ($rel.Replace('/', '\'))
+            $onDisk = Join-Path $script:zipDir $rel
             if (-not (Test-Path -LiteralPath $onDisk)) { throw "the zip contains $rel, which is not in the release directory" }
             if ((Get-Item -LiteralPath $onDisk).Length -ne $e.Length) { throw "$rel differs between the zip and the release directory" }
         }
         Write-Host "        $($names.Count) entries, sorted, pinned timestamps, one root '$($roots[0])'" -ForegroundColor DarkGray
         $global:LASTEXITCODE = 0
     } finally { $z.Dispose() }
-} { $script:release }
+} { [bool]$script:release }
 
 # The archive, checked the way a downloader receives it rather than the way this
 # machine built it.
@@ -2400,12 +2712,18 @@ Step 'the zip is a deterministic function of dist/' {
 # against the archive that will actually be attached to the release, so this is
 # a local rehearsal of a check that also happens where it matters.
 Step 'the zip verifies against its own manifest' {
-    $zip = Get-ChildItem -LiteralPath $script:release -Filter '*.zip'
-    if (-not $zip) { throw 'no zip was produced' }
-    & "$PSScriptRoot/check-archive.ps1" -Archive $zip.FullName
-} { $script:release }
+    if (-not $script:zip) { throw 'no zip was produced' }
+    & "$PSScriptRoot/check-archive.ps1" -Archive $script:zip
+} { [bool]$script:release }
 
 if ($script:release) { Remove-Item -Recurse -Force $script:release -ErrorAction SilentlyContinue }
+# The zip build is a second directory off Windows and the same one on it, so
+# this is guarded on being different rather than on the platform: deleting
+# $script:release twice is harmless, but saying "if not on Windows" here would
+# be a third place that has to agree with the two above.
+if ($script:zipDir -and $script:zipDir -ne $script:release) {
+    Remove-Item -Recurse -Force $script:zipDir -ErrorAction SilentlyContinue
+}
 
 Write-Host "`nrelease workflow" -ForegroundColor Cyan
 
@@ -2417,16 +2735,27 @@ Write-Host "`nrelease workflow" -ForegroundColor Cyan
 # every Unix user would begin with `chmod +x`.
 #
 # None of that code would otherwise run anywhere anybody looks. This gate is the
-# only thing that runs on a developer machine, this machine is Windows, and a
+# only thing that runs on a developer machine, that machine is Windows, and a
 # tar writer whose only exercise is a green job on a runner is a tar writer
 # nobody has read the output of. So `-ArchiveFormat` exists and this step forces
-# it: the payload is the Windows one, which is not the point -- the container is.
+# it on every platform: on Windows the payload is the Windows one, which is not
+# the point -- the container is. Off Windows the format is also the default, so
+# there the forcing is a no-op and the step checks what a user will download.
 #
 # Checked twice. `check-archive.ps1` reads the tar with this project's own
-# reader, and then `tar.exe` reads it with somebody else's, which is the same
+# reader, and then a real `tar` reads it with somebody else's, which is the same
 # argument the oracle steps above make. Windows 11 ships bsdtar as
 # System32\tar.exe and Git for Windows ships GNU tar, and between them they
 # disagree about enough of the format to be worth having.
+#
+# HOW MANY READERS IS PLATFORM-DEPENDENT, AND IS ASSERTED RATHER THAN NAMED.
+# This step used to be called "...two other tools can read" while running
+# however many `Find-Tars` happened to return, so on a machine with one tar the
+# title was simply false -- the defect this project keeps finding, prose
+# asserting what the code does not do. Windows has two known homes and both the
+# author's machine and the runner have both, so two is required there; Linux
+# ships GNU tar and macOS ships bsdtar, one each, so one is required there. The
+# floor is checked below and the banners are printed either way.
 #
 # EVERY TAR FOUND, EACH NAMED IN THE LOG. This used to take
 # `(Get-Command tar.exe).Source` -- whichever implementation happened to be first
@@ -2443,16 +2772,27 @@ Write-Host "`nrelease workflow" -ForegroundColor Cyan
 # deduplicated by normalised path, and every survivor is run and reported with
 # its version banner. A machine with neither still skips, which is what the
 # precondition is for.
+#
+# `tar$exe`, NOT `tar.exe`. Off Windows the program is called `tar` and this
+# function found none, so the step would have skipped on the two platforms
+# whose users are the reason the tar.gz exists at all. Linux ships GNU tar and
+# macOS ships bsdtar, so each of those runners contributes one reader; Windows
+# contributes two, and the loop below reports the count and the version banners
+# either way.
 function Find-Tars {
     $found = @()
-    foreach ($c in @(Get-Command tar.exe -All -ErrorAction SilentlyContinue)) { $found += $c.Source }
+    foreach ($c in @(Get-Command "tar$exe" -All -ErrorAction SilentlyContinue)) { $found += $c.Source }
 
     # Each guarded by the variable it uses, which is the rule the step 'the
-    # cross-platform scripts touch no Windows-only environment variable
-    # unguarded' enforces over this file -- and it enforced it: the first draft
+    # cross-platform scripts touch no environment variable unguarded'
+    # enforces over this file -- and it enforced it: the first draft
     # of this function read all four unguarded and that step failed the gate,
     # naming three of the four lines. Off Windows these are absent rather than
     # empty and `Join-Path` treats a null `-Path` as a terminating error.
+    #
+    # All four are Windows install locations, so off Windows every one of these
+    # guards is false and the PATH search above is the whole of it -- which is
+    # correct: there is no second tar to find on a Unix runner.
     $candidates = @()
     if ($env:SystemRoot)   { $candidates += (Join-Path $env:SystemRoot 'System32\tar.exe') }
     if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles 'Git\usr\bin\tar.exe') }
@@ -2475,11 +2815,26 @@ function Find-Tars {
         $k = [System.IO.Path]::GetFullPath($f).ToLowerInvariant()
         if (-not $seen.Contains($k)) { $seen[$k] = $true; $out += $f }
     }
-    return $out
+    # `,$out`, AND THE COMMA IS THE WHOLE FIX. PowerShell unrolls a returned
+    # array, so a one-element array comes back as the bare STRING it held -- and
+    # a string has a .Count of 1 and indexes by character. That is not a
+    # theoretical hazard: on macOS `Get-Command tar -All` finds exactly
+    # `/usr/bin/tar`, the four Windows candidate paths below are all absent, and
+    # `$tools[$i]` in the step below evaluated to `/`. Run 31359657821 failed
+    # with "The term '/' is not recognized as a name of a cmdlet".
+    #
+    # It could not fire anywhere it had ever run. Windows has two tars -- System32's
+    # bsdtar and Git for Windows' GNU tar -- so this always returned a real array
+    # there, and Ubuntu has two paths to one GNU tar (`/usr/bin/tar` and
+    # `/bin/tar`, which this does not dedup because `GetFullPath` does not resolve
+    # the `/bin` -> `/usr/bin` symlink). macOS, with one, was the first machine to
+    # take the branch. The comma wraps the array in an outer array, which is what
+    # gets unrolled instead.
+    return ,$out
 }
 
-Step 'the tar.gz writer produces an archive two other tools can read' {
-    $out = Join-Path $env:TEMP ('pl-tar-check-' + $PID)
+Step 'the tar.gz writer produces an archive other tar implementations can read' {
+    $out = Join-Path $tmp ('pl-tar-check-' + $PID)
     Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
     try {
         & "$PSScriptRoot/release.ps1" -Out $out -ArchiveFormat tar.gz -Quiet 2>&1 | Out-Null
@@ -2504,7 +2859,18 @@ Step 'the tar.gz writer produces an archive two other tools can read' {
         # The precondition already established there is at least one. If that
         # ever stops being true this must say so rather than pass having read
         # the archive with nothing.
-        if (-not $tools) { throw 'no tar.exe was found, so no independent reader checked this archive' }
+        if (-not $tools) { throw 'no tar was found, so no independent reader checked this archive' }
+        # AND THE FLOOR THE OLD STEP NAME ONLY CLAIMED. Two on Windows, where
+        # both System32's bsdtar and Git for Windows' GNU tar are present on the
+        # runner and on the author's machine; one elsewhere, where the platform
+        # ships exactly one. Without this, a PATH change that hid one of the two
+        # would halve the coverage silently and the log line would still read
+        # like a pass.
+        $floor = if ($onWindows) { 2 } else { 1 }
+        if ($tools.Count -lt $floor) {
+            throw ("only $($tools.Count) tar implementation(s) found and $floor are expected here: " +
+                   "$($tools -join ', ')")
+        }
 
         $tested = @()
         for ($i = 0; $i -lt $tools.Count; $i++) {
@@ -2526,9 +2892,15 @@ Step 'the tar.gz writer produces an archive two other tools can read' {
 
             $root = Get-ChildItem -LiteralPath (Join-Path $out $dir) -Directory
             if ($root.Count -ne 1) { throw "extracting with $tool produced $($root.Count) top-level directories" }
+            # FORWARD SLASHES, unconverted. `Replace('/', '\')` was fine on
+            # Windows and wrong off it, where a backslash is an ordinary
+            # character in a file name rather than a separator, so
+            # `licences\Phosphor-MIT.txt` would have named a file that does not
+            # exist and the step would have reported the archive as broken.
+            # Windows accepts `/` in a path everywhere this uses one.
             foreach ($probe in 'SHA256SUMS.txt', 'licences/Phosphor-MIT.txt', 'features/NOTICE.txt') {
-                $a = Join-Path $out ($probe.Replace('/', '\'))
-                $b = Join-Path $root[0].FullName ($probe.Replace('/', '\'))
+                $a = Join-Path $out $probe
+                $b = Join-Path $root[0].FullName $probe
                 if (-not (Test-Path -LiteralPath $b)) { throw "$probe did not survive a round trip through $tool ($banner)" }
                 $ha = (Get-FileHash -LiteralPath $a -Algorithm SHA256).Hash
                 $hb = (Get-FileHash -LiteralPath $b -Algorithm SHA256).Hash
@@ -2541,7 +2913,7 @@ Step 'the tar.gz writer produces an archive two other tools can read' {
     } finally {
         Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
     }
-    # `Find-Tars`, not `Have tar.exe`: a machine with GNU tar installed under Git
+    # `Find-Tars`, not `Have tar`: a machine with GNU tar installed under Git
     # for Windows but not on PATH does have an independent reader, and used to
     # skip as though it had none.
 } { (Find-Tars).Count -gt 0 }
@@ -2789,7 +3161,20 @@ Step 'the MSI is generated from the manifest and not from a second file list' {
         Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
     }
     $global:LASTEXITCODE = 0
-} { Test-Path "$repo/dist/SHA256SUMS.txt" }
+} {
+    # An MSI is a Windows Installer database and `dist/` here is the Windows
+    # release it would be built from. Generating the payload fragment off
+    # Windows would compare a WiX component set against a manifest listing
+    # `polylinker.so` and a README-LINUX.txt -- two lists that still agree,
+    # because both are derived from that manifest, about an installer that will
+    # never be built there. A green from that tells a reader nothing.
+    #
+    # The half of the MSI's authoring that IS platform-neutral -- no <File>, no
+    # <Extension>, the pinned UpgradeCode -- is asserted by the step below,
+    # which reads the committed .wxs, has no precondition at all, and therefore
+    # runs on all three.
+    WindowsOnly { Test-Path "$repo/dist/SHA256SUMS.txt" }
+}
 
 Step 'the MSI takes no file type away from a program the reader already uses' {
     # WiX's <Extension> element writes an extension's DEFAULT value, which is
@@ -2858,8 +3243,10 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     # elevation and because it is the scope readers get by default. The
     # per-machine pass is added only when the session happens to be elevated.
     # The step is skipped entirely without wix, since a workstation with no .NET
-    # SDK cannot build an MSI to test and the other 62 steps are still worth
-    # running there.
+    # SDK cannot build an MSI to test and the other 71 steps are still worth
+    # running there. (It said 62 until 2026-08-10, which was the count before
+    # the gate grew; the number is one more than this file's step total minus
+    # one, so it moves every time a step is added.)
     $dist = "$repo/dist"
     $out = Join-Path ([IO.Path]::GetTempPath()) ("pl-msi-" + [IO.Path]::GetRandomFileName())
     try {
@@ -2884,8 +3271,20 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     }
     $global:LASTEXITCODE = 0
 } {
-    (Test-Path "$repo/dist/SHA256SUMS.txt") -and
-    ($null -ne (Get-Command wix -ErrorAction SilentlyContinue))
+    # `msiexec` is Windows. `wix` is a .NET tool that will install anywhere, and
+    # would build a .msi anywhere, but this step's oracle is INSTALLING it and
+    # then reading the disk and the registry back -- there is no Linux msiexec
+    # to install with and nothing to read.
+    #
+    # `wix` missing on Windows stays $false, not a reason: on a runner that is a
+    # failure (ci.yml installs it, and a `dotnet tool install` that silently
+    # stopped working is exactly the "installs its oracles and then stops" case
+    # -ExpectedSkips exists for), and on a workstation with no .NET SDK it is a
+    # quiet skip because no list is being checked there.
+    WindowsOnly {
+        (Test-Path "$repo/dist/SHA256SUMS.txt") -and
+        ($null -ne (Get-Command wix -ErrorAction SilentlyContinue))
+    }
 }
 
 Step 'the release workflow parses and covers three platforms' {
@@ -3132,101 +3531,183 @@ Step 'the release notes still say what an unsigned build costs' {
     $global:LASTEXITCODE = 0
 }
 
-Step 'the cross-platform scripts touch no Windows-only environment variable unguarded' {
-    # WHY THIS EXISTS. The first three-platform release failed on both non-Windows
-    # legs at `Join-Path $env:USERPROFILE '.cargo\bin'`. Off Windows that variable
-    # is not merely empty, it is absent; `Join-Path` refuses a null `-Path`; and
-    # `$ErrorActionPreference = 'Stop'` promotes the refusal to a fatal error. The
-    # Linux job died in 41 seconds having compiled nothing.
-    #
-    # Every gate in this file runs on Windows, where the faulty line works
-    # perfectly. That is the actual defect: a Windows-only assumption in a script
-    # whose entire purpose is to run on three platforms cannot be caught by
-    # executing it here, so it has to be caught by reading it here. It was in fact
-    # read, and called harmless -- prepending an empty string is a no-op, which is
-    # true of the assignment and irrelevant to the call that produces it.
-    #
-    # A use is accepted only inside an `if` that tests the same variable, or
-    # inside one that tests the platform. Guard scope is tracked by brace depth.
-    $winOnly = 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMFILES', 'PROGRAMDATA',
-               'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'USERNAME', 'HOMEDRIVE', 'HOMEPATH'
-
-    # BOTH SPELLINGS. `$env:NAME` and `${env:NAME}` are the same dereference, and
-    # this step used to match only the first -- so `${env:ProgramFiles(x86)}` was
-    # invisible to it. That is not hypothetical: on 2026-08-09 a new helper in
-    # this file read four Windows-only variables unguarded, this step failed the
-    # gate naming three of them, and the fourth was the one written in braces.
-    # A checker that catches three lines out of four teaches that its silence
-    # means clean.
-    #
-    # The braced form is also the ONLY way to write a variable whose name is not
-    # a bare identifier, so the names most likely to need it -- `ProgramFiles
-    # (x86)` above all -- were exactly the ones exempt.
-    #
-    # `[^}]*` after the name, so `ProgramFiles(x86)` is caught by the PROGRAMFILES
-    # entry rather than needing a list entry of its own: a variable that starts
-    # with a Windows-only name and continues is still Windows-only.
-    $ref = { param($v) '(\$env:' + $v + '\b|\$\{env:' + $v + '[^}]*\})' }
+# EVERY ENVIRONMENT VARIABLE THE THREE CROSS-PLATFORM SCRIPTS READ, AGAINST AN
+# ALLOWLIST -- NOT AGAINST A LIST OF THE WINDOWS-ONLY ONES.
+#
+# WHY THIS EXISTS. The first three-platform release failed on both non-Windows
+# legs at `Join-Path $env:USERPROFILE '.cargo\bin'`. Off Windows that variable
+# is not merely empty, it is absent; `Join-Path` refuses a null `-Path`; and
+# `$ErrorActionPreference = 'Stop'` promotes the refusal to a fatal error. The
+# Linux job died in 41 seconds having compiled nothing.
+#
+# Every gate in this file used to run on Windows only, where the faulty line
+# works perfectly. That is the actual defect: a Windows-only assumption in a
+# script whose entire purpose is to run on three platforms cannot be caught by
+# executing it there, so it has to be caught by reading it. It was in fact read,
+# and called harmless -- prepending an empty string is a no-op, which is true of
+# the assignment and irrelevant to the call that produces it.
+#
+# WHY THE DENYLIST WENT. This step used to carry eleven Windows-only names --
+# USERPROFILE, APPDATA, LOCALAPPDATA, PROGRAMFILES, PROGRAMDATA, SYSTEMROOT,
+# WINDIR, COMSPEC, USERNAME, HOMEDRIVE, HOMEPATH -- and TEMP was not among them.
+# So the seventeen unguarded `$env:TEMP` uses in this very file, the exact
+# spelling named in the header as the thing that killed the release, were
+# invisible to the step written to catch that class. A denylist fails by
+# omission and reports the omission as cleanliness; and the omission is always
+# the variable nobody thought of, which is the definition of the case that bites.
+#
+# So the polarity is inverted. EVERY dereference is a finding unless it is
+# guarded, or the name is on a short list of variables that genuinely exist on
+# all three platforms. Adding a new one to that list is a visible diff with a
+# reason beside it. Forgetting to is a red gate rather than silence.
+#
+# BOTH SPELLINGS. `$env:NAME` and `${env:NAME}` are the same dereference, and
+# this step used to match only the first -- so `${env:ProgramFiles(x86)}` was
+# invisible to it too. On 2026-08-09 a new helper in this file read four
+# Windows-only variables unguarded, the step failed the gate naming three of
+# them, and the fourth was the one written in braces. The braced form is also
+# the ONLY way to write a variable whose name is not a bare identifier, so the
+# names most likely to need it were exactly the ones exempt.
+#
+# A use is accepted inside an `if` that tests the same variable, or inside one
+# that tests the platform. Guard scope is tracked by brace depth.
+function Find-UnguardedEnvUses {
+    param([string[]]$Lines, [string]$Label, [string[]]$Everywhere)
     $problems = @()
+    $depth = 0
+    $guards = @{}          # depth -> names guarded at that depth
+    $platformGuard = @{}
 
-    foreach ($rel in 'tools/release.ps1', 'tools/ci.ps1', 'tools/check-archive.ps1') {
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        # Single-quoted literals FIRST, then comments. A comment naming a
+        # variable is documentation and a quoted 'USERPROFILE' is a string, not
+        # a dereference -- this very step would otherwise flag the prose above
+        # it, which is the mistake the release-workflow checker already made
+        # once and had to be taught not to repeat. The old version of this line
+        # said it stripped both and stripped only comments; it survived because
+        # no single-quoted literal in these three files happened to spell one of
+        # the eleven names. That is luck, and this step is about not relying on
+        # it.
+        $code = $Lines[$i] -replace "'[^']*'", '' -replace '(^|\s)#.*$', ''
+
+        # Every name this line dereferences, in either spelling.
+        $names = @()
+        foreach ($m in [regex]::Matches($code, '\$env:([A-Za-z_][A-Za-z0-9_]*)|\$\{env:([^}]+)\}')) {
+            $n = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
+            $names += $n
+        }
+        if ($names.Count -eq 0) {
+            $depth += ([regex]::Matches($code, '\{')).Count - ([regex]::Matches($code, '\}')).Count
+            if ($depth -lt 0) { $depth = 0 }
+            foreach ($d in @($guards.Keys))        { if ($d -gt $depth) { $guards.Remove($d) } }
+            foreach ($d in @($platformGuard.Keys)) { if ($d -gt $depth) { $platformGuard.Remove($d) } }
+            continue
+        }
+
+        $opensGuard = @()
+        $guardsPlatform = $false
+        if ($code -match '^\s*(\}\s*)?(else)?if\s*\(') {
+            $opensGuard = @($names)
+            if ($code -match '\$(IsWindows|onWindows|IsLinux|IsMacOS|onMac|onLinux)\b') { $guardsPlatform = $true }
+        }
+
+        $active = @()
+        $platformActive = $false
+        foreach ($d in $guards.Keys) { if ($d -le $depth) { $active += $guards[$d] } }
+        foreach ($d in $platformGuard.Keys) { if ($d -le $depth -and $platformGuard[$d]) { $platformActive = $true } }
+
+        foreach ($v in ($names | Sort-Object -Unique)) {
+            # Compared case-insensitively, because Windows environment variable
+            # names are and `$env:ProgramFiles` and `$env:PROGRAMFILES` are one
+            # variable.
+            if ($Everywhere -contains $v.ToUpperInvariant()) { continue }
+            if ($opensGuard -contains $v) { continue }            # this line IS the guard
+            if ($active -contains $v) { continue }                # inside its own guard
+            if ($platformActive -or $guardsPlatform) { continue }  # inside a platform branch
+            # A bare assignment cannot fail; only passing it onward can.
+            if ($code -match ('^\s*(\$env:' + [regex]::Escape($v) + '\b|\$\{env:' + [regex]::Escape($v) + '\})\s*=')) { continue }
+            # ONE FORMAT STRING, not three concatenated with `-f` on the last.
+            # `-f` binds tighter than `+`, so the first version formatted only
+            # the final literal and the message came out reading
+            # "{0}:{1} reads $env:{2} outside any guard" -- which is also why
+            # the self-test below matches on the message and not merely on the
+            # count.
+            $problems += ("{0}:{1} reads `$env:{2} outside any guard. That variable is not on the everywhere list, so it may be ABSENT rather than empty on some platform -- and Join-Path treats a null -Path as a terminating error: {3}" -f
+                          $Label, ($i + 1), $v, $code.Trim())
+        }
+
+        if ($opensGuard.Count -or $guardsPlatform) {
+            $inner = $depth + 1
+            if ($opensGuard.Count) { $guards[$inner] = $opensGuard }
+            if ($guardsPlatform)   { $platformGuard[$inner] = $true }
+        }
+        $depth += ([regex]::Matches($code, '\{')).Count - ([regex]::Matches($code, '\}')).Count
+        if ($depth -lt 0) { $depth = 0 }
+        foreach ($d in @($guards.Keys))        { if ($d -gt $depth) { $guards.Remove($d) } }
+        foreach ($d in @($platformGuard.Keys)) { if ($d -gt $depth) { $platformGuard.Remove($d) } }
+    }
+    return $problems
+}
+
+Step 'the cross-platform scripts touch no environment variable unguarded' {
+    # THE ALLOWLIST, which is two names and has to earn both.
+    #
+    # PATH is the only variable POSIX and Windows both guarantee. PL_CORPUS is
+    # set by this file before it is read, so it is this repository's own and
+    # exists exactly when the code that reads it says it does.
+    #
+    # Everything else -- TEMP, USERPROFILE, HOME, SystemRoot, ProgramFiles,
+    # LOCALAPPDATA, ProgramData, RUNNER_TEMP -- is absent on at least one of the
+    # three platforms and must be guarded where it is read. HOME is the mirror
+    # case worth naming: it is the Unix one, it does not exist on Windows, and
+    # the guard on the cargo-bin line at the top of this file is there because
+    # of this rule rather than in spite of it.
+    $everywhere = 'PATH', 'PL_CORPUS'
+
+    $files = 'tools/release.ps1', 'tools/ci.ps1', 'tools/check-archive.ps1'
+    $problems = @()
+    $seen = @{}
+    foreach ($rel in $files) {
         $p = "$repo/$rel"
         if (-not (Test-Path $p)) { throw "$rel is missing" }
-        $lines = Get-Content -LiteralPath $p
-        $depth = 0
-        $guards = @{}   # depth -> list of variable names guarded at that depth
-        $platformGuard = @{}
-
-        for ($i = 0; $i -lt $lines.Count; $i++) {
-            # Strip comments and single-quoted literals. A comment naming the
-            # variable is documentation, and a quoted 'USERPROFILE' is a string,
-            # not a dereference -- this very step would otherwise flag the prose
-            # above, which is the mistake the release-workflow checker already
-            # made once and had to be taught not to repeat.
-            $code = $lines[$i] -replace '(^|\s)#.*$', ''
-
-            $opensGuard = @()
-            $guardsPlatform = $false
-            if ($code -match '^\s*(\}\s*)?(else)?if\s*\(') {
-                foreach ($v in $winOnly) {
-                    if ($code -match (& $ref $v)) { $opensGuard += $v }
-                }
-                if ($code -match '\$(IsWindows|onWindows|IsLinux|IsMacOS|onMac|onLinux)\b') { $guardsPlatform = $true }
-            }
-
-            # Active guards are those opened at a still-open depth.
-            $active = @()
-            $platformActive = $false
-            foreach ($d in $guards.Keys) { if ($d -le $depth) { $active += $guards[$d] } }
-            foreach ($d in $platformGuard.Keys) { if ($d -le $depth -and $platformGuard[$d]) { $platformActive = $true } }
-
-            foreach ($v in $winOnly) {
-                if ($code -notmatch (& $ref $v)) { continue }
-                if ($opensGuard -contains $v) { continue }        # this line IS the guard
-                if ($active -contains $v) { continue }            # inside its own guard
-                if ($platformActive -or $guardsPlatform) { continue }  # inside a platform branch
-                # A bare assignment cannot fail; only passing it onward can.
-                if ($code -match ('^\s*(\$env:' + $v + '\b|\$\{env:' + $v + '[^}]*\})\s*=')) { continue }
-                $problems += ("{0}:{1} uses `$env:{2} outside any guard -- that variable does not exist off Windows: {3}" -f
-                              $rel, ($i + 1), $v, $code.Trim())
-            }
-
-            $opens = ([regex]::Matches($code, '\{')).Count
-            $closes = ([regex]::Matches($code, '\}')).Count
-            if ($opensGuard.Count -or $guardsPlatform) {
-                $inner = $depth + 1
-                if ($opensGuard.Count) { $guards[$inner] = $opensGuard }
-                if ($guardsPlatform)   { $platformGuard[$inner] = $true }
-            }
-            $depth += $opens - $closes
-            if ($depth -lt 0) { $depth = 0 }
-            foreach ($d in @($guards.Keys))       { if ($d -gt $depth) { $guards.Remove($d) } }
-            foreach ($d in @($platformGuard.Keys)) { if ($d -gt $depth) { $platformGuard.Remove($d) } }
+        $lines = @(Get-Content -LiteralPath $p)
+        $problems += @(Find-UnguardedEnvUses -Lines $lines -Label $rel -Everywhere $everywhere)
+        foreach ($m in [regex]::Matches(($lines -join "`n"), '\$env:([A-Za-z_][A-Za-z0-9_]*)|\$\{env:([^}]+)\}')) {
+            $n = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
+            $seen[$n.ToUpperInvariant()] = $true
         }
     }
 
+    # THE ALLOWLIST ITSELF IS CHECKED. A name on it that nothing reads is slack,
+    # and slack on an allowlist is how the next variable gets waved through by a
+    # line somebody added "while I am here". Both of these are read today.
+    foreach ($v in $everywhere) {
+        if (-not $seen.Contains($v)) {
+            $problems += "the everywhere list names $v, which none of the three scripts reads; a name nobody uses is a hole nobody notices"
+        }
+    }
+
+    # THE CONTROL, and it is the whole reason this step was rewritten. A scanner
+    # that has stopped matching reports the same clean as a clean tree. Four
+    # planted lines: the two shapes that must be caught, and the two guards that
+    # must not be. TEMP is deliberately the subject of the first, because TEMP is
+    # exactly what the eleven-name denylist could not see.
+    $planted = @(
+        '$out = Join-Path $env:TEMP ''probe''',                   # 1: must be caught
+        'if (${env:ProgramFiles(x86)}) { $x = 1 }',               # 2: guard, must not
+        '$y = Join-Path ${env:ProgramFiles(x86)} ''Git''',        # 3: outside it, must be caught
+        'if ($env:TEMP) { $z = Join-Path $env:TEMP ''ok'' }'      # 4: guard + use, must not
+    )
+    $found = @(Find-UnguardedEnvUses -Lines $planted -Label 'planted' -Everywhere $everywhere)
+    $caught = @($found | ForEach-Object { if ($_ -match '^planted:(\d+)') { [int]$Matches[1] } })
+    if (($caught | Sort-Object) -join ',' -ne '1,3') {
+        throw ("the scanner caught planted lines [$($caught -join ', ')] and should have caught exactly 1 and 3. " +
+               "It is no longer measuring what this step claims:`n        " + ($found -join "`n        "))
+    }
+
     if ($problems) { throw ($problems -join "`n        ") }
-    Write-Host '        release.ps1, ci.ps1 and check-archive.ps1 are clean' -ForegroundColor DarkGray
+    Write-Host ("        $($files.Count) scripts, $($seen.Count) environment variable(s) read, " +
+                "all guarded or on the everywhere list; scanner verified on planted input") -ForegroundColor DarkGray
     $global:LASTEXITCODE = 0
 }
 
@@ -3239,8 +3720,12 @@ Step 'polylinker-bench' {
     # every case scored "unsupported", the bench printed 0.0%, and run.py still
     # exited 0. The step reported ok for a score of zero. A gate that only
     # checks an exit code cannot notice a benchmark collapsing.
-    $exe = (Resolve-Path 'target/release/pl.exe').Path
-    $out = python bench/run.py bench/polylinker-bench.json -- $exe bench-adapter 2>&1
+    # NOT `$exe`, which is this file's platform suffix. A local named `$exe`
+    # inside a step body does not clobber the script-level one -- PowerShell
+    # creates it in the scriptblock's own scope -- but a reader cannot tell that
+    # from the line, and the next person to move a line would be right to worry.
+    $plAbs = (Resolve-Path $pl).Path
+    $out = python bench/run.py bench/polylinker-bench.json -- $plAbs bench-adapter 2>&1
     $out
     if ($LASTEXITCODE -ne 0) { return }
     $line = $out | Select-String -Pattern '^all\s' | Select-Object -Last 1
@@ -3263,11 +3748,38 @@ Step 'polylinker-bench' {
     }
 } { Have python }
 Step 'bench regenerates identically' {
-    python bench/generate.py > "$env:TEMP\regen.json" 2>$null
-    $a = (Get-FileHash 'bench/polylinker-bench.json' -Algorithm SHA256).Hash
-    $b = (Get-FileHash "$env:TEMP\regen.json" -Algorithm SHA256).Hash
-    if ($a -ne $b) { Write-Output 'generate.py is no longer deterministic'; $global:LASTEXITCODE = 1 }
-    else { $global:LASTEXITCODE = 0 }
+    # COMPARED AS TEXT WITH THE LINE ENDINGS NORMALISED, not as a SHA-256 of
+    # the bytes, and the reason is the same one written out at length above
+    # 'renderers agree (fixture is current)': `>` re-encodes the generator's
+    # stdout with the PLATFORM's newline. `bench/polylinker-bench.json` is
+    # committed with CRLF because it was last regenerated through this line on
+    # Windows, so a byte hash compares a Windows-written fixture against a
+    # Linux-written regeneration and reports "generate.py is no longer
+    # deterministic" about a file generate.py produced identically.
+    #
+    # Nothing is lost that this step ever claimed. Its subject is whether
+    # generate.py's OUTPUT is a function of its input; the newline the shell
+    # wrapped that output in is a property of the shell. `-cne`, so a case
+    # change in a checksum is still a difference.
+    #
+    # generate.py writes to stdout and takes no output path, which is why this
+    # cannot follow the fixture step's better pattern of having the generator
+    # write the file itself.
+    $regen = Join-Path $tmp 'pl-bench-regen.json'
+    python bench/generate.py > $regen 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Output 'generate.py failed'; return }
+    $a = ([IO.File]::ReadAllText((Join-Path $repo 'bench/polylinker-bench.json'))) -replace "`r`n", "`n"
+    $b = ([IO.File]::ReadAllText($regen)) -replace "`r`n", "`n"
+    Remove-Item -LiteralPath $regen -Force -ErrorAction SilentlyContinue
+    # A floor, because two empty strings compare equal: if the generator wrote
+    # nothing and the fixture were ever emptied, this would report ok.
+    if ($a.Length -lt 1000 -or $b.Length -lt 1000) {
+        Write-Output "the fixture is $($a.Length) chars and the regeneration $($b.Length); one of them is empty and this comparison proved nothing"
+        $global:LASTEXITCODE = 1
+    } elseif ($a -cne $b) {
+        Write-Output 'generate.py is no longer deterministic'
+        $global:LASTEXITCODE = 1
+    } else { $global:LASTEXITCODE = 0 }
 } { (HavePy 'seguid') -and (HavePy 'pydna') }
 
 # The feature-database rules. Both of these lived only in .github/workflows/
@@ -3288,7 +3800,7 @@ Step 'the build''s writer reads SIGNOFF.tsv and never writes it' {
     python features/build/check_writer.py --quiet
 } { Have python }
 
-# THE SKIP LIST, CHECKED -- because on a runner it is the only thing standing
+# THE SKIP DISCIPLINE -- because on a runner it is the only thing standing
 # between "the gate passed" and "the gate did not run".
 #
 # A skip costs nothing here. On a workstation that is correct and deliberate:
@@ -3301,7 +3813,39 @@ Step 'the build''s writer reads SIGNOFF.tsv and never writes it' {
 # whole file exists to answer: a check that cannot fail proves nothing, and a
 # check that can be skipped without anybody being told cannot fail.
 #
-# Hence set equality against a committed list, and not:
+# WHAT CHANGED WHEN THE GATE WENT TO THREE PLATFORMS. The committed list used to
+# name every step allowed to skip, full stop. That worked while there was one
+# runner and cannot express "runs on Windows, cannot run on Linux": under three
+# flat lists, or one list with a platform column, adding
+# 'the built binaries carry their icon and version resource' to the Linux side
+# is a one-line diff that reads as bookkeeping, and NOTHING anywhere then says
+# the step still runs on Windows. Both of those designs add a second,
+# unverified claim -- which platforms a step should run on -- on top of the one
+# that is verified.
+#
+# So the platform half of the list is DERIVED instead. A precondition returns
+# the reason it is unmet, from the two-word vocabulary at the top of this file,
+# and three rules are checked here:
+#
+#   L1  Every skip carries a declared reason. $false -- a missing SciPy, a
+#       missing node, a missing WiX -- is a skip nobody declared and is a
+#       FAILURE. This is exactly what the old list bought, and it costs no list.
+#   L2  A platform reason must agree with the platform: 'not windows' may only
+#       appear when $IsWindows is false, and on Windows it may not appear at
+#       all. So a Windows-only step cannot be made to skip on Windows by
+#       relabelling it, and a step that is not Windows-only cannot be quietly
+#       excused off Windows without hand-writing the string into its own
+#       precondition under its own comment.
+#   L3  The steps that skipped for want of a CORPUS are exactly the committed
+#       list, by set equality in both directions, and every name on it names a
+#       real step.
+#
+# L3 is the list that survives, and it is one flat list again -- because "there
+# is no corpus on this machine" is a fact about the machine and not about the
+# platform, so the SAME five names are right on all three runners. The file
+# needs no platform column because it never has anything platform-shaped in it.
+#
+# Set equality for L3, and not:
 #
 #   * a count. `$skipped.Count -eq 5` is satisfied by the WRONG five skipping,
 #     and the wrong five is the likely five: drop `scipy` and `pypdf` from the
@@ -3310,7 +3854,8 @@ Step 'the build''s writer reads SIGNOFF.tsv and never writes it' {
 #   * a subset ("no more than these"). A step on the list that stopped skipping
 #     is also news -- either somebody solved the precondition, in which case the
 #     list should say so, or the precondition is now being satisfied by
-#     something nobody intended.
+#     something nobody intended. On a runner it means somebody put lab plasmids
+#     on a runner, which is news of a different kind again.
 #   * a floor. Nothing to floor: the right number is exact.
 #
 # The names must also BE names. A step renamed here while the list keeps the old
@@ -3319,9 +3864,39 @@ Step 'the build''s writer reads SIGNOFF.tsv and never writes it' {
 # its protein', which spent weeks running zero tests because it filtered on a
 # name that had been renamed away -- so it is checked separately and said in
 # different words.
+#
+# WHAT STILL CANNOT BE SEEN FROM ONE LEG: a step that skipped on ALL THREE
+# platforms. Nothing here can tell that a step declared 'not windows' twice was
+# ever observed to run anywhere. `tools/reconcile-ledgers.ps1` is where that is
+# checked, over the -Ledger files the three runners upload.
 if ($ExpectedSkips) {
     $checkName = 'the steps that skipped are exactly the ones this machine was told to expect'
     $problems = @()
+
+    # L1 and L2 first, because they need no file and hold on a machine with no
+    # list at all.
+    foreach ($row in $script:stepLedger) {
+        if ($row.State -ne 'skipped') { continue }
+        if (-not $row.Reason) {
+            $problems += ("`"$($row.Name)`" skipped and its precondition declared no reason. Install what it " +
+                          'needs, or -- if it genuinely cannot run on this platform -- say so IN THE ' +
+                          'PRECONDITION by returning one of: ' + ($script:ReasonVocabulary -join ', ') +
+                          '. An unannounced skip is how six releases shipped behind a gate nobody was running.')
+            continue
+        }
+        if ($script:ReasonVocabulary -notcontains $row.Reason) {
+            $problems += ("`"$($row.Name)`" skipped with the reason `"$($row.Reason)`", which is not in the " +
+                          'vocabulary (' + ($script:ReasonVocabulary -join ', ') + '). A reason nobody checks ' +
+                          'is a label, and a label is what this replaced.')
+            continue
+        }
+        # L2. The string is checked against the platform rather than believed.
+        if ($row.Reason -eq 'not windows' -and $onWindows) {
+            $problems += ("`"$($row.Name)`" skipped saying 'not windows', and this IS Windows. Either the " +
+                          'precondition is lying or it is testing something else and calling it the platform.')
+        }
+    }
+    # L3.
     if (-not (Test-Path -LiteralPath $ExpectedSkips)) {
         $problems += "-ExpectedSkips names $ExpectedSkips, which does not exist"
         $expected = @()
@@ -3332,41 +3907,74 @@ if ($ExpectedSkips) {
         $expected = @(Get-Content -LiteralPath $ExpectedSkips |
             ForEach-Object { ($_ -replace '(^|\s)#.*$', '').Trim() } |
             Where-Object { $_ })
-        if ($expected.Count -eq 0 -and $script:skipped.Count -eq 0) {
+        $corpusSkips = @($script:stepLedger | Where-Object { $_.State -eq 'skipped' -and $_.Reason -eq 'corpus' } |
+                         ForEach-Object { $_.Name })
+        if ($expected.Count -eq 0 -and $corpusSkips.Count -eq 0) {
             # Not an error, but say it out loud rather than printing ok for a
             # comparison of two empty sets.
-            Write-Host '        the list is empty and nothing skipped' -ForegroundColor DarkGray
+            Write-Host '        the list is empty and nothing skipped for want of a corpus' -ForegroundColor DarkGray
         }
         foreach ($e in $expected) {
             if ($script:steps -notcontains $e) {
                 $problems += ("`"$e`" is on the list and names no step in this gate. It has been renamed or " +
                               'removed, and the list has been silently protecting nothing since.')
-            } elseif ($script:skipped -notcontains $e) {
-                $problems += ("`"$e`" was expected to skip here and ran. If that is the improvement it looks " +
-                              "like, delete the line from $ExpectedSkips in the same commit.")
+            } elseif ($corpusSkips -notcontains $e) {
+                $problems += ("`"$e`" is on $ExpectedSkips and did not skip for want of a corpus. That file " +
+                              'names ONLY the corpus skips -- a step that cannot run on this platform declares ' +
+                              'it in its own precondition and must not be listed here. If a corpus really has ' +
+                              'appeared on this machine, delete the line in the same commit.')
             }
         }
-        foreach ($s in $script:skipped) {
+        foreach ($s in $corpusSkips) {
             if ($expected -notcontains $s) {
-                $problems += ("`"$s`" skipped and is not on the list. Install what it needs, or add it with the " +
-                              'reason it cannot run here -- an unannounced skip is how six releases shipped ' +
-                              'behind a gate nobody was running.')
+                $problems += ("`"$s`" skipped for want of a corpus and is not on the list. Add it, with the " +
+                              'reason it needs one.')
             }
         }
     }
+
     if ($problems) {
         Write-Host ("  FAIL  {0}" -f $checkName) -ForegroundColor Red
         $problems | ForEach-Object { Write-Host "        $_" }
         $script:failed += $checkName
     } else {
-        Write-Host ("  ok    {0} ({1})" -f $checkName, $expected.Count) -ForegroundColor Green
+        $declared = @($script:stepLedger | Where-Object { $_.State -eq 'skipped' })
+        Write-Host ("  ok    {0} ({1} corpus, {2} skipped in all)" -f
+                    $checkName, $expected.Count, $declared.Count) -ForegroundColor Green
     }
+}
+
+# The ledger, for the cross-platform reconciler. Written even when the run
+# failed: a leg that went red still has a true record of what it ran, and the
+# reconciler's job -- has every step run SOMEWHERE -- is exactly the question
+# whose answer a failed leg still carries.
+if ($Ledger) {
+    $dir = Split-Path -Parent $Ledger
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+    # TAB-SEPARATED AND LF-TERMINATED, with the platform on the first line. A
+    # step name may contain a comma (three do) and may not contain a tab.
+    $osName = if ($onWindows) { 'windows' } elseif ($onMac) { 'macos' } elseif ($onLinux) { 'linux' } else { 'unknown' }
+    $rows = @("# platform`t$osName")
+    foreach ($row in $script:stepLedger) {
+        if ($row.Name -match "`t") { throw "the step name `"$($row.Name)`" contains a tab and cannot go in the ledger" }
+        $rows += ("{0}`t{1}`t{2}" -f $row.Name, $row.State, $row.Reason)
+    }
+    [System.IO.File]::WriteAllText($Ledger, ($rows -join "`n") + "`n")
+    Write-Host ("        ledger: $($script:stepLedger.Count) step(s) -> $Ledger") -ForegroundColor DarkGray
 }
 
 $elapsed = (Get-Date) - $started
 Write-Host ''
 if ($script:skipped) {
-    Write-Host ("skipped: {0}" -f ($script:skipped -join ', ')) -ForegroundColor DarkGray
+    # WITH THE REASON. The old line printed the names alone, so a reader could
+    # not tell "no corpus here" from "this cannot run on this platform" from
+    # "somebody's SciPy stopped importing" -- three quite different pieces of
+    # news that the summary rendered identically.
+    Write-Host 'skipped:' -ForegroundColor DarkGray
+    foreach ($row in ($script:stepLedger | Where-Object { $_.State -eq 'skipped' })) {
+        $why = if ($row.Reason) { $row.Reason } else { 'no reason declared' }
+        Write-Host ("  {0}  ({1})" -f $row.Name, $why) -ForegroundColor DarkGray
+    }
 }
 if ($script:failed.Count -eq 0) {
     Write-Host ("GATE PASSED in {0:N0}s" -f $elapsed.TotalSeconds) -ForegroundColor Green

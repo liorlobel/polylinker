@@ -1,15 +1,68 @@
-# The steps `tools/ci.ps1` is ALLOWED to skip on the CI runner. Everything else
-# must run. `.github/workflows/ci.yml` passes this file as -ExpectedSkips, and
-# the gate fails on any difference in either direction -- a step that skipped
-# and is not named here, and a step named here that did not skip.
+# The steps `tools/ci.ps1` skips FOR WANT OF A CORPUS. Nothing else belongs
+# here. `.github/workflows/ci.yml` passes this file as -ExpectedSkips on every
+# runner, and the gate fails on any difference in either direction -- a step
+# that skipped for want of a corpus and is not named here, and a step named here
+# that did not skip for that reason.
 #
-# THIS FILE IS NOT A DESCRIPTION OF A DEVELOPER MACHINE. A workstation without
-# SciPy, without WiX, without the wasm target skips more than this and that is
-# fine; run the gate with no -ExpectedSkips there. This is the list for a runner
-# that has been given everything a runner can be given, and its whole job is to
-# make the difference between "the gate passed" and "the gate ran" impossible to
-# miss. The gate passed on the author's machine with six steps skipped for six
-# releases and no line anywhere said so.
+# THIS FILE IS NOT A LIST OF THE STEPS ALLOWED TO SKIP. It was until 2026-08-10,
+# when the gate ran on windows-latest alone. It stopped being able to be one the
+# moment the gate went to three runners, because a flat list cannot say "runs on
+# Windows, cannot run on Linux" -- and the two obvious repairs are both worse
+# than the disease:
+#
+#   * one file per platform. Adding 'the built binaries carry their icon and
+#     version resource' to the Linux list is a one-line diff that reads as
+#     bookkeeping, and nothing anywhere then says the step still runs on
+#     Windows. The next amber run makes adding a line the obvious move.
+#   * one file with a platform column. Better for review, and it still cannot
+#     say WHY: "there is no corpus" and "there is no PE file on Linux" render
+#     identically, so a reviewer has no basis on which to push back.
+#
+# Both add a SECOND, UNVERIFIED claim -- which platforms a step should run on --
+# on top of the one thing that is actually verified, which is what the step did.
+#
+# So the platform half is not written down at all. A step that cannot run off
+# Windows declares it in ITS OWN PRECONDITION, as `WindowsOnly { ... }` -- the
+# one helper in `tools/ci.ps1` that owns the string 'not windows' -- and the
+# gate checks that string against `$IsWindows` rather than believing it: on
+# Windows the string is a failure, and off Windows a step that does NOT return
+# it must run. NO LINE IN THIS FILE CAN QUIET A PLATFORM SKIP -- that is what the
+# split buys, and it is the whole of what it buys.
+#
+# THE SENTENCE HERE USED TO BE BROADER AND WAS WRONG. It read "there is no line
+# anybody can add ANYWHERE to quiet a platform skip", and there is: `WindowsOnly`
+# in a portable step's own precondition. Measured on 2026-08-10, by doing it to
+# 'gel calibration spline vs SciPy' and pushing -- run 31361991651, whose Linux
+# leg reported 5 corpus and EIGHT 'not windows' skips where the honest count is
+# seven, and PASSED. Every rule was satisfied: the reason was declared (L1), it
+# agreed with the platform (L2), it was not a corpus skip (L3), and the step had
+# still run on Windows so the reconciler's X2 was satisfied too. Two platforms of
+# coverage gone, nothing red anywhere.
+#
+# So the boundary, stated as it actually is: these rules catch a step that stops
+# running for a reason NOBODY DECLARED -- a wheel that stops building, a
+# `pip install` line edited in a hurry, which is the failure that happens. They
+# do not catch a human deciding to call a portable step Windows-only. Nothing
+# mechanical can, short of the second list this file exists to argue against.
+# What holds it is that `WindowsOnly` is one greppable identifier appearing in
+# seven places, and `tools/ci.ps1` is reviewed.
+#
+# See 'THE SKIP DISCIPLINE' at the foot of `tools/ci.ps1` for the three
+# per-leg rules, and `tools/reconcile-ledgers.ps1` for the four cross-leg ones,
+# which include the only check that can see a step skipping on all three.
+#
+# WHAT IS LEFT IS THIS FILE, AND IT IS THE SAME ON ALL THREE RUNNERS -- which is
+# the test that the split is the right one. "There is no corpus on this machine"
+# is a fact about the machine, not about the operating system, so there is
+# nothing platform-shaped left in here to need a column.
+#
+# THIS FILE IS STILL NOT A DESCRIPTION OF A DEVELOPER MACHINE. A workstation
+# without SciPy, without WiX, without the wasm target skips more than this and
+# that is fine; run the gate with no -ExpectedSkips there. This is the list for a
+# runner that has been given everything a runner can be given, and its whole job
+# is to make the difference between "the gate passed" and "the gate ran"
+# impossible to miss. The gate passed on the author's machine with six steps
+# skipped for six releases and no line anywhere said so.
 #
 # Every name below is here for ONE reason, and it is the same reason: the step
 # needs -Corpus, and the corpus is real laboratory .dna and .ab1 files. Those
@@ -41,22 +94,24 @@
 # than quietly reporting that the step has started running.
 #
 # ONE STEP IS DELIBERATELY ABSENT AND IS WORTH NAMING HERE, because the day it
-# starts skipping the message will be "skipped and is not on the list" and the
-# reason will not be obvious: 'the helper unmangles a real 8.3 alias and the
-# arithmetic it replaced does not'. It needs a directory reachable through an 8.3
-# short name, and on a runner it has one for free -- `$env:TEMP` is
-# `C:\Users\RUNNER~1\AppData\Local\Temp` over a real `runneradmin`. That is also
-# what has been exercising the 8.3 half of `Get-DirectoryPrefix` incidentally on
-# every run since the gate went green, and what caught the defect in run
-# 31325886841 in the first place.
+# starts skipping on Windows the message will be "skipped and its precondition
+# declared no reason" and the cause will not be obvious: 'the helper unmangles a
+# real 8.3 alias and the arithmetic it replaced does not'. It needs a directory
+# reachable through an 8.3 short name, and on a Windows runner it has one for
+# free -- `$env:TEMP` is `C:\Users\RUNNER~1\AppData\Local\Temp` over a real
+# `runneradmin`. That is also what has been exercising the 8.3 half of
+# `Get-DirectoryPrefix` incidentally on every run since the gate went green, and
+# what caught the defect in run 31325886841 in the first place.
 #
-# It is absent rather than listed because on this runner it CAN run, and listing
-# it would assert the opposite. If GitHub ever renames that account to something
-# that fits in 8.3, the step will skip, this file will fail the build, and the
-# loss of that coverage gets reported instead of passing silently -- which is the
-# whole point of the step. Do not add it here to make the build green; the honest
-# fixes are a runner whose TEMP carries an alias, or a volume with 8.3 creation
-# enabled so the case can be minted.
+# On the Linux and macOS legs that step declares 'not windows' and skips, which
+# is checked against the platform and needs no line here. On Windows it must
+# RUN, and its precondition deliberately falls back to $false rather than to a
+# reason -- so if GitHub ever renames that account to something that fits in
+# 8.3, the step skips with no declared reason, the build reds, and the loss of
+# coverage gets reported instead of passing silently. That is the whole point of
+# the step. Do not reach for a vocabulary entry to make the build green; the
+# honest fixes are a runner whose TEMP carries an alias, or a volume with 8.3
+# creation enabled so the case can be minted.
 
 wasm module vs native binary
 rendered chromatograms agree with their files
