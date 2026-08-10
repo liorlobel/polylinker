@@ -17,6 +17,8 @@ and by what evidence.
 > `description` and `notes` are both in `SIGNED_COLUMNS`. The gap between 115
 > and 89 is the intended state of a table a machine is allowed to add to; see
 > *Rule 6* below, and *What is proposed and not yet signed* for what the 26 are.
+> The curator's reading list for them, row by row and contested cases first, is
+> [`PROPOSED.md`](PROPOSED.md).
 >
 > **This is a dated snapshot** (sources retrieved 2026-07-27, 2026-07-28 and
 > 2026-08-10) and does not reflect the most current data available from NLM,
@@ -82,7 +84,9 @@ right name.
 | `build/lib_columns.py` | The schema, in one place. Pinned to `crates/pl-features/src/lib.rs` through the header of the file it writes — the Rust loader compares that header against its own `FEATURE_COLUMNS` and refuses the file if they differ. |
 | `build/stage_uniprot.py` | Stage 2. UniProt → ENA, one pinned cross-reference per entry, exact translation match. |
 | `build/stage_rfam.py` | Stage 3. Rfam seed alignments, with the miRBase and Wikipedia exclusions enforced at parse time. |
-| `build/stage_curated.py` | Stage 5. Hand-curated designed parts, one citation each, and two routes: codons sliced out of a natural parent, or a peptide verified against a wwPDB polymer entity. Six of 28 are still held; see *Honest coverage*. |
+| `build/stage_curated.py` | Stage 4. Hand-curated designed parts, one citation each, and two routes: codons sliced out of a natural parent, or a peptide verified against a wwPDB polymer entity. Six of 28 are still held; see *Honest coverage*. (This row said "Stage 5" from before there was one, which stopped being merely wrong the day a real Stage 5 landed underneath it.) |
+| `build/stage_classb.py` | Stage 5. INSDC-anchored Class B conventions — promoters, terminators, poly(A) signals. One anchor record per row, re-sliced every build, plus ≥2 witnesses from *different submitting addresses*. Reads no `/note`, `/label`, `/gene`, `/product` or `/standard_name`, and refuses a SnapGene-annotated record as a witness. Nine further elements are held with reasons in `HELD`; see *Class B*. |
+| `PROPOSED.md` | The curator worklist for every row that is `proposed`: what it claims, which accessions to check it against, the boundary chosen and on what basis, and — first — the ones where the exemplars disagreed or the convention is contested. Carries no digests, deliberately: `SIGNOFF.tsv` says signing a digest nobody has read is not an attestation. |
 | `build/check_signoff.py` | Proves no row asserts more than a human signed — and proves the check itself can fail, in both directions. |
 | `build/check_writer.py` | Proves the build's writer *reads* `SIGNOFF.tsv` and never writes it, over the real shipped rows and with no network. Plants five misbehaving writers and requires itself to catch each, then requires itself to pass a clean one. |
 
@@ -301,6 +305,14 @@ nothing below is searched by `pl annotate`, by the desktop app, or by anything
 else, until a curator signs it in `SIGNOFF.tsv`. **They are in the repository so
 that a human can read them, which is the only thing the machine is allowed to
 ask for.**
+
+[`PROPOSED.md`](PROPOSED.md) is the worklist for that reading: every one of the
+26, what it claims, the accessions to check it against, the boundary decision
+and its basis, and the exact `--show` invocation per row. It opens with the rows
+where the exemplars disagreed or the convention is contested, because those are
+the ones a curator has to *decide* rather than merely check — and with the one
+row that should not be signed at all until an unresolved organism conflict is
+settled (`PLF:1016`).
 
 **14 further selection markers** (`PLF:1014`–`PLF:1027`), all through the Stage
 2 chain, so all of them translation-verified exactly against a UniProt canonical

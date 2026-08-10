@@ -74,6 +74,20 @@ smoothed over:
   forty Class B rows; twelve is what survived the two-independent-submissions
   rule applied honestly, and that is the finding rather than a shortfall.
 
+**A curator worklist, [`features/PROPOSED.md`](features/PROPOSED.md).** Twenty-six
+rows nobody has read is a request for several hours of a specialist's attention,
+and "here is the table, good luck" is not how to ask for it. The file gives each
+row's claim, the accessions to check it against, the boundary chosen and its
+basis, and the exact `--show` invocation — and it leads with the rows where the
+exemplars *disagreed*, because those need a decision rather than a check: the lac
+promoter's rival 84 nt convention, the two T7-terminator forms that are offset
+from each other by one base, rrnB T1's rivals running 43 to 98 nt, and `PLF:1016`,
+which should not be signed at all until an unresolved organism conflict between
+UniProt and the ENA record is settled. It carries no digests on purpose —
+`SIGNOFF.tsv` says signing a digest nobody has read is not an attestation, and a
+worklist you could copy twenty-six hashes out of without opening a row would be a
+machine for producing exactly that.
+
 ### Fixed
 
 - The desktop app's "no promoter is in this database yet" line is computed by
@@ -87,6 +101,20 @@ smoothed over:
   corrected by measurement: the alias-collision table said twelve colliding
   strings when there were more, and listed `smR` as resolving to two records
   when it resolves to three.
+- **Every Class B row told the curator the anchor record annotated nothing near
+  it, when what had been measured was narrower than that.** The sentence read
+  "ANCHOR RECORD'S OWN ANNOTATION within 80 nt of this interval: none", but
+  `parse_embl()` keeps only regulatory-type feature keys, so a CDS, gene or exon
+  over the interval was never looked at and could not appear. It is not
+  hypothetical: `X17403.1` annotates `CDS complement(173505..>173909)` straight
+  across `PLF:4005`'s interval, and the row said "none". The rows are still
+  right — a CDS is not a rival promoter boundary — but a curator reading "none"
+  had been told the region was bare, which it is not. The note now says which
+  keys were counted and that it is silent about the rest.
+- `features/README.md` described `build/stage_curated.py` as "Stage 5" when it
+  is and always was Stage 4. Harmless while there were four stages; actively
+  misleading the moment a real Stage 5 (`stage_classb.py`) landed underneath it.
+  Both rows are now in the file table, with the correct numbers.
 
 ## [0.5.0] - 2026-08-10
 

@@ -1060,8 +1060,20 @@ def notes_for(item: Convention, ev: dict) -> str:
         f"{arec.accession} {item.lo}-{item.hi} on the {item.strand} strand this build: "
         f"{len(item.sequence)} nt, identical to the sequence in the allow-list, and the "
         f"record's FASTA and flat-file views of that interval agree. These bases occur "
+        # SAY WHICH KEYS WERE LOOKED AT, because "none" is otherwise read as
+        # "the record says nothing here" and that is a stronger claim than was
+        # measured. parse_embl() keeps REGULATORY_KEYS and nothing else, so a
+        # CDS, gene or exon over the interval is invisible to this sentence and
+        # was never counted. It is not hypothetical: X17403.1 annotates
+        # `CDS complement(173505..>173909)` across PLF:4005's interval and
+        # `exon complement(173610..173730)` just outside it, and this note said
+        # "none". The row is still right -- the CDS is not a rival promoter
+        # boundary -- but a curator reading "none" would have been told the
+        # region was bare, which it is not.
         f"{len(ev['anchor_hits'])} time(s) in the anchor record. ANCHOR RECORD'S OWN "
-        f"ANNOTATION within {ANCHOR_WINDOW} nt of this interval: "
+        f"ANNOTATION within {ANCHOR_WINDOW} nt of this interval, counting only the "
+        f"regulatory-type feature keys this stage reads and therefore silent about "
+        f"any CDS, gene or exon there: "
         + ("; ".join(ev["anchor_near"]) or "none") + ". "
     )
     out += (
