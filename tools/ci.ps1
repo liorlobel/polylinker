@@ -1521,6 +1521,20 @@ Step 'the helper unmangles a real 8.3 alias and the arithmetic it replaced does 
         # is also the only way the shipped installer's copy -- the user-facing one,
         # and the likeliest to be forgotten -- gets its behaviour tested without
         # running an installer.
+        #
+        # WHAT THIS STEP DOES NOT COVER, so that a green line here is not read as
+        # more than it is: it drives the DEFINITIONS. A CALL SITE that stops using
+        # the helper and goes back to doing the arithmetic inline is invisible
+        # here, because there is then no definition carrying the defect to
+        # extract. Measured rather than reasoned: reverting `release.ps1`'s
+        # `$outFull` to `(Resolve-Path $Out).Path` with
+        # `Substring($outFull.Length + 1)` left both steps in this section green,
+        # and was caught one section down by 'release script and its manifest',
+        # which died on `pl-release-check-44516\EADME-WINDOWS.txt`. That division
+        # of labour is deliberate -- that step hands `release.ps1` an `-Out` with
+        # a trailing separator precisely so a call site cannot regress unwatched
+        # -- but it is why this step's name says "the helper" and not "the
+        # repository's path arithmetic".
         $copies = @(Find-PrefixHelperCopies (Join-Path $repo 'tools'))
 
         # THE SAME FLOOR THE DRIFT GUARD HAS. The first draft of this step did not
