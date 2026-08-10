@@ -400,7 +400,7 @@ pub fn version_from_env(bin_name: &str) -> Version {
             // NOTICE:1-2 and the About page (bins/pl-gui/src/help.rs) already
             // say these two sentences; this is the third place they appear and
             // the only one Windows reads.
-            ("CompanyName".into(), "The Polylinker contributors".into()),
+            ("CompanyName".into(), String::new()),
             ("FileDescription".into(), desc),
             ("FileVersion".into(), ver.clone()),
             ("InternalName".into(), bin_name.into()),
