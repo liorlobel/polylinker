@@ -293,7 +293,7 @@ pub fn methods(t: Topic) -> String {
             //
             // Asked of the REVIEWED table, not the whole one. That choice was
             // invisible until 2026-08-10, because the two held the same rows;
-            // they no longer do. Twelve promoter, terminator and poly(A) rows
+            // they no longer do. Seven promoter, terminator and poly(A) rows
             // arrived `proposed`, so the whole table has those classes and the
             // default annotation run still does not search them — and reporting
             // the whole table's gaps here would have quietly stopped mentioning

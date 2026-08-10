@@ -25,6 +25,53 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.6.0] - 2026-08-10
+
+**Nothing in this release changes what Polylinker does to a sequence**, and the
+89 feature records `pl annotate` searches by default are unchanged, byte for
+byte, with every signature still valid. If you upgrade and change nothing else,
+nothing you get out of the tool moves. The database grew from 89 rows to 110;
+the 21 new rows are `proposed`, which means a program put them there and no
+human has read them, so they are searched only if you ask for them by name with
+`--include-proposed` or the equivalent tick-box in the app.
+
+Those 21 are the story, and it has two halves that arrived four hours apart.
+
+**The database got its first promoters, terminators and yeast markers** — 14
+selection markers and 12 Class B regulatory elements, the first elements of
+those classes it has ever held.
+
+**Then a rule applied honestly took five of the twelve back.** `SOURCING.md` §4
+has always required "≥2 independent GenBank exemplars *showing where depositors
+actually place it*", and only the first half of that sentence was ever executed:
+the build checked that two independent submissions held the *bases*, measured
+where each drew the *edges*, wrote the answer into a note, and tested nothing. A
+row could therefore ship `boundary_rule = consensus_of_insdc` on a consensus of
+one, and four did. Making the second half executable refused `lac`, `tac`,
+`trc`, the CMV promoter and the SV40 early poly(A) — each corroborated by
+exactly one submission, which is one lab's opinion. Seven Class B rows ship as
+`proposed`. That is the finding, not a shortfall.
+
+Two limits belong up here rather than in a footnote, because a release about not
+overclaiming cannot overclaim:
+
+- **The new posture check does not detect a coordinate, and nothing here could.**
+  It is a process rule: every build stage that emits a boundary must declare how
+  it avoided taking one from a vendor, and the gate checks that the declaration
+  exists and matches the code. The artifact the taint gate is pinned to has four
+  columns — no sequence, no coordinates, no lengths — so there is nothing in it
+  to compare an extent against. The taint gate remains a check on the
+  **description** column and must not be described as a check on the database.
+- **There is a demonstrated false negative inside the shipping witness set.**
+  `OP697991.1`, one of the two submissions corroborating `PLF:4006`, carries
+  `/note` text byte-identical to the flagged `MH325107.1` but for the token
+  `label: `. The screen passes it — correctly by its own rule, wrongly as a
+  matter of fact. Widening the screen to that shape was deliberately not done,
+  because honest records share it. So "2 independent submissions" must not be
+  read as "2 SnapGene-free submissions".
+
 ### Added — 21 proposed feature records, and none of them ship yet
 
 `features/features.tsv` goes from 89 rows to 110. **The 89 rows the tool
@@ -40,9 +87,14 @@ same chain as the existing natural-protein rows — translate the nucleotides,
 require an exact residue-for-residue match to a UniProt canonical, cite the
 depositor's own coordinates — and each dropped rather than corrected if any leg
 disagreed: `pac`, `bsd`, `bsr`, `dhfrI`, `URA3`, `LEU2`, `HIS3`, `TRP1`, HSV
-`TK`, mouse `Dhfr`, `gpt`, `bar`, `pat` and `rpsL`. These close the eukaryotic
-selection-marker gap `features/SOURCING.md` names as Gap 6, and they give the
-database its first yeast markers.
+`TK`, mouse `Dhfr`, `gpt`, `bar`, `pat` and `rpsL`. They give the database its
+first yeast markers of any kind. They **narrow** the eukaryotic selection-marker
+gap `features/SOURCING.md` names as Gap 6 without closing it, and the earlier
+draft of this entry said "close", which was an overclaim on two counts: three of
+Gap 6's five named markers were already signed before today, the two these add
+(`pac`, `bsd`) are `proposed` and so are searched by nobody, and Gap 6 also names
+the codon-optimised forms, of which this adds none — every row here is a native
+CDS. Gap 6's own entry now records that.
 
 **7 Class B regulatory elements** — the T7 and SP6 promoters (`PLF:4000`,
 `PLF:4001`), the CMV enhancer (`PLF:4006`), the T7, rrnB T1 and rrnB T2
@@ -1163,7 +1215,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.6.0
 [0.5.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.5.0
 [0.4.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.4.0
 [0.3.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.2

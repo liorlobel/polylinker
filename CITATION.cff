@@ -45,7 +45,7 @@ repository-code: https://github.com/liorlobel/polylinker
 license:
   - MIT
   - Apache-2.0
-version: 0.5.0
+version: 0.6.0
 date-released: 2026-08-10
 keywords:
   - plasmid

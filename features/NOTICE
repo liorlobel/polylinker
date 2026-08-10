@@ -29,7 +29,7 @@ UniProt Consortium, EMBL-EBI, Rfam or the Worldwide Protein Data Bank.
 
 Three dates because there have been three ingest passes, not because anything
 was refreshed underneath an existing row: the 2026-08-10 date belongs to the
-fourteen additional selection markers and the twelve Class B regulatory
+fourteen additional selection markers and the seven Class B regulatory
 elements added that day, and every earlier row still carries its own earlier
 retrieval date, field by field, in `provenance.tsv`.
 

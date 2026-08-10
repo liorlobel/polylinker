@@ -2379,12 +2379,17 @@ mod tests {
     /// reverting `stage_classb.py` to `genbank_key="regulatory"` and rebuilding:
     ///
     /// ```text
-    /// the whole table still reports 'promoter' absent, but it holds 12 Class B
+    /// the whole table still reports 'promoter' absent, but it holds 7 Class B
     /// rows; Db::absent_common_kinds probes literal genbank_key values and
     /// something has stopped matching
     /// ```
     ///
-    /// and it fails the other way if the twelve are ever signed without this
+    /// That count is not the twelve above and is not meant to be: the message
+    /// interpolates `PLF:4*` live, and `MIN_PLACEMENTS` withdrew five of the
+    /// twelve later the same day. The transcript is what reproducing the break
+    /// prints *now*, which is the only version of it a reader can check.
+    ///
+    /// and it fails the other way if the seven are ever signed without this
     /// test being reconsidered, because the first assertion then stops holding.
     #[test]
     fn the_absent_kinds_disclosure_tracks_the_reviewed_set_and_not_the_whole_table() {

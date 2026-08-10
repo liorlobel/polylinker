@@ -30465,8 +30465,12 @@ ATGAAACGCTAA
     /// An unreviewed record is marked, and marked as a warning.
     ///
     /// The badge could not fire against the shipped tables at all until
-    /// 2026-08-10, when 26 `proposed` rows landed beside the 89 signed ones, so
-    /// this test pinned the mapping directly and still does. Pinning it here
+    /// 2026-08-10, when the first `proposed` rows landed beside the 89 signed
+    /// ones, so this test pinned the mapping directly and still does. How many
+    /// landed is deliberately not written here: `stage_classb` withdraws a row
+    /// whose extent only one submission corroborates, and five were withdrawn
+    /// that same day, so any number in this sentence is a number that rots.
+    /// Pinning it here
     /// rather than through the table is the right shape either way: the badge
     /// must be correct for a status, not for whichever statuses happen to be in
     /// the file this week, and `features/SIGNOFF.tsv` withdraws a signature by

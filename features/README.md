@@ -339,7 +339,7 @@ that a human can read them, which is the only thing the machine is allowed to
 ask for.**
 
 [`PROPOSED.md`](PROPOSED.md) is the worklist for that reading: every one of the
-26, what it claims, the accessions to check it against, the boundary decision
+21, what it claims, the accessions to check it against, the boundary decision
 and its basis, and the exact `--show` invocation per row. It opens with the rows
 where the exemplars disagreed or the convention is contested, because those are
 the ones a curator has to *decide* rather than merely check — and with the one
@@ -353,9 +353,12 @@ and `bsr` (the two unrelated blasticidin deaminases), `dhfrI` (trimethoprim),
 the four yeast markers `URA3`, `LEU2`, `HIS3` and `TRP1`, `TK` (HSV thymidine
 kinase, for ganciclovir negative selection), mouse `Dhfr` (methotrexate), `gpt`
 (mycophenolic acid), `bar` and `pat` (glufosinate, for plants), and `rpsL` (the
-counter-selection half of an rpsL-neo cassette). These close `SOURCING.md`
-Gap 6, which named eukaryotic selection markers as unclosed, and they give the
-database its first yeast markers of any kind.
+counter-selection half of an rpsL-neo cassette). They give the database its
+first yeast markers of any kind, and they **narrow** `SOURCING.md` Gap 6 rather
+than closing it: three of Gap 6's five markers were signed before this, the two
+added here (`pac`, `bsd`) are `proposed` and therefore searched by nobody, and
+Gap 6's codon-optimised half gets nothing from a native CDS. Gap 6's entry
+carries the remainder.
 
 Every one of them is the **ORF only**, initiator codon through stop codon, and
 excludes the promoter. That is not a preference, it is what the chain derives,
