@@ -39,6 +39,24 @@
 # Names are matched exactly, and a name matching no step in the gate is itself a
 # failure. So renaming a step below without editing this line goes red, rather
 # than quietly reporting that the step has started running.
+#
+# ONE STEP IS DELIBERATELY ABSENT AND IS WORTH NAMING HERE, because the day it
+# starts skipping the message will be "skipped and is not on the list" and the
+# reason will not be obvious: 'the helper unmangles a real 8.3 alias and the
+# arithmetic it replaced does not'. It needs a directory reachable through an 8.3
+# short name, and on a runner it has one for free -- `$env:TEMP` is
+# `C:\Users\RUNNER~1\AppData\Local\Temp` over a real `runneradmin`. That is also
+# what has been exercising the 8.3 half of `Get-DirectoryPrefix` incidentally on
+# every run since the gate went green, and what caught the defect in run
+# 31325886841 in the first place.
+#
+# It is absent rather than listed because on this runner it CAN run, and listing
+# it would assert the opposite. If GitHub ever renames that account to something
+# that fits in 8.3, the step will skip, this file will fail the build, and the
+# loss of that coverage gets reported instead of passing silently -- which is the
+# whole point of the step. Do not add it here to make the build green; the honest
+# fixes are a runner whose TEMP carries an alias, or a volume with 8.3 creation
+# enabled so the case can be minted.
 
 wasm module vs native binary
 rendered chromatograms agree with their files
