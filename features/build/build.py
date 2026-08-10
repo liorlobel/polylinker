@@ -1290,6 +1290,15 @@ STAGES: tuple[Stage, ...] = (
           "Rfam structured RNA elements"),
     Stage("curated", "stage_curated", "build", 3000, 1000,
           "Hand-curated tags, linkers, protease sites, 2A"),
+    # Added 2026-08-10. Class B in SOURCING.md section 3's sense: promoters,
+    # enhancers, terminators and poly(A) signals, whose boundaries are
+    # CONVENTIONS rather than facts. A separate stage and a separate block
+    # rather than rows inside stage_curated, because the evidence a Class B row
+    # needs -- an INSDC anchor plus two independent witnesses to the same bases
+    # -- is a different check from anything the other four stages run, and
+    # burying it inside a stage named for designed peptides would hide that.
+    Stage("classb", "stage_classb", "build", 4000, 1000,
+          "INSDC-anchored Class B conventions: promoters, terminators, poly(A)"),
 )
 
 VALID_CLASSES = {"cds", "regulatory", "origin", "repeat", "synthetic_part", "misc"}

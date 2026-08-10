@@ -6,18 +6,25 @@ An openly licensed, provenance-tracked database of common plasmid features.
 this carries, and [`SOURCING.md`](SOURCING.md) for how each source was cleared
 and by what evidence.
 
-> **Status: v0.1 pre-release, 89 records. All 89 carry a curator sign-off dated
-> 2026-07-28, so none are left at `proposed`.**
+> **Status: v0.1 pre-release, 115 records. 89 carry a curator sign-off, and 26 are `proposed`.**
+>
+> The 89 were signed on 2026-07-28. The 26 were added on 2026-08-10, no human
+> has read them, and **`Db::reviewed()` does not ship them** — what a user of
+> the tool searches is still 89 rows until a curator signs each one.
 > `Db::reviewed()` ships only the rows [`SIGNOFF.tsv`](SIGNOFF.tsv) names with a
 > content digest that still matches. A sign-off lapses automatically the moment
 > the row it approves changes — including a change to its prose, because
-> `description` and `notes` are both in `SIGNED_COLUMNS`. That is the intended
-> state, not an unfinished one; see *Rule 6* below.
+> `description` and `notes` are both in `SIGNED_COLUMNS`. The gap between 115
+> and 89 is the intended state of a table a machine is allowed to add to; see
+> *Rule 6* below, and *What is proposed and not yet signed* for what the 26 are.
+> The curator's reading list for them, row by row and contested cases first, is
+> [`PROPOSED.md`](PROPOSED.md).
 >
-> **This is a dated snapshot** (sources retrieved 2026-07-27 and 2026-07-28) and
-> does not reflect the most current data available from NLM, UniProt, EMBL-EBI,
-> Rfam or the wwPDB. Per-field retrieval dates and source hashes are in
-> `provenance.tsv`.
+> **This is a dated snapshot** (sources retrieved 2026-07-27, 2026-07-28 and
+> 2026-08-10) and does not reflect the most current data available from NLM,
+> UniProt, EMBL-EBI, Rfam or the wwPDB. Per-field retrieval dates and source
+> hashes are in `provenance.tsv`; the three dates are three ingest passes, and
+> no existing row was re-fetched underneath its signature.
 
 ## Why this exists
 
@@ -77,7 +84,9 @@ right name.
 | `build/lib_columns.py` | The schema, in one place. Pinned to `crates/pl-features/src/lib.rs` through the header of the file it writes — the Rust loader compares that header against its own `FEATURE_COLUMNS` and refuses the file if they differ. |
 | `build/stage_uniprot.py` | Stage 2. UniProt → ENA, one pinned cross-reference per entry, exact translation match. |
 | `build/stage_rfam.py` | Stage 3. Rfam seed alignments, with the miRBase and Wikipedia exclusions enforced at parse time. |
-| `build/stage_curated.py` | Stage 5. Hand-curated designed parts, one citation each, and two routes: codons sliced out of a natural parent, or a peptide verified against a wwPDB polymer entity. Six of 28 are still held; see *Honest coverage*. |
+| `build/stage_curated.py` | Stage 4. Hand-curated designed parts, one citation each, and two routes: codons sliced out of a natural parent, or a peptide verified against a wwPDB polymer entity. Six of 28 are still held; see *Honest coverage*. (This row said "Stage 5" from before there was one, which stopped being merely wrong the day a real Stage 5 landed underneath it.) |
+| `build/stage_classb.py` | Stage 5. INSDC-anchored Class B conventions — promoters, terminators, poly(A) signals. One anchor record per row, re-sliced every build, plus ≥2 witnesses from *different submitting addresses*. Reads no `/note`, `/label`, `/gene`, `/product` or `/standard_name`, and refuses a SnapGene-annotated record as a witness. Nine further elements are held with reasons in `HELD`; see *Class B*. |
+| `PROPOSED.md` | The curator worklist for every row that is `proposed`: what it claims, which accessions to check it against, the boundary chosen and on what basis, and — first — the ones where the exemplars disagreed or the convention is contested. Carries no digests, deliberately: `SIGNOFF.tsv` says signing a digest nobody has read is not an attestation. |
 | `build/check_signoff.py` | Proves no row asserts more than a human signed — and proves the check itself can fail, in both directions. |
 | `build/check_writer.py` | Proves the build's writer *reads* `SIGNOFF.tsv` and never writes it, over the real shipped rows and with no network. Plants five misbehaving writers and requires itself to catch each, then requires itself to pass a clean one. |
 
@@ -133,12 +142,21 @@ its own defect sends whoever reads it looking for a bug that is not there.
 Each stage owns a permanently reserved block of the `PLF:` space, and a row's id
 comes from **where it is declared**, never from where it landed in the output:
 
-| Block | Stage | Issued |
-|---|---|---|
-| `PLF:0001`–`PLF:0999` | AMRFinderPlus resistance and selection markers | 24 |
-| `PLF:1000`–`PLF:1999` | UniProt → ENA natural proteins | 14 |
-| `PLF:2000`–`PLF:2999` | Rfam structured RNA | 24 |
-| `PLF:3000`–`PLF:3999` | Hand-curated designed parts | 27 of 28 declared |
+| Block | Stage | Issued | Signed |
+|---|---|---|---|
+| `PLF:0001`–`PLF:0999` | AMRFinderPlus resistance and selection markers | 24 | 24 |
+| `PLF:1000`–`PLF:1999` | UniProt → ENA natural proteins | 28 | 14 |
+| `PLF:2000`–`PLF:2999` | Rfam structured RNA | 24 | 24 |
+| `PLF:3000`–`PLF:3999` | Hand-curated designed parts | 27 of 28 declared | 27 |
+| `PLF:4000`–`PLF:4999` | INSDC-anchored Class B conventions | 12 of 21 worked up | 0 |
+
+**The block follows the stage, not the topic**, and the 2026-08-10 additions
+make that visible for the first time: fourteen new *selection markers* landed in
+the `PLF:1000` block, beside lacI and GFP, because the route that verified them
+is the UniProt → ENA chain and that is what Stage 2 is. They are not next to the
+`PLF:0001` resistance markers and they never will be. An id says which stage
+built a row and therefore what was checked about it; it does not say what the
+row is for. Use `class`, `boundary_rule` and the name for that.
 
 A candidate that fails verification leaves its number unissued rather than
 pulling every later id down by one. That mechanism has now been exercised for
@@ -171,23 +189,34 @@ what changed between releases.
    commit, compares, and deletes — no byte is ever committed, enforced by
    `.gitignore` on the name and by `tools/hooks/pre-commit` on the content hash.
    It is `features/build/taint_gate.py`, it runs in CI, and it fails **closed**
-   on a network error. Its measured result over all 89 descriptions: no shared
-   five-token run anywhere, no row above 60% containment, and two rows above the
-   30% warning line — PLF:0002 and PLF:0003, longest shared runs of one and two
-   tokens, which is the shared vocabulary of two aminoglycoside
-   phosphotransferases rather than shared phrasing. That is the written
-   justification the threshold asks for. Disclosing the gate is an asset: it is
-   the concrete evidence behind the project's premise.
+   on a network error. Its measured result over all 115 descriptions: **no shared
+   five-token run anywhere, and no row above 60% containment.** Five rows sit
+   above the 30% warning line, and this is the written justification the
+   threshold asks for:
 
-   **It fired for real on this release.** PLF:3012, the calmodulin-binding
-   peptide, is one of the fourteen rows decision 1 issued, so its description
-   faced the gate for the first time — and failed it, sharing the eight-token run
-   *"skeletal muscle myosin light chain kinase binds calmodulin"*. Nothing was
-   copied; that is the vocabulary of the subject arriving in the obvious order,
-   and a sentence break vanished when stopwords were removed. The rule is
-   mechanical on purpose, so the answer was to rewrite the row from the cited
-   paper rather than to argue with the measurement. `stage_curated.py` records
-   why that description is phrased the way it is, so nobody "tidies" it back.
+   | Row | Containment | Longest shared run | Why |
+   |---|---|---|---|
+   | PLF:0002, PLF:0003 | 54.5%, 58.3% | 1 and 2 tokens | The shared vocabulary of two aminoglycoside phosphotransferases. A one-token run is not phrasing. |
+   | PLF:1018 URA3 | 36.1% | 4 tokens | *orotidine 5-phosphate decarboxylase* is the enzyme's name. There is no second way to write it, and 13 shared tokens over a short description is what a description of a named enzyme looks like. |
+   | PLF:1019 LEU2 | 35.0% | 3 tokens | *3-isopropylmalate dehydrogenase*, same argument. |
+   | PLF:1021 TRP1 | 35.7% | 3 tokens | *phosphoribosyl anthranilate isomerase*, same argument. |
+
+   Disclosing the gate is an asset: it is the concrete evidence behind the
+   project's premise.
+
+   **It has now fired for real twice, on two different releases.** First
+   PLF:3012, the calmodulin-binding peptide, sharing the eight-token run
+   *"skeletal muscle myosin light chain kinase binds calmodulin"*. Then, on
+   2026-08-10, PLF:1015 — the fungal blasticidin S deaminase — whose first
+   draft opened with the enzyme's name followed by its organism and thereby
+   produced a five-token run that occurs verbatim in their file. Neither was
+   copied; both are the vocabulary of the subject arriving in the only order
+   anyone writes it, and in both cases a sentence boundary vanished when
+   stopwords were stripped. The rule is mechanical on purpose, so both times the
+   answer was to rewrite the row rather than to argue with the measurement, and
+   both times the stage file records why the description is phrased the way it
+   is so that nobody "tidies" it back. The gate cost two rewrites and bought the
+   only evidence this project's central claim can actually be defended with.
 4. **Per-row provenance** means a single challenged row can be dropped without
    rebuilding, and a licence question can be answered feature by feature.
 5. **Publish the build script, not just the output.**
@@ -211,10 +240,13 @@ what changed between releases.
 
 ## Honest coverage
 
-**polylinker-features v0.1 contains 89 feature records: 24 antibiotic-resistance
-and selection markers, 14 natural regulatory and enzyme proteins, 24 structured
-RNA elements, and 27 designed parts (epitope tags, protease sites, 2A peptides
-and linkers). Every record carries an explicit boundary rule, at least one
+**polylinker-features v0.1 contains 115 feature records — 89 signed off and
+shipped, 26 `proposed` and not shipped. The 89: 24 antibiotic-resistance and
+selection markers, 14 natural regulatory and enzyme proteins, 24 structured RNA
+elements, and 27 designed parts (epitope tags, protease sites, 2A peptides and
+linkers). The 26 awaiting a curator: 14 further selection markers and 12 Class B
+regulatory elements (promoters, an enhancer, terminators, poly(A) signals).
+Every record carries an explicit boundary rule, at least one
 `boundary_evidence` pointer, and a per-field provenance chain with licence. It is
 released under CC BY 4.0, with attribution notices for the U.S. National Library
 of Medicine, the UniProt Consortium, EMBL-EBI (ENA and Rfam), Rfam's per-family
@@ -226,23 +258,31 @@ Composition, measured from the shipped file:
 | Block | Records | Class | Reference | Boundary rule |
 |---|---|---|---|---|
 | AMRFinderPlus markers | 24 | `cds` | nt + protein | `orf_atg_to_stop`, translation-verified |
-| UniProt → ENA proteins | 14 | `cds` | nt + protein | `orf_atg_to_stop`, translation-verified |
+| UniProt → ENA proteins | 28 (14 signed) | `cds` | nt + protein | `orf_atg_to_stop`, translation-verified |
 | Rfam structured RNA | 24 | `regulatory` (19), `misc` (5) | nt | `consensus_of_insdc` |
 | Curated designed parts | 8 | `synthetic_part` | nt | codons from a natural parent |
 | Curated designed parts | 19 | `synthetic_part` | **peptide only** | `designed_sequence` (13), `literature_defined` (6); across all 27, 13 and 14 |
+| Class B conventions | 12 (0 signed) | `regulatory` | nt | `consensus_of_insdc` |
 
-38 of 89 rows are coding and carry a protein reference verified by exact
+52 of 115 rows are coding and carry a protein reference verified by exact
 translation from their own nucleotides. **19 rows carry a peptide and no
 nucleotides at all** — the shape decision 1 created — and each was verified by
 locating its residue string, exactly once, in a sequence fetched at build time:
 a wwPDB polymer entity for 18 of them, and the UniProt canonical of its own
 declared parent for the nineteenth (enterokinase, whose five residues are below
 `MIN_NT` and so cannot take codons from that parent even though it has one).
-17 rows carry `patent_flag = 1`. **Five** licences are in play across
-1,008 provenance rows: our own work (598), INSDC-free (156), CC0-1.0 (114),
-`unresolved-see-SOURCING-Risk-4` (89) and CC BY 4.0 (51); by source, polylinker
-598, Rfam 96, the INSDC feature-table specification 89, ENA 84, AMRFinderPlus 72,
-UniProt 51 and the wwPDB 18.
+20 rows carry `patent_flag = 1`. **Five** licences are in play across
+1,327 provenance rows: our own work (752), INSDC-free (253), CC0-1.0 (114),
+`unresolved-see-SOURCING-Risk-4` (115) and CC BY 4.0 (93); by source, polylinker
+752, ENA 181, the INSDC feature-table specification 115, Rfam 96, UniProt 93,
+AMRFinderPlus 72 and the wwPDB 18.
+
+ENA overtook Rfam as the second-largest source in that list on 2026-08-10, and
+the reason is worth stating rather than leaving as a number that moved: a Class B
+row cites ENA once for the bases it ships, once for the anchor record they were
+sliced out of, and once more for **each independent record that witnesses
+them** — because for a convention the witnesses *are* the evidence. Twelve rows
+contributed 69 ENA provenance rows between them, out of 165 in total.
 
 Two of those numbers are new and both were previously absent rather than wrong.
 `genbank_key` had **no** provenance at all on any row, and it is the one column
@@ -257,12 +297,134 @@ bases are a member of that family. Labelling the bases themselves CC0 attributed
 a depositor's sequence to Rfam's waiver — the same conflation this project had
 already caught and corrected on the UniProt → ENA leg.
 
+### What is proposed and not yet signed
+
+26 rows carry `review_status = proposed`, which means a program put them in the
+table and no human has read them. `Db::reviewed()` excludes every one, so
+nothing below is searched by `pl annotate`, by the desktop app, or by anything
+else, until a curator signs it in `SIGNOFF.tsv`. **They are in the repository so
+that a human can read them, which is the only thing the machine is allowed to
+ask for.**
+
+[`PROPOSED.md`](PROPOSED.md) is the worklist for that reading: every one of the
+26, what it claims, the accessions to check it against, the boundary decision
+and its basis, and the exact `--show` invocation per row. It opens with the rows
+where the exemplars disagreed or the convention is contested, because those are
+the ones a curator has to *decide* rather than merely check — and with the one
+row that should not be signed at all until an unresolved organism conflict is
+settled (`PLF:1016`).
+
+**14 further selection markers** (`PLF:1014`–`PLF:1027`), all through the Stage
+2 chain, so all of them translation-verified exactly against a UniProt canonical
+and all of them coordinate-cited in an INSDC record: `pac` (puromycin), `bsd`
+and `bsr` (the two unrelated blasticidin deaminases), `dhfrI` (trimethoprim),
+the four yeast markers `URA3`, `LEU2`, `HIS3` and `TRP1`, `TK` (HSV thymidine
+kinase, for ganciclovir negative selection), mouse `Dhfr` (methotrexate), `gpt`
+(mycophenolic acid), `bar` and `pat` (glufosinate, for plants), and `rpsL` (the
+counter-selection half of an rpsL-neo cassette). These close `SOURCING.md`
+Gap 6, which named eukaryotic selection markers as unclosed, and they give the
+database its first yeast markers of any kind.
+
+Every one of them is the **ORF only**, initiator codon through stop codon, and
+excludes the promoter. That is not a preference, it is what the chain derives,
+and it is checkable from the row: `len(reference_nt) == 3 × (len(reference_aa) +
+1)` on all fourteen. The trap it creates is stated in each row's `notes`: what a
+vector map labels `PuroR` is a promoter-ORF-poly(A) *cassette*, `URA3` on a pRS
+map is the gene with its own promoter and terminator, and `TRP1` in the YRp7
+lineage means TRP1-ARS1. A match against those files covers the ORF and stops,
+and that is correct.
+
+**12 Class B regulatory elements** (`PLF:4000`–`PLF:4011`) — see the next
+section.
+
+### Class B: boundaries that are conventions, and how they are evidenced
+
+`SOURCING.md` §3 divides features by where their boundary comes from. Class A
+boundaries are *facts* (the ORF), Class C boundaries are *stipulated by a paper*
+(a designed part), and **Class B boundaries are *conventions*** — nothing says
+where "the CMV promoter" ends. §6 prescribes the method: human curation plus at
+least two independent GenBank exemplars each. `build/stage_classb.py` executes
+the second half rather than asserting it.
+
+The twelve rows are the T7, SP6, lac, tac, trc and CMV promoters, the CMV
+enhancer, the T7 (Tφ), rrnB T1 and rrnB T2 terminators, and the bGH and SV40
+early poly(A) signals. Each one claims exactly three things:
+
+- **These bases are `accession:lo-hi` on this strand.** Re-fetched and re-sliced
+  on every build, and cross-checked between the record's FASTA view and its flat
+  file. A row whose coordinates stop holding its sequence is dropped, never
+  corrected.
+- **At least two INSDC records from different submitting addresses contain those
+  exact bases**, and where each of those depositors put the edges relative to
+  ours is *measured at build time* and written into `notes` — `5'+48/3'+6` means
+  that depositor's feature starts 48 bases earlier and ends 6 later, in the
+  element's own orientation.
+- **Nothing about the extent being right.** `boundary_rule = consensus_of_insdc`
+  says it is a convention, and the rival conventions are named in `notes` with
+  their offsets.
+
+Three findings from building it are worth having in the open, because two of
+them are about this repository's own controls:
+
+1. **INSDC is contaminated with SnapGene, and the CI taint gate structurally
+   cannot see it.** Ordinary submitters deposit records annotated in SnapGene;
+   ENA folds SnapGene's `/label` into the `/note`, so a record reads
+   `/note="promoter for the E. coli lac operon; label: lac promoter"`. The taint
+   gate compares *our descriptions* against theirs — it has no way to notice a
+   *coordinate* arriving this way. Two consequences, both mechanical:
+   `stage_classb.py` never reads a `/note`, `/label`, `/gene`, `/product` or
+   `/standard_name` at all, and a record carrying the `label:` tell is **not
+   counted as an independent witness**. Counting two SnapGene-annotated deposits
+   as "two exemplars" would manufacture exactly the convergence this project
+   exists to disclaim. It fires on real data: five of the twelve rows —
+   `PLF:4002`, `4005`, `4006`, `4010` and `4011` — have a witness excluded for
+   this reason, and each of the five names it in its own `notes`.
+2. **"Two exemplars" has to mean two *submissions*.** A quarter of the surveyed
+   corpus is one bulk deposit from one culture collection; by record count some
+   of these elements have dozens of witnesses and by submission they have three.
+   Independence is decided from the address on each record's own submission
+   reference, and addresses are merged when they look like one lab writing its
+   address two different ways — a comparison biased towards merging, because
+   over-merging can only make the gate harder to pass.
+3. **Depositor strand annotation is not trustworthy.** Several records annotate
+   a T7 or SP6 promoter without `complement()`, so the enclosed bases are the
+   reverse complement of the promoter: the span is right and the strand is not.
+   Every sequence is therefore located in every witness on *both* strands and
+   the strand actually found is recorded, never inherited.
+
+`genbank_key` on these rows is `promoter`, `enhancer`, `terminator` or
+`polyA_signal` — **all four of which INSDC has retired** in favour of
+`regulatory` plus a `/regulatory_class` qualifier, and the anchor records
+themselves have moved (V01146 writes `regulatory` + `/regulatory_class=
+"promoter"`). The stage emitted the current spelling first, and it broke
+something: `Db::absent_common_kinds` probes the table for the literal keys
+`promoter`, `terminator` and `rep_origin`, and that probe is what makes the
+desktop app and `pl methods annotate` say *"no promoter is in this database
+yet"*. Under `regulatory` the twelve rows are invisible to it, so the app would
+have kept saying "no promoter" after promoters were signed — a user-facing claim
+made false by a schema decision nobody would think to connect to it. This schema
+has no column for `/regulatory_class`, so the choice was between a current key
+that says nothing and a retired key that says what the feature is. The retired
+key won because something real depends on it. If they are ever changed again,
+`absent_common_kinds`'s probe list is the thing that has to change with them.
+
+**Nine more were worked up and are not rows**, each for a stated reason recorded
+in `stage_classb.py`'s `HELD` list: T3 (its two leading conventions are offset
+rather than nested and have one submission each — there is no consensus to
+record); the SV40 early promoter (its interval wraps the record's numbering
+origin, which `boundary_evidence` cannot express); U6 (one submission); H1 (no
+record to anchor it in); EF-1α and PGK (the vector element is not a verbatim
+slice of the gene); CAG (two different elements under one name); araBAD (no
+anchor fetched). tetO/TRE was dropped outright: the name covers at least four
+unrelated elements. §6 budgets about forty Class B rows; twelve is what survived
+the rules applied honestly, and that number is the finding.
+
 ### Aliases that resolve to more than one record
 
 `SOURCING.md` §3 makes the alias table the mechanism that collapses spellings on
 a map onto one record, so a spelling that resolves to two records is worth
-stating rather than leaving to be discovered. Twelve do, all of them within a
-family and all of them deliberate:
+stating rather than leaving to be discovered. **Seventeen strings do**, counted
+over names and aliases together, case-insensitively:
 
 | Alias | Records | Why |
 |---|---|---|
@@ -274,24 +436,40 @@ family and all of them deliberate:
 | `ble` | PLF:0008, PLF:0018 | Tn5 ble and Sh ble: same family, different phyla. |
 | `hygB` | PLF:0019, PLF:0020 | The E. coli and Streptomyces hygromycin enzymes. |
 | `MLS`, `emR` | PLF:0021, PLF:0022 | ErmB and ErmC, the same resistance phenotype. |
-| `smR` | PLF:0023, PLF:0024 | StrA and StrB, adjacent genes drawn as one block. |
+| `smR` | PLF:0004, PLF:0023, PLF:0024 | **Three, not two.** AadA is *named* `SmR`, and StrA and StrB both carry it as an alias. Three different enzymes inactivating one drug. |
+| `Blasticidin-S deaminase` | PLF:1015, PLF:1016 | UniProt gives the fungal `bsd` and the bacterial `bsr` the identical recommended name. They are unrelated proteins of different lengths that catalyse the same reaction, and a vector map calls either one `BsdR`. |
+| `Phosphinothricin N-acetyltransferase`, `PPT N-acetyltransferase`, `Phosphinothricin-resistance protein` | PLF:1025, PLF:1026 | The same three UniProt names for `bar` and `pat`. They are used interchangeably in the plant-transformation literature and are two genes. |
+| `strA` | PLF:0023, **PLF:1027** | **The one collision here that inverts a phenotype**, and the only one not within a family. `StrA` is the plasmid aminoglycoside phosphotransferase APH(3'')-Ib, which confers streptomycin RESISTANCE. UniProt lists `strA` as a synonym of `rpsL`, from the early *E. coli* genetics in which resistance mapped to that locus — and wild-type `rpsL` confers streptomycin SENSITIVITY and is used as a counter-selectable marker for exactly that reason. Both usages are real and neither is a typo. |
 
-A caller that resolves an alias to a single record will get one of a pair; the
-descriptions say which is which and the sequences are 25-34% identical, so
-sequence matching does not confuse them. What is *not* here any more is `tetA`,
-which used to resolve to three records (PLF:0006, 0013, 0014) — those are now
-`tetA(A)`, `tetA(B)` and `tetA(C)`. Drug names (`gentamicin`, `phleomycin`,
-`thiamphenicol`) have been dropped as aliases: a drug is not a gene name and
-selecting on it is a different concept from being it.
+A caller that resolves an alias to a single record will get one of a set; the
+descriptions say which is which and the sequences are far enough apart that
+sequence matching does not confuse them. `strA` is the one to be careful with,
+and it is called out above rather than left in the list. What is *not* here any
+more is `tetA`, which used to resolve to three records (PLF:0006, 0013, 0014) —
+those are now `tetA(A)`, `tetA(B)` and `tetA(C)`. Drug names (`gentamicin`,
+`phleomycin`, `thiamphenicol`) have been dropped as aliases: a drug is not a gene
+name and selecting on it is a different concept from being it.
+
+Two corrections to an earlier version of this section, both found by measuring
+it rather than reading it: it said *twelve* strings when the count was over the
+whole table and it listed `smR` as resolving to two records when it resolves to
+three. The count is now taken from the shipped file.
 
 ### Boundary rules and alternative initiation codons
 
-Seven rows carry `boundary_rule = orf_atg_to_stop` over a sequence beginning
-`GTG` or `TTG` — PLF:0006, 0015, 0017, 0020, 0023, 1000 and 1007. That is not a
-contradiction and the rows are correct: the rule means *start codon through stop
-codon of the frame that translates to the verified reference protein*, and
-`GTG`/`TTG` are real initiation codons read as formyl-Met when they initiate.
-tet(A) genuinely begins `GTG`.
+Nine rows carry `boundary_rule = orf_atg_to_stop` over a sequence beginning
+`GTG` or `TTG` — PLF:0006, 0015, 0017, 0020, 0023, 1000, 1007, 1017 and 1026.
+That is not a contradiction and the rows are correct: the rule means *start codon
+through stop codon of the frame that translates to the verified reference
+protein*, and `GTG`/`TTG` are real initiation codons read as formyl-Met when they
+initiate. tet(A) genuinely begins `GTG`.
+
+The two most recent, PLF:1017 (`dhfrI`) and PLF:1026 (`pat`), are also the
+sharpest illustration of why the initiator is a per-row fact and not a family
+one: PLF:1025 (`bar`) is the same enzyme as `pat`, the same length in
+nucleotides and in residues, and begins `ATG`. The `bar` row's `notes` record
+that the two INSDC records for that gene differ at exactly one base — position
+1, `ATG` against `GTG` — and which one this database pinned.
 
 The enum's string form is nonetheless narrower than its definition, and
 `BoundaryRule::is_derived()` treats this rule as the strongest derivation claim
@@ -303,7 +481,8 @@ states its initiator codon in `notes`, measured rather than assumed.
 ### What this is not
 
 It is **not** a drop-in replacement for pLannotate or SnapGene Common Features:
-at 89 rows against their 1,367 it is about 7% of the row count, and it covers
+at 115 rows against their 1,367 it is about 8% of the row count — and 89 of the
+115 are what the tool actually searches, which is about 7% — and it covers
 partly different ground. It is **not** complete or comprehensive, and it does not
 cover all common plasmid features. It carries **no** coverage claim for
 commercial catalogue vectors — pET-28a, pGEX-4T-1 and pMAL-c2 return `Count=0`
@@ -368,13 +547,19 @@ All measured, not assumed, and all documented in `SOURCING.md`.
   because of the *shape of a row* rather than because anyone decided anything,
   which is what `Db::audit`'s own comment means by "discipline is not a
   control".
-- **Mammalian selection markers.** `pac`/PuroR and `bsd`/BsdR are absent from
-  AMRFinderPlus, confirmed by enumerating its drug-class field: zero PUROMYCIN
-  and zero BLASTICIDIN entries. HygR and ZeoR *are* present but under catalogue
-  symbols rather than vernacular ones (`aph(4)-Ia` and `ble-Sh`, not `hph` and
-  `Sh ble`), which is why they read as missing until the field was enumerated
-  properly; both now ship. Codon-optimised eukaryotic versions of any of them
-  are absent from every source cleared so far.
+- **Mammalian selection markers — mostly closed, and via the other stage.**
+  `pac`/PuroR and `bsd`/BsdR are absent from AMRFinderPlus, confirmed by
+  enumerating its drug-class field: zero PUROMYCIN and zero BLASTICIDIN entries.
+  HygR and ZeoR *are* present but under catalogue symbols rather than vernacular
+  ones (`aph(4)-Ia` and `ble-Sh`, not `hph` and `Sh ble`), which is why they read
+  as missing until the field was enumerated properly; both now ship. The rest
+  came through the UniProt → ENA chain instead on 2026-08-10 and are `proposed`,
+  not shipped: `pac`, both blasticidin deaminases, HSV `TK`, mouse `Dhfr`, `gpt`,
+  and the four yeast markers. **Codon-optimised eukaryotic versions of any of
+  them are still absent from every source cleared so far**, and that half of the
+  gap is the one that matters for detection: a mammalian construct usually
+  carries a re-coded `pac`, which these nucleotides cannot match at all. What
+  finds those is the translated tier, over the protein reference on the same row.
 - **Engineered fluorescent proteins.** Swiss-Prot curates natural proteins; its
   entire GFP family is 13 wild-type entries. Wild-type avGFP and DsRed ship;
   EGFP, sfGFP and mCherry are simply not in any cleared source and need
@@ -383,7 +568,10 @@ All measured, not assumed, and all documented in `SOURCING.md`.
   than inherited. Rfam's type vocabulary has no terminator or attenuator class
   at all, and the word appears only inside free-text curator comments. By name:
   `rrnB`, `T7Te`, `tL3`, `SV40 polyA`, `BGH`, `CYC1` and `ADH1` all return zero.
-  Hand curation, roughly 20 rows.
+  That confirmed negative is why `build/stage_classb.py` exists and anchors on
+  primary records instead; `rrnB` T1 and T2, T7 Tφ, and the bGH and SV40 early
+  poly(A) signals are `proposed` through it. `tL3`, `CYC1` and `ADH1` are still
+  nowhere, and the terminator half of this gap is closed to about a quarter.
 - **No EMCV IRES, and no WPRE.** Rfam has no EMCV model — `RF00229 IRES_Picorna`
   is an enterovirus/rhinovirus family, checked by pulling five of its seed
   identifiers and looking them up. The EMCV IRES is on essentially every
@@ -513,8 +701,9 @@ that makes the *claim* ("this is a tag on a protein") mean something.
   `require_start`, so which codons may initiate decides which ORFs exist at all.
   The default is now **table 11** — seven initiators, including `GTG` — and it
   was table 1 until 2026-07-28, under which an N-terminal tag on `TetA`,
-  `AprR`, `HygR`, `lacI` or lambda `int` (five of this database's own 38 CDS
-  rows, all beginning `GTG`) was dropped with no output of any kind. C-terminal
+  `AprR`, `HygR`, `lacI` or lambda `int` (five of this database's 52 CDS rows,
+  all beginning `GTG`; there are nine such rows in all) was dropped with no
+  output of any kind. C-terminal
   tags on the same genes were accidentally rescued by an internal downstream
   `ATG`, so the miss bit hardest at the N-terminus, which is where His, FLAG and
   Strep tags usually go. Under table 1 the miss is still real for `GTG`, `ATT`,

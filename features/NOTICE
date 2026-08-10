@@ -18,14 +18,20 @@ fetched from, is in `SOURCING.md`.
 DATED SNAPSHOT
 ================================================================================
 
-This dataset is a dated snapshot (retrieved 2026-07-28) and does not reflect
+This dataset is a dated snapshot (retrieved 2026-08-10) and does not reflect
 the most current data available from NLM.
 
 That sentence is reproduced exactly as `SOURCING.md` section 2 Stage 0.1
 requires it. It is narrower than the truth, so the broader statement follows:
-this dataset is a dated snapshot (sources retrieved 2026-07-27 and 2026-07-28)
-and does not reflect the most current data available from NLM, the UniProt
-Consortium, EMBL-EBI, Rfam or the Worldwide Protein Data Bank.
+this dataset is a dated snapshot (sources retrieved 2026-07-27, 2026-07-28 and
+2026-08-10) and does not reflect the most current data available from NLM, the
+UniProt Consortium, EMBL-EBI, Rfam or the Worldwide Protein Data Bank.
+
+Three dates because there have been three ingest passes, not because anything
+was refreshed underneath an existing row: the 2026-08-10 date belongs to the
+fourteen additional selection markers and the twelve Class B regulatory
+elements added that day, and every earlier row still carries its own earlier
+retrieval date, field by field, in `provenance.tsv`.
 
 The exact retrieval date and the sha256 of every fetched source file are
 recorded per field in `provenance.tsv`, so the age of any individual value can
@@ -94,11 +100,21 @@ CC BY 4.0 requires that changes be indicated. Per field, from `provenance.tsv`:
 EMBL-EBI -- European Nucleotide Archive (ENA)
 ================================================================================
 
-Nucleotide sequences and INSDC location expressions for the natural-protein and
-curated designed-part rows were retrieved from the European Nucleotide Archive,
-operated by the European Molecular Biology Laboratory's European Bioinformatics
-Institute (EMBL-EBI):
+Nucleotide sequences and INSDC location expressions for the natural-protein
+rows, the curated designed-part rows and the Class B regulatory rows were
+retrieved from the European Nucleotide Archive, operated by the European
+Molecular Biology Laboratory's European Bioinformatics Institute (EMBL-EBI):
     https://www.ebi.ac.uk/ena/browser/
+
+The Class B rows -- promoters, enhancers, terminators and poly(A) signals --
+use ENA twice over, and both uses are recorded per row in `provenance.tsv`.
+Once for the bases: the reference sequence is a coordinate slice of one named
+record, re-fetched and re-sliced on every build. And once for the evidence: two
+or more FURTHER records, from different submitting addresses, are fetched whole
+and required to contain those exact bases, and where each of those depositors
+placed the feature's edges relative to ours is measured at build time and
+written into the row's `notes`. Every one of those accessions is a separately
+credited INSDC submission; see the INSDC section below.
 
 ENA records are INSDC records; see the INSDC section below.
 
@@ -268,8 +284,20 @@ sources rather than reproducing them:
     peptide is located, exactly once, in a deposited PDB polymer entity fetched
     at build time. Back-translating a peptide is refused outright, because
     choosing codons would be writing a sequence no record contains.
-  * All names, aliases and descriptions are written by the Polylinker
-    contributors, and are marked `own-work` per field in `provenance.tsv`.
+  * Class B regulatory rows -- promoters, enhancers, terminators, poly(A)
+    signals -- are a coordinate slice of one INSDC record and nothing else. No
+    depositor's `/note`, `/label`, `/gene`, `/product` or `/standard_name` is
+    read at any point, so no editorial text from any record enters the dataset;
+    what is read is coordinates, submission addresses and bases. The extent
+    itself is a convention this project chose, `boundary_rule` says
+    `consensus_of_insdc` to say so, and each row's `notes` name the rival
+    conventions with the offsets measured against them.
+  * Descriptions are written by the Polylinker contributors on every row and are
+    marked `own-work` per field. Names and aliases are ours on the Class B and
+    resistance-marker rows and are UNIPROT'S on the natural-protein rows, which
+    is why they are attributed to UniProt in `provenance.tsv` and described in
+    the UniProt section above. An earlier version of this line claimed all three
+    columns for us on every row; it was wrong about names and aliases on 28 rows.
 
 Provenance is recorded per FIELD, so the nucleotide reference, the protein
 reference and our own editorial each cite the file they actually came from,

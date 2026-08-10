@@ -187,12 +187,13 @@ pub struct Layout {
     /// too has to ask for them by name, and owes the user that sentence." The
     /// checkbox is the asking; the line beside it is the sentence.
     ///
-    /// Today it changes nothing findable — all 89 shipped rows carry a sign-off
-    /// — and that is exactly why it has to exist before it matters. A
-    /// contributed row arrives `proposed`, and a sign-off lapses by itself the
-    /// moment a signed row's content changes, so the first time either happens
-    /// the difference between the two searches must already be something the
-    /// user chose rather than something that appeared.
+    /// It changed nothing findable until 2026-08-10, and that was exactly why
+    /// it had to exist before it mattered. It matters now: the table holds 115
+    /// rows against 89 signatures, so turning this on adds 26 machine-extracted
+    /// records — 14 selection markers and 12 promoters, terminators and poly(A)
+    /// signals — that no human has read. Because the switch was built before it
+    /// did anything, the difference between the two searches is still something
+    /// the user chose rather than something that appeared.
     pub annotate_unreviewed: bool,
 
     /// Which way round the window is painted. See [`Theme`].

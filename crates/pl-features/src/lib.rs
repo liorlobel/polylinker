@@ -2283,6 +2283,17 @@ mod tests {
     /// Deliberately `include_str!` and not `fs::read`: the paths resolve at
     /// compile time relative to this file, so the test cannot pass by failing
     /// to find the files.
+    ///
+    /// **Rewritten 2026-08-10, when the table stopped being all-signed.** The
+    /// version above asserted `total == signed` outright and built both
+    /// sentences around "all N reviewed", so the first `proposed` row anyone
+    /// contributed broke it — not because the prose was wrong but because the
+    /// test could only express one state of the world. That is the wrong shape
+    /// for a check on a database whose entire premise is that a machine may add
+    /// rows a human has not yet approved: the interesting number is the gap.
+    /// Both sentences now carry all three counts, and the inverted control at
+    /// the bottom is what stops the READMEs quietly reverting to the reassuring
+    /// wording — "all N reviewed" must be ABSENT while anything is proposed.
     #[test]
     fn the_readmes_state_the_signoff_count_the_database_has() {
         const ROOT_README: &str = include_str!("../../../README.md");
@@ -2292,42 +2303,133 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         let total = db.records.len();
         let signed = db.reviewed().records.len();
+        let proposed = total - signed;
 
         // The whole phrase, built from the tables rather than written out.
         // Matching a phrase and not a bare integer on purpose: "89" turns up in
         // a README for many reasons, and a check that some digit occurs
         // somewhere is a check that cannot fail.
         let root_claim = format!(
-            "**{total} records as of release {}, all {signed} reviewed.**",
+            "**{total} records as of release {}, {signed} reviewed and {proposed} \
+             proposed.**",
             db.version
         );
         assert!(
             ROOT_README.contains(&root_claim),
             "README.md does not carry {root_claim:?}"
         );
-        let features_claim =
-            format!("v0.1 pre-release, {total} records. All {signed} carry a curator sign-off");
+        let features_claim = format!(
+            "v0.1 pre-release, {total} records. {signed} carry a curator sign-off, \
+             and {proposed} are `proposed`"
+        );
         assert!(
             FEATURES_README.contains(&features_claim),
             "features/README.md does not carry {features_claim:?}"
         );
 
-        // And the claim that started this: nothing may say the shipped set is
-        // empty while it is not. Asserted as the absence of the exact stale
-        // wording, because that wording is what actually shipped.
-        assert_eq!(
-            total, signed,
-            "the assertions above assume every row signed"
-        );
         for (name, text) in [
             ("README.md", ROOT_README),
             ("features/README.md", FEATURES_README),
         ] {
+            // The claim that started this: nothing may say the shipped set is
+            // empty while it is not. Asserted as the absence of the exact stale
+            // wording, because that wording is what actually shipped.
             assert!(
                 !text.contains("0 reviewed"),
                 "{name} still says the database ships 0 reviewed records; it ships {signed}"
             );
+            // And its mirror image, which is the failure mode this file now has
+            // and did not before: prose that says everything is approved while
+            // `proposed` rows sit in the table. Both spellings the old wording
+            // used are refused, so restoring either one fails here.
+            if proposed > 0 {
+                for stale in [
+                    format!("all {total} reviewed"),
+                    format!("All {total} carry"),
+                ] {
+                    assert!(
+                        !text.contains(&stale),
+                        "{name} says {stale:?} while {proposed} row(s) are still 'proposed'"
+                    );
+                }
+            }
         }
+    }
+
+    /// The "no promoter is in it yet" disclosure follows the SIGNED table.
+    ///
+    /// [`Db::absent_common_kinds`] is what the desktop app's proposals panel
+    /// and `pl methods annotate` both use to tell a user which whole classes of
+    /// feature the database has never held, and it exists because somebody who
+    /// watches `AmpR` light up and sees no `ori` will otherwise conclude their
+    /// plasmid has none. It probes for three literal `genbank_key` values.
+    ///
+    /// That coupling is invisible from either end, and on 2026-08-10 it broke
+    /// for the length of one build. Twelve promoter, enhancer, terminator and
+    /// poly(A) rows landed carrying `genbank_key = regulatory` -- the current
+    /// INSDC spelling, and the correct one, since `promoter` and `terminator`
+    /// are retired keys. The probe looks for `promoter`, so those rows were
+    /// invisible to it, and the app would have gone on saying "no promoter is
+    /// in it yet" after promoters were signed off. Nothing in the schema, the
+    /// loader or the build would have noticed: the rows are well formed, the
+    /// key is more correct than what replaced it, and the only symptom is a
+    /// sentence on a panel that quietly stops being true.
+    ///
+    /// So the property is pinned from both sides at once. PROVEN TO FAIL by
+    /// reverting `stage_classb.py` to `genbank_key="regulatory"` and rebuilding:
+    ///
+    /// ```text
+    /// the whole table still reports 'promoter' absent, but it holds 12 Class B
+    /// rows; Db::absent_common_kinds probes literal genbank_key values and
+    /// something has stopped matching
+    /// ```
+    ///
+    /// and it fails the other way if the twelve are ever signed without this
+    /// test being reconsidered, because the first assertion then stops holding.
+    #[test]
+    fn the_absent_kinds_disclosure_tracks_the_reviewed_set_and_not_the_whole_table() {
+        let (all, errors) = Db::builtin();
+        assert!(errors.is_empty(), "{errors:?}");
+        let reviewed = all.reviewed();
+        assert!(
+            all.records.len() > reviewed.records.len(),
+            "this test is about the difference between the two tables and there is none"
+        );
+
+        // What a user actually searches by default. Still has all three gaps,
+        // because none of the Class B rows is signed.
+        let searched = reviewed.absent_common_kinds();
+        for kind in ["promoter", "terminator", "origin of replication"] {
+            assert!(
+                searched.contains(&kind),
+                "the signed table reports {kind:?} present; the disclosure the app \
+                 shows by default would be wrong"
+            );
+        }
+
+        // And the whole table, which `--include-proposed` searches, must NOT
+        // claim the two gaps it no longer has.
+        let whole = all.absent_common_kinds();
+        for kind in ["promoter", "terminator"] {
+            assert!(
+                !whole.contains(&kind),
+                "the whole table still reports {kind:?} absent, but it holds {} Class B \
+                 rows; Db::absent_common_kinds probes literal genbank_key values and \
+                 something has stopped matching",
+                all.records
+                    .iter()
+                    .filter(|r| r.id.starts_with("PLF:4"))
+                    .count()
+            );
+        }
+        // Origins are genuinely absent from both, and saying so here is what
+        // keeps the two assertions above from being a test that anything
+        // non-empty passes.
+        assert!(
+            whole.contains(&"origin of replication"),
+            "an origin row appeared; this test's third probe needs rewriting rather \
+             than deleting"
+        );
     }
 
     /// `tools/release.ps1` must copy `features/NOTICE` into `dist/`, because
