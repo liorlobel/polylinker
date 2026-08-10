@@ -291,6 +291,24 @@ class Convention:
 # informative for it. features/README.md records the trade rather than hiding
 # it, and `absent_common_kinds`'s own probe list is the thing to keep in step if
 # these keys are ever changed again.
+# AN ITEM MAY NOT BE REMOVED FROM THIS TUPLE ONCE ITS ID IS PUBLISHED.
+#
+# `build()` allocates `PLF:{ID_BASE + i}` from the item's INDEX here, so deleting
+# one renumbers every item after it. Measured 2026-08-11: dropping the CMV
+# enhancer at index 6 moves the T7 terminator to PLF:4006, rrnB T1 to PLF:4007,
+# rrnB T2 to PLF:4008, bGH poly(A) to PLF:4009 and SV40 early poly(A) to
+# PLF:4010 -- five published ids, each now meaning a different element.
+# `build.py` catches it (it re-reads the previous table and refuses to write when
+# a published id changes meaning), so the failure is loud rather than silent, but
+# it is still a failure and the rebuild does not complete.
+#
+# features/PROPOSED.md said the opposite until 2026-08-11 -- "IDs are allocated
+# from where a row is declared, never from how many survived, so dropping one
+# does not renumber anything after it". That is true of a row DROPPED BY A CHECK,
+# which is what the five refused Class B elements are: they stay in this tuple,
+# keep their index, and are re-measured every build. It is not true of an item
+# deleted from the source. Withdrawing a published row therefore means keeping
+# its declaration here and stopping it at the gate, not deleting it.
 ITEMS: tuple[Convention, ...] = (
     Convention(
         name="T7 promoter",
@@ -302,8 +320,14 @@ ITEMS: tuple[Convention, ...] = (
         sequence="TAATACGACTCACTATA",
         exemplars=("AF053733", "KJ641600", "PV764404", "GQ421427"),
         description=(
-            "The 17 bp class III promoter of bacteriophage T7: the seventeen bases "
-            "immediately upstream of a T7 transcription start. T7 RNA polymerase "
+            # "the 17 bp class III promoter" said, of an element whose primary
+            # description this project has not read, that the class III promoter
+            # IS 17 bp -- while this row's own caveat says the row is -17..-1
+            # with +1 excluded, i.e. a part of something. The description is the
+            # user-facing string and it now says which.
+            "The 17 bp recognition element of the class III promoter of "
+            "bacteriophage T7: the seventeen bases immediately upstream of a T7 "
+            "transcription start, with the +1 base excluded. T7 RNA polymerase "
             "reads it as a single subunit with no sigma factor and no accessory "
             "protein, and the host polymerase cannot read it at all. That mutual "
             "blindness is what a T7 expression system is built on."
@@ -312,16 +336,37 @@ ITEMS: tuple[Convention, ...] = (
             "WHY 17 AND NOT 18 OR 20. This row is -17 to -1 relative to the "
             "transcription start, and the +1 base is deliberately excluded. The "
             "anchor record settles where +1 is without anyone having to assert it: "
-            "these seventeen bases occur seven times in the T7 genome and every one "
+            "these seventeen bases occur seven times in the T7 genome, every one "
             "of the seven ends exactly one base before a coordinate the record "
-            "annotates as a promoter, so the annotated point is +1 and the interval "
-            "here is the promoter proper. The copy cited is the one immediately "
-            "upstream of the gene 10 capsid CDS, which is the phi10 promoter that "
-            "expression vectors carry. A 20 nt convention exists and extends three "
-            "bases into the transcript; it is measured against this row in the "
-            "witness offsets above. Note that PLF:1004, the T7 RNA polymerase row, "
+            "annotates as a promoter, and in all seven the next base is G -- so the "
+            "annotated point is +1 and the interval here is the promoter proper. "
+            "Re-derived from the record by a second reader on 2026-08-11: 7 of 7. "
+            "The copy cited is the one immediately upstream of the gene 10 capsid "
+            "CDS, which is the phi10 promoter that expression vectors carry. "
+            "A SECOND ARGUMENT FOR THE SAME 5' EDGE, measured on 2026-08-11 and "
+            "not previously in this row: the anchor annotates SEVENTEEN T7 "
+            "promoters, not seven, and aligned on their annotated points every "
+            "column from -17 to -3 agrees in 14 of 17 records or better (nine of "
+            "those columns in 17 of 17), while no column from -24 to -18 exceeds "
+            "12 of 17. The conserved block and this row have the same 5' edge. "
+            "RIVAL EXTENTS, NAMED, BECAUSE THE OFFSETS ABOVE DO NOT SHOW THEM. "
+            "Until 2026-08-11 this note said a 20 nt convention 'is measured "
+            "against this row in the witness offsets above'; all four offsets above "
+            "are 5'+0/3'+0, so that sentence pointed a reader at evidence that is "
+            "not there, and no 20 nt form was found anywhere. What was found, in "
+            "records this stage names as exemplars of OTHER rows and which "
+            "therefore cannot appear in this row's offsets: 19 nt at -17..+2 "
+            "(MH325107.1, which the SnapGene screen flags) and 21 nt at -17..+4 "
+            "(DQ250998.1, FJ457001.1) and at -18..+3 (AY640625.1). Every rival "
+            "runs into the transcript; that is the decision this row takes and "
+            "they do not. Note also that PLF:1004, the T7 RNA polymerase row, "
             "already describes this promoter as 17 bp, so a longer row here would "
-            "have made this database disagree with itself."
+            "have made this database disagree with itself. STILL OPEN, AND IT IS "
+            "PROSE AND NOT SEQUENCE: the primary description of the class III "
+            "promoter is Dunn & Studier 1983, J Mol Biol 166:477-535, PMID "
+            "6864790, whose PubMed record carries no abstract. The length that "
+            "paper gives for the element was NOT read from the paper here, so the "
+            "17 in this row is this project's boundary and not a quotation."
         ),
     ),
     Convention(
@@ -334,21 +379,41 @@ ITEMS: tuple[Convention, ...] = (
         exemplars=("DQ250998", "FJ457001", "KC800697"),
         description=(
             "The 17 bp promoter of Salmonella phage SP6, read by SP6 RNA polymerase "
-            "and by no host enzyme. Bounded by the same convention as the T7 row: "
-            "the seventeen bases upstream of the transcription start. Paired with a "
+            "and by no host enzyme. Bounded on the same rule as the T7 row, and by "
+            "SP6's own published promoter consensus: the seventeen bases upstream "
+            "of the transcription start. Paired with a "
             "T7 or T3 promoter at the other end of a polylinker it is what lets a "
             "vector transcribe either strand of an insert in vitro."
         ),
         caveat=(
-            "THE ANCHOR IS A LOCUS, NOT AN ANNOTATION, AND THAT IS WEAKER THAN THE "
-            "T7 ROW. The SP6 genome record annotates genes and coding sequences and "
-            "NO promoters at all, so unlike T7 there is no depositor-annotated "
+            "THE ANCHOR'S FEATURE TABLE IS SILENT; THE ANCHOR'S OWN PAPER IS NOT. "
+            "The SP6 genome record annotates genes and coding sequences and NO "
+            "promoters at all, so unlike T7 there is no depositor-annotated "
             "transcription start to bound this interval against. These seventeen "
             "bases occur three times in that genome, identically, in three "
             "intergenic positions; the coordinate cited is the first of the three "
-            "and the choice does not affect a single base of the row. What makes "
-            "this a promoter row rather than a sequence row is the witness "
-            "annotation measured above and the SP6 literature, not the anchor."
+            "and the choice does not affect a single base of the row. Until "
+            "2026-08-11 this row's basis stopped there and was read as bounded by "
+            "analogy to T7. It is not. The record's OWN publication -- Dobbins, "
+            "George, Basham, Ford, Houtz, Pedulla, Lawrence, Hatfull & Hendrix "
+            "2004, J Bacteriol 186:1933-1944, PMID 15028677 -- identifies ten "
+            "promoters for the SP6-encoded RNA polymerase in this genome and "
+            "publishes the degenerate consensus KAWTTARGKGACACTATAG, which is 19 "
+            "nt and runs -18..+1. Resolved (K=T, W=T, R=G) its -17..-1 window is "
+            "this row base for base, checked on 2026-08-11. The one base further "
+            "5' that the consensus carries is the degenerate K, and the three "
+            "exact copies of this row in the anchor carry G, T and G there -- so "
+            "-18 is the first column that varies, and 17 is where the invariant "
+            "window ends. All three are followed by G at +1. Brown, Klement & "
+            "McAllister 1986, Nucleic Acids Res 14:3521-3526, PMID 3010240, fixes "
+            "the register independently: the core these phage promoters share, "
+            "CACTA, runs -7 to -3, and in this row read as -17..-1 it does. So the "
+            "boundary rests on the same articulated rule the T7 row uses -- the "
+            "conserved window lying entirely upstream of +1 -- applied to primary "
+            "evidence about SP6, and not on an analogy standing in for evidence. "
+            "The residue of honest doubt is that both primary consensuses extend "
+            "through +1, so 17 remains a choice; it is the same choice, made the "
+            "same way, as the T7 row."
         ),
     ),
     Convention(
@@ -484,12 +549,48 @@ ITEMS: tuple[Convention, ...] = (
             "cell types, which is why it travels with the promoter into vectors."
         ),
         caveat=(
-            "THE UPSTREAM HALF OF THE 584 nt BLOCK; see the promoter row above for "
-            "why the block is split into two rows and why they ship together. "
-            "A 378 nt convention is also widely deposited and is NOT simply this "
-            "row two bases shorter: a record annotating it was checked here and "
-            "does not contain these 380 bases at all, so the two differ inside the "
-            "element and not only at the ends."
+            "THE UPSTREAM HALF OF A 584 nt BLOCK WHOSE DOWNSTREAM HALF IS NOT IN "
+            "THIS TABLE, AND THAT IS THIS ROW'S PROBLEM. In a pcDNA3-type vector "
+            "the cytomegalovirus region is one contiguous 584 nt block. This row "
+            "is its upstream 380 nt. The 204 nt immediately downstream -- the part "
+            "carrying the TATA box, and the part most maps actually call the CMV "
+            "promoter -- was PLF:4005, which the extent-corroboration rule refused "
+            "on 2026-08-10 for want of a second independent submission drawing its "
+            "edges. The condition this row shipped under, in that row's own words, "
+            "was 'ship this row and the enhancer together or not at all; shipping "
+            "one alone would silently pick a convention', and the table violates "
+            "it today: a user annotating that block sees the upstream 380 nt light "
+            "up and the promoter half stay dark. Db::absent_common_kinds does not "
+            "rescue that, because it probes the literal key `promoter` and "
+            "PLF:4000 and PLF:4001 supply it, so the app will not say 'no promoter "
+            "is in this database yet'. WHAT THE EVIDENCE SAYS ABOUT THE SPLIT "
+            "ITSELF, measured 2026-08-11. Of the six records this stage has "
+            "fetched that contain these 380 bases, the three that draw the 380/204 "
+            "split are the three the project has already identified as "
+            "SnapGene-shaped: MH325107.1 carries the `label:` tell; LC897329.1 is "
+            "SnapGene Common Feature naming from top to bottom with no tell; and "
+            "OP697991.1's /note over this very interval is byte-identical to "
+            "MH325107.1's but for the token 'label: ', which SOURCING.md section "
+            "0.6 already records as a demonstrated false negative of the screen. "
+            "The other three draw no enhancer at all: OR659033.1 annotates ONE 584 "
+            "nt feature and calls it a CMV promoter, MN224159.1 one of 655 nt, "
+            "MW987522.1 one of 623 nt. THE PRIMARY LITERATURE DOES NOT DRAW THIS "
+            "EDGE EITHER. Boshart, Weber, Jahn, Dorsch-Haesler, Fleckenstein & "
+            "Schaffner 1985, Cell 41:521-530, PMID 2985280, place the enhancer "
+            "'between nucleotides -118 and -524' of the immediate-early "
+            "transcription start. On the anchor's own numbering -- X17403.1 "
+            "annotates exon complement(173610..173730), so +1 is 173730 -- this "
+            "row is -219..-598 and the refused promoter row was -15..-218, so "
+            "Boshart's -118 falls inside the promoter half and -524 inside the "
+            "enhancer half. Neither of this row's edges is a Boshart edge; the "
+            "split is a fragment boundary. RECOMMENDED TO THE CURATOR: WITHDRAW, "
+            "or restore the promoter row before signing this one. That decision is "
+            "a curator's and this note does not take it; features/PROPOSED.md sets "
+            "out both options and what each costs. Finally, a 378 nt rival "
+            "convention was asserted here until 2026-08-11 on the strength of a "
+            "record that was neither named nor retained. It is not re-derivable "
+            "from anything in this repository, so it has been removed rather than "
+            "left standing."
         ),
     ),
     Convention(
@@ -507,14 +608,37 @@ ITEMS: tuple[Convention, ...] = (
             "so that transcription stops instead of running on round the plasmid."
         ),
         caveat=(
-            "THE CLEANEST DEMONSTRATION IN THIS STAGE THAT THESE ARE CONVENTIONS. "
-            "Two rival 48 nt forms of this terminator are deposited, and they are "
-            "offset from each other BY ONE BASE -- one starts a base earlier and "
-            "ends a base earlier than the other. Neither is wrong. This row takes "
-            "the 47 nt form whose 3' end is the coordinate the anchor record itself "
-            "annotates. Separately, at least one deposit labels 'T7 terminator' a "
-            "sequence from an entirely different part of the T7 genome; a name is "
-            "not a location, which is the whole reason these rows carry one."
+            "THE 3' EDGE IS PRIMARY; ONLY THE 5' EDGE IS A CONVENTION. Macdonald, "
+            "Durbin, Dunn & McAllister 1994, J Mol Biol 238:145-158, PMID 8158645, "
+            "define this signal as a stem-loop followed by a run of six uridylates "
+            "where 'termination occurs at a 3' G residue just downstream of the U "
+            "run'. In the anchor, 24201-24215 reads GGGTTTTTTGCTGAA, so that G is "
+            "24210 -- this row's last base, and the single coordinate the anchor "
+            "annotates as 'T7 transcription terminator Tphi'. The primary "
+            "definition and the depositor's annotation land on the same base. The "
+            "same paper says the 5' side is NOT delimited -- 'sequences upstream "
+            "from the terminator have marked effects on the position and "
+            "efficiency of termination' -- so nothing primary fixes where this "
+            "element begins, and that is the one arbitrary edge here. THE RIVALS, "
+            "RE-MEASURED 2026-08-11, AND THEY ARE NOT SYMMETRIC. Until then this "
+            "note said two 48 nt forms are offset from each other by one base and "
+            "'neither is wrong'. The offset is real; the symmetry is not. "
+            "GQ421427.1's 48 nt shares this row's 3' edge and starts at the first "
+            "base after the gene 10 stop codon, which the anchor puts at "
+            "24160-24162 -- an articulable rule. AY303670.1's 48 nt starts at the "
+            "LAST base of that stop codon and ends one base SHORT of the "
+            "termination site, so it shares neither edge with the primary "
+            "definition. Also measured: KJ641600.1 at 62 nt, same 3' edge; and "
+            "KM261834.1's 253 nt 'terminator', which is not a rival extent but a "
+            "synthetic composite -- it contains this row verbatim at its offset 2 "
+            "and a one-base variant of the rrnB T1 row at its offset 60, and it "
+            "stops nine bases into the rrnB T2 row rather than enclosing it. If a "
+            "curator prefers 48 nt on the "
+            "'start after the CDS' rule, that is defensible and would today have "
+            "ONE exact placement, which is below this stage's floor of two. "
+            "A claim that some deposit gives this name to a different part of the "
+            "T7 genome stood here until 2026-08-11; no record checked shows it and "
+            "none was ever named, so it has been removed."
         ),
     ),
     Convention(
@@ -533,16 +657,35 @@ ITEMS: tuple[Convention, ...] = (
             "read-through from the vector."
         ),
         caveat=(
-            "THE NAME COMES FROM VECTOR RECORDS AND THE LOCUS FROM THE PRIMARY ONE, "
-            "AND THAT SPLIT IS DELIBERATE. The rrnB operon record annotates no "
-            "terminator at all, so nothing in the primary source says 'T1'; what it "
-            "supplies is the coordinates. Rfam cannot help here either -- "
-            "SOURCING.md records as a confirmed negative that Rfam does not model "
-            "standalone rho-independent terminators -- so this is the route that "
-            "exists. Rival extents are all nested around this one and run from 43 "
-            "to 98 nt; the 5' ends vary by about ten bases and the 3' ends by about "
-            "forty-five, which is the usual shape for a terminator whose hairpin "
-            "everyone agrees on and whose flanks nobody does."
+            "THE NAME COMES FROM VECTOR RECORDS AND THE LOCUS FROM THE PRIMARY "
+            "ONE, AND THE TRUE CLAIM IS NARROWER THAN THE ONE THAT STOOD HERE. "
+            "What is true: J01695's FEATURE TABLE annotates no terminator -- the "
+            "only feature between 5900 and 7200 is rRNA 6246..6365 -- so the "
+            "coordinates come from the primary record and the name does not. What "
+            "is NOT true, and was asserted here until 2026-08-11, is that nothing "
+            "primary says 'T1'. Brosius 1984, Gene 27:161-172, PMID 6202587 -- the "
+            "author of this operon's sequence and of the pKK vectors these extents "
+            "come from -- reports that 'the putative rrnB terminators, T1 and T2, "
+            "each function separately in vivo'. Orosz, Boros & Venetianer 1991, "
+            "Eur J Biochem 201:653-659, PMID 1718749, which is in J01695's OWN "
+            "reference list, subcloned them individually and concluded that 'T1 "
+            "and T2 are both efficient terminators in isolated forms'. That is "
+            "primary support for shipping T1 and T2 as two rows, which is what "
+            "this row and the next do. Rfam still cannot help: SOURCING.md records "
+            "as a confirmed negative that Rfam does not model standalone "
+            "rho-independent terminators. THE RIVAL EXTENTS, RE-MEASURED "
+            "2026-08-11. This note used to put them at 43 to 98 nt with 3' ends "
+            "varying by about forty-five bases. Across every record this stage "
+            "fetches that contains these bases there is no rival longer than 44 nt "
+            "at all, and the 98 is not re-derivable from anything here. Five "
+            "records place it at EXACTLY 44 -- DQ115377.1, EF216319.1, LT727425.1, "
+            "U13859.1 and U13872.1 -- and the only 43 nt feature is one record "
+            "disagreeing with itself: U13859.1 carries these bases three times and "
+            "annotates all three 'rrnB T1', twice at 44 nt and once at 43, the 43 "
+            "being this row without its leading A. That is a slip inside a single "
+            "submission, not a competing convention. LT727425.1 is a further exact "
+            "placement from an address this row does not yet cite; adding it to "
+            "the exemplars would raise the corroboration count honestly."
         ),
     ),
     Convention(
@@ -565,7 +708,14 @@ ITEMS: tuple[Convention, ...] = (
             "stage: it is the shortest and most sharply bounded of the twelve. Note "
             "that 'rrnB T1T2' as one annotation is a THIRD element -- T1, the "
             "natural spacer, and T2 -- and is not this row and not the T1 row; a "
-            "file carrying it will match both rows separately, with a gap."
+            "file carrying it will match both rows separately, with a gap. "
+            "THE NAME HAS A PRIMARY SOURCE AND THIS ROW NOW CITES IT, which it did "
+            "not before 2026-08-11: Orosz, Boros & Venetianer 1991, Eur J Biochem "
+            "201:653-659, PMID 1718749 -- in J01695's own reference list -- "
+            "subcloned T2 on its own and found it an efficient terminator, and "
+            "Brosius 1984, Gene 27:161-172, PMID 6202587, reports that T1 and T2 "
+            "'each function separately in vivo'. So the name rests on the primary "
+            "literature and only the extent rests on the vector records."
         ),
     ),
     Convention(
@@ -593,7 +743,21 @@ ITEMS: tuple[Convention, ...] = (
             "evidence. The rival extents that do exist add or remove a few bases at "
             "the 5' end only. A poly(A) signal is one of the few Class B elements "
             "where a short row would be actively wrong: the hexamer alone is six "
-            "bases and occurs by chance in any plasmid."
+            "bases and occurs by chance in any plasmid. THE ANCHOR LOCATES THE "
+            "CLEAVAGE SITE, WHICH TURNS 'ENOUGH FLANKING SEQUENCE' INTO A "
+            "MEASUREMENT, and this row did not say so before 2026-08-11. AATAAA "
+            "occurs exactly once in these 225 bases, at row position 91 = M57764.1 "
+            "2416-2421; the anchor's own exon 2138..2439 puts the cleavage and "
+            "polyadenylation site at 2439, eighteen bases after the hexamer ends, "
+            "and this row runs 111 further bases past it. Goodwin & Rottman 1992, "
+            "J Biol Chem 267:16330-16334, PMID 1644817, found that 'a region from "
+            "18 to 27 nucleotides downstream of the cleavage site contains "
+            "sequences required for correctly positioning the cleavage site' -- "
+            "that is 2457-2466, inside this row with 84 bases to spare -- and that "
+            "the efficiency element here is 'diffuse ... rather than a discrete "
+            "element', which is exactly why there is no sharp 3' edge to find. The "
+            "anchor's own publication is Gordon, Quick, Erwin, Donelson & Maurer "
+            "1983, Mol Cell Endocrinol 33:81-95, PMID 6357899."
         ),
     ),
     Convention(

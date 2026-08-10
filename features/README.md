@@ -86,7 +86,7 @@ right name.
 | `build/stage_rfam.py` | Stage 3. Rfam seed alignments, with the miRBase and Wikipedia exclusions enforced at parse time. |
 | `build/stage_curated.py` | Stage 4. Hand-curated designed parts, one citation each, and two routes: codons sliced out of a natural parent, or a peptide verified against a wwPDB polymer entity. Six of 28 are still held; see *Honest coverage*. (This row said "Stage 5" from before there was one, which stopped being merely wrong the day a real Stage 5 landed underneath it.) |
 | `build/stage_classb.py` | Stage 5. INSDC-anchored Class B conventions — promoters, terminators, poly(A) signals. One anchor record per row, re-sliced every build, plus ≥2 witnesses from *different submitting addresses* and ≥2 of those placing the feature at *exactly* the shipped extent. Reads no `/note`, `/label`, `/gene`, `/product` or `/standard_name`, and refuses a SnapGene-annotated record as a witness. Nine further elements are held with reasons in `HELD` and five more are refused on the extent rule; see *Class B*. |
-| `PROPOSED.md` | The curator worklist for every row that is `proposed`: what it claims, which accessions to check it against, the boundary chosen and on what basis, and — first — the ones where the exemplars disagreed or the convention is contested. Carries no digests, deliberately: `SIGNOFF.tsv` says signing a digest nobody has read is not an attestation. |
+| `PROPOSED.md` | The curator worklist for every row that is `proposed`: what it claims, which accessions to check it against, the boundary chosen and on what basis, **the primary source that settles it**, and a recommendation — sign, withdraw, or a decision the evidence cannot make — with the decisions first and the arithmetic afterwards. Its *Claims*, *Anchor*, *Sources* and witness lines are read out of `features.tsv` rather than retyped, so they cannot drift from the table. Carries no digests, deliberately: `SIGNOFF.tsv` says signing a digest nobody has read is not an attestation. |
 | `build/insdc_posture.py` | The stage-posture gate. Every stage in `build.STAGES` must declare `INSDC_POSTURE` — what it does about a boundary convention arriving from a depositor's INSDC feature table — and this refuses a stage that declares nothing, then checks the mechanical half of whatever was declared. Runs inside `taint_gate.py` before the fetch, and in `tools/ci.ps1` offline. Not a taint check, and its docstring says why one cannot be built here. |
 | `build/check_signoff.py` | Proves no row asserts more than a human signed — and proves the check itself can fail, in both directions. |
 | `build/check_writer.py` | Proves the build's writer *reads* `SIGNOFF.tsv` and never writes it, over the real shipped rows and with no network. Plants five misbehaving writers and requires itself to catch each, then requires itself to pass a clean one. |
@@ -341,11 +341,14 @@ ask for.**
 
 [`PROPOSED.md`](PROPOSED.md) is the worklist for that reading: every one of the
 21, what it claims, the accessions to check it against, the boundary decision
-and its basis, and the exact `--show` invocation per row. It opens with the rows
-where the exemplars disagreed or the convention is contested, because those are
-the ones a curator has to *decide* rather than merely check — and with the one
-row that should not be signed at all until an unresolved organism conflict is
-settled (`PLF:1016`).
+and its basis, the exact `--show` invocation per row, and — since 2026-08-11 —
+the primary source that settles the row plus a recommendation. It opens with the
+handful of questions a curator has to *decide* rather than check, because no
+further research can make them: whether to withdraw `PLF:4006`, whether to write
+alias spellings ourselves into a UniProt-sourced column, and the three
+unadjudicated patent flags. The organism conflict that blocked `PLF:1016` is
+resolved — the gene is *Bacillus cereus*, the record's `/organism` is the
+expression host — and the resolution is in the row.
 
 **14 further selection markers** (`PLF:1014`–`PLF:1027`), all through the Stage
 2 chain, so all of them translation-verified exactly against a UniProt canonical
