@@ -229,8 +229,9 @@ what changed between releases.
    **The coordinate route, and why it gets a declaration rather than a check.**
    ENA folds a submitter's SnapGene `/label` into the `/note`, so a depositor who
    annotated their plasmid in SnapGene publishes SnapGene's *boundary convention*
-   inside an INSDC record — 14 of 481 records surveyed for Stage 5 carry the
-   fingerprint. The gate above cannot see it: it compares English strings, and
+   inside an INSDC record — 15 of 481 records surveyed for Stage 5 carry the
+   fingerprint (6 by the strong `label:` tell, 9 by prose alone), and
+   `SOURCING.md` lists all fifteen so the number can be re-derived. The gate above cannot see it: it compares English strings, and
    the file it is pinned to has no coordinate in it to compare against. Neither
    can anything else here, and `SOURCING.md` §0.6 gives the measurements —
    chiefly that a rule keyed on extent agreement fires on 84% of the distinct
