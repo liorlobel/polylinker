@@ -289,15 +289,25 @@ pub fn methods(t: Topic) -> String {
             // the whole categories the database has never held is describing
             // the wrong limit: a reader of the paper has no way to know that
             // "no origin of replication was annotated" was decided by the
-            // database's contents rather than by the plasmid's. The desktop
-            // app's proposals panel is built from the same call, so the two
-            // cannot come to disagree.
-            let kinds = db.absent_common_kinds();
+            // database's contents rather than by the plasmid's.
+            //
+            // Asked of the REVIEWED table, not the whole one. That choice was
+            // invisible until 2026-08-10, because the two held the same rows;
+            // they no longer do. Twelve promoter, terminator and poly(A) rows
+            // arrived `proposed`, so the whole table has those classes and the
+            // default annotation run still does not search them — and reporting
+            // the whole table's gaps here would have quietly stopped mentioning
+            // promoters in a paragraph describing a run that never looked for
+            // one. The desktop app's proposals panel asks the same question of
+            // whichever table it just searched, which is the right question
+            // there; this paragraph describes the default and says so.
+            let kinds = db.reviewed().absent_common_kinds();
             let gaps = match kinds.split_last() {
                 None => String::new(),
                 Some((last, rest)) => format!(
-                    " The library holds no {} record of any kind, so features of those \
-                     classes are not searched for and cannot be reported.",
+                    " The reviewed library holds no {} record of any kind, so features \
+                     of those classes are not searched for by default and cannot be \
+                     reported.",
                     if rest.is_empty() {
                         (*last).to_string()
                     } else {

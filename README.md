@@ -8,8 +8,8 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 158,777 lines of Rust, 93,763 of it dependency-free (141 `.rs`
-> files under `crates/` and `bins/`), with 1,934 `#[test]` functions and a
+> crates and 158,925 lines of Rust, 93,875 of it dependency-free (141 `.rs`
+> files under `crates/` and `bins/`), with 1,935 `#[test]` functions and a
 > 72-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-09, and recounted on every test run since:
@@ -45,9 +45,11 @@ sends a sequence anywhere.
 > checks before it keeps a byte. An operating system has never heard of that key, so
 > it buys you nothing at the SmartScreen dialog and everything afterwards. The
 > features database used to be the second entry on this list and is not any
-> more — all 89 records carry a
-> named curator in `features/SIGNOFF.tsv`, so `pl annotate` reports by default,
-> and an approval lapses by itself the moment the row it approves changes. See
+> more — the 89 records `pl annotate` searches by default each carry a
+> named curator in `features/SIGNOFF.tsv`, and an approval lapses by itself the
+> moment the row it approves changes. The table also holds 26 rows a program
+> added and nobody has read; those are `proposed`, they are not searched, and
+> `--include-proposed` is how to see them. See
 > [Where this actually is](#where-this-actually-is).
 
 ---
@@ -100,7 +102,7 @@ Each ships before the app, stands alone, and survives the app.
 | [`docs/AUDIT-2026-07-28.md`](docs/AUDIT-2026-07-28.md) | A 123-agent audit of the whole workspace: 90 confirmed findings, 19 refuted, 90 of 90 fixed. Kept in the repo because the findings that mattered most were **checks that could not fail**, and that is worth being public about. |
 | Windows installer | **`polylinker-<version>-windows-x64.msi`**, built by [`tools/build-msi.ps1`](tools/build-msi.ps1) from [`tools/installer/Polylinker.wxs`](tools/installer/Polylinker.wxs). Installs for you alone by default — no administrator, no elevation prompt — with "for everyone" offered for machines where you are one. The installer itself contacts nothing, and it registers no service, no scheduled task and no auto-updater: nothing it puts on the machine ever runs on its own. ([`tools/ci.ps1`](tools/ci.ps1) fails the build if any network or scheduling facility appears anywhere under `tools/installer/`.) It **adds** Polylinker to the "Open with" list for eight sequence formats and takes none of them away from SnapGene or anything else you already use. The MSI carries no file list of its own: it is generated from the same `SHA256SUMS.txt` the archive is verified against, because a second list is how a licence text stops shipping. The readable [`Install-Polylinker.ps1`](tools/installer/Install-Polylinker.ps1) still ships inside the zip for anyone who would rather run something they can read. See [`docs/RELEASING.md`](docs/RELEASING.md). |
 | Signing | **Code signing: not done, and not planned.** There is no code-signing certificate and no Apple Developer ID, and obtaining them is not on the roadmap — see [`docs/RELEASING.md`](docs/RELEASING.md), which states the decision and what it costs you at the download. That is the signature an *operating system* checks, so Windows and macOS go on saying they do not recognise the publisher, and a machine under someone else's policy may refuse the binaries outright. **Manifest signing: done, 2026-08-05.** `SHA256SUMS.txt` ships with an Ed25519 signature (`SHA256SUMS.txt.sig`) whose public key is compiled into the two programs that can use it, `pl` and `polylinker` (`pl-mcp`, the Python module and the wasm build do not carry it, because none of them can update anything), so a download can be traced to whoever holds the release key rather than merely to whoever served the page. Every release page prints the OpenSSL command to check it by hand, or `pl update` does it for you — it refuses everything that key did not sign. The private half is a GitHub Actions secret and is on no machine here. |
-| Features database | **89 records as of release 2026.07.28, all 89 reviewed.** Machine-assembled from public sources, then signed off row by row on 2026-07-28. A row moves past `proposed` only when `features/SIGNOFF.tsv` names it with a sha256 of its content that still matches, so an approval lapses by itself when the row changes and the shipped set shrinks without anyone deciding to shrink it. That mechanism, not the current count, is what enforces "the tool may propose and never assert". **It is not comprehensive, and the gaps are not small: there is not one promoter, terminator or origin of replication in it** — 89 rows against SnapGene's 1,367, and those three classes have no automatable source that gives a defensible boundary, so they are curatorial work nobody has done yet ([`features/README.md`](features/README.md) enumerates the rest). The desktop app and `pl methods annotate` both say so on screen, computed from the table rather than written down, because a user who watches `AmpR` light up and sees no `ori` will otherwise conclude their plasmid has none. `pl licences` prints the live count and the attribution. |
+| Features database | **115 records as of release 2026.08.10, 89 reviewed and 26 proposed.** Machine-assembled from public sources, then signed off row by row; the 89 were signed on 2026-07-28 and the 26 added on 2026-08-10 have not been read by anyone. A row moves past `proposed` only when `features/SIGNOFF.tsv` names it with a sha256 of its content that still matches, so an approval lapses by itself when the row changes and the shipped set shrinks without anyone deciding to shrink it. That mechanism, not the current count, is what enforces "the tool may propose and never assert" — and the 26 are what it looks like when it works: they are in the repository, they are not in what `pl annotate` searches, and `--include-proposed` is the only way to see them. **It is not comprehensive, and the gaps are not small: the 89 rows the tool searches contain no promoter, no terminator and no origin of replication** — 89 against SnapGene's 1,367 — because those classes have no automatable source that gives a defensible boundary. Twelve promoters and terminators are now proposed and awaiting a curator; origins are still untouched ([`features/README.md`](features/README.md) enumerates the rest). The desktop app and `pl methods annotate` both say so on screen, computed from the table rather than written down, because a user who watches `AmpR` light up and sees no `ori` will otherwise conclude their plasmid has none. `pl licences` prints the live count and the attribution. |
 
 ### Getting your sequences out of `.dna`, today
 

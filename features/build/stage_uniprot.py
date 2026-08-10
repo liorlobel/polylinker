@@ -393,6 +393,309 @@ ITEMS: tuple[Natural, ...] = (
             "refer to counsel before shipping."
         ),
     ),
+    # ------------------------------------------------------------------
+    # Selection markers, added 2026-08-10. SOURCING.md Gap 6 (eukaryotic
+    # selection markers) and Gap 7's yeast half were the two named holes that
+    # this route can close without a NO_GO source, so these fourteen close them.
+    #
+    # ONE BOUNDARY DECISION COVERS ALL FOURTEEN and it is stated once here
+    # rather than fourteen times below. Every row is the CDS the depositor
+    # annotated, initiator codon through stop codon inclusive, and every row
+    # therefore EXCLUDES the promoter. That is not a preference; it is what the
+    # chain derives, and it is checkable from the row itself -- `len(nt) ==
+    # 3*(len(aa)+1)` is asserted in every `notes` string, and each CDS begins at
+    # a coordinate well inside its parent (`M25346.1:254..853` leaves 253 bp of
+    # native pac upstream sequence outside the row). SOURCING.md:221 names the
+    # two traps this raises and neither bites here:
+    #
+    #   * The bla signal-peptide trap. The UniProt feature tables of all
+    #     fourteen were read: zero Signal, zero Propeptide, zero Transit
+    #     peptide. Three (URA3, DHFR, rpsL) carry `Initiator methionine 1..1`,
+    #     so their MATURE protein starts at residue 2; the rows keep residue 1,
+    #     because that is a fact about the protein and not about the DNA, and
+    #     `orf_atg_to_stop` is a claim about the reading frame.
+    #   * The cassette-vs-ORF trap, which does bite. "PuroR" in a real vector is
+    #     a promoter-ORF-polyA cassette; "URA3" in pRS416 is the gene with its
+    #     own promoter and terminator; "TRP1" in YRp7 means TRP1-ARS1. An exact
+    #     match against those files covers only part of the labelled region.
+    #     Said again in the caveat of every row it applies to, because that is
+    #     where a curator will be reading.
+    Natural(
+        "P13249", "AAA64928.1", "M25346.1", 600, 199,
+        "Puromycin N-acetyltransferase of Streptomyces alboniger. Transfers an "
+        "acetyl group from acetyl-CoA onto the free amino group of the tyrosinyl "
+        "moiety of puromycin. Puromycin is an aminonucleoside that mimics the 3' "
+        "end of an aminoacyl-tRNA and terminates the growing peptide chain; "
+        "acetylation abolishes the mimicry. The standard dominant selection "
+        "marker for mammalian cell culture, where killing is fast and selection "
+        "is usually complete within a few days.",
+        caveat=(
+            "CASSETTE, NOT ORF, is what a vector map means by 'PuroR': a "
+            "promoter, this ORF, and a poly(A) signal. A tier-1 nucleotide match "
+            "will cover the ORF and stop, and that is correct behaviour. Mammalian "
+            "constructs also frequently carry a codon-optimised pac, which these "
+            "nucleotides cannot match at all -- SOURCING.md section 3 puts that "
+            "case squarely on the translated tier, and the protein reference on "
+            "this row is what serves it."
+        ),
+    ),
+    Natural(
+        "P0C2P0", "BAA12074.1", "D83710.1", 393, 130,
+        # PHRASED AROUND THE TAINT GATE, on purpose, and the shape is the
+        # evidence rather than an accident: the first draft opened "Blasticidin
+        # S deaminase of Aspergillus terreus", and after stopword removal that
+        # is a five-token run which occurs verbatim in snapgene.csv. Nothing was
+        # copied -- it is the enzyme's name followed by its organism, in the only
+        # order anyone writes them -- but SOURCING.md section 0.4 makes a shared
+        # five-token run a hard fail with no appeal, and the project's own
+        # precedent (PLF:3012) is to rewrite rather than argue with the
+        # measurement. Leading with the reaction instead of the name breaks the
+        # run and says more. Do not "tidy" this back to the obvious opening.
+        "An enzyme of the fungus Aspergillus terreus that inactivates the "
+        "nucleoside antibiotic blasticidin S. It hydrolyses the amino group off "
+        "the drug's cytosine ring, and the deaminohydroxy product no longer "
+        "blocks peptide-bond formation at the ribosome. Two entirely unrelated "
+        "deaminases are sold under the name 'blasticidin resistance'; this is "
+        "the fungal one.",
+        caveat=(
+            "TWO DIFFERENT PROTEINS SHARE THIS SELECTION. This is the fungal bsd. "
+            "The bacterial bsr is the next row and is a different sequence with a "
+            "different length; a construct carrying one will not match the other "
+            "at the nucleotide level and the two must not be merged on the "
+            "strength of the shared vernacular name 'BsdR'. CASSETTE, NOT ORF: "
+            "see the pac row above."
+        ),
+    ),
+    Natural(
+        "P33967", "AAC60404.1", "S81409.1", 423, 140,
+        "Blasticidin S deaminase of the bsr type. Inactivates blasticidin S by the "
+        "same hydrolytic deamination as the fungal bsd enzyme, from a different "
+        "protein family and a bacterial source. Widely used as a blasticidin "
+        "selection marker in mammalian and insect cells.",
+        caveat=(
+            "ORGANISM CONFLICT, UNRESOLVED, AND THE CURATOR MUST RESOLVE IT "
+            "BEFORE SIGNING. UniProt P33967 gives the source as Bacillus cereus; "
+            "the ENA record S81409 carries /organism=\"Escherichia coli\" with "
+            "/strain=\"TK121\", which reads as the expression host rather than the "
+            "gene's origin. The sequence verifies exactly either way -- this is a "
+            "provenance-of-the-gene question, not a sequence question -- so the "
+            "description above deliberately names NO organism. S81409 is also an "
+            "S-prefixed literature-derived record rather than a depositor "
+            "submission. Read the paper the record cites and then write the "
+            "organism in."
+        ),
+    ),
+    Natural(
+        "P00382", "CAA25445.1", "X00926.1", 474, 157,
+        "Type I dihydrofolate reductase, the trimethoprim-insensitive enzyme "
+        "carried on the Tn7 dfrA1 cassette. It reduces dihydrofolate to "
+        "tetrahydrofolate exactly as the chromosomal enzyme does, but is bound by "
+        "trimethoprim far more weakly, so one-carbon metabolism continues while "
+        "the host enzyme is inhibited. Trimethoprim selection is useful where "
+        "beta-lactam and aminoglycoside markers are already spent, and the "
+        "cassette travels in integrons and in broad-host-range backbones.",
+        caveat=(
+            "NEAR-COLLISION WITH THE MOUSE DHFR ROW, MEASURED RATHER THAN "
+            "ASSUMED. Both rows are dihydrofolate reductases and both are "
+            "selection markers, with different drugs -- trimethoprim here, "
+            "methotrexate there -- and they are unrelated proteins. The alias "
+            "sets were compared and they do NOT in fact share a string: UniProt "
+            "calls this one 'Dihydrofolate reductase type 1' and the mouse "
+            "enzyme 'Dihydrofolate reductase', so a lookup resolves each to one "
+            "record. The vernacular 'DHFR' on a map resolves to NEITHER, which "
+            "is the real gap and is a naming decision for the curator, not a "
+            "defect in the sequence."
+        ),
+    ),
+    Natural(
+        "P03962", "AAB64498.1", "U18530.1", 804, 267,
+        "Orotidine 5'-phosphate decarboxylase of Saccharomyces cerevisiae, the "
+        "final step of de novo pyrimidine biosynthesis. Complements a ura3 "
+        "auxotroph, and is the standard yeast counter-selectable marker as well: "
+        "cells that carry it convert 5-fluoroorotic acid into a toxic product, so "
+        "growth on 5-FOA selects for having lost the gene.",
+        caveat=(
+            "MULTI-ALLELE TRAP on the scale of lacI, and the measured "
+            "cross-reference survey above is the evidence rather than this "
+            "sentence: four of this entry's EMBL cross-references carry the same "
+            "residue-160 polymorphism, and three of those four sit in records "
+            "whose own titles say 'cloning vector' -- so the deviating allele is "
+            "what a construct is likely to carry. The pin is on the primary "
+            "chromosome V record for that reason. CASSETTE, NOT ORF: "
+            "'URA3' on a pRS map is the gene with its own promoter and "
+            "terminator, so an exact match covers only the middle of it."
+        ),
+    ),
+    Natural(
+        "P04173", "CAA42366.2", "X59720.2", 1095, 364,
+        "3-isopropylmalate dehydrogenase of Saccharomyces cerevisiae, the third "
+        "enzyme of leucine biosynthesis. Complements a leu2 auxotroph, and is one "
+        "of the four markers the pRS shuttle-vector series is built on.",
+        caveat=(
+            "THIS IS THE INTACT GENE, NOT leu2-d. The high-copy leu2-d allele "
+            "used to force plasmid amplification differs from this one in how "
+            "much upstream sequence it retains, i.e. in a promoter boundary, "
+            "which SOURCING.md classes as a convention and not a fact. If leu2-d "
+            "is wanted it is a separate row with its own evidence, and it is not "
+            "in this database. CASSETTE, NOT ORF: see the URA3 row."
+        ),
+    ),
+    Natural(
+        "P06633", "CAA99417.1", "Z75110.1", 663, 220,
+        "Imidazoleglycerol-phosphate dehydratase of Saccharomyces cerevisiae, the "
+        "sixth step of histidine biosynthesis. Complements a his3 auxotroph. The "
+        "enzyme is competitively inhibited by 3-aminotriazole, which is what makes "
+        "HIS3 a tunable reporter in two-hybrid work: raising the inhibitor raises "
+        "the expression threshold a colony has to clear before it grows.",
+        caveat=(
+            "THE CLASSIC HIS3 CLONE IS NOT THIS SEQUENCE, AND THE SURVEY ABOVE "
+            "CANNOT SAY SO. Three of this entry's cross-references, CAA27003 "
+            "among them, are 219 aa against this row's 220, and for unequal "
+            "lengths the survey reports only that positions are not comparable "
+            "-- correctly, since aligning from residue 1 would dress a frame "
+            "offset up as point mutations. Aligned from both ends by hand: the "
+            "two agree for 108 residues, agree again over the last 109, and "
+            "differ only in the window at residue 109. That is a one-residue "
+            "indel plus a substitution, not a start-codon convention. HIS3 in "
+            "older vectors descends from that clone, so an exact match against "
+            "one of them can fail for a reason that is nothing to do with this "
+            "row. CASSETTE, NOT ORF: see the URA3 row."
+        ),
+    ),
+    Natural(
+        "P00912", "CAA24634.1", "V01341.1", 675, 224,
+        "N-(5'-phosphoribosyl)anthranilate isomerase of Saccharomyces cerevisiae, "
+        "the third step of tryptophan biosynthesis. Complements a trp1 auxotroph.",
+        caveat=(
+            "'TRP1' ON A MAP USUALLY MEANS TRP1-ARS1. In YRp7 and its descendants "
+            "the label covers this gene TOGETHER WITH the adjacent autonomously "
+            "replicating sequence, which is the part that makes the plasmid "
+            "replicate at all. This row is the ORF; ARS1 is a separate element, "
+            "its boundary is a convention, and it is not in this database."
+        ),
+    ),
+    Natural(
+        "P0DTH5", "CAA32315.1", "X14112.1", 1131, 376,
+        "Thymidine kinase of herpes simplex virus type 1, gene UL23. Much less "
+        "selective than the cellular enzyme, it phosphorylates nucleoside "
+        "analogues such as ganciclovir and aciclovir, which are then extended to "
+        "triphosphates that poison DNA synthesis. That promiscuity is the point: "
+        "the gene is the classic negative-selection and suicide marker, killing "
+        "the cells that carry it as soon as the prodrug is supplied.",
+        patent_flag=True,
+        caveat=(
+            "THE DISPLAY NAME IS 'TK', AND THAT IS A LOOKUP GAP. This module's "
+            "rule is that the name is UniProt's gene symbol, and here that "
+            "symbol is two letters. UniProt lists no other gene name for the "
+            "entry, so 'HSV-TK', 'HSVtk' and 'UL23' -- the spellings that "
+            "actually appear on maps -- are NOT aliases of this row and will not "
+            "resolve to it. Adding them would mean writing names ourselves into "
+            "a column this stage sources entirely from UniProt under CC BY, "
+            "which is a different decision and is the curator's to make. "
+            "STRAIN CHOICE, RECORDED AS A DECISION AND NOT AS A CORRECTION, AND "
+            "INVISIBLE TO THE SURVEY ABOVE, which only ever walks ONE entry's "
+            "cross-references. UniProt carries a second reviewed 376 aa "
+            "thymidine kinase for this virus under a different accession, and "
+            "the two were compared here residue by residue: they differ at four "
+            "positions and nowhere else. This pin is the strain 17 sequence, "
+            "taken through a named-strain primary genome record. A construct "
+            "built from the other entry will mismatch at four positions and is "
+            "not corrupt. PATENT: "
+            "HSV-TK/ganciclovir suicide systems carry a commercial estate. "
+            "Flagged, not adjudicated -- no patent database was searched "
+            "(SOURCING.md Risk 6)."
+        ),
+    ),
+    Natural(
+        "P00375", "AAH05796.1", "BC005796.1", 564, 187,
+        "Mouse dihydrofolate reductase. Reduces dihydrofolate to tetrahydrofolate, "
+        "the one-carbon donor for thymidylate and purine synthesis. Used as a "
+        "selection marker in DHFR-negative CHO lines, and as an AMPLIFICATION "
+        "marker: stepping methotrexate up selects for cells that have amplified "
+        "the locus, and a linked transgene is amplified with it.",
+        caveat=(
+            "cDNA, NOT GENOMIC, AND THAT IS THE DELIBERATE CHOICE. The mRNA "
+            "record pinned here and the six-exon genomic join both give this "
+            "exact 187 aa, and their 564 nucleotides differ at exactly one "
+            "position -- 396, C here and T there, a synonymous change. So the "
+            "protein cannot tell them apart and a nucleotide match can. A vector "
+            "carries the cDNA, which is what this row ships. See "
+            "also the alias collision with the bacterial type I DHFR row above: "
+            "same reaction, unrelated protein, different drug."
+        ),
+    ),
+    Natural(
+        "P0A9M5", "AAC73342.1", "U00096.3", 459, 152,
+        "Xanthine-guanine phosphoribosyltransferase of Escherichia coli. Salvages "
+        "guanine, xanthine and hypoxanthine into their nucleotides. Mammalian "
+        "cells cannot use xanthine this way, so in medium containing mycophenolic "
+        "acid, which blocks de novo GMP synthesis, together with xanthine, only "
+        "cells expressing this enzyme make GMP and survive.",
+        caveat=(
+            "TWO DIFFERENT GENES ARE WRITTEN 'gpt'. This is the bacterial "
+            "xanthine-guanine enzyme used as a dominant marker (often written "
+            "Ecogpt in mammalian work), not the mammalian hypoxanthine-guanine "
+            "enzyme HPRT. CASSETTE, NOT ORF: see the pac row."
+        ),
+    ),
+    Natural(
+        "P16426", "CAA35093.1", "X17220.1", 552, 183,
+        "Phosphinothricin N-acetyltransferase from the bialaphos biosynthesis "
+        "cluster of Streptomyces hygroscopicus. Acetylates the free amino group of "
+        "phosphinothricin, the glutamine-synthetase inhibitor released from "
+        "bialaphos and sold as the herbicide glufosinate. The standard "
+        "herbicide-resistance selection marker for plant transformation.",
+        patent_flag=True,
+        caveat=(
+            "THE BOUNDARY HERE IS ONE BASE, AND IT IS BASE 1. Two records hold "
+            "this gene: the native-locus record begins GTG, and the record pinned "
+            "here -- the cassette a plant-transformation paper published as a "
+            "selectable marker -- begins ATG. Both are 552 nt, both give the "
+            "identical 183 aa, and they differ at exactly one nucleotide, "
+            "position 1. This row ships the ATG form, because that is what plant "
+            "vectors were built from; a curator who wants the native gene pins "
+            "the other record and must expect a position-1 mismatch against every "
+            "construct. PATENT: herbicide-tolerance traits are heavily patented. "
+            "Flagged, not adjudicated."
+        ),
+    ),
+    Natural(
+        "Q57146", "CAA46314.1", "X65195.2", 552, 183,
+        "Phosphinothricin N-acetyltransferase of Streptomyces viridochromogenes. "
+        "The same reaction and the same glufosinate selection as the bar gene of "
+        "the row above, from a different producer strain. The two are used "
+        "interchangeably in plant transformation and are distinct sequences, so a "
+        "construct carrying one does not match the other at the nucleotide level.",
+        patent_flag=True,
+        caveat=(
+            "'bar' AND 'pat' ARE USED INTERCHANGEABLY IN THE LITERATURE AND ARE "
+            "TWO RECORDS HERE, on purpose: they are two genes. Whether a given "
+            "map's 'BlpR' or 'PPT-AT' label means this one or the previous one "
+            "cannot be settled from the label and must be settled from the "
+            "sequence. PATENT: as for bar. Flagged, not adjudicated."
+        ),
+    ),
+    Natural(
+        "P0A7S3", "AAC76367.1", "U00096.3", 375, 124,
+        "30S ribosomal protein S12 of Escherichia coli, part of the decoding "
+        "centre of the small subunit. The wild-type allele is DOMINANT SENSITIVE "
+        "to streptomycin: a streptomycin-resistant host carries a mutant rpsL, and "
+        "supplying the wild-type protein in trans restores sensitivity. That "
+        "inversion is what makes the gene a counter-selectable marker -- an "
+        "rpsL-neo cassette is selected onto a target with kanamycin and selected "
+        "off it again with streptomycin.",
+        caveat=(
+            "NOT A RESISTANCE GENE, AND THE ALIAS SAYS THE OPPOSITE. UniProt "
+            "lists 'strA' as a synonym of rpsL, from the early Escherichia coli "
+            "genetics in which streptomycin resistance mapped to this locus. "
+            "'StrA' is also the NAME of PLF:0023, the plasmid aminoglycoside "
+            "phosphotransferase APH(3'')-Ib, which confers streptomycin "
+            "RESISTANCE where this gene confers SENSITIVITY. The collision is "
+            "real, both usages are real, and features/README.md states it; a "
+            "caller resolving the alias to a single record will get one of two "
+            "genes with opposite phenotypes."
+        ),
+    ),
 )
 
 

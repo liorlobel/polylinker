@@ -344,9 +344,12 @@ fn font_definitions() -> egui::FontDefinitions {
     // overriding some normal latin text glyphs in egui". Reproduced here at
     // Proportional index 0: a feature named "cat" renders as one 9.00 pt cat
     // icon, and `main.rs`'s `name_font` draws feature names proportionally at
-    // 9 pt. Nineteen of the 89 curated rows in `features/features.tsv` contain
-    // a Phosphor ligature name; `tag` is an icon, and epitope tags are the most
-    // common annotation class in a plasmid. It also `Vec::insert(1, ..)`s,
+    // 9 pt. Nineteen of the 89 curated rows `features/features.tsv` held when
+    // this was measured contain a Phosphor ligature name -- the count is dated
+    // rather than restated, because the table has since grown to 115 and
+    // nobody has re-run it; the defect does not depend on the number. `tag` is
+    // an icon, and epitope tags are the most common annotation class in a
+    // plasmid. It also `Vec::insert(1, ..)`s,
     // which panics on the empty Proportional chain a `default_fonts`-off build
     // would have, and it hard-codes the `font_data` key with no way to name a
     // family, so it cannot express this shape at all. Eleven lines replaced by
@@ -30461,11 +30464,13 @@ ATGAAACGCTAA
 
     /// An unreviewed record is marked, and marked as a warning.
     ///
-    /// The badge cannot fire against the shipped tables today — all 89 rows
-    /// carry a sign-off — so this pins the mapping directly. It is not
-    /// hypothetical upkeep: a contributed row arrives `proposed`, and
-    /// `features/SIGNOFF.tsv` withdraws a signature by itself the moment a
-    /// signed row's content changes.
+    /// The badge could not fire against the shipped tables at all until
+    /// 2026-08-10, when 26 `proposed` rows landed beside the 89 signed ones, so
+    /// this test pinned the mapping directly and still does. Pinning it here
+    /// rather than through the table is the right shape either way: the badge
+    /// must be correct for a status, not for whichever statuses happen to be in
+    /// the file this week, and `features/SIGNOFF.tsv` withdraws a signature by
+    /// itself the moment a signed row's content changes.
     ///
     /// PROVEN TO FAIL by returning `("proposed", false)` for `Proposed`, which
     /// paints the caveat in the same muted ink as everything else on the row.
@@ -31061,12 +31066,14 @@ ATGAAACGCTAA
 
     /// The panel tells a user, on screen, what is NOT in the database.
     ///
-    /// `features/README.md` is candid that promoters, origins and terminators
-    /// have no cleared source yet — but `features/README.md` does not ship in
-    /// the application and nobody reads it before opening a plasmid. What they
-    /// do is open a plasmid, watch `AmpR` and `lacI` light up, see no `ori`,
-    /// and conclude there is no `ori`. That inference is wrong, and the tool
-    /// caused it by having just demonstrated that it knows what features are.
+    /// `features/README.md` is candid about the classes the shipped table has
+    /// no rows for — origins entirely, and promoters and terminators until
+    /// somebody signs the twelve `proposed` ones — but `features/README.md`
+    /// does not ship in the application and nobody reads it before opening a
+    /// plasmid. What they do is open a plasmid, watch `AmpR` and `lacI` light
+    /// up, see no `ori`, and conclude there is no `ori`. That inference is
+    /// wrong, and the tool caused it by having just demonstrated that it knows
+    /// what features are.
     ///
     /// Asserted against what is PAINTED and not against the string function,
     /// because the failure being guarded is a true sentence nobody put on

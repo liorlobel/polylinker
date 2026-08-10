@@ -25,7 +25,68 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added — 26 proposed feature records, and none of them ship yet
+
+`features/features.tsv` goes from 89 rows to 115. **The 89 rows the tool
+searches by default are unchanged, byte for byte; every one of their signatures
+is still valid.** The 26 new rows are `proposed`, which means a program put them
+there and no human has read them, so `pl annotate` ignores them unless you pass
+`--include-proposed` and the desktop app ignores them unless you tick the box.
+This is what "the tool may propose and never assert" looks like when it is
+actually exercised, rather than when the table happens to be fully signed.
+
+**14 further selection markers** (`PLF:1014`–`PLF:1027`), each verified by the
+same chain as the existing natural-protein rows — translate the nucleotides,
+require an exact residue-for-residue match to a UniProt canonical, cite the
+depositor's own coordinates — and each dropped rather than corrected if any leg
+disagreed: `pac`, `bsd`, `bsr`, `dhfrI`, `URA3`, `LEU2`, `HIS3`, `TRP1`, HSV
+`TK`, mouse `Dhfr`, `gpt`, `bar`, `pat` and `rpsL`. These close the eukaryotic
+selection-marker gap `features/SOURCING.md` names as Gap 6, and they give the
+database its first yeast markers.
+
+**12 Class B regulatory elements** (`PLF:4000`–`PLF:4011`) — the T7, SP6, lac,
+tac, trc and CMV promoters, the CMV enhancer, the T7, rrnB T1 and rrnB T2
+terminators, and the bGH and SV40 early poly(A) signals. These are the first
+promoters and terminators of any kind in the database. A Class B boundary is a
+*convention* and not a fact, so each row ships a coordinate slice of one named
+INSDC record, and the claim that at least two further records **from different
+submitting addresses** hold those exact bases is re-checked on every build, with
+each depositor's own edges measured against ours and written into the row.
+
+Three things that came out of building it and are documented rather than
+smoothed over:
+
+- **INSDC records carry SnapGene annotation, and the CI taint gate cannot see
+  it.** ENA folds SnapGene's `/label` into the `/note`, so its editorial prose
+  arrives through a source this project cleared. The gate compares descriptions
+  and can never notice a *coordinate* arriving that way. The new stage therefore
+  reads no `/note`, `/label`, `/gene`, `/product` or `/standard_name` at all,
+  and refuses to count a SnapGene-annotated deposit as an independent witness.
+  Five of the twelve rows have a witness excluded on those grounds.
+- **The taint gate fired for real, for the second time in this project's
+  history**, on the blasticidin deaminase description, whose first draft shared
+  a five-token run with their file. Nothing was copied; the row was rewritten
+  anyway, because the rule is mechanical on purpose.
+- **Nine more elements were worked up and are not here**, each with its reason
+  recorded in `features/build/stage_classb.py`: T3, the SV40 early promoter, U6,
+  H1, EF-1α, PGK, CAG and araBAD are held, and tetO/TRE is dropped outright
+  because the name covers four unrelated elements. `SOURCING.md` budgets about
+  forty Class B rows; twelve is what survived the two-independent-submissions
+  rule applied honestly, and that is the finding rather than a shortfall.
+
+### Fixed
+
+- The desktop app's "no promoter is in this database yet" line is computed by
+  probing the table for literal INSDC feature keys, and the twelve new rows were
+  invisible to that probe for the length of one build because they used the
+  current INSDC spelling (`regulatory`) rather than the retired one. The app
+  would have gone on saying "no promoter" after promoters were signed off. The
+  rows now carry `promoter`, `enhancer`, `terminator` and `polyA_signal`, and a
+  test pins the disclosure to the table it describes in both directions.
+- Two counts in `features/README.md` were wrong before this change and are
+  corrected by measurement: the alias-collision table said twelve colliding
+  strings when there were more, and listed `smR` as resolving to two records
+  when it resolves to three.
 
 ## [0.5.0] - 2026-08-10
 

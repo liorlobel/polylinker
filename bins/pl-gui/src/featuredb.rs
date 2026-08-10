@@ -93,8 +93,10 @@ static EVERYTHING: OnceLock<Annotator<'static>> = OnceLock::new();
 /// [`db`] is what returns the matching one.
 ///
 /// Built lazily, so a user who never turns the unreviewed rows on never pays
-/// for the second pair of indexes, and — today, with every shipped row signed
-/// off — never builds a second index over the identical 89 records.
+/// for the second pair of indexes. That saving used to be the whole of it,
+/// because the two tables held identical contents; since 2026-08-10 they do
+/// not — 115 rows against 89 — so the second index is now genuinely a second
+/// index and the laziness is buying real work, not just a clone.
 pub fn annotator(unreviewed: bool) -> &'static Annotator<'static> {
     if unreviewed {
         EVERYTHING.get_or_init(|| Annotator::new(&library().all, Config::default()))
@@ -234,11 +236,14 @@ mod tests {
     ///
     /// PROVEN TO FAIL by making `db()` ignore its argument and always return
     /// `&library().all`. Pointer identity, not equality, is what catches it:
-    /// `Db::reviewed` CLONES, so `all` and `reviewed` are two objects even
-    /// while — today, with all 89 shipped rows signed off — they hold equal
-    /// contents in equal order. The day a contributed row lands `proposed` the
-    /// two orders diverge, and a mismatched pair would then put one record's
-    /// name, id and review status against another record's coordinates.
+    /// `Db::reviewed` CLONES, so `all` and `reviewed` are two objects. When
+    /// this was written they also held equal contents in equal order, and the
+    /// comment said the two would diverge "the day a contributed row lands
+    /// `proposed`". That day was 2026-08-10: the table now holds 115 rows and
+    /// 89 signatures, so the two orders differ from `PLF:1014` onwards and a
+    /// mismatched pair would put one record's name, id and review status
+    /// against another record's coordinates — which is no longer a hypothetical
+    /// and is exactly what pointer identity is here to prevent.
     #[test]
     fn each_annotator_is_paired_with_the_table_it_indexes() {
         assert!(std::ptr::eq(annotator(false).db(), db(false)));
@@ -320,13 +325,36 @@ mod tests {
             "the caveat does not say what it is: {note}"
         );
         // And the claim really is a claim about the data: the three INSDC keys
-        // are absent, which is what the note is reading.
+        // are absent from THE TABLE THE NOTE WAS COMPUTED OVER.
+        //
+        // `lib.reviewed`, and not `lib.all`. This read `lib.all` until
+        // 2026-08-10, which was the same assertion while every row was signed
+        // and became a wrong one the moment twelve `proposed` promoter and
+        // terminator rows landed: the note above is about what a default search
+        // covers, and a proposed row is not in a default search. Asserting over
+        // `all` made this test fail for a change that made the panel MORE
+        // right, which is the wrong way round.
         for key in ["promoter", "terminator", "rep_origin"] {
             assert!(
-                !lib.all.records.iter().any(|r| r.genbank_key == key),
-                "a `{key}` row now ships, so the caveat above is stale prose"
+                !lib.reviewed.records.iter().any(|r| r.genbank_key == key),
+                "a `{key}` row is now signed off, so the caveat above is stale prose"
             );
         }
+        // The other side of the same fact, so that this test notices if the two
+        // tables silently become one again: the full table DOES hold promoters
+        // and terminators, and a user who ticks "search unreviewed rows" is
+        // shown a shorter caveat computed from it.
+        assert!(
+            lib.all.records.iter().any(|r| r.genbank_key == "promoter"),
+            "the full table holds no promoter row at all; the twelve Class B rows have \
+             gone missing, or their genbank_key has changed under this test"
+        );
+        let opted_in = coverage_note(&lib.all).expect("origins are still absent from both");
+        assert!(
+            !opted_in.contains("promoter"),
+            "the opted-in caveat still apologises for promoters the table now holds: \
+             {opted_in}"
+        );
 
         // A table with all three says nothing at all.
         let mut db = lib.reviewed.clone();
