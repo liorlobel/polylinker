@@ -102,11 +102,13 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 pwsh -NoProfile -File tools/ci.ps1
 
-# 3. Commit, push, and let CI go green. FIVE jobs, and the one that matters
-#    here is `the gate (tools/ci.ps1)` -- it runs the whole of step 2 on
-#    windows-latest, with the oracles, node, the wasm target and WiX installed,
-#    and it fails if any step skips that is not on
-#    .github/ci-expected-skips.txt.
+# 3. Commit, push, and let CI go green. SIX jobs, and the ones that matter
+#    here are `the gate (tools/ci.ps1)` -- which runs the whole of step 2 on
+#    windows-latest, ubuntu-latest and macos-latest, with the oracles, node,
+#    the wasm target and (on Windows) WiX installed, and fails if any step
+#    skips without a declared reason or if the corpus skips are not exactly
+#    .github/ci-expected-skips.txt -- and `reconcile`, which compares the three
+#    legs and fails if any step ran on none of them.
 
 # 4. Tag. This is the only step that publishes anything.
 git tag -a v0.2.0 -m "Polylinker 0.2.0"
@@ -125,13 +127,15 @@ v0.1.2, v0.1.3, v0.2.0, v0.3.0, v0.3.1 and v0.3.2 were all tagged with it red,
 because the only evidence either way was a terminal on one machine and nobody
 had a reason to look at it between releases.
 
-`ci.yml` now has a `gate` job. It runs this exact file, on `windows-latest`,
-with everything the gate's preconditions ask for installed first: the eleven
-Python oracles, Node 24, the `wasm32-unknown-unknown` target, the WiX Toolset,
-`packages/circular-map/node_modules`, and a `dist/` assembled by
+`ci.yml` now has a `gate` job. It runs this exact file — since 2026-08-10 on
+`windows-latest`, `ubuntu-latest` and `macos-latest` — with everything the
+gate's preconditions ask for installed first: the eleven Python oracles, Node
+24, the `wasm32-unknown-unknown` target, `packages/circular-map/node_modules`,
+and, on Windows, the WiX Toolset and a `dist/` assembled by
 `tools/release.ps1` so that the two MSI steps have something to read. It passes
-`-ExpectedSkips`, so a step that skips and is not on that list turns the build
-red — which matters more than it sounds, because the gate's whole design is that
+`-ExpectedSkips`, so a step that skips **without a reason its own precondition
+declared** turns the build red — which matters more than it sounds, because the
+gate's whole design is that
 a missing dependency is a grey SKIP rather than a failure. On a workstation that
 is right. On a runner it is how a green check comes to mean nothing, and it is
 the precise mechanism by which the gate passed for six releases **with six steps
@@ -403,10 +407,13 @@ That leniency used to mean the install test ran nowhere. `wix` was absent on the
 one machine running the gate, and no machine ran the gate, so *the MSI installs,
 does what it says, uninstalls, and leaves nothing* — the only check that puts an
 actual `msiexec` against an actual registry — was skipped for six releases and
-the MSI's real oracle was `release.yml`, after the tag. The `gate` job installs
-WiX 5.0.2 and the UI extension, assembles a `dist/` for it to read, and
-`.github/ci-expected-skips.txt` does **not** name that step, so it now runs on
-every push or the build is red.
+the MSI's real oracle was `release.yml`, after the tag. The `gate` job's Windows
+leg installs WiX 5.0.2 and the UI extension and assembles a `dist/` for it to
+read; without them the step's precondition returns `$false`, which is a skip
+with no declared reason, and under `-ExpectedSkips` that fails. So it now runs
+on every push or the build is red. (On the Linux and macOS legs it declares
+`not windows` — there is no `msiexec` to drive — and that string is checked
+against `$IsWindows` rather than believed.)
 
 **Answered by writing it in the gate's own language.** `tools/check-msi.ps1` is
 PowerShell, like the rest of the gate. It installs with `msiexec`, asserts

@@ -100,10 +100,10 @@ pwsh -NoProfile -File tools/ci.ps1
 pwsh -NoProfile -File tools/ci.ps1 -Corpus "C:\path\to\your\plasmids"
 ```
 
-70 steps. **CI runs this same file**, in the `gate` job of
-`.github/workflows/ci.yml`, on `windows-latest` — so running it here is not a
-courtesy version of CI, it is CI, and "CI is green" becomes something you know
-rather than something you find out.
+72 steps. **CI runs this same file**, in the `gate` job of
+`.github/workflows/ci.yml`, on `windows-latest`, `ubuntu-latest` and
+`macos-latest` — so running it here is not a courtesy version of CI, it is CI,
+and "CI is green" becomes something you know rather than something you find out.
 
 That was not true until 2026-08-09, and the way it was untrue is worth knowing
 because it is the failure this project keeps having. `ci.yml` mentioned this
@@ -112,31 +112,56 @@ invoked it. It had been failing on a clean tree since v0.1.2 and six releases
 were tagged with it red, while `docs/RELEASING.md` named it as the thing to run
 before tagging.
 
+It then ran on `windows-latest` alone until 2026-08-10, so "the gate passed"
+meant "passed on Windows" and nothing said so. The port to three platforms was
+done by spelling rather than by skipping — an `$exe` suffix, a portable temp
+root, a three-way `.pyd`/`.so`/`.dylib` table, `tar$exe` — and **seven** steps
+genuinely cannot run off Windows: the 8.3 short-name helper, the PE icon and
+version resource, the C-runtime scan, the installer plan, the installer round
+trip, and the two MSI steps. Each of those declares it in its own precondition —
+`WindowsOnly { … }`, the one helper that owns the string `not windows` — and the
+gate checks that string against `$IsWindows` rather than believing it. There is
+no list of Windows-only steps anywhere; the preconditions are the list.
+
 What is left in `ci.yml` alongside the gate is not a second copy of it:
 
-- the `test` matrix runs on `ubuntu-latest` and `macos-latest`, the two
-  platforms this script cannot run on at all — it is a Windows script, hardcoding
-  `target/release/pl.exe`, reading PE resources, driving `msiexec`;
+- `reconcile` compares the three legs' ledgers. It is the only place a step that
+  skipped on **all three** platforms can be seen, and the only place a step
+  deleted from one leg at file level can be seen;
+- the `test` matrix runs on `ubuntu-latest` and `macos-latest` and passes
+  `--locked` on every cargo invocation, which no step in the gate does — so
+  lockfile drift is red there and nowhere else. It also runs
+  `pl-draw/tests/memory.rs` and `pl-features/tests/schema_pin.rs`, which the
+  gate does not;
 - `msrv` and `wasm` are ubuntu jobs holding the toolchain floor and the wasm
   module driven against a Linux `pl`;
-- `oracles` re-runs the differential checks on a different OS and rendering
-  stack, and holds four checks with no twin here at all — the pLannotate taint
-  gate, the content sweep behind it, the offline end-to-end features build, and
-  the GenBank round-trip through Biopython.
+- `oracles` re-runs the differential checks under a different Python and
+  rendering stack, and holds four checks with no twin here at all — the
+  pLannotate taint gate, the content sweep behind it, the offline end-to-end
+  features build, and the GenBank round-trip through Biopython.
 
-A step whose tooling is missing **skips with a reason** rather than failing —
-no Python, no corpus, no `node`, no `wix`. That is deliberate: a gate that goes
-red for a missing optional package teaches people to ignore it. It also means a
-green run on your machine may have measured much less than a green run on a
-runner, so read the skip list.
+A step whose tooling is missing **skips** rather than failing — no Python, no
+corpus, no `node`, no `wix`. That is deliberate: a gate that goes red for a
+missing optional package teaches people to ignore it. It also means a green run
+on your machine may have measured much less than a green run on a runner, so
+read the skip list.
 
 On the runner that leniency is switched off, because there it is dangerous
-rather than kind. The job passes `-ExpectedSkips .github/ci-expected-skips.txt`
-and the run **fails** on any difference in either direction: a step that skipped
-and is not named, a step named that did not skip, or a name matching no step in
-the gate at all. Set equality, not a count — a count of five is satisfied by the
-wrong five skipping. That file has five entries and they are all the same entry:
-the step needs a corpus.
+rather than kind. The job passes `-ExpectedSkips .github/ci-expected-skips.txt`,
+which turns on three rules:
+
+1. **Every skip must carry a reason its own precondition declared.** A step that
+   skips because SciPy is missing returns `$false`, which is no reason, and the
+   run fails. This is what the old "not on the list" check bought, and it now
+   costs no list.
+2. **A platform reason must agree with the platform.** `not windows` on Windows
+   is a failure; there is no line anybody can add anywhere to quiet a platform
+   skip, because the string is checked rather than believed.
+3. **The corpus skips are exactly the committed list**, by set equality in both
+   directions, with a name matching no step also a failure. Not a count — a
+   count of five is satisfied by the wrong five skipping. That file has five
+   entries and they are all the same entry: the step needs a corpus. It is the
+   same five on all three runners, which is why it needs no platform column.
 
 You can use it locally too, if you want your machine held to a standard:
 
