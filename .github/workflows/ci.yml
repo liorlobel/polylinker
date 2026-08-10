@@ -13,7 +13,7 @@ name: CI
 # HOW THE TWO GATE FILES DIVIDE THE WORK, since 2026-08-09 and revised
 # 2026-08-10.
 #
-# `tools/ci.ps1` is 72 steps and `docs/RELEASING.md` names it as the thing to
+# `tools/ci.ps1` is 73 steps and `docs/RELEASING.md` names it as the thing to
 # run before tagging. Until 2026-08-09 NO WORKFLOW INVOKED IT. It appeared in
 # this file six times and every one of them was on a comment line. It had been
 # failing on a clean tree since v0.1.2 and six releases were tagged with it red,
@@ -43,11 +43,14 @@ name: CI
 #     not of the operating system, so two platforms is enough for it.
 #   * `msrv`, `wasm` and `oracles` stay. Each holds something the gate does not:
 #     the toolchain floor, the wasm module driven against a Linux `pl`, and four
-#     checks with no twin in the gate at all — the taint gate, the content sweep
-#     behind it, the offline end-to-end features build, and the GenBank
-#     round-trip through Biopython. The rest of `oracles` is a second run of the
-#     differential checks under a different Python and a different rendering
-#     stack, which for a rasteriser is coverage and not repetition.
+#     checks with no twin in the gate at all — the taint gate's FETCHING half,
+#     the content sweep behind it, the offline end-to-end features build, and
+#     the GenBank round-trip through Biopython. The taint gate's STRUCTURAL
+#     half — `features/build/insdc_posture.py`, which needs no network — became
+#     a step in `tools/ci.ps1` on 2026-08-10 and does have a twin now. The rest
+#     of `oracles` is a second run of the differential checks under a different
+#     Python and a different rendering stack, which for a rasteriser is coverage
+#     and not repetition.
 #
 # WHAT THE MATRIX MUST NOT COST, stated up front because it is the whole risk:
 # the Windows leg is what has stood between a mistake and a published release,
@@ -142,7 +145,7 @@ jobs:
   # strong one that runs in one. `fail-fast: false`, so a Linux failure does not
   # cancel Windows and hide what it would have said.
   #
-  # 72 steps. Five skip everywhere for want of a corpus
+  # 73 steps. Five skip everywhere for want of a corpus
   # (`.github/ci-expected-skips.txt`); seven more skip off Windows and say why.
   # The `reconcile` job below is what checks the three legs against each other,
   # and it is the only place a step that skipped on ALL THREE can be seen.
@@ -961,9 +964,29 @@ jobs:
       # Fails CLOSED. A network error exits 3 with `taint-gate-unavailable`,
       # because "could not check" and "checked and clean" are different results.
       # This step is the concrete evidence behind the project's central claim
-      # that this database is not derived from SnapGene's list, and the NOTICE
-      # discloses it -- so it has to exist, and it has to run.
-      - name: Taint gate -- our descriptions vs pLannotate's snapgene.csv
+      # that this database is not derived from SnapGene's DESCRIPTIONS, and the
+      # NOTICE discloses it -- so it has to exist, and it has to run.
+      #
+      # DESCRIPTIONS, and that word is doing work. The pinned artifact is four
+      # columns -- sseqid, Feature, Type, Description -- with no sequence and no
+      # coordinate in it, so the one thing it cannot support is a comparison of
+      # feature BOUNDARIES. Boundaries have a route of their own into this
+      # database: ENA folds a submitter's SnapGene `/label` into the `/note`, so
+      # a depositor who annotated their plasmid in SnapGene publishes SnapGene's
+      # boundary convention inside an ordinary INSDC record. features/SOURCING.md
+      # section 0.6 sets out why nobody can measure that, rather than promising a
+      # check later.
+      #
+      # So this command runs TWO gates, the structural one FIRST and before any
+      # fetch: features/build/insdc_posture.py requires every stage in
+      # build.STAGES to declare what it does about a depositor's coordinates,
+      # refuses one that declares nothing, and drives the mechanisms those
+      # declarations name. Running it first is deliberate -- on a day the pin is
+      # unreachable and the fetch below exits 3, the structural half has still
+      # run and still said something. It also runs alone, offline, as a step in
+      # tools/ci.ps1, which is the first part of this gate's subject to have a
+      # local twin at all.
+      - name: Taint gate -- stage postures, then our descriptions vs pLannotate's snapgene.csv
         run: python features/build/taint_gate.py
 
       # The taint gate brought an unlicensed file onto the runner. Prove the

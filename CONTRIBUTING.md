@@ -100,7 +100,7 @@ pwsh -NoProfile -File tools/ci.ps1
 pwsh -NoProfile -File tools/ci.ps1 -Corpus "C:\path\to\your\plasmids"
 ```
 
-72 steps. **CI runs this same file**, in the `gate` job of
+73 steps. **CI runs this same file**, in the `gate` job of
 `.github/workflows/ci.yml`, on `windows-latest`, `ubuntu-latest` and
 `macos-latest` — so running it here is not a courtesy version of CI, it is CI,
 and "CI is green" becomes something you know rather than something you find out.
@@ -137,8 +137,10 @@ What is left in `ci.yml` alongside the gate is not a second copy of it:
   module driven against a Linux `pl`;
 - `oracles` re-runs the differential checks under a different Python and
   rendering stack, and holds four checks with no twin here at all — the
-  pLannotate taint gate, the content sweep behind it, the offline end-to-end
-  features build, and the GenBank round-trip through Biopython.
+  pLannotate taint gate's *fetching* half, the content sweep behind it, the
+  offline end-to-end features build, and the GenBank round-trip through
+  Biopython. Its *structural* half, `features/build/insdc_posture.py`, needs no
+  network and is a step in `tools/ci.ps1`, so that one you can run here.
 
 A step whose tooling is missing **skips** rather than failing — no Python, no
 corpus, no `node`, no `wix`. That is deliberate: a gate that goes red for a

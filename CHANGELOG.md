@@ -25,11 +25,11 @@ which.
 
 ## [Unreleased]
 
-### Added — 26 proposed feature records, and none of them ship yet
+### Added — 21 proposed feature records, and none of them ship yet
 
-`features/features.tsv` goes from 89 rows to 115. **The 89 rows the tool
+`features/features.tsv` goes from 89 rows to 110. **The 89 rows the tool
 searches by default are unchanged, byte for byte; every one of their signatures
-is still valid.** The 26 new rows are `proposed`, which means a program put them
+is still valid.** The 21 new rows are `proposed`, which means a program put them
 there and no human has read them, so `pl annotate` ignores them unless you pass
 `--include-proposed` and the desktop app ignores them unless you tick the box.
 This is what "the tool may propose and never assert" looks like when it is
@@ -44,14 +44,16 @@ disagreed: `pac`, `bsd`, `bsr`, `dhfrI`, `URA3`, `LEU2`, `HIS3`, `TRP1`, HSV
 selection-marker gap `features/SOURCING.md` names as Gap 6, and they give the
 database its first yeast markers.
 
-**12 Class B regulatory elements** (`PLF:4000`–`PLF:4011`) — the T7, SP6, lac,
-tac, trc and CMV promoters, the CMV enhancer, the T7, rrnB T1 and rrnB T2
-terminators, and the bGH and SV40 early poly(A) signals. These are the first
-promoters and terminators of any kind in the database. A Class B boundary is a
-*convention* and not a fact, so each row ships a coordinate slice of one named
-INSDC record, and the claim that at least two further records **from different
-submitting addresses** hold those exact bases is re-checked on every build, with
-each depositor's own edges measured against ours and written into the row.
+**7 Class B regulatory elements** — the T7 and SP6 promoters (`PLF:4000`,
+`PLF:4001`), the CMV enhancer (`PLF:4006`), the T7, rrnB T1 and rrnB T2
+terminators (`PLF:4007`–`PLF:4009`) and the bGH poly(A) signal (`PLF:4010`).
+These are the first promoters and terminators of any kind in the database. A
+Class B boundary is a *convention* and not a fact, so each row ships a coordinate
+slice of one named INSDC record, and two claims are re-checked on every build:
+that at least two records **from different submitting addresses** hold those
+exact bases, and that at least two of those submissions annotate a feature at
+**exactly** the shipped extent. The second of those is new — see below — and it
+is why this is seven rows and not twelve.
 
 Three things that came out of building it and are documented rather than
 smoothed over:
@@ -59,10 +61,12 @@ smoothed over:
 - **INSDC records carry SnapGene annotation, and the CI taint gate cannot see
   it.** ENA folds SnapGene's `/label` into the `/note`, so its editorial prose
   arrives through a source this project cleared. The gate compares descriptions
-  and can never notice a *coordinate* arriving that way. The new stage therefore
+  and can never notice a *coordinate* arriving that way. The stage therefore
   reads no `/note`, `/label`, `/gene`, `/product` or `/standard_name` at all,
   and refuses to count a SnapGene-annotated deposit as an independent witness.
-  Five of the twelve rows have a witness excluded on those grounds.
+  Two of the seven surviving rows have a witness excluded on those grounds, and
+  three more of the five that were refused did too.
+  **This is no longer an open hole — see "the coordinate route" below.**
 - **The taint gate fired for real, for the second time in this project's
   history**, on the blasticidin deaminase description, whose first draft shared
   a five-token run with their file. Nothing was copied; the row was rewritten
@@ -71,22 +75,115 @@ smoothed over:
   recorded in `features/build/stage_classb.py`: T3, the SV40 early promoter, U6,
   H1, EF-1α, PGK, CAG and araBAD are held, and tetO/TRE is dropped outright
   because the name covers four unrelated elements. `SOURCING.md` budgets about
-  forty Class B rows; twelve is what survived the two-independent-submissions
-  rule applied honestly, and that is the finding rather than a shortfall.
+  forty Class B rows; seven is what survives both rules applied honestly, and
+  that is the finding rather than a shortfall.
 
-**A curator worklist, [`features/PROPOSED.md`](features/PROPOSED.md).** Twenty-six
+**A curator worklist, [`features/PROPOSED.md`](features/PROPOSED.md).** Twenty-one
 rows nobody has read is a request for several hours of a specialist's attention,
 and "here is the table, good luck" is not how to ask for it. The file gives each
 row's claim, the accessions to check it against, the boundary chosen and its
 basis, and the exact `--show` invocation — and it leads with the rows where the
-exemplars *disagreed*, because those need a decision rather than a check: the lac
-promoter's rival 84 nt convention, the two T7-terminator forms that are offset
-from each other by one base, rrnB T1's rivals running 43 to 98 nt, and `PLF:1016`,
-which should not be signed at all until an unresolved organism conflict between
-UniProt and the ENA record is settled. It carries no digests on purpose —
-`SIGNOFF.tsv` says signing a digest nobody has read is not an attestation, and a
-worklist you could copy twenty-six hashes out of without opening a row would be a
-machine for producing exactly that.
+exemplars *disagreed*, because those need a decision rather than a check: the two
+T7-terminator forms that are offset from each other by one base, rrnB T1's rivals
+running 43 to 98 nt, and `PLF:1016`, which should not be signed at all until an
+unresolved organism conflict between UniProt and the ENA record is settled. It
+carries no digests on purpose — `SIGNOFF.tsv` says signing a digest nobody has
+read is not an attestation, and a worklist you could copy twenty-one hashes out of
+without opening a row would be a machine for producing exactly that. It now also
+carries the five elements that were refused, so the work of rescuing them is
+asked for rather than left implicit.
+
+### Added — the coordinate route, declared by every stage that could carry it
+
+The bullet above says the taint gate cannot see a coordinate arriving from
+SnapGene through INSDC. That sentence described an open hole for one release.
+This closes it — and the first thing to say is what "closes" means, because the
+obvious repair is not available and pretending otherwise would be the exact
+defect this project keeps catching in itself.
+
+**A coordinate-level taint check cannot be built here, and the reason is not
+effort.** `features/build/insdc_posture.py` carries the argument in full and
+`features/SOURCING.md` §0.6 carries the measurements. In short: the artifact the
+gate is pinned to, pLannotate's `snapgene.csv`, is four columns of `sseqid`,
+`Feature`, `Type` and `Description` — **no sequence and no coordinate**, so there
+is nothing in it to compare an extent against. SnapGene's feature bases live in a
+separate bulk asset that carries no licence and sits on a host the build refuses,
+and fetching a complete copy of their extents in order to prove we did not copy
+their extents would be a larger act of copying than the one being disproved. And
+the sequences are biology: the T7 promoter is the T7 promoter, an exact match
+proves nothing about copying, and a rule keyed on agreement fires on **84%** of
+the distinct extents in a 481-record survey of this database's own witnesses —
+100% for the rarer ones. That is a check that gets switched off in a week, which
+is a check that proves nothing.
+
+**So the enforcement is structural rather than statistical.** Every stage in
+`build.STAGES` must declare `INSDC_POSTURE`, naming one of four postures and
+saying in its own words what it does about a depositor's coordinates. The gate
+refuses a stage that declares nothing — the same shape, and for the same reason,
+as the existing rule that refuses a stage that does not declare its id block —
+and then checks the mechanical half of whatever was declared:
+
+- a `no_insdc` stage must name no INSDC host;
+- a `no_feature_table` stage must name no record flat-file endpoint, because a
+  feature table is only served by the flat-file view;
+- a `feature_table_forced` stage must **name** the test that forces its extents,
+  and the gate drives that test with a CDS that translates to its protein and one
+  that does not;
+- a `feature_table_convention` stage must name its SnapGene screen, which the
+  gate drives against a record carrying the tell and one without, and its
+  corroboration floor, which may not go below two.
+
+Each of those was proven to fail by breaking the real tree seven ways — deleting
+a declaration, adding an ENA fetch to the stage that says it makes none, pointing
+a FASTA-only stage at a flat file, blinding the SnapGene screen, making it fire
+on everything, lowering the floor to one, and neutering the translation check
+that `stage_uniprot`'s whole posture rests on. All seven go red. The gate runs
+inside `taint_gate.py` **before** the fetch, so it still reports on a day the pin
+is unreachable, and it is now a step in `tools/ci.ps1` — the first half of the
+taint gate to have a local twin, since it needs no network at all.
+
+**Say plainly what this does not buy.** It does not show that no coordinate in
+`features.tsv` agrees with SnapGene's, and nothing in this repository can. It
+shows that no stage reached the table without a human answering the question, and
+that four named mechanisms still work. `SOURCING.md` §6 now forbids describing
+the taint gate as a check on the database: it is a check on the description
+column, and saying more than that is the overclaim.
+
+### Changed — a Class B row must now show that depositors put the edges where we did
+
+`features/SOURCING.md` §4 has always asked for "≥2 independent GenBank exemplars
+**showing where depositors actually place it**", and only the first half of that
+sentence was executed. `stage_classb.verify()` required two independent
+submissions to *contain the bases* — a fact about the sequence, not about a
+boundary — then measured where each of them drew the edges, wrote the answer into
+`notes`, and tested nothing. A row could therefore ship
+`boundary_rule = consensus_of_insdc` on a consensus of one, and four did.
+
+`MIN_PLACEMENTS` makes the second half executable: two independent submissions
+must annotate a feature at **exactly** the shipped extent, edge for edge, with no
+tolerance — a tolerance would be a knob to widen until the row passed. **Five of
+the twelve candidates fail and do not ship:**
+
+| Row | Element | Submissions holding the bases | Placing it exactly |
+|---|---|---|---|
+| `PLF:4002` | lac promoter | 4 | 1 |
+| `PLF:4003` | tac promoter | 3 | 1 *(two records, one lab)* |
+| `PLF:4004` | trc promoter | 2 | 1 *(the anchor itself)* |
+| `PLF:4005` | CMV promoter | 3 | 1 |
+| `PLF:4011` | SV40 early poly(A) | 3 | 1 |
+
+Two things about that table. The rows stay in the stage's allow-list rather than
+moving to `HELD`, so they keep their ids, are re-measured on every build, and come
+back by themselves the day a curator cites evidence that corroborates the extent
+— or re-cuts it to one the evidence already corroborates. And `PLF:4005` is worth
+looking at twice: the CMV promoter's *only* exact corroboration is `LC897329`, a
+record whose feature table is SnapGene's Common Feature naming throughout with no
+`label:` tell in it. That is the blind spot at the top of this entry, biting a
+real row — caught by a rule that names no vendor and reads no `/note`.
+
+**This rule is not a taint check and must not be described as one.** It cannot
+show that an extent came from SnapGene. It answers the narrower question that is
+answerable: did our own evidence force this extent, or is it one lab's opinion?
 
 ### Fixed
 

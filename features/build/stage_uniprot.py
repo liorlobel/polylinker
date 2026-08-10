@@ -112,6 +112,34 @@ UNIPROT_JSON = "https://rest.uniprot.org/uniprotkb/{}.json"
 ENA_FASTA = "https://www.ebi.ac.uk/ena/browser/api/fasta/{}"
 ENA_EMBL = "https://www.ebi.ac.uk/ena/browser/api/embl/{}"
 
+# features/SOURCING.md §0.6, checked by features/build/insdc_posture.py.
+#
+# This stage DOES read a depositor's feature table. `ena_cds_record()` walks it,
+# and `boundary_evidence` is the depositor's own location expression copied out
+# verbatim. That is exactly the route SnapGene's boundary convention travels,
+# and a declaration here saying "we never look" would be false.
+#
+# What makes it defensible is not that we do not look, it is that the extent is
+# nobody's to choose. The sliced nucleotides have to translate residue for
+# residue to a named UniProt canonical, and a CDS that does not is dropped
+# rather than trimmed to fit. Agreement with any vendor's convention is
+# therefore explained by the arithmetic — which is the only kind of agreement
+# this project can defend, and the distinction the whole posture vocabulary
+# exists to make.
+INSDC_POSTURE = {
+    "posture": "feature_table_forced",
+    "reason": (
+        "ena_cds_record() parses the depositor's CDS feature and boundary_evidence is "
+        "that depositor's own location expression. The extent is nevertheless forced: "
+        "the nucleotides must translate residue for residue to the UniProt canonical "
+        "protein the row is keyed on, and a difference anywhere but the initiator drops "
+        "the row instead of moving the boundary. A depositor who annotated their "
+        "plasmid in an editor cannot shift that extent without breaking the equality, "
+        "so no convention of anyone's rides in on it."
+    ),
+    "forced_by": "cds_matches_protein",
+}
+
 # Stage 2's reserved block. IDs are what a curator signs off against: if Stage 2
 # numbered from "wherever Stage 1 ended", adding one resistance marker would
 # renumber every natural-protein row, and a signature on PLF:0009 would silently

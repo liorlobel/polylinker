@@ -1070,6 +1070,23 @@ def unesc(s: str) -> str:
 # --------------------------------------------------------------------------
 # Stage 1 — AMRFinderPlus
 
+# features/SOURCING.md §0.6, checked by features/build/insdc_posture.py. This
+# file hosts stage_amrfinder, so this constant answers for that stage and for
+# nothing else — the fetching harness above it works on behalf of stages that
+# each answer for themselves.
+INSDC_POSTURE = {
+    "posture": "no_feature_table",
+    "reason": (
+        "stage_amrfinder reads two FASTA files from the AMRFinderPlus catalogue and no "
+        "record flat file, so no depositor's feature table is parsed here at all. The "
+        "coordinates written into boundary_evidence are the ones the catalogue's own "
+        "defline gives for that CDS in its reference record, and the extent is the "
+        "reading frame: initiator through stop codon of the frame that translates "
+        "residue for residue to the catalogue's protein. Nobody chose that extent and "
+        "no plasmid editor could have moved it."
+    ),
+}
+
 
 def stage_amrfinder(refresh: bool) -> tuple[list, list]:
     """Resistance markers with verified CDS, protein, and real coordinates.

@@ -145,7 +145,7 @@ $started = Get-Date
 # for nothing more than that. Measured, not reasoned: wrapping the precondition
 # of 'gel calibration spline vs SciPy' in `WindowsOnly` and reconciling the three
 # real ledgers of run 31359657821 with that one row changed on the Linux and
-# macOS legs gives "reconciled 3 legs, 72 steps each; every step ran on at least
+# macOS legs gives "reconciled 3 legs, 73 steps each; every step ran on at least
 # one platform", exit 0. L1 does not fire (a reason was declared), L2 does not
 # (the platform agrees), L3 does not (it is not a corpus skip), and X1, X3 and X4
 # do not either. Two legs of coverage disappear and every check reports clean.
@@ -3807,6 +3807,29 @@ Step 'no feature row asserts more than a human signed' {
 } { Have python }
 Step 'the build''s writer reads SIGNOFF.tsv and never writes it' {
     python features/build/check_writer.py --quiet
+} { Have python }
+# THE FIRST PART OF THE TAINT GATE'S SUBJECT THAT CAN RUN HERE AT ALL.
+#
+# `features/build/taint_gate.py` fetches pLannotate's snapgene.csv from a third
+# party, so it cannot live in this file: the rule this gate keeps is that a step
+# whose result depends on somebody else's uptime belongs in a workflow. That
+# left the project's central licensing control with no local twin, which
+# `.github/workflows/ci.yml` states in its own header.
+#
+# This part needs nothing. It reads every stage module named in `build.STAGES`,
+# requires each to declare what it does about a boundary convention arriving
+# from a depositor's INSDC feature table -- ENA folds a submitter's SnapGene
+# `/label` into the `/note`, so the route is real and the taint gate's
+# description comparison cannot see it -- and then drives the mechanisms those
+# declarations name: `stage_classb`'s SnapGene screen against a record carrying
+# the tell and one without, `stage_uniprot`'s translation test against a CDS one
+# residue out. Offline, about a second.
+#
+# READ features/SOURCING.md section 0.6 BEFORE QUOTING THIS STEP. It does not
+# show that no coordinate here agrees with SnapGene's, and no check can; what it
+# shows is that no stage reached the table without answering the question.
+Step 'every stage declares what it does about SnapGene arriving through INSDC' {
+    python features/build/insdc_posture.py
 } { Have python }
 
 # THE SKIP DISCIPLINE -- because on a runner it is the only thing standing

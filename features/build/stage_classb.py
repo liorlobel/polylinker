@@ -23,9 +23,41 @@ rrnB operon record holds T1 and T2 and annotates no terminator at all, so the
 name comes from vector records and the locus from the primary one, and the row
 says so rather than implying the primary agreed.
 
+CLAIMED, and this is new on 2026-08-10: at least `MIN_PLACEMENTS` of those
+independent submissions annotate a feature at **exactly** this extent, edge for
+edge. That is a different measurement from the one above -- holding the bases is
+a fact about the sequence, drawing the same edges is the only thing that makes
+the word *consensus* true -- and until this build only the first was tested.
+`verify()` had measured each depositor's edges since the stage was written, put
+them in `notes`, and then tested nothing, so a row could ship
+`boundary_rule = consensus_of_insdc` on a consensus of one. Five of the twelve
+did, and they now drop:
+
+    PLF:4002 lac promoter        1 of 4 submissions place it exactly
+    PLF:4003 tac promoter        1 of 3   (and that one is two records from one lab)
+    PLF:4004 trc promoter        1 of 2   (and that one is the anchor itself)
+    PLF:4005 CMV promoter        1 of 3
+    PLF:4011 SV40 early poly(A)  1 of 3
+
+Those numbers are this build's, printed in full with each rival's offsets every
+time the stage runs; nothing above is a stored figure. The five stay in `ITEMS`
+rather than moving to `HELD`, so they keep their ids, are re-measured on every
+build, and come back by themselves the day a curator cites evidence that
+corroborates the extent -- or the day they are re-cut to an extent the evidence
+already corroborates. That is a curator's decision and not this program's,
+which is why the rows are refused rather than adjusted.
+
 NOT CLAIMED: that the extent is correct, canonical, or agreed. It is a
 convention this project chose, the rival conventions are named with their
 measured offsets, and `boundary_rule = consensus_of_insdc` says exactly that.
+
+NOT CLAIMED, AND NOT CLAIMABLE: that no extent here agrees with SnapGene's, or
+that agreement would mean anything if it did. The sequences are biology and
+nobody owns them; an exact match to a vendor's element proves nothing about
+copying. What the corroboration rule answers is the narrower question that IS
+answerable -- did our own evidence force this extent, or is it one lab's
+opinion? See `MIN_PLACEMENTS` below and `features/build/insdc_posture.py` for
+why the wider question cannot be answered from inside this repository.
 
 Three findings from the corpus survey that shaped the code, not just the prose
 -----------------------------------------------------------------------------
@@ -37,11 +69,19 @@ Three findings from the corpus survey that shaped the code, not just the prose
    prose is SnapGene's own editorial Description column arriving through a
    source this project cleared -- and `taint_gate.py` compares *our*
    descriptions against theirs, so it cannot possibly notice a *coordinate*
-   arriving this way. Two consequences, both mechanical here: `parse_embl()`
-   never reads a `/note` at all, and the `snapgene` flag it does set makes
-   `verify()` refuse to count such a record as an independent witness. Counting
-   two of them as "two exemplars" would manufacture exactly the convergence the
-   project exists to disclaim.
+   arriving this way. Three consequences, all mechanical here: `parse_embl()`
+   never reads a `/note` at all; the `snapgene` flag it does set makes
+   `verify()` refuse to count such a record as an independent witness; and
+   `MIN_PLACEMENTS` requires the extent to be corroborated by two independent
+   submissions before the row may claim a consensus, which is the only part of
+   this that a depositor who retyped the note by hand cannot walk straight
+   past. Counting two SnapGene-annotated deposits as "two exemplars" would
+   manufacture exactly the convergence the project exists to disclaim.
+
+   The flag is exported as `record_is_snapgene_annotated()` and DRIVEN by
+   `features/build/insdc_posture.py`, which refuses this stage if the screen
+   stops seeing the tell or starts seeing it everywhere. The declaration at the
+   top of this file is what that gate reads.
 
 2. **"Two exemplars" has to mean two SUBMISSIONS, not two records.** A quarter
    of the surveyed corpus is one bulk deposit from one culture collection. By
@@ -115,6 +155,53 @@ ID_BASE = PLF_BLOCK_BASE
 # SnapGene-annotated, which is the only reading of that line that means anything
 # -- see finding 2 in the module docstring.
 MIN_SUBMISSIONS = 2
+
+# Two again, and NOT the same two. SOURCING.md section 4 asks for ">=2
+# independent GenBank exemplars SHOWING WHERE DEPOSITORS ACTUALLY PLACE IT", and
+# until 2026-08-10 only the first half of that sentence was executed:
+# MIN_SUBMISSIONS counts submissions that CONTAIN the bases, which is a claim
+# about the sequence and says nothing about the boundary. `verify()` measured
+# each depositor's edges, wrote them into `notes`, and then tested nothing --
+# so a row could ship `boundary_rule = consensus_of_insdc` on a consensus of
+# one. Five of the twelve did; they are named in the module docstring above.
+#
+# This is the number that makes that sentence executable: how many INDEPENDENT
+# SUBMISSIONS must annotate a feature at EXACTLY the shipped extent, edge for
+# edge, before the word "consensus" is allowed on the row.
+#
+# WHAT IT IS NOT. It is not a taint check and must never be described as one.
+# It cannot show that an extent came from SnapGene; nothing here can, and
+# `features/build/insdc_posture.py` says why at length. It answers a narrower
+# question that is answerable: did this project's own evidence force this
+# extent, or is it one lab's opinion? Agreement that the evidence explains is
+# not suspicious. An extent nothing corroborates is not a consensus, whoever it
+# came from -- and the rule reads no `/note`, names no vendor, and cannot be
+# evaded by retyping a description.
+#
+# EXACT, with no tolerance. A tolerance would be a knob to widen until the row
+# passed, which is the shape of every check this project has caught being
+# useless. A depositor whose feature runs 380 nt further than ours is annotating
+# a different thing, not agreeing with us approximately.
+MIN_PLACEMENTS = 2
+
+# features/SOURCING.md §0.6, checked by features/build/insdc_posture.py. The
+# only stage in the tree holding this posture, and the reason the vocabulary has
+# a fourth entry at all.
+INSDC_POSTURE = {
+    "posture": "feature_table_convention",
+    "reason": (
+        "This stage ships extents that nothing forces -- a Class B boundary is a "
+        "convention somebody chose, which is precisely what a SnapGene-annotated "
+        "deposit carries into INSDC. Two mechanisms answer for that and both are "
+        "executed here: parse_embl() reads no /note, /label, /gene, /product or "
+        "/standard_name at all and flags the records that carry SnapGene's tell so "
+        "verify() refuses to count them as witnesses, and MIN_PLACEMENTS requires two "
+        "independent submissions to annotate a feature at exactly the shipped extent "
+        "before the row may claim a consensus."
+    ),
+    "screen": "record_is_snapgene_annotated",
+    "corroboration": "MIN_PLACEMENTS",
+}
 
 
 # --------------------------------------------------------------------------
@@ -769,6 +856,23 @@ def parse_embl(text: str) -> Record:
     )
 
 
+def record_is_snapgene_annotated(embl_text: str) -> bool:
+    """Does this record's feature table carry SnapGene's `label:` tell?
+
+    Named and exported because `INSDC_POSTURE` above points at it, and
+    `features/build/insdc_posture.py` DRIVES it -- against a record carrying the
+    tell and one without -- rather than taking the declaration's word for it.
+    The screen is therefore not a comment claiming a thing is checked; it is a
+    function some other program can prove still works.
+
+    It is the whole record that goes in, deliberately, so what the gate exercises
+    is the parser this stage actually runs and not a regex lifted out of it. A
+    change to the continuation-line handling that stopped the tell being seen
+    would be invisible to a regex-level test and is caught by this one.
+    """
+    return parse_embl(embl_text).snapgene
+
+
 def ena_record(acc: str, refresh: bool) -> tuple[Record, dict]:
     url = f"{ENA_BASE}/embl/{acc}"
     _guard(url)
@@ -837,6 +941,20 @@ annotation. Wide enough to catch a transcription-start POINT sitting one base
 outside the interval -- which is the single most informative thing several of
 these records have to say -- and narrow enough not to drag in the neighbouring
 gene."""
+
+
+def corroborating_submissions(submitters: dict) -> dict:
+    """Of the independent submissions, the ones that drew the edges where we did.
+
+    Split out of `verify()` so `self_test()` can drive it: inside the loop it was
+    reachable only with the network or the cache, which is the condition under
+    which a rule quietly stops being tested. One submission may hold several
+    records and only some of them place the feature exactly; the SUBMISSION
+    counts once, because two records from one lab are one opinion -- the same
+    reading of "independent" that `MIN_SUBMISSIONS` already uses.
+    """
+    out = {key: [e for e in group if e.get("exact")] for key, group in submitters.items()}
+    return {key: group for key, group in out.items() if group}
 
 
 def relate(ours: tuple, theirs: tuple, key: str, our_strand: str,
@@ -982,6 +1100,12 @@ def verify(item: Convention, refresh: bool) -> tuple[dict, list]:
         placed = ", ".join(
             f"{k} {offsets((lo, hi), (flo, fhi), strand)}" for k, flo, fhi in near_feats[:4]
         ) or "nothing over them at all"
+        # The corroboration test, computed from the intervals rather than from
+        # the string above -- `placed` is truncated to four features for the
+        # report, and a fifth feature landing exactly on our edges would be
+        # invisible to anything that parsed it. Equality of the raw interval IS
+        # `5'+0/3'+0`; offsets() is only how it is rendered.
+        exact = [(k, flo, fhi) for k, flo, fhi in near_feats if (flo, fhi) == (lo, hi)]
         entry = {
             "accession": rec.accession or acc,
             "is_anchor": acc == item.anchor,
@@ -989,6 +1113,7 @@ def verify(item: Convention, refresh: bool) -> tuple[dict, list]:
             "snapgene": rec.snapgene,
             "submitter": rec.submitter,
             "placed": placed,
+            "exact": [k for k, _lo, _hi in exact],
             "occurrences": len(hits),
             "meta": meta,
         }
@@ -1028,6 +1153,35 @@ def verify(item: Convention, refresh: bool) -> tuple[dict, list]:
             f"SnapGene convention. Absent from: {absent or 'none'}"
         )
 
+    # THE SECOND HALF OF SOURCING.md SECTION 4'S SENTENCE. The count above is of
+    # submissions that hold the BASES; this one is of submissions that draw the
+    # EDGES where this row draws them. They are different numbers and only the
+    # second one is about a boundary. See MIN_PLACEMENTS at the top of this file
+    # for why it is not a taint check and must not be called one.
+    corroborating = corroborating_submissions(submitters)
+    for key, group in corroborating.items():
+        for e in group:
+            lines.append(
+                f"    PLACES IT EXACTLY  {e['accession']:12s} "
+                f"{'/'.join(e['exact'])} at {e['lo']}-{e['hi']}"
+            )
+    if len(corroborating) < MIN_PLACEMENTS:
+        near = "; ".join(
+            f"{e['accession']} places {e['placed']}"
+            for g in submitters.values() for e in g
+        )
+        raise ValueError(
+            f"{len(corroborating)} independent submission(s) annotate a feature at "
+            f"EXACTLY this extent, and {MIN_PLACEMENTS} are required. "
+            f"{len(submitters)} submission(s) hold the bases, which is a fact about the "
+            f"sequence and not about the boundary -- SOURCING.md section 4 asks for two "
+            f"exemplars 'showing where depositors actually place it'. On this evidence "
+            f"`boundary_rule = consensus_of_insdc` would be false on its face: the "
+            f"extent is one lab's opinion. Where they actually put the edges: {near}. "
+            f"The remedy is a curator's, not a program's -- cite more evidence, or ship "
+            f"an extent the evidence corroborates."
+        )
+
     return (
         {
             "header": header,
@@ -1038,6 +1192,7 @@ def verify(item: Convention, refresh: bool) -> tuple[dict, list]:
             "anchor_near": anchor_near,
             "witnesses": witnesses,
             "submitters": submitters,
+            "corroborating": corroborating,
             "tainted": tainted,
             "absent": absent,
         },
@@ -1087,6 +1242,28 @@ def notes_for(item: Convention, ev: dict) -> str:
         + f"Where those depositors put the edges, measured on this build in the "
         f"element's own 5'-to-3' sense and signed so that a positive number means "
         f"the depositor's feature extends further than this row's: {placed}. "
+    )
+    corr = ev["corroborating"]
+    # Grouped by SUBMISSION and not by record, because the number in front of it
+    # counts submissions: a flat list of three accessions beside the number 2
+    # reads as an arithmetic slip rather than as two labs, one of which
+    # deposited twice.
+    exactly = "; ".join(
+        " and ".join("{} ({})".format(e["accession"], "/".join(e["exact"])) for e in group)
+        + (" -- one submitting address" if len(group) > 1 else "")
+        for group in corr.values()
+    )
+    out += (
+        f"CORROBORATION OF THE EXTENT ITSELF, which is a different measurement from the "
+        f"one above and is the one `boundary_rule = consensus_of_insdc` actually rests "
+        f"on: {len(corr)} of those {len(subs)} independent submission(s) annotate a "
+        f"feature at EXACTLY this extent, edge for edge, against a floor of "
+        f"{MIN_PLACEMENTS}. They are: {exactly}. Holding the bases is a fact about the "
+        f"sequence; drawing the same edges is the only thing that makes the word "
+        f"consensus true, and until 2026-08-10 this stage tested the first and not the "
+        f"second. This is NOT a taint check and cannot show where anybody's convention "
+        f"came from -- it says only whether this project's own evidence forced this "
+        f"extent. "
     )
     if ev["tainted"]:
         out += (
@@ -1229,6 +1406,11 @@ def self_test() -> list[str]:
     clean = tainted.replace("; label: lac promoter", "")
     must("SnapGene 'label:' tell is detected", parse_embl(tainted).snapgene)
     must("a clean record is not flagged", not parse_embl(clean).snapgene)
+    # The exported screen must agree with the parser it wraps, because
+    # insdc_posture.py drives the export and would otherwise be proving a
+    # function nothing else calls still works.
+    must("the exported screen sees what parse_embl sees",
+         record_is_snapgene_annotated(tainted) and not record_is_snapgene_annotated(clean))
     must("SQ block is parsed", parse_embl(clean).sequence == "ACGTACGTAC")
     # The accession is reassembled with its SV. `boundary_evidence` citing a
     # bare accession would point at whatever ENA serves under that name next.
@@ -1264,6 +1446,38 @@ def self_test() -> list[str]:
     #    curator a depositor trimmed the 5' end when they extended it.
     must("offsets on the plus strand", offsets((10, 20), (7, 25), "+") == "5'+3/3'+5")
     must("offsets invert on the minus strand", offsets((10, 20), (7, 25), "-") == "5'+5/3'+3")
+
+    # 4b. THE IDENTITY THE CORROBORATION RULE RESTS ON. `verify()` decides
+    #     "places it exactly" by comparing raw intervals, because the rendered
+    #     string is truncated to four features and would silently lose a fifth.
+    #     That is only sound if interval equality and `5'+0/3'+0` are the same
+    #     statement, on both strands -- so assert it rather than assume it.
+    for st in ("+", "-"):
+        must(f"equal intervals render as 5'+0/3'+0 on the {st} strand",
+             offsets((10, 20), (10, 20), st) == "5'+0/3'+0")
+        must(f"an off-by-one interval does not, on the {st} strand",
+             offsets((10, 20), (10, 21), st) != "5'+0/3'+0")
+
+    # 4c. The rule itself, driven with evidence that must fail it. Without this
+    #     the check is reachable only through the network or the cache, which is
+    #     precisely the condition under which a rule stops being tested.
+    def sub(*flags):
+        return [{"exact": ["regulatory"] if f else [], "accession": f"X{i}"}
+                for i, f in enumerate(flags)]
+
+    one_lab_twice = {"kaist": sub(True, True)}
+    two_labs = {"kaist": sub(True), "gent": sub(True)}
+    holds_but_disagrees = {"kaist": sub(True), "gent": sub(False), "oregon": sub(False)}
+    must("two records from ONE lab are one corroborating submission",
+         len(corroborating_submissions(one_lab_twice)) == 1)
+    must("two labs placing it exactly are two",
+         len(corroborating_submissions(two_labs)) == MIN_PLACEMENTS)
+    must("submissions that hold the bases but draw other edges do not count",
+         len(corroborating_submissions(holds_but_disagrees)) == 1)
+    must("a submission whose only record places it partly still counts once",
+         len(corroborating_submissions({"a": sub(False, True)})) == 1)
+    must("the floor is above one, or the rule permits a consensus of one",
+         MIN_PLACEMENTS >= 2)
 
     # 5. Two spellings of ONE lab's address merge; two institutions do not.
     #    The first two strings are the submission addresses ENA serves for

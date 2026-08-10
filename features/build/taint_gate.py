@@ -12,8 +12,33 @@ against the thing the project's central claim depends on. Disclosing a control
 that was never built is worse than claiming nothing, which is why this file is
 here rather than a rewritten sentence.
 
-WHAT THIS DOES NOT DO
----------------------
+WHAT THIS DOES NOT DO, AND CANNOT
+---------------------------------
+
+**It measures DESCRIPTION TEXT and only description text.** SnapGene's prose is
+copyrightable expression and this file is the control over it. SnapGene's
+*boundary convention* -- where they decided "the CMV promoter" starts and stops
+-- is a different thing, it arrives by a different route, and nothing below can
+see it. ENA folds a submitter's SnapGene `/label` into the `/note`, so an
+ordinary depositor who annotated their plasmid in SnapGene publishes that
+convention inside a record `features/SOURCING.md` cleared as a source; 14 of 481
+records in a survey of this database's own witnesses carry the fingerprint
+(2.9%). `their_descriptions()` returns a list of English strings, so there is no
+object in this program a coordinate could be compared against -- the blind spot
+is a missing data type, not a missing branch.
+
+It cannot be closed here, and `features/build/insdc_posture.py` sets out why at
+length: the pinned artifact carries no sequence and no coordinate, SnapGene's
+extents live in a bulk asset carrying no licence on a host
+`build.ALLOWED_FETCH_HOSTS` refuses, and the sequences are biology that nobody
+owns, so a check keyed on agreement would fire on almost every legitimate row.
+What is there instead is structural: every stage must declare what it does about
+that route, and `main()` below runs that gate before it fetches anything. It
+does not prove a row is clean. It proves nobody reached the table without
+answering the question.
+
+IT ALSO DOES NOT DO THIS
+------------------------
 
 It does not read `snapgene.csv` into the database, into a description, or into
 any file this repository keeps. The payload is fetched to a temporary directory
@@ -90,6 +115,7 @@ ROOT = HERE.parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import insdc_posture  # noqa: E402
 from lib_columns import FEATURE_COLUMNS  # noqa: E402
 
 PIN_COMMIT = "61ed152e9f8c9abc3c5c1b01eabfc28b63cda551"
@@ -262,8 +288,25 @@ def main() -> int:
     print(f"  pinned sha256 {PIN_SHA256}")
     print("\nSelf-test")
     self_test()
+    insdc_posture.self_test()
     if args.self_test:
         return 0
+
+    # BEFORE the fetch, deliberately. This half needs no network, so on the day
+    # the pin is unreachable and the prose comparison exits 3, the structural
+    # half has still run and still said something. Ordering it after the fetch
+    # would have made the only check of the coordinate route conditional on a
+    # host nobody here operates.
+    print("\nStage postures on the INSDC coordinate route")
+    posture_problems = insdc_posture.check()
+    if posture_problems:
+        print(f"\n{len(posture_problems)} problem(s) with the stage postures:")
+        for p in posture_problems:
+            print(f"  !! {p}")
+        print("\nThis is not a finding about a row. It is a stage that reached the table")
+        print("without answering for what it does about SnapGene arriving through INSDC,")
+        print("or one whose answer no longer matches what its code does.")
+        return 1
 
     ours = our_descriptions()
     tmp = Path(tempfile.mkdtemp(prefix="plf-taint-"))

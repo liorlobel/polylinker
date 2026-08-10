@@ -95,7 +95,7 @@ static EVERYTHING: OnceLock<Annotator<'static>> = OnceLock::new();
 /// Built lazily, so a user who never turns the unreviewed rows on never pays
 /// for the second pair of indexes. That saving used to be the whole of it,
 /// because the two tables held identical contents; since 2026-08-10 they do
-/// not — 115 rows against 89 — so the second index is now genuinely a second
+/// not — 110 rows against 89 — so the second index is now genuinely a second
 /// index and the laziness is buying real work, not just a clone.
 pub fn annotator(unreviewed: bool) -> &'static Annotator<'static> {
     if unreviewed {
@@ -239,7 +239,7 @@ mod tests {
     /// `Db::reviewed` CLONES, so `all` and `reviewed` are two objects. When
     /// this was written they also held equal contents in equal order, and the
     /// comment said the two would diverge "the day a contributed row lands
-    /// `proposed`". That day was 2026-08-10: the table now holds 115 rows and
+    /// `proposed`". That day was 2026-08-10: the table now holds 110 rows and
     /// 89 signatures, so the two orders differ from `PLF:1014` onwards and a
     /// mismatched pair would put one record's name, id and review status
     /// against another record's coordinates — which is no longer a hypothetical
@@ -329,7 +329,7 @@ mod tests {
         //
         // `lib.reviewed`, and not `lib.all`. This read `lib.all` until
         // 2026-08-10, which was the same assertion while every row was signed
-        // and became a wrong one the moment twelve `proposed` promoter and
+        // and became a wrong one the moment `proposed` promoter and
         // terminator rows landed: the note above is about what a default search
         // covers, and a proposed row is not in a default search. Asserting over
         // `all` made this test fail for a change that made the panel MORE
@@ -346,8 +346,11 @@ mod tests {
         // shown a shorter caveat computed from it.
         assert!(
             lib.all.records.iter().any(|r| r.genbank_key == "promoter"),
-            "the full table holds no promoter row at all; the twelve Class B rows have \
-             gone missing, or their genbank_key has changed under this test"
+            "the full table holds no promoter row at all; the Class B rows have gone \
+             missing, or their genbank_key has changed under this test. HOW MANY of \
+             them there are is deliberately not asserted: stage_classb refuses a row \
+             whose extent only one submission corroborates, so the count is a property \
+             of the evidence and moves without anything here being wrong"
         );
         let opted_in = coverage_note(&lib.all).expect("origins are still absent from both");
         assert!(

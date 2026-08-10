@@ -259,6 +259,24 @@ RETIRED_PEPTIDE_FLOOR = 8
 # deliberately NOT written into any row.
 RCSB_ENTITY = "https://data.rcsb.org/rest/v1/core/polymer_entity/{}/{}"
 
+# features/SOURCING.md §0.6, checked by features/build/insdc_posture.py.
+#
+# The strongest of the four postures, and the only stage that can hold it: an
+# epitope tag or a linker has no gene and no INSDC record, so there is nothing
+# here to fetch from ENA or NCBI even if somebody wanted to. `boundary_rule` on
+# every row is `designed_sequence` or `literature_defined`, and the boundary is
+# whatever the designing paper stipulated.
+INSDC_POSTURE = {
+    "posture": "no_insdc",
+    "reason": (
+        "Nothing in this stage is fetched from an INSDC host. The one endpoint it uses "
+        "is RCSB's polymer-entity API, read for a deposited one-letter residue string "
+        "and no annotation of any kind, and every boundary is stipulated by the paper "
+        "that designed the part. A depositor's plasmid-editor session cannot reach any "
+        "row here by any route, because no row here has an INSDC record behind it."
+    ),
+}
+
 
 # --------------------------------------------------------------------------
 # The allow-list

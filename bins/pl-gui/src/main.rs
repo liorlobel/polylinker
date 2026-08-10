@@ -31068,7 +31068,7 @@ ATGAAACGCTAA
     ///
     /// `features/README.md` is candid about the classes the shipped table has
     /// no rows for — origins entirely, and promoters and terminators until
-    /// somebody signs the twelve `proposed` ones — but `features/README.md`
+    /// somebody signs the `proposed` ones — but `features/README.md`
     /// does not ship in the application and nobody reads it before opening a
     /// plasmid. What they do is open a plasmid, watch `AmpR` and `lacI` light
     /// up, see no `ori`, and conclude there is no `ori`. That inference is
