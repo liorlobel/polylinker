@@ -436,10 +436,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # windows-latest is deliberately absent: the `gate` job above runs every
-        # one of the steps below, on the same runner image, as part of the list
-        # `docs/RELEASING.md` names. See the division set out in this file's
-        # header, including what dropping it cost.
+        # windows-latest is deliberately absent: the `gate` job above runs
+        # ALMOST every one of the steps below, on the same runner image, as part
+        # of the list `docs/RELEASING.md` names. Three exceptions, and they are
+        # the reason this job exists at all rather than being deleted:
+        # `--locked`, `pl-draw/tests/memory.rs` and
+        # `pl-features/tests/schema_pin.rs`, none of which any step in the gate
+        # carries. See the division set out in this file's header, including
+        # what dropping the Windows leg cost.
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4

@@ -9,12 +9,16 @@
     against Python and Biopython.
 
     It is not the whole gate and must not be read as one. `tools/ci.ps1` is,
-    and it runs roughly forty more steps this does not -- every other
-    integration suite, all the oracles, the release script, the benchmark, the
-    TypeScript side. This script printing ALL CHECKS PASSED means those five
-    things passed, no more. The header used to say "the same checks as CI",
-    which is how `--lib` alone survived here for as long as it did: nobody
-    re-reads a claim that sounds like it was checked.
+    and at 72 steps it runs some sixty-five more things this does not -- every
+    other integration suite, all the oracles, the release script, the MSI, the
+    benchmark, the TypeScript side. This script printing ALL CHECKS PASSED
+    means those five things passed, no more. The header used to say "the same
+    checks as CI", which is how `--lib` alone survived here for as long as it
+    did: nobody re-reads a claim that sounds like it was checked. It then said
+    "roughly forty more steps" while the gate was 72, which is the same decay
+    one size smaller -- so re-derive it rather than trusting it: the gate's
+    total is `(Select-String '^Step ' tools/ci.ps1).Count`, and this covers
+    five of them.
 
     Requires a linker. rustup does not ship one, so on Windows this needs the
     MSVC toolset (Visual Studio Build Tools, "MSVC v143 ... build tools" plus a
@@ -109,9 +113,11 @@ Section 'unit tests'
 #   the difference: 557 tests that had never run here -- 507 in bins/pl-gui,
 #                   39 of pl-mcp's protocol tests, 11 of the CLI's
 #
-# `tools/ci.ps1:103` and `.github/workflows/ci.yml:63` have always run
-# `--lib --bins`, so this was a divergence from the gate it claims to mirror,
-# in the direction that reports success.
+# `tools/ci.ps1`'s Step 'unit tests' and `.github/workflows/ci.yml`'s "Unit
+# tests" step have always run `--lib --bins`, so this was a divergence from the
+# gate it claims to mirror, in the direction that reports success. (Named rather
+# than cited by line: both numbers here were line references and both had moved
+# by the time anyone read them.)
 $out = cargo test --workspace --lib --bins 2>&1
 $sum = ($out | Select-String '^test result').Line
 if ($LASTEXITCODE -eq 0) { Pass ($sum -join '; ') } else { $out | Select-Object -Last 25; Fail 'unit tests' }

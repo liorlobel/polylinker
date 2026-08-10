@@ -90,7 +90,7 @@ One tag. Everything else follows from it.
 #    [workspace.package] key alone -- and following it literally leaves a tree
 #    where step 4's tag check passes while every crate still demands the old
 #    version. Change them together, then let the lockfile follow:
-sed -i 's/version = "0.3.2"/version = "0.4.0"/g' Cargo.toml
+sed -i 's/version = "0.4.0"/version = "0.5.0"/g' Cargo.toml
 cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
 #    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
 #    are the two files a tag does not update and nothing checks.
@@ -102,17 +102,25 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 pwsh -NoProfile -File tools/ci.ps1
 
-# 3. Commit, push, and let CI go green. SIX jobs, and the ones that matter
-#    here are `the gate (tools/ci.ps1)` -- which runs the whole of step 2 on
-#    windows-latest, ubuntu-latest and macos-latest, with the oracles, node,
-#    the wasm target and (on Windows) WiX installed, and fails if any step
-#    skips without a declared reason or if the corpus skips are not exactly
+# 3. Commit, push, and let CI go green. NINE checks off six job definitions --
+#    `the gate (tools/ci.ps1)` three times, `test` twice, and one each of
+#    `reconcile`, `msrv`, `wasm` and `oracles`. The ones that matter here are
+#    the three gate legs -- which run the whole of step 2 on windows-latest,
+#    ubuntu-latest and macos-latest, with the oracles, node, the wasm target
+#    and (on Windows) WiX installed, and fail if any step skips without a
+#    declared reason or if the corpus skips are not exactly
 #    .github/ci-expected-skips.txt -- and `reconcile`, which compares the three
 #    legs and fails if any step ran on none of them.
+#
+#    Cutting the release on a branch and opening a pull request is how those
+#    nine are read before anything is tagged; `on: pull_request` runs the same
+#    workflow. Nothing below is reachable from a branch, so nothing is
+#    published by getting this wrong.
 
-# 4. Tag. This is the only step that publishes anything.
-git tag -a v0.2.0 -m "Polylinker 0.2.0"
-git push origin v0.2.0
+# 4. Tag, on main, after the release commit has landed there. This is the only
+#    step that publishes anything.
+git tag -a v0.5.0 -m "Polylinker 0.5.0"
+git push origin v0.5.0
 ```
 
 ### Step 2 is no longer the only thing standing between a tag and a red gate
@@ -347,7 +355,7 @@ these rows, and that was the whole of the truth: nothing ran the file.
 | Check | Where |
 |---|---|
 | `release.ps1` runs; its manifest is set-equal to `dist/` | `tools/ci.ps1` |
-| ≥ 20 files hashed, ≥ 7 licence texts, `NOTICE.txt` / `LICENSE.txt` / `LICENSE-MIT.txt` / `features/NOTICE.txt` by name | `tools/ci.ps1` |
+| ≥ 21 files hashed on Windows and ≥ 18 elsewhere, ≥ 8 font licence texts under `licences/`, `NOTICE.txt` / `LICENSE.txt` / `LICENSE-MIT.txt` / `features/NOTICE.txt` by name | `tools/ci.ps1` |
 | The zip is a deterministic function of `dist/` | `tools/ci.ps1` |
 | The **archive** verifies against its own `SHA256SUMS.txt`, licence set included | `tools/check-archive.ps1`, in the gate and on all three release runners |
 | The tar writer produces something GNU tar or bsdtar will read | `tools/ci.ps1` (forces `-ArchiveFormat tar.gz` on Windows) |
@@ -357,10 +365,12 @@ these rows, and that was the whole of the truth: nothing ran the file.
 | The measured glibc floor matches `README-LINUX.txt` | `release.yml`, Linux job |
 
 The tar writer is forced on Windows for a specific reason: it is Unix-only code,
-and every machine that runs this gate — the author's, and the `gate` job's
-`windows-latest` runner — is a Windows one. An archive format whose only
-exercise is a green job on a runner that produces it for real is an archive
-format nobody has looked at the output of.
+and the Windows leg would otherwise never exercise it. That leg is the one that
+runs on the author's machine, where an archive format's output can actually be
+looked at, and a format whose only exercise is a green job on a runner is a
+format nobody has read the output of. Since 2026-08-10 the Linux and macOS legs
+of the `gate` job produce a `tar.gz` for real, where forcing the format is a
+no-op and the step checks what a user will download.
 
 ## The Windows install path
 
@@ -399,9 +409,15 @@ a second copy of it.
 
 **Answered by where it runs — nothing installed on the build machine.** WiX is a
 `dotnet tool` and there is no .NET SDK on the author's machine. It is therefore
-a *CI-time* dependency only: every MSI step in `tools/ci.ps1` skips itself when
-`wix` is absent, so a contributor without an SDK still runs the rest of the gate.
-`cargo build` and `cargo test` acquired no dependency at all.
+a *CI-time* dependency only: *one* MSI step in `tools/ci.ps1` — *the MSI
+installs, does what it says, uninstalls, and leaves nothing* — is preconditioned
+on `wix`, so a contributor without an SDK still runs the other seventy-one.
+(The other two MSI steps do not need it. *The MSI is generated from the manifest
+and not from a second file list* calls `build-msi.ps1 -GenerateOnly`, which
+returns before the `wix` lookup, and is preconditioned on `dist/SHA256SUMS.txt`
+alone; *the MSI takes no file type away from a program the reader already uses*
+reads `Polylinker.wxs` and has no precondition at all, so it runs on all three
+platforms.) `cargo build` and `cargo test` acquired no dependency at all.
 
 That leniency used to mean the install test ran nowhere. `wix` was absent on the
 one machine running the gate, and no machine ran the gate, so *the MSI installs,

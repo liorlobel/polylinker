@@ -155,8 +155,23 @@ which turns on three rules:
    run fails. This is what the old "not on the list" check bought, and it now
    costs no list.
 2. **A platform reason must agree with the platform.** `not windows` on Windows
-   is a failure; there is no line anybody can add anywhere to quiet a platform
-   skip, because the string is checked rather than believed.
+   is a failure, because the string is checked against `$IsWindows` rather than
+   believed, and **no line in `.github/ci-expected-skips.txt` can quiet a
+   platform skip**.
+
+   What this does *not* catch is a human hand-writing `WindowsOnly` into a
+   portable step's own precondition. That step goes on running on Windows, so
+   every per-leg rule here is satisfied — a reason was declared, it agrees with
+   the platform, it is not a corpus skip — and so is the reconciler's
+   requirement that every step ran somewhere, which the untouched Windows leg
+   answers. Two platforms of coverage disappear and nothing turns red.
+
+   Measured, not reasoned: it was done on purpose to *gel calibration spline vs
+   SciPy* and pushed, and run 31361991651's Linux leg reported **eight**
+   `not windows` skips where seven is the honest count and passed. See
+   `.github/ci-expected-skips.txt`, which sets out why the two obvious repairs
+   are worse than the disease. What holds this is that `WindowsOnly` is one
+   greppable identifier in seven places and `tools/ci.ps1` is reviewed.
 3. **The corpus skips are exactly the committed list**, by set equality in both
    directions, with a name matching no step also a failure. Not a count — a
    count of five is satisfied by the wrong five skipping. That file has five
