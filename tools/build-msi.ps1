@@ -286,7 +286,7 @@ That needs a .NET SDK, not just the runtime. Both workflows install it on their
 windows-latest runners -- ci.yml's `gate` job and release.yml's build job -- and
 tools/ci.ps1 preconditions exactly one step on it, 'the MSI installs, does what
 it says, uninstalls, and leaves nothing', so a machine without the SDK still
-runs the other seventy-one. That skip is fine here and not on a runner: without
+runs the other seventy-two. That skip is fine here and not on a runner: without
 wix that precondition returns $false, which is a skip with no declared reason,
 and under -ExpectedSkips a skip with no declared reason FAILS. So a CI job that
 failed to install wix goes red instead of quietly testing less. (Off Windows the

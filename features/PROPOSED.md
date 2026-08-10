@@ -66,7 +66,7 @@ name, the date, the digest, and a note saying what you actually checked.
 
 **No digests are printed in this file, on purpose.** `SIGNOFF.tsv` says
 signing a digest nobody has read is not an attestation; a worklist that let
-you copy 26 hashes out of it without opening a single row would be a machine
+you copy 21 hashes out of it without opening a single row would be a machine
 for producing exactly that. The digests also change the moment any prose in a
 row changes, so a copy here would go stale silently.
 

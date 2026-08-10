@@ -21,9 +21,13 @@ copyrightable expression and this file is the control over it. SnapGene's
 -- is a different thing, it arrives by a different route, and nothing below can
 see it. ENA folds a submitter's SnapGene `/label` into the `/note`, so an
 ordinary depositor who annotated their plasmid in SnapGene publishes that
-convention inside a record `features/SOURCING.md` cleared as a source; 14 of 481
+convention inside a record `features/SOURCING.md` cleared as a source; 15 of 481
 records in a survey of this database's own witnesses carry the fingerprint
-(2.9%). `their_descriptions()` returns a list of English strings, so there is no
+(3.1%) -- 6 of them by the strong `label:` tell and 9 by description prose
+alone, which is the weaker claim and is counted separately for that reason.
+The fifteen are listed in `features/SOURCING.md` so the figure can be
+re-derived; it read 14 until 2026-08-10, when re-running the detector over
+the preserved corpus gave 15. `their_descriptions()` returns a list of English strings, so there is no
 object in this program a coordinate could be compared against -- the blind spot
 is a missing data type, not a missing branch.
 

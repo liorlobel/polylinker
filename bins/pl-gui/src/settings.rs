@@ -188,9 +188,9 @@ pub struct Layout {
     /// checkbox is the asking; the line beside it is the sentence.
     ///
     /// It changed nothing findable until 2026-08-10, and that was exactly why
-    /// it had to exist before it mattered. It matters now: the table holds 115
-    /// rows against 89 signatures, so turning this on adds 26 machine-extracted
-    /// records — 14 selection markers and 12 promoters, terminators and poly(A)
+    /// it had to exist before it mattered. It matters now: the table holds 110
+    /// rows against 89 signatures, so turning this on adds 21 machine-extracted
+    /// records — 14 selection markers and 7 promoters, terminators and poly(A)
     /// signals — that no human has read. Because the switch was built before it
     /// did anything, the difference between the two searches is still something
     /// the user chose rather than something that appeared.

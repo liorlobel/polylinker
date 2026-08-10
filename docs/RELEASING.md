@@ -89,8 +89,14 @@ One tag. Everything else follows from it.
 #    exactly one copy of it", which is what a reader would conclude from the
 #    [workspace.package] key alone -- and following it literally leaves a tree
 #    where step 4's tag check passes while every crate still demands the old
-#    version. Change them together, then let the lockfile follow:
-sed -i 's/version = "0.4.0"/version = "0.5.0"/g' Cargo.toml
+#    version. Change them together, then let the lockfile follow. The two
+#    numbers below are the release you are LEAVING and the one you are CUTTING
+#    -- substitute both; they are written concretely because a placeholder is
+#    the thing people paste by accident, and they are one release behind the
+#    moment a release lands:
+sed -i 's/version = "0.5.0"/version = "0.6.0"/g' Cargo.toml
+#    Then check it took, because a typo in the left-hand side is a silent no-op:
+grep -c 'version = "0.6.0"' Cargo.toml   # must print 17, and 0.5.0 must print 0
 cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
 #    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
 #    are the two files a tag does not update and nothing checks.
@@ -119,8 +125,8 @@ pwsh -NoProfile -File tools/ci.ps1
 
 # 4. Tag, on main, after the release commit has landed there. This is the only
 #    step that publishes anything.
-git tag -a v0.5.0 -m "Polylinker 0.5.0"
-git push origin v0.5.0
+git tag -a v0.6.0 -m "Polylinker 0.6.0"
+git push origin v0.6.0
 ```
 
 ### Step 2 is no longer the only thing standing between a tag and a red gate
@@ -411,7 +417,7 @@ a second copy of it.
 `dotnet tool` and there is no .NET SDK on the author's machine. It is therefore
 a *CI-time* dependency only: *one* MSI step in `tools/ci.ps1` — *the MSI
 installs, does what it says, uninstalls, and leaves nothing* — is preconditioned
-on `wix`, so a contributor without an SDK still runs the other seventy-one.
+on `wix`, so a contributor without an SDK still runs the other seventy-two.
 (The other two MSI steps do not need it. *The MSI is generated from the manifest
 and not from a second file list* calls `build-msi.ps1 -GenerateOnly`, which
 returns before the `wix` lookup, and is preconditioned on `dist/SHA256SUMS.txt`
