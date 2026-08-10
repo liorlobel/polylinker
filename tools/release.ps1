@@ -411,7 +411,7 @@ $notices = @(
     @{ From = 'bins/pl-gui/fonts/emoji-icon-font-MIT.txt'
        To   = 'licences/emoji-icon-font-MIT.txt' }         # emoji-icon-font
     @{ From = 'bins/pl-gui/fonts/Phosphor-MIT.txt'
-       To   = 'licences/Phosphor-MIT.txt' }                # Phosphor Icons Bold
+       To   = 'licences/phosphor-mit.txt' }                # Phosphor Icons Bold
     # SEVEN SINCE 2026-08-03, and this is the first entry NOT under
     # `bins/pl-gui/fonts/` -- which is exactly why it was missed, because the
     # array had been a list of everything in one directory.
