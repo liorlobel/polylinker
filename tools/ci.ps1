@@ -133,11 +133,31 @@ $started = Get-Date
 # A precondition returns $true to run, or a string to skip WITH A REASON, or
 # $false to skip with none. The string is not a label somebody attached to a
 # step: it is the return value of the test that failed, so 'not windows' cannot
-# be produced by anything except `-not $onWindows`. To write it falsely you
-# would have to hand-type the literal into a scriptblock sitting under the
-# step's own comment, in a reviewed diff, and then survive X2 in
-# `tools/reconcile-ledgers.ps1`, which requires every step to have RUN on at
-# least one platform.
+# be produced by anything except `-not $onWindows`. To write it falsely you have
+# to hand-type `WindowsOnly` into a scriptblock sitting under the step's own
+# comment, in a reviewed diff.
+#
+# AND THAT REVIEWED DIFF IS THE WHOLE OF THE DEFENCE, which this comment used to
+# deny. It said such an edit would additionally have "to survive X2 in
+# tools/reconcile-ledgers.ps1, which requires every step to have RUN on at least
+# one platform" -- true as a sentence and worthless as an obstacle, because a
+# portable step relabelled Windows-only GOES ON RUNNING ON WINDOWS and X2 asks
+# for nothing more than that. Measured, not reasoned: wrapping the precondition
+# of 'gel calibration spline vs SciPy' in `WindowsOnly` and reconciling the three
+# real ledgers of run 31359657821 with that one row changed on the Linux and
+# macOS legs gives "reconciled 3 legs, 72 steps each; every step ran on at least
+# one platform", exit 0. L1 does not fire (a reason was declared), L2 does not
+# (the platform agrees), L3 does not (it is not a corpus skip), and X1, X3 and X4
+# do not either. Two legs of coverage disappear and every check reports clean.
+#
+# So the honest statement of the boundary is this: the guard catches a step that
+# stops running for a reason NOBODY DECLARED, on any platform, which is the
+# failure that actually happens -- a wheel that stops building, a `pip install`
+# line edited in a hurry. It does not catch a human deciding to call a portable
+# step Windows-only. Nothing here can, without a second list of which steps ought
+# to run where, and `.github/ci-expected-skips.txt` sets out at length why that
+# list would be worse than the disease. What closes it is that `WindowsOnly` is
+# one identifier, greppable in seven places, and this file is reviewed.
 #
 # $false is deliberately still allowed and deliberately still fatal under
 # -ExpectedSkips: a missing SciPy, a missing node, a missing WiX has no entry
@@ -2000,6 +2020,44 @@ Step 'release script and its manifest' {
     if (-not (Test-Path "$($archive.FullName).sha256")) { throw 'the archive has no checksum sidecar' }
     $notHashed = @('SHA256SUMS.txt', $archive.Name, "$($archive.Name).sha256")
 
+    # THE ZIP, WHICH OFF WINDOWS THE DEFAULT DID NOT PRODUCE.
+    #
+    # The two steps below read a zip: entry order, pinned timestamps, one root
+    # directory. None of that is a Windows property -- the zip is hand-written
+    # in release.ps1 precisely because Compress-Archive cannot pin a timestamp
+    # -- and ENTRY ORDER in particular is the one assertion whose input differs
+    # per platform, because it is the order the filesystem enumerated. So the
+    # answer here is the same one `-ArchiveFormat` was invented for one section
+    # below, where a Windows machine builds the Unix container: off Windows,
+    # build the Windows one.
+    #
+    # On Windows this is the archive already built above and costs nothing; the
+    # extra `release.ps1` run happens on Linux and macOS only, where the
+    # workspace is already built and the run is a copy, a hash and a zip.
+    #
+    # UP HERE, ABOVE EVERY ASSERTION IN THIS STEP, and that placement is a fix
+    # rather than a tidy. `$script:zip` is what the two zip steps read, so while
+    # this sat at the foot of the step ANY throw above it left them reporting
+    # "no zip was produced" -- a sentence about the zip writer, describing a
+    # defect in the manifest arithmetic twenty lines earlier. Run 31359657821
+    # showed one failure as three that way, and run 31360902875 showed it again
+    # after the first cause was fixed and a second took its place. What the zip
+    # steps check is a property of the zip; they should not be able to fail for
+    # anything else. Nothing below this line is needed to build one.
+    if ($onWindows) {
+        $script:zipDir = $out
+        $script:zip = $archive.FullName
+    } else {
+        $zipOut = Join-Path $tmp ('pl-release-zip-' + $PID)
+        Remove-Item -Recurse -Force $zipOut -ErrorAction SilentlyContinue
+        & "$PSScriptRoot/release.ps1" -Out $zipOut -ArchiveFormat zip -Quiet 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'release.ps1 -ArchiveFormat zip failed' }
+        $z = @(Get-ChildItem -LiteralPath $zipOut -Filter '*.zip')
+        if ($z.Count -ne 1) { throw "release.ps1 -ArchiveFormat zip produced $($z.Count) zip(s), and one is expected" }
+        $script:zipDir = $zipOut
+        $script:zip = $z[0].FullName
+    }
+
     # `Get-DirectoryPrefix`, not `$out.Length + 1`. The same defect as in
     # `release.ps1`, in the check that exists to audit `release.ps1` -- so with
     # the script fixed and this line left alone, the runner would simply have
@@ -2028,8 +2086,9 @@ Step 'release script and its manifest' {
     if ($unhashed) { throw "shipped but not in the manifest: $($unhashed -join ', ')" }
 
     # A floor as well, because set equality alone is satisfied by a release of
-    # nothing agreeing with a manifest of nothing. Twenty is what the current
-    # `$artifacts` + `$notices` + installer produce; raise it when they grow.
+    # nothing agreeing with a manifest of nothing. Twenty-one is what the current
+    # `$artifacts` + `$notices` + installer produce ON WINDOWS; raise it when they
+    # grow.
     #
     # It read sixteen until 2026-08-05, by which time the release had been
     # eighteen files for a while: the floor had become two files of slack rather
@@ -2039,7 +2098,28 @@ Step 'release script and its manifest' {
     # the repository had been offering `MIT OR Apache-2.0` while shipping only
     # the Apache half; twenty-one is twenty plus licences/Inter-OFL.txt, added
     # on 2026-08-09 with the heading face.
-    if ($listed.Count -lt 21) { throw "only $($listed.Count) file(s) in the manifest; at least 21 are expected" }
+    #
+    # EIGHTEEN OFF WINDOWS, AND NOT TWENTY-ONE EVERYWHERE MINUS SLACK. This was a
+    # bare `21` and the macOS leg of run 31360902875 failed on it with "only 18
+    # file(s) in the manifest" -- correctly, because the Windows release carries
+    # three files no other platform gets: `Install-Polylinker.ps1`, `Install.cmd`
+    # and `polylinker.ico`, the installer set `release.ps1` ships behind
+    # `if ($onWindows)` and says at that block is deliberate rather than an
+    # oversight. (The read-me is a fourth Windows-only NAME but not a fourth
+    # file: README-WINDOWS.txt is swapped for README-LINUX.txt or
+    # README-MACOS.txt, one either way.)
+    #
+    # The tempting repair is to lower the number until it holds everywhere. That
+    # would buy a green macOS leg with three files of permanent slack on the
+    # platform the installer actually ships to, which is the platform whose
+    # release this floor exists to protect -- a weaker check running in three
+    # places instead of a strong one running in one. So the floor is exact on
+    # each platform and the difference between the two numbers is the list of
+    # files above, the same shape as `$floor` in the tar step below.
+    $minFiles = if ($onWindows) { 21 } else { 18 }
+    if ($listed.Count -lt $minFiles) {
+        throw "only $($listed.Count) file(s) in the manifest; at least $minFiles are expected here"
+    }
 
     # And the specific obligation named in NOTICE, spelled out once here because
     # this is the assertion whose failure is a licence violation rather than a
@@ -2053,34 +2133,6 @@ Step 'release script and its manifest' {
     if ($lic.Count -lt 8) { throw "only $($lic.Count) font licence text(s) shipped; NOTICE requires 8" }
     foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'LICENSE-MIT.txt', 'features/NOTICE.txt') {
         if ($listed -notcontains $required) { throw "$required did not ship" }
-    }
-
-    # THE ZIP, WHICH OFF WINDOWS THE DEFAULT DID NOT PRODUCE.
-    #
-    # The two steps below read a zip: entry order, pinned timestamps, one root
-    # directory. None of that is a Windows property -- the zip is hand-written
-    # in release.ps1 precisely because Compress-Archive cannot pin a timestamp
-    # -- and ENTRY ORDER in particular is the one assertion whose input differs
-    # per platform, because it is the order the filesystem enumerated. So the
-    # answer here is the same one `-ArchiveFormat` was invented for one section
-    # below, where a Windows machine builds the Unix container: off Windows,
-    # build the Windows one.
-    #
-    # On Windows this is the archive already built above and costs nothing; the
-    # extra `release.ps1` run happens on Linux and macOS only, where the
-    # workspace is already built and the run is a copy, a hash and a zip.
-    if ($onWindows) {
-        $script:zipDir = $out
-        $script:zip = $archive.FullName
-    } else {
-        $zipOut = Join-Path $tmp ('pl-release-zip-' + $PID)
-        Remove-Item -Recurse -Force $zipOut -ErrorAction SilentlyContinue
-        & "$PSScriptRoot/release.ps1" -Out $zipOut -ArchiveFormat zip -Quiet 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'release.ps1 -ArchiveFormat zip failed' }
-        $z = Get-ChildItem -LiteralPath $zipOut -Filter '*.zip'
-        if (-not $z) { throw 'release.ps1 -ArchiveFormat zip produced no zip' }
-        $script:zipDir = $zipOut
-        $script:zip = $z.FullName
     }
 
     Write-Host ("        $($listed.Count) file(s) hashed, $($lic.Count) licence texts, manifest verified; " +

@@ -27,7 +27,10 @@
           SAME order. Catches a step deleted or made conditional at file level
           on one platform, and catches two legs of the same platform being
           uploaded by mistake.
-      X2  Every step RAN on at least one platform. This is the anti-gaming rule.
+      X2  Every step RAN on at least one platform. NOT an anti-gaming rule --
+          a portable step relabelled Windows-only goes on running on Windows and
+          satisfies this; see the comment on Test-RanSomewhere for the
+          measurement. It catches a step that ran nowhere.
       X3  The steps that skipped for want of a corpus are the same set on all
           three legs. A corpus step that ran on one runner means somebody put
           lab plasmids on a runner, which is news; a corpus step skipping on one
@@ -179,8 +182,22 @@ function Test-Ledgers {
     return $problems
 }
 
-# X2: EVERY STEP RAN ON AT LEAST ONE PLATFORM. THE ANTI-GAMING RULE, and the
-# only one of the four that no leg could possibly check for itself.
+# X2: EVERY STEP RAN ON AT LEAST ONE PLATFORM. The only one of the four that no
+# leg could possibly check for itself.
+#
+# IT IS NOT AN ANTI-GAMING RULE, which is what this comment called it, and the
+# difference matters because the other files were leaning on the stronger claim.
+# X2 asks whether a step ran SOMEWHERE. A portable step relabelled Windows-only
+# still runs on Windows, so X2 is satisfied by the very leg the relabelling did
+# not touch. Measured against the three real ledgers of run 31359657821 with one
+# row changed on the Linux and macOS legs -- 'gel calibration spline vs SciPy'
+# from `ran` to `skipped / not windows`, exactly what wrapping its precondition
+# in `WindowsOnly` produces: "reconciled 3 legs, 72 steps each; every step ran on
+# at least one platform", exit 0. Two platforms of coverage gone, nothing red.
+#
+# What X2 does catch is a step that ran NOWHERE, which is a different and real
+# failure -- see the note on the self-test case below for why today's two-word
+# vocabulary makes it a backstop there rather than the first rule to fire.
 #
 # IT EXEMPTS THE CORPUS STEPS, and says so out loud rather than quietly not
 # checking them. Those five run on no runner on any platform, by design and for
