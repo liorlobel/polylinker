@@ -118,6 +118,12 @@ function Say($msg, $colour = 'Gray') { if (-not $Quiet) { Write-Host $msg -Foreg
 # `release.ps1 -Out dist` by .github/workflows/ci.yml, that would have silently
 # pointed at a different `dist`. So the path is made absolute the way PowerShell
 # resolves it first, and expanded second.
+#
+# `tools/ci.ps1` and `tools/installer/Install-Polylinker.ps1` carry copies -- the
+# installer because it ships alone inside the release zip with nothing to
+# dot-source. If you edit this function, edit those: the gate step
+# 'Get-DirectoryPrefix is one function copied, not three functions drifting'
+# finds every copy under tools/ by parsing and fails the build when they differ.
 function Get-DirectoryPrefix([string]$Path) {
     $abs = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $abs = [System.IO.Path]::GetFullPath($abs)

@@ -399,9 +399,15 @@ function Set-RegValueRaw {
 # not the PowerShell location. So the path is made absolute the way PowerShell
 # resolves it first, and expanded second.
 #
-# The same function is in `tools/release.ps1` and `tools/ci.ps1`. It is copied
-# rather than shared because this file SHIPS ALONE inside the release zip, next
-# to the payload it installs, with nothing to dot-source.
+# Copies of this function are in `tools/release.ps1` and `tools/ci.ps1`. It is
+# copied rather than shared because this file SHIPS ALONE inside the release zip,
+# next to the payload it installs, with nothing to dot-source.
+#
+# That they have not drifted apart is checked rather than hoped for, which
+# matters most for this copy: the two in tools/ are exercised by every gate run,
+# and this one is the one that reaches users. The gate step 'Get-DirectoryPrefix
+# is one function copied, not three functions drifting' compares all three, and
+# the step after it drives THIS file's definition over a real 8.3 alias.
 function Get-DirectoryPrefix([string]$Path) {
     $abs = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $abs = [System.IO.Path]::GetFullPath($abs)

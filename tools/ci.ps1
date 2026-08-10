@@ -118,8 +118,8 @@ function Step {
 function Have($cmd) { $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 # A DIRECTORY PATH IN THE SAME SPELLING `FileInfo.FullName` USES, with exactly
-# one trailing separator. The full reasoning is in `tools/release.ps1`, where the
-# identical function is defined and where the defect first fired; the short
+# one trailing separator. The full reasoning is in `tools/release.ps1`, where a
+# copy of this function is defined and where the defect first fired; the short
 # version is that `Resolve-Path` and the FileSystemProvider disagree about 8.3
 # aliases and about trailing separators, and every `Substring`/`StartsWith` on a
 # path in this file was silently assuming they did not.
@@ -128,6 +128,15 @@ function Have($cmd) { $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue)
 # this one, `release.ps1` and `installer/Install-Polylinker.ps1` -- are each
 # invoked directly and the installer additionally SHIPS ALONE, inside the release
 # zip, with nothing to dot-source. A copy in each is the cost of that.
+#
+# THAT THE COPIES ARE STILL THE SAME FUNCTION IS CHECKED, not asserted here. This
+# comment used to call `release.ps1`'s the "identical function" and nothing
+# compared them -- prose standing in for a check, which is this project's own
+# recurring defect sitting on top of the bug it describes. The step
+# 'Get-DirectoryPrefix is one function copied, not three functions drifting'
+# finds every definition under tools/ by parsing and compares them; the step
+# after it drives each one over a real 8.3 alias. Change this function and both
+# go red until the other copies follow.
 function Get-DirectoryPrefix([string]$Path) {
     $abs = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $abs = [System.IO.Path]::GetFullPath($abs)
@@ -1304,6 +1313,322 @@ Step 'renderers agree (rust replays it)' {
     # an integration test.
     cargo test -p pl-draw --test agreement
 } { Have node }
+
+Write-Host "`npath arithmetic (the helper three scripts each carry a copy of)" -ForegroundColor Cyan
+
+# THE COPIES OF `Get-DirectoryPrefix`, FOUND BY PARSING RATHER THAN BY PATH.
+#
+# `tools/ci.ps1`, `tools/release.ps1` and `tools/installer/Install-Polylinker.ps1`
+# each define this function, byte for byte. That duplication is deliberate and is
+# explained where each copy sits; the short version is that the installer SHIPS
+# ALONE inside the release zip -- `release.ps1` copies it to the archive root as a
+# single flat file, with nothing from `tools/` beside it -- so it cannot dot-source
+# a shared module that will not be there. A copy in each is the cost of that.
+#
+# Nothing scans by path. A fourth copy in a fifth script is exactly the thing this
+# is for, and a list of three known files would not see it. Line numbers are no
+# better: the three moved three times on 2026-08-10 alone.
+#
+# `-Recurse -Include` over the whole tools tree, and `git ls-files` says every
+# .ps1 and .psm1 in this repository is under it, so the tree is the whole search
+# space rather than a convenient subset of it.
+function Find-PrefixHelperCopies {
+    param([string]$ToolsDir)
+    $found = @()
+    foreach ($f in (Get-ChildItem -Path $ToolsDir -Recurse -File -Include *.ps1, *.psm1 | Sort-Object FullName)) {
+        $toks = $null
+        $errs = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$toks, [ref]$errs)
+        if ($errs) { throw "$($f.FullName) does not parse: $($errs[0])" }
+
+        # CALLERS, so that a copy DELETED is caught as what it is. The rot this
+        # section exists to stop is somebody tidying the duplication away into a
+        # dot-sourced module: the call sites stay, the definition goes, and the
+        # shipped installer dies on a user's machine at a command it no longer
+        # has. The floor below would notice the missing copy, but would report it
+        # as a count; this reports the actual mistake, and it also catches the case
+        # the floor cannot -- a NEW file that calls the helper without defining it,
+        # where all three original copies are still present and the count is fine.
+        # A CommandAst is a call; the mention in `build-msi.ps1` is inside a
+        # comment and is correctly not one.
+        $calls = @($ast.FindAll({ param($n)
+                    $n -is [System.Management.Automation.Language.CommandAst] -and
+                    $n.GetCommandName() -eq 'Get-DirectoryPrefix' }, $true))
+
+        $defs = @($ast.FindAll({ param($n)
+                    $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $n.Name -eq 'Get-DirectoryPrefix' }, $true))
+
+        if ($calls.Count -and -not $defs.Count) {
+            throw ("$($f.FullName) calls Get-DirectoryPrefix $($calls.Count) time(s) and does not define it. " +
+                   'If the definition has been moved to a shared file, note that the installer ships alone ' +
+                   'inside the release zip and can dot-source nothing.')
+        }
+
+        foreach ($d in $defs) {
+            # NORMALISED BY TOKENISING, not by hashing lines at fixed offsets.
+            # Dropping the Comment and NewLine tokens and joining the rest with a
+            # single space makes indentation, blank lines, CRLF-vs-LF-vs-CR and an
+            # added explanatory comment all invisible, while a changed argument or
+            # a dropped `TrimEnd` is not. Measured, all six of those perturbations:
+            # the first four compare equal and the last two do not.
+            #
+            # The whole definition is compared, not just the brace body: the
+            # parameter list is behaviour too, and `[string[]]$Path` instead of
+            # `[string]$Path` is drift a body-only comparison would wave through.
+            $inside = @($toks | Where-Object {
+                    $_.Extent.StartOffset -ge $d.Extent.StartOffset -and
+                    $_.Extent.EndOffset -le $d.Extent.EndOffset -and
+                    $_.Kind -ne [System.Management.Automation.Language.TokenKind]::Comment -and
+                    $_.Kind -ne [System.Management.Automation.Language.TokenKind]::NewLine })
+            $found += [pscustomobject]@{
+                Path   = $f.FullName.Substring($repo.Length + 1).Replace('\', '/')
+                Line   = $d.Extent.StartLineNumber
+                Text   = $d.Extent.Text
+                Tokens = @($inside | ForEach-Object { $_.Text })
+                Norm   = (@($inside | ForEach-Object { $_.Text }) -join ' ')
+            }
+        }
+    }
+    return $found
+}
+
+Step 'Get-DirectoryPrefix is one function copied, not three functions drifting' {
+    $copies = @(Find-PrefixHelperCopies (Join-Path $repo 'tools'))
+
+    # A FLOOR, because a scan that matched nothing would report ok. This is the
+    # same shape as the parse floor in 'every file the release reads is
+    # committed': the failure mode of a finder is finding nothing quietly.
+    if ($copies.Count -lt 3) {
+        throw ("only $($copies.Count) definition(s) of Get-DirectoryPrefix found under tools/; there are three " +
+               '(ci.ps1, release.ps1, installer/Install-Polylinker.ps1). One has been renamed or deleted, and ' +
+               'this guard has been protecting nothing since.')
+    }
+
+    # Grouped rather than compared pairwise, so the message can name the odd one
+    # out instead of reporting that two unnamed files differ.
+    $groups = @($copies | Group-Object -Property Norm | Sort-Object -Property @{ E = 'Count'; D = $true })
+    if ($groups.Count -gt 1) {
+        $ref = $groups[0]
+        $lines = @('the copies of Get-DirectoryPrefix have drifted apart.',
+                   "  agreed on by $($ref.Count): $(($ref.Group | ForEach-Object { "$($_.Path):$($_.Line)" }) -join ', ')")
+        foreach ($g in $groups[1..($groups.Count - 1)]) {
+            foreach ($c in $g.Group) {
+                # WHERE it disagrees, not merely that it does. The first differing
+                # token is what a reader needs; a dump of six lines they can
+                # already open in an editor is not.
+                $a = $ref.Group[0].Tokens
+                $b = $c.Tokens
+                $i = 0
+                while ($i -lt [Math]::Min($a.Count, $b.Count) -and $a[$i] -ceq $b[$i]) { $i++ }
+                $expect = if ($i -lt $a.Count) { "'$($a[$i])'" } else { '<end of function>' }
+                $actual = if ($i -lt $b.Count) { "'$($b[$i])'" } else { '<end of function>' }
+                $ctx = ($b[[Math]::Max(0, $i - 4)..[Math]::Min($b.Count - 1, $i + 4)]) -join ' '
+                $lines += "  $($c.Path):$($c.Line) differs at token $($i + 1): expected $expect, found $actual"
+                $lines += "      near: ... $ctx ..."
+            }
+        }
+        $lines += ('  The duplication is deliberate -- the installer ships alone in the release zip and can ' +
+                   'dot-source nothing -- so the fix is to bring the copies back into line, not to share them.')
+        throw ($lines -join "`n        ")
+    }
+
+    Write-Host ("        $($copies.Count) identical copies: " +
+                "$(($copies | ForEach-Object { "$($_.Path):$($_.Line)" }) -join ', ')") -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
+
+# A DIRECTORY REACHED THROUGH A REAL 8.3 ALIAS, DISCOVERED RATHER THAN CREATED.
+#
+# 8.3 alias creation is a per-volume setting and it is off on this machine:
+# measured, a freshly created `...\pl-mint-attempt-longname-23076` has a ShortPath
+# equal to its long path, so the case cannot be minted on demand. What CAN be done
+# is to ask the OS for the short spelling of a directory that already has one.
+# Measured here: `C:\ProgramData` -> `C:\PROGRA~3`, `C:\Program Files` ->
+# `C:\PROGRA~1`. ProgramData is also writable without elevation, which is what
+# makes a self-contained tree with known names possible; Program Files is not, and
+# is deliberately not a candidate.
+#
+# Two ways in, because either alone has a hole. A path may ALREADY be spelled with
+# an alias -- the real-world case, and the one that matters most: a GitHub
+# runner's `$env:TEMP` is `C:\Users\RUNNER~1\AppData\Local\Temp` over a real
+# `runneradmin`. Or it may have an alias that nothing has spelled, which is
+# ProgramData here and needs `Scripting.FileSystemObject` to reveal.
+#
+# THE INCIDENTAL COVERAGE THIS REPLACES. Because a runner's `$env:TEMP` carries an
+# alias, 'release script and its manifest' has been exercising this defect for
+# real on every CI run -- that is how run 31325886841 found it. But that coverage
+# is an accident of how GitHub names its build account. Rename `runneradmin` to
+# something that fits in 8.3 and the alias case stops being tested, every gate
+# stays green, and nothing reports the loss. This step is what reports it: it
+# names the case it needs, and if it cannot find one it SKIPs -- and on the runner
+# a skip is a build failure, because the skip list is set equality in both
+# directions and this step is deliberately not on it.
+$script:aliasSubject = $null
+$script:aliasWhy = @()
+$aliasFso = $null
+$aliasCandidates = @()
+# Guarded, each on one line with its own test, for the reason the step named 'the
+# cross-platform scripts touch no Windows-only environment variable unguarded'
+# gives at length: off Windows these are absent, not empty.
+if ($env:TEMP) { $aliasCandidates += $env:TEMP }
+if ($env:ProgramData) { $aliasCandidates += $env:ProgramData }
+if ($env:LOCALAPPDATA) { $aliasCandidates += $env:LOCALAPPDATA }
+foreach ($cand in $aliasCandidates) {
+    if (-not (Test-Path -LiteralPath $cand)) { $script:aliasWhy += "$cand does not exist"; continue }
+    $spellings = @($cand)
+    if ($null -eq $aliasFso) {
+        try { $aliasFso = New-Object -ComObject Scripting.FileSystemObject } catch { $aliasFso = $false }
+    }
+    if ($aliasFso) { try { $spellings += $aliasFso.GetFolder($cand).ShortPath } catch { } }
+
+    # The test for "this spelling carries an alias" is that GetFullPath CHANGES
+    # it -- not that the string contains a `~`. A directory may legitimately be
+    # named with one, and would then be mistaken for an alias that expands to
+    # itself: a subject on which old and new arithmetic agree, which is precisely
+    # the subject that proves nothing.
+    $aliased = @($spellings | Where-Object { $_ -and [System.IO.Path]::GetFullPath($_) -cne $_ })[0]
+    if (-not $aliased) { $script:aliasWhy += "$cand has no 8.3 alias in any component"; continue }
+
+    $probe = Join-Path $aliased ('pl-83-check-' + $PID)
+    try {
+        New-Item -ItemType Directory -Force -Path (Join-Path $probe 'features') -ErrorAction Stop | Out-Null
+        Set-Content -LiteralPath (Join-Path $probe 'features/NOTICE.txt') -Value 'notice' -ErrorAction Stop
+        Set-Content -LiteralPath (Join-Path $probe 'top.txt') -Value 'top' -ErrorAction Stop
+        $script:aliasSubject = $probe
+        break
+    } catch {
+        Remove-Item -Recurse -Force $probe -ErrorAction SilentlyContinue
+        $script:aliasWhy += "$aliased carries an alias but is not writable ($($_.Exception.GetType().Name))"
+    }
+}
+if ($aliasFso) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($aliasFso) }
+
+Step 'the helper unmangles a real 8.3 alias and the arithmetic it replaced does not' {
+    try {
+        $sep = [System.IO.Path]::DirectorySeparatorChar
+        $subject = $script:aliasSubject
+        $longRoot = [System.IO.Path]::GetFullPath($subject)
+        # `features/NOTICE.txt` on purpose: run 31325886841 died reporting
+        # `pl-release-check-6584\84\features\NOTICE.txt`, and a subject shaped like
+        # the original failure makes the old arithmetic's output recognisable.
+        $expected = 'features/NOTICE.txt', 'top.txt'
+        $problems = @()
+
+        # EVERY COPY IS DRIVEN, not just this file's. The drift guard above proves
+        # the three agree; this proves what they agree ON, and extracting each
+        # definition means neither step has to be believed on the other's word. It
+        # is also the only way the shipped installer's copy -- the user-facing one,
+        # and the likeliest to be forgotten -- gets its behaviour tested without
+        # running an installer.
+        #
+        # WHAT THIS STEP DOES NOT COVER, so that a green line here is not read as
+        # more than it is: it drives the DEFINITIONS. A CALL SITE that stops using
+        # the helper and goes back to doing the arithmetic inline is invisible
+        # here, because there is then no definition carrying the defect to
+        # extract. Measured rather than reasoned: reverting `release.ps1`'s
+        # `$outFull` to `(Resolve-Path $Out).Path` with
+        # `Substring($outFull.Length + 1)` left both steps in this section green,
+        # and was caught one section down by 'release script and its manifest',
+        # which died on `pl-release-check-44516\EADME-WINDOWS.txt`. That division
+        # of labour is deliberate -- that step hands `release.ps1` an `-Out` with
+        # a trailing separator precisely so a call site cannot regress unwatched
+        # -- but it is why this step's name says "the helper" and not "the
+        # repository's path arithmetic".
+        $copies = @(Find-PrefixHelperCopies (Join-Path $repo 'tools'))
+
+        # THE SAME FLOOR THE DRIFT GUARD HAS. The first draft of this step did not
+        # have one: with `Find-PrefixHelperCopies` returning nothing the loop below
+        # runs zero times, `$problems` stays empty and the step reports ok -- a
+        # step that silently passes when it could not test anything, inside the
+        # step whose whole purpose is to stop that. It surfaced while writing the
+        # injection that renames the function away, before that injection was run,
+        # which is an argument for writing the injections rather than only the
+        # checks. With the floor in place that injection fails here as it should.
+        if ($copies.Count -lt 3) {
+            throw ("only $($copies.Count) definition(s) of Get-DirectoryPrefix found under tools/; there are " +
+                   'three, so this step drove nothing and proved nothing')
+        }
+        $demonstrated = 0
+
+        foreach ($copy in $copies) {
+            $invoke = [ScriptBlock]::Create($copy.Text + "`nGet-DirectoryPrefix `$args[0]")
+
+            # Both spellings. The bare alias is the runner's `$env:TEMP`; the alias
+            # WITH a trailing separator is what cmd's `%~dp0` hands `-Source`, which
+            # the installer documents as carrying both defects at once. The helper
+            # must return the identical string for the two.
+            foreach ($given in @($subject, ($subject + $sep))) {
+                $prefix = & $invoke $given
+                $old = (Resolve-Path -LiteralPath $given).Path   # what the code did before 2026-08-09
+
+                if ($prefix -cne ($longRoot + $sep)) {
+                    $problems += "$($copy.Path): given '$given' the prefix was '$prefix', expected '$longRoot$sep'"
+                    continue
+                }
+
+                # THE SUBJECT MUST ACTUALLY CARRY THE DISAGREEMENT. Without this, a
+                # machine whose candidates had no alias would run the whole
+                # comparison over a path where old and new agree and report ok
+                # having tested nothing -- the exact failure this step exists to
+                # prevent, reproduced inside the step.
+                if ($old.TrimEnd($sep).Length -eq $longRoot.Length) {
+                    $problems += ("$($copy.Path): '$given' and '$longRoot' are the same length, so no Substring " +
+                                  'could have been wrong here and this comparison proved nothing')
+                    continue
+                }
+
+                $newNames = @()
+                $oldNames = @()
+                foreach ($f in (Get-ChildItem -LiteralPath $given -Recurse -File)) {
+                    $newNames += $f.FullName.Substring($prefix.Length).Replace('\', '/')
+                    $oldNames += $f.FullName.Substring($old.Length + 1).Replace('\', '/')
+                }
+                $newNames = @($newNames | Sort-Object)
+                $oldNames = @($oldNames | Sort-Object)
+
+                if (($newNames -join '|') -cne ($expected -join '|')) {
+                    $problems += ("$($copy.Path): given '$given' the names came back " +
+                                  "'$($newNames -join ', ')', expected '$($expected -join ', ')'")
+                }
+
+                # AND THE OTHER HALF, which is what makes this a test rather than a
+                # tautology: the arithmetic the helper replaced must still be WRONG
+                # on this input. `(Resolve-Path).Path` with `Length + 1` is verbatim
+                # what release.ps1 did until 2026-08-09. If it agrees with the
+                # helper then the input carried no alias, and the assertion above
+                # was satisfied by an accident rather than by the fix.
+                if (($oldNames -join '|') -ceq ($newNames -join '|')) {
+                    $problems += ("$($copy.Path): given '$given' the OLD Resolve-Path arithmetic agreed with the " +
+                                  'helper, so this input never exercised the defect')
+                } else {
+                    $demonstrated++
+                    if ($given -eq $subject -and $copy.Path -eq 'tools/ci.ps1') {
+                        Write-Host "        old arithmetic on '$given' -> $($oldNames -join ', ')" -ForegroundColor DarkGray
+                    }
+                }
+            }
+        }
+        if ($problems) { throw ($problems -join "`n        ") }
+
+        # AND THE COUNT, so that a comparison skipped by a `continue` above cannot
+        # leave the step reporting ok for work it did not do. Two spellings per
+        # copy, every copy.
+        if ($demonstrated -ne $copies.Count * 2) {
+            throw ("$demonstrated of the expected $($copies.Count * 2) comparisons actually ran; the rest were " +
+                   'skipped, so this step is reporting on less than it claims')
+        }
+        Write-Host ("        $demonstrated comparisons over $($copies.Count) copies; " +
+                    "the helper on the same input -> $($expected -join ', ')") -ForegroundColor DarkGray
+        $global:LASTEXITCODE = 0
+    } finally {
+        Remove-Item -Recurse -Force $script:aliasSubject -ErrorAction SilentlyContinue
+    }
+} { $null -ne $script:aliasSubject }
+if (-not $script:aliasSubject) {
+    Write-Host ('        no directory here is reachable through an 8.3 alias, so the case cannot be exercised: ' +
+                ($script:aliasWhy -join '; ')) -ForegroundColor DarkGray
+}
 
 # This heading said "benchmark" while the two steps under it were the release
 # script and its manifest, because the benchmark used to be the only thing here.
