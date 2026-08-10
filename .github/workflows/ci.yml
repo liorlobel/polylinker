@@ -200,8 +200,16 @@ jobs:
       # installed identically on all three legs, deliberately: a missing wheel
       # on one platform is a step that skips with no declared reason there, and
       # -ExpectedSkips turns that into a red build rather than a grey line.
+      # INJECTION (do not merge). The Linux leg stops installing SciPy, which is
+      # the "a `pip install` line edited in a hurry" that ci.ps1's own skip
+      # discipline names as the thing it exists to catch.
       - name: Install the oracles
+        if: runner.os != 'Linux'
         run: pip install biopython seguid pydna pillow fonttools resvg-py numpy scipy pymupdf pypdf PyYAML
+
+      - name: Install the oracles
+        if: runner.os == 'Linux'
+        run: pip install biopython seguid pydna pillow fonttools resvg-py numpy pymupdf pypdf PyYAML
 
       # `node --test --experimental-strip-types test/*.test.ts` needs Node 22.6
       # or newer, and `Have node` is true on any of them -- so on an image with
