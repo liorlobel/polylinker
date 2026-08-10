@@ -1961,8 +1961,45 @@ Step 'release script and its manifest' {
     # manifest says, in both directions, and `release.ps1` already refuses to
     # build a copy whose notice SOURCES are missing.
     #
-    # The zip and its checksum sidecar are the two files that cannot be in the
-    # manifest, because they are built from it.
+    # THE ARCHIVE AND ITS CHECKSUM SIDECAR are the two files that cannot be in
+    # the manifest, because they are built from it. They are found FIRST and
+    # excluded BY NAME, and both halves of that sentence are the fix for a real
+    # failure rather than tidying.
+    #
+    # This used to read `-notlike '*.zip' -and -notlike '*.zip.sha256'`, a suffix
+    # list written when the only platform the gate ran on was the only platform
+    # whose default container is a zip. On the first Linux and macOS runs of this
+    # step -- run 31359657821 -- the default container was
+    # `polylinker-0.4.0-linux-x64.tar.gz`, no `-notlike` matched it, and the set
+    # equality below reported the archive and its sidecar as "shipped but not in
+    # the manifest". A second suffix in that list would have fixed the symptom
+    # and left the next container format to find the same way, so the list is
+    # gone: `$archive` below is what `release.ps1` actually produced, and it is
+    # that name -- not a pattern that might match it -- which is excluded.
+    #
+    # The discovery moved UP from below the comparison rather than the exclusion
+    # moving down, because `$archive` is also what the two zip steps read: with
+    # the throw above them, they reported "no zip was produced" on both legs and
+    # the real defect was one line further up. A step that dies before it sets
+    # what three later steps need turns one failure into three.
+    #
+    # THE CONTAINER release.ps1 CHOOSES BY DEFAULT ON THIS PLATFORM, and the
+    # default is the thing under test rather than an inconvenience to route
+    # around: `.github/workflows/release.yml` runs `./tools/release.ps1 -Out
+    # dist` on all three runners with no -ArchiveFormat, so the default IS what
+    # ships. This line read `'*.zip'` and 'no Windows zip was produced', which
+    # was true of the only platform it ever ran on and would have been a
+    # confident lie on the other two.
+    $wantArchive = if ($onWindows) { '*.zip' } else { '*.tar.gz' }
+    $archive = @(Get-ChildItem -LiteralPath $out -Filter $wantArchive)
+    if ($archive.Count -ne 1) {
+        throw ("release.ps1's default archive format produced $($archive.Count) $wantArchive here, and " +
+               'exactly one is expected; release.yml relies on that default')
+    }
+    $archive = $archive[0]
+    if (-not (Test-Path "$($archive.FullName).sha256")) { throw 'the archive has no checksum sidecar' }
+    $notHashed = @('SHA256SUMS.txt', $archive.Name, "$($archive.Name).sha256")
+
     # `Get-DirectoryPrefix`, not `$out.Length + 1`. The same defect as in
     # `release.ps1`, in the check that exists to audit `release.ps1` -- so with
     # the script fixed and this line left alone, the runner would simply have
@@ -1986,7 +2023,7 @@ Step 'release script and its manifest' {
             }
             $_.FullName.Substring($outPrefix.Length).Replace('\', '/')
         } |
-        Where-Object { $_ -ne 'SHA256SUMS.txt' -and $_ -notlike '*.zip' -and $_ -notlike '*.zip.sha256' }
+        Where-Object { $notHashed -notcontains $_ }
     $unhashed = @($onDisk | Where-Object { $listed -notcontains $_ })
     if ($unhashed) { throw "shipped but not in the manifest: $($unhashed -join ', ')" }
 
@@ -2017,20 +2054,6 @@ Step 'release script and its manifest' {
     foreach ($required in 'NOTICE.txt', 'LICENSE.txt', 'LICENSE-MIT.txt', 'features/NOTICE.txt') {
         if ($listed -notcontains $required) { throw "$required did not ship" }
     }
-
-    # THE CONTAINER release.ps1 CHOOSES BY DEFAULT ON THIS PLATFORM, and the
-    # default is the thing under test rather than an inconvenience to route
-    # around: `.github/workflows/release.yml` runs `./tools/release.ps1 -Out
-    # dist` on all three runners with no -ArchiveFormat, so the default IS what
-    # ships. This line read `'*.zip'` and 'no Windows zip was produced', which
-    # was true of the only platform it ever ran on and would have been a
-    # confident lie on the other two.
-    $wantArchive = if ($onWindows) { '*.zip' } else { '*.tar.gz' }
-    $archive = Get-ChildItem -LiteralPath $out -Filter $wantArchive
-    if (-not $archive) {
-        throw "release.ps1's default archive format produced no $wantArchive here; release.yml relies on that default"
-    }
-    if (-not (Test-Path "$($archive.FullName).sha256")) { throw 'the archive has no checksum sidecar' }
 
     # THE ZIP, WHICH OFF WINDOWS THE DEFAULT DID NOT PRODUCE.
     #
@@ -2740,7 +2763,22 @@ function Find-Tars {
         $k = [System.IO.Path]::GetFullPath($f).ToLowerInvariant()
         if (-not $seen.Contains($k)) { $seen[$k] = $true; $out += $f }
     }
-    return $out
+    # `,$out`, AND THE COMMA IS THE WHOLE FIX. PowerShell unrolls a returned
+    # array, so a one-element array comes back as the bare STRING it held -- and
+    # a string has a .Count of 1 and indexes by character. That is not a
+    # theoretical hazard: on macOS `Get-Command tar -All` finds exactly
+    # `/usr/bin/tar`, the four Windows candidate paths below are all absent, and
+    # `$tools[$i]` in the step below evaluated to `/`. Run 31359657821 failed
+    # with "The term '/' is not recognized as a name of a cmdlet".
+    #
+    # It could not fire anywhere it had ever run. Windows has two tars -- System32's
+    # bsdtar and Git for Windows' GNU tar -- so this always returned a real array
+    # there, and Ubuntu has two paths to one GNU tar (`/usr/bin/tar` and
+    # `/bin/tar`, which this does not dedup because `GetFullPath` does not resolve
+    # the `/bin` -> `/usr/bin` symlink). macOS, with one, was the first machine to
+    # take the branch. The comma wraps the array in an outer array, which is what
+    # gets unrolled instead.
+    return ,$out
 }
 
 Step 'the tar.gz writer produces an archive other tar implementations can read' {
