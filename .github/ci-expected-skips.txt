@@ -26,8 +26,28 @@
 # one helper in `tools/ci.ps1` that owns the string 'not windows' -- and the
 # gate checks that string against `$IsWindows` rather than believing it: on
 # Windows the string is a failure, and off Windows a step that does NOT return
-# it must run. There is no line anybody can add anywhere to quiet a platform
-# skip. See 'THE SKIP DISCIPLINE' at the foot of `tools/ci.ps1` for the three
+# it must run. NO LINE IN THIS FILE CAN QUIET A PLATFORM SKIP -- that is what the
+# split buys, and it is the whole of what it buys.
+#
+# THE SENTENCE HERE USED TO BE BROADER AND WAS WRONG. It read "there is no line
+# anybody can add ANYWHERE to quiet a platform skip", and there is: `WindowsOnly`
+# in a portable step's own precondition. Measured on 2026-08-10, by doing it to
+# 'gel calibration spline vs SciPy' and pushing -- run 31361991651, whose Linux
+# leg reported 5 corpus and EIGHT 'not windows' skips where the honest count is
+# seven, and PASSED. Every rule was satisfied: the reason was declared (L1), it
+# agreed with the platform (L2), it was not a corpus skip (L3), and the step had
+# still run on Windows so the reconciler's X2 was satisfied too. Two platforms of
+# coverage gone, nothing red anywhere.
+#
+# So the boundary, stated as it actually is: these rules catch a step that stops
+# running for a reason NOBODY DECLARED -- a wheel that stops building, a
+# `pip install` line edited in a hurry, which is the failure that happens. They
+# do not catch a human deciding to call a portable step Windows-only. Nothing
+# mechanical can, short of the second list this file exists to argue against.
+# What holds it is that `WindowsOnly` is one greppable identifier appearing in
+# seven places, and `tools/ci.ps1` is reviewed.
+#
+# See 'THE SKIP DISCIPLINE' at the foot of `tools/ci.ps1` for the three
 # per-leg rules, and `tools/reconcile-ledgers.ps1` for the four cross-leg ones,
 # which include the only check that can see a step skipping on all three.
 #
