@@ -25,19 +25,109 @@ which.
 
 ## [Unreleased]
 
-Nothing here changes what Polylinker does. It changes what "CI is green" is
-worth, which is why it is written down rather than left in a commit message.
+Nothing yet.
+
+## [0.5.0] - 2026-08-10
+
+**Nothing in this release changes what Polylinker does to a sequence.** No
+parser, no renderer, no digest, no annotation and no file format is touched.
+What changes is what "CI is green" is worth: for six releases it was worth
+nothing, because the gate `docs/RELEASING.md` names before tagging was run by
+no workflow at all, and the number that gate produces was a terminal on one
+Windows machine.
+
+One thing here is user-facing, and it is first for that reason.
 
 ### Fixed
 
-- **The gate now runs in CI.** `tools/ci.ps1` is a 70-step gate and
-  [`docs/RELEASING.md`](docs/RELEASING.md) names it as the thing to run before
-  tagging. **No workflow invoked it.** It appeared in
+- **The Windows installer refused a correct download as incomplete.**
+  `Install-Polylinker.ps1` checks the extracted files against
+  `SHA256SUMS.txt` before it installs anything, and it built the relative name
+  of each file by subtracting the source directory's path from
+  `FileInfo.FullName` — two strings produced by two different normalisers.
+  `Resolve-Path` hands back the string it was given; `Get-ChildItem` reports
+  what the volume holds. Where those differ, every name came out wrong, nothing
+  matched the manifest, and the installer stopped with *"this copy is
+  incomplete — 21 file(s) the manifest lists are not here"* over a download in
+  which all 21 were present.
+
+  They differ in two measured ways. An **8.3 short name** anywhere in the path
+  is shorter than what the volume reports — `C:\PROGRA~1` is 11 characters and
+  `C:\Program Files` is 16 — so the subtraction left the tail of the source
+  directory welded to the front of every filename. A **trailing separator**
+  needs no alias at all and reproduces on any machine: `Substring(len + 1)` cut
+  one character too many, and `a.txt` came back as `.txt`.
+
+  Which invocations were exposed is measured rather than assumed, because the
+  first draft of the fix's own comment got it wrong. Running the installer the
+  way `README-WINDOWS.txt` and `Install.cmd` tell you to is **safe**: `-Source`
+  defaults to `$PSScriptRoot`, and PowerShell hands that over already expanded
+  and without a trailing separator, on 5.1 and on 7 alike. What is exposed is
+  an explicit `-Source`, and the obvious thing a wrapper script passes to it is
+  cmd's `%~dp0`, which carries both defects at once — the alias verbatim and a
+  trailing backslash always.
+
+  The same wrong subtraction sat in two more places in that file, where the
+  failure would have been worse than a refusal: an uninstall decides whether to
+  copy itself out of the directory it is about to delete by asking whether
+  `$PSCommandPath` is under `$Prefix`, and `Stop-IfRunning` decides whether the
+  app is running out of the prefix by comparing against `Process.Path`. Windows
+  reports both of those expanded, so a short `$Prefix` answered "no" to both:
+  the uninstaller would have been deleting its own running file, and an upgrade
+  would have overwritten files mapped into a running process instead of
+  refusing. All of it now goes through one `Get-DirectoryPrefix`.
+
+- **What did *not* reach a shipped release, said plainly rather than left to be
+  inferred.** Two defects of the same family turned up beside the one above,
+  and the reason neither touched a published artifact is where they could
+  reach, not luck.
+
+  The same path arithmetic was in `tools/release.ps1`.
+  `.github/workflows/release.yml` invokes that script as
+  `release.ps1 -Out dist` — a relative path, resolved under the runner's
+  workspace, which carries no 8.3 component — so the defect had nothing to bite
+  on there. Checked rather than reasoned: the Windows archive published for
+  v0.4.0 verifies against its own manifest, all 21 entries matching the bytes.
+
+  Separately, `RUSTFLAGS: -D warnings` set at workflow level was *replacing*
+  `.cargo/config.toml`'s `-C target-feature=+crt-static` rather than merging
+  with it, putting a VC++ redistributable dependency back into anything built
+  under it — a dependency whose installer needs administrator rights, which the
+  user this project is aimed at does not have. That was in `ci.yml` only;
+  `release.yml` has never set `RUSTFLAGS`, so no shipped binary ever carried
+  it. Both were found because the gate started running in the places where the
+  defects were reachable.
+
+- **The gate now runs in CI, on all three platforms.** `tools/ci.ps1` is a
+  72-step gate and [`docs/RELEASING.md`](docs/RELEASING.md) names it as the
+  thing to run before tagging. **No workflow invoked it.** It appeared in
   `.github/workflows/ci.yml` six times and every one of those was on a comment
   line, so from v0.1.2 until now it had been failing on a clean tree and
   nothing reported that: 0.1.2, 0.1.3, 0.2.0, 0.3.0, 0.3.1 and 0.3.2 were all
-  tagged with it red. `ci.yml` has a `gate` job now, on `windows-latest`, and a
-  red gate is a red build.
+  tagged with it red. `ci.yml` has a `gate` job now — `windows-latest`,
+  `ubuntu-latest` and `macos-latest`, `fail-fast: false` — and a red gate is a
+  red build.
+
+  The three legs of that job, read out of the per-leg ledgers of run
+  31364592031 — this release's parent commit — rather than described:
+
+  | Leg | Steps | Ran | Skipped | `not windows` | corpus |
+  |---|---|---|---|---|---|
+  | `windows-latest` | 72 | 67 | 5 | 0 | 5 |
+  | `ubuntu-latest` | 72 | 60 | 12 | 7 | 5 |
+  | `macos-latest` | 72 | 60 | 12 | 7 | 5 |
+
+  **The port did not weaken the Windows leg**, which is the leg that has been
+  standing between a mistake and a published release: 67 steps ran before it
+  and 67 ran after, the same five skipped for want of a corpus both times, and
+  the two lists of what ran differ on two names — both of them renames of a
+  step that ran either way. It was done by spelling rather than by skipping: an
+  `$exe` suffix for 25 hardcoded `pl.exe` sites, `[IO.Path]::GetTempPath()` for
+  17 unguarded `$env:TEMP` uses, a three-way `.pyd`/`.so`/`.dylib` table,
+  `tar$exe`. Two things nothing had ever exercised now run for real: the tar.gz
+  writer, on the two platforms whose users are the reason it exists; and the
+  zip's "entry order is sorted" claim, which off Windows is fed ext4 and APFS
+  enumeration orders instead of only NTFS's.
 
 - **The gate's skips are checked, not printed.** A step whose tooling is
   missing SKIPs rather than failing — right on a workstation, dangerous on a
@@ -46,9 +136,9 @@ worth, which is why it is written down rather than left in a commit message.
   chromatogram oracles, digest versus Biopython on real plasmids, the
   Rust-versus-Python reader, and the MSI install test. The job now installs
   what a runner can be given — eleven Python oracles, Node 24, the
-  `wasm32-unknown-unknown` target, the WiX Toolset, the TypeScript toolchain,
-  and a `dist/` for the MSI steps to read — and passes `-ExpectedSkips`, a new
-  parameter that fails the run on any difference from
+  `wasm32-unknown-unknown` target, the TypeScript toolchain, and on Windows the
+  WiX Toolset and a `dist/` for the MSI steps to read — and passes
+  `-ExpectedSkips`, a new parameter that fails the run on any difference from
   [`.github/ci-expected-skips.txt`](.github/ci-expected-skips.txt) in either
   direction. Set equality, not a count: a count of five is satisfied by the
   wrong five skipping, and a name matching no step in the gate is itself a
@@ -56,27 +146,88 @@ worth, which is why it is written down rather than left in a commit message.
 
   Five of the six skips remain, and they are one skip five times: those steps
   need real `.dna` and `.ab1` files, and a lab's plasmids are not ours to
-  publish. The sixth, the MSI install-and-uninstall test, now runs on every
-  push — the only check that puts a real `msiexec` against a real registry, and
-  until now its first execution on any given release was after the tag.
+  publish. It is the same five on all three legs, which is why that file needs
+  no platform column. The sixth, the MSI install-and-uninstall test, now runs
+  on every push — the only check that puts a real `msiexec` against a real
+  registry, and until now its first execution on any given release was after
+  the tag.
 
 - **Three gate steps that had never run in CI at all now do**, because each
-  needs a Python package the existing `oracles` job does not install: the gel
-  calibration spline against SciPy, *PDF is a PDF, and matches the SVG* against
-  PyMuPDF and pypdf, and the step that parses `release.yml` with PyYAML.
+  needs a Python package the existing `oracles` job does not install: *gel
+  calibration spline vs SciPy*, *PDF is a PDF, and matches the SVG* against
+  PyMuPDF and pypdf, and *the release workflow parses and covers three
+  platforms*, which parses `release.yml` with PyYAML.
+
+- **`Get-DirectoryPrefix` is one function copied three times, and that is now
+  checked rather than asserted.** It is defined in `tools/ci.ps1`,
+  `tools/release.ps1` and `tools/installer/Install-Polylinker.ps1`, and the
+  duplication is legitimate and stays: `release.ps1` copies the installer into
+  the archive root as a single flat file with nothing beside it to dot-source.
+  What was missing is that nothing compared the copies while `ci.ps1`'s comment
+  called `release.ps1`'s the "identical function" — prose standing in for a
+  check, sitting directly on top of the defect above. Two steps hold it now.
+  One finds every definition under `tools/` by parsing rather than by path,
+  and compares the bodies as token streams, so a reformat is invisible and a
+  dropped `TrimEnd` is not. The other is the one that matters, because three
+  identically wrong copies pass a drift guard: it drives each extracted
+  definition over a **real** 8.3 alias, discovered on the machine rather than
+  minted, and requires the arithmetic it replaced to still come back mangled on
+  the same input.
+
+### Added
+
+- **A `reconcile` job, because no leg of a matrix can see the others.** Each
+  leg writes a ledger — every step, `ran` or `skipped`, and the reason a skip
+  gave for itself — and `tools/reconcile-ledgers.ps1` compares the three. It is
+  the only place a step that skipped on **all three** platforms can be seen
+  (`not windows` on two legs is only honest if the third ran it), and the only
+  place a step deleted from one leg at file level can be seen. The job runs the
+  reconciler's own self-test first, because a reconciler whose parser stopped
+  matching reports every push clean.
 
 ### Changed
 
 - **`ci.yml`'s `test` matrix drops `windows-latest`** and runs on
-  `ubuntu-latest` and `macos-latest`. Every step in that leg is run by the
-  `gate` job on the same runner image, which is duplication rather than
-  platform coverage — `tools/ci.ps1` is a Windows script and cannot run on the
-  other two, which is exactly why they stay. What that cost is stated in the
-  workflow: those steps passed `--locked` and the gate does not, so the
-  lockfile check now rides on the two remaining runners plus `msrv` and `wasm`
-  (lock drift is a property of the tree, not of the operating system), and
-  `pl-draw/tests/memory.rs` and `pl-features/tests/schema_pin.rs` run on two
-  platforms instead of three.
+  `ubuntu-latest` and `macos-latest`. That leg was the one piece of genuine
+  duplication, because the `gate` job runs those steps on the same runner
+  image. What it is **not** is a copy of the gate, and the cost is stated in
+  the workflow rather than glossed: every cargo invocation in `test` passes
+  `--locked` and no cargo invocation in the gate does, so a rewritten lockfile
+  is a red build there and nowhere else, and `pl-draw/tests/memory.rs` and
+  `pl-features/tests/schema_pin.rs` are run by no step in the gate at all. Lock
+  drift is a property of the tree and not of an operating system, and the two
+  suites count `Layout` sizes and compare a Python file to a Rust constant, so
+  none of the three has an operating system in it; they run on two platforms
+  now instead of three. `tools/ci.ps1`'s step *every integration suite is run
+  by a gate* is what keeps that division honest — it reads the tree, and every
+  `tests/*.rs` target under `crates/` and `bins/` must be run, whole, by one of
+  the two files.
+
+### Known limitations at this release
+
+- **A mislabelled skip is held by review alone, and nothing mechanical catches
+  it.** The skip rules catch a step that stops running for a reason *nobody
+  declared* — a wheel that stops building, a `pip install` line edited in a
+  hurry — which is the failure that actually happens. They do not catch a human
+  hand-writing `WindowsOnly` into a portable step's own precondition. Such a
+  step goes on running on Windows, so every per-leg rule is satisfied (the
+  reason was declared, it agrees with the platform, it is not a corpus skip)
+  and so is the reconciler's requirement that every step ran somewhere. Two
+  platforms of coverage disappear and nothing anywhere turns red.
+
+  This is measured, not reasoned. It was done on purpose to *gel calibration
+  spline vs SciPy* and pushed: run 31361991651's Linux leg
+  reported **eight** `not windows` skips where seven is the honest count, and
+  it passed. The sentence that used to say there was "no line anybody can add
+  anywhere to quiet a platform skip" was wrong and now says what is true: no
+  line in `.github/ci-expected-skips.txt` can, which is what the split between
+  that file and the preconditions buys, and it is the whole of what it buys.
+  What holds the rest is that `WindowsOnly` is one greppable identifier in
+  seven places and `tools/ci.ps1` is reviewed. The two obvious repairs — a
+  file per platform, or a platform column — are both a second, unverified claim
+  about where a step *ought* to run laid on top of the one thing that is
+  actually verified, which is what it did; `.github/ci-expected-skips.txt` sets
+  that argument out at length.
 
 ## [0.4.0] - 2026-08-09
 
@@ -808,7 +959,9 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.5.0
+[0.4.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.4.0
 [0.3.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.2
 [0.3.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.1
 [0.3.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.3.0

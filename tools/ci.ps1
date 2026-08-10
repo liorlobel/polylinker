@@ -628,12 +628,21 @@ function Get-SuitesRun($Invocations, $Targets) {
 # or declares a `[[test]]` section, so the files ARE the targets), and every one
 # of them must be run, whole, by tools/ci.ps1 or by .github/workflows/ci.yml.
 #
-# EITHER GATE, NOT BOTH. CONTRIBUTING.md is explicit that ci.yml "does not
-# invoke this script, so it is a second list of steps rather than the same one";
-# `pl-features/tests/schema_pin.rs` is in ci.yml by design and in no step here,
-# and `pl-features/tests/budget.rs` is here (it must run --release, and asserts
-# nothing under debug_assertions) and deliberately not there. Requiring both
-# would be requiring a duplication the project has reasoned its way out of.
+# EITHER GATE, NOT BOTH -- and note that "either" is no longer "one of two
+# unrelated lists". Since 2026-08-09 ci.yml RUNS this script, as the `gate` job,
+# so what is left in ci.yml alongside it is the part that is deliberately not
+# here: `pl-features/tests/schema_pin.rs` is in ci.yml by design and in no step
+# here, and `pl-features/tests/budget.rs` is here (it must run --release, and
+# asserts nothing under debug_assertions) and deliberately not there. Requiring
+# both would be requiring a duplication the project has reasoned its way out of.
+#
+# The sentence this comment used to quote from CONTRIBUTING.md -- that ci.yml
+# "does not invoke this script, so it is a second list of steps rather than the
+# same one" -- was doubly wrong by the time it was read: ci.yml does invoke it,
+# and `git log -S` over the whole history finds that string never having been in
+# CONTRIBUTING.md, or anywhere else in this repository, at all. CONTRIBUTING.md
+# says the opposite today, under 'Run the gate before you submit': "CI runs this
+# same file".
 #
 # WHAT IT DOES NOT PROVE: that a step's preconditions hold on the machine you
 # are reading this on. Four of pl-draw's suites are named inside Python-gated
@@ -3245,8 +3254,8 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     # The step is skipped entirely without wix, since a workstation with no .NET
     # SDK cannot build an MSI to test and the other 71 steps are still worth
     # running there. (It said 62 until 2026-08-10, which was the count before
-    # the gate grew; the number is one more than this file's step total minus
-    # one, so it moves every time a step is added.)
+    # the gate grew; the number is this file's step total minus this one step,
+    # so it moves every time a step is added.)
     $dist = "$repo/dist"
     $out = Join-Path ([IO.Path]::GetTempPath()) ("pl-msi-" + [IO.Path]::GetRandomFileName())
     try {

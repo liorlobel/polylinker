@@ -3,10 +3,10 @@ name: Release
 # Cut a release for Windows, macOS and Linux from one tag.
 #
 # WHAT THIS FILE DOES NOT CONTAIN, and deliberately: any knowledge of what goes
-# into an archive. Every job below runs `tools/release.ps1`, which is the same
-# script `tools/ci.ps1` exercises on a developer machine, and then checks the
-# result with `tools/check-archive.ps1`. There is no `tar -cf` here and no file
-# list in YAML.
+# into an archive. Every job below runs `tools/release.ps1`, which `tools/ci.ps1`
+# exercises on all three legs of `ci.yml`'s `gate` job and on a developer
+# machine, and then checks the result with `tools/check-archive.ps1`. There is no
+# `tar -cf` here and no file list in YAML.
 #
 # That is not tidiness. Four of the licences this project ships under require
 # their text to accompany every copy, and the packaging step has dropped them
@@ -78,11 +78,21 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # NOTE THE ABSENCE OF `RUSTFLAGS: -D warnings`, which ci.yml sets at workflow
-  # level. Lint is CI's job and it has already run on this commit. Here it would
-  # mean a new warning in a dependency -- or a rustc release with a new lint --
-  # failing a release build of code that compiles and works, at the one moment
-  # when the tag has already been pushed and cannot be un-pushed.
+  # NOTE THE ABSENCE OF `RUSTFLAGS: -D warnings`, which ci.yml sets on its
+  # `test`, `msrv`, `wasm` and `oracles` jobs. Lint is CI's job and it has
+  # already run on this commit. Here it would mean a new warning in a dependency
+  # -- or a rustc release with a new lint -- failing a release build of code that
+  # compiles and works, at the one moment when the tag has already been pushed
+  # and cannot be un-pushed.
+  #
+  # It was at ci.yml's WORKFLOW level until 2026-08-09, which is a second and
+  # heavier reason: cargo does not merge a RUSTFLAGS environment variable with
+  # `[target.<triple>] rustflags` from .cargo/config.toml, it REPLACES them, so
+  # at workflow level it reached the Windows `gate` job and discarded
+  # `-C target-feature=+crt-static` -- putting a VC++ redistributable dependency
+  # back into binaries built there. This file has never set the variable, so no
+  # shipped binary was ever affected. See the note in ci.yml's `env:` block for
+  # the measurement.
 
 jobs:
   build:
