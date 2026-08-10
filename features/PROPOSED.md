@@ -1,7 +1,7 @@
-# PROPOSED.md -- the curator worklist for the 26 unsigned rows
+# PROPOSED.md -- the curator worklist for the 21 unsigned rows
 
 `features/SIGNOFF.tsv` states the rule this database exists to enforce:
-**AI may propose, never assert.** These 26 rows are the proposal. Every one
+**AI may propose, never assert.** These 21 rows are the proposal. Every one
 ships `review_status = proposed` with an empty curator, none appears in
 `SIGNOFF.tsv`, and `Db::reviewed()` ships none of them. Nothing here is in
 the product until a named human signs it.
@@ -13,8 +13,9 @@ a contested choice rather than to confirm an arithmetic fact.**
 
 | | |
 |---|---|
-| Table | 115 rows, of which 89 signed and 26 proposed |
-| This worklist | 26 rows: 14 selection markers (Stage 2), 12 Class B conventions (Stage 5) |
+| Table | 110 rows, of which 89 signed and 21 proposed |
+| This worklist | 21 rows: 14 selection markers (Stage 2), 7 Class B conventions (Stage 5) |
+| Refused, not proposed | 5 Class B elements that were built and then failed the extent-corroboration rule; they are in *Refused on the evidence* below, and rescuing one is real work asked for here |
 | Branch | `features-promoters-markers-terminators` |
 | Signatures on file | 89, all still valid, `SIGNOFF.tsv` byte-identical to `main` |
 
@@ -44,22 +45,17 @@ python features/build/build.py --show PLF:1026
 python features/build/build.py --show PLF:1027
 python features/build/build.py --show PLF:4000
 python features/build/build.py --show PLF:4001
-python features/build/build.py --show PLF:4002
-python features/build/build.py --show PLF:4003
-python features/build/build.py --show PLF:4004
-python features/build/build.py --show PLF:4005
 python features/build/build.py --show PLF:4006
 python features/build/build.py --show PLF:4007
 python features/build/build.py --show PLF:4008
 python features/build/build.py --show PLF:4009
 python features/build/build.py --show PLF:4010
-python features/build/build.py --show PLF:4011
 ```
 
 Several at once, comma-separated and no spaces:
 
 ```
-python features/build/build.py --show PLF:4000,PLF:4001,PLF:4002,PLF:4003,PLF:4004,PLF:4005,PLF:4006,PLF:4007,PLF:4008,PLF:4009,PLF:4010,PLF:4011
+python features/build/build.py --show PLF:4000,PLF:4001,PLF:4006,PLF:4007,PLF:4008,PLF:4009,PLF:4010
 python features/build/build.py --show PLF:1014,PLF:1015,PLF:1016,PLF:1017,PLF:1018,PLF:1019,PLF:1020,PLF:1021,PLF:1022,PLF:1023,PLF:1024,PLF:1025,PLF:1026,PLF:1027
 ```
 
@@ -94,16 +90,55 @@ Signing them is a judgement, not a check.
 
 | Row | What is contested |
 |---|---|
-| **PLF:4002** lac promoter | Rival 84 nt convention, nearly 3x longer, running CAP site to O1 -- and the anchor annotates the CAP site and O1 but no promoter. |
+| **PLF:4006** CMV enhancer | **DO NOT SIGN ALONE.** This row previously carried the note *"ship with PLF:4005 or not at all -- shipping one alone silently picks a convention"*, and PLF:4005 has since been refused by the extent rule below. That advice has not been withdrawn; it has become a blocker. A user who annotates a CMV region and sees only an enhancer light up is being told something false by omission. Also: a rival 378 nt form differs internally, not just at the ends. |
 | **PLF:4007** T7 terminator | Two rival 48 nt forms, OFFSET FROM EACH OTHER BY ONE BASE. Neither is wrong. Also: one deposit gives the name to a different part of the T7 genome. |
 | **PLF:4008** rrnB T1 terminator | Rival extents 43-98 nt, nested; 5' ends vary ~10 bases, 3' ends ~45. Nothing primary says 'T1'. |
-| **PLF:4004** trc promoter | Thinnest witness set in the stage: 2 submitters, 2 records -- the floor SOURCING.md sets. One base from tac. |
 | **PLF:4001** SP6 promoter | The anchor annotates no promoters at all, so nothing in it bounds the interval. Bounded by analogy to T7. |
 | **PLF:1020** HIS3 | The classic HIS3 clone is a different sequence (219 aa vs 220), and the automated survey structurally cannot report it. |
 | **PLF:1022** TK | Two open decisions: the alias/lookup gap ('HSV-TK', 'UL23' do not resolve) and the choice between two reviewed strains differing at 4 residues. Patent flagged. |
 | **PLF:1018** URA3 | Four of nine cross-references carry A160S, three of them in records titled 'cloning vector' -- the deviating allele is what constructs carry. |
-| **PLF:4005** CMV promoter | Ship with PLF:4006 or not at all. Shipping one alone silently picks a convention. |
-| **PLF:4006** CMV enhancer | Ship with PLF:4005 or not at all. A rival 378 nt form differs internally, not just at the ends. |
+
+### Refused on the evidence: five Class B elements that are NOT in the table
+
+Added 2026-08-10. `stage_classb.MIN_PLACEMENTS` requires **two independent
+submissions to annotate a feature at exactly the shipped extent**, edge for
+edge, before a row may carry `boundary_rule = consensus_of_insdc`. Until that
+build the stage measured where each depositor drew the edges, wrote it into
+`notes`, and tested nothing -- so "consensus" could rest on one lab. These five
+rested on one lab, and the build now drops each of them with its numbers
+printed:
+
+| Row | Element | Submissions holding the bases | Placing it at our extent |
+|---|---|---|---|
+| `PLF:4002` | lac promoter | 4 | 1 (HM126493.1) |
+| `PLF:4003` | tac promoter | 3 | 1 (MH488909.1 + MH488911.1, one address) |
+| `PLF:4004` | trc promoter | 2 | 1 (U13872.1, which is the anchor itself) |
+| `PLF:4005` | CMV promoter | 3 | 1 (LC897329.1) |
+| `PLF:4011` | SV40 early poly(A) | 3 | 1 (LT009443.1) |
+
+**These are not deletions and they are not `HELD`.** They stay in
+`stage_classb.ITEMS`, keep their ids, and are re-measured on every build, so a
+row returns by itself the moment its evidence does. Two ways to rescue one, both
+a curator's and neither a program's:
+
+1. **Cite more evidence.** Find further independent submissions that draw the
+   same edges and add them to the item's `exemplars`. Note what this is not:
+   searching until the check goes green is the failure mode, and for at least
+   `PLF:4005` and `PLF:4011` a wider survey says it will not work -- across 481
+   records, roughly one independent submission in nine uses our CMV-promoter
+   extent, and the SV40 poly(A) figure is one in forty-six.
+2. **Re-cut the extent** to one the evidence already corroborates, and rewrite
+   the row's basis to match. For `PLF:4002` that means confronting the 84 nt
+   convention the anchor's own annotation gestures at; for `PLF:4005` it means
+   deciding whether the CMV promoter is separable from the enhancer at all.
+
+One of these is worth reading twice. **`PLF:4005`'s only exact corroboration was
+`LC897329`**, whose feature table is SnapGene's Common Feature naming from top to
+bottom -- `CMV enhancer`, `CMV promoter`, `bovine growth hormone (bGH)
+polyadenylation signal` -- with no `label:` tell anywhere in it, so the stage's
+SnapGene screen passes it and counts it. That is the blind spot `SOURCING.md`
+§0.6 describes, in a record this database relies on. It was not a taint check
+that caught the row; it was the extent rule, which names no vendor at all.
 
 ### Flagged for patent, not adjudicated
 
@@ -120,7 +155,9 @@ No patent database was searched (SOURCING.md Risk 6). `patent_flag = 1` on:
 Independently re-derived for this PR by a checker sharing no code with the
 build -- its own fetches, its own coordinate arithmetic, its own codon table:
 
-- **26 of 26 rows re-derive exactly.** Every Class B slice was re-cut from a
+- **26 of 26 rows re-derived exactly** when this was written, and the five rows
+  since refused are among them: they were refused on their *boundary evidence*,
+  never on their bases. Every Class B slice was re-cut from a
   window padded 25 nt either side and required to land at exactly that offset,
   so the coordinates were tested rather than handed to the server. Every marker
   CDS was re-translated and matched its shipped protein residue for residue.
@@ -130,6 +167,9 @@ build -- its own fetches, its own coordinate arithmetic, its own codon table:
   genome end one base before an annotated promoter point, and in all 7 the next
   base is G.
 - **The CMV split is arithmetic**: 204 + 380 = 584, contiguous, nothing over.
+  That says the two intervals abut. It does not say the split is where the
+  community puts it, which is why `PLF:4005` needed corroboration and did not
+  have it.
 
 None of that is a substitute for signing. It proves the bases are the bases
 the accession holds. It says nothing about whether the *boundary* is the one
@@ -138,23 +178,31 @@ nothing about the organism, strain and allele questions listed above.
 
 ---
 
-## The 12 Class B rows (Stage 5, `features/build/stage_classb.py`)
+## The 7 Class B rows (Stage 5, `features/build/stage_classb.py`)
 
 SOURCING.md section 3 classes promoter, terminator and poly(A) boundaries as
 **conventions, not facts** -- there is no database that says where 'the CMV
 promoter' ends -- and section 6 prescribes human curation plus at least two
-independent GenBank exemplars each. The stage executes the second half. Each
-row is a coordinate slice of one anchor record, re-fetched and re-sliced every
-build, with at least two further records **from different submitting
-addresses** carrying the exact bases.
+independent GenBank exemplars each -- and section 4 says what for: "showing
+where depositors actually place it". The stage executes both. Each row is a
+coordinate slice of one anchor record, re-fetched and re-sliced every build,
+with at least two further records **from different submitting addresses**
+carrying the exact bases, and at least two independent submissions annotating a
+feature at **exactly** the shipped extent.
 
-Two things to know while reading these:
+Three things to know while reading these:
 
 - **Witness counts are floors.** Submitting addresses are merged fuzzily when
   they look like one lab writing its address two ways.
 - **SnapGene-annotated deposits are refused as witnesses**, because INSDC
   carries them and the CI taint gate structurally cannot see one -- it compares
-  descriptions, never coordinates. Rows below name the records excluded.
+  descriptions, never coordinates. Rows below name the records excluded. That
+  screen catches only the deposits that kept the `label:` tell; `SOURCING.md`
+  §0.6 records that no detector can do better, and what is enforced instead.
+- **Holding the bases and drawing the same edges are different claims**, and
+  the second is the one `consensus_of_insdc` rests on. Each row's `notes` now
+  carries both counts. Five elements were built and refused on the second; they
+  are in *Refused on the evidence* above and are not rows.
 
 ### PLF:4000 -- T7 promoter
 
@@ -162,6 +210,7 @@ Two things to know while reading these:
 - **Anchor**: `V01146.1:22887-22903:+`  (17 nt, `promoter`, `consensus_of_insdc`)
 - **Check against**: AF053733.1, KJ641600.1, PV764404.1, GQ421427.1
 - **Witnesses**: 5 independent submitting address(es) over 5 record(s)
+- **Places it at our extent**: 4 of 5 -- AF053733.1, KJ641600.1, PV764404.1, GQ421427.1
 - **Boundary decision**: Ship the promoter as -17..-1, excluding the +1 base.
 - **Basis**: The anchor settles it mechanically: all seven copies of these 17 bases in the T7 genome end exactly one base before a coordinate the record annotates as a promoter, and in all seven the next base is G. Re-measured for this PR: 7 of 7. A 20 nt convention exists and runs three bases into the transcript. PLF:1004 already calls this promoter 17 bp, so a longer row would contradict a signed row.
 
@@ -175,63 +224,12 @@ Two things to know while reading these:
 - **Anchor**: `AY288927.2:12542-12558:+`  (17 nt, `promoter`, `consensus_of_insdc`)
 - **Check against**: DQ250998.1, FJ457001.1, KC800697.1
 - **Witnesses**: 3 independent submitting address(es) over 4 record(s)
+- **Places it at our extent**: 2 of 3 -- DQ250998.1 + FJ457001.1 (one address), KC800697.1
 - **Boundary decision**: Ship 17 nt, bounded by analogy to T7 rather than by an annotation.
 - **Basis**: WEAKER EVIDENCE THAN T7 AND THE ROW SAYS SO. The SP6 genome record annotates no promoters at all, so nothing in the anchor bounds this interval; the bases occur three times identically and the cited copy is the first. The boundary rests on the three witness deposits and on the T7 analogy, not on the anchor.
 
   ```
   python features/build/build.py --show PLF:4001
-  ```
-
-### PLF:4002 -- lac promoter
-
-- **Claims**: The promoter of the Escherichia coli lactose operon, from the -35 hexamer through the -10 hexamer. Read by sigma-70, blocked by LacI bound at the operator immediately downstream, and released by allolactose or IPTG. Weak on its own, which is why the strong expression promoters derived from it -- tac and trc -- replace its -35 hexamer with the trp one.
-- **Anchor**: `J01636.1:1210-1239:+`  (30 nt, `promoter`, `consensus_of_insdc`)
-- **Check against**: HM126493.1, KJ641600.1, LT009443.1
-- **Witnesses**: 4 independent submitting address(es) over 4 record(s) -- EXCLUDED as SnapGene-annotated: MH325107.1
-- **Boundary decision**: Ship the promoter proper, -35 through -10 (30 nt), and leave the CAP site and operator O1 to separate rows that do not yet exist.
-- **Basis**: CONTESTED. A widely deposited 84 nt convention -- nearly three times longer -- runs from the CAP site to the base before O1, and the anchor record annotates the CAP site and O1 but no promoter, so the longer reading is the one the primary record's own annotation gestures at. One witness (KJ641600.1) places its feature 5'+93/3'+168 beyond this row. Also NOT lacUV5, which differs inside the -10 hexamer.
-
-  ```
-  python features/build/build.py --show PLF:4002
-  ```
-
-### PLF:4003 -- tac promoter
-
-- **Claims**: A hybrid promoter carrying the -35 hexamer of the Escherichia coli trp promoter and the -10 hexamer of lacUV5, separated by a 16 bp spacer. Far stronger than either parent and still repressed by LacI at the downstream operator, so it stays IPTG-inducible.
-- **Anchor**: `MH488909.1:175-203:+`  (29 nt, `promoter`, `consensus_of_insdc`)
-- **Check against**: MH488911.1, KM261834.1, U78874.1
-- **Witnesses**: 3 independent submitting address(es) over 4 record(s)
-- **Boundary decision**: Ship the whole -35..-10 interval (29 nt) from a construct record.
-- **Basis**: The anchor is a cloning vector because tac is a designed hybrid with no natural locus. One depositor (U78874.1) annotates 'tac promoter' as two features of 6 and 7 nt -- the hexamers alone -- and a row built that way could not tell tac from trc.
-
-  ```
-  python features/build/build.py --show PLF:4003
-  ```
-
-### PLF:4004 -- trc promoter
-
-- **Claims**: A hybrid promoter of the same design as tac -- the trp -35 hexamer with the lacUV5 -10 hexamer -- but with a 17 bp spacer rather than 16. The extra base restores the spacing sigma-70 prefers, and the two promoters are used interchangeably in practice.
-- **Anchor**: `U13872.1:193-222:+`  (30 nt, `promoter`, `consensus_of_insdc`)
-- **Check against**: LT727425.1
-- **Witnesses**: 2 independent submitting address(es) over 2 record(s)
-- **Boundary decision**: Ship 30 nt from the pTrc99A record.
-- **Basis**: THINNEST WITNESS SET IN THE STAGE: 2 submitters over 2 records, the floor SOURCING.md sets. Differs from tac by one inserted C in the spacer and nothing else, so anything matching 29 of 30 bases is probably the other row.
-
-  ```
-  python features/build/build.py --show PLF:4004
-  ```
-
-### PLF:4005 -- CMV promoter
-
-- **Claims**: The proximal immediate-early promoter of human cytomegalovirus: the TATA box and the sequence between it and the IE transcription start. On its own this is an unremarkable promoter. What makes 'the CMV promoter' the default strong promoter of mammalian expression vectors is the enhancer immediately upstream of it, which is the next row.
-- **Anchor**: `X17403.1:173745-173948:-`  (204 nt, `promoter`, `consensus_of_insdc`)
-- **Check against**: LC897329.1, LT726933.1
-- **Witnesses**: 3 independent submitting address(es) over 3 record(s) -- EXCLUDED as SnapGene-annotated: MH325107.1
-- **Boundary decision**: Ship promoter and enhancer as two contiguous rows, not one 584 nt block.
-- **Basis**: SHIP WITH PLF:4006 OR NOT AT ALL. Re-measured for this PR: 204 + 380 = 584 with no base between them and none left over, so the two rows are exactly the halves of the block on pcDNA3-type maps. LT726933.1 places a 584 nt feature at 5'+380/3'+0 against this row, which is the split confirmed mechanically. A file carrying the whole block will match both rows, adjacently, and that is intended.
-
-  ```
-  python features/build/build.py --show PLF:4005
   ```
 
 ### PLF:4006 -- CMV enhancer
@@ -240,6 +238,7 @@ Two things to know while reading these:
 - **Anchor**: `X17403.1:173949-174328:-`  (380 nt, `enhancer`, `consensus_of_insdc`)
 - **Check against**: LC897329.1, OP697991.1
 - **Witnesses**: 3 independent submitting address(es) over 3 record(s) -- EXCLUDED as SnapGene-annotated: MH325107.1
+- **Places it at our extent**: 2 of 3 -- LC897329.1, OP697991.1. **Both of them carry a SnapGene fingerprint the `label:` screen cannot see, so ALL of this row's corroboration comes from deposits the screen passes.** `LC897329.1` is SnapGene's Common Feature naming from top to bottom with no `label:` anywhere in it -- see *Refused on the evidence* above, where the same record was the whole of `PLF:4005`'s corroboration. `OP697991.1` is the sharper case and was measured on 2026-08-10: four of its `/note`s -- over the enhancer, the promoter, the ColE1 origin and the AmpR CDS -- have a descriptive half **byte-identical** to the corresponding `/note` in `MH325107.1`, the record the screen DOES flag, in the same two-part `<description>; <short name>` shape ENA produces when it folds a `/label`. The two strings differ by the token `label: ` and by nothing else. Neither observation is proof that either depositor used SnapGene, and neither is a reason to refuse the row: an extent two independent submissions publish is attested whatever tool drew it. It is a reason not to read "2 of 3 independent submissions" as "2 of 3 SnapGene-free submissions", which is what a reader would otherwise take from it.
 - **Boundary decision**: Ship the 380 nt enhancer as the upstream half of the block.
 - **Basis**: A 378 nt convention is also widely deposited and is NOT this row two bases shorter -- a record annotating it was checked and does not contain these 380 bases at all, so the two differ internally.
 
@@ -253,6 +252,7 @@ Two things to know while reading these:
 - **Anchor**: `V01146.1:24164-24210:+`  (47 nt, `terminator`, `consensus_of_insdc`)
 - **Check against**: AF525444.1, PV764404.1, KJ641600.1
 - **Witnesses**: 4 independent submitting address(es) over 4 record(s)
+- **Places it at our extent**: 2 of 4 -- AF525444.1, PV764404.1
 - **Boundary decision**: Ship the 47 nt form whose 3' end is the coordinate the anchor annotates.
 - **Basis**: CONTESTED, AND THE CLEAREST CASE THAT THESE ARE CONVENTIONS. Two rival 48 nt forms are deposited and they are OFFSET FROM EACH OTHER BY ONE BASE; neither is wrong. Separately, at least one deposit labels 'T7 terminator' a sequence from a different part of the T7 genome entirely.
 
@@ -266,6 +266,7 @@ Two things to know while reading these:
 - **Anchor**: `J01695.2:6369-6412:+`  (44 nt, `terminator`, `consensus_of_insdc`)
 - **Check against**: DQ115377.1, EF216319.1, U13872.1
 - **Witnesses**: 3 independent submitting address(es) over 4 record(s)
+- **Places it at our extent**: 2 of 3 -- DQ115377.1 + EF216319.1 (one address), U13872.1
 - **Boundary decision**: Ship 44 nt, named from vector records and located from the primary operon record.
 - **Basis**: CONTESTED EXTENT. Rivals are nested around this one and run 43 to 98 nt: 5' ends vary by about ten bases, 3' ends by about forty-five. The rrnB operon record annotates no terminator, so nothing primary says 'T1'. Rfam cannot help -- SOURCING.md line ~193 records as a confirmed negative that Rfam does not model standalone rho-independent terminators.
 
@@ -279,6 +280,7 @@ Two things to know while reading these:
 - **Anchor**: `J01695.2:6544-6571:+`  (28 nt, `terminator`, `consensus_of_insdc`)
 - **Check against**: LT739213.1, U13859.1, U13872.1
 - **Witnesses**: 3 independent submitting address(es) over 4 record(s)
+- **Places it at our extent**: 2 of 3 -- LT739213.1, U13859.1 + U13872.1 (one address)
 - **Boundary decision**: Ship 28 nt.
 - **Basis**: NO COMPETING EXTENT WAS FOUND -- every deposit that annotates T2 separately encloses exactly these 28 bases. Note 'rrnB T1T2' as a single annotation is a THIRD element (T1 + spacer + T2) and is neither this row nor PLF:4008.
 
@@ -292,36 +294,13 @@ Two things to know while reading these:
 - **Anchor**: `M57764.1:2326-2550:+`  (225 nt, `polyA_signal`, `consensus_of_insdc`)
 - **Check against**: LC897329.1, MN224159.1, OR659033.1
 - **Witnesses**: 4 independent submitting address(es) over 4 record(s) -- EXCLUDED as SnapGene-annotated: MN811118.1
+- **Places it at our extent**: 3 of 4 -- LC897329.1, MN224159.1, OR659033.1
 - **Boundary decision**: Ship 225 nt, hexamer plus the downstream GT-rich element.
 - **Basis**: BEST-CONVERGED ELEMENT IN THE STAGE; rival extents differ at the 5' end only. A short row would be actively wrong here: the AATAAA hexamer alone is six bases and occurs by chance in any plasmid. Re-measured: AATAAA present at position 91 of 225.
 
   ```
   python features/build/build.py --show PLF:4010
   ```
-
-### PLF:4011 -- SV40 early poly(A) signal
-
-- **Claims**: The polyadenylation signal of the simian virus 40 EARLY transcription unit, on the early strand. Small, well characterised and old, which is why it is the poly(A) signal of choice where space matters -- typically on the selection-marker cassette of a mammalian vector rather than on the gene of interest.
-- **Anchor**: `J02400.1:2594-2668:-`  (75 nt, `polyA_signal`, `consensus_of_insdc`)
-- **Check against**: LT009443.1, LT726828.1, AY640625.1
-- **Witnesses**: 3 independent submitting address(es) over 4 record(s) -- EXCLUDED as SnapGene-annotated: MH325107.1
-- **Boundary decision**: Ship the EARLY signal, on the early strand, and say 'early' in the name.
-- **Basis**: STRAND IS THE WHOLE DECISION. Early and late are the same bases on opposite strands, and deposits in the wild annotate this identical span twice under both names. A row called plain 'SV40 poly(A)' would be wrong whichever strand it took. The late signal is not in this database.
-
-  ```
-  python features/build/build.py --show PLF:4011
-  ```
-
----
-
-## The 14 selection markers (Stage 2, `features/build/stage_uniprot.py`)
-
-These went through the existing Class A chain unchanged: UniProt canonical ->
-one pinned EMBL cross-reference -> ENA CDS -> exact residue-for-residue
-translation, with parent and length cross-checks. A disagreement drops the row
-rather than correcting it. The boundary is `orf_atg_to_stop` and is *derived*,
-not chosen -- which is why the interesting questions on these rows are about
-**allele, strain, organism and name**, not about coordinates.
 
 ### PLF:1014 -- pac (Puromycin N-acetyltransferase)
 
@@ -484,8 +463,8 @@ not chosen -- which is why the interesting questions on these rows are about
 
 ## Worked up and deliberately NOT shipped
 
-SOURCING.md section 6 budgets about 40 Class B items. Twelve survived the
-rules. The rest are recorded in `stage_classb.HELD` with the reason, so that
+SOURCING.md section 6 budgets about 40 Class B items. Seven survived the
+rules; five more were built and refused on the extent evidence (above). The rest are recorded in `stage_classb.HELD` with the reason, so that
 nobody re-does the work and concludes it was never done:
 
 - **T3 promoter** -- No consensus to record. The two leading conventions are 17 nt and 19 nt, they are OFFSET rather than nested -- they share a 16 nt core and neither contains the other -- and each has exactly one independent submission behind it. Picking one would be a coin toss dressed up as consensus_of_insdc. A third deposit annotates the reverse complement, i.e. it got the strand wrong. The bases are unambiguous; the boundary is not.

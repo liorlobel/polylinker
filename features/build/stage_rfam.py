@@ -101,6 +101,28 @@ SEED_CACHE = "Rfam.seed.gz"
 
 ENA_BASE = "https://www.ebi.ac.uk/ena/browser/api"
 
+# features/SOURCING.md §0.6, checked by features/build/insdc_posture.py.
+#
+# `ena_fetch()` above already refuses any URL that is not `{ENA_BASE}/fasta/...`,
+# and that refusal is what makes this declaration checkable rather than
+# aspirational: a FASTA response is bases and a description line, with no
+# feature table in it to read. The 24 rows this stage ships carry
+# `boundary_rule = consensus_of_insdc` and an `accession:start-end`
+# boundary_evidence, but those coordinates come from Rfam's own seed alignment,
+# not from anybody's annotation of that record — ENA is asked only whether the
+# interval still holds the bases Rfam says it does.
+INSDC_POSTURE = {
+    "posture": "no_feature_table",
+    "reason": (
+        "The extent of every row here is an Rfam seed-alignment interval, and ENA is "
+        "fetched only to confirm that the interval still holds the bases Rfam reports. "
+        "ena_fetch() refuses any URL outside the FASTA endpoint, so no record flat "
+        "file is ever retrieved and no depositor's feature table is parsed. A "
+        "submitter who annotated the same locus in a plasmid editor has no way to "
+        "reach this stage's boundaries."
+    ),
+}
+
 # Both files are a **latin-1** MySQL/Stockholm dump, not UTF-8: `family.txt`
 # fails to decode as UTF-8 at byte 1,678,625 and `Rfam.seed` at 21,378,990,
 # both inside author names. Decoding with errors="replace" would not raise —

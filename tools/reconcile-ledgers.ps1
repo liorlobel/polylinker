@@ -192,7 +192,7 @@ function Test-Ledgers {
 # not touch. Measured against the three real ledgers of run 31359657821 with one
 # row changed on the Linux and macOS legs -- 'gel calibration spline vs SciPy'
 # from `ran` to `skipped / not windows`, exactly what wrapping its precondition
-# in `WindowsOnly` produces: "reconciled 3 legs, 72 steps each; every step ran on
+# in `WindowsOnly` produces: "reconciled 3 legs, 73 steps each; every step ran on
 # at least one platform", exit 0. Two platforms of coverage gone, nothing red.
 #
 # What X2 does catch is a step that ran NOWHERE, which is a different and real

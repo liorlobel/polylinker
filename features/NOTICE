@@ -255,15 +255,34 @@ matches the pinned one, so renaming it does not get it in. It is implemented in
 fails CLOSED -- a network error exits with the status `taint-gate-unavailable`
 rather than passing.
 
-Its result at the time of writing, over all descriptions against all 1,367
-of theirs: no row shares a contiguous five-token run, and no row reaches 60%
-containment. Two rows exceed the 30% warning threshold, PLF:0002 and PLF:0003,
-whose longest shared runs are one and two tokens; they are the two
-aminoglycoside phosphotransferases, and what they share is the vocabulary of
-the subject (kanamycin, neomycin, phosphotransferase, resistance), not phrasing.
+Its result at the time of writing, over all 110 of our descriptions against all
+1,367 of theirs: no row shares a contiguous five-token run, and no row reaches
+60% containment. Five rows exceed the 30% warning threshold -- PLF:0002 and
+PLF:0003, the two aminoglycoside phosphotransferases, whose longest shared runs
+are one and two tokens; and PLF:1018, PLF:1019 and PLF:1021, the yeast URA3,
+LEU2 and TRP1 markers, whose runs are four, three and three. What each pair
+shares is the vocabulary of the subject -- kanamycin, neomycin,
+phosphotransferase, resistance; orotidine 5-phosphate decarboxylase -- and not
+phrasing. `features/README.md` carries the written justification the 30%
+threshold asks for, row by row.
 
-Disclosing the gate is the point: it is the concrete evidence behind this
-project's premise.
+WHAT THAT GATE DOES NOT COVER, said here because this is the file a user reads.
+It compares DESCRIPTION PROSE. Their file carries no sequence and no coordinate,
+so it cannot support a comparison of feature BOUNDARIES -- and boundaries reach
+this database by a route of their own: ENA folds a submitter's SnapGene `/label`
+into the `/note`, so a depositor who annotated their plasmid in SnapGene
+publishes SnapGene's boundary convention inside an ordinary INSDC record. No
+check anywhere can measure that, and `features/SOURCING.md` section 0.6 sets out
+why rather than promising one later. What is enforced instead is structural:
+every stage of the build must declare what it does about a depositor's
+coordinates, and `features/build/insdc_posture.py` refuses a stage that declares
+nothing and drives the mechanisms each declaration names. It proves that nobody
+reached this table without answering the question. It does not prove that no
+boundary here agrees with SnapGene's, and nothing claims it does.
+
+Disclosing the gate is the point, with its limits attached: it is the concrete
+evidence behind this project's premise about DESCRIPTIONS, which is the part of
+that premise that can be evidenced.
 
 ================================================================================
 Changes made
