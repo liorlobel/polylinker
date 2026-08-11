@@ -110,8 +110,8 @@ retrieved from the European Nucleotide Archive, operated by the European
 Molecular Biology Laboratory's European Bioinformatics Institute (EMBL-EBI):
     https://www.ebi.ac.uk/ena/browser/
 
-The Class B rows -- promoters, enhancers, terminators and poly(A) signals --
-use ENA twice over, and both uses are recorded per row in `provenance.tsv`.
+The Class B rows -- promoters, terminators and poly(A) signals -- use ENA twice
+over, and both uses are recorded per row in `provenance.tsv`.
 Once for the bases: the reference sequence is a coordinate slice of one named
 record, re-fetched and re-sliced on every build. And once for the evidence: two
 or more FURTHER records, from different submitting addresses, are fetched whole
@@ -307,7 +307,7 @@ sources rather than reproducing them:
     peptide is located, exactly once, in a deposited PDB polymer entity fetched
     at build time. Back-translating a peptide is refused outright, because
     choosing codons would be writing a sequence no record contains.
-  * Class B regulatory rows -- promoters, enhancers, terminators, poly(A)
+  * Class B regulatory rows -- promoters, terminators, poly(A)
     signals -- are a coordinate slice of one INSDC record and nothing else. No
     depositor's `/note`, `/label`, `/gene`, `/product` or `/standard_name` is
     read at any point, so no editorial text from any record enters the dataset;

@@ -325,8 +325,8 @@ ENA overtook Rfam as the second-largest source in that list on 2026-08-10, and
 the reason is worth stating rather than leaving as a number that moved: a Class B
 row cites ENA once for the bases it ships, once for the anchor record they were
 sliced out of, and once more for **each independent record that witnesses
-them** — because for a convention the witnesses *are* the evidence. Seven rows
-contributed 42 ENA provenance rows between them, out of 154 in total.
+them** — because for a convention the witnesses *are* the evidence. Six rows
+contributed 37 ENA provenance rows between them, out of 149 in total.
 
 Two of those numbers are new and both were previously absent rather than wrong.
 `genbank_key` had **no** provenance at all on any row, and it is the one column
@@ -402,9 +402,11 @@ least two independent GenBank exemplars each, and §4 says what those exemplars
 are for — "showing where depositors actually place it". `build/stage_classb.py`
 executes both halves rather than asserting them.
 
-**Twelve elements were built and seven ship.** The seven are the T7 and SP6
-promoters, the CMV enhancer, the T7 (Tφ), rrnB T1 and rrnB T2 terminators, and
-the bGH poly(A) signal. Each one claims exactly four things:
+**Twelve elements were built and six are in the table.** The six are the T7 and
+SP6 promoters, the T7 (Tφ), rrnB T1 and rrnB T2 terminators, and the bGH poly(A)
+signal. A seventh, the CMV enhancer (`PLF:4006`), reached the table on
+2026-08-10 and was withdrawn by the curator on 2026-08-11; its id is retired.
+Each one claims exactly four things:
 
 - **These bases are `accession:lo-hi` on this strand.** Re-fetched and re-sliced
   on every build, and cross-checked between the record's FASTA view and its flat
@@ -494,8 +496,8 @@ them are about this repository's own controls:
    Every sequence is therefore located in every witness on *both* strands and
    the strand actually found is recorded, never inherited.
 
-`genbank_key` on these rows is `promoter`, `enhancer`, `terminator` or
-`polyA_signal` — **all four of which INSDC has retired** in favour of
+`genbank_key` on these rows is `promoter`, `terminator` or
+`polyA_signal` — **all three of which INSDC has retired** in favour of
 `regulatory` plus a `/regulatory_class` qualifier, and the anchor records
 themselves have moved (V01146 writes `regulatory` + `/regulatory_class=
 "promoter"`). The stage emitted the current spelling first, and it broke
@@ -519,8 +521,9 @@ record to anchor it in); EF-1α and PGK (the vector element is not a verbatim
 slice of the gene); CAG (two different elements under one name); araBAD (no
 anchor fetched). tetO/TRE was dropped outright: the name covers at least four
 unrelated elements. §6 budgets about forty Class B rows; seven is what survived
-the rules applied honestly — five more were built and then refused by the
-exact-extent corroboration rule described above — and that number is the finding.
+the rules applied honestly, and six is what is left after the curator withdrew
+one of them — five more were built and then refused by the exact-extent
+corroboration rule described above — and those numbers are the finding.
 
 ### Aliases that resolve to more than one record
 
