@@ -431,14 +431,15 @@ Each one claims exactly four things:
   `consensus_of_insdc` actually rests on, and it is the one that was measured and
   never tested until 2026-08-10: holding the bases is a fact about the sequence,
   drawing the same edges is the only thing that makes the word *consensus* true.
-  **Five rows failed it and do not ship** — lac (`PLF:4002`), tac (`PLF:4003`),
-  trc (`PLF:4004`), the CMV promoter (`PLF:4005`) and the SV40 early poly(A)
-  signal (`PLF:4011`), each corroborated by exactly one submission out of the two
-  to four that hold its bases. They keep their ids, stay in the stage's
-  allow-list, and are re-measured on every build, so a row returns by itself the
-  day a curator cites evidence that corroborates its extent — or re-cuts it to an
-  extent the evidence already corroborates. That is a curator's judgement and not
-  a program's, which is why they are refused rather than adjusted.
+  **Five rows failed it and never reached the table at all** — lac
+  (`PLF:4002`), tac (`PLF:4003`), trc (`PLF:4004`), the CMV promoter
+  (`PLF:4005`) and the SV40 early poly(A) signal (`PLF:4011`), each corroborated
+  by exactly one submission out of the two to four that hold its bases. They
+  keep their ids, stay in the stage's allow-list, and are re-measured on every
+  build, so a row returns by itself the day a curator cites evidence that
+  corroborates its extent — or re-cuts it to an extent the evidence already
+  corroborates. That is a curator's judgement and not a program's, which is why
+  they are refused rather than adjusted.
 - **Nothing about the extent being right.** `boundary_rule = consensus_of_insdc`
   says it is a convention, and the rival conventions are named in `notes` with
   their offsets.

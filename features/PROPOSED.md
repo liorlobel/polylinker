@@ -19,9 +19,9 @@ would settle it.
 
 **One of those decisions has been taken. `PLF:4006`, the CMV enhancer, was
 WITHDRAWN by the curator on 2026-08-11** and is no longer in the table; the
-withdrawal took the worklist from 21 rows to 20. What that cost, how it was done without
-moving another id, and the record of the reasons are below under *`PLF:4006`*
-and *If you withdraw a row*.
+withdrawal took the worklist from 21 rows to 20. What that cost, how it was
+done without moving another id, and the record of the reasons are below under
+*`PLF:4006`* and *If you withdraw a row*.
 
 **Three rows were ADDED on 2026-08-11**, after the elements they describe were
 re-measured and the reasons they had been held for did not survive it:

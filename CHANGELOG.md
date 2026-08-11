@@ -165,9 +165,12 @@ rows and 112 `insdc-ft` rows read 2026-08-11 today.
   inside one record are less independent than two records from one lab, which
   `corroborating_submissions()` already collapses to a single opinion.
 - **What that changed for the rows: nothing, and it was measured rather than
-  assumed.** All fifteen declared Class B items — the fourteen offered and the
-  one withdrawn — were run through the real `verify()` under both loops. Every
-  submission count and every exact-placement count is identical, all sixty
+  assumed.** All fourteen Class B items the stage offers were run through the
+  real `verify()` under both loops. (Fifteen are declared; `build()` reports a
+  withdrawn item and `continue`s **before** the `verify()` call, so `PLF:4006`
+  is measured under neither loop. This entry claimed all fifteen were, which the
+  build path contradicts — `features/PROPOSED.md` said fourteen and was right.)
+  Every submission count and every exact-placement count is identical, all sixty
   witness evidence strings are byte-identical, the five rows refused on
   2026-08-10 (`PLF:4002`, `PLF:4003`, `PLF:4004`, `PLF:4005`, `PLF:4011`) are
   refused on the same evidence by the same numbers, **no refused row returned**,
@@ -245,6 +248,12 @@ rows and 112 `insdc-ft` rows read 2026-08-11 today.
 - Row counts in `README.md`, `features/README.md`, `docs/PLAN.md` and
   `features/PROPOSED.md` updated for the three new rows, including the
   provenance licence and per-source tallies.
+- **`docs/RELEASING.md`'s version check is now two greps.** Step 1 said
+  `grep -c 'version = "<new>"' Cargo.toml   # must print 17, and <old> must
+  print 0` — one command, with the half that catches a `sed` matching nothing
+  left as a comment. Both are commands now. The step's concrete sed and tag
+  numbers advanced to 0.7.0 → 0.8.0, which that file already documents as
+  deliberately one release behind the moment a release lands.
 - `PLF:4014`'s worklist entry now cites a **measurement** where it cited
   arithmetic. The claim that the gene form still annotates real pEF vectors was
   argued from 99.7% identity against a 0.96 floor; on review `pl annotate
@@ -1736,7 +1745,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.8.0
 [0.7.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.7.0
 [0.6.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.6.0
 [0.5.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.5.0
