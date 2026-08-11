@@ -56,6 +56,13 @@ which.
 - Row counts in `README.md`, `features/README.md`, `docs/PLAN.md` and
   `features/PROPOSED.md` updated for the three new rows, including the
   provenance licence and per-source tallies.
+- `PLF:4014`'s worklist entry now cites a **measurement** where it cited
+  arithmetic. The claim that the gene form still annotates real pEF vectors was
+  argued from 99.7% identity against a 0.96 floor; on review `pl annotate
+  --include-proposed` was run against all three 1179 nt deposits (`MG547974.1`,
+  `OQ300330.1`, `PP944532.1`) and each returns the row at 99.7% identity and
+  100% coverage. One garbled sentence in `PLF:4012`'s entry, which left a
+  mid-sentence self-correction in the text, is repaired.
 
 ### Known issue
 

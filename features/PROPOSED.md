@@ -688,8 +688,8 @@ Read as a comparison of `AATTAACCCTCACTAAA` with the *shifted*
 `ATTAACCCTCACTAAAGGG`, that is exactly right. It was the wrong pair. On a corpus
 large enough to see it the two leading conventions are this row's 19 nt (18
 independent submissions in the 2026-08-11 survey; 5 in this row's own witness
-list) and the 20 nt nested inside... nested *around* it (14 in the survey; 4
-verified here -- Montreal, Wisconsin-Madison, CNB-CSIC, Stratagene). Both share
+list) and the 20 nt nested *around* it -- this row plus one G (14 in the survey;
+4 verified here -- Montreal, Wisconsin-Madison, CNB-CSIC, Stratagene). Both share
 this row's 5' edge. Nested rivals are a case this table already handles.
 
 **The decision that is actually yours.** The extent that would make this row read
@@ -753,6 +753,11 @@ first half was answered by measurement: at the default `min_identity` of 0.96 a
 four-base deletion over 1188 nt is 99.7% identity, so this row *does* annotate
 real pEF vectors. The figures in that reason, 1144 and 1148 nt, are not
 reproducible on any record fetched; the two real conventions are 1179 and 1188.
+That last point stopped being an arithmetic argument on review: `pl annotate
+--include-proposed` was run against all three of the 1179 nt deposits below,
+fetched from ENA as FASTA, and each returns this row at **99.7% identity, 100%
+coverage** over `1..1179`. The row annotates real pEF vectors; that is now a
+measurement on the shipped binary and not a calculation about one.
 
 **The decision that is yours.** The 1179 nt vector form -- this row minus its
 first five bases and minus `GCCC` at `J04617.1:686-689` -- has **three**
