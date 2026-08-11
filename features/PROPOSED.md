@@ -2,9 +2,12 @@
 
 `features/SIGNOFF.tsv` states the rule this database exists to enforce:
 **AI may propose, never assert.** These 23 rows are the proposal. Every one
-ships `review_status = proposed` with an empty curator, none appears in
+**carries** `review_status = proposed` with an empty curator, none appears in
 `SIGNOFF.tsv`, and `Db::reviewed()` ships none of them. Nothing here is in
-the product until a named human signs it.
+the product until a named human signs it. Read the two verbs in that sentence
+as the different events they are: a row **reaches the table** when a stage
+emits it, and a row **ships** when a curator's signature puts it inside
+`Db::reviewed()`. Nothing on this page has done the second.
 
 This file is the reading list for that human. **It was a list of open
 questions; as of 2026-08-11 it is a list of decisions with the evidence
@@ -16,9 +19,9 @@ would settle it.
 
 **One of those decisions has been taken. `PLF:4006`, the CMV enhancer, was
 WITHDRAWN by the curator on 2026-08-11** and is no longer in the table; the
-worklist was 21 rows and is now 20. What that cost, how it was done without
-moving another id, and the record of the reasons are below under *`PLF:4006`*
-and *If you withdraw a row*.
+withdrawal took the worklist from 21 rows to 20. What that cost, how it was
+done without moving another id, and the record of the reasons are below under
+*`PLF:4006`* and *If you withdraw a row*.
 
 **Three rows were ADDED on 2026-08-11**, after the elements they describe were
 re-measured and the reasons they had been held for did not survive it:
@@ -31,14 +34,14 @@ either side of the change. They are the last three entries in the table below.
 |---|---|
 | Table | 112 rows, of which 89 signed and 23 proposed |
 | This worklist | 23 rows: 14 selection markers (Stage 2), 9 Class B conventions (Stage 5) |
-| Recommended to sign | 19, of which 3 only after reading a specific paragraph; the 3 rows added on 2026-08-11 are *your call* and say why |
+| Recommended to sign | 20, of which 3 only after reading a specific paragraph. Two of the three rows added on 2026-08-11 (`PLF:4012`, `PLF:4014`) are *your call* and say why; the third, `PLF:4013`, is **SIGN** |
 | WITHDRAWN | 1 (`PLF:4006`), decided by the curator 2026-08-11; the id is retired, not freed |
 | Needs a decision that no evidence can make | 3 naming/scope questions and 3 patent flags, listed below |
 | Refused, not proposed | 5 Class B elements that were built and then failed the extent-corroboration rule; see *Refused on the evidence* |
 | Signatures on file | 89, all still valid, `SIGNOFF.tsv` byte-identical to `main` |
 
 **No digests are printed in this file, on purpose.** `SIGNOFF.tsv` says signing
-a digest nobody has read is not an attestation; a worklist that let you copy 20
+a digest nobody has read is not an attestation; a worklist that let you copy 23
 hashes out of it without opening a single row would be a machine for producing
 exactly that. The digests also change the moment any prose in a row changes, so
 a copy here would go stale silently. Get them from `--show`, one row at a time,
@@ -170,7 +173,7 @@ unescaped, plus the provenance quads and the resulting digest, and it writes
 nothing:
 
 ```
-python features/build/build.py --show PLF:4000,PLF:4001,PLF:4007,PLF:4008,PLF:4009,PLF:4010
+python features/build/build.py --show PLF:4000,PLF:4001,PLF:4007,PLF:4008,PLF:4009,PLF:4010,PLF:4012,PLF:4013,PLF:4014
 python features/build/build.py --show PLF:1014,PLF:1015,PLF:1016,PLF:1017,PLF:1018,PLF:1019,PLF:1020,PLF:1021,PLF:1022,PLF:1023,PLF:1024,PLF:1025,PLF:1026,PLF:1027
 ```
 
@@ -220,10 +223,11 @@ only route to it).
 
 ---
 
-# The 6 Class B rows (Stage 5, `features/build/stage_classb.py`)
+# The 9 Class B rows (Stage 5, `features/build/stage_classb.py`)
 
-*Seven sections follow, because `PLF:4006` is kept below as the record of a
-decision. Six of them are rows you can sign; the first is not in the table.*
+*Ten sections follow, because `PLF:4006` is kept below as the record of a
+decision. Nine of them are rows you can sign; the first is not in the table.
+None of the nine is signed today, so none of the nine is searched by anything.*
 
 SOURCING.md section 3 classes promoter, terminator and poly(A) boundaries as
 **conventions, not facts** -- there is no database that says where 'the CMV
@@ -695,7 +699,7 @@ this row's 5' edge. Nested rivals are a case this table already handles.
 **The decision that is actually yours.** The extent that would make this row read
 like `PLF:4000` and `PLF:4001` -- 17 nt, −17..−1, +1 excluded -- is deposited and
 has **one** submitting address behind it: BCCM/LMBP Gent, checked on three of its
-records. It fails `MIN_PLACEMENTS`. So either this row ships at 19 nt and the
+records. It fails `MIN_PLACEMENTS`. So either this row goes into the table at 19 nt and the
 database holds two conventions for three phage promoters, or T3 stays out
 because the extent that matches its siblings cannot clear the floor. The row
 takes the first and says so at length; the primary literature (Bailey, Klement &
@@ -769,6 +773,10 @@ ship what most pEF vectors actually carry, that is a defensible call and the
 caveat gives the exact recipe. Note also that one of the two placements is a
 `misc_feature`, and that the four deleted bases are present in the human genome
 (`AL603910.6`), so the deletion is the vectors' and not the record's.
+
+```
+python features/build/build.py --show PLF:4014
+```
 
 ---
 
@@ -1242,8 +1250,8 @@ design and it has now been exercised, so the qualification it needs is here:
 > nothing. Since that widens what counts as corroboration for **every** Class B
 > row at once, all fourteen were measured under both loops before the fix
 > landed. **NONE OF THE FIVE ABOVE RETURNED. NO ROW MOVED AT ALL** -- the two
-> numbers in the table above are the same under either loop, all nine shipped
-> rows keep their extents and their `notes` byte for byte, and `features.tsv`
+> numbers in the table above are the same under either loop, all nine rows in
+> the table keep their extents and their `notes` byte for byte, and `features.tsv`
 > and `provenance.tsv` rebuild identical. The reason is that only four witness
 > records in `ITEMS` carry their element more than once -- `V01146` (T7, 7x),
 > `AY288927` (SP6, 3x), `U13859` (rrnB T2, 2x) and `AJ318471` (T3, 3x) -- and
@@ -1280,7 +1288,7 @@ that caught the row; it was the extent rule, which names no vendor at all.
 
 ---
 
-## Worked up and deliberately NOT shipped
+## Worked up and deliberately NOT issued as rows
 
 SOURCING.md section 6 budgets about 40 Class B items. Ten survived the rules and
 nine of those are in the table, the tenth having been withdrawn; five more were

@@ -163,7 +163,7 @@ comes from **where it is declared**, never from where it landed in the output:
 | `PLF:1000`–`PLF:1999` | UniProt → ENA natural proteins | 28 | 14 |
 | `PLF:2000`–`PLF:2999` | Rfam structured RNA | 24 | 24 |
 | `PLF:3000`–`PLF:3999` | Hand-curated designed parts | 27 of 28 declared | 27 |
-| `PLF:4000`–`PLF:4999` | INSDC-anchored Class B conventions | 6 of 21 worked up, 5 more refused, 1 withdrawn | 0 |
+| `PLF:4000`–`PLF:4999` | INSDC-anchored Class B conventions | 9 of 25 worked up, 5 more refused, 1 withdrawn | 0 |
 
 **The block follows the stage, not the topic**, and the 2026-08-10 additions
 make that visible for the first time: fourteen new *selection markers* landed in
@@ -326,10 +326,10 @@ AMRFinderPlus 72 and the wwPDB 18.
 
 ENA overtook Rfam as the second-largest source in that list on 2026-08-10, and
 the reason is worth stating rather than leaving as a number that moved: a Class B
-row cites ENA once for the bases it ships, once for the anchor record they were
+row cites ENA once for the bases it carries, once for the anchor record they were
 sliced out of, and once more for **each independent record that witnesses
-them** — because for a convention the witnesses *are* the evidence. Six rows
-contributed 37 ENA provenance rows between them, out of 149 in total.
+them** — because for a convention the witnesses *are* the evidence. Nine rows
+contributed 58 ENA provenance rows between them, out of 170 in total.
 
 Two of those numbers are new and both were previously absent rather than wrong.
 `genbank_key` had **no** provenance at all on any row, and it is the one column
@@ -354,13 +354,14 @@ that a human can read them, which is the only thing the machine is allowed to
 ask for.**
 
 [`PROPOSED.md`](PROPOSED.md) is the worklist for that reading: every one of the
-20, what it claims, the accessions to check it against, the boundary decision
+23, what it claims, the accessions to check it against, the boundary decision
 and its basis, the exact `--show` invocation per row, and — since 2026-08-11 —
 the primary source that settles the row plus a recommendation. It opens with the
 handful of questions a curator has to *decide* rather than check, because no
 further research can make them. The first of those was `PLF:4006`, and it is
-**decided**: the curator withdrew it on 2026-08-11, so the file that listed 21
-rows to read now lists 20. The two that remain open are whether to write alias
+**decided**: the curator withdrew it on 2026-08-11, which took the file from 21
+rows to read down to 20; the three Class B rows added the same day took it to
+**23**. The two that remain open are whether to write alias
 spellings ourselves into a UniProt-sourced column, and the three unadjudicated
 patent flags. The organism conflict that blocked `PLF:1016` is
 resolved — the gene is *Bacillus cereus*, the record's `/organism` is the
@@ -389,11 +390,13 @@ map is the gene with its own promoter and terminator, and `TRP1` in the YRp7
 lineage means TRP1-ARS1. A match against those files covers the ORF and stops,
 and that is correct.
 
-**6 Class B regulatory elements**, from the twelve that were built — see the
-next section for the five that were refused and why. Seven reached the table on
-2026-08-10; the curator withdrew `PLF:4006` on 2026-08-11, so of the twelve
-built, five were refused on the evidence and one was withdrawn by a human, which
-are different things and are counted separately here on purpose.
+**9 Class B regulatory elements**, from the fifteen that were built — see the
+next section for the five that were refused and why. Ten reached the table,
+seven on 2026-08-10 and three more on 2026-08-11; the curator withdrew
+`PLF:4006` on 2026-08-11, so of the fifteen built, five were refused on the
+evidence and one was withdrawn by a human, which are different things and are
+counted separately here on purpose. None of the nine is signed, so none of them
+is searched.
 
 ### Class B: boundaries that are conventions, and how they are evidenced
 
@@ -428,14 +431,15 @@ Each one claims exactly four things:
   `consensus_of_insdc` actually rests on, and it is the one that was measured and
   never tested until 2026-08-10: holding the bases is a fact about the sequence,
   drawing the same edges is the only thing that makes the word *consensus* true.
-  **Five rows failed it and do not ship** — lac (`PLF:4002`), tac (`PLF:4003`),
-  trc (`PLF:4004`), the CMV promoter (`PLF:4005`) and the SV40 early poly(A)
-  signal (`PLF:4011`), each corroborated by exactly one submission out of the two
-  to four that hold its bases. They keep their ids, stay in the stage's
-  allow-list, and are re-measured on every build, so a row returns by itself the
-  day a curator cites evidence that corroborates its extent — or re-cuts it to an
-  extent the evidence already corroborates. That is a curator's judgement and not
-  a program's, which is why they are refused rather than adjusted.
+  **Five rows failed it and never reached the table at all** — lac
+  (`PLF:4002`), tac (`PLF:4003`), trc (`PLF:4004`), the CMV promoter
+  (`PLF:4005`) and the SV40 early poly(A) signal (`PLF:4011`), each corroborated
+  by exactly one submission out of the two to four that hold its bases. They
+  keep their ids, stay in the stage's allow-list, and are re-measured on every
+  build, so a row returns by itself the day a curator cites evidence that
+  corroborates its extent — or re-cuts it to an extent the evidence already
+  corroborates. That is a curator's judgement and not a program's, which is why
+  they are refused rather than adjusted.
 - **Nothing about the extent being right.** `boundary_rule = consensus_of_insdc`
   says it is a convention, and the rival conventions are named in `notes` with
   their offsets.
@@ -458,11 +462,12 @@ them are about this repository's own controls:
    `/standard_name` at all, and a record carrying the `label:` tell is **not
    counted as an independent witness**. Counting two SnapGene-annotated deposits
    as "two exemplars" would manufacture exactly the convergence this project
-   exists to disclaim. It fires on real data: five of the twelve rows built —
+   exists to disclaim. It fires on real data: five of the fifteen rows built —
    `PLF:4002`, `4005`, `4006`, `4010` and `4011` — have a witness excluded for
    this reason. Two of those five reached the table, `PLF:4006` and `PLF:4010`,
    and each names the exclusion in its own `notes`; `PLF:4006` has since been
-   withdrawn, so `PLF:4010` is the only one of the five that still ships.
+   withdrawn, so `PLF:4010` is the only one of the five still in the table — and
+   it is `proposed`, like every Class B row, so it does not ship either.
 
    **What that leaves, and what now covers it.** Excluding the records that carry
    the tell does nothing about a depositor who retyped the note, and no detector
@@ -472,7 +477,8 @@ them are about this repository's own controls:
    corroboration was `LC897329`, whose feature table is SnapGene's Common Feature
    naming throughout with no `label:` in it. It was the corroboration rule above,
    which names no vendor at all, that refused the row. **`PLF:4006` was the case
-   that is NOT in the open**, and until 2026-08-11 it shipped: *both* of its two
+   that is NOT in the open**, and until 2026-08-11 it was in the table as
+   `proposed`: *both* of its two
    corroborating submissions carry a fingerprint the tell cannot see —
    `LC897329` again, and `OP697991`, four of whose `/note`s have a descriptive
    half byte-identical to `MH325107`'s, differing by the `label: ` token the
