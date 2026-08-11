@@ -1,7 +1,7 @@
-# PROPOSED.md -- the curator worklist for the 20 unsigned rows
+# PROPOSED.md -- the curator worklist for the 23 unsigned rows
 
 `features/SIGNOFF.tsv` states the rule this database exists to enforce:
-**AI may propose, never assert.** These 20 rows are the proposal. Every one
+**AI may propose, never assert.** These 23 rows are the proposal. Every one
 ships `review_status = proposed` with an empty curator, none appears in
 `SIGNOFF.tsv`, and `Db::reviewed()` ships none of them. Nothing here is in
 the product until a named human signs it.
@@ -20,11 +20,18 @@ worklist was 21 rows and is now 20. What that cost, how it was done without
 moving another id, and the record of the reasons are below under *`PLF:4006`*
 and *If you withdraw a row*.
 
+**Three rows were ADDED on 2026-08-11**, after the elements they describe were
+re-measured and the reasons they had been held for did not survive it:
+`PLF:4012` the T3 promoter, `PLF:4013` the araBAD promoter and `PLF:4014` the
+human EF-1alpha promoter. All three were APPENDED, so no id in this worklist
+moved and the 89 signatures and the other 20 proposed rows are byte-identical
+either side of the change. They are the last three entries in the table below.
+
 | | |
 |---|---|
-| Table | 109 rows, of which 89 signed and 20 proposed |
-| This worklist | 20 rows: 14 selection markers (Stage 2), 6 Class B conventions (Stage 5) |
-| Recommended to sign | 19, of which 3 only after reading a specific paragraph |
+| Table | 112 rows, of which 89 signed and 23 proposed |
+| This worklist | 23 rows: 14 selection markers (Stage 2), 9 Class B conventions (Stage 5) |
+| Recommended to sign | 19, of which 3 only after reading a specific paragraph; the 3 rows added on 2026-08-11 are *your call* and say why |
 | WITHDRAWN | 1 (`PLF:4006`), decided by the curator 2026-08-11; the id is retired, not freed |
 | Needs a decision that no evidence can make | 3 naming/scope questions and 3 patent flags, listed below |
 | Refused, not proposed | 5 Class B elements that were built and then failed the extent-corroboration rule; see *Refused on the evidence* |
@@ -119,10 +126,10 @@ bar**, **`PLF:1026` pat**.
 
 ---
 
-## The 20 rows at a glance
+## The 23 rows at a glance
 
 The withdrawn row is listed first and struck from the count: it is not one of
-the 20, it is not in the table, and it cannot be signed. It stays on the page
+the 23, it is not in the table, and it cannot be signed. It stays on the page
 because a decision with no record of itself is how a database forgets why it
 looks the way it does.
 
@@ -149,6 +156,9 @@ looks the way it does.
 | `PLF:1025` | bar | **SIGN** | The one-base boundary is confirmed: the native-locus record differs at position 1 only, A→G, M1V |
 | `PLF:1026` | pat | **SIGN** | A second INSDC record, `M22827`, is nucleotide-identical to the pin |
 | `PLF:1027` | rpsL | **SIGN** (see decision 4) | Not a resistance gene, and the row says the alias says the opposite |
+| `PLF:4012` | T3 promoter | **your call** | Five independent addresses draw these 19 edges; the 17 nt extent that would match `PLF:4000`'s −17..−1 rule has one, so this row and its two siblings use different conventions on purpose |
+| `PLF:4013` | araBAD promoter | **SIGN** | Five independent addresses place it edge for edge, verbatim in `J01641.1`, the 1978 araBAD regulatory-region record -- and 284/285 against K-12 MG1655, which the row states |
+| `PLF:4014` | EF-1alpha promoter (human) | **your call** | At the floor with two placements; the 1179 nt *vector* form has three and is a different sequence -- the row explains which it took and what that costs |
 
 ---
 
@@ -665,6 +675,103 @@ which is the cassette-vs-ORF trap named in each row it applies to.
 
 ---
 
+## `PLF:4012` -- T3 promoter  ·  **RECOMMENDATION: YOUR CALL.** The evidence is overwhelming; what needs deciding is whether three sibling rows may use two conventions
+
+- **Claims**: The 19 bp T3 promoter convention -- the seventeen bases upstream of a T3 transcription start, plus the first two bases of the transcript.
+- **Anchor**: `AJ318471.1:20733-20751:+`  (19 nt, `promoter`, `consensus_of_insdc`) -- the T3 genome, and this is the phi10 copy, immediately upstream of the gene 10A major-capsid CDS, exactly as `PLF:4000` takes T7's phi10.
+- **Check against**: PV959484.1, PQ463640.1, OK413188.1, PP475160.1, LC795782.1
+- **Places it at our extent**: 5 of 6 -- every exemplar; the anchor draws 23 nt (`5'+0/3'+4`)
+
+**Why it was held, and why that was wrong.** The old reason said the two leading
+conventions were 17 nt and 19 nt, offset rather than nested, one submission each.
+Read as a comparison of `AATTAACCCTCACTAAA` with the *shifted*
+`ATTAACCCTCACTAAAGGG`, that is exactly right. It was the wrong pair. On a corpus
+large enough to see it the two leading conventions are this row's 19 nt (18
+independent submissions in the 2026-08-11 survey; 5 in this row's own witness
+list) and the 20 nt nested *around* it -- this row plus one G (14 in the survey;
+4 verified here -- Montreal, Wisconsin-Madison, CNB-CSIC, Stratagene). Both share
+this row's 5' edge. Nested rivals are a case this table already handles.
+
+**The decision that is actually yours.** The extent that would make this row read
+like `PLF:4000` and `PLF:4001` -- 17 nt, −17..−1, +1 excluded -- is deposited and
+has **one** submitting address behind it: BCCM/LMBP Gent, checked on three of its
+records. It fails `MIN_PLACEMENTS`. So either this row ships at 19 nt and the
+database holds two conventions for three phage promoters, or T3 stays out
+because the extent that matches its siblings cannot clear the floor. The row
+takes the first and says so at length; the primary literature (Bailey, Klement &
+McAllister 1983, PMID 6574450) is what makes the disagreement measurable rather
+than vague -- their conserved 16 bp block runs −12..+4, so this row's last two
+bases are transcribed.
+
+```
+python features/build/build.py --show PLF:4012
+```
+
+---
+
+## `PLF:4013` -- araBAD promoter  ·  **RECOMMENDATION: SIGN**
+
+- **Claims**: The araC-araBAD intergenic regulatory region of *Escherichia coli* in the extent vectors carry as "the pBAD promoter".
+- **Anchor**: `J01641.1:1004-1288:+`  (285 nt, `promoter`, `consensus_of_insdc`) -- "E.coli araBAD promoter region and araC gene", the 1978 record the old hold reason said did not exist.
+- **Check against**: OR900359.1, PQ381271.1, PQ015303.1, PP457274.1, LC143902.1
+- **Places it at our extent**: 5 of 6 -- every exemplar; the anchor annotates four "(approx)" regulatory sites inside the interval and draws none of its edges
+
+**Why it was held, and why that was wrong.** "No Escherichia coli ara locus
+record fetched to anchor any of them" -- `J01641` is that record, it is verbatim
+over the whole 285 nt, and it carries five primary references including Smith &
+Schleif 1978 (PMID 357433) and Greenfield, Boone & Wilcox 1978 (PMID 368797).
+"Three extents from three submissions, two of them SnapGene-annotated" is also
+retired: five independent, non-SnapGene addresses draw these edges in this row's
+own witness list alone.
+
+**Read before signing.** The row does NOT claim its 3' edge is −1 relative to the
+araBAD transcription start; nothing fetched establishes that, and the caveat says
+so. And the 285 bases are **not** in K-12 MG1655: against `U00096.3` they match
+284/285, the difference at genome coordinate 70289, inside the annotated AraC
+inducer site. The row cites `J01641` because that is the record the bases are
+verbatim in, and states which strain the fragment descends from as unknown.
+
+```
+python features/build/build.py --show PLF:4013
+```
+
+---
+
+## `PLF:4014` -- EF-1alpha promoter (human)  ·  **RECOMMENDATION: YOUR CALL.** Two forms clear the rule and they are different molecules
+
+- **Claims**: The promoter of human `EEF1A1` with its first exon and entire first intron, ending nine bases into exon 2.
+- **Anchor**: `J04617.1:373-1560:+`  (1188 nt, `promoter`, `consensus_of_insdc`) -- Uetsuki, Naito, Nagata & Kaziro 1989, J Biol Chem 264:5791-5798, PMID 2564392.
+- **Check against**: LC884827.1, LC904051.1
+- **Places it at our extent**: 2 of 3, against a floor of 2 -- no margin
+
+**Why it was held, and what survives.** The old reason said the element "is not a
+verbatim slice of anything: a reference taken from the gene will not match real
+vectors, and one taken from a vector cannot be cited to the gene by coordinates."
+The second half is true and irrelevant -- a vector form does not need to be cited
+to the gene, and the tac and trc rows already anchor on construct records. The
+first half was answered by measurement: at the default `min_identity` of 0.96 a
+four-base deletion over 1188 nt is 99.7% identity, so this row *does* annotate
+real pEF vectors. The figures in that reason, 1144 and 1148 nt, are not
+reproducible on any record fetched; the two real conventions are 1179 and 1188.
+That last point stopped being an arithmetic argument on review: `pl annotate
+--include-proposed` was run against all three of the 1179 nt deposits below,
+fetched from ENA as FASTA, and each returns this row at **99.7% identity, 100%
+coverage** over `1..1179`. The row annotates real pEF vectors; that is now a
+measurement on the shipped binary and not a calculation about one.
+
+**The decision that is yours.** The 1179 nt vector form -- this row minus its
+first five bases and minus `GCCC` at `J04617.1:686-689` -- has **three**
+independent placements (UCSD, Mahidol, Tsinghua) against this row's two. It was
+not taken because all three of those sit at base 1 of their own record, so they
+corroborate a 3' edge and not a 5' one, while both of this row's placements are
+interior annotations where the depositor chose both edges. If you would rather
+ship what most pEF vectors actually carry, that is a defensible call and the
+caveat gives the exact recipe. Note also that one of the two placements is a
+`misc_feature`, and that the four deleted bases are present in the human genome
+(`AL603910.6`), so the deletion is the vectors' and not the record's.
+
+---
+
 ## `PLF:1016` -- bsr  ·  **RECOMMENDATION: SIGN. The blocker is cleared.**
 
 - **Claims**: Blasticidin S deaminase of the bsr type. Inactivates blasticidin S by the same hydrolytic deamination as the fungal bsd enzyme, from a different protein family. Its origin is bacterial: the gene was cloned out of pBSR8, a plasmid carried by the soil organism Bacillus cereus K55-S1. Widely used as a blasticidin selection marker in mammalian and insect cells.
@@ -1154,27 +1261,47 @@ that caught the row; it was the extent rule, which names no vendor at all.
 
 ## Worked up and deliberately NOT shipped
 
-SOURCING.md section 6 budgets about 40 Class B items. Seven survived the rules;
-five more were built and refused on the extent evidence (above). The rest are
-recorded in `stage_classb.HELD` with the reason, so that nobody re-does the work
-and concludes it was never done:
+SOURCING.md section 6 budgets about 40 Class B items. Ten survived the rules and
+nine of those are in the table, the tenth having been withdrawn; five more were
+built and refused on the extent evidence (above). The rest are recorded in
+`stage_classb.HELD` with the reason, so that nobody re-does the work and
+concludes it was never done.
 
-- **T3 promoter** -- No consensus to record. The two leading conventions are 17 nt and 19 nt, they are OFFSET rather than nested -- they share a 16 nt core and neither contains the other -- and each has exactly one independent submission behind it. Picking one would be a coin toss dressed up as consensus_of_insdc. A third deposit annotates the reverse complement, i.e. it got the strand wrong. The bases are unambiguous; the boundary is not.
-- **SV40 early promoter** -- The 330 nt convention is a contiguous circular interval that WRAPS the numbering origin of the SV40 record, which this schema's accession:lo-hi:strand boundary_evidence cannot express, and a rival 283 nt form does not place as a single interval at all. The region also carries a tandem repeat, so the two forms may differ in repeat copy number -- that was NOT counted and is not offered as a finding.
-- **U6 promoter (human)** -- The cleanest anchor of everything examined -- 249 nt, exact in the primary record for human U6 -- and only ONE independent submission witnesses it. Fails on witnesses, not on evidence. The cheapest of these to rescue.
-- **H1 promoter (human)** -- Three independent submissions agree on 216 nt, which is a genuine consensus, but the sequence does not occur in the human H1 RNA record and no genomic record carrying the upstream promoter could be located. Boundary witnessed, provenance absent; a row would have nothing to put in boundary_evidence.
-- **EF-1alpha promoter (human)** -- The 1144 nt vector element is the primary record's 1148 nt MINUS a four-base internal deletion, with both flanks exact. It is therefore not a verbatim slice of anything: a reference taken from the gene will not match real vectors, and one taken from a vector cannot be cited to the gene by coordinates. Needs an explicit decision about which sequence ships.
-- **PGK promoter (mouse)** -- Same shape as EF-1alpha and worse: exact for 67 nt, then a single-base shift, and roughly 48 substitutions across the rest. One submission. Two independent reasons to hold.
-- **CAG promoter** -- NOT ONE ELEMENT. The widely deposited 1342 nt 'AG promoter' begins in the chicken beta-actin gene and ends in rabbit beta-globin and contains no cytomegalovirus sequence at all; a 935 nt 'CAG promoter' begins in the cytomegalovirus enhancer. Merging two different elements under one near-identical name would be the worst error available in this set.
-- **araBAD / pBAD promoter** -- Three extents from three submissions, two of them SnapGene-annotated, and no Escherichia coli ara locus record fetched to anchor any of them. Insufficient on both legs. Note PLF:1002 already carries araC, the regulator; the promoter it works on is the hole.
-- **tetO / TRE / Ptet** -- DROPPED, not held. The name covers at least four unrelated elements -- a bacterial PLtetO-1, a bacterial pTet, a mammalian bidirectional TRE, and a CMV-tetO2 hybrid -- with nothing in common but the word. It must be split into separately named rows before any part of it can be sourced at all.
+**Rewritten 2026-08-11 against fresh measurement, and this list is not what it
+was.** Three entries left it for the table (`PLF:4012`, `PLF:4013`, `PLF:4014`).
+Two entries were one name over several unrelated elements and are now separate
+entries with separate statuses -- the CAG line became three, the dropped
+`tetO / TRE / Ptet` line became the three-way split it asked for. Of the rest,
+every reason changed: two were **backwards** about which of the two rules they
+failed, one had been checking the wrong accession, and one turns out to fail
+only because `verify()` scores a record's first copy of an element and not its
+second. Where an entry now says an extent CLEARS the corroboration floor and is
+still not a row, the missing thing is named.
 
-The recurring reasons are worth naming: **one witness is not two** (U6, PGK),
-**the element is not a verbatim slice of anything** (EF-1alpha, PGK), **the
-schema cannot express the interval** (SV40 early promoter, which wraps the
-numbering origin), and **the name covers more than one element** (CAG,
-tetO/TRE). The last is the dangerous one and is why tetO was dropped outright
-rather than held.
+- **SV40 early promoter** -- The 330 nt convention is a contiguous circular interval that WRAPS the numbering origin of the SV40 record, which this schema's accession:lo-hi:strand boundary_evidence cannot express, and a rival 283 nt form does not place as a single interval at all. The region also carries a tandem repeat, so the two forms may differ in repeat copy number -- that was NOT counted and is not offered as a finding. RE-CHECKED 2026-08-11 ON A 419 nt FORM OF THE SAME CONVENTION, and the wrap is not one record's numbering quirk but every record's: the interval is 5171..5589 of a 5243 bp genome, i.e. it runs 346 bases past the origin, and the assembled 419 bases occur CONTIGUOUSLY in none of J02400.1, AF316139.1 or EF579804.1 -- all three 5243 bp, all three sharing that origin. The obstacle is the schema and not the evidence, which is a different thing from the other holds in this list and would be cleared by a boundary_evidence form that can express a circular join, not by more fetching.
+- **U6 promoter (human)** -- STILL HELD, and the reason it stood under until 2026-08-11 was backwards. It said only ONE independent submission witnesses the 249 nt extent and that it 'fails on witnesses, not on evidence'. Both halves are the wrong way round. The bases are witnessed abundantly: four independent addresses in a single afternoon's fetching hold them (Allen Institute for Brain Science PZ036121.1, George Washington University JN255690.1, AIST LC414435.1, UCSD MK318530.1) and a 2026-08-11 survey of 479 records put it at eleven. What exactly ONE submission does is DRAW those edges: OP099837.1, OP099840.1 and OP099843.1, all Drug Discovery Sciences, Boehringer Ingelheim Pharma, one address. So it clears MIN_SUBMISSIONS several times over and fails MIN_PLACEMENTS at one, which is the opposite failure and has the opposite remedy. THE EXTENT IS THE ARTICULABLE ONE, WHICH IS WHY IT IS WORTH SAYING SO. M14486.1 (human U6 gene, clone pGEM/U6, Kunkel, Texas A&M; Kunkel, Maser, Calvet & Pederson 1986, Proc Natl Acad Sci USA 83:8575-8579, PMID 3464970) annotates the PSE at 263..282, the TATA box at 298..306 and prim_transcript 329..435, so +1 is 329 and the 249 nt convention is exactly M14486.1:80-328 = -249..-1, the same rule PLF:4000 and PLF:4001 use. (That prim_transcript is invisible to this stage's own parser -- see the EF-1alpha row's caveat on fifteen-character feature keys -- and was read by hand.) TWO NESTED ALTERNATIVES DO CLEAR THE FLOOR AND ARE DELIBERATELY NOT OFFERED AS ROWS. 241 nt = M14486.1:80-320 is annotated exactly by the Allen Institute (PZ036121.1, PZ036141.1 -- one address), PX139666.1 and MK318530.1, three independent submissions; it stops nine bases short of +1 for no reason anyone has articulated. 264 nt = M14486.1:65-328 is annotated exactly by George Washington University (JN255690.1, JN255691.1 -- one address) and AIST (LC414435.1), two submissions, at the floor, and it ends at -1 like the 249. Adopting either BECAUSE the 249 failed is re-cutting an extent until two records agree with it, which is the move this stage exists to refuse; the module docstring already says such a re-cut 'is a curator's decision and not this program's'. They are recorded here so that decision is cheap, not taken. One further measurement, because it is the trap: three submissions DO draw a 249 nt extent whose sequence is not the primary record's -- one substitution at M14486.1:146 -- and MG550105.1 is one of them. Counting those would ship a sequence that is in no primary record, which is the failure the EF-1alpha and PGK entries are about.
+- **H1 promoter (human)** -- STILL HELD, and both halves of the old reason were wrong; the corrected reason is stronger and it fails on two legs rather than one. THE PROVENANCE GAP IS CLOSED, so 'no genomic record carrying the upstream promoter could be located' is retired. The record is X16612.1, 'Human gene for H1 RNA', 1057 bp, clone pMBH1, deposited by S. Altman at Yale (Baer, Nilsen, Costigan & Altman). It annotates the TATA box at 345..348 and precursor_RNA 375..715, and X16612.1:152-366 -- 215 nt -- is held verbatim by three independent addresses: AL355075.6:176331-176545 (Genoscope, chromosome 14 clone), AF479321.1:1615-1829 (Genome Sciences, University of Washington) and the anchor itself. The old reason was checking X15624, 'Human H1 RNA', which is a 340 bp transcript-level record and contains none of the promoter. THE CONSENSUS WAS NEVER THERE, which is the leg that now kills it. 'Three independent submissions agree on 216 nt' counted address STRINGS, which is precisely the error same_submitter() exists to prevent (finding 2 above). Every record found holding those 216 bases is one department: AY640625.1 and AY640626.1, Neurology, University of Goettingen, Waldweg 33 -- one address, one submission. FJ687158.1, DQ465352.1, MH749464.1, LT727092.1, AL355075.6 and AF479321.1 were each checked and hold no copy of the 216 nt at all. Corroborating submissions: ONE. AND THE 216 nt IS STILL NOT A SLICE OF ANYTHING. It is X16612.1:152-366 plus one further base, and that base is A where X16612.1:367 is T -- so it is 215 verbatim bases with a 216th that disagrees with the gene, and boundary_evidence would have nothing to point at. The genomic 215 nt form, which does slice cleanly, is annotated by NOBODY: three submissions hold it and zero draw it, so it fails MIN_PLACEMENTS at nought. WHAT WOULD RESCUE IT: two genuinely independent submissions annotating exactly 215 nt (today none) or exactly 216 nt (today one, and it would still not be a verbatim slice). Nothing in the schema and nothing about the anchor is now the obstacle.
+- **PGK promoter (mouse)** -- HELD AT ONE PLACEMENT -- but every other clause of the old reason was wrong, and one of the corrections is about this stage's code rather than about PGK. 'NOT A VERBATIM SLICE OF ANYTHING' IS RETIRED. The 508 nt element is exact at BX469914.4:13192-13699 on the plus strand -- 'Mouse DNA sequence from clone RP23-217J7 on chromosome X', Wellcome Trust Sanger Institute -- so a citable modern anchor exists. What is true is that it is not in M18735.1 (Adra, Boer & Klip 1987, Gene 60:65-74), the 1987 Pgk-1 exon 1 record the old reason measured against: the longest exact prefix of the element present there is 64 nt, and the record then diverges. That is a 1987 record differing from the genome, NOT the engineered internal deletion the EF-1alpha entry describes, and calling the two 'the same shape' was wrong. 'ONE SUBMISSION' WAS WRONG BY AN ORDER OF MAGNITUDE. A 2026-08-11 survey put nine independent addresses on the exact bases; this file's own fetching confirms Sanger and the Central Institute for Experimental Animals directly. MIN_SUBMISSIONS is not the problem. IT DIES ON MIN_PLACEMENTS AT ONE, AND THE SECOND WITNESS IS LOST TO A LIMITATION OF verify() RATHER THAN TO THE EVIDENCE. CR293496.1 (Sanger Centre) annotates regulatory 4137..4644 = exactly these 508 bases. AB242435.1 (Central Institute for Experimental Animals, Kawasaki) carries the element TWICE, and annotates the SECOND copy at exactly 508 nt (regulatory 2089..2596) while the first carries a 516 nt feature (regulatory 366..881, 5'+8/3'+0). verify() scores occurrences()[0] and nothing else, so it sees the 516 and never the 508: on the rule as IMPLEMENTED this element has one placement, and on the rule as WRITTEN -- 'independent submissions annotate a feature at exactly this extent' -- it has two. Note also that BX469914 and CR293496 are both Hinxton addresses and same_submitter() merges them, so the anchor would not add a third opinion. TWO DECISIONS ARE OWED HERE AND NEITHER IS THIS FILE'S: whether a second copy inside one record may corroborate an extent, and if so, a change to verify() that will alter the measured notes of rows already signed. Held until both are taken.
+- **AG promoter of pCAGGS, 1342 nt** -- HELD AT ONE PLACEMENT, and the old CAG entry's central claim is confirmed harder than it was stated. These 1342 bases -- LT727518.1:3457-4798, the pCAGGS record deposited by BCCM/LMBP Gent -- share ZERO 20-mers with X17403.1, the human cytomegalovirus genome, on either strand. There is no CMV sequence in the element that most maps call a CAG promoter's front half; it is chicken beta-actin running into rabbit beta-globin. WHAT KILLS IT IS NOT THAT: it is that 'widely deposited' was false. The extent appears in dozens of records and ONE submission -- the BCCM/LMBP bulk plasmid-collection deposit -- which is finding 2 of the module docstring in its purest form. One placement, floor of two. A second, independent AG-type element of 1347 nt exists (EF186083-EF186088, LUMC Leiden), also with no CMV sequence and also with one submission, so the family is not one depositor's quirk and is still not a consensus.
+- **CAG promoter, the CMV-enhancer-containing forms** -- HELD, AND THE NUMBER IS THE FINDING: fifteen distinct extents were measured and not one of them reaches two independent submissions. The 935 nt form (JN898959.1/JN898962.1, KIST, one submission) really does begin inside the cytomegalovirus enhancer -- 210 20-mers shared with X17403.1, against zero for the AG element above -- and so do the 1699, 1722, 1740, 1733, 1728, 1721, 1720, 1710, 1677, 1673, 1667 and 1647 nt forms, each with exactly one submission behind it. Fifteen single opinions is not a convention, and the reason to keep this entry separate from the AG one is that a single row named 'CAG promoter' spanning both would merge an element that contains CMV with an element that provably does not.
+- **chicken beta-actin promoter** -- HELD, AND THIS IS THE ONE TO READ TWICE, because the two legs of the rule are satisfied by two INCOMPATIBLE extents and the near-miss is exactly the shape PLF:4006 was withdrawn over. 276 nt = X00182.1:268-543 has the better boundary argument in this whole file: the record annotates a CAAT signal at 455..459 and a TATA box at 517..524, and the extent is -276..-1 against the transcription start, +1 excluded -- the PLF:4000 rule arrived at independently. It has TWO submissions annotating it exactly, and the second one must not be counted: OK413188.1 (OHSU/ONPRC) is an honest witness, and OP697986.1 is the same submitting address as OP697991.1 -- same_submitter() returns True -- which SOURCING.md section 0.6 names as a DEMONSTRATED false negative of record_is_snapgene_annotated, and which section deliberately declined to widen the screen for. The mechanical screen passes it; a curator may not. ONE honest placement. 278 nt has two honest submissions (Oxford Protein Production Facility, EF372394.1 and EU733644.1, deposited 2007 and 2008; Witten/Herdecke, PQ540283.1, 2024) and no anchor: it is the 276 nt with TWO extra G in a G-homopolymer -- measured, the run is 14 G in X00182.1 and 16 G in the vector form -- so it is a verbatim slice of no primary record and reference_nt taken through that tract will silently miss whichever half of the wild population has the other length. WHAT WOULD RESCUE IT: one more independent submission drawing 276 nt exactly. Nothing else is missing.
+- **PLtetO-1 (bacterial tet-regulated promoter)** -- STILL NOT A ROW, BUT NO LONGER FOR THE OLD REASON. The old 'tetO / TRE / Ptet' entry was DROPPED on the ground that the name covers at least four unrelated elements and 'must be split into separately named rows before any part of it can be sourced at all'. This entry and the two below are that split, and the sourcing now exists for parts of it. A 74 nt extent -- KX682238.1:4307-4380, the lambda PL promoter with two tet operators -- is annotated edge for edge by FOUR independent addresses checked on 2026-08-11: Pacific Northwest National Laboratory (KX682238.1), Biomedical Engineering, Boston University (KM521209.1), Biological Engineering, MIT (KT893256.1, KX264176.1 -- one address) and Biology, University of Texas at Tyler (MK753225.1). None carries the SnapGene tell. It clears both legs. WHAT IT DOES NOT YET HAVE, and why no row is offered: a curated name and a description written from the primary source (Lutz & Bujard 1997, Nucleic Acids Res 25:1203-1210, which was NOT read here), and a decision between this 74 nt and the 54 nt form nested inside it -- JX155235.1:1-54, whose placements checked here (JX155235.1, JX155240.1, JX155247.1) are all ONE address, UC Berkeley EECS. This is a designed hybrid with no natural locus, so it would be anchored on a construct record exactly as PLF:4003 and PLF:4004 are. It is the strongest unclaimed candidate in this list.
+- **tetO7 / TRE (mammalian tet-response element)** -- HELD, WITH THE CORROBORATION MEASURED AND A HAZARD THAT IS NOT YET ANSWERED. A 271 nt heptamer array -- MG883664.1:1376-1646 -- is annotated edge for edge by three independent addresses checked on 2026-08-11: Southwest University (MG883664.1, protein_bind), University of York (PQ260749.1) and Human Genetics, University of Michigan (PQ360726.1). A 291 nt form was reported by the same survey with three more. Both clear the floor on their face. THE HAZARD IS THAT THIS ELEMENT IS A TANDEM REPEAT, so two extents differing by 20 nt may be the same convention counted over a different number of operator copies rather than two rival boundaries -- and this stage has no way to tell those apart, because occurrences() matches a whole string and says nothing about periodicity. That is the same hazard the SV40 early promoter entry flags and does not count. Until somebody counts the repeat units in each deposit and says which extents are the same element, a row here would be asserting a boundary it has not distinguished from an artefact.
+- **CMV-tetO2, PTight and the remaining tet hybrids** -- HELD, AND STILL PARTLY UNSPLIT. The third and fourth elements the dropped 'tetO / TRE / Ptet' entry named -- a CMV-tetO2 hybrid and a bacterial pTet -- plus a PTight/TRE-Tight form of 315 nt that the 2026-08-11 survey turned up, have not been separated into individually named elements here and none of their extents was measured against this stage's own rule. A CMV-tetO2 element additionally OVERLAPS PLF:4005's refused interval, so it cannot be worked up independently of the decision the CMV promoter row is still waiting on. Recorded so the split is complete on paper even where the evidence is not.
+
+The recurring reasons are worth naming, and they are not the ones this list gave
+before: **holding the bases is not drawing the edges** (U6, PGK, the AG promoter
+of pCAGGS -- all three have witnesses in abundance and one placement), **the
+element is not a verbatim slice of anything** (H1's 216 nt form, the 278 nt
+chicken beta-actin form), **the schema cannot express the interval** (SV40 early
+promoter, which wraps the numbering origin in every genome record checked), and
+**the name covers more than one element** (CAG, tetO/TRE -- now split rather than
+merely deplored). One new reason has appeared and is the most important of them:
+**an extent can pass the mechanical screen and still not be honestly
+corroborated.** The 276 nt chicken beta-actin promoter has two submissions
+drawing its edges, and the second is the record `SOURCING.md` section 0.6 already
+names as a demonstrated false negative of the SnapGene screen. The screen passes
+it. A curator may not. That is the same question `PLF:4006` was withdrawn over.
 
 ---
 

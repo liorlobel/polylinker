@@ -31,7 +31,7 @@ the word *consensus* true -- and until this build only the first was tested.
 `verify()` had measured each depositor's edges since the stage was written, put
 them in `notes`, and then tested nothing, so a row could ship
 `boundary_rule = consensus_of_insdc` on a consensus of one. Five of the twelve
-did, and they now drop:
+items declared on that date did, and they now drop:
 
     PLF:4002 lac promoter        1 of 4 submissions place it exactly
     PLF:4003 tac promoter        1 of 3   (and that one is two records from one lab)
@@ -105,11 +105,27 @@ Rho-independent terminators cannot come from Rfam: SOURCING.md line 193 records
 that as a confirmed negative, so rrnB T1/T2 and T7 Tphi are anchored on their
 own primary records instead and no one went looking again.
 
-Nine further elements were worked up and are NOT rows -- eight held and one
-dropped outright -- each for a stated reason; see `HELD` at the bottom of this
-file. A row whose boundary would be a coin toss between two equally-supported,
-non-nested conventions is not a row this database can carry, because
-`consensus_of_insdc` would then be false on its face.
+Nine further elements were worked up in the first pass and were NOT rows. Three
+of them are rows now -- the T3 promoter, the araBAD promoter and the human
+EF-1alpha promoter, PLF:4012 to PLF:4014, APPENDED on 2026-08-11 so that no
+published id moved. Each had been refused for a reason that measurement did not
+support: T3 for a want of witnesses it does not have, EF-1alpha because a vector
+form cannot be cited to the gene by coordinates (true, and it does not need to
+be), araBAD for want of an anchor that exists. The corrected reasons are in
+`HELD` below beside the six elements that are still refused, which are now ten
+entries because two of them were one name over several unrelated elements and
+have been split. A row whose boundary would be a coin toss between two
+equally-supported, non-nested conventions is not a row this database can carry,
+because `consensus_of_insdc` would then be false on its face.
+
+NOT DONE, AND IT IS A DEFECT IN THIS FILE RATHER THAN IN ANY ROW: `FT_LINE`
+cannot match a feature key fifteen characters wide, because EMBL pads the key
+field to sixteen columns and the pattern demands two spaces. `prim_transcript`,
+`minus_35_signal` and `minus_10_signal` are therefore declared in
+`REGULATORY_KEYS` and unreachable -- a key that cannot match is the same shape
+of nothing as a check that cannot fail. It is left alone here because widening
+it adds text to the `notes` of rows already under sign-off, and this pass is not
+entitled to move those. PLF:4014's caveat records where it bites.
 
 Usage
 -----
@@ -833,6 +849,263 @@ ITEMS: tuple[Convention, ...] = (
             "not in this database and would be a separate row."
         ),
     ),
+    # ------------------------------------------------------------------
+    # APPENDED 2026-08-11, and APPENDED is the whole of why they are here and
+    # not where they belong. The T3 promoter is the sibling of PLF:4000 and
+    # PLF:4001 and reads far better next to them; putting it there would have
+    # moved twelve published ids, so it is PLF:4012 and the reader is told why
+    # rather than shown a tidy tuple that lies about its own history.
+    #
+    # All three came out of `HELD`. Each was refused there for a reason that
+    # measurement did not support, and the reasons that replaced them are at the
+    # bottom of this file. Nothing was re-cut to make evidence fit: every extent
+    # below is the extent the corpus already drew, and where a nested rival is
+    # also corroborated it is named in the caveat with its own count.
+    Convention(
+        name="T3 promoter",
+        aliases=("T3 RNA polymerase promoter", "PT3", "T3 phi10 promoter",
+                 "T3 class III promoter"),
+        genbank_key="promoter",
+        cls="regulatory",
+        anchor="AJ318471", anchor_version="AJ318471.1", lo=20733, hi=20751, strand="+",
+        sequence="AATTAACCCTCACTAAAGG",
+        exemplars=("PV959484", "PQ463640", "OK413188", "PP475160", "LC795782"),
+        description=(
+            "The 19 bp promoter of bacteriophage T3, read by T3 RNA polymerase and by "
+            "no host enzyme, in the extent depositors overwhelmingly draw: the "
+            "seventeen bases upstream of a T3 transcription start together with the "
+            "first two bases of the transcript. T3 and T7 RNA polymerases are "
+            "cross-blind -- the difference is a single C where T7 has G-A, at -10 -- "
+            "so a vector carrying a T7 promoter at one end of its polylinker and a T3 "
+            "promoter at the other can transcribe either strand of an insert "
+            "selectively in vitro."
+        ),
+        caveat=(
+            "THIS ROW USES A DIFFERENT CONVENTION FROM PLF:4000 AND PLF:4001, "
+            "DELIBERATELY, AND THE REASON IS EVIDENCE AND NOT PREFERENCE. The T7 and "
+            "SP6 rows stop at -1 and exclude the +1 base. The extent that would match "
+            "them here is 17 nt, AATTAACCCTCACTAAA = -17..-1, and it is deposited: "
+            "checked on 2026-08-11, LT009443.1, LT726830.1 and LT727417.1 all annotate "
+            "exactly those seventeen bases -- and all three carry the SAME submitting "
+            "address, BCCM/LMBP Universiteit Gent, i.e. one bulk culture-collection "
+            "deposit and therefore ONE submission. It fails MIN_PLACEMENTS at one. "
+            "This 19 nt extent does not: five independent addresses in this row's own "
+            "witness list draw it edge for edge, and a 2026-08-11 survey of T3-family "
+            "deposits put it at eighteen. Refusing the corroborated extent to keep "
+            "three sibling rows visually consistent would be substituting a "
+            "preference for the rule, so the rows disagree and this note says so. "
+            "WHERE +1 IS, FROM THE PRIMARY LITERATURE, WHICH MAKES THAT DISAGREEMENT "
+            "MEASURABLE RATHER THAN VAGUE. Bailey, Klement & McAllister 1983, Proc "
+            "Natl Acad Sci USA 80:2814-2818, PMID 6574450, sequenced six T3 promoters "
+            "and report that five share an identical 16 bp block, ACCCTCACTAAAGGGA, "
+            "running -12..+4 with initiation at GTP at +1. Aligned on that block this "
+            "row is -17..+2, so its last two bases are transcribed. Adhya, Basu, "
+            "Sarkar & Maitra 1981, Proc Natl Acad Sci USA 78:147-151, PMID 6264429, "
+            "fix the same register independently, marking +1 in a T3 promoter "
+            "sequence and reporting T3 and T7 to be virtually identical between -9 "
+            "and +4 and quite different between -17 and -10. "
+            "AND THE 5' EDGE IS NOT A CONSERVATION BOUNDARY HERE, WHICH IS THE ONE "
+            "PLACE THE ANALOGY TO PLF:4000 BREAKS. The T7 row's -17 is where a "
+            "conserved column block ends. Bailey's conserved T3 block is only 16 bp "
+            "and is preceded by a six-base A+T region that VARIES between T3 "
+            "promoters: Adhya's reads TATTTA where all three copies in this row's "
+            "anchor read AATTAA. So -17 here is the edge the anchor and the deposits "
+            "draw, not the edge conservation forces. "
+            "THE ANCHOR, AND WHY THIS COPY. AJ318471.1 is the T3 genome (Pajunen et "
+            "al., University of Turku). These nineteen bases occur three times in it "
+            "and the record annotates a promoter at each of the three, every one at "
+            "23 nt = -17..+6: phi6.5 at 17160..17182, phi10 at 20733..20755, phi13 at "
+            "25457..25479. The coordinates cited are the phi10 copy, which sits "
+            "immediately upstream of the gene 10A major-capsid CDS at 20891..21934 -- "
+            "the same choice, for the same reason, as the T7 row's phi10. Which of "
+            "the three is cited does not change a base. Note that the witness line "
+            "above scores the anchor at 17160, because occurrences() returns the "
+            "first copy; the annotation there is the phi6.5 promoter and its offsets "
+            "against this row are identical. "
+            "RIVALS, MEASURED 2026-08-11, ALL NESTED WITH THIS ONE EXCEPT THE LAST. "
+            "20 nt (-17..+3) is genuinely corroborated and is this row plus one G: "
+            "MG490656.1 (Universite de Montreal), MZ541859.1 (Wisconsin-Madison), "
+            "OP405364.1 (CNB-CSIC Madrid) and AF151087.1 (Stratagene) annotate it "
+            "exactly, four addresses, and the survey put it at fourteen. This row "
+            "takes the narrower of two nested conventions, as PLF:4002 does; a file "
+            "labelled over 20 or 23 nt matches this row across part of its length, "
+            "which is the correct outcome and not a miss. The anchor's own 23 nt is a "
+            "third nested form with one submission. What is NOT nested is a family "
+            "shifted one base 3' -- ATTAACCCTCACTAAAGGG and ATTAACCCTCACTAAAGGGA -- "
+            "and that family is why this element was held: the HELD reason said the "
+            "two leading conventions were 17 nt and 19 nt, offset, sharing a 16 nt "
+            "core, with one submission each. Read as a comparison of the 17 nt form "
+            "with the SHIFTED 19 nt form that is exactly right, and both of those do "
+            "have one submission. It was the wrong pair: on a corpus large enough to "
+            "see it, the two leading conventions are this row and the 20 nt, they "
+            "share this row's 5' edge, and they are nested."
+        ),
+    ),
+    Convention(
+        name="araBAD promoter",
+        aliases=("pBAD promoter", "PBAD", "araBAD operon promoter",
+                 "arabinose-inducible promoter"),
+        genbank_key="promoter",
+        cls="regulatory",
+        anchor="J01641", anchor_version="J01641.1", lo=1004, hi=1288, strand="+",
+        sequence=(
+            "AAGAAACCAATTGTCCATATTGCATCAGACATTGCCGTCACTGCGTCTTTTACTGGCTCTTCTCGCTAACCAAACCGG"
+            "TAACCCCGCTTATTAAAAGCATTCTGTAACAAAGCGGGACCAAAGCCATGACAAAAACGCGTAACAAAAGTGTCTATA"
+            "ATCACGGCAGAAAAGTCCACATTGATTATTTGCACGGCGTCACACTTTGCTATGCCATAGCATTTTTATCCATAAGAT"
+            "TAGCGGATCCTACCTGACGCTTTTTATCGCAACTCTCTACTGTTTCTCCAT"),
+        exemplars=("OR900359", "PQ381271", "PQ015303", "PP457274", "LC143902"),
+        description=(
+            "The regulatory region driving the Escherichia coli L-arabinose operon, in "
+            "the extent cloning vectors carry as 'the pBAD promoter': the araC-araBAD "
+            "intergenic region, containing the AraC operator and inducer sites, the "
+            "cyclic-AMP receptor protein site, and PBAD itself. AraC represses it by "
+            "looping between operators in the absence of arabinose and activates it in "
+            "the presence of arabinose and CRP-cAMP, which is why this promoter is "
+            "prized for titratable expression rather than raw strength."
+        ),
+        caveat=(
+            "WHAT THE TWO EDGES ARE, AND WHAT NEITHER OF THEM IS. On the anchor's own "
+            "feature table the araC coding sequence ends at 977 and the araB "
+            "initiation codon is at 1316, so this interval starts 26 bases after the "
+            "one and stops 27 bases before the other, entirely inside the intergenic "
+            "region and touching neither gene. IT IS NOT ESTABLISHED HERE THAT 1288 "
+            "IS -1 RELATIVE TO THE araBAD TRANSCRIPTION START, and this row does not "
+            "claim it: unlike PLF:4000, the anchor annotates no transcription start "
+            "anywhere in this region, and the length was not read from any paper. "
+            "Both edges are the convention the deposits draw and nothing more. "
+            "WHAT THE ANCHOR DOES ANNOTATE INSIDE THE INTERVAL, all four of which the "
+            "depositor marks '(approx)': a CRP site at 1143-1168 and an AraC operator "
+            "at 1145-1183 in the Pc region, a second CRP site at 1182-1211 and the "
+            "AraC inducer site at 1212-1240 in the PBAD region. The row encloses the "
+            "whole cluster; it is not bounded by any one of them. "
+            "THESE BASES ARE NOT IN THE K-12 REFERENCE GENOME, AND THAT IS A "
+            "MEASUREMENT AND NOT A WORRY. Against U00096.3 (E. coli K-12 MG1655) "
+            "these 285 bases match at 284 of 285, the genome carrying the element on "
+            "its minus strand at 70076-70360. The single difference is at THIS ROW'S "
+            "POSITION 72 = J01641.1:1075 = U00096.3:70289 -- A in the anchor, C in "
+            "MG1655 -- and no feature of either record annotates that base; it is 68 "
+            "bases 5' of the first regulatory site the anchor draws. J01641 is cited "
+            "because it is the record the bases "
+            "are verbatim in. Its own reference list draws on both K12 and B/r "
+            "material (Smith & Schleif 1978, J Biol Chem 253:6931-6933, PMID 357433, "
+            "covering 1082-1335; Greenfield, Boone & Wilcox 1978, Proc Natl Acad Sci "
+            "USA 75:4724-4728, PMID 368797, covering 1124-1332; Ogden, Haggerty, "
+            "Stoner, Kolodrubetz & Schleif 1980, Proc Natl Acad Sci USA 77:3346-3350, "
+            "PMID 6251457; Lee, Gielow & Wallace 1981, Proc Natl Acad Sci USA "
+            "78:752-756, PMID 6262769, on the overlapping Pc and PBAD promoters), and "
+            "WHICH strain this vector fragment descends from was NOT determined here. "
+            "A NESTED 28 nt CONVENTION EXISTS AND HAS THE BEST PROVENANCE OF ANY OF "
+            "THEM: J01641.1:1253-1280, annotated in X81837.1 (pBAD24) and X81838.1 "
+            "(pBAD18) -- L. M. Guzman, Harvard Medical School, i.e. the pBAD vectors' "
+            "own author, Guzman, Belin, Carson & Beckwith 1995, J Bacteriol "
+            "177:4121-4130, PMID 7608087. Those two records are ONE submitting "
+            "address, so on this stage's arithmetic that extent stands or falls on "
+            "witnesses this row has not enumerated; it is nested inside this row "
+            "either way, so a file annotated over it matches here across part of its "
+            "length. A 131 nt convention also circulates and is NOT this row and was "
+            "NOT measured here: the 2026-08-11 survey reported it as an iGEM registry "
+            "part arriving through INSDC deposits with an engineered NheI site at its "
+            "3' end, and iGEM is a NO-GO source under SOURCING.md section 1, so no "
+            "extent was taken from it -- recorded as a warning, not as a finding. "
+            "Note finally that PLF:1002 already carries AraC, the protein that works "
+            "on this promoter; the two rows are halves of one system and neither "
+            "implies the other."
+        ),
+    ),
+    Convention(
+        name="EF-1alpha promoter (human)",
+        aliases=("EF-1a promoter", "EEF1A1 promoter", "PEF-1alpha",
+                 "human elongation factor 1 alpha promoter"),
+        genbank_key="promoter",
+        cls="regulatory",
+        anchor="J04617", anchor_version="J04617.1", lo=373, hi=1560, strand="+",
+        sequence=(
+            "CGTGAGGCTCCGGTGCCCGTCAGTGGGCAGAGCGCACATCGCCCACAGTCCCCGAGAAGTTGGGGGGAGGGGTCGGCA"
+            "ATTGAACCGGTGCCTAGAGAAGGTGGCGCGGGGTAAACTGGGAAAGTGATGTCGTGTACTGGCTCCGCCTTTTTCCCG"
+            "AGGGTGGGGGAGAACCGTATATAAGTGCAGTAGTCGCCGTGAACGTTCTTTTTCGCAACGGGTTTGCCGCCAGAACAC"
+            "AGGTAAGTGCCGTGTGTGGTTCCCGCGGGCCTGGCCTCTTTACGGGTTATGGCCCTTGCGTGCCTTGAATTACTTCCA"
+            "CGCCCCTGGCTGCAGTACGTGATTCTTGATCCCGAGCTTCGGGTTGGAAGTGGGTGGGAGAGTTCGAGGCCTTGCGCT"
+            "TAAGGAGCCCCTTCGCCTCGTGCTTGAGTTGAGGCCTGGCCTGGGCGCTGGGGCCGCCGCGTGCGAATCTGGTGGCAC"
+            "CTTCGCGCCTGTCTCGCTGCTTTCGATAAGTCTCTAGCCATTTAAAATTTTTGATGACCTGCTGCGACGCTTTTTTTC"
+            "TGGCAAGATAGTCTTGTAAATGCGGGCCAAGATCTGCACACTGGTATTTCGGTTTTTGGGGCCGCGGGCGGCGACGGG"
+            "GCCCGTGCGTCCCAGCGCACATGTTCGGCGAGGCGGGGCCTGCGAGCGCGGCCACCGAGAATCGGACGGGGGTAGTCT"
+            "CAAGCTGGCCGGCCTGCTCTGGTGCCTGGCCTCGCGCCGCCGTGTATCGCCCCGCCCTGGGCGGCAAGGCTGGCCCGG"
+            "TCGGCACCAGTTGCGTGAGCGGAAAGATGGCCGCTTCCCGGCCCTGCTGCAGGGAGCTCAAAATGGAGGACGCGGCGC"
+            "TCGGGAGAGCGGGCGGGTGAGTCACCCACACAAAGGAAAAGGGCCTTTCCGTCCTCAGCCGTCGCTTCATGTGACTCC"
+            "ACGGAGTACCGGGCGCCGTCCAGGCACCTCGATTAGTTCTCGAGCTTTTGGAGTACGTCGTCTTTAGGTTGGGGGGAG"
+            "GGGTTTTATGCGATGGAGTTTCCCCACACTGAGTGGGTGGAGACTGAAGTTAGGCCAGCTTGGCACTTGATGTAATTC"
+            "TCCTTGGAATTTGCCCTTTTTGAGTTTGGATCTTGGTTCATTCTCAAGCCTCAGACAGTGGTTCAAAGTTTTTTTCTT"
+            "CCATTTCAGGTGTCGTGA"),
+        exemplars=("LC884827", "LC904051"),
+        description=(
+            "The promoter of the human translation elongation factor 1-alpha gene "
+            "EEF1A1, taken as vectors take it: the region upstream of the "
+            "transcription start together with the whole of the first exon and the "
+            "whole of the first intron, ending nine bases into exon 2. The intron is "
+            "not padding -- it is the reason this element is used, and the reason it "
+            "is a kilobase long. A housekeeping promoter, active in most mammalian "
+            "cell types and much less prone to silencing than the viral alternatives, "
+            "which is what recommends it for stable lines where the CMV promoter fades."
+        ),
+        caveat=(
+            "THIS IS NOT A -N..-1 INTERVAL AND A READER WHO ASSUMES IT IS WILL BE "
+            "WRONG BY A KILOBASE. The anchor annotates a TATA box at 546..552, a "
+            "primary transcript beginning at 576 and an intron at 609..1551, so this "
+            "row runs from 203 bases upstream of the transcription start, through "
+            "exon 1, through all of intron 1, and nine bases into exon 2. "
+            "AND THE MEASURED 'ANCHOR RECORD'S OWN ANNOTATION' LINE ABOVE WILL NOT "
+            "SHOW THE TRANSCRIPT, WHICH IS A DEFECT IN THIS STAGE AND IS RECORDED "
+            "RATHER THAN FIXED. `FT_LINE` requires two or more spaces between the "
+            "feature key and its location; EMBL pads the key field to sixteen "
+            "columns; `prim_transcript` is fifteen characters, so it is followed by "
+            "exactly one space and the pattern never matches it. The same is true of "
+            "`minus_35_signal` and `minus_10_signal` -- three of the keys "
+            "REGULATORY_KEYS declares are unreachable, and a key that cannot match is "
+            "the same shape of nothing as a check that cannot fail. Repairing it "
+            "would add text to the notes of rows already under sign-off, so it is "
+            "left for a pass that can re-sign them. The transcript coordinates above "
+            "were read out of J04617.1 by hand on 2026-08-11 and are re-checkable in "
+            "four lines of its feature table. "
+            "THE VECTOR FORM IS A DIFFERENT SEQUENCE, ALSO CLEARS THIS STAGE'S RULE, "
+            "AND WAS NOT TAKEN. It is 1179 nt = J04617.1:378-685 followed directly by "
+            "J04617.1:690-1560 -- this row minus its first five bases and minus the "
+            "four bases GCCC at J04617.1:686-689 -- and three independent submissions "
+            "annotate exactly it: MG547974.1 (Bioengineering, UCSD), OQ300330.1 "
+            "(Siriraj, Mahidol) and PP944532.1 (Pharmaceutical Sciences, Tsinghua). "
+            "Three is more than this row's two. It was still not taken, for two "
+            "reasons that are about evidence and not taste. First, all three of those "
+            "placements begin at base 1 of their own record, so they corroborate the "
+            "3' edge and not the 5', which is where their fragment happens to start; "
+            "this row's two placements are interior annotations where the depositor "
+            "chose both edges -- LC884827.1 regulatory 2914..4101 and LC904051.1 "
+            "misc_feature 2117..3304. Second, the vector form is a verbatim slice of "
+            "no primary record and would have to be anchored on a synthetic-construct "
+            "deposit. THE COST OF THAT CHOICE, STATED PLAINLY: this row is not what "
+            "most pEF vectors carry. THE DELETION IS THE VECTORS' AND NOT THE "
+            "RECORD'S ERROR: AL603910.6, the Sanger genomic clone RP11-505P4, holds "
+            "J04617.1:656-715 verbatim, GCCC included. "
+            "IT WILL STILL ANNOTATE THOSE VECTORS, and that was checked rather than "
+            "hoped: pl-features aligns with an edit-tolerant matcher whose default "
+            "`min_identity` is 0.96, and a four-base deletion over 1188 nt is 99.7% "
+            "identity, so a real pEF vector resolves against this row with the indel "
+            "reported -- it does not fall through. "
+            "AT THE FLOOR, WITH NOTHING TO SPARE. Two corroborating submissions "
+            "against a floor of two, and one of the two annotates the interval as "
+            "`misc_feature` rather than as a regulatory key. Both are Tokyo deposits, "
+            "which is worth an eye: they are different institutions (Tokyo "
+            "Metropolitan Institute of Medical Science; The University of Tokyo) and "
+            "same_submitter() scores their address overlap at 0.25 against a merge "
+            "threshold of 0.6. AL603910.6 holds this row's 1188 bases at "
+            "113562-114749 on the minus strand with ONE mismatch, at this row's "
+            "position 431 = J04617.1:803, C in the anchor and T in the clone -- so "
+            "the anchor is not an outlier, but neither record is 'the' sequence. "
+            "Finally, the figures in the old HELD reason -- a 1144 nt vector element "
+            "against a 1148 nt gene -- were not reproducible on any record fetched "
+            "here; the two real conventions are 1179 and 1188. The primary source for "
+            "both is Uetsuki, Naito, Nagata & Kaziro 1989, J Biol Chem 264:5791-5798, "
+            "PMID 2564392, which is J04617's own publication."
+        ),
+    ),
 )
 
 
@@ -840,59 +1113,227 @@ ITEMS: tuple[Convention, ...] = (
 # the list is here rather than in a commit message because the next person to
 # want one of these should not have to rediscover why it is missing.
 #
-# SOURCING.md section 6 budgets about forty Class B rows. Twelve is what
-# survived the two-independent-submissions rule and the nested-rivals rule
-# applied honestly, and saying so is worth more than twelve more rows.
+# SOURCING.md section 6 budgets about forty Class B rows. Fifteen are declared
+# above and nine of them ship -- one withdrawn by the curator, five refused by
+# MIN_PLACEMENTS -- which is what survived the two-independent-submissions rule
+# and the nested-rivals rule applied honestly, and saying so is worth more than
+# thirty more rows.
+#
+# Rewritten 2026-08-11. Three entries left this list for `ITEMS`; two were one
+# name over several unrelated elements and are now separate entries with
+# separate statuses; the rest carry the reason the measurement supports rather
+# than the one the first pass guessed. Where an entry now says an extent CLEARS
+# the corroboration floor and is still not a row, the missing thing is named.
 HELD: tuple[tuple[str, str], ...] = (
-    ("T3 promoter",
-     "No consensus to record. The two leading conventions are 17 nt and 19 nt, "
-     "they are OFFSET rather than nested -- they share a 16 nt core and neither "
-     "contains the other -- and each has exactly one independent submission "
-     "behind it. Picking one would be a coin toss dressed up as "
-     "consensus_of_insdc. A third deposit annotates the reverse complement, i.e. "
-     "it got the strand wrong. The bases are unambiguous; the boundary is not."),
     ("SV40 early promoter",
      "The 330 nt convention is a contiguous circular interval that WRAPS the "
      "numbering origin of the SV40 record, which this schema's "
      "accession:lo-hi:strand boundary_evidence cannot express, and a rival 283 nt "
      "form does not place as a single interval at all. The region also carries a "
      "tandem repeat, so the two forms may differ in repeat copy number -- that was "
-     "NOT counted and is not offered as a finding."),
+     "NOT counted and is not offered as a finding. "
+     "RE-CHECKED 2026-08-11 ON A 419 nt FORM OF THE SAME CONVENTION, and the wrap "
+     "is not one record's numbering quirk but every record's: the interval is "
+     "5171..5589 of a 5243 bp genome, i.e. it runs 346 bases past the origin, and "
+     "the assembled 419 bases occur CONTIGUOUSLY in none of J02400.1, AF316139.1 or "
+     "EF579804.1 -- all three 5243 bp, all three sharing that origin. The obstacle "
+     "is the schema and not the evidence, which is a different thing from the other "
+     "holds in this list and would be cleared by a boundary_evidence form that can "
+     "express a circular join, not by more fetching."),
     ("U6 promoter (human)",
-     "The cleanest anchor of everything examined -- 249 nt, exact in the primary "
-     "record for human U6 -- and only ONE independent submission witnesses it. "
-     "Fails on witnesses, not on evidence. The cheapest of these to rescue."),
+     "STILL HELD, and the reason it stood under until 2026-08-11 was backwards. It "
+     "said only ONE independent submission witnesses the 249 nt extent and that it "
+     "'fails on witnesses, not on evidence'. Both halves are the wrong way round. "
+     "The bases are witnessed abundantly: four independent addresses in a single "
+     "afternoon's fetching hold them (Allen Institute for Brain Science PZ036121.1, "
+     "George Washington University JN255690.1, AIST LC414435.1, UCSD MK318530.1) and "
+     "a 2026-08-11 survey of 479 records put it at eleven. What exactly ONE "
+     "submission does is DRAW those edges: OP099837.1, OP099840.1 and OP099843.1, "
+     "all Drug Discovery Sciences, Boehringer Ingelheim Pharma, one address. So it "
+     "clears MIN_SUBMISSIONS several times over and fails MIN_PLACEMENTS at one, "
+     "which is the opposite failure and has the opposite remedy. "
+     "THE EXTENT IS THE ARTICULABLE ONE, WHICH IS WHY IT IS WORTH SAYING SO. "
+     "M14486.1 (human U6 gene, clone pGEM/U6, Kunkel, Texas A&M; Kunkel, Maser, "
+     "Calvet & Pederson 1986, Proc Natl Acad Sci USA 83:8575-8579, PMID 3464970) "
+     "annotates the PSE at 263..282, the TATA box at 298..306 and prim_transcript "
+     "329..435, so +1 is 329 and the 249 nt convention is exactly M14486.1:80-328 = "
+     "-249..-1, the same rule PLF:4000 and PLF:4001 use. (That prim_transcript is "
+     "invisible to this stage's own parser -- see the EF-1alpha row's caveat on "
+     "fifteen-character feature keys -- and was read by hand.) "
+     "TWO NESTED ALTERNATIVES DO CLEAR THE FLOOR AND ARE DELIBERATELY NOT OFFERED "
+     "AS ROWS. 241 nt = M14486.1:80-320 is annotated exactly by the Allen Institute "
+     "(PZ036121.1, PZ036141.1 -- one address), PX139666.1 and MK318530.1, three "
+     "independent submissions; it stops nine bases short of +1 for no reason anyone "
+     "has articulated. 264 nt = M14486.1:65-328 is annotated exactly by George "
+     "Washington University (JN255690.1, JN255691.1 -- one address) and AIST "
+     "(LC414435.1), two submissions, at the floor, and it ends at -1 like the 249. "
+     "Adopting either BECAUSE the 249 failed is re-cutting an extent until two "
+     "records agree with it, which is the move this stage exists to refuse; the "
+     "module docstring already says such a re-cut 'is a curator's decision and not "
+     "this program's'. They are recorded here so that decision is cheap, not taken. "
+     "AND THE TRAP, WHICH IS WHY MG550105.1 IS NAMED HERE: it does NOT contain the "
+     "anchor's 249 bases at all -- checked. The same survey reports it as one of "
+     "three submissions drawing a 249 nt extent that differs from the primary record "
+     "by a single substitution at M14486.1:146, which was not re-measured here. "
+     "Counting a variant of that shape would ship a sequence that is in no primary "
+     "record, which is the failure the EF-1alpha and PGK entries are about."),
     ("H1 promoter (human)",
-     "Three independent submissions agree on 216 nt, which is a genuine consensus, "
-     "but the sequence does not occur in the human H1 RNA record and no genomic "
-     "record carrying the upstream promoter could be located. Boundary witnessed, "
-     "provenance absent; a row would have nothing to put in boundary_evidence."),
-    ("EF-1alpha promoter (human)",
-     "The 1144 nt vector element is the primary record's 1148 nt MINUS a four-base "
-     "internal deletion, with both flanks exact. It is therefore not a verbatim "
-     "slice of anything: a reference taken from the gene will not match real "
-     "vectors, and one taken from a vector cannot be cited to the gene by "
-     "coordinates. Needs an explicit decision about which sequence ships."),
+     "STILL HELD, and both halves of the old reason were wrong; the corrected reason "
+     "is stronger and it fails on two legs rather than one. "
+     "THE PROVENANCE GAP IS CLOSED, so 'no genomic record carrying the upstream "
+     "promoter could be located' is retired. The record is X16612.1, 'Human gene for "
+     "H1 RNA', 1057 bp, clone pMBH1, deposited by S. Altman at Yale (Baer, Nilsen, "
+     "Costigan & Altman). It annotates the TATA box at 345..348 and precursor_RNA "
+     "375..715, and X16612.1:152-366 -- 215 nt -- is held verbatim by three "
+     "independent addresses: AL355075.6:176331-176545 (Genoscope, chromosome 14 "
+     "clone), AF479321.1:1615-1829 (Genome Sciences, University of Washington) and "
+     "the anchor itself. The old reason was checking X15624, 'Human H1 RNA', which "
+     "is a 340 bp transcript-level record and contains none of the promoter. "
+     "THE CONSENSUS WAS NEVER THERE, which is the leg that now kills it. 'Three "
+     "independent submissions agree on 216 nt' counted address STRINGS, which is "
+     "precisely the error same_submitter() exists to prevent (finding 2 above). "
+     "Every record found holding those 216 bases is one department: AY640625.1 and "
+     "AY640626.1, Neurology, University of Goettingen, Waldweg 33 -- one address, "
+     "one submission. FJ687158.1, DQ465352.1, MH749464.1, LT727092.1, AL355075.6 "
+     "and AF479321.1 were each checked and hold no copy of the 216 nt at all. "
+     "Corroborating submissions: ONE. "
+     "AND THE 216 nt IS STILL NOT A SLICE OF ANYTHING. It is X16612.1:152-366 plus "
+     "one further base, and that base is A where X16612.1:367 is T -- so it is 215 "
+     "verbatim bases with a 216th that disagrees with the gene, and boundary_evidence "
+     "would have nothing to point at. The genomic 215 nt form, which does slice "
+     "cleanly, is annotated by NOBODY: three submissions hold it and zero draw it, "
+     "so it fails MIN_PLACEMENTS at nought. WHAT WOULD RESCUE IT: two genuinely "
+     "independent submissions annotating exactly 215 nt (today none) or exactly 216 "
+     "nt (today one, and it would still not be a verbatim slice). Nothing in the "
+     "schema and nothing about the anchor is now the obstacle."),
     ("PGK promoter (mouse)",
-     "Same shape as EF-1alpha and worse: exact for 67 nt, then a single-base shift, "
-     "and roughly 48 substitutions across the rest. One submission. Two independent "
-     "reasons to hold."),
-    ("CAG promoter",
-     "NOT ONE ELEMENT. The widely deposited 1342 nt 'AG promoter' begins in the "
-     "chicken beta-actin gene and ends in rabbit beta-globin and contains no "
-     "cytomegalovirus sequence at all; a 935 nt 'CAG promoter' begins in the "
-     "cytomegalovirus enhancer. Merging two different elements under one "
-     "near-identical name would be the worst error available in this set."),
-    ("araBAD / pBAD promoter",
-     "Three extents from three submissions, two of them SnapGene-annotated, and no "
-     "Escherichia coli ara locus record fetched to anchor any of them. Insufficient "
-     "on both legs. Note PLF:1002 already carries araC, the regulator; the promoter "
-     "it works on is the hole."),
-    ("tetO / TRE / Ptet",
-     "DROPPED, not held. The name covers at least four unrelated elements -- a "
-     "bacterial PLtetO-1, a bacterial pTet, a mammalian bidirectional TRE, and a "
-     "CMV-tetO2 hybrid -- with nothing in common but the word. It must be split "
-     "into separately named rows before any part of it can be sourced at all."),
+     "HELD AT ONE PLACEMENT -- but every other clause of the old reason was wrong, "
+     "and one of the corrections is about this stage's code rather than about PGK. "
+     "'NOT A VERBATIM SLICE OF ANYTHING' IS RETIRED. The 508 nt element is exact at "
+     "BX469914.4:13192-13699 on the plus strand -- 'Mouse DNA sequence from clone "
+     "RP23-217J7 on chromosome X', Wellcome Trust Sanger Institute -- so a citable "
+     "modern anchor exists. What is true is that it is not in M18735.1 (Adra, "
+     "Boer & McBurney 1987, Gene 60:65-74), the 1987 Pgk-1 exon 1 record the old "
+     "reason "
+     "measured against: the longest exact prefix of the element present there is 64 "
+     "nt, and the record then diverges. That is a 1987 record differing from the "
+     "genome, NOT the engineered internal deletion the EF-1alpha entry describes, "
+     "and calling the two 'the same shape' was wrong. "
+     "'ONE SUBMISSION' WAS WRONG BY AN ORDER OF MAGNITUDE. A 2026-08-11 survey put "
+     "nine independent addresses on the exact bases; this file's own fetching "
+     "confirms Sanger and the Central Institute for Experimental Animals directly. "
+     "MIN_SUBMISSIONS is not the problem. "
+     "IT DIES ON MIN_PLACEMENTS AT ONE, AND THE SECOND WITNESS IS LOST TO A "
+     "LIMITATION OF verify() RATHER THAN TO THE EVIDENCE. CR293496.1 (Sanger Centre) "
+     "annotates regulatory 4137..4644 = exactly these 508 bases. AB242435.1 (Central "
+     "Institute for Experimental Animals, Kawasaki) carries the element TWICE, and "
+     "annotates the SECOND copy at exactly 508 nt (regulatory 2089..2596) while the "
+     "first carries a 516 nt feature (regulatory 366..881, 5'+8/3'+0). verify() "
+     "scores occurrences()[0] and nothing else, so it sees the 516 and never the "
+     "508: on the rule as IMPLEMENTED this element has one placement, and on the "
+     "rule as WRITTEN -- 'independent submissions annotate a feature at exactly this "
+     "extent' -- it has two. Note also that BX469914 and CR293496 are both Hinxton "
+     "addresses and same_submitter() merges them, so the anchor would not add a "
+     "third opinion. TWO DECISIONS ARE OWED HERE AND NEITHER IS THIS FILE'S: whether "
+     "a second copy inside one record may corroborate an extent, and if so, a change "
+     "to verify() that will alter the measured notes of rows already signed. Held "
+     "until both are taken."),
+    ("AG promoter of pCAGGS, 1342 nt",
+     "HELD AT ONE PLACEMENT, and the old CAG entry's central claim is confirmed "
+     "harder than it was stated. These 1342 bases -- LT727518.1:3457-4798, the "
+     "pCAGGS record deposited by BCCM/LMBP Gent -- share ZERO 20-mers with X17403.1, "
+     "the human cytomegalovirus genome, on either strand. There is no CMV sequence "
+     "in the element that most maps call a CAG promoter's front half; it is chicken "
+     "beta-actin running into rabbit beta-globin. "
+     "WHAT KILLS IT IS NOT THAT: it is that 'widely deposited' was false. The extent "
+     "is drawn edge for edge in record after record of one series -- LT727518.1, "
+     "LT726810.1 and LT726815.1 were each checked -- and every one of them carries "
+     "the same submitting address, the BCCM/LMBP Gent bulk plasmid-collection "
+     "deposit. That is finding 2 of the module docstring in its purest form: dozens "
+     "of records, ONE submission. One placement, floor of two. "
+     "A SECOND, INDEPENDENT AG-TYPE ELEMENT EXISTS AND WAS CHECKED: EF186083.1 "
+     "annotates regulatory 449..1795, 1347 nt, which likewise shares ZERO 20-mers "
+     "with X17403.1, and EF186088.1 carries the same address -- MCB, LUMC Leiden. "
+     "So the no-CMV family is not one depositor's quirk, and it is still not a "
+     "consensus: one address again."),
+    ("CAG promoter, the CMV-enhancer-containing forms",
+     "HELD, AND THE NUMBER IS THE FINDING: fifteen distinct extents were measured "
+     "and not one of them reaches two independent submissions. The 935 nt form "
+     "(JN898959.1/JN898962.1, KIST, one submission) really does begin inside the "
+     "cytomegalovirus enhancer -- 210 20-mers shared with X17403.1, against zero for "
+     "the AG element above -- and so do the 1699, 1722, 1740, 1733, 1728, 1721, "
+     "1720, 1710, 1677, 1673, 1667 and 1647 nt forms, each with exactly one "
+     "submission behind it. Fifteen single opinions is not a convention, and the "
+     "reason to keep this entry separate from the AG one is that a single row named "
+     "'CAG promoter' spanning both would merge an element that contains CMV with an "
+     "element that provably does not."),
+    ("chicken beta-actin promoter",
+     "HELD, AND THIS IS THE ONE TO READ TWICE, because the two legs of the rule are "
+     "satisfied by two INCOMPATIBLE extents and the near-miss is exactly the shape "
+     "PLF:4006 was withdrawn over. "
+     "276 nt = X00182.1:268-543 has the better boundary argument in this whole file: "
+     "the record annotates a CAAT signal at 455..459 and a TATA box at 517..524, and "
+     "the extent is -276..-1 against the transcription start, +1 excluded -- the "
+     "PLF:4000 rule arrived at independently. It has TWO submissions annotating it "
+     "exactly, and the second one must not be counted: OK413188.1 (OHSU/ONPRC) is an "
+     "honest witness, and OP697986.1 is the same submitting address as OP697991.1 -- "
+     "same_submitter() returns True -- which SOURCING.md section 0.6 names as a "
+     "DEMONSTRATED false negative of record_is_snapgene_annotated, and which section "
+     "deliberately declined to widen the screen for. The mechanical screen passes it; "
+     "a curator may not. ONE honest placement. "
+     "278 nt has two honest submissions (Oxford Protein Production Facility, "
+     "EF372394.1 and EU733644.1, deposited 2007 and 2008; Witten/Herdecke, "
+     "PQ540283.1, 2024) and no anchor: it is the 276 nt with TWO extra G in a "
+     "G-homopolymer -- measured, the run is 14 G in X00182.1 and 16 G in the vector "
+     "form -- so it is a verbatim slice of no primary record and reference_nt taken "
+     "through that tract will silently miss whichever half of the wild population "
+     "has the other length. WHAT WOULD RESCUE IT: one more independent submission "
+     "drawing 276 nt exactly. Nothing else is missing."),
+    ("PLtetO-1 (bacterial tet-regulated promoter)",
+     "STILL NOT A ROW, BUT NO LONGER FOR THE OLD REASON. The old 'tetO / TRE / Ptet' "
+     "entry was DROPPED on the ground that the name covers at least four unrelated "
+     "elements and 'must be split into separately named rows before any part of it "
+     "can be sourced at all'. This entry and the two below are that split, and the "
+     "sourcing now exists for parts of it. "
+     "A 74 nt extent -- KX682238.1:4307-4380, the lambda PL promoter with two tet "
+     "operators -- is annotated edge for edge by FOUR independent addresses checked "
+     "on 2026-08-11: Pacific Northwest National Laboratory (KX682238.1), Biomedical "
+     "Engineering, Boston University (KM521209.1), Biological Engineering, MIT "
+     "(KT893256.1, KX264176.1 -- one address) and Biology, University of Texas at "
+     "Tyler (MK753225.1). None carries the SnapGene tell. It clears both legs. "
+     "WHAT IT DOES NOT YET HAVE, and why no row is offered: a curated name and a "
+     "description written from the primary source (Lutz & Bujard 1997, Nucleic Acids "
+     "Res 25:1203-1210, PMID 9092630, whose text was NOT read here), and a decision "
+     "between this 74 nt "
+     "and the 54 nt form nested inside it -- JX155235.1:1-54, whose placements "
+     "checked here (JX155235.1, JX155240.1, JX155247.1) are all ONE address, UC "
+     "Berkeley EECS. This is a designed hybrid with no natural locus, so it would be "
+     "anchored on a construct record exactly as PLF:4003 and PLF:4004 are. It is the "
+     "strongest unclaimed candidate in this list."),
+    ("tetO7 / TRE (mammalian tet-response element)",
+     "HELD, WITH THE CORROBORATION MEASURED AND A HAZARD THAT IS NOT YET ANSWERED. "
+     "A 271 nt heptamer array -- MG883664.1:1376-1646 -- is annotated edge for edge "
+     "by three independent addresses checked on 2026-08-11: Southwest University "
+     "(MG883664.1, protein_bind), University of York (PQ260749.1) and Human "
+     "Genetics, University of Michigan (PQ360726.1). A 291 nt form was reported by "
+     "the same survey with three more. Both clear the floor on their face. "
+     "THE HAZARD IS THAT THIS ELEMENT IS A TANDEM REPEAT, so two extents differing "
+     "by 20 nt may be the same convention counted over a different number of "
+     "operator copies rather than two rival boundaries -- and this stage has no way "
+     "to tell those apart, because occurrences() matches a whole string and says "
+     "nothing about periodicity. That is the same hazard the SV40 early promoter "
+     "entry flags and does not count. Until somebody counts the repeat units in each "
+     "deposit and says which extents are the same element, a row here would be "
+     "asserting a boundary it has not distinguished from an artefact."),
+    ("CMV-tetO2, PTight and the remaining tet hybrids",
+     "HELD, AND STILL PARTLY UNSPLIT. The third and fourth elements the dropped "
+     "'tetO / TRE / Ptet' entry named -- a CMV-tetO2 hybrid and a bacterial pTet -- "
+     "plus a PTight/TRE-Tight form of 315 nt that the 2026-08-11 survey turned up, "
+     "have not been separated into individually named elements here and none of "
+     "their extents was measured against this stage's own rule. A CMV-tetO2 element "
+     "additionally OVERLAPS PLF:4005's refused interval, so it cannot be worked up "
+     "independently of the decision the CMV promoter row is still waiting on. "
+     "Recorded so the split is complete on paper even where the evidence is not."),
 )
 
 
@@ -1769,12 +2210,20 @@ def self_test() -> list[str]:
     #    written out with the elements they are PUBLISHED as, in
     #    features/features.tsv, so the literal is an independent statement about
     #    the world and not a restatement of the code.
+    #    The last three were appended on 2026-08-11 and are `proposed`, not
+    #    signed -- but they are in features/features.tsv under these ids from
+    #    that build onward, so an id that moves under them is as wrong as one
+    #    that moves under the five above, and pinning them is what stops the
+    #    next person tidying the T3 promoter up next to PLF:4000.
     published = {
         "PLF:4006": "CMV enhancer",
         "PLF:4007": "T7 terminator",
         "PLF:4008": "rrnB T1 terminator",
         "PLF:4009": "rrnB T2 terminator",
         "PLF:4010": "bGH poly(A) signal",
+        "PLF:4012": "T3 promoter",
+        "PLF:4013": "araBAD promoter",
+        "PLF:4014": "EF-1alpha promoter (human)",
     }
     live = {rid: it.name for rid, it in allocation()}
     for rid, nm in published.items():

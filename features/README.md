@@ -6,19 +6,22 @@ An openly licensed, provenance-tracked database of common plasmid features.
 this carries, and [`SOURCING.md`](SOURCING.md) for how each source was cleared
 and by what evidence.
 
-> **Status: v0.1 pre-release, 109 records. 89 carry a curator sign-off, and 20 are `proposed`.**
+> **Status: v0.1 pre-release, 112 records. 89 carry a curator sign-off, and 23 are `proposed`.**
 >
 > The 89 were signed on 2026-07-28. Twenty-one rows were added on 2026-08-10; on
 > 2026-08-11 the curator **withdrew one of them**, `PLF:4006`, the CMV enhancer,
-> leaving 20. No human has read those 20, and **`Db::reviewed()` does not ship
+> leaving 20, and three more Class B rows were added the same day — `PLF:4012`
+> the T3 promoter, `PLF:4013` the araBAD promoter and `PLF:4014` the human
+> EF-1alpha promoter, each appended so that no published id moved. That is 23.
+> No human has read those 23, and **`Db::reviewed()` does not ship
 > them** — what a user of the tool searches is still 89 rows until a curator
 > signs each one.
 > `Db::reviewed()` ships only the rows [`SIGNOFF.tsv`](SIGNOFF.tsv) names with a
 > content digest that still matches. A sign-off lapses automatically the moment
 > the row it approves changes — including a change to its prose, because
-> `description` and `notes` are both in `SIGNED_COLUMNS`. The gap between 109
+> `description` and `notes` are both in `SIGNED_COLUMNS`. The gap between 112
 > and 89 is the intended state of a table a machine is allowed to add to; see
-> *Rule 6* below, and *What is proposed and not yet signed* for what the 20 are.
+> *Rule 6* below, and *What is proposed and not yet signed* for what the 23 are.
 > The curator's reading list for them, row by row and contested cases first, is
 > [`PROPOSED.md`](PROPOSED.md).
 >
@@ -95,7 +98,7 @@ right name.
 | `build/stage_uniprot.py` | Stage 2. UniProt → ENA, one pinned cross-reference per entry, exact translation match. |
 | `build/stage_rfam.py` | Stage 3. Rfam seed alignments, with the miRBase and Wikipedia exclusions enforced at parse time. |
 | `build/stage_curated.py` | Stage 4. Hand-curated designed parts, one citation each, and two routes: codons sliced out of a natural parent, or a peptide verified against a wwPDB polymer entity. Six of 28 are still held; see *Honest coverage*. (This row said "Stage 5" from before there was one, which stopped being merely wrong the day a real Stage 5 landed underneath it.) |
-| `build/stage_classb.py` | Stage 5. INSDC-anchored Class B conventions — promoters, terminators, poly(A) signals. One anchor record per row, re-sliced every build, plus ≥2 witnesses from *different submitting addresses* and ≥2 of those placing the feature at *exactly* the shipped extent. Reads no `/note`, `/label`, `/gene`, `/product` or `/standard_name`, and refuses a SnapGene-annotated record as a witness. Nine further elements are held with reasons in `HELD` and five more are refused on the extent rule; see *Class B*. |
+| `build/stage_classb.py` | Stage 5. INSDC-anchored Class B conventions — promoters, terminators, poly(A) signals. One anchor record per row, re-sliced every build, plus ≥2 witnesses from *different submitting addresses* and ≥2 of those placing the feature at *exactly* the shipped extent. Reads no `/note`, `/label`, `/gene`, `/product` or `/standard_name`, and refuses a SnapGene-annotated record as a witness. Ten held elements carry their reasons in `HELD` and five more rows are refused on the extent rule; see *Class B*. |
 | `PROPOSED.md` | The curator worklist for every row that is `proposed`: what it claims, which accessions to check it against, the boundary chosen and on what basis, **the primary source that settles it**, and a recommendation — sign, withdraw, or a decision the evidence cannot make — with the decisions first and the arithmetic afterwards. Its *Claims*, *Anchor*, *Sources* and witness lines are read out of `features.tsv` rather than retyped, so they cannot drift from the table. Carries no digests, deliberately: `SIGNOFF.tsv` says signing a digest nobody has read is not an attestation. |
 | `build/insdc_posture.py` | The stage-posture gate. Every stage in `build.STAGES` must declare `INSDC_POSTURE` — what it does about a boundary convention arriving from a depositor's INSDC feature table — and this refuses a stage that declares nothing, then checks the mechanical half of whatever was declared. Runs inside `taint_gate.py` before the fetch, and in `tools/ci.ps1` offline. Not a taint check, and its docstring says why one cannot be built here. |
 | `build/check_signoff.py` | Proves no row asserts more than a human signed — and proves the check itself can fail, in both directions. |
@@ -201,7 +204,7 @@ what changed between releases.
    commit, compares, and deletes — no byte is ever committed, enforced by
    `.gitignore` on the name and by `tools/hooks/pre-commit` on the content hash.
    It is `features/build/taint_gate.py`, it runs in CI, and it fails **closed**
-   on a network error. Its measured result over all 109 descriptions: **no shared
+   on a network error. Its measured result over all 112 descriptions: **no shared
    five-token run anywhere, and no row above 60% containment.** Five rows sit
    above the 30% warning line, and this is the written justification the
    threshold asks for:
@@ -282,13 +285,13 @@ what changed between releases.
 
 ## Honest coverage
 
-**polylinker-features v0.1 contains 109 feature records — 89 signed off and
-shipped, 20 `proposed` and not shipped. The 89: 24 antibiotic-resistance and
+**polylinker-features v0.1 contains 112 feature records — 89 signed off and
+shipped, 23 `proposed` and not shipped. The 89: 24 antibiotic-resistance and
 selection markers, 14 natural regulatory and enzyme proteins, 24 structured RNA
 elements, and 27 designed parts (epitope tags, protease sites, 2A peptides and
-linkers). The 20 awaiting a curator: 14 further selection markers and 6 Class B
-regulatory elements (two promoters, three terminators and a poly(A) signal).
-A seventh Class B row, the CMV enhancer, was withdrawn on 2026-08-11 rather than
+linkers). The 23 awaiting a curator: 14 further selection markers and 9 Class B
+regulatory elements (five promoters, three terminators and a poly(A) signal).
+A tenth Class B row, the CMV enhancer, was withdrawn on 2026-08-11 rather than
 signed; its id, `PLF:4006`, is retired and stays so.
 Every record carries an explicit boundary rule, at least one
 `boundary_evidence` pointer, and a per-field provenance chain with licence. It is
@@ -306,9 +309,9 @@ Composition, measured from the shipped file:
 | Rfam structured RNA | 24 | `regulatory` (19), `misc` (5) | nt | `consensus_of_insdc` |
 | Curated designed parts | 8 | `synthetic_part` | nt | codons from a natural parent |
 | Curated designed parts | 19 | `synthetic_part` | **peptide only** | `designed_sequence` (13), `literature_defined` (6); across all 27, 13 and 14 |
-| Class B conventions | 6 (0 signed; a 7th withdrawn) | `regulatory` | nt | `consensus_of_insdc`, corroborated by ≥2 independent placements |
+| Class B conventions | 9 (0 signed; a 10th withdrawn) | `regulatory` | nt | `consensus_of_insdc`, corroborated by ≥2 independent placements |
 
-52 of 109 rows are coding and carry a protein reference verified by exact
+52 of 112 rows are coding and carry a protein reference verified by exact
 translation from their own nucleotides. **19 rows carry a peptide and no
 nucleotides at all** — the shape decision 1 created — and each was verified by
 locating its residue string, exactly once, in a sequence fetched at build time:
@@ -316,9 +319,9 @@ a wwPDB polymer entity for 18 of them, and the UniProt canonical of its own
 declared parent for the nineteenth (enterokinase, whose five residues are below
 `MIN_NT` and so cannot take codons from that parent even though it has one).
 20 rows carry `patent_flag = 1`. **Five** licences are in play across
-1,247 provenance rows: our own work (710), INSDC-free (221), CC0-1.0 (114),
-`unresolved-see-SOURCING-Risk-4` (109) and CC BY 4.0 (93); by source, polylinker
-710, ENA 149, the INSDC feature-table specification 109, Rfam 96, UniProt 93,
+1,292 provenance rows: our own work (731), INSDC-free (242), CC0-1.0 (114),
+`unresolved-see-SOURCING-Risk-4` (112) and CC BY 4.0 (93); by source, polylinker
+731, ENA 170, the INSDC feature-table specification 112, Rfam 96, UniProt 93,
 AMRFinderPlus 72 and the wwPDB 18.
 
 ENA overtook Rfam as the second-largest source in that list on 2026-08-10, and
@@ -343,7 +346,7 @@ already caught and corrected on the UniProt → ENA leg.
 
 ### What is proposed and not yet signed
 
-20 rows carry `review_status = proposed`, which means a program put them in the
+23 rows carry `review_status = proposed`, which means a program put them in the
 table and no human has read them. `Db::reviewed()` excludes every one, so
 nothing below is searched by `pl annotate`, by the desktop app, or by anything
 else, until a curator signs it in `SIGNOFF.tsv`. **They are in the repository so
@@ -402,10 +405,13 @@ least two independent GenBank exemplars each, and §4 says what those exemplars
 are for — "showing where depositors actually place it". `build/stage_classb.py`
 executes both halves rather than asserting them.
 
-**Twelve elements were built and six are in the table.** The six are the T7 and
-SP6 promoters, the T7 (Tφ), rrnB T1 and rrnB T2 terminators, and the bGH poly(A)
-signal. A seventh, the CMV enhancer (`PLF:4006`), reached the table on
-2026-08-10 and was withdrawn by the curator on 2026-08-11; its id is retired.
+**Fifteen elements were built and nine are in the table.** The nine are the T7,
+SP6, T3, araBAD and human EF-1α promoters, the T7 (Tφ), rrnB T1 and rrnB T2
+terminators, and the bGH poly(A) signal; the last three promoters were appended
+on 2026-08-11 as `PLF:4012`–`PLF:4014`, having been held until measurement
+contradicted the reasons they were held for. A tenth, the CMV enhancer
+(`PLF:4006`), reached the table on 2026-08-10 and was withdrawn by the curator
+on 2026-08-11; its id is retired.
 Each one claims exactly four things:
 
 - **These bases are `accession:lo-hi` on this strand.** Re-fetched and re-sliced
@@ -512,18 +518,23 @@ that says nothing and a retired key that says what the feature is. The retired
 key won because something real depends on it. If they are ever changed again,
 `absent_common_kinds`'s probe list is the thing that has to change with them.
 
-**Nine more were worked up and are not rows**, each for a stated reason recorded
-in `stage_classb.py`'s `HELD` list: T3 (its two leading conventions are offset
-rather than nested and have one submission each — there is no consensus to
-record); the SV40 early promoter (its interval wraps the record's numbering
-origin, which `boundary_evidence` cannot express); U6 (one submission); H1 (no
-record to anchor it in); EF-1α and PGK (the vector element is not a verbatim
-slice of the gene); CAG (two different elements under one name); araBAD (no
-anchor fetched). tetO/TRE was dropped outright: the name covers at least four
-unrelated elements. §6 budgets about forty Class B rows; seven is what survived
-the rules applied honestly, and six is what is left after the curator withdrew
-one of them — five more were built and then refused by the exact-extent
-corroboration rule described above — and those numbers are the finding.
+**Ten elements are worked up and are not rows**, each for a stated reason
+recorded in `stage_classb.py`'s `HELD` list, rewritten on 2026-08-11 against
+fresh measurement: the SV40 early promoter (its interval wraps the record's
+numbering origin in every genome record checked, which `boundary_evidence`
+cannot express — the schema is the obstacle, not the evidence); U6 (many
+submissions hold the bases, exactly one draws the edges); H1 (its 216 nt form is
+one department's, and is not a verbatim slice of the gene record that has now
+been found for it); PGK (one placement, and a second that `verify()` cannot see
+because it is the record's *second* copy of the element); three separate
+chicken-β-actin and CAG entries, replacing the one entry that used to cover
+them, of which the best-evidenced fails only because its second witness is the
+record `SOURCING.md` §0.6 names as a demonstrated false negative of the SnapGene
+screen; and three tet entries, which are the split the old dropped `tetO / TRE /
+Ptet` line asked for. §6 budgets about forty Class B rows; ten is what survived
+the rules applied honestly, after five more were built and then refused by the
+exact-extent corroboration rule described above and one was withdrawn — and
+those numbers are the finding.
 
 ### Aliases that resolve to more than one record
 
@@ -587,8 +598,8 @@ states its initiator codon in `notes`, measured rather than assumed.
 ### What this is not
 
 It is **not** a drop-in replacement for pLannotate or SnapGene Common Features:
-at 109 rows against their 1,367 it is about 8% of the row count — and 89 of the
-109 are what the tool actually searches, which is about 7% — and it covers
+at 112 rows against their 1,367 it is about 8% of the row count — and 89 of the
+112 are what the tool actually searches, which is about 7% — and it covers
 partly different ground. It is **not** complete or comprehensive, and it does not
 cover all common plasmid features. It carries **no** coverage claim for
 commercial catalogue vectors — pET-28a, pGEX-4T-1 and pMAL-c2 return `Count=0`

@@ -25,7 +25,54 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Three Class B feature rows, `PLF:4012` the T3 promoter, `PLF:4013` the
+  araBAD promoter and `PLF:4014` the human EF-1alpha promoter.** All three had
+  been held out of the table with stated reasons; all three reasons turned out
+  not to survive measurement. Each row clears the same two rules the six Class B
+  rows before it clear — at least two INSDC submissions from different
+  submitting addresses hold the exact bases, and at least two of those annotate
+  a feature at exactly the shipped extent — and each is anchored on a primary
+  record, re-sliced on every build: the bacteriophage T3 genome `AJ318471.1`,
+  the 1978 *E. coli* araBAD regulatory-region record `J01641.1`, and the human
+  `EEF1A1` gene record `J04617.1`. They ship `proposed`, like everything a
+  machine adds, and `Db::reviewed()` does not search them. The database is 112
+  records, 89 signed and 23 proposed.
+- All three were **appended** to `stage_classb.ITEMS`, not inserted where they
+  read best, so no published id moved; `self_test()`'s id pin now covers them.
+
+### Changed
+
+- **`stage_classb.HELD` rewritten.** Six elements are still refused and their
+  reasons now say what measurement says rather than what the first pass guessed:
+  two were backwards about which of the two rules they failed, one had been
+  checking a transcript-level record where the gene record exists, and one fails
+  only because `verify()` scores a record's first copy of an element and never
+  its second. Two entries that were one name over several unrelated elements —
+  CAG, and the dropped `tetO / TRE / Ptet` — are now six separately named
+  entries, each with its own status; three of those name extents that clear the
+  corroboration floor and say what is still missing before a row could exist.
+- Row counts in `README.md`, `features/README.md`, `docs/PLAN.md` and
+  `features/PROPOSED.md` updated for the three new rows, including the
+  provenance licence and per-source tallies.
+- `PLF:4014`'s worklist entry now cites a **measurement** where it cited
+  arithmetic. The claim that the gene form still annotates real pEF vectors was
+  argued from 99.7% identity against a 0.96 floor; on review `pl annotate
+  --include-proposed` was run against all three 1179 nt deposits (`MG547974.1`,
+  `OQ300330.1`, `PP944532.1`) and each returns the row at 99.7% identity and
+  100% coverage. One garbled sentence in `PLF:4012`'s entry, which left a
+  mid-sentence self-correction in the text, is repaired.
+
+### Known issue
+
+- `stage_classb.parse_embl` cannot see a feature key fifteen characters wide:
+  EMBL pads the key field to sixteen columns and `FT_LINE` requires two spaces,
+  so `prim_transcript`, `minus_35_signal` and `minus_10_signal` are declared in
+  `REGULATORY_KEYS` and unreachable. Found while anchoring `PLF:4014`, recorded
+  in that row's caveat and in the module docstring, and deliberately **not**
+  fixed in this change: repairing it adds text to the measured `notes` of rows
+  that already carry a curator signature, and those signatures would lapse.
 
 ## [0.7.0] - 2026-08-11
 
