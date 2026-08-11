@@ -57,8 +57,8 @@ counts as corroboration for every Class B row at once, it must be said plainly
 what it moved, and the answer is MEASURED and not assumed:
 
     NOTHING. All five refused rows are refused on the same evidence and by the
-    same numbers; all nine shipped rows keep their extents, their offsets and
-    their `notes` byte for byte; features.tsv and provenance.tsv rebuild
+    same numbers; all nine rows IN THE TABLE keep their extents, their offsets
+    and their `notes` byte for byte; features.tsv and provenance.tsv rebuild
     identical. Four witness records in `ITEMS` carry their element more than
     once -- V01146 (T7, 7x), AY288927 (SP6, 3x), U13859 (rrnB T2, 2x) and
     AJ318471 (T3, 3x) -- and in every one of them the copies are annotated
@@ -1161,10 +1161,13 @@ ITEMS: tuple[Convention, ...] = (
 # want one of these should not have to rediscover why it is missing.
 #
 # SOURCING.md section 6 budgets about forty Class B rows. Fifteen are declared
-# above and nine of them ship -- one withdrawn by the curator, five refused by
-# MIN_PLACEMENTS -- which is what survived the two-independent-submissions rule
-# and the nested-rivals rule applied honestly, and saying so is worth more than
-# thirty more rows.
+# above and nine of them are rows in the table -- one withdrawn by the curator,
+# five refused by MIN_PLACEMENTS -- which is what survived the
+# two-independent-submissions rule and the nested-rivals rule applied honestly,
+# and saying so is worth more than thirty more rows. NONE OF THE NINE SHIPS:
+# every one is `proposed`, and `Db::reviewed()` serves none of them. "Reached
+# the table" and "ships" are two different events with a curator's signature
+# between them, and this file does not use the second word for the first.
 #
 # Rewritten 2026-08-11. Three entries left this list for `ITEMS`; two were one
 # name over several unrelated elements and are now separate entries with
@@ -1830,7 +1833,7 @@ def place_in_record(rec: Record, needle: str) -> dict:
     #
     # Where every copy renders the same there is nothing to disambiguate and
     # nothing is added -- which is not a convenience but the condition under
-    # which this fix leaves the shipped rows untouched. All four multi-copy
+    # which this fix leaves the rows in the table untouched. All four multi-copy
     # witnesses in ITEMS today are of that kind: V01146 (T7, 7 copies) and
     # AY288927 (SP6, 3 copies) annotate nothing over any copy, AJ318471 (T3, 3
     # copies) draws 5'+0/3'+4 over every one, and U13859 (rrnB T2, 2 copies)

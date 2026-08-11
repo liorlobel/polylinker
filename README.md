@@ -8,7 +8,7 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 158,948 lines of Rust, 93,885 of it dependency-free (141 `.rs`
+> crates and 158,953 lines of Rust, 93,888 of it dependency-free (141 `.rs`
 > files under `crates/` and `bins/`), with 1,935 `#[test]` functions and a
 > 73-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
@@ -47,7 +47,7 @@ sends a sequence anywhere.
 > features database used to be the second entry on this list and is not any
 > more — the 89 records `pl annotate` searches by default each carry a
 > named curator in `features/SIGNOFF.tsv`, and an approval lapses by itself the
-> moment the row it approves changes. The table also holds 20 rows a program
+> moment the row it approves changes. The table also holds 23 rows a program
 > added and nobody has read; those are `proposed`, they are not searched, and
 > `--include-proposed` is how to see them. See
 > [Where this actually is](#where-this-actually-is).

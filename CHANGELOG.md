@@ -25,7 +25,134 @@ which.
 
 ## [Unreleased]
 
-### Fixed
+Nothing yet.
+
+## [0.8.0] - 2026-08-11
+
+**Nothing in this release changes what Polylinker does to a sequence.** No
+engine, no format reader or writer, no annotator rule and no default moved. A
+plasmid opened under 0.7.0 and the same plasmid opened under 0.8.0 get the same
+answer, from the same code.
+
+**The 89 signed rows are untouched, and so is the file that signs them.**
+`features/SIGNOFF.tsv` is byte-identical to the one 0.6.0 and 0.7.0 shipped —
+the same blob, `2d63b169d0de742154b5a7e87c830e12d5052be7`, and the same
+sha256 `7cf86057c2b9b964976ad04788a764fd1882b56c2e4cdd427e3395a0fc858e97` — so
+**nothing has been signed since 0.6.0**, and all 89 signatures still verify. The
+89 records `pl annotate` searches by default are the same 89.
+
+**Three promoter rows joined the table, and none of them ships.** `PLF:4012`
+the T3 promoter, `PLF:4013` the araBAD promoter and `PLF:4014` the human
+EF-1alpha promoter are in `features.tsv` as `proposed`, which means a program
+put them there and no human has read them. `Db::reviewed()` serves none of the
+nine Class B rows the table now holds, and `pl annotate` searches none of them
+without `--include-proposed`. The table is **112 rows: 89 signed, 23 proposed.**
+
+**A scoring bug was fixed and it moved nothing.** `verify()` had been measuring
+only a record's first copy of an element. Fixing it changed no row, no refusal
+and no byte of either table — which was measured, not assumed, and is the whole
+of the entry below.
+
+### The three decisions this release did NOT take, because they are a curator's
+
+Each of these is a place where the program could have acted and deliberately did
+not. They are listed first because a release note that reported only what moved
+would be reporting the easy half.
+
+- **The mouse PGK promoter was not issued as a row.** Under the fixed loop it
+  measures two independent submissions and two exact placements, and would clear
+  both floors. It stays in `stage_classb.HELD`. A stage that promoted an element
+  the moment its own code stopped under-counting it would be adjusting its own
+  membership, which is the move every refusal in that file exists to refuse. The
+  measurement is done and recorded; the judgement is the curator's.
+- **The 276 nt chicken beta-actin promoter was refused although the code passes
+  it.** `X00182.1:268-543` has the best boundary argument in the file — the
+  record's own CAAT signal and TATA box put it at −276..−1 with +1 excluded,
+  which is `PLF:4000`'s rule arrived at independently — and two submissions
+  annotate it exactly. The second, `OP697986.1`, shares a submitting address
+  with `OP697991.1`, which `SOURCING.md` §0.6 names as a **demonstrated false
+  negative** of `record_is_snapgene_annotated` and deliberately declined to
+  widen the screen for. `same_submitter()` returns True, the mechanical screen
+  passes the record, and the author refused to count it anyway: one honest
+  placement, held. This is the case where the program said yes and a human said
+  no, and it is in these notes for that reason.
+- **The T3 convention split was left standing.** The table now holds `-17..-1`
+  for T7 and SP6 and `-17..+2` for T3. Three sibling rows using two conventions
+  is not tidy, and the alternative is worse: the T3 extent that would match the
+  T7 rule has exactly one submitting address behind it. `PLF:4012`'s worklist
+  entry states the choice as *your call* rather than resolving it.
+
+### Fixed — "ships" was being used to mean "reached the table"
+
+This is the largest change in the release and it is entirely prose.
+
+**Nothing in `PLF:4000`–`PLF:4014` has ever shipped.** All nine Class B rows in
+the table are `proposed`; `Db::reviewed()` has never served one. Prose in this
+repository had nonetheless been using *ships* for *is in the table* — in the
+build source, in the curator worklist, in `features/README.md`, in
+`features/SOURCING.md`, in two Rust doc comments and in this file — with the
+result that a reader could come away believing the tool searches promoters it
+has never searched. Two of those sentences were written by the previous release
+and one, in `features/README.md`, had said since 0.7.0 that `PLF:4010` "still
+ships".
+
+The two events now have two names throughout: a row **reaches the table** when a
+stage emits it, and a row **ships** when a curator's signature puts it inside
+`Db::reviewed()`. `features/PROPOSED.md` and `stage_classb.py` both say so
+explicitly at the point a reader meets the distinction, so the next person to
+write the sentence has the wording in front of them.
+
+Corrected with it, all measured against the tree rather than decremented:
+
+- `README.md`'s status blockquote said the table holds **20** unread rows. It is
+  **23**. (The blockquote's test-asserted counts were not touched.)
+- `features/README.md`: the id-block table read *6 of 21 worked up* and is now
+  *9 of 25* — `stage_classb.ITEMS` went 12 → 15 and `HELD` 9 → 10; the worklist
+  paragraph said **20** rows twice; the Class B summary still read *6 … from the
+  twelve*, which the 0.7.0 pass rewrote in its near-duplicate sixteen lines below
+  and walked past here; *five of the twelve rows built* is *five of the fifteen*,
+  the set of five being unchanged and re-measured against `features.tsv`; and the
+  Class B ENA tally, *Six rows contributed 37 … out of 149*, is nine rows, 58
+  and 170.
+- `features/README.md` also claimed `PROPOSED.md` carries "the exact `--show`
+  invocation per row". It did not: `PLF:4014` had no `--show` block. **One was
+  added**, so the sentence is true rather than weakened, and the *How to sign*
+  invocation — which listed six Class B ids and told the curator to read 20 of
+  the 23 rows — now names all nine.
+- `features/PROPOSED.md`: the Class B section was headed *The 6 Class B rows*
+  and promised *Seven sections … Six of them are rows you can sign*; it is nine
+  and ten. The summary table said **19** rows recommended for signing with all
+  three 2026-08-11 additions *your call*; counted from the glance table it is
+  **20**, and `PLF:4013` araBAD is **SIGN** in that table and in its own heading.
+  The 0.7.0 notes record fixing this same heading when it read *The 7 Class B
+  rows*; it went stale again inside one release, which is the argument for the
+  test this file still does not have.
+- `features/SOURCING.md`: *Seven of our twelve* → *Ten of our fifteen*; *Five of
+  the twelve … do not ship* → *five of the fifteen … never became rows at all*.
+- `features/NOTICE`: the taint gate's recorded scope was **109** descriptions
+  and is 112.
+- `bins/pl-gui/src/settings.rs`, `bins/pl-gui/src/featuredb.rs`,
+  `crates/pl-features/src/lib.rs`: three doc comments describing a 109-row table
+  against 89 signatures, and a `text` transcript claiming the table "holds 6
+  Class B rows". That transcript is **interpolated live** from
+  `records.filter(id.starts_with("PLF:4")).count()`, and its own doc comment
+  insists it is "what reproducing the break prints *now*" — so it was refuting
+  itself. It prints 9.
+
+### Fixed — `features/NOTICE` denied a fourth ingest pass that had happened
+
+The file said "Three dates because there have been three ingest passes" and, of
+the `PLF:4006` withdrawal, that it was "a row leaving, not a fourth ingest pass".
+Adding `PLF:4012`–`PLF:4014` fetched **fifteen ENA records that had not been
+fetched before, contributing 21 provenance rows dated 2026-08-11** — a fourth
+pass by the file's own definition. The snapshot line now names four dates, the
+paragraph says what the fourth one is, and it records the check that
+distinguishes a new pass from a refresh: the count of rows carrying each earlier
+date is unchanged. The paragraph also now says that `retrieved` on an own-work
+field is the build date and not a fetch, because that is why 731 `polylinker`
+rows and 112 `insdc-ft` rows read 2026-08-11 today.
+
+### Fixed — `stage_classb.verify()` scored only a record's FIRST copy of an element
 
 - **`stage_classb.verify()` scored only a record's FIRST copy of an element, so
   a depositor who carries it twice and draws our edges over the SECOND copy was
@@ -50,8 +177,9 @@ which.
   annotate their copies alike, which is why. A row returning because the
   implementation changed is not the same thing as a row returning on new
   evidence, so `features/PROPOSED.md` now says how to tell them apart.
-- **The element the fix does move is held, not shipped.** Re-measured under the
-  new loop, the mouse PGK promoter has two independent submissions and two exact
+- **The one element the fix does move stayed held, and was not issued as a
+  row** — the first of the three decisions above. Re-measured under the new
+  loop, the mouse PGK promoter has two independent submissions and two exact
   placements where it had one, and would clear both floors. It stays in
   `stage_classb.HELD`: issuing a row is a curator's decision, and a stage that
   promoted an element the moment its own code stopped under-counting it would be
@@ -79,7 +207,7 @@ which.
   withdrawn wording, or suppressing the disclosure when every copy is exact each
   turns the whole stage self-test red, and the stage then emits no rows at all.
 
-### Added
+### Added — three Class B rows in the table, none of them shipping
 
 - **Three Class B feature rows, `PLF:4012` the T3 promoter, `PLF:4013` the
   araBAD promoter and `PLF:4014` the human EF-1alpha promoter.** All three had
@@ -87,12 +215,17 @@ which.
   not to survive measurement. Each row clears the same two rules the six Class B
   rows before it clear — at least two INSDC submissions from different
   submitting addresses hold the exact bases, and at least two of those annotate
-  a feature at exactly the shipped extent — and each is anchored on a primary
-  record, re-sliced on every build: the bacteriophage T3 genome `AJ318471.1`,
-  the 1978 *E. coli* araBAD regulatory-region record `J01641.1`, and the human
-  `EEF1A1` gene record `J04617.1`. They ship `proposed`, like everything a
-  machine adds, and `Db::reviewed()` does not search them. The database is 112
-  records, 89 signed and 23 proposed.
+  a feature at exactly the extent the row carries — and each is anchored on a
+  primary record, re-sliced on every build: the bacteriophage T3 genome
+  `AJ318471.1`, the 1978 *E. coli* araBAD regulatory-region record `J01641.1`,
+  and the human `EEF1A1` gene record `J04617.1`. They **carry**
+  `review_status = proposed`, like everything a machine adds, which means they
+  reached the table and did not ship: `Db::reviewed()` does not serve them and
+  `pl annotate` does not search them. The database is 112 records, 89 signed and
+  23 proposed.
+- Adding them was the fourth genuine upstream ingest pass: fifteen ENA records
+  fetched for the first time, 21 provenance rows dated 2026-08-11. See the
+  `features/NOTICE` entry above.
 - All three were **appended** to `stage_classb.ITEMS`, not inserted where they
   read best, so no published id moved; `self_test()`'s id pin now covers them.
 
@@ -123,12 +256,24 @@ which.
 ### Known issue
 
 - `stage_classb.parse_embl` cannot see a feature key fifteen characters wide:
-  EMBL pads the key field to sixteen columns and `FT_LINE` requires two spaces,
-  so `prim_transcript`, `minus_35_signal` and `minus_10_signal` are declared in
-  `REGULATORY_KEYS` and unreachable. Found while anchoring `PLF:4014`, recorded
-  in that row's caveat and in the module docstring, and deliberately **not**
-  fixed in this change: repairing it adds text to the measured `notes` of rows
-  that already carry a curator signature, and those signatures would lapse.
+  EMBL pads the key field to sixteen columns and `FT_LINE` is
+  `^FT {3}(\S+) {2,}(\S.*)$`, which requires two spaces, so `prim_transcript`,
+  `minus_35_signal` and `minus_10_signal` — the only three fifteen-character
+  keys in `REGULATORY_KEYS` — are declared and unreachable. Found while
+  anchoring `PLF:4014`, recorded in that row's caveat and in the module
+  docstring, and deliberately **not** fixed in this change.
+- **The reason that was given for deferring it was wrong, and correcting it is
+  part of this release.** It read: "repairing it adds text to the measured
+  `notes` of rows that already carry a curator signature, and those signatures
+  would lapse." No signature would lapse. `parse_embl` is called from
+  `stage_classb.py` and nowhere else, that stage emits only `PLF:4*` rows, and
+  `SIGNOFF.tsv` contains **no `PLF:4` line at all** — the same fact
+  `features/PROPOSED.md` states about the PGK entry. The honest reason to defer
+  is narrower and survives checking: widening the regex changes the measured
+  `notes` of nine rows, which changes `features.tsv`, which needs a rebuild
+  against ENA and a fresh measurement — in a release whose entire claim is that
+  nothing moved. It is deferred on that ground, not on a signature that does not
+  exist.
 
 ## [0.7.0] - 2026-08-11
 
