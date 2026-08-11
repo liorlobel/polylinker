@@ -47,6 +47,53 @@ corroborates the extent -- or the day they are re-cut to an extent the evidence
 already corroborates. That is a curator's decision and not this program's,
 which is why the rows are refused rather than adjusted.
 
+A ROW MAY ALSO COME BACK BECAUSE THIS FILE CHANGED, AND THAT IS A DIFFERENT
+THING WEARING THE SAME CLOTHES. The paragraph above is about NEW EVIDENCE. On
+2026-08-11 the rule's IMPLEMENTATION changed instead: `verify()` scored
+`occurrences()[0]` and no other copy, so a depositor who carries the element
+twice and draws our edges over the SECOND copy was measured as having drawn
+nothing. `place_in_record()` now scores every copy. Because that widens what
+counts as corroboration for every Class B row at once, it must be said plainly
+what it moved, and the answer is MEASURED and not assumed:
+
+    NOTHING. All five refused rows are refused on the same evidence and by the
+    same numbers; all nine shipped rows keep their extents, their offsets and
+    their `notes` byte for byte; features.tsv and provenance.tsv rebuild
+    identical. Four witness records in `ITEMS` carry their element more than
+    once -- V01146 (T7, 7x), AY288927 (SP6, 3x), U13859 (rrnB T2, 2x) and
+    AJ318471 (T3, 3x) -- and in every one of them the copies are annotated
+    alike, so scoring the first was already scoring all of them.
+
+That was measured over the HELD list too, and not only over `ITEMS`, because a
+held element is the population a returning row would come from. Eleven of the
+extents the entries below name could be re-derived from the accessions they
+cite and were driven through this same code both ways; EXACTLY ONE of them
+moves, the mouse PGK promoter, from one exact placement to two. Nothing else
+does -- not the U6 forms, not H1, not either AG form, not chicken beta-actin,
+not PLtetO-1, and not the tetO7 heptamer, which was the one to watch because a
+tandem repeat is where multiple copies are expected. The SV40 early promoter
+cannot be reached by this fix at all: its 419 nt form occurs contiguously in no
+record, so there is no first copy to have been scoring. TWO ENTRIES ARE NOT
+COVERED BY THAT SENTENCE AND SAY SO RATHER THAN BEING COUNTED AS CLEAN -- the
+CMV-enhancer-containing CAG forms and the CMV-tetO2/PTight group state no
+accession:lo-hi this file could re-derive, so their extents were not measured
+either way, then or now.
+
+PGK is HELD and is not a row, so no row returns on this change. If one ever is
+seen to, this paragraph is the first thing to re-run: a return that no new
+evidence explains is the implementation moving the bar, and it must be reported
+as that.
+
+ONE CLAIM THIS FIX ITSELF MADE HAD TO BE WITHDRAWN, which is the reason to
+distrust a widening even when it measures clean. `place_in_record()` at first
+appended the words "this record's copies DISAGREE" whenever a record's copies
+were not annotated identically. Measured on KX264176.1 -- a PLtetO-1 witness
+below -- that is false: it carries the element twice, the depositor drew
+`regulatory` edge for edge over BOTH copies, and only a neighbouring
+`misc_feature` differs. The copies agree about the extent perfectly. The
+disclosure now says what was actually tested, that the record does not annotate
+its copies alike, and `self_test()` drives that record's shape.
+
 NOT CLAIMED: that the extent is correct, canonical, or agreed. It is a
 convention this project chose, the rival conventions are named with their
 measured offsets, and `boundary_rule = consensus_of_insdc` says exactly that.
@@ -1184,11 +1231,18 @@ HELD: tuple[tuple[str, str], ...] = (
      "promoter could be located' is retired. The record is X16612.1, 'Human gene for "
      "H1 RNA', 1057 bp, clone pMBH1, deposited by S. Altman at Yale (Baer, Nilsen, "
      "Costigan & Altman). It annotates the TATA box at 345..348 and precursor_RNA "
-     "375..715, and X16612.1:152-366 -- 215 nt -- is held verbatim by three "
+     "375..715, and X16612.1:152-366 -- 215 nt -- is held verbatim by FOUR "
      "independent addresses: AL355075.6:176331-176545 (Genoscope, chromosome 14 "
-     "clone), AF479321.1:1615-1829 (Genome Sciences, University of Washington) and "
-     "the anchor itself. The old reason was checking X15624, 'Human H1 RNA', which "
-     "is a 340 bp transcript-level record and contains none of the promoter. "
+     "clone), AF479321.1:1615-1829 (Genome Sciences, University of Washington), "
+     "Neurology at the University of Goettingen (AY640625.1:2317-2531 and "
+     "AY640626.1:2373-2587, one address between them) and the anchor itself. "
+     "THAT COUNT SAID THREE UNTIL 2026-08-11 AND THE FOURTH IS THE INFORMATIVE ONE: "
+     "re-measured while the every-copy fix below was having its blast radius taken, "
+     "Goettingen holds the 215 verbatim and draws it 5'+0/3'+1 -- their 216 nt starts "
+     "on this extent's own 5' edge and runs one base past its 3' edge, which is the "
+     "whole of the 215-versus-216 question in one number. The old reason was checking "
+     "X15624, 'Human H1 RNA', which is a 340 bp transcript-level record and contains "
+     "none of the promoter. "
      "THE CONSENSUS WAS NEVER THERE, which is the leg that now kills it. 'Three "
      "independent submissions agree on 216 nt' counted address STRINGS, which is "
      "precisely the error same_submitter() exists to prevent (finding 2 above). "
@@ -1201,8 +1255,11 @@ HELD: tuple[tuple[str, str], ...] = (
      "one further base, and that base is A where X16612.1:367 is T -- so it is 215 "
      "verbatim bases with a 216th that disagrees with the gene, and boundary_evidence "
      "would have nothing to point at. The genomic 215 nt form, which does slice "
-     "cleanly, is annotated by NOBODY: three submissions hold it and zero draw it, "
-     "so it fails MIN_PLACEMENTS at nought. WHAT WOULD RESCUE IT: two genuinely "
+     "cleanly, is annotated by NOBODY: four submissions hold it and zero draw it, "
+     "so it fails MIN_PLACEMENTS at nought -- and it fails there under the every-copy "
+     "rule exactly as it did under the first-copy one, re-measured 2026-08-11: no "
+     "witness of this element carries it more than once, so there was never a second "
+     "copy being overlooked here. WHAT WOULD RESCUE IT: two genuinely "
      "independent submissions annotating exactly 215 nt (today none) or exactly 216 "
      "nt (today one, and it would still not be a verbatim slice). Nothing in the "
      "schema and nothing about the anchor is now the obstacle."),
@@ -1223,21 +1280,35 @@ HELD: tuple[tuple[str, str], ...] = (
      "nine independent addresses on the exact bases; this file's own fetching "
      "confirms Sanger and the Central Institute for Experimental Animals directly. "
      "MIN_SUBMISSIONS is not the problem. "
-     "IT DIES ON MIN_PLACEMENTS AT ONE, AND THE SECOND WITNESS IS LOST TO A "
+     "IT DIED ON MIN_PLACEMENTS AT ONE, AND THE SECOND WITNESS WAS LOST TO A "
      "LIMITATION OF verify() RATHER THAN TO THE EVIDENCE. CR293496.1 (Sanger Centre) "
      "annotates regulatory 4137..4644 = exactly these 508 bases. AB242435.1 (Central "
      "Institute for Experimental Animals, Kawasaki) carries the element TWICE, and "
      "annotates the SECOND copy at exactly 508 nt (regulatory 2089..2596) while the "
-     "first carries a 516 nt feature (regulatory 366..881, 5'+8/3'+0). verify() "
-     "scores occurrences()[0] and nothing else, so it sees the 516 and never the "
-     "508: on the rule as IMPLEMENTED this element has one placement, and on the "
-     "rule as WRITTEN -- 'independent submissions annotate a feature at exactly this "
-     "extent' -- it has two. Note also that BX469914 and CR293496 are both Hinxton "
-     "addresses and same_submitter() merges them, so the anchor would not add a "
-     "third opinion. TWO DECISIONS ARE OWED HERE AND NEITHER IS THIS FILE'S: whether "
-     "a second copy inside one record may corroborate an extent, and if so, a change "
-     "to verify() that will alter the measured notes of rows already signed. Held "
-     "until both are taken."),
+     "first carries a 516 nt feature (regulatory 366..881 over a copy at 374-881, so "
+     "5'+8/3'+0). verify() scored occurrences()[0] and nothing else, so it saw the "
+     "516 and never the 508: on the rule as IMPLEMENTED this element had one "
+     "placement, and on the rule as WRITTEN -- 'independent submissions annotate a "
+     "feature at exactly this extent' -- it had two. Note also that BX469914 and "
+     "CR293496 are both Hinxton addresses and same_submitter() merges them, so the "
+     "anchor adds no third opinion. "
+     "THE TWO DECISIONS THAT WERE OWED HAVE BOTH BEEN TAKEN, 2026-08-11, and this "
+     "entry is kept rather than deleted because the third one has not. Whether a "
+     "second copy inside one record may corroborate an extent: YES, and "
+     "place_in_record() carries the reasoning -- the depositor drew our edges, and "
+     "the unit of corroboration is the SUBMISSION, so one record is one placement "
+     "however many of its copies are drawn. The change to verify(): made, and the "
+     "clause above predicting it 'will alter the measured notes of rows already "
+     "signed' WAS WRONG -- measured on the day, no Class B row is signed at all, and "
+     "the rebuild is byte-identical in features.tsv and provenance.tsv. So on "
+     "today's evidence this element measures TWO independent submissions and TWO "
+     "exact placements and would pass both floors. "
+     "WHAT IS STILL OWED IS THE ONE DECISION THIS FILE MUST NEVER TAKE: issuing the "
+     "row. That is a curator's, it needs an id APPENDED after the last item so that "
+     "none of PLF:4000..PLF:4014 moves, and a rule that promoted an element the "
+     "moment the code stopped under-counting it would be the stage adjusting its own "
+     "membership -- which is the move every refusal in this file exists to refuse. "
+     "The measurement is done; the judgement is not."),
     ("AG promoter of pCAGGS, 1342 nt",
      "HELD AT ONE PLACEMENT, and the old CAG entry's central claim is confirmed "
      "harder than it was stated. These 1342 bases -- LT727518.1:3457-4798, the "
@@ -1301,6 +1372,14 @@ HELD: tuple[tuple[str, str], ...] = (
      "Engineering, Boston University (KM521209.1), Biological Engineering, MIT "
      "(KT893256.1, KX264176.1 -- one address) and Biology, University of Texas at "
      "Tyler (MK753225.1). None carries the SnapGene tell. It clears both legs. "
+     "RE-MEASURED 2026-08-11 UNDER THE EVERY-COPY RULE and unchanged at four "
+     "submissions and four placements -- but this is the element that corrected the "
+     "wording of that fix, so the record is kept here too. KX264176.1 carries the 74 "
+     "bases TWICE, at 7377-7450 and at 8612-8685, and the depositor drew `regulatory` "
+     "edge for edge over BOTH; only a `misc_feature` overlapping the first copy "
+     "differs. `place_in_record()` first called such copies 'in disagreement', which "
+     "would have told a curator this witness was weaker than it is. It now reports "
+     "only what it tested, that the record does not annotate its copies alike. "
      "WHAT IT DOES NOT YET HAVE, and why no row is offered: a curated name and a "
      "description written from the primary source (Lutz & Bujard 1997, Nucleic Acids "
      "Res 25:1203-1210, PMID 9092630, whose text was NOT read here), and a decision "
@@ -1649,6 +1728,136 @@ def offsets(ours: tuple, theirs: tuple, our_strand: str) -> str:
     return f"5'{left:+d}/3'{right:+d}"
 
 
+def place_in_record(rec: Record, needle: str) -> dict:
+    """Where one record puts `needle`, scoring EVERY copy of it the record holds.
+
+    Returns {} when the record does not contain the sequence at all; otherwise
+    `lo`, `hi`, `strand` and `copy` for the copy that was scored, the `placed`
+    string for the report and for `notes`, the `exact` feature keys that fall on
+    that copy's edges, and `occurrences`.
+
+    SPLIT OUT OF `verify()` SO `self_test()` CAN DRIVE IT, for the same reason
+    `corroborating_submissions()` is: inside the exemplar loop this was reachable
+    only with the network or the cache, which is exactly the condition under
+    which a rule quietly stops being tested. The rule it decides is
+    MIN_PLACEMENTS, and MIN_PLACEMENTS is the whole of what makes
+    `boundary_rule = consensus_of_insdc` more than an assertion.
+
+    WHY EVERY COPY AND NOT THE FIRST -- a 2026-08-11 fix to the IMPLEMENTATION of
+    the rule and not to the rule. MIN_PLACEMENTS asks whether an independent
+    submission "annotates a feature at EXACTLY this extent"; a depositor whose
+    construct carries the element twice and who draws our edges over the SECOND
+    copy has done precisely that. Until this build the loop read `hits[0]` and
+    nothing else, so it scored one copy and threw the rest away -- while the dict
+    it returned carried `occurrences` and therefore knew all along that the other
+    copies were there.
+
+    MEASURED, on the mouse PGK promoter that is still HELD above. The 508 nt
+    element is BX469914.4:13192-13699. AB242435.1 (Central Institute for
+    Experimental Animals, Kawasaki) carries it TWICE: at 374-881, where the
+    depositor drew `regulatory 366..881` -- 516 nt, 5'+8/3'+0 -- and again at
+    2089-2596, where the depositor drew `regulatory 2089..2596`, exactly these
+    508 bases. Scoring copy 1 alone saw the 516 and never the 508, so on the rule
+    as IMPLEMENTED that submission placed nothing and on the rule as WRITTEN it
+    placed the element edge for edge.
+    """
+    hits = occurrences(rec.sequence, needle)
+    if not hits:
+        return {}
+
+    scored = []
+    for lo, hi, _strand in hits:
+        # Deliberately NOT named `near`: an earlier version of `verify()` used
+        # that name for the anchor's features as well and the exemplar loop
+        # silently overwrote them.
+        near_feats = [
+            (k, flo, fhi) for (k, flo, fhi, _s) in rec.features
+            if overlaps(lo, hi, flo, fhi) and (fhi - flo + 1) <= 12 * len(needle)
+        ]
+        scored.append(near_feats)
+
+    def render(i: int) -> str:
+        lo, hi, strand = hits[i]
+        return ", ".join(
+            f"{k} {offsets((lo, hi), (flo, fhi), strand)}" for k, flo, fhi in scored[i][:4]
+        ) or "nothing over them at all"
+
+    # The corroboration test, computed from the intervals rather than from the
+    # rendered string -- `render()` truncates to four features for the report,
+    # and a fifth feature landing exactly on our edges would be invisible to
+    # anything that parsed it. Equality of the raw interval IS `5'+0/3'+0`;
+    # offsets() is only how it is rendered.
+    def exact_keys(i: int) -> list:
+        lo, hi, _strand = hits[i]
+        return [k for k, flo, fhi in scored[i] if (flo, fhi) == (lo, hi)]
+
+    # ONE RECORD CONTRIBUTES ONE PLACEMENT, however many of its copies are drawn
+    # edge for edge, and the next reader's question is answered here so it is not
+    # re-litigated: YES, a record that draws copy 1 inexactly and copy 2 exactly
+    # is ONE exact placement, and a record that draws both exactly is still one.
+    # The reason is that the unit of corroboration in this stage is the
+    # SUBMISSION and never the copy. `corroborating_submissions()` already
+    # collapses one lab's several RECORDS into a single opinion, because two
+    # records from one lab are one opinion; two copies inside ONE record are less
+    # independent than that and not more, so they cannot be allowed to buy what
+    # two records from one lab cannot. That the depositor also drew different
+    # edges elsewhere in the same construct is a fact about that record's
+    # internal consistency -- it is disclosed in `placed` below rather than being
+    # allowed to cancel a draw the depositor really made.
+    pick = next((i for i in range(len(hits)) if exact_keys(i)), 0)
+    lo, hi, strand = hits[pick]
+    placed = render(pick)
+
+    # WHICH COPY THIS DESCRIBES, said out loud when and only when the record does
+    # NOT ANNOTATE ITS COPIES ALIKE. Before the fix the scored copy was always
+    # copy 1, so the string was merely incomplete; now it is chosen by a rule a
+    # reader cannot invert from the offsets alone, and an evidence string a
+    # curator cannot resolve is worse than one that is plainly wrong.
+    #
+    # THE TRIGGER IS THE ANNOTATION AND NOT THE EXTENT, and the wording has to
+    # say so, because those are not the same test and the stronger word would be
+    # a claim nobody checked. MEASURED 2026-08-11 on KX264176.1, which the
+    # PLtetO-1 entry in HELD already names: it carries that 74 nt element twice,
+    # at 7377-7450 and at 8612-8685, and the depositor drew `regulatory` EDGE FOR
+    # EDGE OVER BOTH -- so those copies agree about this extent as completely as
+    # two copies can -- while a `misc_feature` overlaps only the first. The
+    # difference is real and worth disclosing, but calling such copies "in
+    # disagreement" would tell a curator the corroboration is shakier than it is,
+    # in a file whose entire subject is how strong the corroboration is. What is
+    # true, and all that is true, is that the record does not annotate its copies
+    # alike; the enumeration that follows is what lets a curator see which kind
+    # of difference it is, and check 4d drives exactly this case.
+    #
+    # Where every copy renders the same there is nothing to disambiguate and
+    # nothing is added -- which is not a convenience but the condition under
+    # which this fix leaves the shipped rows untouched. All four multi-copy
+    # witnesses in ITEMS today are of that kind: V01146 (T7, 7 copies) and
+    # AY288927 (SP6, 3 copies) annotate nothing over any copy, AJ318471 (T3, 3
+    # copies) draws 5'+0/3'+4 over every one, and U13859 (rrnB T2, 2 copies)
+    # draws 5'+0/3'+0 over both.
+    renders = [render(i) for i in range(len(hits))]
+    if len(set(renders)) > 1:
+        placed += (
+            f" [scored on copy {pick + 1} of {len(hits)}, at {lo}-{hi}:{strand};"
+            f" this record does NOT annotate its copies alike -- "
+            + "; ".join(
+                f"copy {i + 1} at {h[0]}-{h[1]}:{h[2]} places {r}"
+                for i, (h, r) in enumerate(zip(hits, renders))
+            )
+            + "]"
+        )
+
+    return {
+        "lo": lo,
+        "hi": hi,
+        "strand": strand,
+        "copy": pick + 1,
+        "placed": placed,
+        "exact": exact_keys(pick),
+        "occurrences": len(hits),
+    }
+
+
 # --------------------------------------------------------------------------
 # The stage
 
@@ -1733,38 +1942,22 @@ def verify(item: Convention, refresh: bool) -> tuple[dict, list]:
                 f"anchor {acc} is a SnapGene-annotated record; the bases a Class B "
                 f"row ships must not be sliced out of one"
             )
-        hits = occurrences(rec.sequence, item.sequence)
-        if not hits:
+        # EVERY copy this record holds is scored, not just the first; see
+        # `place_in_record()` for why, and for the PGK record that proved it.
+        placement = place_in_record(rec, item.sequence)
+        if not placement:
             absent.append(acc)
             lines.append(f"    exemplar {acc:12s} DOES NOT CONTAIN the sequence -- not counted")
             continue
-        lo, hi, strand = hits[0]
-        # Deliberately NOT named `near`: an earlier version of this function used
-        # that name for the anchor's features as well and the exemplar loop
-        # silently overwrote them.
-        near_feats = [
-            (k, flo, fhi) for (k, flo, fhi, _s) in rec.features
-            if overlaps(lo, hi, flo, fhi) and (fhi - flo + 1) <= 12 * len(item.sequence)
-        ]
-        placed = ", ".join(
-            f"{k} {offsets((lo, hi), (flo, fhi), strand)}" for k, flo, fhi in near_feats[:4]
-        ) or "nothing over them at all"
-        # The corroboration test, computed from the intervals rather than from
-        # the string above -- `placed` is truncated to four features for the
-        # report, and a fifth feature landing exactly on our edges would be
-        # invisible to anything that parsed it. Equality of the raw interval IS
-        # `5'+0/3'+0`; offsets() is only how it is rendered.
-        exact = [(k, flo, fhi) for k, flo, fhi in near_feats if (flo, fhi) == (lo, hi)]
+        lo, hi, strand = placement["lo"], placement["hi"], placement["strand"]
+        placed = placement["placed"]
         entry = {
             "accession": rec.accession or acc,
             "is_anchor": acc == item.anchor,
-            "lo": lo, "hi": hi, "strand": strand,
             "snapgene": rec.snapgene,
             "submitter": rec.submitter,
-            "placed": placed,
-            "exact": [k for k, _lo, _hi in exact],
-            "occurrences": len(hits),
             "meta": meta,
+            **placement,
         }
         witnesses.append(entry)
         if rec.snapgene:
@@ -1788,7 +1981,7 @@ def verify(item: Convention, refresh: bool) -> tuple[dict, list]:
         lines.append(
             f"    {'anchor  ' if acc == item.anchor else 'exemplar'} {acc:12s} "
             f"{rec.accession:12s} at {lo}-{hi}:{strand} "
-            f"x{len(hits)}; depositor places {placed}"
+            f"x{placement['occurrences']}; depositor places {placed}"
             + ("  [same submitter as an earlier record]" if merged else "")
             + ("  [no submission address]" if not rec.submitter else "")
         )
@@ -2166,6 +2359,143 @@ def self_test() -> list[str]:
          len(corroborating_submissions({"a": sub(False, True)})) == 1)
     must("the floor is above one, or the rule permits a consensus of one",
          MIN_PLACEMENTS >= 2)
+
+    # 4d. EVERY COPY IS SCORED, NOT THE FIRST ONE. This is the check for the
+    #     2026-08-11 fix in `place_in_record()`, and the record it is modelled on
+    #     is real: AB242435.1 carries the mouse PGK promoter TWICE and annotates
+    #     `regulatory 366..881` over the first copy (which sits at 374-881, so
+    #     5'+8/3'+0) and `regulatory 2089..2596` over the second (2089-2596,
+    #     edge for edge). Reading `hits[0]` saw the 516 nt draw and never the 508,
+    #     so PGK measured ONE placement on the rule as implemented and TWO on the
+    #     rule as written.
+    #
+    #     THE FIXTURE IS SYNTHETIC AND THE SHAPE IS AB242435's, because a test
+    #     that needed that record would need the network or the cache -- the
+    #     condition under which a rule stops being tested. It is driven through
+    #     `parse_embl()` rather than through a hand-built `Record`, so what runs
+    #     is the parser the stage actually uses.
+    twice_seq = (
+        "     tttttttttg attacaggcc ttaagctcga aaaaaaaaaa aaaaaaaaag attacaggcc     60\n"
+        "     ttaagctcgc ccccccccc                                                 79\n"
+    )
+
+    def two_copy_record(ft: str) -> Record:
+        return parse_embl(
+            "ID   XX05; SV 1; circular; other DNA; STD; SYN; 79 BP.\n"
+            + ft
+            + "SQ   Sequence 79 BP;\n" + twice_seq + "//\n"
+        )
+
+    elem = "GATTACAGGCCTTAAGCTCG"
+    #     The literal coordinates below are the claim, not a restatement of the
+    #     fixture: if the sequence above is ever edited without moving them, this
+    #     is the assertion that says so instead of the rest of the block quietly
+    #     testing a one-copy record.
+    disagree = two_copy_record(
+        "FT   regulatory      7..29\n"
+        'FT                   /regulatory_class="promoter"\n'
+        "FT   regulatory      50..69\n"
+        'FT                   /regulatory_class="promoter"\n'
+    )
+    must("the fixture really does hold the element twice",
+         occurrences(disagree.sequence, elem) == [(10, 29, "+"), (50, 69, "+")])
+    #     The control that makes the three assertions after it mean something: the
+    #     FIRST copy is drawn INEXACTLY, so anything that scores only `hits[0]`
+    #     must come back with no exact placement at all.
+    must("the fixture's first copy is drawn inexactly, 5'+3 like AB242435's",
+         [k for k, flo, fhi, _s in disagree.features if (flo, fhi) == (10, 29)] == []
+         and offsets((10, 29), (7, 29), "+") == "5'+3/3'+0")
+    p = place_in_record(disagree, elem)
+    must("a record that draws its SECOND copy exactly places the element exactly",
+         p["exact"] == ["regulatory"])
+    must("and the copy reported is the one that was drawn exactly, not the first",
+         (p["lo"], p["hi"], p["copy"], p["occurrences"]) == (50, 69, 2, 2))
+    #     A row whose evidence string is ambiguous is worse than one that is
+    #     merely wrong: the offsets alone cannot tell a curator which of two
+    #     copies they describe, so a record that does not annotate its copies
+    #     alike has to say which one this describes.
+    must("when the copies are not annotated alike the report names the copy it scored",
+         "scored on copy 2 of 2, at 50-69:+" in p["placed"]
+         and "does NOT annotate its copies alike" in p["placed"])
+    must("and discloses what the other copy was drawn as, so nothing is hidden",
+         "copy 1 at 10-29:+ places regulatory 5'+3/3'+0" in p["placed"])
+    #     ONE RECORD, ONE PLACEMENT -- the decision `place_in_record()` documents.
+    #     A depositor who drew our edges once is one opinion, so this record on
+    #     its own still cannot reach the floor.
+    must("a record whose second copy is exact is ONE corroborating submission",
+         len(corroborating_submissions({"kawasaki": [p]})) == 1)
+    must("so one such record on its own still does not meet MIN_PLACEMENTS",
+         len(corroborating_submissions({"kawasaki": [p]})) < MIN_PLACEMENTS)
+
+    #     AND THE CONTROL THAT PROTECTS EVERY ROW ALREADY SHIPPING. Nothing is
+    #     appended when the copies AGREE, because then the sentence is true of all
+    #     of them and there is nothing to disambiguate. All four multi-copy
+    #     witnesses in ITEMS are of that kind, so this fix leaves their `notes`
+    #     byte for byte where they were: the two cases below are U13859's (every
+    #     copy exact, PLF:4009) and AJ318471's (every copy drawn the same wrong
+    #     way, PLF:4012).
+    agree_exact = place_in_record(two_copy_record(
+        "FT   regulatory      10..29\n"
+        'FT                   /regulatory_class="promoter"\n'
+        "FT   regulatory      50..69\n"
+        'FT                   /regulatory_class="promoter"\n'
+    ), elem)
+    must("copies that all place it exactly add no disambiguation, as U13859's do",
+         agree_exact["placed"] == "regulatory 5'+0/3'+0" and agree_exact["copy"] == 1)
+    must("and they still place it exactly", agree_exact["exact"] == ["regulatory"])
+    #     The other half of "one record, one placement", and it needs a fixture of
+    #     its own: a record BOTH of whose copies are drawn edge for edge must
+    #     still be ONE submission. Two copies inside one record cannot buy what
+    #     two records from one lab cannot, and `exact` is a flag on the record
+    #     rather than a tally of copies precisely so that it cannot.
+    must("a record with BOTH copies drawn exactly is still ONE submission",
+         len(corroborating_submissions({"kawasaki": [agree_exact]})) == 1
+         and len(agree_exact["exact"]) == 1)
+    agree_wrong = place_in_record(two_copy_record(
+        "FT   regulatory      7..29\n"
+        'FT                   /regulatory_class="promoter"\n'
+        "FT   regulatory      47..69\n"
+        'FT                   /regulatory_class="promoter"\n'
+    ), elem)
+    must("copies that are all drawn the same wrong way add none either, as AJ318471's",
+         agree_wrong["placed"] == "regulatory 5'+3/3'+0" and agree_wrong["copy"] == 1)
+    must("and drawing every copy the same wrong way corroborates nothing",
+         agree_wrong["exact"] == [])
+    #     THE CASE THAT DECIDES THE WORDING, and it is a real record: KX264176.1
+    #     carries the PLtetO-1 element HELD names TWICE, at 7377-7450 and
+    #     8612-8685, draws `regulatory` edge for edge over BOTH, and overlaps only
+    #     the first with a `misc_feature`. The copies therefore agree about this
+    #     extent completely and are still not annotated alike. Measured
+    #     2026-08-11 while this fix's blast radius was being taken; the fixture
+    #     below is that shape, with the extra feature over copy 1 only.
+    #
+    #     TWO WAYS TO GET THIS WRONG, and this block refuses both. Suppressing
+    #     the note because the copies agree on the extent would hide from a
+    #     curator that the record annotates its copies differently at all; and
+    #     the note may not say the copies DISAGREE, because here they do not --
+    #     the trigger is `render()` differing, which is a statement about the
+    #     annotation and not about the boundary, and a file whose whole subject
+    #     is the strength of corroboration must not overstate a weakness any more
+    #     than a strength.
+    exact_both_extra = place_in_record(two_copy_record(
+        "FT   regulatory      10..29\n"
+        'FT                   /regulatory_class="promoter"\n'
+        "FT   regulatory      50..69\n"
+        'FT                   /regulatory_class="promoter"\n'
+        "FT   misc_feature    1..40\n"
+    ), elem)
+    must("a record that draws both copies exactly but annotates one further says so",
+         "scored on copy 1 of 2, at 10-29:+" in exact_both_extra["placed"]
+         and "does NOT annotate its copies alike" in exact_both_extra["placed"])
+    must("and shows both copies drawn edge for edge, rather than calling that a disagreement",
+         "copy 1 at 10-29:+ places regulatory 5'+0/3'+0, misc_feature 5'+9/3'+11"
+         in exact_both_extra["placed"]
+         and "copy 2 at 50-69:+ places regulatory 5'+0/3'+0" in exact_both_extra["placed"]
+         and "DISAGREE" not in exact_both_extra["placed"])
+    must("and it is still one exact placement, scored on the first exact copy",
+         exact_both_extra["exact"] == ["regulatory"] and exact_both_extra["copy"] == 1)
+    must("a record that does not hold the sequence places nothing",
+         place_in_record(disagree, "ACGTACGTACGTACGTACGT") == {})
 
     # 5. Two spellings of ONE lab's address merge; two institutions do not.
     #    The first two strings are the submission addresses ENA serves for

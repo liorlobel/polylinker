@@ -25,6 +25,60 @@ which.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`stage_classb.verify()` scored only a record's FIRST copy of an element, so
+  a depositor who carries it twice and draws our edges over the SECOND copy was
+  measured as having drawn nothing.** The dict the loop built already carried
+  `occurrences`, so the code knew the other copies were there and never looked
+  at them. Scoring moved to a new `place_in_record()`, which scores every copy;
+  the copy reported is the first one drawn edge for edge, or copy 1 if none is.
+  **One record is still ONE placement however many of its copies are drawn** —
+  the unit of corroboration in this stage is the submission, and two copies
+  inside one record are less independent than two records from one lab, which
+  `corroborating_submissions()` already collapses to a single opinion.
+- **What that changed for the rows: nothing, and it was measured rather than
+  assumed.** All fifteen declared Class B items — the fourteen offered and the
+  one withdrawn — were run through the real `verify()` under both loops. Every
+  submission count and every exact-placement count is identical, all sixty
+  witness evidence strings are byte-identical, the five rows refused on
+  2026-08-10 (`PLF:4002`, `PLF:4003`, `PLF:4004`, `PLF:4005`, `PLF:4011`) are
+  refused on the same evidence by the same numbers, **no refused row returned**,
+  and `features.tsv` and `provenance.tsv` rebuild byte for byte: 112 rows, 1292
+  provenance rows, 89 signatures still valid, 23 still proposed. Only four
+  witness records in `ITEMS` carry their element more than once and all four
+  annotate their copies alike, which is why. A row returning because the
+  implementation changed is not the same thing as a row returning on new
+  evidence, so `features/PROPOSED.md` now says how to tell them apart.
+- **The element the fix does move is held, not shipped.** Re-measured under the
+  new loop, the mouse PGK promoter has two independent submissions and two exact
+  placements where it had one, and would clear both floors. It stays in
+  `stage_classb.HELD`: issuing a row is a curator's decision, and a stage that
+  promoted an element the moment its own code stopped under-counting it would be
+  adjusting its own membership. Ten further held extents were measured the same
+  way and none of them moves; the SV40 early promoter cannot be reached by the
+  fix at all, its 419 nt form occurring contiguously in no record.
+- **One claim the fix itself made, withdrawn before it shipped.** The new
+  disclosure said "this record's copies DISAGREE" whenever a record's copies
+  were not annotated identically. Measured on `KX264176.1`, that is false: it
+  carries the PLtetO-1 element twice, the depositor drew `regulatory` edge for
+  edge over BOTH copies, and only a neighbouring `misc_feature` differs. The
+  trigger is the annotation and not the extent, and the note now says only what
+  was tested — that the record does not annotate its copies alike.
+- **`stage_classb.HELD` and `features/PROPOSED.md` said the H1 promoter's 215 nt
+  form is held by three independent submissions. It is four**: Neurology at the
+  University of Goettingen holds it verbatim too, and draws it `5'+0/3'+1`,
+  which is the whole 215-versus-216 question in one number. Found while taking
+  this fix's blast radius. The hold is unaffected — zero submissions draw that
+  extent, under either loop — and `PROPOSED.md`'s citation for `M18735.1` is
+  corrected to Adra, Boer & McBurney.
+- Seventeen checks added to `stage_classb.self_test()`, 43 before and 60 after,
+  driven through the real `parse_embl()` on fixtures shaped like `AB242435.1`,
+  `U13859.1`, `AJ318471.1` and `KX264176.1`. Each was shown to fail against the
+  unfixed code: reverting `place_in_record()` to `hits[0]`, restoring the
+  withdrawn wording, or suppressing the disclosure when every copy is exact each
+  turns the whole stage self-test red, and the stage then emits no rows at all.
+
 ### Added
 
 - **Three Class B feature rows, `PLF:4012` the T3 promoter, `PLF:4013` the
@@ -47,12 +101,14 @@ which.
 - **`stage_classb.HELD` rewritten.** Six elements are still refused and their
   reasons now say what measurement says rather than what the first pass guessed:
   two were backwards about which of the two rules they failed, one had been
-  checking a transcript-level record where the gene record exists, and one fails
-  only because `verify()` scores a record's first copy of an element and never
-  its second. Two entries that were one name over several unrelated elements —
-  CAG, and the dropped `tetO / TRE / Ptet` — are now six separately named
-  entries, each with its own status; three of those name extents that clear the
-  corroboration floor and say what is still missing before a row could exist.
+  checking a transcript-level record where the gene record exists, and one failed
+  only because `verify()` scored a record's first copy of an element and never
+  its second — fixed in this same change, and that entry now records a
+  measurement rather than a complaint. Two entries that were one name over
+  several unrelated elements — CAG, and the dropped `tetO / TRE / Ptet` — are
+  now six separately named entries, each with its own status; three of those
+  name extents that clear the corroboration floor and say what is still
+  missing before a row could exist.
 - Row counts in `README.md`, `features/README.md`, `docs/PLAN.md` and
   `features/PROPOSED.md` updated for the three new rows, including the
   provenance licence and per-source tallies.
