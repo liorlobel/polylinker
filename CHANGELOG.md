@@ -25,14 +25,29 @@ which.
 
 ## [Unreleased]
 
-**Nothing here changes what Polylinker does to a sequence, and no row was
-signed.** The 89 records `pl annotate` searches by default are unchanged, byte
-for byte, with every signature still valid; `features/SIGNOFF.tsv` is
-byte-identical to 0.6.0 and CI still proves the build never writes it. Of the 21
-`proposed` rows, **one has been withdrawn by the curator**; the other 20 are
-still `proposed` and byte-identical either side of the withdrawal. What else
-changed is the prose those rows carry, and the worklist that asks a human to
-read them.
+Nothing yet.
+
+## [0.7.0] - 2026-08-11
+
+**Nothing in this release changes what Polylinker does to a sequence, and no row
+was signed.** The 89 records `pl annotate` searches by default are unchanged in
+every field their sign-off covers, and all 89 signatures still verify;
+`features/SIGNOFF.tsv` is byte-identical to 0.6.0 — the same sha256 it carried at
+that tag — and CI still proves the build never writes it. Of the 21 `proposed`
+rows 0.6.0 shipped, **one has been withdrawn by the curator**; the other **20 are
+still `proposed`, and still unread by any human**, byte-identical either side of
+the withdrawal. What changed is the prose those rows carry, the worklist that
+asks a human to read them, and two checks that turned out not to be running.
+
+**One column did move on all 109 rows, and it is not content: `date_added`.** A
+build stamps today's date into `#!version`, into every row's `date_added` and
+into every own-work `retrieved` unless `PLF_BUILD_DATE` pins it — the mechanism
+is `features/README.md`'s, not a change made here — so those bytes differ from
+0.6.0 on every row, the signed ones included. The sign-off digest does not cover
+that column, which is exactly why all 89 signatures still verify over rows whose
+lines are *not* byte-identical. The 0.6.0 entry below calls the signed rows
+unchanged "byte for byte"; what was true there was the digest-covered content,
+and this entry says which rather than repeating the phrase.
 
 ### Removed — `PLF:4006`, the CMV enhancer, withdrawn by the curator
 
@@ -72,6 +87,24 @@ of subtracting one from it: **1,367 of theirs against 109 of ours, no shared
 five-token run, nothing above 60% containment**, and the same five rows above the
 30% line with the same longest runs (1, 2, 4, 3, 3).
 
+**That sweep was not complete, and cutting this release is what found the rest.**
+Six more sentences had not moved with the row, and every one of them sits in a
+file the paragraph above names by hand. In `features/README.md`: *seven ship*,
+still listing the withdrawn CMV enhancer among rows the table holds; *Seven rows
+contributed 42 ENA provenance rows … out of 154 in total*, where the same edit
+that recomputed `ENA 149` eight lines earlier walked past the 154; *seven is what
+survived the rules applied honestly*, which is true of the rules and reads, in
+the present tense, one row better than the table is; and a `genbank_key` list of
+`promoter`, `enhancer`, `terminator`, `polyA_signal` described as *all four*,
+when no row anywhere in `features.tsv` carries `enhancer`. In `features/NOTICE`,
+twice, the Class B rows are glossed as *promoters, enhancers, terminators and
+poly(A) signals* — a kind with no row behind it, in the file that exists to
+describe what is redistributed. Each was recomputed from the tables: six Class B
+rows, 37 ENA provenance rows of 149, `promoter` (2), `terminator` (3),
+`polyA_signal` (1). The lesson is the one the paragraph above already draws and
+understated — untested prose does not stay true because a previous pass looked at
+the file.
+
 ### Added — a row can be withdrawn, and a test proves the other ids do not move
 
 `Convention` (Stage 5) and `Natural` (Stage 2) both gained a `withdrawn` field.
@@ -82,12 +115,6 @@ withdrawal is permanent, and a bare flag would record that somebody had decided
 without recording what they decided. A marked item is dropped by `build()`, its
 id is still consumed, and the drop is reported as `WITHDRAWN` with its reason
 rather than as a check failing, because a decision is not a failure.
-
-`build.py`'s id-stability audit learned the one absence that has an answer: a
-published id that disappears is still fatal *unless* a stage declares it
-withdrawn, and `--allow-id-drift` remains the only way past a genuine
-repointing. Four cases in `build.self_test()` drive that hole, including a
-withdrawal declared for the wrong id and a row that is present and repointed.
 
 The check that matters is `stage_classb.self_test()` item 8: it pins
 `PLF:4006`–`PLF:4010` to the elements they were published as, asserts that
@@ -106,11 +133,30 @@ them away leaves its own claim unwitnessed. The exit now carries every pin that
 failed, so the sentence above is something a reader reproduces rather than
 something two files assert about each other.
 
-`stage_classb.build()` now runs `self_test()` before it emits a row. That
-function's docstring had said since it was written that its gates "run on every
-build"; in fact they ran only under `python features/build/stage_classb.py`,
-because `build.py` called `build()` and never `self_test()`. They need no
-network, so there was never a reason for that.
+### Fixed — two checks that were not running
+
+Building the withdrawal turned up two gates that existed and were not being
+exercised. Neither changes a byte of anybody's data, and both are why this entry
+does not simply report that the checks held.
+
+**`stage_classb.self_test()` ran on no build at all.** Its docstring had said
+since it was written that its gates "run on every build". They ran only under
+`python features/build/stage_classb.py`; `build.py` called `build()` and never
+`self_test()` — so any test written there would have been a test CI never runs,
+which is what the id pin above would have been had both not landed together.
+They need no network, so there was never a reason for it.
+`stage_classb.build()` now runs `self_test()` before it emits a row, and returns
+its report.
+
+**`build.py`'s `audit_ids` would have refused this release.** It treated *any*
+published id disappearing as fatal — correct for a silent repointing, wrong for a
+decision, and a legitimate withdrawal is exactly what this release is. So the
+mechanism above would have been built and then blocked by the audit meant to
+protect it. It now separates an absence a stage *explains* from one nothing
+explains; every other absence stays fatal, and `--allow-id-drift` is still the
+only way past a genuine repointing. Four cases in `build.self_test()` drive that
+hole, including a withdrawal declared for the wrong id and a row that is present
+and repointed.
 
 ### Changed — the curator worklist now carries the evidence, not just the questions
 
@@ -1442,7 +1488,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.7.0
 [0.6.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.6.0
 [0.5.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.5.0
 [0.4.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.4.0
