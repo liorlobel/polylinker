@@ -187,6 +187,25 @@ class Natural:
     caveat: str = ""
     """Something the curator must decide or must not be allowed to assume. Goes
     into `notes` verbatim; it is not decoration."""
+    withdrawn: str = ""
+    """WHY the curator withdrew this row, or "" if it ships. Set it and the row
+    stops at the gate in `build()`; the declaration stays in `ITEMS`, at its
+    index, and keeps its id.
+
+    A STRING AND NOT A BOOL: the id is permanent, so the withdrawal is permanent
+    too, and `withdrawn = True` would record that somebody decided without
+    recording what they decided. The reason is printed beside the id it retires.
+
+    HERE AS WELL AS IN `stage_classb.Convention`, deliberately. This stage
+    allocates `PLF:{ID_BASE + i}` from the item's index exactly as that one does,
+    so it carries exactly the same hazard: deleting a published item renumbers
+    every item after it, and `build.py` then refuses to write. A withdrawal
+    mechanism built for one stage only would be a trap set for whoever first
+    needs it in the other.
+
+    NOT a review status. `review_status` moves only through features/SIGNOFF.tsv,
+    which no program here may write; this field removes the row from the table
+    altogether, and a row that is not in the table cannot be signed."""
 
 
 ITEMS: tuple[Natural, ...] = (
@@ -1187,6 +1206,32 @@ def run_control(refresh: bool) -> list[str]:
 # Stage 2
 
 
+def allocation(items: tuple[Natural, ...] | None = None) -> list:
+    """(id, item) for every DECLARED item, in declaration order.
+
+    The id comes from the item's INDEX and from nothing else, so an item that
+    drops out — on its evidence, or because a curator withdrew it — still holds
+    its place here and its number stays spoken for. `build()` iterates this
+    rather than re-deriving `ID_BASE + i` inline, so the allocator a test can
+    drive is the allocator the build really uses.
+
+    The twin of `stage_classb.allocation`. Two stages, one rule, and neither of
+    them a special case.
+    """
+    src = ITEMS if items is None else items
+    return [(f"PLF:{ID_BASE + i:04d}", it) for i, it in enumerate(src)]
+
+
+def withdrawn_ids(items: tuple[Natural, ...] | None = None) -> dict:
+    """{id: reason} for every item the curator has withdrawn.
+
+    Read by `build.py`'s id-stability audit, which is otherwise right to treat a
+    published id's disappearance as fatal. A withdrawal is the one absence that
+    has an answer; an id that vanishes without one still stops the build.
+    """
+    return {rid: it.withdrawn for rid, it in allocation(items) if it.withdrawn}
+
+
 def build(refresh: bool) -> tuple[list, list]:
     """Return (rows, report), the shape `stage_amrfinder` returns.
 
@@ -1198,15 +1243,20 @@ def build(refresh: bool) -> tuple[list, list]:
     report, rows = [], []
     report += run_control(refresh)
 
-    for i, it in enumerate(ITEMS):
-        # `ordinal` is the contract build.allocate() actually reads; `rid` is the
-        # same number spelled out, kept so this module's standalone report and
-        # its provenance tuples name the id the row will really get. If an item
-        # drops out, the ordinal of every later item is unchanged and the gap
-        # stays open for it — which is the whole reason the id comes from the
-        # declaration and not from the output.
-        ordinal = i + 1
-        rid = f"PLF:{ID_BASE + i:04d}"
+    # `ordinal` is the contract build.allocate() actually reads; `rid` is the
+    # same number spelled out, kept so this module's standalone report and its
+    # provenance tuples name the id the row will really get. If an item drops
+    # out, the ordinal of every later item is unchanged and the gap stays open
+    # for it — which is the whole reason the id comes from the declaration and
+    # not from the output.
+    for ordinal, (rid, it) in enumerate(allocation(), start=1):
+        # WITHDRAWN BY THE CURATOR: a decision, not a check failing, so it is
+        # reported as itself and carries its reason. The item is still declared
+        # — that is how it reached this loop — so `rid` goes on meaning this
+        # protein and can never be handed to another one.
+        if it.withdrawn:
+            report.append(f"  WITHDRAWN {it.uniprot_acc:8s} {rid}: {it.withdrawn}")
+            continue
         try:
             raw = json.loads(fetch(
                 UNIPROT_JSON.format(it.uniprot_acc),

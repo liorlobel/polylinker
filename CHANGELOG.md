@@ -28,25 +28,86 @@ which.
 **Nothing here changes what Polylinker does to a sequence, and no row was
 signed.** The 89 records `pl annotate` searches by default are unchanged, byte
 for byte, with every signature still valid; `features/SIGNOFF.tsv` is
-byte-identical to 0.6.0 and CI still proves the build never writes it. All 21
-`proposed` rows are still `proposed`. What changed is the prose those 21 rows
-carry, and the worklist that asks a human to read them.
+byte-identical to 0.6.0 and CI still proves the build never writes it. Of the 21
+`proposed` rows, **one has been withdrawn by the curator**; the other 20 are
+still `proposed` and byte-identical either side of the withdrawal. What else
+changed is the prose those rows carry, and the worklist that asks a human to
+read them.
+
+### Removed — `PLF:4006`, the CMV enhancer, withdrawn by the curator
+
+**The table is 109 rows; it was 110.** On 2026-08-11 Lior Lobel withdrew
+`PLF:4006` rather than sign it. The reason is recorded beside the declaration in
+`features/build/stage_classb.py` and printed by every build: its `notes`
+referenced `PLF:4005`, which is not in the table, and asserted a shipping
+condition — *ship this row and the enhancer together or not at all* — that the
+table violates; of this project's own evidence only the SnapGene-shaped
+submissions draw the 380/204 split, while every other deposit annotates the
+region as a single element and calls it a promoter; and Boshart et al. 1985
+(Cell 41:521–530, PMID 2985280) place the enhancer at −118..−524, which straddles
+the split on either numbering, so neither of the row's edges is a literature
+edge.
+
+**The id is retired, not freed.** `PLF:4006` will never name anything else. The
+declaration stays in `stage_classb.ITEMS` at its index, carrying the reason,
+because that is what keeps the number spoken for — deleting it would have moved
+the T7 terminator into `PLF:4006` and shifted four more published ids, which
+0.6.0 measured and which the mechanism below now prevents.
+
+Withdrawing this row **removes an instance and answers no question.** The posture
+question underneath it — whether SnapGene-shaped corroboration counts for a Class
+B extent — is exactly as open as it was, the SnapGene screen is unchanged, and
+`PLF:4005` is still refused on the evidence that refused it.
+
+### Added — a row can be withdrawn, and a test proves the other ids do not move
+
+`Convention` (Stage 5) and `Natural` (Stage 2) both gained a `withdrawn` field.
+Both, deliberately: the two stages allocate ids the same way and carry the same
+hazard, so a mechanism built for one would be a trap set for whoever first needed
+it in the other. It takes the **reason**, not a bool — an id is permanent, so a
+withdrawal is permanent, and a bare flag would record that somebody had decided
+without recording what they decided. A marked item is dropped by `build()`, its
+id is still consumed, and the drop is reported as `WITHDRAWN` with its reason
+rather than as a check failing, because a decision is not a failure.
+
+`build.py`'s id-stability audit learned the one absence that has an answer: a
+published id that disappears is still fatal *unless* a stage declares it
+withdrawn, and `--allow-id-drift` remains the only way past a genuine
+repointing. Four cases in `build.self_test()` drive that hole, including a
+withdrawal declared for the wrong id and a row that is present and repointed.
+
+The check that matters is `stage_classb.self_test()` item 8: it pins
+`PLF:4006`–`PLF:4010` to the elements they were published as, asserts that
+marking one withdrawn moves none of them, and asserts against the same fixture
+with the item **deleted** that the pin catches all five reassignments. Proven by
+doing it: deleting the CMV enhancer declaration for real failed the pin on every
+one of the five ids, and the build wrote nothing.
+
+`stage_classb.build()` now runs `self_test()` before it emits a row. That
+function's docstring had said since it was written that its gates "run on every
+build"; in fact they ran only under `python features/build/stage_classb.py`,
+because `build.py` called `build()` and never `self_test()`. They need no
+network, so there was never a reason for that.
 
 ### Changed — the curator worklist now carries the evidence, not just the questions
 
 [`features/PROPOSED.md`](features/PROPOSED.md) was a list of open questions. It
-is now a list of decisions: every one of the 21 rows carries the primary source
-that settles it, what that source settles, and a recommendation — *sign*,
-*withdraw*, or *your call* with the options and their consequences spelled out.
-Nineteen are recommended for signature, three of those only after reading a
-named paragraph. Four naming and scope questions and three unadjudicated patent
-flags are collected at the top as the things no further research can decide. Its
+is now a list of decisions: every one of the 21 rows it was written for carries
+the primary source that settles it, what that source settles, and a
+recommendation — *sign*, *withdraw*, or *your call* with the options and their
+consequences spelled out. Nineteen are recommended for signature, three of those
+only after reading a named paragraph; one was recommended for withdrawal and has
+since been withdrawn, so the worklist is 20 rows. Three naming and scope
+questions and three unadjudicated patent flags are collected at the top as the
+things no further research can decide — there were four, and the CMV question is
+the one that is now closed. Its
 *Claims*, *Anchor*, *Sources* and witness lines are read out of `features.tsv`
 rather than retyped, so they cannot drift from the table, and it still carries no
 digests for the reason it always did.
 
-**One row is recommended for withdrawal: `PLF:4006`, the CMV enhancer** — and it
-is a recommendation, because withdrawing a row is a curator's call too. Its
+**One row was recommended for withdrawal: `PLF:4006`, the CMV enhancer** — a
+recommendation, because withdrawing a row is a curator's call too. *He took it;
+see* Removed *above.* Its
 `notes` sent the reader to "the promoter row above" for why the two halves of the
 584 nt block ship together; that row is `PLF:4005`, which the
 extent-corroboration rule refused in 0.6.0, so the table is in the state the note
@@ -142,7 +203,9 @@ before anyone signed, which is the order that rule exists to produce. Each is a
   would make `PLF:4006` mean the T7 terminator and would shift four more ids.
   `build.py` catches it and refuses to write, so the failure is loud, but it is
   still a failure. `stage_classb.ITEMS` now carries a comment recording this at
-  the point where somebody would reach for the delete key.
+  the point where somebody would reach for the delete key. That section said the
+  gate it describes did not exist yet; it does now, and it is the `withdrawn`
+  field and its test under *Added* above.
 
 ### Added — primary citations for rows that had none
 

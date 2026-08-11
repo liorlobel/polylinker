@@ -6,19 +6,29 @@ An openly licensed, provenance-tracked database of common plasmid features.
 this carries, and [`SOURCING.md`](SOURCING.md) for how each source was cleared
 and by what evidence.
 
-> **Status: v0.1 pre-release, 110 records. 89 carry a curator sign-off, and 21 are `proposed`.**
+> **Status: v0.1 pre-release, 109 records. 89 carry a curator sign-off, and 20 are `proposed`.**
 >
-> The 89 were signed on 2026-07-28. The 21 were added on 2026-08-10, no human
-> has read them, and **`Db::reviewed()` does not ship them** — what a user of
-> the tool searches is still 89 rows until a curator signs each one.
+> The 89 were signed on 2026-07-28. Twenty-one rows were added on 2026-08-10; on
+> 2026-08-11 the curator **withdrew one of them**, `PLF:4006`, the CMV enhancer,
+> leaving 20. No human has read those 20, and **`Db::reviewed()` does not ship
+> them** — what a user of the tool searches is still 89 rows until a curator
+> signs each one.
 > `Db::reviewed()` ships only the rows [`SIGNOFF.tsv`](SIGNOFF.tsv) names with a
 > content digest that still matches. A sign-off lapses automatically the moment
 > the row it approves changes — including a change to its prose, because
-> `description` and `notes` are both in `SIGNED_COLUMNS`. The gap between 110
+> `description` and `notes` are both in `SIGNED_COLUMNS`. The gap between 109
 > and 89 is the intended state of a table a machine is allowed to add to; see
-> *Rule 6* below, and *What is proposed and not yet signed* for what the 21 are.
+> *Rule 6* below, and *What is proposed and not yet signed* for what the 20 are.
 > The curator's reading list for them, row by row and contested cases first, is
 > [`PROPOSED.md`](PROPOSED.md).
+>
+> **`PLF:4006` is retired, not recycled.** A withdrawn row leaves the table and
+> its id stays spoken for: the declaration remains in `stage_classb.ITEMS` at its
+> index, carrying the reason it was withdrawn, so no future element can be issued
+> under that number. Deleting it instead would have shifted the T7 terminator
+> into `PLF:4006` and moved four more published ids; `stage_classb.self_test()`
+> pins those five ids by name, and `build.py`'s id audit refuses any absence that
+> is not a declared withdrawal.
 >
 > **This is a dated snapshot** (sources retrieved 2026-07-27, 2026-07-28 and
 > 2026-08-10) and does not reflect the most current data available from NLM,
@@ -150,7 +160,7 @@ comes from **where it is declared**, never from where it landed in the output:
 | `PLF:1000`–`PLF:1999` | UniProt → ENA natural proteins | 28 | 14 |
 | `PLF:2000`–`PLF:2999` | Rfam structured RNA | 24 | 24 |
 | `PLF:3000`–`PLF:3999` | Hand-curated designed parts | 27 of 28 declared | 27 |
-| `PLF:4000`–`PLF:4999` | INSDC-anchored Class B conventions | 7 of 21 worked up, 5 more refused | 0 |
+| `PLF:4000`–`PLF:4999` | INSDC-anchored Class B conventions | 6 of 21 worked up, 5 more refused, 1 withdrawn | 0 |
 
 **The block follows the stage, not the topic**, and the 2026-08-10 additions
 make that visible for the first time: fourteen new *selection markers* landed in
@@ -191,7 +201,7 @@ what changed between releases.
    commit, compares, and deletes — no byte is ever committed, enforced by
    `.gitignore` on the name and by `tools/hooks/pre-commit` on the content hash.
    It is `features/build/taint_gate.py`, it runs in CI, and it fails **closed**
-   on a network error. Its measured result over all 110 descriptions: **no shared
+   on a network error. Its measured result over all 109 descriptions: **no shared
    five-token run anywhere, and no row above 60% containment.** Five rows sit
    above the 30% warning line, and this is the written justification the
    threshold asks for:
@@ -272,13 +282,14 @@ what changed between releases.
 
 ## Honest coverage
 
-**polylinker-features v0.1 contains 110 feature records — 89 signed off and
-shipped, 21 `proposed` and not shipped. The 89: 24 antibiotic-resistance and
+**polylinker-features v0.1 contains 109 feature records — 89 signed off and
+shipped, 20 `proposed` and not shipped. The 89: 24 antibiotic-resistance and
 selection markers, 14 natural regulatory and enzyme proteins, 24 structured RNA
 elements, and 27 designed parts (epitope tags, protease sites, 2A peptides and
-linkers). The 21 awaiting a curator: 14 further selection markers and 7 Class B
-regulatory elements (two promoters, an enhancer, three terminators and a
-poly(A) signal).
+linkers). The 20 awaiting a curator: 14 further selection markers and 6 Class B
+regulatory elements (two promoters, three terminators and a poly(A) signal).
+A seventh Class B row, the CMV enhancer, was withdrawn on 2026-08-11 rather than
+signed; its id, `PLF:4006`, is retired and stays so.
 Every record carries an explicit boundary rule, at least one
 `boundary_evidence` pointer, and a per-field provenance chain with licence. It is
 released under CC BY 4.0, with attribution notices for the U.S. National Library
@@ -295,9 +306,9 @@ Composition, measured from the shipped file:
 | Rfam structured RNA | 24 | `regulatory` (19), `misc` (5) | nt | `consensus_of_insdc` |
 | Curated designed parts | 8 | `synthetic_part` | nt | codons from a natural parent |
 | Curated designed parts | 19 | `synthetic_part` | **peptide only** | `designed_sequence` (13), `literature_defined` (6); across all 27, 13 and 14 |
-| Class B conventions | 7 (0 signed) | `regulatory` | nt | `consensus_of_insdc`, corroborated by ≥2 independent placements |
+| Class B conventions | 6 (0 signed; a 7th withdrawn) | `regulatory` | nt | `consensus_of_insdc`, corroborated by ≥2 independent placements |
 
-52 of 110 rows are coding and carry a protein reference verified by exact
+52 of 109 rows are coding and carry a protein reference verified by exact
 translation from their own nucleotides. **19 rows carry a peptide and no
 nucleotides at all** — the shape decision 1 created — and each was verified by
 locating its residue string, exactly once, in a sequence fetched at build time:
@@ -305,9 +316,9 @@ a wwPDB polymer entity for 18 of them, and the UniProt canonical of its own
 declared parent for the nineteenth (enterokinase, whose five residues are below
 `MIN_NT` and so cannot take codons from that parent even though it has one).
 20 rows carry `patent_flag = 1`. **Five** licences are in play across
-1,260 provenance rows: our own work (717), INSDC-free (226), CC0-1.0 (114),
-`unresolved-see-SOURCING-Risk-4` (110) and CC BY 4.0 (93); by source, polylinker
-717, ENA 154, the INSDC feature-table specification 110, Rfam 96, UniProt 93,
+1,247 provenance rows: our own work (710), INSDC-free (221), CC0-1.0 (114),
+`unresolved-see-SOURCING-Risk-4` (109) and CC BY 4.0 (93); by source, polylinker
+710, ENA 149, the INSDC feature-table specification 109, Rfam 96, UniProt 93,
 AMRFinderPlus 72 and the wwPDB 18.
 
 ENA overtook Rfam as the second-largest source in that list on 2026-08-10, and
@@ -332,7 +343,7 @@ already caught and corrected on the UniProt → ENA leg.
 
 ### What is proposed and not yet signed
 
-21 rows carry `review_status = proposed`, which means a program put them in the
+20 rows carry `review_status = proposed`, which means a program put them in the
 table and no human has read them. `Db::reviewed()` excludes every one, so
 nothing below is searched by `pl annotate`, by the desktop app, or by anything
 else, until a curator signs it in `SIGNOFF.tsv`. **They are in the repository so
@@ -340,13 +351,15 @@ that a human can read them, which is the only thing the machine is allowed to
 ask for.**
 
 [`PROPOSED.md`](PROPOSED.md) is the worklist for that reading: every one of the
-21, what it claims, the accessions to check it against, the boundary decision
+20, what it claims, the accessions to check it against, the boundary decision
 and its basis, the exact `--show` invocation per row, and — since 2026-08-11 —
 the primary source that settles the row plus a recommendation. It opens with the
 handful of questions a curator has to *decide* rather than check, because no
-further research can make them: whether to withdraw `PLF:4006`, whether to write
-alias spellings ourselves into a UniProt-sourced column, and the three
-unadjudicated patent flags. The organism conflict that blocked `PLF:1016` is
+further research can make them. The first of those was `PLF:4006`, and it is
+**decided**: the curator withdrew it on 2026-08-11, so the file that listed 21
+rows to read now lists 20. The two that remain open are whether to write alias
+spellings ourselves into a UniProt-sourced column, and the three unadjudicated
+patent flags. The organism conflict that blocked `PLF:1016` is
 resolved — the gene is *Bacillus cereus*, the record's `/organism` is the
 expression host — and the resolution is in the row.
 
@@ -436,8 +449,9 @@ them are about this repository's own controls:
    as "two exemplars" would manufacture exactly the convergence this project
    exists to disclaim. It fires on real data: five of the twelve rows built —
    `PLF:4002`, `4005`, `4006`, `4010` and `4011` — have a witness excluded for
-   this reason, and each of the two that survived (`PLF:4006`, `PLF:4010`) names
-   it in its own `notes`.
+   this reason. Two of those five reached the table, `PLF:4006` and `PLF:4010`,
+   and each names the exclusion in its own `notes`; `PLF:4006` has since been
+   withdrawn, so `PLF:4010` is the only one of the five that still ships.
 
    **What that leaves, and what now covers it.** Excluding the records that carry
    the tell does nothing about a depositor who retyped the note, and no detector
@@ -446,14 +460,21 @@ them are about this repository's own controls:
    κ ≤ 0.067. `PLF:4005` is the case in the open: the CMV promoter's only exact
    corroboration was `LC897329`, whose feature table is SnapGene's Common Feature
    naming throughout with no `label:` in it. It was the corroboration rule above,
-   which names no vendor at all, that refused the row. **`PLF:4006` is the case
-   that is NOT in the open**, and it ships: *both* of its two corroborating
-   submissions carry a fingerprint the tell cannot see — `LC897329` again, and
-   `OP697991`, four of whose `/note`s have a descriptive half byte-identical to
-   `MH325107`'s, differing by the `label: ` token the screen matches on and by
-   nothing else (measured 2026-08-10). The row is still attested by two
-   independent submissions, which is what its `notes` claim; what it is not is
-   two submissions this screen has cleared. And every stage now
+   which names no vendor at all, that refused the row. **`PLF:4006` was the case
+   that is NOT in the open**, and until 2026-08-11 it shipped: *both* of its two
+   corroborating submissions carry a fingerprint the tell cannot see —
+   `LC897329` again, and `OP697991`, four of whose `/note`s have a descriptive
+   half byte-identical to `MH325107`'s, differing by the `label: ` token the
+   screen matches on and by nothing else (measured 2026-08-10). The row was still
+   attested by two independent submissions, which is what its `notes` claimed;
+   what it was not is two submissions this screen has cleared. **The curator
+   withdrew that row on 2026-08-11**, and the reason he gave includes this — only
+   the SnapGene-shaped submissions draw its 380/204 split, while every other
+   deposit in the project's evidence annotates the region as one element and
+   calls it a promoter. Read that as a case the disclosure was written for, not
+   as the disclosure being retired: the blind spot is exactly as wide as it was,
+   no detector closed it, and the next row to fall into it will not announce
+   itself either. And every stage now
    declares what it does about this route in `INSDC_POSTURE`, with
    `features/build/insdc_posture.py` refusing one that declares nothing;
    `SOURCING.md` §0.6 is the adjudication.
@@ -560,8 +581,8 @@ states its initiator codon in `notes`, measured rather than assumed.
 ### What this is not
 
 It is **not** a drop-in replacement for pLannotate or SnapGene Common Features:
-at 110 rows against their 1,367 it is about 8% of the row count — and 89 of the
-110 are what the tool actually searches, which is about 7% — and it covers
+at 109 rows against their 1,367 it is about 8% of the row count — and 89 of the
+109 are what the tool actually searches, which is about 7% — and it covers
 partly different ground. It is **not** complete or comprehensive, and it does not
 cover all common plasmid features. It carries **no** coverage claim for
 commercial catalogue vectors — pET-28a, pGEX-4T-1 and pMAL-c2 return `Count=0`

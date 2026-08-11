@@ -1,7 +1,7 @@
-# PROPOSED.md -- the curator worklist for the 21 unsigned rows
+# PROPOSED.md -- the curator worklist for the 20 unsigned rows
 
 `features/SIGNOFF.tsv` states the rule this database exists to enforce:
-**AI may propose, never assert.** These 21 rows are the proposal. Every one
+**AI may propose, never assert.** These 20 rows are the proposal. Every one
 ships `review_status = proposed` with an empty curator, none appears in
 `SIGNOFF.tsv`, and `Db::reviewed()` ships none of them. Nothing here is in
 the product until a named human signs it.
@@ -14,18 +14,24 @@ what that source settles, and a recommendation -- *sign*, *withdraw*, or
 Where the evidence does not settle a question the row says so and says what
 would settle it.
 
+**One of those decisions has been taken. `PLF:4006`, the CMV enhancer, was
+WITHDRAWN by the curator on 2026-08-11** and is no longer in the table; the
+worklist was 21 rows and is now 20. What that cost, how it was done without
+moving another id, and the record of the reasons are below under *`PLF:4006`*
+and *If you withdraw a row*.
+
 | | |
 |---|---|
-| Table | 110 rows, of which 89 signed and 21 proposed |
-| This worklist | 21 rows: 14 selection markers (Stage 2), 7 Class B conventions (Stage 5) |
+| Table | 109 rows, of which 89 signed and 20 proposed |
+| This worklist | 20 rows: 14 selection markers (Stage 2), 6 Class B conventions (Stage 5) |
 | Recommended to sign | 19, of which 3 only after reading a specific paragraph |
-| Recommended to WITHDRAW | 1 (`PLF:4006`), and that is your call, not this file's |
-| Needs a decision that no evidence can make | 4 naming/scope questions and 3 patent flags, listed below |
+| WITHDRAWN | 1 (`PLF:4006`), decided by the curator 2026-08-11; the id is retired, not freed |
+| Needs a decision that no evidence can make | 3 naming/scope questions and 3 patent flags, listed below |
 | Refused, not proposed | 5 Class B elements that were built and then failed the extent-corroboration rule; see *Refused on the evidence* |
 | Signatures on file | 89, all still valid, `SIGNOFF.tsv` byte-identical to `main` |
 
 **No digests are printed in this file, on purpose.** `SIGNOFF.tsv` says signing
-a digest nobody has read is not an attestation; a worklist that let you copy 21
+a digest nobody has read is not an attestation; a worklist that let you copy 20
 hashes out of it without opening a single row would be a machine for producing
 exactly that. The digests also change the moment any prose in a row changes, so
 a copy here would go stale silently. Get them from `--show`, one row at a time,
@@ -70,15 +76,20 @@ the primary papers behind their names and extents, which they did not before.
 
 ## Decide these. No amount of further research will.
 
-Four naming and scope questions, and three patent flags. Each is a judgement
-about what this database is for, and the data cannot make it.
+Three naming and scope questions, and three patent flags. Each is a judgement
+about what this database is for, and the data cannot make it. A fourth,
+the CMV question, is **decided** and is kept here as the record of it.
 
-**1. `PLF:4006` -- the CMV question, and it is the one that blocks.**
-Withdraw the enhancer, restore the promoter row, or re-cut both into one 584 nt
-row? Behind it sits the posture question: **does this project accept
-SnapGene-shaped corroboration for a Class B extent at all?** Every submission
-that draws the 380/204 split is SnapGene-shaped; every submission that is not
-annotates one element and calls it a promoter. Full case in the row below.
+**1. `PLF:4006` -- the CMV question. DECIDED 2026-08-11: WITHDRAWN.**
+The choice was: withdraw the enhancer, restore the promoter row, or re-cut both
+into one 584 nt row. The curator withdrew it. Behind it sat the posture
+question -- **does this project accept SnapGene-shaped corroboration for a Class
+B extent at all?** -- and note what withdrawing one row does and does not do to
+that: every submission that draws the 380/204 split is SnapGene-shaped and every
+submission that is not annotates one element and calls it a promoter, and both
+of those sentences are as true today as they were before. **The posture question
+is not answered by this decision and remains open.** Full case, and what the
+withdrawal did and did not settle, in the row below.
 
 **2. `PLF:1022` TK -- two decisions, both yours.**
 (a) *The lookup gap.* The name is UniProt's gene symbol and here that is two
@@ -108,11 +119,16 @@ bar**, **`PLF:1026` pat**.
 
 ---
 
-## The 21 rows at a glance
+## The 20 rows at a glance
+
+The withdrawn row is listed first and struck from the count: it is not one of
+the 20, it is not in the table, and it cannot be signed. It stays on the page
+because a decision with no record of itself is how a database forgets why it
+looks the way it does.
 
 | Row | | Recommendation | The one line that decides it |
 |---|---|---|---|
-| `PLF:4006` | CMV enhancer | **WITHDRAW -- your call** | Its own note forbade the state the table is in; the split is drawn only by SnapGene-shaped records; Boshart's −524..−118 straddles it |
+| ~~`PLF:4006`~~ | CMV enhancer | **WITHDRAWN 2026-08-11** -- not in the table, not signable | Its own note forbade the state the table is in; the split is drawn only by SnapGene-shaped records; Boshart's −524..−118 straddles it |
 | `PLF:4000` | T7 promoter | **SIGN** | 7 of 7 re-derived, and all 17 annotated T7 promoters agree from −17 inward and not before it |
 | `PLF:4001` | SP6 promoter | **SIGN** | Not an analogy after all: the anchor's own paper publishes `KAWTTARGKGACACTATAG`, whose −17..−1 is this row exactly |
 | `PLF:4007` | T7 terminator | **SIGN** | The 3' base is where Macdonald 1994 says termination happens and where the anchor annotates Tphi |
@@ -144,7 +160,7 @@ unescaped, plus the provenance quads and the resulting digest, and it writes
 nothing:
 
 ```
-python features/build/build.py --show PLF:4000,PLF:4001,PLF:4006,PLF:4007,PLF:4008,PLF:4009,PLF:4010
+python features/build/build.py --show PLF:4000,PLF:4001,PLF:4007,PLF:4008,PLF:4009,PLF:4010
 python features/build/build.py --show PLF:1014,PLF:1015,PLF:1016,PLF:1017,PLF:1018,PLF:1019,PLF:1020,PLF:1021,PLF:1022,PLF:1023,PLF:1024,PLF:1025,PLF:1026,PLF:1027
 ```
 
@@ -216,13 +232,30 @@ Three things to know while reading these:
   descriptions, never coordinates. That screen catches only the deposits that
   kept the `label:` tell; `SOURCING.md` §0.6 records that no detector can do
   better, and what is enforced instead. **`PLF:4006` is what that blind spot
-  looks like when it matters.**
+  looks like when it matters** -- and its withdrawal on 2026-08-11 removed that
+  instance and left the blind spot exactly as wide as it was.
 - **Holding the bases and drawing the same edges are different claims**, and the
   second is the one `consensus_of_insdc` rests on.
 
 ---
 
-## `PLF:4006` -- CMV enhancer  ·  **RECOMMENDATION: WITHDRAW, and it is your call**
+## `PLF:4006` -- CMV enhancer  ·  **WITHDRAWN 2026-08-11 by Lior Lobel**
+
+**This row is no longer in the table.** The recommendation below was *withdraw,
+and it is your call*; the curator made that call on 2026-08-11, for the reasons
+recorded in `stage_classb.ITEMS` beside the declaration itself. Everything under
+this heading is kept as the record of the decision and is written in the tense it
+was written in -- it is what was read, not what is shipped.
+
+Two things the withdrawal did **not** do. It did not free the id: `PLF:4006` is
+retired, its declaration stays in `stage_classb.ITEMS` at index 6, and
+`stage_classb.self_test()` pins the five ids that a deletion would have moved.
+And it did not answer the posture question about SnapGene-shaped corroboration,
+which is still open and still applies to every Class B row this project builds.
+
+`python features/build/build.py --show PLF:4006` now prints *no such row in this
+build*, which is the correct answer and the reason the invocation at the foot of
+this section is no longer offered.
 
 - **Claims**: The immediate-early enhancer of human cytomegalovirus: a tandem array of repeated binding sites for host transcription factors, directly upstream of and contiguous with the immediate-early promoter. It is the part that supplies the strength, and it works in most mammalian cell types, which is why it travels with the promoter into vectors.
 - **Anchor**: `X17403.1:173949-174328:-`  (380 nt, `enhancer`, `consensus_of_insdc`)
@@ -313,20 +346,24 @@ so in those words.
 `absent_common_kinds` and the app behave. This is what the non-SnapGene-shaped
 depositors annotate and what maps mean. **Blocked today at one exact placement
 (`OR659033.1`); it needs a second independent submission annotating 584 nt edge
-for edge.** That is a bounded ENA survey and it is the only new fetching any of
-these seven rows needs.
+for edge.** That is a bounded ENA survey and it was the only new fetching any of
+the seven Class B rows needed. It is still the survey option B waits on, and
+withdrawing this row did not perform it.
 
-**(C) Withdraw to `HELD`.** What this file recommends. See *If you reject a row*
-below for the mechanism, which is **not** what this file used to say it was.
+**(C) Withdraw.** What this file recommended, and **what the curator chose on
+2026-08-11**. See *If you withdraw a row* below for the mechanism -- which is
+**not** what this file used to say it was, and which is now code with a test
+rather than a paragraph. Note one correction to the option as it was written:
+withdrawal is not a move to `HELD`. `HELD` is for elements that were never
+issued an id; a published row keeps its declaration in `ITEMS`, and its id, and
+gains a `withdrawn` reason.
 
-The decision turns on the posture question the data cannot answer: whether
-SnapGene-shaped corroboration counts for a Class B extent. Option A says yes and
-says so out loud. Option B owes nothing to SnapGene and costs one survey.
-Option C ships nothing false.
-
-```
-python features/build/build.py --show PLF:4006
-```
+The decision turned on the posture question the data cannot answer: whether
+SnapGene-shaped corroboration counts for a Class B extent. Option A said yes and
+said so out loud. Option B owed nothing to SnapGene and cost one survey.
+Option C shipped nothing false — and it is worth being exact about what choosing
+it means: **it removes the instance, not the question.** A and B are still the
+two ways to put a CMV region back into this database, and neither has been done.
 
 ---
 
@@ -1098,7 +1135,9 @@ to rescue one, both a curator's and neither a program's:
    the row's basis to match. For `PLF:4002` that means confronting the 84 nt
    convention the anchor's own annotation gestures at; for `PLF:4005` it means
    deciding whether the CMV promoter is separable from the enhancer at all --
-   which is now the live question under `PLF:4006` above.
+   the question set out under `PLF:4006` above. Withdrawing that row on
+   2026-08-11 removed the half-block from the table; it did not answer this,
+   and `PLF:4005` is still refused on the same evidence it was refused on.
 
 `PLF:4005` is worth reading twice. **Its only exact corroboration was
 `LC897329`**, whose feature table is SnapGene's Common Feature naming from top to
@@ -1136,10 +1175,13 @@ rather than held.
 
 ---
 
-## If you reject a row
+## If you withdraw a row
 
-**This section was wrong until 2026-08-11, and it was wrong about the thing that
-matters most right now**, because withdrawing `PLF:4006` is the live question.
+**This section was wrong until 2026-08-11**, and it was wrong about the thing
+that mattered most that day, because withdrawing `PLF:4006` was the live
+question. It has since been corrected twice: first to describe the hazard, and
+then -- when the withdrawal was actually carried out -- to describe the mechanism
+that now exists. Read to the end; the last part is the part that is code.
 
 It used to say: remove the item from `stage_classb.ITEMS` or
 `stage_uniprot.ITEMS`, add it to the stage's `HELD` tuple with the reason, and
@@ -1166,13 +1208,43 @@ write when a published id changes meaning -- so the failure is loud rather than
 silent. It is still a failure, and the rebuild does not complete.
 
 **So: to withdraw a published row, keep its declaration in `ITEMS` at its index
-and stop it at the gate.** Today the only gates that stop a row are the
-verification checks themselves; there is no "withdrawn" marker, and adding one
-is a one-field change to `Convention`/`Natural` plus a branch in `build()` --
-small, but it is code, and it should be written with a test that fails without
-it rather than added in passing here. `stage_classb.ITEMS` now carries a comment
-recording all of this at the point where somebody would reach for the delete
-key.
+and stop it at the gate.** Until 2026-08-11 the only gates that stopped a row
+were the verification checks themselves and there was no "withdrawn" marker.
+There is one now, and this is how to use it.
 
-Nothing about this changes the recommendation on `PLF:4006`. It changes what
-acting on it costs, and you should know that before you decide.
+### The mechanism, as built on 2026-08-11
+
+1. **Set `withdrawn` on the item, in place.** `stage_classb.Convention` and
+   `stage_uniprot.Natural` both carry the field -- both, so the mechanism is not
+   a special case for whichever stage happened to need it first. It takes the
+   **reason**, not a bool: an id is permanent, so a withdrawal is permanent, and
+   `withdrawn = True` would record that somebody decided without recording what
+   they decided.
+2. **Do not touch anything else.** Leave the item where it is. The id comes from
+   its index, so its place in the tuple is what keeps the number spoken for; the
+   row leaves the table and the id is *retired*, never reissued.
+3. **Rebuild.** `build()` drops the row and prints `WITHDRAWN` with the reason
+   against the id, beside the ordinary `DROP` lines but distinct from them,
+   because a decision is not a check failing. `build.py`'s id-stability audit
+   then reports the absence as a withdrawal instead of refusing to write --
+   **only** because `withdrawn_ids()` explains that exact id. Any other
+   disappearance is still fatal, and `--allow-id-drift` is still the only way
+   past a genuine repointing.
+4. **Fix the counts.** The README headline counts are test-asserted from the
+   live tables by `pl-features`' `the_readmes_state_the_signoff_count_the_
+   database_has`, so a withdrawal that leaves them alone is a red build.
+
+The check that makes any of this trustworthy is `stage_classb.self_test()` item
+8, which runs on every build: it pins `PLF:4006`..`PLF:4010` to the elements
+they were published as, asserts that marking one withdrawn moves none of them,
+and asserts against the same fixture with the item **deleted** that the pin
+really does catch the five reassignments in the table above. Driven at HEAD by
+deleting the CMV enhancer declaration for real, it failed on all five ids and
+the build wrote nothing.
+
+`stage_classb.ITEMS` carries a comment recording all of this at the point where
+somebody would reach for the delete key.
+
+`PLF:4006` was withdrawn under this mechanism on 2026-08-11. The table went from
+110 rows to 109; the 89 signatures and the other 20 proposed rows are
+byte-identical either side of it, and `SIGNOFF.tsv` was not touched.
