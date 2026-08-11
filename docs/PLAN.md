@@ -1306,9 +1306,10 @@ gapped search, which is refused by name rather than by empty result; ranking and
 relevance, since results are ordered deterministically by `(path, record,
 position)`; protein and translated search; annotate-at-import, which is only as
 good as `features/features.tsv` and that is 89 records at release 2026.07.28,
-all 89 signed off by a curator — and 109 records as of 2026-08-11, of which 89
-are signed and 20 are `proposed` and therefore not searched by default (21 were
-proposed on 2026-08-10; the curator withdrew `PLF:4006` on 2026-08-11); and
+all 89 signed off by a curator — and 112 records as of 2026-08-11, of which 89
+are signed and 23 are `proposed` and therefore not searched by default (21 were
+proposed on 2026-08-10; the curator withdrew `PLF:4006` on 2026-08-11, and three
+Class B promoter rows were appended the same day); and
 Type IIS
 enzymes, so **no Golden Gate query is advertised** — the shipped table has no
 BsaI, BsmBI, BbsI or SapI, and `--enzyme BsaI` says so instead of guessing.
