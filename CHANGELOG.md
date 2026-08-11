@@ -88,22 +88,22 @@ five-token run, nothing above 60% containment**, and the same five rows above th
 30% line with the same longest runs (1, 2, 4, 3, 3).
 
 **That sweep was not complete, and cutting this release is what found the rest.**
-Six more sentences in the two files the paragraph above names by hand had not
-moved with the row, and are corrected here. In `features/README.md`: *seven
-ship*, still listing the withdrawn CMV enhancer among rows the table holds;
-*Seven rows contributed 42 ENA provenance rows … out of 154 in total*, where the
-same edit that recomputed `ENA 149` eight lines earlier walked past the 154;
-*seven is what survived the rules applied honestly*, which is true of the rules
-and reads, in the present tense, one row better than the table is; and a
-`genbank_key` list of `promoter`, `enhancer`, `terminator`, `polyA_signal`
-described as *all four*, when no row anywhere in `features.tsv` carries
-`enhancer`. In `features/NOTICE`, twice, the Class B rows are glossed as
-*promoters, enhancers, terminators and poly(A) signals* — a kind with no row
-behind it, in the file that exists to describe what is redistributed. Each was
-recomputed from the tables: six Class B rows, 37 ENA provenance rows of 149,
-`promoter` (2), `terminator` (3), `polyA_signal` (1). The lesson is the one the
-paragraph above already draws and understated — untested prose does not stay
-true because a previous pass looked at the file.
+Six more sentences had not moved with the row, and every one of them sits in a
+file the paragraph above names by hand. In `features/README.md`: *seven ship*,
+still listing the withdrawn CMV enhancer among rows the table holds; *Seven rows
+contributed 42 ENA provenance rows … out of 154 in total*, where the same edit
+that recomputed `ENA 149` eight lines earlier walked past the 154; *seven is what
+survived the rules applied honestly*, which is true of the rules and reads, in
+the present tense, one row better than the table is; and a `genbank_key` list of
+`promoter`, `enhancer`, `terminator`, `polyA_signal` described as *all four*,
+when no row anywhere in `features.tsv` carries `enhancer`. In `features/NOTICE`,
+twice, the Class B rows are glossed as *promoters, enhancers, terminators and
+poly(A) signals* — a kind with no row behind it, in the file that exists to
+describe what is redistributed. Each was recomputed from the tables: six Class B
+rows, 37 ENA provenance rows of 149, `promoter` (2), `terminator` (3),
+`polyA_signal` (1). The lesson is the one the paragraph above already draws and
+understated — untested prose does not stay true because a previous pass looked at
+the file.
 
 ### Added — a row can be withdrawn, and a test proves the other ids do not move
 
