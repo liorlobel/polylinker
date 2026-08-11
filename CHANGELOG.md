@@ -25,7 +25,148 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+**Nothing here changes what Polylinker does to a sequence, and no row was
+signed.** The 89 records `pl annotate` searches by default are unchanged, byte
+for byte, with every signature still valid; `features/SIGNOFF.tsv` is
+byte-identical to 0.6.0 and CI still proves the build never writes it. All 21
+`proposed` rows are still `proposed`. What changed is the prose those 21 rows
+carry, and the worklist that asks a human to read them.
+
+### Changed — the curator worklist now carries the evidence, not just the questions
+
+[`features/PROPOSED.md`](features/PROPOSED.md) was a list of open questions. It
+is now a list of decisions: every one of the 21 rows carries the primary source
+that settles it, what that source settles, and a recommendation — *sign*,
+*withdraw*, or *your call* with the options and their consequences spelled out.
+Nineteen are recommended for signature, three of those only after reading a
+named paragraph. Four naming and scope questions and three unadjudicated patent
+flags are collected at the top as the things no further research can decide. Its
+*Claims*, *Anchor*, *Sources* and witness lines are read out of `features.tsv`
+rather than retyped, so they cannot drift from the table, and it still carries no
+digests for the reason it always did.
+
+**One row is recommended for withdrawal: `PLF:4006`, the CMV enhancer** — and it
+is a recommendation, because withdrawing a row is a curator's call too. Its
+`notes` sent the reader to "the promoter row above" for why the two halves of the
+584 nt block ship together; that row is `PLF:4005`, which the
+extent-corroboration rule refused in 0.6.0, so the table is in the state the note
+forbids. A user annotating a pcDNA3-type CMV region sees the upstream 380 nt
+light up and the promoter half stay dark, and `Db::absent_common_kinds` cannot
+say so, because `PLF:4000` and `PLF:4001` supply the literal `promoter` key it
+probes for. The evidence turned out to say something stronger than the note did:
+of the six records this stage fetches that contain the 380 bases, the only three
+that draw the 380/204 split are the three already identified as SnapGene-shaped,
+and every submission that is *not* SnapGene-shaped annotates the region as one
+element and calls it a promoter. Boshart et al. 1985 (PMID 2985280) put the
+enhancer at −524..−118, which straddles the split on either numbering
+convention, so no primary source draws this edge either. `PROPOSED.md` sets out
+all three options — restore the promoter row, re-cut to one 584 nt row, or
+withdraw — with what each costs.
+
+### Fixed — nine rows carried a sentence the evidence does not support
+
+`SIGNOFF.tsv` defines a signature as a human who "wrote or checked its
+description from the primary source", so a description written from nothing in
+particular is precisely what a signature is supposed to catch. These were caught
+before anyone signed, which is the order that rule exists to produce. Each is a
+`description` or `notes` change on an unsigned row; no signed row's prose moved.
+
+- **`PLF:4008` rrnB T1 — "nothing in the primary source says 'T1'" is false.**
+  Brosius 1984 (PMID 6202587), who sequenced this operon and built the pKK
+  vectors these extents come from, reports that T1 and T2 "each function
+  separately in vivo"; Orosz et al. 1991 (PMID 1718749) subcloned them
+  individually and found "T1 and T2 are both efficient terminators in isolated
+  forms" — and that paper is in `J01695`'s **own reference list**. The narrower
+  true claim, that the record's *feature table* annotates no terminator, is what
+  the row says now. Its "rival extents run 43 to 98 nt" also does not survive
+  re-measurement: no rival longer than 44 nt exists in anything checked, and the
+  lone 43 nt feature is `U13859` annotating the same bases `rrnB T1` three times
+  at 44, 44 and 43 — one submission disagreeing with itself.
+- **`PLF:4000` T7 promoter — a note that pointed at evidence which is not
+  there.** It said a 20 nt convention "is measured against this row in the
+  witness offsets above"; all four offsets above are `5'+0/3'+0`, and no 20 nt
+  form exists anywhere checked. The rivals that do exist are 19 nt and 21 nt,
+  sit in other rows' records, and are now named. The description also called the
+  row "the 17 bp class III promoter" while its own caveat described it as the
+  −17..−1 part with +1 excluded; the description now says which. Added: across
+  all 17 T7 promoters the anchor annotates, every column from −17 to −3 agrees
+  in 14 of 17 records or better while no column from −24 to −18 exceeds 12 of 17
+  — a better 5'-edge argument than the row was making.
+- **`PLF:4007` T7 terminator — "neither is wrong" understated the row.**
+  Macdonald et al. 1994 (PMID 8158645) put termination "at a 3' G residue just
+  downstream of the U run"; that G is 24210, this row's last base and the single
+  coordinate the anchor annotates as Tphi. Only the 5' edge is a convention, and
+  the two rival 48 nt forms are not equally defensible. A claim that some deposit
+  gives the name to a different part of the T7 genome was removed: no record
+  checked shows it and none was ever named.
+- **`PLF:4006` CMV enhancer — a rival "378 nt convention" attributed to a record
+  that was neither named nor retained.** Not re-derivable from anything in the
+  repository, so it is gone rather than left standing.
+- **`PLF:1016` bsr — the organism conflict is resolved and written in.** UniProt
+  said *Bacillus cereus*, ENA `S81409` said `/organism="Escherichia coli"
+  /strain="TK121"`, and the row named no organism at all. The paper the record
+  was created from (Kobayashi et al. 1991, PMID 1368770 — no PubMed abstract, so
+  the full text is the only route) says the authors isolated a blasticidin S
+  resistant *Bacillus cereus* K55-S1, took the plasmid pBSR8 from it, subcloned
+  the gene into pUC19 as pTK17, and grew pTK17 in *E. coli* TK121. **The
+  `/organism` is the expression host.** Four corroborations re-derived from the
+  record itself: the promoter coordinates a 1998 *Bacillus* paper reports
+  (91TTGATC, 113TAAAAT, start at 125) are exact in `S81409`; those are σ^A/σ^B
+  promoters and *E. coli* has no σ^B; the CDS is 37.4 % GC with 25.5 % at third
+  positions; and the record's ends are the paper's NdeI and HincII sites. The
+  organism is written into the description in a sentence of its own, because the
+  obvious phrasing is a five-token run of exactly the shape SOURCING.md §0.4
+  hard-fails — the same trap `PLF:1015` was already rewritten around.
+- **`PLF:1014` pac — the pinned record is flagged `UNVERIFIED_ORGANISM` by the
+  archive and the row said nothing about it.** `M25346.1`'s own first line reads
+  "UNVERIFIED:", its comment says GenBank staff could not verify the source
+  organism, the sequence and/or the annotation, and `P13249` has exactly one EMBL
+  cross-reference. The flag is discharged — the organism from Lacalle et al. 1989
+  (PMID 2676728) and the `ATCC:12461` culture collection, the extent from that
+  same paper's "600-nt open reading frame, starting with an ATG codon", the
+  sequence from the stage's forced translation — but a signature that does not
+  mention the flag would be a signature saying a curator read the record and did
+  not notice its first line.
+- **`PLF:1019` LEU2 — presented as uncontested; it is not.** Every pRS vector in
+  INSDC carries a LEU2 that differs from this row (`A69V`, `N300D`; plus `G78A`
+  and `V195L` in pRS405 and pRS425), and those five records are **one submitter
+  on two consecutive days in November 1993** — a single vector series that does
+  not agree with itself. `A69V` is also in `X03840`, a genomic record, so part of
+  it is allelic rather than error.
+- **`PROPOSED.md`'s own instructions for rejecting a row were wrong**, and wrong
+  about the thing that matters most right now. "Dropping one does not renumber
+  anything after it" is true of a row *dropped by a check* — the five refused
+  Class B elements keep their index and are re-measured every build — and false
+  of an item *deleted from a stage's `ITEMS`*, because both stages allocate
+  `PLF:{ID_BASE + i}` from the tuple index. Measured: deleting the CMV enhancer
+  would make `PLF:4006` mean the T7 terminator and would shift four more ids.
+  `build.py` catches it and refuses to write, so the failure is loud, but it is
+  still a failure. `stage_classb.ITEMS` now carries a comment recording this at
+  the point where somebody would reach for the delete key.
+
+### Added — primary citations for rows that had none
+
+- **`PLF:4009` rrnB T2** now cites Brosius 1984 and Orosz 1991 for the *name*, so
+  only the extent rests on vector records. **`PLF:4010` bGH poly(A)** now cites
+  its anchor's own publication (Gordon et al. 1983, PMID 6357899) and Goodwin &
+  Rottman 1992 (PMID 1644817), and records that the anchor's `exon 2138..2439`
+  places the cleavage site 18 bases after the hexamer — which turns "enough
+  flanking sequence" from a judgement into a measurement, with the positioning
+  element those authors require sitting inside the row with 84 bases to spare.
+- **`PLF:4001` SP6 promoter** was described as bounded by analogy to T7. It is
+  not: the anchor record's own publication (Dobbins et al. 2004, PMID 15028677)
+  identifies ten SP6 promoters and publishes the consensus
+  `KAWTTARGKGACACTATAG`, whose −17..−1 window resolves to this row base for
+  base, and Brown et al. 1986 (PMID 3010240) fixes the register at `CACTA` =
+  −7..−3, which this row satisfies. **`PLF:1015` bsd** now cites Kimura et al.
+  1994 (PMID 8159161) for "an open reading frame of 393 bp, encoding a
+  polypeptide of 130 amino acids" — this row's extent to the base.
+
+Literature was checked against PubMed and Europe PMC; no source on
+`SOURCING.md`'s NO-GO list was consulted. Two papers carry no PubMed abstract
+and are marked as such wherever they are used: Dunn & Studier 1983, which
+nothing here relies on, and Kobayashi et al. 1991, read from the publisher's
+full text.
 
 ## [0.6.0] - 2026-08-10
 
