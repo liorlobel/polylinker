@@ -188,12 +188,18 @@ pub struct Layout {
     /// checkbox is the asking; the line beside it is the sentence.
     ///
     /// It changed nothing findable until 2026-08-10, and that was exactly why
-    /// it had to exist before it mattered. It matters now: the table holds 110
-    /// rows against 89 signatures, so turning this on adds 21 machine-extracted
-    /// records — 14 selection markers and 7 promoters, terminators and poly(A)
+    /// it had to exist before it mattered. It matters now: the table holds 109
+    /// rows against 89 signatures, so turning this on adds 20 machine-extracted
+    /// records — 14 selection markers and 6 promoters, terminators and poly(A)
     /// signals — that no human has read. Because the switch was built before it
     /// did anything, the difference between the two searches is still something
     /// the user chose rather than something that appeared.
+    ///
+    /// It was 110 against 89, and 21 records, until 2026-08-11: the curator
+    /// withdrew `PLF:4006`, the CMV enhancer, so the Class B half of that list
+    /// is six and not seven. Nothing about the switch changed — this comment is
+    /// counted from the table, so it goes stale every time the table moves, and
+    /// the composition is the part a reader cannot get from the headline count.
     pub annotate_unreviewed: bool,
 
     /// Which way round the window is painted. See [`Theme`].

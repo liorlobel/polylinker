@@ -2379,17 +2379,22 @@ mod tests {
     /// reverting `stage_classb.py` to `genbank_key="regulatory"` and rebuilding:
     ///
     /// ```text
-    /// the whole table still reports 'promoter' absent, but it holds 7 Class B
+    /// the whole table still reports 'promoter' absent, but it holds 6 Class B
     /// rows; Db::absent_common_kinds probes literal genbank_key values and
     /// something has stopped matching
     /// ```
     ///
     /// That count is not the twelve above and is not meant to be: the message
-    /// interpolates `PLF:4*` live, and `MIN_PLACEMENTS` withdrew five of the
-    /// twelve later the same day. The transcript is what reproducing the break
-    /// prints *now*, which is the only version of it a reader can check.
+    /// interpolates `PLF:4*` live, `MIN_PLACEMENTS` refused five of the twelve
+    /// later the same day, and the curator withdrew a sixth, `PLF:4006`, on
+    /// 2026-08-11 — which is why the transcript reads 6 and read 7 until then.
+    /// Those two subtractions are not the same event and the wording here used
+    /// to blur them: a check refusing a row on its evidence is the program
+    /// working, and a human withdrawing one is a decision the program may not
+    /// take. The transcript is what reproducing the break prints *now*, which
+    /// is the only version of it a reader can check.
     ///
-    /// and it fails the other way if the seven are ever signed without this
+    /// and it fails the other way if the six are ever signed without this
     /// test being reconsidered, because the first assertion then stops holding.
     #[test]
     fn the_absent_kinds_disclosure_tracks_the_reviewed_set_and_not_the_whole_table() {

@@ -29,9 +29,13 @@ UniProt Consortium, EMBL-EBI, Rfam or the Worldwide Protein Data Bank.
 
 Three dates because there have been three ingest passes, not because anything
 was refreshed underneath an existing row: the 2026-08-10 date belongs to the
-fourteen additional selection markers and the seven Class B regulatory
-elements added that day, and every earlier row still carries its own earlier
-retrieval date, field by field, in `provenance.tsv`.
+fourteen additional selection markers and the six Class B regulatory elements
+that carry it today, and every earlier row still carries its own earlier
+retrieval date, field by field, in `provenance.tsv`. Seven Class B rows were
+added that day; the curator withdrew one of them, `PLF:4006`, on 2026-08-11, and
+its provenance left the file with it. So twenty rows carry that date and not
+twenty-one -- which is a row leaving, not a fourth ingest pass, and nothing that
+stayed was re-fetched.
 
 The exact retrieval date and the sha256 of every fetched source file are
 recorded per field in `provenance.tsv`, so the age of any individual value can
@@ -255,7 +259,7 @@ matches the pinned one, so renaming it does not get it in. It is implemented in
 fails CLOSED -- a network error exits with the status `taint-gate-unavailable`
 rather than passing.
 
-Its result at the time of writing, over all 110 of our descriptions against all
+Its result at the time of writing, over all 109 of our descriptions against all
 1,367 of theirs: no row shares a contiguous five-token run, and no row reaches
 60% containment. Five rows exceed the 30% warning threshold -- PLF:0002 and
 PLF:0003, the two aminoglycoside phosphotransferases, whose longest shared runs

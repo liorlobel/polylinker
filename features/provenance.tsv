@@ -1190,19 +1190,6 @@ PLF:4001	class	polylinker	-	own-work	-	2026-08-11
 PLF:4001	genbank_key	insdc-ft	promoter	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-08-11	
 PLF:4001	patent_flag	polylinker	-	own-work	-	2026-08-11	
 PLF:4001	notes	polylinker	-	own-work	-	2026-08-11	
-PLF:4006	reference_nt	ena	X17403.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/X17403?range=173949-174328	2026-08-10	f9a1166bcb5e19e1b4720740774cbe5a59acb95801fa205661a7b90e05798255
-PLF:4006	boundary_evidence	ena	X17403.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/X17403?range=173949-174328	2026-08-10	f9a1166bcb5e19e1b4720740774cbe5a59acb95801fa205661a7b90e05798255
-PLF:4006	boundary_evidence	ena	X17403.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/X17403	2026-08-10	983402066a653435a6d5c83c5737b6d56b114e9c7dec6ce2f80adfba0f1f96bc
-PLF:4006	name	polylinker	-	own-work	-	2026-08-11	
-PLF:4006	aliases	polylinker	-	own-work	-	2026-08-11	
-PLF:4006	boundary_rule	polylinker	-	own-work	-	2026-08-11	
-PLF:4006	description	polylinker	-	own-work	-	2026-08-11	
-PLF:4006	boundary_evidence	ena	LC897329.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/LC897329.1	2026-08-10	6af112a9ff2c0fa8eb41fc86f345650464c7b2a6e33f90c79fecc46c047fead6
-PLF:4006	boundary_evidence	ena	OP697991.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/OP697991.1	2026-08-10	2181859631ba80caab180f39c58badd562d2590ab68fa78bfae482bccdbcd50c
-PLF:4006	class	polylinker	-	own-work	-	2026-08-11	
-PLF:4006	genbank_key	insdc-ft	enhancer	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-08-11	
-PLF:4006	patent_flag	polylinker	-	own-work	-	2026-08-11	
-PLF:4006	notes	polylinker	-	own-work	-	2026-08-11	
 PLF:4007	reference_nt	ena	V01146.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/V01146?range=24164-24210	2026-08-10	ebfff15e520bef7a304d49487862d514bd2641cb1a205c200141671862c05ce7
 PLF:4007	boundary_evidence	ena	V01146.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/V01146?range=24164-24210	2026-08-10	ebfff15e520bef7a304d49487862d514bd2641cb1a205c200141671862c05ce7
 PLF:4007	boundary_evidence	ena	V01146.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/V01146	2026-08-10	e25b762e475af73f0ed483a6c754c8031aa61bb97fe265849ca73cc74ec7cfdb

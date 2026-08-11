@@ -122,7 +122,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -263,6 +263,27 @@ class Convention:
     """What a curator must decide or must not assume. Goes into `notes`
     verbatim."""
     patent_flag: bool = False
+    withdrawn: str = ""
+    """WHY the curator withdrew this row, or "" if it ships. Set it and the row
+    stops at the gate in `build()`; the declaration stays here and keeps its id.
+
+    A STRING AND NOT A BOOL, and that is the whole design of this field. The id
+    is permanent, so a withdrawal is permanent too, and `withdrawn = True` would
+    record that somebody decided without recording what they decided -- which is
+    the one thing this database refuses everywhere else. The reason is written
+    into the build log next to the id it retires, so a reader who finds a gap in
+    the numbering has the answer in the same place as the gap.
+
+    WHY THE DECLARATION MUST STAY. `allocation()` numbers from the item's INDEX
+    in `ITEMS`, so deleting a withdrawn item renumbers every item after it -- see
+    the comment above `ITEMS`, which measures exactly what that would cost here.
+    Keeping the declaration is what makes the retired id unreachable forever
+    rather than merely unused today.
+
+    NOT a review status and not a substitute for one. `review_status` moves only
+    through features/SIGNOFF.tsv, which this file cannot write; this field
+    removes a row from the table altogether, and a row that is not in the table
+    cannot be signed."""
 
 
 # `genbank_key` uses the SPECIFIC keys -- `promoter`, `enhancer`, `terminator`,
@@ -309,6 +330,13 @@ class Convention:
 # keep their index, and are re-measured every build. It is not true of an item
 # deleted from the source. Withdrawing a published row therefore means keeping
 # its declaration here and stopping it at the gate, not deleting it.
+#
+# THE GATE NOW EXISTS: `Convention.withdrawn`, added 2026-08-11 and carrying the
+# curator's reason. Set it on the item you are withdrawing and leave the item
+# where it is. `self_test()` check 8 pins PLF:4006..PLF:4010 to the elements they
+# are published as and asserts that marking one moves none of the others -- and
+# asserts, against the same fixture with the item DELETED instead, that the pin
+# really does catch the renumbering.
 ITEMS: tuple[Convention, ...] = (
     Convention(
         name="T7 promoter",
@@ -591,6 +619,22 @@ ITEMS: tuple[Convention, ...] = (
             "record that was neither named nor retained. It is not re-derivable "
             "from anything in this repository, so it has been removed rather than "
             "left standing."
+        ),
+        # WITHDRAWN 2026-08-11 by Lior Lobel, the curator, taking the decision the
+        # caveat above declined to take for him. The declaration stays here and
+        # keeps index 6, so PLF:4006 is retired rather than freed and can never be
+        # issued to another element. features/PROPOSED.md sets out the alternative
+        # -- restoring the promoter row first -- and what it would have cost.
+        withdrawn=(
+            "withdrawn 2026-08-11 by Lior Lobel. Its notes referenced PLF:4005, "
+            "which is not in the table, and asserted a shipping condition -- 'ship "
+            "this row and the enhancer together or not at all' -- that the table "
+            "violates. Of this project's own evidence, only the SnapGene-shaped "
+            "submissions draw the 380/204 split; every other deposit annotates the "
+            "region as a single element and calls it a promoter. And Boshart et al. "
+            "1985, Cell 41:521-530, PMID 2985280, place the enhancer at -118..-524, "
+            "which straddles the split on either numbering, so neither of this "
+            "row's edges is a literature edge."
         ),
     ),
     Convention(
@@ -1445,13 +1489,52 @@ def notes_for(item: Convention, ev: dict) -> str:
     return out
 
 
+def allocation(items: tuple[Convention, ...] | None = None) -> list:
+    """(id, item) for every DECLARED item, in declaration order.
+
+    The id comes from the item's INDEX and from nothing else, so this list has
+    one entry per declaration whatever any check later decides -- a row refused
+    on its evidence, and a row the curator withdrew, both keep their place in it.
+    That is the property the comment above `ITEMS` measures the cost of losing.
+
+    `build()` iterates THIS, rather than re-deriving `ID_BASE + i` in its own
+    loop, so that `self_test()` can drive the real allocator over a mutated tuple
+    instead of over a copy of the expression it is meant to be testing.
+    """
+    src = ITEMS if items is None else items
+    return [(f"PLF:{ID_BASE + i:04d}", it) for i, it in enumerate(src)]
+
+
+def withdrawn_ids(items: tuple[Convention, ...] | None = None) -> dict:
+    """{id: reason} for every item the curator has withdrawn.
+
+    Read by `build.py`'s id-stability audit, which is otherwise right to call a
+    published id's disappearance fatal. A withdrawal is the one absence that has
+    an answer, and this is where the answer is kept -- so an id that vanishes
+    WITHOUT a reason here still stops the build, which is the point.
+    """
+    return {rid: it.withdrawn for rid, it in allocation(items) if it.withdrawn}
+
+
 def build(refresh: bool) -> tuple[list, list]:
     """Return (rows, report), the shape every other stage returns."""
-    report, rows = [], []
-    for i, it in enumerate(ITEMS):
-        ordinal = i + 1
-        rid = f"PLF:{ID_BASE + i:04d}"
+    # RUN THE GATES BEFORE EMITTING ANYTHING FROM THEM. `self_test()` has said
+    # since it was written that its checks "run on every build", and until
+    # 2026-08-11 that was only true of `python features/build/stage_classb.py`
+    # -- `build.py` called this function and never that one, so on the path that
+    # actually writes features.tsv the stage's own gates never ran. They need no
+    # network, so there was never a reason for that; it was an oversight, and a
+    # sentence claiming otherwise is worse than no sentence.
+    report, rows = list(self_test()), []
+    for ordinal, (rid, it) in enumerate(allocation(), start=1):
         report.append(f"  {rid} {it.name}")
+        # WITHDRAWN BY THE CURATOR. Not a check failing -- a decision taken -- so
+        # it is reported in its own words rather than as a DROP, and the reason
+        # travels with the id. The item stayed in `ITEMS` to get here, which is
+        # what keeps `rid` meaning this element and no other, forever.
+        if it.withdrawn:
+            report.append(f"    WITHDRAWN -- {it.withdrawn}")
+            continue
         try:
             ev, lines = verify(it, refresh)
         except Exception as e:  # noqa: BLE001 -- one bad item must not kill the stage
@@ -1675,6 +1758,79 @@ def self_test() -> list[str]:
     except SystemExit:
         must("the fetch guard refuses a non-record ENA endpoint", True)
 
+    # 8. WITHDRAWING A ROW MUST NOT MOVE ANY OTHER ID, and this is the check
+    #    that says so. It is here because the failure it guards against is
+    #    invisible: deleting an item from `ITEMS` leaves a tuple that is
+    #    perfectly well-formed, builds without a murmur from this stage, and
+    #    silently repoints five published accessions at different elements.
+    #
+    #    THE PIN IS BY NAME AND NOT BY ARITHMETIC. Asserting `ITEMS[7].name ==
+    #    ITEMS[7].name` would pass under any renumbering; the five ids below are
+    #    written out with the elements they are PUBLISHED as, in
+    #    features/features.tsv, so the literal is an independent statement about
+    #    the world and not a restatement of the code.
+    published = {
+        "PLF:4006": "CMV enhancer",
+        "PLF:4007": "T7 terminator",
+        "PLF:4008": "rrnB T1 terminator",
+        "PLF:4009": "rrnB T2 terminator",
+        "PLF:4010": "bGH poly(A) signal",
+    }
+    live = {rid: it.name for rid, it in allocation()}
+    for rid, nm in published.items():
+        must(f"{rid} still names the element it was published as, {nm}",
+             live.get(rid) == nm)
+
+    # Withdraw one, the RIGHT way: replace the declaration in place, leave it in
+    # the tuple. Every id, including the withdrawn one's, must be untouched.
+    #
+    # `at` is SEARCHED FOR and its absence is a stated failure, not a
+    # StopIteration. Deleting the item is precisely the mistake the block above
+    # exists to catch, so being told about it by a traceback out of the test's
+    # own scaffolding would be the worst available outcome.
+    at = next((i for i, it in enumerate(ITEMS) if it.name == "CMV enhancer"), None)
+    must("the CMV enhancer is still DECLARED, withdrawn or not", at is not None)
+    if at is None:
+        # AND EVERY FAILURE THE PIN ACTUALLY FOUND, not only this one. `must`
+        # accumulates its labels into `fails`, and on the ordinary path at the
+        # foot of this function `fails` is what the exit message is built from --
+        # but an early `raise` here discards it. Until 2026-08-11 that is what
+        # happened: deleting the declaration for real printed one sentence about
+        # the enhancer and no evidence whatever that four further published ids
+        # had moved with it, while `PROPOSED.md` and `CHANGELOG.md` both say the
+        # pin fails on all five. Those five reassignments ARE the subject of this
+        # check; a message that measures them and then throws them away leaves
+        # its own claim unwitnessed, which is the failure mode this file is
+        # least entitled to.
+        raise SystemExit(
+            "stage_classb self-test failed: the CMV enhancer is not in ITEMS. If it "
+            "was deleted to withdraw it, every id after it has just shifted down one "
+            "and PLF:4006 now means the T7 terminator. Restore the declaration and "
+            "set its `withdrawn` field instead; see the comment above ITEMS.\n"
+            "  Every pin that failed, so the reassignment is visible and not merely "
+            "asserted:\n    " + "\n    ".join(fails)
+        )
+    marked = ITEMS[:at] + (replace(ITEMS[at], withdrawn="fixture"),) + ITEMS[at + 1:]
+    after = {rid: it.name for rid, it in allocation(marked)}
+    must("withdrawing a row moves no other id", after == live)
+    must("the withdrawn row keeps its own id too, so it can never be reissued",
+         after["PLF:4006"] == "CMV enhancer")
+    must("the withdrawal is reported against that id, with its reason",
+         withdrawn_ids(marked) == {"PLF:4006": "fixture"})
+    must("and nothing is withdrawn unless it says so",
+         withdrawn_ids(ITEMS[:at] + ITEMS[at + 1:]) == {})
+
+    # THE INVERTED CONTROL, and the reason the checks above are worth anything.
+    # Withdraw the same row the WRONG way -- delete it -- and the pin must fail,
+    # naming the exact five reassignments PROPOSED.md measured.
+    deleted = {rid: it.name for rid, it in allocation(ITEMS[:at] + ITEMS[at + 1:])}
+    must("deleting the item instead renumbers, so the pin above can fail",
+         deleted != live)
+    must("and it renumbers by exactly one place, five published ids deep",
+         [deleted.get(f"PLF:{n}") for n in range(4006, 4011)]
+         == ["T7 terminator", "rrnB T1 terminator", "rrnB T2 terminator",
+             "bGH poly(A) signal", "SV40 early poly(A) signal"])
+
     if fails:
         raise SystemExit(
             "stage_classb self-test failed: " + "; ".join(fails)
@@ -1690,14 +1846,17 @@ def main() -> int:
 
     print("Stage 5 -- Class B conventions (standalone run)")
     print(f"  date {TODAY}   cache {CACHE}")
-    print(f"  {len(ITEMS)} allow-listed items, {len(HELD)} worked up and held\n")
-    print("\n".join(self_test()))
-    print()
-
+    withdrawn = withdrawn_ids()
+    print(f"  {len(ITEMS)} allow-listed items, {len(HELD)} worked up and held, "
+          f"{len(withdrawn)} withdrawn")
+    # `self_test()` is NOT called here any more: `build()` runs it and returns
+    # its lines at the head of the report, so this path and the `build.py` path
+    # run the same gates rather than only this one.
     rows, report = build(args.refresh)
     print("\n".join(report))
-    print(f"\n{len(rows)}/{len(ITEMS)} row(s) verified")
-    return 0 if len(rows) == len(ITEMS) else 1
+    print(f"\n{len(rows)}/{len(ITEMS) - len(withdrawn)} declared row(s) verified "
+          f"({len(withdrawn)} withdrawn and not offered)")
+    return 0 if len(rows) == len(ITEMS) - len(withdrawn) else 1
 
 
 if __name__ == "__main__":

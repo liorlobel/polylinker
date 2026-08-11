@@ -1976,6 +1976,33 @@ def self_test() -> list:
     want("an unreadable patent_flag has no digest rather than hashing as 0",
          unreadable_refused)
 
+    # THE ID-STABILITY AUDIT, INCLUDING ITS ONE EXCEPTION. `audit_ids` gained a
+    # way past "was published and is now absent" when withdrawal was added, and
+    # a check with a new way past it is a check that has to be driven at the
+    # hole. Every case below is run against the same two-row baseline, so the
+    # difference between them is only the thing being tested.
+    was = {"PLF:0000": {"name": "kept", "nt": "ATGTAA"},
+           "PLF:0001": {"name": "gone", "nt": "ATGTAG"}}
+    kept = signed_row(id="PLF:0000", name="kept", reference_nt="ATGTAA")
+    f, _, g = audit_ids(was, [kept], {})
+    want("an unexplained disappearance is still fatal",
+         len(f) == 1 and "PLF:0001" in f[0] and not g)
+    f, _, g = audit_ids(was, [kept], {"PLF:0001": "a reason."})
+    want("a declared withdrawal is reported instead of refused",
+         not f and len(g) == 1 and "PLF:0001" in g[0] and "a reason." in g[0])
+    want("and the withdrawal is not silent -- the reason reaches the log",
+         "WITHDRAWN" in g[0])
+    f, _, g = audit_ids(was, [kept], {"PLF:0002": "wrong id."})
+    want("a withdrawal declared for some OTHER id does not excuse this one",
+         len(f) == 1 and "PLF:0001" in f[0] and not g)
+    f, _, _ = audit_ids(
+        was,
+        [kept, signed_row(id="PLF:0001", ordinal=2, name="gone", reference_nt="ATGTTT")],
+        {"PLF:0001": "withdrawn, allegedly."},
+    )
+    want("a withdrawal does not excuse a row that is present and repointed",
+         len(f) == 1 and "changed sequence" in f[0])
+
     if fails:
         for f in fails:
             print(f)
@@ -2331,19 +2358,59 @@ def read_previous(path: Path) -> dict | None:
     return prev
 
 
-def audit_ids(prev: dict | None, rows: list) -> tuple[list, list]:
+def collect_withdrawals() -> dict:
+    """{id: reason} over every stage that declares a withdrawal.
+
+    A stage says which of its declared items a curator has WITHDRAWN by exposing
+    `withdrawn_ids()`; `stage_classb` and `stage_uniprot` both do, computed from
+    the same index that gives each item its id. Stages without the function
+    contribute nothing, which is the right default — saying nothing must never
+    excuse an absence.
+
+    Read from `sys.modules` and never imported here. The stage loop has already
+    run by the time this is called, so a module present in `sys.modules` is one
+    that really loaded and really built; importing it afresh could pull in a
+    stage that `load_stage()` had just refused, and then explain a missing id
+    with a declaration from code the build did not use.
+    """
+    out = {}
+    for stage in STAGES:
+        if stage.module is None:
+            continue
+        mod = sys.modules.get(stage.module)
+        fn = getattr(mod, "withdrawn_ids", None) if mod is not None else None
+        if callable(fn):
+            out.update(fn())
+    return out
+
+
+def audit_ids(prev: dict | None, rows: list, withdrawn: dict | None = None) -> tuple:
     """Compare the ids we are about to write against the ones already published.
 
-    Returns (fatal, warnings). A PLF id is a permanent name. If the sequence
-    under an existing id changes, every citation of that id now points at
-    something else and nothing anywhere says so — which is precisely the failure
-    the reserved-block scheme exists to prevent, so this check is what proves
-    the scheme worked rather than merely looking like it did.
+    Returns (fatal, warnings, withdrawals). A PLF id is a permanent name. If the
+    sequence under an existing id changes, every citation of that id now points
+    at something else and nothing anywhere says so — which is precisely the
+    failure the reserved-block scheme exists to prevent, so this check is what
+    proves the scheme worked rather than merely looking like it did.
 
     A name change is a warning, not a failure: renaming a record is a legitimate
     curatorial edit and does not repoint the sequence. A *missing* id is fatal
     for the same reason a changed sequence is — the id has stopped meaning what
     it meant, it has just stopped meaning anything at all.
+
+    WITH ONE EXCEPTION, AND IT IS AN EXCEPTION WITH A NAME ON IT. A curator may
+    withdraw a published row; the row then legitimately leaves the table. What
+    separates that from the failure above is not that the row is gone — those
+    look identical from here — it is that somebody wrote down which id they were
+    retiring and why, in the stage's own declaration, and `collect_withdrawals()`
+    carries it to this function. So an absence explained by `withdrawn` is
+    reported as a withdrawal and does not stop the build, and every other
+    absence is still fatal. The escape hatch is exactly one id wide and cannot
+    be opened without recording a reason.
+
+    Note what is NOT weakened: a withdrawn id that is somehow still in `rows`,
+    or whose sequence moved, never reaches this branch, and `--allow-id-drift`
+    remains the only way past a genuine repointing.
 
     KNOW WHAT THE BASELINE IS. By default `prev` is the file this run is about
     to overwrite, which is the *published* table only on a clean checkout. Run
@@ -2354,13 +2421,22 @@ def audit_ids(prev: dict | None, rows: list) -> tuple[list, list]:
     """
     if prev is None:
         return [], ["no previous features.tsv, so id stability could not be checked "
-                    "this run -- that is an unchecked assumption, not a pass"]
-    fatal, warn = [], []
+                    "this run -- that is an unchecked assumption, not a pass"], []
+    withdrawn = withdrawn or {}
+    fatal, warn, gone = [], [], []
     now = {r.id: r for r in rows}
     for rid, old in sorted(prev.items()):
         new = now.get(rid)
         if new is None:
-            fatal.append(f"{rid} ({old['name']}) was published and is now absent")
+            if rid in withdrawn:
+                gone.append(
+                    f"{rid} ({old['name']}) was published and is WITHDRAWN by the "
+                    f"curator: {withdrawn[rid]} The id is retired, not freed: its "
+                    f"declaration stays in the stage, so nothing else can ever be "
+                    f"issued under it."
+                )
+            else:
+                fatal.append(f"{rid} ({old['name']}) was published and is now absent")
             continue
         if new.reference_nt != old["nt"]:
             fatal.append(
@@ -2369,7 +2445,7 @@ def audit_ids(prev: dict | None, rows: list) -> tuple[list, list]:
             )
         elif new.name != old["name"]:
             warn.append(f"{rid} renamed {old['name']!r} -> {new.name!r} (sequence unchanged)")
-    return fatal, warn
+    return fatal, warn, gone
 
 
 # --------------------------------------------------------------------------
@@ -2530,14 +2606,20 @@ def main() -> int:
 
     baseline = Path(args.baseline) if args.baseline else (out / "features.tsv")
     prev = read_previous(baseline)
-    fatal, warn = audit_ids(prev, rows)
+    withdrawn = collect_withdrawals()
+    fatal, warn, gone = audit_ids(prev, rows, withdrawn)
     print(f"\nID stability audit  [baseline: {baseline}]")
+    for g in gone:
+        print(f"  WITHDRAWN {g}")
     for w in warn:
         print(f"  warn  {w}")
     for f in fatal:
         print(f"  FATAL {f}")
-    if not warn and not fatal:
+    if not warn and not fatal and not gone:
         print(f"  {len(prev or {})} previously published id(s) still mean the same sequence")
+    elif not warn and not fatal:
+        print(f"  {len(prev or {}) - len(gone)} previously published id(s) still mean the "
+              f"same sequence; {len(gone)} withdrawn above")
     if fatal and not args.allow_id_drift:
         print("\nRefusing to write. A published id now means a different sequence, and")
         print("nothing downstream would be told. Fix the allocation, or pass")
