@@ -1791,11 +1791,24 @@ def self_test() -> list[str]:
     at = next((i for i, it in enumerate(ITEMS) if it.name == "CMV enhancer"), None)
     must("the CMV enhancer is still DECLARED, withdrawn or not", at is not None)
     if at is None:
+        # AND EVERY FAILURE THE PIN ACTUALLY FOUND, not only this one. `must`
+        # accumulates its labels into `fails`, and on the ordinary path at the
+        # foot of this function `fails` is what the exit message is built from --
+        # but an early `raise` here discards it. Until 2026-08-11 that is what
+        # happened: deleting the declaration for real printed one sentence about
+        # the enhancer and no evidence whatever that four further published ids
+        # had moved with it, while `PROPOSED.md` and `CHANGELOG.md` both say the
+        # pin fails on all five. Those five reassignments ARE the subject of this
+        # check; a message that measures them and then throws them away leaves
+        # its own claim unwitnessed, which is the failure mode this file is
+        # least entitled to.
         raise SystemExit(
             "stage_classb self-test failed: the CMV enhancer is not in ITEMS. If it "
             "was deleted to withdraw it, every id after it has just shifted down one "
             "and PLF:4006 now means the T7 terminator. Restore the declaration and "
-            "set its `withdrawn` field instead; see the comment above ITEMS."
+            "set its `withdrawn` field instead; see the comment above ITEMS.\n"
+            "  Every pin that failed, so the reassignment is visible and not merely "
+            "asserted:\n    " + "\n    ".join(fails)
         )
     marked = ITEMS[:at] + (replace(ITEMS[at], withdrawn="fixture"),) + ITEMS[at + 1:]
     after = {rid: it.name for rid, it in allocation(marked)}

@@ -210,7 +210,10 @@ only route to it).
 
 ---
 
-# The 7 Class B rows (Stage 5, `features/build/stage_classb.py`)
+# The 6 Class B rows (Stage 5, `features/build/stage_classb.py`)
+
+*Seven sections follow, because `PLF:4006` is kept below as the record of a
+decision. Six of them are rows you can sign; the first is not in the table.*
 
 SOURCING.md section 3 classes promoter, terminator and poly(A) boundaries as
 **conventions, not facts** -- there is no database that says where 'the CMV

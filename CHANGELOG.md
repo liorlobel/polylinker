@@ -59,6 +59,19 @@ question underneath it — whether SnapGene-shaped corroboration counts for a Cl
 B extent — is exactly as open as it was, the SnapGene screen is unchanged, and
 `PLF:4005` is still refused on the evidence that refused it.
 
+**Six further counts moved with the row, in files no test reads.**
+`features/NOTICE` said the taint gate ran over 110 descriptions and that seven
+Class B rows carry the 2026-08-10 retrieval date; `README.md` said the table
+holds 21 unread rows; `features/README.md` said 7 Class B elements; `PROPOSED.md` headed
+its Class B section *The 7 Class B rows*; and two Rust doc comments described a
+110-row table with 21 proposed and quoted a failure transcript reading *7 Class B
+rows*. Only the two README headline claims are test-asserted, which is exactly
+why the rest went stale — so each was recomputed from the tables rather than
+decremented, and the taint gate was re-run to get the description count instead
+of subtracting one from it: **1,367 of theirs against 109 of ours, no shared
+five-token run, nothing above 60% containment**, and the same five rows above the
+30% line with the same longest runs (1, 2, 4, 3, 3).
+
 ### Added — a row can be withdrawn, and a test proves the other ids do not move
 
 `Convention` (Stage 5) and `Natural` (Stage 2) both gained a `withdrawn` field.
@@ -82,6 +95,16 @@ marking one withdrawn moves none of them, and asserts against the same fixture
 with the item **deleted** that the pin catches all five reassignments. Proven by
 doing it: deleting the CMV enhancer declaration for real failed the pin on every
 one of the five ids, and the build wrote nothing.
+
+**And the failure now says so.** When the declaration is missing the check exits
+early, and that early exit used to discard every label `must()` had recorded —
+so reproducing the break printed one sentence about the enhancer and no evidence
+at all that four further published ids had moved with it, while this entry and
+`PROPOSED.md` both claimed the pin fails on all five. The five reassignments are
+the entire subject of the check; a message that measures them and then throws
+them away leaves its own claim unwitnessed. The exit now carries every pin that
+failed, so the sentence above is something a reader reproduces rather than
+something two files assert about each other.
 
 `stage_classb.build()` now runs `self_test()` before it emits a row. That
 function's docstring had said since it was written that its gates "run on every

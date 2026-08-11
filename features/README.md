@@ -386,8 +386,11 @@ map is the gene with its own promoter and terminator, and `TRP1` in the YRp7
 lineage means TRP1-ARS1. A match against those files covers the ORF and stops,
 and that is correct.
 
-**7 Class B regulatory elements**, from the twelve that were built — see the
-next section for the five that were refused and why.
+**6 Class B regulatory elements**, from the twelve that were built — see the
+next section for the five that were refused and why. Seven reached the table on
+2026-08-10; the curator withdrew `PLF:4006` on 2026-08-11, so of the twelve
+built, five were refused on the evidence and one was withdrawn by a human, which
+are different things and are counted separately here on purpose.
 
 ### Class B: boundaries that are conventions, and how they are evidenced
 
