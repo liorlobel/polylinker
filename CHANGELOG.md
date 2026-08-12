@@ -25,12 +25,51 @@ which.
 
 ## [Unreleased]
 
-### Changed
+Nothing yet.
 
-- **Selecting a feature now selects its bases, from every path, whatever tab is
-  open.** 0.9.0 made a click on the map *reveal* the feature in the panel you
-  already had open; it selected the feature's bases only when that panel was the
-  Sequence tab. A click on a Features ROW selected neither. So the map's
+## [0.9.1] - 2026-08-13
+
+**A patch number over a change to what a gesture does, and this paragraph is
+here so that nobody is surprised by it.** 0.9.0 took a *minor* number for one
+stated reason — "for the first time in four releases, something you do in the
+app answers differently" — and the thing that answered differently was a click
+on a feature. A click on a feature answers differently again here, on a second
+surface and in a second way: it now takes the sequence selection. By the rule
+0.9.0 wrote for itself this would be 0.10.0. It carries 0.9.1 because that is
+the number the release was cut under, and the number is the only thing that was
+made smaller — everything below is written at the size of the change rather than
+at the size of the digit.
+
+**What that means for somebody deciding whether to take it.** A gesture you
+already use does something it did not do before, and it is destructive: clicking
+a feature — on the map from any tab, or on a row in the Features list — replaces
+whatever you had selected in the sequence, and undo does not reach a selection.
+If you have a habit built on a hand-dragged range surviving a click on a feature
+row, this release breaks it. That is the whole of the risk, and the app says so
+on the hover of both surfaces, so it is met before it is paid rather than after.
+
+**Nothing in the feature database moved.** No row was added, withdrawn or
+edited, no sequence, extent, boundary rule or evidence citation changed, and
+nothing was signed. The table is still **113 rows: 89 signed, 24 proposed**, the
+same ids in the same order. Ten of those rows are Class B regulatory elements,
+all ten are `proposed`, and **none of the ten ships**: `Db::reviewed()` serves
+none of them and `pl annotate` searches none of them without
+`--include-proposed`. Being in the table is not shipping, and this release adds
+nothing to either.
+
+**`features/SIGNOFF.tsv` is byte-identical to `main` and to `v0.6.0`** — 89
+signature rows, sha256
+`7cf86057c2b9b964976ad04788a764fd1882b56c2e4cdd427e3395a0fc858e97`, blob
+`2d63b169d0de742154b5a7e87c830e12d5052be7`, the same blob 0.6.0, 0.7.0, 0.8.0,
+0.8.1 and 0.9.0 shipped. **Nothing has been signed since 0.6.0**, all 89
+signatures still verify, and no row digest was computed or published here.
+
+### Changed — selecting a feature now selects its bases, from every path
+
+- **Click a feature and its bases are selected, whatever tab is open.** 0.9.0
+  made a click on the map *reveal* the feature in the panel you already had open,
+  and it selected that feature's bases only when the open panel was the Sequence
+  tab. A click on a Features ROW set the highlight and nothing else. So the map's
   selection arc and its end caps, the readout's GC and Tm, Ctrl+Shift+R (copy
   reverse complement) and Ctrl+Shift+P (copy protein) all keyed off a selection
   that the commonest gesture for picking a feature had never made — the GC of a
@@ -42,43 +81,99 @@ which.
   which panel moves to show them is a question about where you are standing, and
   0.9.0's answer to that is untouched. Every path into a feature — the map click,
   the Features row, the feature editor opening, Duplicate, Accept on a database
-  proposal, and Save on a new feature — now goes through one setter. The one
-  exception is a double-click *in the sequence grid*, which deliberately selects
-  the smallest covering segment rather than the whole feature: an exon, not the
-  gene the exon is in.
+  proposal, and Save on a new feature — now goes through one setter,
+  `App::select_feature`. The one exception is a double-click *in the sequence
+  grid*, deliberately not routed: it selects the smallest covering **segment**
+  rather than the whole feature — an exon, not the gene the exon is in — and
+  routing it would have changed that gesture without anyone deciding to.
 
-  **It costs you a selection you made by hand.** A range dragged out in the
-  Sequence tab is replaced when you click a feature to look at it, silently, and
-  undo does not reach a selection. That is what "select" means and it is the same
-  cost Ctrl+F, a primer row and a Sanger mismatch have always charged; it is now
-  said in front of you rather than discovered — both the band and the row say
-  *"click to select its bases"* on hover, and an annotation-only file, which has
-  no bases to select, says *"click to select"* instead.
-
-- **A click on a feature's NAME in the Features list now selects it.** It did
-  not: egui makes a `Label` click-and-drag-sensing so its text can be swept, and
-  those labels are drawn inside the row and therefore on top of it. Measured with
-  `Context::interaction_snapshot`, a press at the centre of `AmpR`'s name was won
-  by the label while the row itself reported `contains_pointer: true, hovered:
-  false, clicked: false`. The row only ever answered where no label had been
-  drawn. Text selection is off for this row and nowhere else.
+- **An origin-crossing feature selects the short arc.** A row click on a feature
+  spelled `join(7900..8117,1..100)` on an 8,117 bp molecule selects the **318**
+  bases the feature is on, not the **7,799** the same pair of carets also names.
+  Both numbers are named in the assertion that holds it, because a message that
+  prints only the one it wanted leaves a reader to work out whether the other one
+  is what it got.
 
 - **A second click on the same feature clears the bases as well as the
   highlight** — but only when they are still the ones that click put there. If
   you have dragged out something else since, that survives: clearing it would
-  destroy a selection the gesture never made.
+  destroy a selection the gesture never made. The guard recognises its own work
+  on a wrapped feature too, which is a different comparison and is now asserted
+  rather than assumed.
 
 - **The selected feature is first in the map's label budget**, ahead of the
   filter matches it already promoted. Otherwise on a dense map you click a row
-  and the band you selected is the one band with no name against it, which is the
-  finding 0.9.0 closed wearing different clothes. One name is promoted, so it
-  cannot crowd out a filter with sixty matches.
+  and the band you selected is the one band with no name against it — the finding
+  0.9.0 closed, wearing different clothes. It goes ahead of the filter and not
+  behind it because there is at most one selected feature, so it can never crowd
+  the matches out, while a sixty-match filter could certainly crowd out the one
+  feature you have in hand.
 
-- **The whole name of a truncated row is shown on the row's own tooltip** rather
-  than on the name label's, together with what a click does. The label is no
-  longer interactive, and egui marks a non-interactive widget hovered only when
-  it is on top of the interactive one, so left where it was the tooltip would
-  simply have stopped appearing.
+### Fixed — a click on a feature's NAME selected nothing at all
+
+**This defect predates the change above and was found while making it.** It is
+here at least as prominently as the feature, because it is the one entry in this
+release that is a plain bug in shipped behaviour rather than a decision about
+what a gesture ought to mean.
+
+- **A click on a feature's name in the Features list selected nothing.** egui
+  makes a `Label` click-and-drag-sensing so its text can be swept, and those
+  labels are drawn inside the row and therefore on top of it; egui's hit test
+  hands a press to the topmost widget that senses one. Measured with
+  `Context::interaction_snapshot`, a press at the centre of `AmpR`'s name — the
+  biggest target in the row and the one a user aims at — was won by the label,
+  while the row itself reported `contains_pointer: true, hovered: false,
+  clicked: false`. **The row only ever answered where no label had been drawn**,
+  so the reliable way to pick a feature out of the list was to click the empty
+  space beside its name. Text selection is now off for this row and nowhere
+  else; the name is still selectable text in the feature editor, which is where
+  it is editable.
+- **The truncated-name tooltip had to move with it, onto the row.** A
+  non-interactive label registered before the row that contains it is underneath
+  it, and egui marks a non-interactive widget hovered only when it is on top of
+  the topmost interactive one — so left where it was, the tooltip that shows the
+  whole of a name too long for its row would silently have stopped appearing. One
+  hover per row now carries both the full name and what a click does.
+
+### What got worse
+
+- **A range you dragged out by hand is destroyed when you click a feature,
+  silently, and undo does not reach a selection.** Somebody with 300 bases
+  dragged out in the Sequence tab who clicks a feature row to see what it is
+  loses the drag, with no warning and nothing to press to get it back. It is
+  accepted rather than overlooked: it is what the word "select" means, and it is
+  the same cost Ctrl+F, a primer row and a Sanger mismatch have charged since
+  each of those was built. A feature row charging it too is one rule instead of a
+  fourth exception.
+
+  **A cost this quiet has to be met before it is paid**, so it is now said in
+  front of you: both the map band and the Features row say *"click to select its
+  bases · double-click to edit"* on hover, in one shared sentence, and an
+  annotation-only document — features and no bases, where there is nothing to
+  select — says *"click to select · double-click to edit"* instead, rather than
+  promising bases the file does not have.
+
+- **The caret moves, and an open typing run is committed.** The selection is set
+  through the one sanctioned door, which commits the run on the way past and
+  leaves the caret at the feature's 3' end on the plus strand. Committing a run
+  is not an edit you did not make — the run is bases you typed, and the commit is
+  what turns them into one undo step — and all three sibling surfaces have always
+  done both.
+
+### Not changed
+
+- **`features/SIGNOFF.tsv`, `features/features.tsv` and
+  `features/provenance.tsv` are byte-identical to `main`**, verified with
+  `git diff --exit-code main` on all three. This release moves version numbers,
+  prose and this file; it does not run the feature build.
+- **`docs/UX-REVIEW-2026-07-31.md` is not amended, and that is deliberate.** Its
+  finding 10, *"Selecting a region answers none of the questions that follow
+  it"*, was closed well before this release — the readout carries GC and Tm and
+  the map draws a selection arc — and what changes here is not what a selection
+  answers but what *makes* one. That file is a dated record of one binary at one
+  commit, it says so in its own header, and it has not been edited since the day
+  it was written; annotating one finding in it now would make it look like a
+  status board, which it has never been.
 
 ## [0.9.0] - 2026-08-12
 
@@ -2141,7 +2236,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.9.1
 [0.9.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.9.0
 [0.8.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.8.1
 [0.8.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.8.0
