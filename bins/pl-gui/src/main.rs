@@ -33324,13 +33324,30 @@ ATGAAACGCTAA
     /// back as 4,921 — and a failure that prints one number leaves the reader to
     /// work out which of the two arcs they got.
     ///
-    /// PROVEN TO FAIL against two MUTATIONS, both run. The restored
-    /// `self.selected = …` row-click body fails with "the row click selected no
-    /// bases at all". And taking the span from `f.start()`/`f.end()` instead of
-    /// `Feature::extent` inside `feature_extent` fails with "the wrap bit is
-    /// off … Selection { anchor: 0, head: 8117, through_origin: false }" — the
-    /// whole plasmid, reported for a 318 bp feature, because the join's last
-    /// part starts at base 1.
+    /// **AND LETTING GO OF IT**, because the toggle's other half spells a wrap
+    /// through two functions that have to agree — see the second click below.
+    ///
+    /// PROVEN TO FAIL against five MUTATIONS, each run and restored:
+    ///
+    /// - the restored `self.selected = …` row-click body: "the row click
+    ///   selected no bases at all";
+    /// - `f.start()`/`f.end()` in place of `Feature::extent` inside
+    ///   `feature_extent`: "the wrap bit is off … Selection { anchor: 0, head:
+    ///   8117, through_origin: false }" — the whole plasmid, reported for a
+    ///   318 bp feature, because the join's last part starts at base 1;
+    /// - `Selection::base_count` returning the caret difference, which is the
+    ///   historical 465 → 4,921: "selected 7799 bases: the FEATURE is 318 and
+    ///   the complement arc … is 7799";
+    /// - `selected_bases` taking the complement arc: the length assertion;
+    /// - `selected_bases` shifted one base round the ring: the length passes
+    ///   and only the identity fails, which is what that assertion is for.
+    ///
+    /// And for the second click, a `deselect_feature` guard that bails on
+    /// `end < start` — one that cannot recognise a wrap as its own work — fails
+    /// with "the highlight went and the wrapped bases stayed: Some(Selection {
+    /// anchor: 7899, head: 100, through_origin: true })", and fails NOTHING
+    /// else: the flat second-click test stays green, which is what says this
+    /// half is not a copy of it.
     #[test]
     fn an_origin_spanning_row_click_selects_the_short_arc() {
         let ctx = test_ctx();
@@ -33449,6 +33466,36 @@ ATGAAACGCTAA
             "the map drew {drawn:.1} pt of arc where 318 bases is {want:.1} pt — the \
              complement would be {:.1}",
             arc_of(&out, 8_117 - 318, 8_117)
+        );
+
+        // AND THE SECOND CLICK LETS GO OF THE WRAP TOO, which is not implied by
+        // the flat case passing. `deselect_feature` only clears bases it
+        // RECOGNISES as its own, and it recognises them by comparing
+        // `feature_extent` against `selection_segment` — two functions that
+        // spell a wrap differently from each other on every other line of this
+        // file. `selection_segment` rebuilds the pair as `(hi + 1, lo)` when
+        // `through_origin` is set, so the comparison is only an identity if
+        // both sides put 7,900 first; a guard that got that backwards would
+        // decline to recognise its own work and leave 318 bases selected under
+        // no highlight, on origin-crossing features only. That is a disagreement
+        // between the picture and the panel, which is the state this whole
+        // toggle exists to prevent.
+        click_row(&mut app, &ctx, "ori-crosser", 2.0);
+        assert_eq!(app.selected, None, "the second click did not deselect");
+        assert!(
+            app.feature_edit.is_none(),
+            "the premise: this was two clicks and not a double-click"
+        );
+        assert_eq!(
+            app.edit.sel, None,
+            "the highlight went and the wrapped bases stayed: {:?}",
+            app.edit.sel
+        );
+        let out = paint_window(&mut app, &ctx, window_at(2.1));
+        assert_eq!(
+            selection_arc_len(&out, &pal),
+            0.0,
+            "the map still draws an arc across the origin for a feature nothing highlights"
         );
     }
 
