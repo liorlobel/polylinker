@@ -33313,6 +33313,17 @@ ATGAAACGCTAA
     /// bases across the origin and 7,799 the long way round, and only
     /// `through_origin` tells them apart.
     ///
+    /// **MEASURED, AND BOTH NUMBERS NAMED.** Three oracles, weakest to
+    /// strongest: `through_origin` is a bit, `base_count` is how many bases the
+    /// selection claims, and `selected_bases` is the bytes the user would get on
+    /// the clipboard. Only the last can tell 318 of the feature's bases from 318
+    /// of somebody else's, and it is the one Ctrl+Shift+R and Ctrl+Shift+P read.
+    /// Every message that reports a count also reports the complement, because
+    /// this repository has already shipped the confusion once — see
+    /// `Selection::base_count`, where a 465 bp origin-crossing selection came
+    /// back as 4,921 — and a failure that prints one number leaves the reader to
+    /// work out which of the two arcs they got.
+    ///
     /// PROVEN TO FAIL against two MUTATIONS, both run. The restored
     /// `self.selected = …` row-click body fails with "the row click selected no
     /// bases at all". And taking the span from `f.start()`/`f.end()` instead of
@@ -33360,10 +33371,74 @@ ATGAAACGCTAA
             (7_899, 100),
             "the carets must bracket 7,900..8,117 and 1..100"
         );
+        // THE COUNT, WITH BOTH NUMBERS NAMED. This project has been bitten by
+        // exactly this before, and the scar is on `Selection::base_count`'s own
+        // doc comment: a 465 bp origin-crossing selection reported 4,921,
+        // because the caret difference is the complement arc when the wrap bit
+        // is set. The two answers here are 318 and 7,799, and a message that
+        // prints only the one it wanted leaves the reader to work out whether
+        // the other one is what it got.
+        //
+        // THE EXPECTATION IS ARRIVED AT TWICE, from two places that share no
+        // code. 318 is this test's own arithmetic on the coordinates it wrote
+        // into the molecule — 218 bases at 7,900..8,117 plus 100 at 1..100 —
+        // and `feature_bp` is the application's answer to "how long is this
+        // feature", summed over the segments rather than taken from `extent`.
+        // Deriving the expectation from `feature_bp` alone would let a broken
+        // `extent` pass by breaking both the same way; asserting the literal
+        // alone would not say the selection is as long as THE FEATURE.
+        let mol = app.document().expect("open").molecule().clone();
+        let own = feature_bp(&mol.features[1], &mol).expect("ori-crosser covers bases");
+        assert_eq!(
+            own, 318,
+            "the premise: ori-crosser is 318 bases — 218 before the origin and 100 after it"
+        );
         assert_eq!(
             sel.base_count(8_117),
+            own,
+            "the row click selected {} bases: the FEATURE is {own} and the complement \
+             arc — which these same two carets also name — is {}",
+            sel.base_count(8_117),
+            8_117 - own
+        );
+
+        // AND THEY ARE THE FEATURE'S OWN BASES, not merely 318 of them.
+        // `selected_bases` is what Ctrl+Shift+R reverse-complements and
+        // Ctrl+Shift+P translates, so it is the only oracle that answers what
+        // the user actually gets off this selection. A count alone cannot tell
+        // the 318 bases at 7,900..100 from any other 318 on the ring.
+        //
+        // Compared as TEXT and not as `Vec<u8>`, because the failure has to be
+        // readable: `assert_eq!` on the bytes prints 318 three-digit numbers
+        // twice, and nobody finds a one-base rotation in 2,000 characters of
+        // decimal. As DNA the two lines sit under each other and the shift is
+        // visible at the first letter.
+        let dna = |b: &[u8]| String::from_utf8_lossy(b).to_string();
+        let want_bases = dna(&mol
+            .subseq(7_900, 8_117)
+            .expect("the part before the origin")
+            .into_iter()
+            .chain(mol.subseq(1, 100).expect("the part after it"))
+            .collect::<Vec<u8>>());
+        assert_eq!(
+            want_bases.len(),
             318,
-            "218 bases before the origin and 100 after it"
+            "the premise: 318 bases were asked for"
+        );
+        let got = dna(&app
+            .edit
+            .selected_bases(&mol)
+            .expect("the selection names no bases"));
+        assert_eq!(
+            got.len(),
+            318,
+            "the selection yields {} bases, not the feature's 318 (the complement is 7,799)",
+            got.len()
+        );
+        assert_eq!(
+            got, want_bases,
+            "318 bases, but not ori-crosser's own: the selection is the wrong arc of the \
+             right length"
         );
 
         let out = paint_window(&mut app, &ctx, window_at(0.3));
@@ -33374,6 +33449,118 @@ ATGAAACGCTAA
             "the map drew {drawn:.1} pt of arc where 318 bases is {want:.1} pt — the \
              complement would be {:.1}",
             arc_of(&out, 8_117 - 318, 8_117)
+        );
+    }
+
+    /// THE COST IS SAID ON THE ROW, and it is said because a test reads it off
+    /// the frame rather than off the source.
+    ///
+    /// The decision this change turns on is that a click DESTROYS a selection
+    /// the user made by hand — silently, and undo does not reach it. The whole
+    /// argument for accepting that is that they are told before they pay it, so
+    /// the sentence on the row is not decoration: it is the mitigation, and an
+    /// untested mitigation is a claim rather than a fact.
+    ///
+    /// It is also the part of this change most likely to go quiet. The whole
+    /// name used to be offered on the NAME LABEL's own hover; this change makes
+    /// that label non-interactive, and egui marks a non-interactive widget
+    /// hovered only when it is on top of the topmost interactive one — the label
+    /// is registered before the row that contains it, so it is underneath. Left
+    /// where it was, the tooltip would have stopped appearing with nothing on
+    /// screen to say so. It was moved onto the row. This is what says it
+    /// arrived there.
+    ///
+    /// THE HOVER IS REAL, not `set_everything_is_visible`: the pointer rests on
+    /// the row across frames whose clock advances past egui's tooltip delay, and
+    /// the oracle is the painted galley. Forcing every popup open would prove
+    /// the string exists in the binary, which was never in doubt; what is in
+    /// doubt is whether hovering the row reaches it.
+    ///
+    /// PROVEN TO FAIL against two MUTATIONS, both run — see the assertions.
+    #[test]
+    fn the_row_says_a_click_will_take_the_sequence_selection() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Features,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        // The centre of the NAME, which is where a user aims and where the old
+        // label used to swallow the interaction outright.
+        let at = feature_rows_at(&out)
+            .into_iter()
+            .find(|(s, _)| s == "AmpR")
+            .expect("the Features list painted no row for AmpR")
+            .1
+            .center();
+
+        // MOVE ONCE, THEN REST — and the difference is the whole reason this
+        // reads a real hover instead of `set_everything_is_visible`.
+        // `Tooltip::should_show_tooltip` gates on
+        // `pointer.time_since_last_movement() >= interaction.tooltip_delay`
+        // (0.5 s), so a loop that re-sends `PointerMoved` on every frame keeps
+        // resetting the clock it is waiting on and the tooltip never comes —
+        // measured, that is exactly what happened here first. The pointer is
+        // put on the row once and the frames after it carry no events, only
+        // time, which is what a user resting their hand does.
+        paint_window(&mut app, &ctx, pointer_to_at(at, 0.2));
+        let mut said = Vec::new();
+        for k in 0..12 {
+            let out = paint_window(&mut app, &ctx, window_at(0.3 + 0.2 * k as f64));
+            said = flat_shapes(&out.shapes)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+            if said.iter().any(|t| t.contains("click to select")) {
+                break;
+            }
+        }
+
+        // MUTATION ONE, run: dropping the `.on_hover_text(...)` from the row's
+        // response — the state this change would have shipped in had the
+        // tooltip been left on the now-non-interactive label — fails here with
+        // the row silent.
+        let tip = said
+            .iter()
+            .find(|t| t.contains("click to select"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "hovering AmpR's row says nothing about what a click will do; the frame \
+                     drew {} strings and none of them mentions selecting",
+                    said.len()
+                )
+            });
+        // MUTATION TWO, run: `click_line` returning the annotation-only wording
+        // for every document — "click to select" — fails here, because on a
+        // molecule with bases the promise the user is owed is the specific one.
+        // The cost is the SEQUENCE SELECTION, and a sentence that says only
+        // "select" describes the row wash and warns nobody about the drag they
+        // are about to lose.
+        assert!(
+            tip.contains("click to select its bases"),
+            "the row's hover does not say the click takes the sequence selection: {tip:?}"
+        );
+        assert!(
+            tip.contains("double-click to edit"),
+            "the row's hover stopped explaining its other gesture: {tip:?}"
+        );
+        // AND IT IS THE SAME SENTENCE THE MAP USES. One gesture described twice
+        // in two wordings is how two surfaces of one application come to
+        // disagree; `click_line` exists so they cannot.
+        let mol = app.document().expect("open").molecule().clone();
+        assert!(
+            tip.contains(click_line(&mol)),
+            "the row and the map describe the same click differently: the row says {tip:?} \
+             and the map says {:?}",
+            click_line(&mol)
         );
     }
 
