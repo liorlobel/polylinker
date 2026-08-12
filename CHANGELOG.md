@@ -25,7 +25,42 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed — a superlative in `PLF:4009` that was false the day it was written
+
+- **`PLF:4009` rrnB T2 no longer claims to be "the shortest".** Its `notes` said
+  "it is the shortest and most sharply bounded of the twelve". The twelve were
+  `PLF:4000`–`PLF:4011`, and `PLF:4000` and `PLF:4001` are **17 nt** each and are
+  both declared above it — so the sentence was wrong when it was written and not
+  overtaken later. It entered on 2026-08-10 with the row itself and shipped
+  unchanged in 0.6.0, 0.7.0 and 0.8.0. `PLF:4012`, appended since, is 19 nt as
+  well; measured against `reference_nt` in `features.tsv`, this row's 28 nt is
+  the **fourth shortest** of the nine Class B rows in the table.
+- **The bounding half is kept, and demoted from a superlative to the measurement
+  it restates.** Every witness of this row that annotates anything over these
+  bases draws `5'+0/3'+0` — and `PLF:4000` and `PLF:4001` read the same way, so
+  "most sharply bounded" was not a ranking either. What distinguishes this row is
+  that their notes *name* rival extents found elsewhere (19 nt and 21 nt for T7,
+  a 19 nt published consensus running through +1 for SP6) and this row's names
+  none. The row records that the claim it replaces was wrong, rather than
+  overwriting it silently.
+- **`README.md` now dates the table 2026.08.12.** `features.tsv`'s `#!version`
+  line is the build clock too, so rebuilding moved it, and
+  `the_readmes_state_the_signoff_count_the_database_has` asserts that the front
+  page carries the live version alongside the live counts. The three counts in
+  that sentence — 112, 89, 23 — are unchanged.
+
+**Nothing else in either table moved, and that was measured rather than assumed.**
+The rebuild ran offline against the cached records (`PLF_OFFLINE=1`, the mode
+`ci.yml` uses, so no upstream change could enter through it). Compared against
+0.8.0 cell by cell: `features.tsv` differs in exactly **one** content cell,
+`PLF:4009`'s `notes`, plus `date_added` on all 112 rows; `provenance.tsv` differs
+in 843 cells, **all** of them the `retrieved` date, and in nothing else. Both of
+those are the build clock and both are outside the content digest by
+construction — see `SIGNED_COLUMNS` in `features/build/lib_columns.py` and
+`content_digest()` in `features/build/build.py`. `PLF:4009` is `proposed` with no
+line in `SIGNOFF.tsv`, so no signature was in a position to lapse, and **all 89
+signatures still verify** against unchanged digests. No id moved; `PLF:4006`
+stays retired. The table is still **112 rows: 89 signed, 23 proposed.**
 
 ## [0.8.0] - 2026-08-11
 

@@ -84,6 +84,35 @@ the primary papers behind their names and extents, which they did not before.
 
 ---
 
+## One more correction, 2026-08-12: a superlative in `PLF:4009` that was never true
+
+The table above is the 2026-08-11 pass. This one is separate because it is not a
+sentence the research overtook — it is a sentence that was **false the day it was
+written**. It entered in the commit that created this worklist's rows
+(`e918bd6`, 2026-08-10), was not touched by the 2026-08-11 pass, and shipped
+unchanged in **v0.6.0, v0.7.0 and v0.8.0**.
+
+| Row | What was written | What the table says |
+|---|---|---|
+| `PLF:4009` rrnB T2 | notes: "it is the shortest and most sharply bounded of the twelve" | **it is not the shortest and never was.** The twelve were `PLF:4000`–`PLF:4011`; `PLF:4000` and `PLF:4001` are 17 nt each and both are declared *above* this row. `PLF:4012`, appended since, is 19 nt. Measure `reference_nt`: at 28 nt this is the **fourth shortest** of the nine Class B rows in the table |
+
+The bounding half is kept but no longer as a superlative, because it is not one:
+every witness of `PLF:4009` that annotates anything over these bases draws
+`5'+0/3'+0`, and `PLF:4000` and `PLF:4001` do exactly the same. What actually
+separates this row from those two is in the *notes*, not in the offsets — theirs
+name rival extents found elsewhere (19 nt and 21 nt for T7, a 19 nt consensus
+running through +1 for SP6) and this row's names none. The row now says all of
+that, and says that the claim it replaces was wrong from the start rather than
+quietly dropping it.
+
+**Nothing else moved.** `PLF:4009` is `proposed` and has no line in
+`SIGNOFF.tsv`, so no signature was in a position to lapse; the 89 that exist
+still verify, and the only other differences in the rebuilt tables are the build
+clock — `date_added` in `features.tsv` and `retrieved` in `provenance.tsv`, both
+outside the content digest by construction.
+
+---
+
 ## Decide these. No amount of further research will.
 
 Three naming and scope questions, and three patent flags. Each is a judgement
@@ -618,6 +647,17 @@ enclosing them. A synthetic tandem terminator, not a rival T2 extent.
 **Added, not corrected:** the row now cites Brosius 1984 and Orosz 1991 (above),
 so the *name* rests on the primary literature and only the *extent* rests on the
 vector records. Before 2026-08-11 both rested on the vector records.
+
+**Corrected 2026-08-12, and it is the one thing on this page to read before
+signing this row:** the note used to end "it is the shortest and most sharply
+bounded of the twelve". It is not the shortest of the twelve, of the nine in the
+table, or of the fifteen this stage declares — `PLF:4000` and `PLF:4001` are
+17 nt against this row's 28 and were both declared before it, so the claim was
+false when written, not overtaken. The note now says so, states
+the bounding as the measurement it is rather than as a ranking, and points at
+`reference_nt` so the count can be re-derived. `notes` is inside the digest, so
+this changed this row's digest — which cost nothing, because the row is
+`proposed` and unsigned.
 
 ```
 python features/build/build.py --show PLF:4009

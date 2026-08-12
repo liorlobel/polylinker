@@ -808,11 +808,37 @@ ITEMS: tuple[Convention, ...] = (
             "operon, downstream of T1. Vectors that carry 'rrnB T1T2' carry both "
             "with the natural spacer between them; this row is T2 alone."
         ),
+        # The sentence below used to end "it is the shortest and most sharply
+        # bounded of the twelve", and that was false on the day it was written,
+        # not merely overtaken: the twelve were PLF:4000..PLF:4011, and two of
+        # them -- T7 and SP6, both declared above this row -- are 17 nt against
+        # this row's 28. A superlative no reader can re-derive from the table is
+        # the kind of claim this file exists to refuse, so the replacement states
+        # the measurement it was pretending to restate (every witness at
+        # 5'+0/3'+0), records that the old claim was wrong rather than dropping
+        # it, and leaves the ranking to anyone who measures `reference_nt`.
+        # "Most sharply bounded" is not kept as a superlative either, because on
+        # the offsets alone PLF:4000 and PLF:4001 tie this row exactly.
         caveat=(
             "THE ONLY ELEMENT IN THIS STAGE WITH NO COMPETING EXTENT. Every deposit "
             "found that annotates T2 separately encloses exactly these 28 bases. "
             "That is a fact about T2 and not a general reassurance about this "
-            "stage: it is the shortest and most sharply bounded of the twelve. Note "
+            "stage. IT IS NOT A FACT ABOUT ITS LENGTH, AND THE SENTENCE THAT STOOD "
+            "HERE UNTIL 2026-08-12 SAID IT WAS: 'the shortest and most sharply "
+            "bounded of the twelve' was WRONG ON THE DAY IT WAS WRITTEN and not "
+            "merely overtaken since. The twelve were PLF:4000..PLF:4011; PLF:4000 "
+            "and PLF:4001 are 17 nt each and both are declared above this row, and "
+            "PLF:4012, appended later, is 19 nt. Measure `reference_nt` in "
+            "features.tsv: 28 nt is the fourth shortest of the nine Class B rows "
+            "in the table, and is not the shortest of the twelve, of the nine, or "
+            "of the fifteen elements this stage declares. WHAT THE "
+            "MEASUREMENT ABOVE SUPPORTS IS THE EDGES AND NOT THE COUNT, and it is "
+            "not a superlative either -- every witness of this row that annotates "
+            "anything over these bases draws 5'+0/3'+0, and PLF:4000 and PLF:4001 "
+            "read the same way. What separates this row from those two is in the "
+            "notes and not in the offsets: theirs NAME rival extents found "
+            "elsewhere (19 nt and 21 nt forms for T7; a 19 nt published consensus "
+            "running through +1 for SP6) and this row's names none. Note "
             "that 'rrnB T1T2' as one annotation is a THIRD element -- T1, the "
             "natural spacer, and T2 -- and is not this row and not the T1 row; a "
             "file carrying it will match both rows separately, with a gap. "
