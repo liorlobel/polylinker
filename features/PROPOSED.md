@@ -69,7 +69,9 @@ one.** It said "Nine of these rows" from 2026-08-11 until 2026-08-12, and nine
 was not reconstructible from anything: the table names **seven** distinct rows
 across eleven entries, plus one entry about this file, and `CHANGELOG.md`'s
 `[0.7.0]` heading — which still reads "nine rows", left standing as the record
-of what that release claimed — enumerates the same seven across eight bullets.
+of what that release claimed — enumerates the same seven in seven of its eight
+bullets, the eighth being about this file too. Seven rows, eleven table entries,
+twelve table lines, eight bullets: nine is none of them.
 Nor would seven have survived: `PLF:4006` was withdrawn on 2026-08-11, so six of
 the seven are among the rows this worklist now describes and the seventh is not
 in the table at all. A bare number here has to be re-derived by hand every time

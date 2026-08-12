@@ -25,15 +25,50 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.8.1] - 2026-08-12
+
+**This is a patch release, and nothing in it changes what Polylinker does to a
+sequence.** No engine, no format reader or writer, no annotator rule and no
+default moved. No row was added or withdrawn, and no sequence, extent, boundary
+rule or evidence citation changed anywhere in the table. A plasmid opened under
+0.8.0 and the same plasmid opened under 0.8.1 get the same answer, from the same
+code, against the same 89 records. Each of the three entries below corrects a
+sentence that was false when it was written, which is why this release has no
+*Added*, *Changed* or *Removed* section at all.
+
+**The 89 signed rows are untouched, and so is the file that signs them.**
+`features/SIGNOFF.tsv` is byte-identical to the one 0.6.0, 0.7.0 and 0.8.0
+shipped — the same blob, `2d63b169d0de742154b5a7e87c830e12d5052be7`, and the same
+sha256 `7cf86057c2b9b964976ad04788a764fd1882b56c2e4cdd427e3395a0fc858e97` — so
+**nothing has been signed since 0.6.0**, and all 89 signatures still verify. The
+table is still **112 rows: 89 signed, 23 proposed**, the same ids in the same
+order. The nine Class B rows it holds are all `proposed` and therefore **none of
+them ships**: `Db::reviewed()` serves none of the nine, and `pl annotate`
+searches none of them without `--include-proposed`.
+
+**`features.tsv` is not byte-identical to 0.8.0, so here is what does differ.**
+Exactly one cell of row *content* — `PLF:4009`'s `notes`, the only digest-covered
+cell that moved anywhere in either table — and what changed inside it is a
+sentence *about* the row, replacing a false superlative, rather than a different
+description of what the row is. That row is `proposed` with no line in
+`SIGNOFF.tsv`, so nothing was in a position to lapse. Everything else that
+differs in either table is the build clock: `date_added`, `retrieved` and the
+`#!version` header. The paragraph at the foot of this entry measures all of it
+cell by cell, because "the tables did not move" is the claim this project checks
+hardest.
+
 ### Fixed — a count in the worklist that nothing could reconstruct
 
 - **`features/PROPOSED.md` said "Nine of these rows carried a sentence" the
   research contradicted, and nine matched nothing.** Its own table names
   **seven** distinct rows across eleven entries, plus one entry about the file
-  itself; this file's `[0.7.0]` heading covers the same seven across eight
-  bullets. Seven would not have held either — `PLF:4006` was withdrawn on
-  2026-08-11, so six of the seven are among the rows the worklist now describes
-  and the seventh is not in the table at all.
+  itself; this file's `[0.7.0]` heading covers the same seven in seven of its
+  eight bullets, the eighth being about that same file rather than about a row.
+  Nothing there is nine. Seven would not have held either — `PLF:4006` was
+  withdrawn on 2026-08-11, so six of the seven are among the rows the worklist
+  now describes and the seventh is not in the table at all.
 
   The sentence now gives no number and says why: a bare count there has to be
   re-derived by hand every time a row is added, withdrawn or corrected, and it
@@ -70,12 +105,32 @@ which.
   page carries the live version alongside the live counts. The three counts in
   that sentence — 112, 89, 23 — are unchanged.
 
+### Fixed — a build date written down in `features/NOTICE`, found by cutting this release
+
+- **`features/NOTICE` said the own-work provenance rows "all read 2026-08-11
+  today". They read 2026-08-12.** The sentence exists to explain that `retrieved`
+  on an own-work field is stamped with the build date rather than with a fetch —
+  and then named the date anyway, so the rebuild that this release documents
+  falsified it on the same day, on all 843 of those rows. The date is **removed**
+  rather than advanced, and the sentence now points at `features.tsv`'s
+  `#!version` line, which is the same clock and is generated. That is the
+  treatment `PROPOSED.md`'s count got above, applied to the same failure mode one
+  file over.
+- **The four upstream dates in that file are unaffected, and that was checked
+  rather than assumed.** The 843 rows that moved are exactly the `polylinker`
+  (731) and `insdc-ft` (112) own-work rows. Every upstream fetch row is unmoved
+  and each date still carries the same number of rows it carried at 0.8.0:
+  72 for 2026-07-27, 249 for 2026-07-28, 107 for 2026-08-10 and 21 for
+  2026-08-11. The paragraph that distinguishes an ingest pass from a refresh is
+  therefore still true as written.
+
 **Nothing else in either table moved, and that was measured rather than assumed.**
 The rebuild ran offline against the cached records (`PLF_OFFLINE=1`, the mode
 `ci.yml` uses, so no upstream change could enter through it). Compared against
 0.8.0 cell by cell: `features.tsv` differs in exactly **one** content cell,
-`PLF:4009`'s `notes`, plus `date_added` on all 112 rows; `provenance.tsv` differs
-in 843 cells, **all** of them the `retrieved` date, and in nothing else. Both of
+`PLF:4009`'s `notes`, plus `date_added` on all 112 rows and the `#!version`
+header; `provenance.tsv` differs in 843 cells, **all** of them the `retrieved`
+date, and in nothing else. The id set and the id order are identical. Both of
 those are the build clock and both are outside the content digest by
 construction — see `SIGNED_COLUMNS` in `features/build/lib_columns.py` and
 `content_digest()` in `features/build/build.py`. `PLF:4009` is `proposed` with no
@@ -1801,7 +1856,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.8.1
 [0.8.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.8.0
 [0.7.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.7.0
 [0.6.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.6.0
