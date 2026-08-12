@@ -1056,11 +1056,30 @@ fn draw_circular(
     let mut feature_order: Vec<usize> = (0..bands.len())
         .filter(|&i| !bands[i].segs.is_empty())
         .collect();
-    // Filter matches ahead of size. On a 9-feature plasmid the budget never
-    // binds and this changes nothing on the map — which is correct, because
-    // nothing is hidden anywhere.
-    if let Some(lit) = lit {
-        feature_order.sort_by_key(|i| !lit.contains(i));
+    // THE SELECTED FEATURE FIRST, then filter matches, then size. On a
+    // 9-feature plasmid the budget never binds and this changes nothing on the
+    // map — which is correct, because nothing is hidden anywhere.
+    //
+    // `selected` is promoted for the reason the filter is, one step further on:
+    // a click on a row now selects that feature's bases, and on a dense map the
+    // band it selected could still be the one band with no name against it. The
+    // arc says WHERE, and a nameless arc on a ring of 80 labels is exactly the
+    // finding the filter promotion closed — a map that answers "which one did I
+    // just pick" with a widened band and nothing to read.
+    //
+    // Ahead of the filter and not behind it because there is at most one of it,
+    // so it can never crowd the matches out, while a 60-match filter could
+    // certainly crowd out the one feature the user has in hand.
+    //
+    // `sort_by_key` is stable, so features tie-broken by neither key keep the
+    // index order they arrived in, exactly as before.
+    if selected.is_some() || lit.is_some() {
+        feature_order.sort_by_key(|i| {
+            (
+                selected != Some(*i),
+                !lit.is_some_and(|lit| lit.contains(i)),
+            )
+        });
     }
     // Before the cap, so the note can say what the cap held back.
     let features_total = feature_order.len();
@@ -1097,16 +1116,20 @@ fn draw_circular(
         for s in &mut by_sector {
             s.sort_unstable_by(|&a, &b| bands[b].span_bp.cmp(&bands[a].span_bp));
         }
-        // A filter match still outranks everything: `feature_order` was already
-        // sorted matches-first above, and this preserves that by taking matches
-        // in a first sweep before the sectors are consulted at all.
+        // The selected feature and the filter matches still outrank everything:
+        // `feature_order` was already sorted promoted-first above, and this
+        // preserves that by taking them in a first sweep before the sectors are
+        // consulted at all. Without this sweep the round-robin would hand the
+        // selected feature's sector to whichever band in it is widest, which on
+        // a dense map is reliably not the one the user just clicked.
+        let promoted = |i: usize| selected == Some(i) || lit.is_some_and(|lit| lit.contains(&i));
         let mut chosen: Vec<usize> = Vec::with_capacity(MAX_FEATURE_LABELS);
-        if let Some(lit) = lit {
+        if selected.is_some() || lit.is_some() {
             for &i in &feature_order {
                 if chosen.len() == MAX_FEATURE_LABELS {
                     break;
                 }
-                if lit.contains(&i) {
+                if promoted(i) {
                     chosen.push(i);
                 }
             }
@@ -1849,6 +1872,29 @@ fn draw_circular(
         } else {
             r + band_w + b.lane as f32 * lane_step
         };
+        // ONE WIDTH FOR BOTH, and it is now a decision rather than a
+        // coincidence. The Features list is careful NOT to conflate the two —
+        // see `features_tab`, where the selected wash is painted over the
+        // hovered one so a row that is both reads as selected — and until
+        // 2026-08-12 the map had no channel to do the same with: `selected` was
+        // reachable from a Features row that put nothing in the selection, so a
+        // selected band and a hovered band were byte-for-byte identical here.
+        //
+        // The SELECTION ARC is that channel, and every path into a feature now
+        // draws it: the accent stroke on the backbone at `r`, plus two radial
+        // end caps that survive a feature too short to draw an arc for at all.
+        // Hovering draws none of it. So the two are told apart by what else is
+        // on the picture, which is a stronger separation than a second width
+        // would be — 1.5 pt between two bands in different lanes is not a
+        // channel anybody reads.
+        //
+        // ONE DOCUMENT CLASS IS STILL AMBIGUOUS HERE, and it is bounded: an
+        // annotation track or an annotation-only GenBank has features and no
+        // bases, so `select_feature_span` selects nothing and there is no arc to
+        // draw. On those files a click also routes to the Features list — see
+        // `map_clicked_feature` — where the row wash distinguishes them, so the
+        // ambiguity is on the map only, in a document whose map cannot show a
+        // selection of any kind.
         let emphasised = selected == Some(b.index) || hot == Some(b.index);
         let w = if emphasised { band_w + 3.0 } else { band_w };
 
@@ -2420,6 +2466,9 @@ fn draw_linear(
         };
         let bx0 = x_of(b.start);
         let bx1 = x_of(b.end).max(bx0 + 2.0);
+        // One height for both, for the reason the circular track keeps one
+        // width: the selection is drawn on the axis above — 3 pt of accent
+        // between two 24 pt caps — and hovering draws none of it.
         let emphasised = selected == Some(b.index) || hot == Some(b.index);
         let hh = if emphasised { h * 0.65 } else { h * 0.5 };
         // Half the width, then 7 pt — the same rule the circular track keeps, and

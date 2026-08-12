@@ -25,7 +25,60 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Selecting a feature now selects its bases, from every path, whatever tab is
+  open.** 0.9.0 made a click on the map *reveal* the feature in the panel you
+  already had open; it selected the feature's bases only when that panel was the
+  Sequence tab. A click on a Features ROW selected neither. So the map's
+  selection arc and its end caps, the readout's GC and Tm, Ctrl+Shift+R (copy
+  reverse complement) and Ctrl+Shift+P (copy protein) all keyed off a selection
+  that the commonest gesture for picking a feature had never made — the GC of a
+  feature you had picked in the list was reachable only by picking it again
+  somewhere else.
+
+  This is one rule where there were two: **selecting is unconditional, revealing
+  stays tab-dependent.** Which bases are selected is a fact about the document;
+  which panel moves to show them is a question about where you are standing, and
+  0.9.0's answer to that is untouched. Every path into a feature — the map click,
+  the Features row, the feature editor opening, Duplicate, Accept on a database
+  proposal, and Save on a new feature — now goes through one setter. The one
+  exception is a double-click *in the sequence grid*, which deliberately selects
+  the smallest covering segment rather than the whole feature: an exon, not the
+  gene the exon is in.
+
+  **It costs you a selection you made by hand.** A range dragged out in the
+  Sequence tab is replaced when you click a feature to look at it, silently, and
+  undo does not reach a selection. That is what "select" means and it is the same
+  cost Ctrl+F, a primer row and a Sanger mismatch have always charged; it is now
+  said in front of you rather than discovered — both the band and the row say
+  *"click to select its bases"* on hover, and an annotation-only file, which has
+  no bases to select, says *"click to select"* instead.
+
+- **A click on a feature's NAME in the Features list now selects it.** It did
+  not: egui makes a `Label` click-and-drag-sensing so its text can be swept, and
+  those labels are drawn inside the row and therefore on top of it. Measured with
+  `Context::interaction_snapshot`, a press at the centre of `AmpR`'s name was won
+  by the label while the row itself reported `contains_pointer: true, hovered:
+  false, clicked: false`. The row only ever answered where no label had been
+  drawn. Text selection is off for this row and nowhere else.
+
+- **A second click on the same feature clears the bases as well as the
+  highlight** — but only when they are still the ones that click put there. If
+  you have dragged out something else since, that survives: clearing it would
+  destroy a selection the gesture never made.
+
+- **The selected feature is first in the map's label budget**, ahead of the
+  filter matches it already promoted. Otherwise on a dense map you click a row
+  and the band you selected is the one band with no name against it, which is the
+  finding 0.9.0 closed wearing different clothes. One name is promoted, so it
+  cannot crowd out a filter with sixty matches.
+
+- **The whole name of a truncated row is shown on the row's own tooltip** rather
+  than on the name label's, together with what a click does. The label is no
+  longer interactive, and egui marks a non-interactive widget hovered only when
+  it is on top of the interactive one, so left where it was the tooltip would
+  simply have stopped appearing.
 
 ## [0.9.0] - 2026-08-12
 
