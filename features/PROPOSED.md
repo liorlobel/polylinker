@@ -122,7 +122,7 @@ unchanged in **v0.6.0, v0.7.0 and v0.8.0**.
 
 | Row | What was written | What the table says |
 |---|---|---|
-| `PLF:4009` rrnB T2 | notes: "it is the shortest and most sharply bounded of the twelve" | **it is not the shortest and never was.** The twelve were `PLF:4000`–`PLF:4011`; `PLF:4000` and `PLF:4001` are 17 nt each and both are declared *above* this row. `PLF:4012`, appended since, is 19 nt. Measure `reference_nt`: at 28 nt this is the **fourth shortest** of the nine Class B rows in the table |
+| `PLF:4009` rrnB T2 | notes: "it is the shortest and most sharply bounded of the twelve" | **it is not the shortest and never was.** The twelve were `PLF:4000`–`PLF:4011`; `PLF:4000` and `PLF:4001` are 17 nt each and both are declared *above* this row. `PLF:4012`, appended since, is 19 nt. Measure `reference_nt`: at 28 nt this is the **fourth shortest** of the ten Class B rows in the table |
 
 The bounding half is kept but no longer as a superlative, because it is not one:
 every witness of `PLF:4009` that annotates anything over these bases draws

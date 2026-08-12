@@ -14555,8 +14555,11 @@ fn strand_glyph(s: Strand) -> &'static str {
 /// reason, and pKoV has three `Unoriented` features whose "no strand" must be
 /// printed rather than guessed at.
 ///
-/// Line 3 is what makes the tab jump on click explicable rather than an
-/// unexplained tab switch.
+/// Line 3 is what makes click-to-select explicable — and, on the six tabs that
+/// cannot show a feature, the tab switch that follows it. It said "the tab jump
+/// on click" until 2026-08-12, when the click stopped always jumping: it now
+/// reveals the feature in the panel that is open, and `map_clicked_feature`'s
+/// own doc comment is the authority on which panels those are.
 fn feature_tip(f: &pl_core::Feature, mol: &pl_core::Molecule) -> String {
     let span = mol.span();
     let circular = mol.topology.is_circular();

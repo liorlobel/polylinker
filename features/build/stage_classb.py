@@ -166,18 +166,26 @@ Rho-independent terminators cannot come from Rfam: SOURCING.md line 193 records
 that as a confirmed negative, so rrnB T1/T2 and T7 Tphi are anchored on their
 own primary records instead and no one went looking again.
 
-Nine further elements were worked up in the first pass and were NOT rows. Three
+Nine further elements were worked up in the first pass and were NOT rows. Four
 of them are rows now -- the T3 promoter, the araBAD promoter and the human
 EF-1alpha promoter, PLF:4012 to PLF:4014, APPENDED on 2026-08-11 so that no
-published id moved. Each had been refused for a reason that measurement did not
-support: T3 for a want of witnesses it does not have, EF-1alpha because a vector
-form cannot be cited to the gene by coordinates (true, and it does not need to
-be), araBAD for want of an anchor that exists. The corrected reasons are in
-`HELD` below beside the six elements that are still refused, which are now ten
-entries because two of them were one name over several unrelated elements and
-have been split. A row whose boundary would be a coin toss between two
-equally-supported, non-nested conventions is not a row this database can carry,
-because `consensus_of_insdc` would then be false on its face.
+published id moved, and the mouse PGK promoter, PLF:4015, appended the same way
+on 2026-08-12 on the curator's instruction. The first three had each been
+refused for a reason that measurement did not support: T3 for a want of
+witnesses it does not have, EF-1alpha because a vector form cannot be cited to
+the gene by coordinates (true, and it does not need to be), araBAD for want of
+an anchor that exists. PGK left for a different kind of reason and the two must
+not be read as one: its reason was NOT contradicted. It measures two independent
+submissions and two exact placements against floors of two and two -- it clears
+at the floor, with nothing to spare -- and the entry that held it ended by
+saying the measurement was done and the judgement was not, naming issuing the
+row as the one decision this file must never take. Lior Lobel took that decision
+on 2026-08-12. The corrected reasons are in `HELD` below beside the five
+elements that are still refused, which are now nine entries because two of them
+were one name over several unrelated elements and have been split. A row whose
+boundary would be a coin toss between two equally-supported, non-nested
+conventions is not a row this database can carry, because `consensus_of_insdc`
+would then be false on its face.
 
 NOT DONE, AND IT IS A DEFECT IN THIS FILE RATHER THAN IN ANY ROW: `FT_LINE`
 cannot match a feature key fifteen characters wide, because EMBL pads the key

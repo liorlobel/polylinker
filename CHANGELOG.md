@@ -25,6 +25,85 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.9.0] - 2026-08-12
+
+**A minor release rather than a patch, and the reason is the first bullet: for
+the first time in four releases, something you do in the app answers
+differently.** 0.6.0, 0.7.0, 0.8.0 and 0.8.1 each opened by saying that nothing
+in them changed what Polylinker does — they moved prose, counts and checks, and
+a plasmid opened under any of them got the same answer from the same code. This
+one changes a gesture. **Clicking a feature on the map used to throw you into
+the Features tab whatever you were doing; now it shows you the feature where you
+already are.** That is a change to the one surface every user touches, so it
+takes a minor number.
+
+**The rest of the release is one database row**: `PLF:4015`, the mouse PGK
+promoter, issued on 2026-08-12 because the curator instructed it and not because
+any rule changed. No engine, no format reader or writer and no annotator rule
+moved, and no existing row's sequence, extent, boundary rule or evidence
+citation changed.
+
+**The 89 signed rows are untouched, and so is the file that signs them.**
+`features/SIGNOFF.tsv` is byte-identical to the one 0.6.0, 0.7.0, 0.8.0 and
+0.8.1 shipped — the same blob, `2d63b169d0de742154b5a7e87c830e12d5052be7`, and
+the same sha256
+`7cf86057c2b9b964976ad04788a764fd1882b56c2e4cdd427e3395a0fc858e97` — so
+**nothing has been signed since 0.6.0**, all 89 signatures still verify, and the
+89 records `pl annotate` searches by default are the same 89. The table is now
+**113 rows: 89 signed, 24 proposed.** Ten of those are Class B regulatory
+elements and **none of the ten ships**: `Db::reviewed()` serves none of them, and
+`pl annotate` searches none of them without `--include-proposed`.
+
+### Changed
+
+- **Click a feature on the map and it is revealed in the panel that is already
+  open.** With the **Sequence** tab up, the click selects that feature's bases
+  and scrolls the grid to where the feature *begins*. For a feature that crosses
+  the origin, "begins" is the high coordinate, and what gets selected is the
+  short arc across the origin — 318 bases on the 8,117 bp molecule the test uses
+  — rather than the 7,799-base complement the same pair of carets also names.
+  With the **Features** tab up, the list scrolls the row into view; before this,
+  clicking a band whose row had scrolled out of sight changed nothing you could
+  see, because the translucent wash on the row is the only per-row marker and it
+  is clipped away. Either destination then lets go: the reveal is a one-shot, so
+  the view comes to rest and you can wheel straight off the row or the bases it
+  just brought up without being dragged back.
+- **The six tabs that cannot show a feature still take you to the Features
+  list** — Library, Enzymes, Primers, Reads, History and File. That is a
+  decision and not a leftover: a cut list, an oligo, a trace, an edit log, a file
+  header and a folder of other files all answer questions that are not about one
+  feature, and a click whose only visible effect is on the surface you clicked
+  reads as a click that did not work. The Sequence tab goes there too on a
+  document with no bases — an annotation track, or an annotation-only GenBank —
+  because it paints one sentence and no grid, so there is nothing there to reveal
+  into.
+- **Clicking the same feature a second time still clears the selection, and now
+  does only that**: no tab switch, no scroll. The map draws the selection
+  whichever tab is open, so a click on a band that is already highlighted is a
+  deliberate "clear this" rather than a request to be taken anywhere.
+  **Double-click still opens the feature editor**, and reveals once rather than
+  twice.
+- **A map click on a feature the Features filter hides says so** in the status
+  line, naming the feature and the filter text, rather than emptying the box the
+  user typed in or selecting something with no row to show for it.
+- **Counts corrected by measurement, not by assumption**: the table is
+  **113 rows — 89 signed, 24 proposed** (was 112/89/23), and Stage 5 now has
+  **ten** Class B rows in the table (was nine) out of **sixteen** declared
+  elements (was fifteen). Five are still refused by `MIN_PLACEMENTS` and
+  `PLF:4006` is still withdrawn. Updated in `README.md`, `features/README.md`,
+  `features/PROPOSED.md`, `features/NOTICE`, `docs/PLAN.md`,
+  `bins/pl-gui/src/featuredb.rs`, `bins/pl-gui/src/settings.rs` and
+  `crates/pl-features/src/lib.rs`. `features/PROPOSED.md` gains a section for
+  `PLF:4015` with its `--show` command, its at-the-floor corroboration stated
+  plainly, and the second-copy provenance.
+- **`stage_classb.HELD` loses the PGK entry**, and nothing left in that file
+  describes PGK as held or as failing on its evidence. The module docstring's
+  every-copy paragraph now separates the two events it would otherwise blur: no
+  row *returned* on the 2026-08-11 fix, and `PLF:4015` did not return — it was
+  issued.
+
 ### Added
 
 - **`PLF:4015`, the mouse PGK promoter, issued on the curator's instruction —
@@ -41,21 +120,21 @@ which.
   `PLF:4006` stays retired. Verified by diffing the id→name mapping across the
   commit: **no published id changed meaning.**
 
-  **The evidence, re-measured by driving the stage's own `verify()` rather than
-  taken from the hold text.** The anchor, `BX469914.4` (Wellcome Trust Sanger
-  Institute, clone RP23-217J7, chromosome X), annotates **nothing** — its entire
-  feature table is one `source` line. `CR293496.1` (Sanger Centre) draws
-  `regulatory 4137..4644`, 5'+0/3'+0. `AB242435.1` (Central Institute for
-  Experimental Animals, Kawasaki) carries the element **twice** and draws
-  `regulatory 2089..2596` over the second copy, edge for edge, while the first
-  copy at 374-881 carries a 516 nt feature, 5'+8/3'+0. `same_submitter()` merges
-  `BX469914` and `CR293496` — both Hinxton — so the anchor adds no third
-  opinion. **The row clears at exactly the floor on both counts: 2 submissions
-  against `MIN_SUBMISSIONS = 2`, and 2 placements against `MIN_PLACEMENTS = 2`,
-  with no margin.** The row says so in its own `caveat` rather than leaving a
-  reader to infer it, because "corroborated" and "corroborated twice over" are
-  different claims. `MIN_PLACEMENTS`, `MIN_SUBMISSIONS`, `SUBMITTER_MERGE`,
-  `same_submitter()` and the SnapGene screen are untouched.
+  **It clears at exactly the floor, on both counts, with nothing to spare.**
+  Re-measured by driving the stage's own `verify()` rather than taken from the
+  hold text: the anchor, `BX469914.4` (Wellcome Trust Sanger Institute, clone
+  RP23-217J7, chromosome X), annotates **nothing** — its entire feature table is
+  one `source` line. `CR293496.1` (Sanger Centre) draws `regulatory 4137..4644`,
+  5'+0/3'+0. `AB242435.1` (Central Institute for Experimental Animals, Kawasaki)
+  carries the element **twice** and draws `regulatory 2089..2596` over the second
+  copy, edge for edge, while the first copy at 374-881 carries a 516 nt feature,
+  5'+8/3'+0. `same_submitter()` merges `BX469914` and `CR293496` — both Hinxton —
+  so the anchor adds no third opinion. That leaves **2 submissions against
+  `MIN_SUBMISSIONS = 2` and 2 placements against `MIN_PLACEMENTS = 2`: lose
+  either witness and the row fails.** The row says so in its own `caveat` rather
+  than leaving a reader to infer it, because "corroborated" and "corroborated
+  twice over" are different claims. `MIN_PLACEMENTS`, `MIN_SUBMISSIONS`,
+  `SUBMITTER_MERGE`, `same_submitter()` and the SnapGene screen are untouched.
 
   **The second placement exists only because of the 2026-08-11 second-copy fix,
   and the row's own note says so.** Under the previous implementation, which
@@ -63,20 +142,22 @@ which.
   refused. That is the honest provenance of this row's corroboration, and it
   travels with the row rather than living only in this file.
 
-  **What the 508 nt is, from the primary source.** The primary source for the
-  mouse Pgk-1 promoter is Adra, Boer & McBurney 1987, *Gene* 60:65-74, PMID
-  3440520, which is `M18735.1`'s own publication; the description is written from
-  it and from measurement, not from any vendor page. Carrying `M18735.1`'s exon-1
-  and CDS annotation across the alignment, the element is **−431..+77** — 431
-  bases upstream of the transcription start, through 77 bases of exon 1, stopping
-  16 bases short of the ATG at `BX469914.4:13715`. It contains the whole promoter
-  as that paper describes it (five `GGGCGG` Sp1 hexamers, one `CCAAT`, no TATA
-  box — counted in the shipped bases, and the only copies of either in the whole
-  1110 bp primary record). **Neither edge is delimited by anything primary**:
-  −431 is 196 bases beyond the outermost Sp1 site, and +77 is a point inside exon
-  1 that misses both the transcription start and the initiation codon. Both edges
-  are a convention two depositors converged on, which is exactly what
-  `boundary_rule = consensus_of_insdc` claims and no more.
+  **Neither edge is a landmark, and that is the whole content of
+  `boundary_rule = consensus_of_insdc` here.** The primary source for the mouse
+  Pgk-1 promoter is Adra, Boer & McBurney 1987, *Gene* 60:65-74, PMID 3440520,
+  which is `M18735.1`'s own publication; the description is written from it and
+  from measurement, not from any vendor page. Carrying `M18735.1`'s exon-1 and
+  CDS annotation across the alignment, the element is **−431..+77** — 431 bases
+  upstream of the 5' end of exon 1, through 77 bases of it, stopping 16 bases
+  short of the ATG at `BX469914.4:13715`. It holds the whole promoter as that
+  paper describes it: all five `GGGCGG` Sp1 hexamers, the one `CCAAT`, and no
+  TATA box — counted in the shipped bases, and the only copies of either in the
+  whole 1110 bp primary record. But **−431 is 196 bases beyond the
+  outermost Sp1 site and nothing draws a line there**, and **+77 is a point
+  inside exon 1 that misses both the transcription start and the initiation
+  codon**. Both edges are a convention two depositors converged on. That is
+  exactly what `consensus_of_insdc` claims, and this row must not be read as
+  claiming more.
 
   **The old hold text's "~48 substitutions from the gene" is withdrawn and is
   not repeated anywhere in the tree.** It came of measuring against `M18735.1`
@@ -92,49 +173,6 @@ which.
   published here. Issuing a row puts it in the table; only a signature puts it
   inside `Db::reviewed()`, and only the first has happened.
 
-### Changed
-
-- **Clicking a feature on the map now reveals it in the panel that is open,
-  instead of always switching to the Features tab.** With the Sequence tab up,
-  the click selects the feature's bases and scrolls the grid to where the
-  feature *begins* — including for an origin-crossing feature, where the start
-  is the high coordinate and the selection is the short arc — 318 bases on the
-  8,117 bp molecule the test uses — rather than the 7,799-base complement the
-  same pair of carets also names. With the Features
-  tab up, the list scrolls the row into view; before this, a selected feature
-  scrolled out of sight was indicated by nothing at all, since the row's
-  translucent wash is the only per-row marker and it is clipped away. Both
-  destinations then let go: the reveal is a one-shot, so the view comes to rest
-  and the wheel can carry it away from the row or the bases it just brought into
-  view, without being dragged back. The six
-  tabs that cannot show a feature — Library, Enzymes, Primers, Reads, History,
-  File — still switch to the Features list, deliberately: a click whose only
-  visible effect is on the surface you clicked reads as a click that did not
-  work. So does the Sequence tab on a document that has no bases to show, which
-  is an annotation track or an annotation-only GenBank: it paints one sentence
-  and no grid, so there is nothing there to reveal into. A second click on the
-  same band still deselects, and now does nothing
-  else: it does not navigate and does not move the view, because the map draws
-  the selection whatever tab is open, so that click is a deliberate "clear
-  this". Double-click still opens the feature editor, and reveals once.
-- **A map click on a feature the Features filter hides says so** in the status
-  line, naming the feature and the filter text, rather than emptying the box the
-  user typed in or selecting something with no row to show for it.
-- **Counts corrected by measurement, not by assumption**: the table is
-  **113 rows — 89 signed, 24 proposed** (was 112/89/23), and Stage 5 now has
-  **ten** Class B rows in the table (was nine) out of **sixteen** declared
-  elements (was fifteen). Five are still refused by `MIN_PLACEMENTS` and
-  `PLF:4006` is still withdrawn. Updated in `README.md`, `features/README.md`,
-  `features/PROPOSED.md`, `docs/PLAN.md`, `bins/pl-gui/src/featuredb.rs` and
-  `crates/pl-features/src/lib.rs`. `features/PROPOSED.md` gains a section for
-  `PLF:4015` with its `--show` command, its at-the-floor corroboration stated
-  plainly, and the second-copy provenance.
-- **`stage_classb.HELD` loses the PGK entry**, and nothing left in that file
-  describes PGK as held or as failing on its evidence. The module docstring's
-  every-copy paragraph now separates the two events it would otherwise blur: no
-  row *returned* on the 2026-08-11 fix, and `PLF:4015` did not return — it was
-  issued.
-
 ### Fixed
 
 - Two cross-references that named the PGK entry as an example of "a sequence
@@ -144,30 +182,82 @@ which.
   2026-08-11, and it is doubly wrong now: `PLF:4015` is an exact slice of a
   primary genomic record, so it is the counter-example. Both now point only at
   `PLF:4014`'s vector form, which is the case that really has this shape.
+- **`PLF:4009`'s two population counts, left standing for one commit and then
+  corrected.** Its `notes` said "the fourth shortest of the nine Class B rows in
+  the table" and "the fifteen elements this stage declares"; issuing `PLF:4015`
+  made those **ten** and **sixteen**. Every assertion the note makes survived the
+  correction — 28 nt is **still** the fourth shortest, of 17, 17, 19, 28, 44, 47,
+  225, 285, 508 and 1188 — and only the sizes of the populations moved. The note
+  now carries the distinction that would have prevented the error: **the ordinal
+  is a fact about this row, the populations are facts about the stage, and only
+  the second kind moves when an element is issued, withdrawn or refused.** Two
+  words changed, `nine` → `ten` and `fifteen` → `sixteen`; the row is `proposed`
+  and unsigned, so its digest moved with them and nothing lapsed.
+  `features/PROPOSED.md` records both the day it was left alone and the day it
+  was fixed.
+- **Six sentences that this release's own two changes falsified**, found by
+  re-measuring every count in the tree against `features.tsv`,
+  `stage_classb.py` and `provenance.tsv` rather than by reading for plausibility:
+  - `bins/pl-gui/src/settings.rs` — the `annotate_unreviewed` doc comment, which
+    warns in its own last line that it goes stale every time the table moves,
+    and did: 112 rows and 23 records against 89 signatures, and nine regulatory
+    elements. It is 113, 24 and ten, and the Class B half moved a **third** time
+    on 2026-08-12.
+  - `features/build/stage_classb.py` — the *"what is deliberately NOT here"*
+    paragraph, which still said three of the nine held elements were rows and
+    that `HELD` was ten entries over six refused elements. Measured at this
+    commit: `len(HELD)` is **9**, over **five** refused elements — SV40 early,
+    U6, H1, the AG/CAG/chicken-β-actin split and the tet split — and **four**
+    are rows.
+  - `features/README.md` — the id-block table's `PLF:4000`–`PLF:4999` row, which
+    the `PLF:4015` commit's hunks skipped. "9 of 25 worked up" is **10 of 25**;
+    25 is unchanged, being 16 `ITEMS` plus 9 `HELD`.
+  - `features/PROPOSED.md` — "the fourth shortest of the **nine** Class B rows",
+    in the correction table that fixed the superlative. Ten.
+  - `features/NOTICE` — "over all **112** of our descriptions", the sibling of a
+    line in `features/README.md` that the same commit did update. 113.
+  - `bins/pl-gui/src/main.rs` — `feature_tip`'s doc comment, which explained the
+    hover line as what makes "the tab jump on click" explicable. The tab no
+    longer jumps on every click; the line itself, *"click to select ·
+    double-click to edit"*, is unchanged and still accurate.
+- **`features/NOTICE`'s ingest-pass banner, which had gone wrong in three
+  places at once.** It listed four upstream retrieval dates; `provenance.tsv`
+  carries **five**, because issuing `PLF:4015` fetched
+  `ena/browser/api/fasta/BX469914?range=13192-13699` from EMBL-EBI on 2026-08-12
+  — a URL no earlier pass had requested, and the source of that row's
+  `reference_nt`. The cache's own metadata records the fetch date, and a verified
+  cache hit returns without rewriting it, so this is a real retrieval on a fifth
+  day and not the build clock leaking into an `ena` row. It is named as a
+  **fetch** and given its size — two provenance rows, against 72, 249, 107 and 21
+  for the four passes before it — rather than promoted to a fifth ingest pass.
+  Two further figures in the same banner moved: the 2026-08-11 bucket now holds
+  **24** rows over 18 accessions, not 21 over 15, because three of `PLF:4015`'s
+  `boundary_evidence` rows cite records fetched that day while the element was
+  still held; and the own-work rows the build clock stamps are **851**, not 843.
+  Every provenance row the file already held survives byte for byte, sha256
+  included, and no other upstream date's count moved.
 
 ### Not changed
 
-- **`features/SIGNOFF.tsv` is byte-identical to `main`**, sha256
-  `7cf86057c2b9b964976ad04788a764fd1882b56c2e4cdd427e3395a0fc858e97` — the same
-  blob 0.6.0, 0.7.0, 0.8.0 and 0.8.1 shipped. Nothing has been signed since
-  0.6.0, and all 89 signatures still verify.
-- **The 89 signed rows and the 23 pre-existing proposed rows did not move by a
-  byte**, and neither did any of their 1292 provenance rows. Rebuilt offline
-  (`PLF_OFFLINE=1`) against the cache, then diffed against `main` column by
-  column: `features.tsv` gains one row and one header count, `provenance.tsv`
-  gains thirteen rows, and **every one of those additions belongs to
-  `PLF:4015`**. Not one pre-existing cell differs — not even `date_added` or
-  `retrieved`, which were expected to drift with the clock and did not, because
-  every source those rows cite was already in the cache.
-- **One stale figure was left standing on purpose.** `PLF:4009`'s `notes` say
-  "the fourth shortest of the nine Class B rows in the table" and "the fifteen
-  elements this stage declares"; those populations are now ten and sixteen. The
-  assertions survive — 28 nt is still the fourth shortest, and still not the
-  shortest of anything — and the row was **not** edited, because `PLF:4015` was
-  added under a rule that no existing row change by a byte, and rewriting a
-  proposed row's prose while asking a curator to read it is the wrong trade. It
-  is recorded in `features/PROPOSED.md` under that row rather than fixed
-  silently.
+- **`features/SIGNOFF.tsv` is byte-identical to `main` and to `v0.6.0`**, sha256
+  `7cf86057c2b9b964976ad04788a764fd1882b56c2e4cdd427e3395a0fc858e97`, blob
+  `2d63b169d0de742154b5a7e87c830e12d5052be7` — the same blob 0.6.0, 0.7.0, 0.8.0
+  and 0.8.1 shipped. `git diff v0.6.0 HEAD -- features/SIGNOFF.tsv` is empty.
+  Nothing has been signed since 0.6.0, all 89 signatures still verify, and no row
+  digest was computed or published anywhere in this release.
+- **The 89 signed rows and 22 of the 23 pre-existing proposed rows did not move
+  by a byte**, and neither did any of the 1,292 provenance rows that existed at
+  0.8.1. Rebuilt offline (`PLF_OFFLINE=1`) against the cache, then diffed against
+  0.8.1 column by column: `features.tsv` gains one row, rewrites one header count
+  and rewrites exactly one pre-existing cell; `provenance.tsv` gains thirteen rows
+  and changes none. **The one cell is `PLF:4009`'s `notes`**, listed under *Fixed*
+  above — column 14 of that row and nothing else on it, not `date_added`, not the
+  `#!version` header, and not one cell of any other row. The thirteen new
+  provenance rows all belong to `PLF:4015`.
+- **The release commit itself does not touch `features.tsv`.** Everything above
+  about that table landed in the two pull requests this release collects; cutting
+  the release moves version numbers, prose and the changelog, and the generated
+  tables are byte-identical before and after it.
 
 ## [0.8.1] - 2026-08-12
 
@@ -1998,7 +2088,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.9.0
 [0.8.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.8.1
 [0.8.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.8.0
 [0.7.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.7.0

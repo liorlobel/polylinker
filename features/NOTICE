@@ -24,13 +24,16 @@ the most current data available from NLM.
 That sentence is reproduced exactly as `SOURCING.md` section 2 Stage 0.1
 requires it. It is narrower than the truth, so the broader statement follows:
 this dataset is a dated snapshot (sources retrieved 2026-07-27, 2026-07-28,
-2026-08-10 and 2026-08-11) and does not reflect the most current data available
-from NLM, the UniProt Consortium, EMBL-EBI, Rfam or the Worldwide Protein Data
-Bank.
+2026-08-10, 2026-08-11 and 2026-08-12) and does not reflect the most current
+data available from NLM, the UniProt Consortium, EMBL-EBI, Rfam or the Worldwide
+Protein Data Bank.
 
-Four dates because there have been four ingest passes, not because anything was
-refreshed underneath an existing row. Every earlier row still carries its own
-earlier retrieval date, field by field, in `provenance.tsv`.
+Five dates because upstream was fetched on five separate days, not because
+anything was refreshed underneath an existing row. Every earlier row still
+carries its own earlier retrieval date, field by field, in `provenance.tsv`.
+The fifth is a fetch and not a pass on the scale of the other four -- see the
+2026-08-12 paragraph below -- and it is listed as a date because that is what
+this sentence promises: every day on which anything was taken from upstream.
 
 The 2026-08-10 date belongs to the fourteen additional selection markers and the
 six Class B regulatory elements that carry it today. Seven Class B rows were
@@ -43,17 +46,39 @@ there was no such thing. Three Class B rows -- `PLF:4012` the T3 promoter,
 `PLF:4013` the araBAD promoter and `PLF:4014` the human EF-1alpha promoter --
 were added that day, and adding them fetched fifteen ENA records that had not
 been fetched before, contributing 21 provenance rows. Nothing that was already
-in the file was re-fetched: the count of rows carrying each earlier date is
+in the file was re-fetched: the count of rows carrying each earlier date was
 unchanged, which is the check that distinguishes a new pass from a refresh.
+
+That count has since moved once, and this file says so rather than leaving the
+sentence above to be read as still current. The 2026-08-11 bucket now holds 24
+rows over 18 accessions, not 21 over 15. The three extra rows are `PLF:4015`'s
+`boundary_evidence` -- the EMBL flatfiles of `BX469914`, `CR293496.1` and
+`AB242435.1`, all fetched on 2026-08-11 while the element was still held and
+still refused. They are a row issued later against records fetched then, which
+is the one way an earlier bucket can grow without anything being re-fetched, and
+it is a different event from a refresh: every provenance row this file already
+held survives byte for byte, sha256 included, and no other upstream date's count
+moved -- 2026-07-27, 2026-07-28 and 2026-08-10 stand where they stood.
+
+The 2026-08-12 date is one fetch, for one row, and it is named here rather than
+folded into the four above. Issuing `PLF:4015` needed the 508 bases themselves,
+which no earlier fetch had taken: the range slice
+`ena/browser/api/fasta/BX469914?range=13192-13699` was requested from EMBL-EBI
+on 2026-08-12 and is the source of that row's `reference_nt` and of one of its
+`boundary_evidence` rows -- two provenance rows, both `ena`. It is an upstream
+retrieval on a fifth day and it is counted as one; calling two rows a fifth
+ingest pass alongside the four above, which brought 72, 249, 107 and 21
+provenance rows, would flatter it, so this paragraph gives its size instead.
 
 Note that `retrieved` on an own-work field is stamped with the build date rather
 than with a fetch, so every `polylinker` and `insdc-ft` row reads whatever date
 the build ran on -- `features.tsv`'s `#!version` line, which is the same clock.
 This sentence used to name that date outright, and the 2026-08-12 rebuild moved
-it on all 843 of those rows while this file went on saying 2026-08-11; a date
-that a rebuild changes is not a date to write down here. The four dates above
-are upstream fetches, which is what this paragraph is about, and none of them
-moved.
+it on all 851 of those rows while this file went on saying 2026-08-11; a date
+that a rebuild changes is not a date to write down here. The five dates above
+are upstream fetches, which is what this paragraph is about, and the escape
+clause in this one does not cover the two 2026-08-12 `ena` rows: they are
+`source = ena`, not own-work, and they are a real fetch on that day.
 
 The exact retrieval date and the sha256 of every fetched source file are
 recorded per field in `provenance.tsv`, so the age of any individual value can
@@ -277,7 +302,7 @@ matches the pinned one, so renaming it does not get it in. It is implemented in
 fails CLOSED -- a network error exits with the status `taint-gate-unavailable`
 rather than passing.
 
-Its result at the time of writing, over all 112 of our descriptions against all
+Its result at the time of writing, over all 113 of our descriptions against all
 1,367 of theirs: no row shares a contiguous five-token run, and no row reaches
 60% containment. Five rows exceed the 30% warning threshold -- PLF:0002 and
 PLF:0003, the two aminoglycoside phosphotransferases, whose longest shared runs
