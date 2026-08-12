@@ -47,9 +47,13 @@ in the file was re-fetched: the count of rows carrying each earlier date is
 unchanged, which is the check that distinguishes a new pass from a refresh.
 
 Note that `retrieved` on an own-work field is stamped with the build date rather
-than with a fetch, so `polylinker` and `insdc-ft` rows all read 2026-08-11 today
-and will read whatever tomorrow's build date is. The four dates above are
-upstream fetches, which is what this paragraph is about.
+than with a fetch, so every `polylinker` and `insdc-ft` row reads whatever date
+the build ran on -- `features.tsv`'s `#!version` line, which is the same clock.
+This sentence used to name that date outright, and the 2026-08-12 rebuild moved
+it on all 843 of those rows while this file went on saying 2026-08-11; a date
+that a rebuild changes is not a date to write down here. The four dates above
+are upstream fetches, which is what this paragraph is about, and none of them
+moved.
 
 The exact retrieval date and the sha256 of every fetched source file are
 recorded per field in `provenance.tsv`, so the age of any individual value can
