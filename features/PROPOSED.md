@@ -56,13 +56,25 @@ citations and the recommendations are prose and are not.
 
 ## What changed in the tree with this worklist, and why
 
-Nine of these rows carried a sentence in `description` or `notes` that the
+Some of these rows carried a sentence in `description` or `notes` that the
 research contradicted, could not reach, or pointed at a row that is not in the
 table. Those are defects: `SIGNOFF.tsv` defines a signature as a human who
 "wrote or checked its description from the primary source", so a description
 written from nothing in particular is the thing a signature is supposed to
 catch. They are fixed here, **before** any signature, which is the order
 `SIGNOFF.tsv` requires because `description` and `notes` are inside the digest.
+
+**The table below is the count, and this sentence deliberately no longer gives
+one.** It said "Nine of these rows" from 2026-08-11 until 2026-08-12, and nine
+was not reconstructible from anything: the table names **seven** distinct rows
+across eleven entries, plus one entry about this file, and `CHANGELOG.md`'s
+`[0.7.0]` heading — which still reads "nine rows", left standing as the record
+of what that release claimed — enumerates the same seven across eight bullets.
+Nor would seven have survived: `PLF:4006` was withdrawn on 2026-08-11, so six of
+the seven are among the rows this worklist now describes and the seventh is not
+in the table at all. A bare number here has to be re-derived by hand every time
+a row is added, withdrawn or corrected, and it went stale within a day of being
+written. Count the rows in the table; that cannot drift from itself.
 
 | Row | What was written | What the evidence says |
 |---|---|---|

@@ -25,6 +25,27 @@ which.
 
 ## [Unreleased]
 
+### Fixed — a count in the worklist that nothing could reconstruct
+
+- **`features/PROPOSED.md` said "Nine of these rows carried a sentence" the
+  research contradicted, and nine matched nothing.** Its own table names
+  **seven** distinct rows across eleven entries, plus one entry about the file
+  itself; this file's `[0.7.0]` heading covers the same seven across eight
+  bullets. Seven would not have held either — `PLF:4006` was withdrawn on
+  2026-08-11, so six of the seven are among the rows the worklist now describes
+  and the seventh is not in the table at all.
+
+  The sentence now gives no number and says why: a bare count there has to be
+  re-derived by hand every time a row is added, withdrawn or corrected, and it
+  went stale within a day of being written. The table is the count. This is the
+  fourth count in three releases to drift in prose while every test-asserted
+  count held, so the fix is to stop asserting it rather than to correct it once
+  more.
+
+  `[0.7.0]`'s "nine rows" heading is **left standing** as the record of what that
+  release claimed, in the same way `PLF:4009`'s note now quotes the superlative
+  it replaces. This project records its corrections rather than overwriting them.
+
 ### Fixed — a superlative in `PLF:4009` that was false the day it was written
 
 - **`PLF:4009` rrnB T2 no longer claims to be "the shortest".** Its `notes` said
