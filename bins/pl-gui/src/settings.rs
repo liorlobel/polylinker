@@ -188,9 +188,9 @@ pub struct Layout {
     /// checkbox is the asking; the line beside it is the sentence.
     ///
     /// It changed nothing findable until 2026-08-10, and that was exactly why
-    /// it had to exist before it mattered. It matters now: the table holds 112
-    /// rows against 89 signatures, so turning this on adds 23 machine-extracted
-    /// records — 14 selection markers and 9 promoters, terminators and poly(A)
+    /// it had to exist before it mattered. It matters now: the table holds 113
+    /// rows against 89 signatures, so turning this on adds 24 machine-extracted
+    /// records — 14 selection markers and 10 promoters, terminators and poly(A)
     /// signals — that no human has read. Because the switch was built before it
     /// did anything, the difference between the two searches is still something
     /// the user chose rather than something that appeared.
@@ -198,7 +198,9 @@ pub struct Layout {
     /// It was 110 against 89, and 21 records, until 2026-08-11, when the Class B
     /// half of that list moved twice: the curator withdrew `PLF:4006`, the CMV
     /// enhancer, taking it to six, and three elements that had been held were
-    /// then issued as `PLF:4012`–`PLF:4014`, taking it to nine. Nothing about
+    /// then issued as `PLF:4012`–`PLF:4014`, taking it to nine. It moved a third
+    /// time on 2026-08-12, when the curator instructed that the mouse PGK
+    /// promoter be issued as `PLF:4015`, taking it to ten. Nothing about
     /// the switch changed — this comment is counted from the table, so it goes
     /// stale every time the table moves, and the composition is the part a
     /// reader cannot get from the headline count.

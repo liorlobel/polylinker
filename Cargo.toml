@@ -25,7 +25,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 # Measured on 2026-08-06, having never been measured before. This said 1.82
 # from the day the workspace was created, and nothing had ever compiled the
@@ -58,21 +58,21 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/liorlobel/polylinker"
 
 [workspace.dependencies]
-pl-core = { path = "crates/pl-core", version = "0.8.1" }
-pl-draw = { path = "crates/pl-draw", version = "0.8.1" }
-pl-abif = { path = "crates/pl-abif", version = "0.8.1" }
-pl-clone = { path = "crates/pl-clone", version = "0.8.1" }
-pl-enzymes = { path = "crates/pl-enzymes", version = "0.8.1" }
-pl-features = { path = "crates/pl-features", version = "0.8.1" }
-pl-index = { path = "crates/pl-index", version = "0.8.1" }
-pl-scan = { path = "crates/pl-scan", version = "0.8.1" }
-pl-primer = { path = "crates/pl-primer", version = "0.8.1" }
-pl-design = { path = "crates/pl-design", version = "0.8.1" }
-pl-sanger = { path = "crates/pl-sanger", version = "0.8.1" }
-pl-gel = { path = "crates/pl-gel", version = "0.8.1" }
-pl-doc = { path = "crates/pl-doc", version = "0.8.1" }
-pl-thermo = { path = "crates/pl-thermo", version = "0.8.1" }
-pl-fileio = { path = "crates/pl-fileio", version = "0.8.1" }
+pl-core = { path = "crates/pl-core", version = "0.9.0" }
+pl-draw = { path = "crates/pl-draw", version = "0.9.0" }
+pl-abif = { path = "crates/pl-abif", version = "0.9.0" }
+pl-clone = { path = "crates/pl-clone", version = "0.9.0" }
+pl-enzymes = { path = "crates/pl-enzymes", version = "0.9.0" }
+pl-features = { path = "crates/pl-features", version = "0.9.0" }
+pl-index = { path = "crates/pl-index", version = "0.9.0" }
+pl-scan = { path = "crates/pl-scan", version = "0.9.0" }
+pl-primer = { path = "crates/pl-primer", version = "0.9.0" }
+pl-design = { path = "crates/pl-design", version = "0.9.0" }
+pl-sanger = { path = "crates/pl-sanger", version = "0.9.0" }
+pl-gel = { path = "crates/pl-gel", version = "0.9.0" }
+pl-doc = { path = "crates/pl-doc", version = "0.9.0" }
+pl-thermo = { path = "crates/pl-thermo", version = "0.9.0" }
+pl-fileio = { path = "crates/pl-fileio", version = "0.9.0" }
 # `pl-update` holds the compiled-in release public key and the updater that
 # reads it -- docs/RELEASING.md's four requirements, met and tested.
 #
@@ -88,7 +88,7 @@ pl-fileio = { path = "crates/pl-fileio", version = "0.8.1" }
 # network from exactly one place, and a test in each reads its own sources and
 # fails if the crate is named anywhere else. If a third consumer ever appears
 # here, it needs the same test before it needs this line.
-pl-update = { path = "crates/pl-update", version = "0.8.1" }
+pl-update = { path = "crates/pl-update", version = "0.9.0" }
 
 [profile.release]
 opt-level = 3

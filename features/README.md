@@ -167,7 +167,7 @@ comes from **where it is declared**, never from where it landed in the output:
 | `PLF:1000`–`PLF:1999` | UniProt → ENA natural proteins | 28 | 14 |
 | `PLF:2000`–`PLF:2999` | Rfam structured RNA | 24 | 24 |
 | `PLF:3000`–`PLF:3999` | Hand-curated designed parts | 27 of 28 declared | 27 |
-| `PLF:4000`–`PLF:4999` | INSDC-anchored Class B conventions | 9 of 25 worked up, 5 more refused, 1 withdrawn | 0 |
+| `PLF:4000`–`PLF:4999` | INSDC-anchored Class B conventions | 10 of 25 worked up, 5 more refused, 1 withdrawn | 0 |
 
 **The block follows the stage, not the topic**, and the 2026-08-10 additions
 make that visible for the first time: fourteen new *selection markers* landed in
