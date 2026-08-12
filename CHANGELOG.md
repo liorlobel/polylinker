@@ -25,7 +25,123 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`PLF:4015`, the mouse PGK promoter, issued on the curator's instruction —
+  not because the program changed its mind.** The element,
+  `BX469914.4:13192-13699:+`, 508 nt, had sat in `stage_classb.HELD` since the
+  Class B stage was written. On 2026-08-11 the second-copy fix took its measured
+  corroboration from one exact placement to two, which cleared both floors, and
+  it was **still refused** — the stage's own docstring says that a stage which
+  promoted an element the moment its code stopped under-counting "would be
+  adjusting its own membership", and that issuing a row "is a curator's decision
+  and not this program's". That reasoning is unamended and still in the file. On
+  2026-08-12 Lior Lobel took the decision, and the item was **appended** to
+  `ITEMS`, taking `PLF:4015` so that none of `PLF:4000`–`PLF:4014` moves and
+  `PLF:4006` stays retired. Verified by diffing the id→name mapping across the
+  commit: **no published id changed meaning.**
+
+  **The evidence, re-measured by driving the stage's own `verify()` rather than
+  taken from the hold text.** The anchor, `BX469914.4` (Wellcome Trust Sanger
+  Institute, clone RP23-217J7, chromosome X), annotates **nothing** — its entire
+  feature table is one `source` line. `CR293496.1` (Sanger Centre) draws
+  `regulatory 4137..4644`, 5'+0/3'+0. `AB242435.1` (Central Institute for
+  Experimental Animals, Kawasaki) carries the element **twice** and draws
+  `regulatory 2089..2596` over the second copy, edge for edge, while the first
+  copy at 374-881 carries a 516 nt feature, 5'+8/3'+0. `same_submitter()` merges
+  `BX469914` and `CR293496` — both Hinxton — so the anchor adds no third
+  opinion. **The row clears at exactly the floor on both counts: 2 submissions
+  against `MIN_SUBMISSIONS = 2`, and 2 placements against `MIN_PLACEMENTS = 2`,
+  with no margin.** The row says so in its own `caveat` rather than leaving a
+  reader to infer it, because "corroborated" and "corroborated twice over" are
+  different claims. `MIN_PLACEMENTS`, `MIN_SUBMISSIONS`, `SUBMITTER_MERGE`,
+  `same_submitter()` and the SnapGene screen are untouched.
+
+  **The second placement exists only because of the 2026-08-11 second-copy fix,
+  and the row's own note says so.** Under the previous implementation, which
+  scored `occurrences()[0]` and nothing else, this element measured 2/1 and was
+  refused. That is the honest provenance of this row's corroboration, and it
+  travels with the row rather than living only in this file.
+
+  **What the 508 nt is, from the primary source.** The primary source for the
+  mouse Pgk-1 promoter is Adra, Boer & McBurney 1987, *Gene* 60:65-74, PMID
+  3440520, which is `M18735.1`'s own publication; the description is written from
+  it and from measurement, not from any vendor page. Carrying `M18735.1`'s exon-1
+  and CDS annotation across the alignment, the element is **−431..+77** — 431
+  bases upstream of the transcription start, through 77 bases of exon 1, stopping
+  16 bases short of the ATG at `BX469914.4:13715`. It contains the whole promoter
+  as that paper describes it (five `GGGCGG` Sp1 hexamers, one `CCAAT`, no TATA
+  box — counted in the shipped bases, and the only copies of either in the whole
+  1110 bp primary record). **Neither edge is delimited by anything primary**:
+  −431 is 196 bases beyond the outermost Sp1 site, and +77 is a point inside exon
+  1 that misses both the transcription start and the initiation codon. Both edges
+  are a convention two depositors converged on, which is exactly what
+  `boundary_rule = consensus_of_insdc` claims and no more.
+
+  **The old hold text's "~48 substitutions from the gene" is withdrawn and is
+  not repeated anywhere in the tree.** It came of measuring against `M18735.1`
+  rather than against the anchor. Against `BX469914.4` the element is a verbatim
+  slice, re-sliced and re-checked on every build. Against `M18735.1` it is three
+  exact blocks covering all 508 bases with **zero substitutions**, separated by
+  two single-base indels; those indels are the whole reason the longest exact
+  shared prefix is 64 nt. Which record is right was not determined, and the row
+  says so.
+
+  **The row carries `review_status = proposed` with an empty curator.**
+  `features/SIGNOFF.tsv` was not written, and no row digest was computed or
+  published here. Issuing a row puts it in the table; only a signature puts it
+  inside `Db::reviewed()`, and only the first has happened.
+
+### Changed
+
+- **Counts corrected by measurement, not by assumption**: the table is
+  **113 rows — 89 signed, 24 proposed** (was 112/89/23), and Stage 5 now has
+  **ten** Class B rows in the table (was nine) out of **sixteen** declared
+  elements (was fifteen). Five are still refused by `MIN_PLACEMENTS` and
+  `PLF:4006` is still withdrawn. Updated in `README.md`, `features/README.md`,
+  `features/PROPOSED.md`, `docs/PLAN.md`, `bins/pl-gui/src/featuredb.rs` and
+  `crates/pl-features/src/lib.rs`. `features/PROPOSED.md` gains a section for
+  `PLF:4015` with its `--show` command, its at-the-floor corroboration stated
+  plainly, and the second-copy provenance.
+- **`stage_classb.HELD` loses the PGK entry**, and nothing left in that file
+  describes PGK as held or as failing on its evidence. The module docstring's
+  every-copy paragraph now separates the two events it would otherwise blur: no
+  row *returned* on the 2026-08-11 fix, and `PLF:4015` did not return — it was
+  issued.
+
+### Fixed
+
+- Two cross-references that named the PGK entry as an example of "a sequence
+  that is in no primary record" — in `stage_classb.py`'s U6 hold text and the
+  matching bullet in `features/PROPOSED.md`. That was already wrong before this
+  change, since the "not a verbatim slice of anything" claim was retired on
+  2026-08-11, and it is doubly wrong now: `PLF:4015` is an exact slice of a
+  primary genomic record, so it is the counter-example. Both now point only at
+  `PLF:4014`'s vector form, which is the case that really has this shape.
+
+### Not changed
+
+- **`features/SIGNOFF.tsv` is byte-identical to `main`**, sha256
+  `7cf86057c2b9b964976ad04788a764fd1882b56c2e4cdd427e3395a0fc858e97` — the same
+  blob 0.6.0, 0.7.0, 0.8.0 and 0.8.1 shipped. Nothing has been signed since
+  0.6.0, and all 89 signatures still verify.
+- **The 89 signed rows and the 23 pre-existing proposed rows did not move by a
+  byte**, and neither did any of their 1292 provenance rows. Rebuilt offline
+  (`PLF_OFFLINE=1`) against the cache, then diffed against `main` column by
+  column: `features.tsv` gains one row and one header count, `provenance.tsv`
+  gains thirteen rows, and **every one of those additions belongs to
+  `PLF:4015`**. Not one pre-existing cell differs — not even `date_added` or
+  `retrieved`, which were expected to drift with the clock and did not, because
+  every source those rows cite was already in the cache.
+- **One stale figure was left standing on purpose.** `PLF:4009`'s `notes` say
+  "the fourth shortest of the nine Class B rows in the table" and "the fifteen
+  elements this stage declares"; those populations are now ten and sixteen. The
+  assertions survive — 28 nt is still the fourth shortest, and still not the
+  shortest of anything — and the row was **not** edited, because `PLF:4015` was
+  added under a rule that no existing row change by a byte, and rewriting a
+  proposed row's prose while asking a curator to read it is the wrong trade. It
+  is recorded in `features/PROPOSED.md` under that row rather than fixed
+  silently.
 
 ## [0.8.1] - 2026-08-12
 

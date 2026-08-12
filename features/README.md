@@ -6,22 +6,26 @@ An openly licensed, provenance-tracked database of common plasmid features.
 this carries, and [`SOURCING.md`](SOURCING.md) for how each source was cleared
 and by what evidence.
 
-> **Status: v0.1 pre-release, 112 records. 89 carry a curator sign-off, and 23 are `proposed`.**
+> **Status: v0.1 pre-release, 113 records. 89 carry a curator sign-off, and 24 are `proposed`.**
 >
 > The 89 were signed on 2026-07-28. Twenty-one rows were added on 2026-08-10; on
 > 2026-08-11 the curator **withdrew one of them**, `PLF:4006`, the CMV enhancer,
 > leaving 20, and three more Class B rows were added the same day — `PLF:4012`
 > the T3 promoter, `PLF:4013` the araBAD promoter and `PLF:4014` the human
-> EF-1alpha promoter, each appended so that no published id moved. That is 23.
-> No human has read those 23, and **`Db::reviewed()` does not ship
+> EF-1alpha promoter, each appended so that no published id moved. A fourth,
+> `PLF:4015` the mouse PGK promoter, was appended on 2026-08-12 **on the
+> curator's instruction**: the stage had refused to issue it itself, and being
+> told to is the only thing that changed. That is 24.
+> No human has read those 24, and **`Db::reviewed()` does not ship
 > them** — what a user of the tool searches is still 89 rows until a curator
-> signs each one.
+> signs each one. Being told to *issue* a row and being told to *sign* it are
+> different instructions, and only the first has been given.
 > `Db::reviewed()` ships only the rows [`SIGNOFF.tsv`](SIGNOFF.tsv) names with a
 > content digest that still matches. A sign-off lapses automatically the moment
 > the row it approves changes — including a change to its prose, because
-> `description` and `notes` are both in `SIGNED_COLUMNS`. The gap between 112
+> `description` and `notes` are both in `SIGNED_COLUMNS`. The gap between 113
 > and 89 is the intended state of a table a machine is allowed to add to; see
-> *Rule 6* below, and *What is proposed and not yet signed* for what the 23 are.
+> *Rule 6* below, and *What is proposed and not yet signed* for what the 24 are.
 > The curator's reading list for them, row by row and contested cases first, is
 > [`PROPOSED.md`](PROPOSED.md).
 >
@@ -309,9 +313,9 @@ Composition, measured from the shipped file:
 | Rfam structured RNA | 24 | `regulatory` (19), `misc` (5) | nt | `consensus_of_insdc` |
 | Curated designed parts | 8 | `synthetic_part` | nt | codons from a natural parent |
 | Curated designed parts | 19 | `synthetic_part` | **peptide only** | `designed_sequence` (13), `literature_defined` (6); across all 27, 13 and 14 |
-| Class B conventions | 9 (0 signed; a 10th withdrawn) | `regulatory` | nt | `consensus_of_insdc`, corroborated by ≥2 independent placements |
+| Class B conventions | 10 (0 signed; an 11th withdrawn) | `regulatory` | nt | `consensus_of_insdc`, corroborated by ≥2 independent placements |
 
-52 of 112 rows are coding and carry a protein reference verified by exact
+52 of 113 rows are coding and carry a protein reference verified by exact
 translation from their own nucleotides. **19 rows carry a peptide and no
 nucleotides at all** — the shape decision 1 created — and each was verified by
 locating its residue string, exactly once, in a sequence fetched at build time:
@@ -346,7 +350,7 @@ already caught and corrected on the UniProt → ENA leg.
 
 ### What is proposed and not yet signed
 
-23 rows carry `review_status = proposed`, which means a program put them in the
+24 rows carry `review_status = proposed`, which means a program put them in the
 table and no human has read them. `Db::reviewed()` excludes every one, so
 nothing below is searched by `pl annotate`, by the desktop app, or by anything
 else, until a curator signs it in `SIGNOFF.tsv`. **They are in the repository so
@@ -354,7 +358,7 @@ that a human can read them, which is the only thing the machine is allowed to
 ask for.**
 
 [`PROPOSED.md`](PROPOSED.md) is the worklist for that reading: every one of the
-23, what it claims, the accessions to check it against, the boundary decision
+24, what it claims, the accessions to check it against, the boundary decision
 and its basis, the exact `--show` invocation per row, and — since 2026-08-11 —
 the primary source that settles the row plus a recommendation. It opens with the
 handful of questions a curator has to *decide* rather than check, because no
@@ -390,12 +394,12 @@ map is the gene with its own promoter and terminator, and `TRP1` in the YRp7
 lineage means TRP1-ARS1. A match against those files covers the ORF and stops,
 and that is correct.
 
-**9 Class B regulatory elements**, from the fifteen that were built — see the
-next section for the five that were refused and why. Ten reached the table,
-seven on 2026-08-10 and three more on 2026-08-11; the curator withdrew
-`PLF:4006` on 2026-08-11, so of the fifteen built, five were refused on the
-evidence and one was withdrawn by a human, which are different things and are
-counted separately here on purpose. None of the nine is signed, so none of them
+**10 Class B regulatory elements**, from the sixteen that were built — see the
+next section for the five that were refused and why. Eleven reached the table,
+seven on 2026-08-10, three more on 2026-08-11 and one on 2026-08-12; the curator
+withdrew `PLF:4006` on 2026-08-11, so of the sixteen built, five were refused on
+the evidence and one was withdrawn by a human, which are different things and are
+counted separately here on purpose. None of the ten is signed, so none of them
 is searched.
 
 ### Class B: boundaries that are conventions, and how they are evidenced
@@ -408,13 +412,18 @@ least two independent GenBank exemplars each, and §4 says what those exemplars
 are for — "showing where depositors actually place it". `build/stage_classb.py`
 executes both halves rather than asserting them.
 
-**Fifteen elements were built and nine are in the table.** The nine are the T7,
-SP6, T3, araBAD and human EF-1α promoters, the T7 (Tφ), rrnB T1 and rrnB T2
-terminators, and the bGH poly(A) signal; the last three promoters were appended
-on 2026-08-11 as `PLF:4012`–`PLF:4014`, having been held until measurement
-contradicted the reasons they were held for. A tenth, the CMV enhancer
-(`PLF:4006`), reached the table on 2026-08-10 and was withdrawn by the curator
-on 2026-08-11; its id is retired.
+**Sixteen elements were built and ten are in the table.** The ten are the T7,
+SP6, T3, araBAD, human EF-1α and mouse PGK promoters, the T7 (Tφ), rrnB T1 and
+rrnB T2 terminators, and the bGH poly(A) signal; three of the promoters were
+appended on 2026-08-11 as `PLF:4012`–`PLF:4014`, having been held until
+measurement contradicted the reasons they were held for. The mouse PGK promoter
+was appended on 2026-08-12 as `PLF:4015`, and it is a different case worth
+reading as one: measurement did *not* contradict the reason it was held for. Its
+entry said the numbers cleared both floors and that issuing the row was a
+judgement the program must never make for itself, and it stayed held on that
+basis until the curator instructed that it be issued. An eleventh, the CMV
+enhancer (`PLF:4006`), reached the table on 2026-08-10 and was withdrawn by the
+curator on 2026-08-11; its id is retired.
 Each one claims exactly four things:
 
 - **These bases are `accession:lo-hi` on this strand.** Re-fetched and re-sliced
@@ -604,8 +613,8 @@ states its initiator codon in `notes`, measured rather than assumed.
 ### What this is not
 
 It is **not** a drop-in replacement for pLannotate or SnapGene Common Features:
-at 112 rows against their 1,367 it is about 8% of the row count — and 89 of the
-112 are what the tool actually searches, which is about 7% — and it covers
+at 113 rows against their 1,367 it is about 8% of the row count — and 89 of the
+113 are what the tool actually searches, which is about 7% — and it covers
 partly different ground. It is **not** complete or comprehensive, and it does not
 cover all common plasmid features. It carries **no** coverage claim for
 commercial catalogue vectors — pET-28a, pGEX-4T-1 and pMAL-c2 return `Count=0`

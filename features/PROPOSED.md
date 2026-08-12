@@ -1,7 +1,7 @@
-# PROPOSED.md -- the curator worklist for the 23 unsigned rows
+# PROPOSED.md -- the curator worklist for the 24 unsigned rows
 
 `features/SIGNOFF.tsv` states the rule this database exists to enforce:
-**AI may propose, never assert.** These 23 rows are the proposal. Every one
+**AI may propose, never assert.** These 24 rows are the proposal. Every one
 **carries** `review_status = proposed` with an empty curator, none appears in
 `SIGNOFF.tsv`, and `Db::reviewed()` ships none of them. Nothing here is in
 the product until a named human signs it. Read the two verbs in that sentence
@@ -28,20 +28,34 @@ re-measured and the reasons they had been held for did not survive it:
 `PLF:4012` the T3 promoter, `PLF:4013` the araBAD promoter and `PLF:4014` the
 human EF-1alpha promoter. All three were APPENDED, so no id in this worklist
 moved and the 89 signatures and the other 20 proposed rows are byte-identical
-either side of the change. They are the last three entries in the table below.
+either side of the change.
+
+**A FOURTH WAS ADDED ON 2026-08-12, AND IT IS A DIFFERENT KIND OF EVENT.**
+`PLF:4015`, the mouse PGK promoter, was **issued on the curator's instruction**.
+Nothing about its evidence changed and no reason it had been held for was
+contradicted. Its held entry said the opposite of a complaint: that the
+measurement was done, that the numbers cleared both floors, and that issuing the
+row was the one decision the program must never take for itself -- *"a stage
+that promoted an element the moment its own code stopped under-counting would be
+adjusting its own membership"*. It stayed held on that basis until Lior Lobel
+said to issue it, on 2026-08-12. Read the three rows above as **the program
+correcting itself** and this one as **a human deciding**; filing them together
+would blur the only distinction this page exists to keep. It too was APPENDED,
+and the 89 signatures and the other 23 proposed rows are byte-identical either
+side of the change -- rebuilt and diffed, not asserted.
 
 | | |
 |---|---|
-| Table | 112 rows, of which 89 signed and 23 proposed |
-| This worklist | 23 rows: 14 selection markers (Stage 2), 9 Class B conventions (Stage 5) |
-| Recommended to sign | 20, of which 3 only after reading a specific paragraph. Two of the three rows added on 2026-08-11 (`PLF:4012`, `PLF:4014`) are *your call* and say why; the third, `PLF:4013`, is **SIGN** |
+| Table | 113 rows, of which 89 signed and 24 proposed |
+| This worklist | 24 rows: 14 selection markers (Stage 2), 10 Class B conventions (Stage 5) |
+| Recommended to sign | 20, of which 3 only after reading a specific paragraph. Two of the three rows added on 2026-08-11 (`PLF:4012`, `PLF:4014`) are *your call* and say why; the third, `PLF:4013`, is **SIGN**. `PLF:4015`, added 2026-08-12, is *your call* and says why |
 | WITHDRAWN | 1 (`PLF:4006`), decided by the curator 2026-08-11; the id is retired, not freed |
 | Needs a decision that no evidence can make | 3 naming/scope questions and 3 patent flags, listed below |
 | Refused, not proposed | 5 Class B elements that were built and then failed the extent-corroboration rule; see *Refused on the evidence* |
 | Signatures on file | 89, all still valid, `SIGNOFF.tsv` byte-identical to `main` |
 
 **No digests are printed in this file, on purpose.** `SIGNOFF.tsv` says signing
-a digest nobody has read is not an attestation; a worklist that let you copy 23
+a digest nobody has read is not an attestation; a worklist that let you copy 24
 hashes out of it without opening a single row would be a machine for producing
 exactly that. The digests also change the moment any prose in a row changes, so
 a copy here would go stale silently. Get them from `--show`, one row at a time,
@@ -172,10 +186,10 @@ bar**, **`PLF:1026` pat**.
 
 ---
 
-## The 23 rows at a glance
+## The 24 rows at a glance
 
 The withdrawn row is listed first and struck from the count: it is not one of
-the 23, it is not in the table, and it cannot be signed. It stays on the page
+the 24, it is not in the table, and it cannot be signed. It stays on the page
 because a decision with no record of itself is how a database forgets why it
 looks the way it does.
 
@@ -205,6 +219,7 @@ looks the way it does.
 | `PLF:4012` | T3 promoter | **your call** | Five independent addresses draw these 19 edges; the 17 nt extent that would match `PLF:4000`'s −17..−1 rule has one, so this row and its two siblings use different conventions on purpose |
 | `PLF:4013` | araBAD promoter | **SIGN** | Five independent addresses place it edge for edge, verbatim in `J01641.1`, the 1978 araBAD regulatory-region record -- and 284/285 against K-12 MG1655, which the row states |
 | `PLF:4014` | EF-1alpha promoter (human) | **your call** | At the floor with two placements; the 1179 nt *vector* form has three and is a different sequence -- the row explains which it took and what that costs |
+| `PLF:4015` | PGK promoter (mouse) | **your call** | Issued on your instruction 2026-08-12, not on new evidence. At the floor on *both* counts -- 2 submissions and 2 placements against floors of 2 and 2 -- and the second placement exists only because of the 2026-08-11 second-copy fix |
 
 ---
 
@@ -216,7 +231,7 @@ unescaped, plus the provenance quads and the resulting digest, and it writes
 nothing:
 
 ```
-python features/build/build.py --show PLF:4000,PLF:4001,PLF:4007,PLF:4008,PLF:4009,PLF:4010,PLF:4012,PLF:4013,PLF:4014
+python features/build/build.py --show PLF:4000,PLF:4001,PLF:4007,PLF:4008,PLF:4009,PLF:4010,PLF:4012,PLF:4013,PLF:4014,PLF:4015
 python features/build/build.py --show PLF:1014,PLF:1015,PLF:1016,PLF:1017,PLF:1018,PLF:1019,PLF:1020,PLF:1021,PLF:1022,PLF:1023,PLF:1024,PLF:1025,PLF:1026,PLF:1027
 ```
 
@@ -266,11 +281,11 @@ only route to it).
 
 ---
 
-# The 9 Class B rows (Stage 5, `features/build/stage_classb.py`)
+# The 10 Class B rows (Stage 5, `features/build/stage_classb.py`)
 
-*Ten sections follow, because `PLF:4006` is kept below as the record of a
-decision. Nine of them are rows you can sign; the first is not in the table.
-None of the nine is signed today, so none of the nine is searched by anything.*
+*Eleven sections follow, because `PLF:4006` is kept below as the record of a
+decision. Ten of them are rows you can sign; the first is not in the table.
+None of the ten is signed today, so none of the ten is searched by anything.*
 
 SOURCING.md section 3 classes promoter, terminator and poly(A) boundaries as
 **conventions, not facts** -- there is no database that says where 'the CMV
@@ -664,14 +679,25 @@ vector records. Before 2026-08-11 both rested on the vector records.
 
 **Corrected 2026-08-12, and it is the one thing on this page to read before
 signing this row:** the note used to end "it is the shortest and most sharply
-bounded of the twelve". It is not the shortest of the twelve, of the nine in the
-table, or of the fifteen this stage declares — `PLF:4000` and `PLF:4001` are
+bounded of the twelve". It is not the shortest of the twelve, of the rows in the
+table, or of the elements this stage declares — `PLF:4000` and `PLF:4001` are
 17 nt against this row's 28 and were both declared before it, so the claim was
 false when written, not overtaken. The note now says so, states
 the bounding as the measurement it is rather than as a ranking, and points at
 `reference_nt` so the count can be re-derived. `notes` is inside the digest, so
 this changed this row's digest — which cost nothing, because the row is
 `proposed` and unsigned.
+
+**AND TWO POPULATION COUNTS INSIDE THAT NOTE WENT STALE LATER THE SAME DAY,
+deliberately unfixed.** It says "the fourth shortest of the nine Class B rows in
+the table" and "the fifteen elements this stage declares"; issuing `PLF:4015`
+made those ten and sixteen. Re-measured: 28 nt is **still** the fourth shortest
+(the ten run 17, 17, 19, 28, 44, 47, 225, 285, 508, 1188) and still not the
+shortest of anything, so every assertion the note makes survives and only the
+sizes of the populations moved. The row was left byte-identical rather than
+re-cut, because `PLF:4015` was appended under a rule that no existing row change
+by a byte, and quietly editing a proposed row's prose while asking a curator to
+read it is the wrong trade. Fix it in a pass that is entitled to move this row.
 
 ```
 python features/build/build.py --show PLF:4009
@@ -830,6 +856,95 @@ caveat gives the exact recipe. Note also that one of the two placements is a
 
 ```
 python features/build/build.py --show PLF:4014
+```
+
+---
+
+## `PLF:4015` -- PGK promoter (mouse)  ·  **RECOMMENDATION: YOUR CALL.** You issued it; signing it is the separate decision
+
+- **Claims**: The promoter of the mouse `Pgk-1` gene -- G+C rich, five Sp1 hexamers, one CCAAT, no TATA box -- taken as the depositors take it, 431 bases upstream of the transcription start through 77 bases of exon 1.
+- **Anchor**: `BX469914.4:13192-13699:+`  (508 nt, `promoter`, `consensus_of_insdc`) -- Wellcome Trust Sanger Institute, clone RP23-217J7, chromosome X.
+- **Primary source for the promoter**: Adra, Boer & McBurney 1987, *Gene* 60:65-74, PMID 3440520, [DOI](https://doi.org/10.1016/0378-1119\(87\)90214-9) -- the publication of `M18735.1`, which the anchor is **not**.
+- **Check against**: CR293496.1, AB242435.1
+- **Places it at our extent**: 2 of 2, against a floor of 2 -- **no margin, on both counts**
+
+**THIS ROW EXISTS BECAUSE YOU SAID SO ON 2026-08-12, AND FOR NO OTHER REASON.**
+It is worth being blunt about, because every other row on this page arrived by a
+program deciding it had cleared a rule. This one did not. The element cleared
+both floors on 2026-08-11 and was **still refused**, because the stage's own
+docstring says that promoting an element the moment its code stopped
+under-counting would be "the stage adjusting its own membership", and that
+issuing a row "is a curator's decision and not this program's". Nothing in that
+reasoning has been withdrawn; the sentence is still in the file, unamended. What
+changed is that the decision was taken by the person it belongs to. If you now
+decline to sign the row, nothing about that is inconsistent: **issuing** put it
+in the table and **signing** would put it in `Db::reviewed()`, and you have so
+far only done the first.
+
+**AT THE FLOOR, ON BOTH COUNTS, WHICH NO OTHER Class B row is.** `PLF:4014` is at
+the floor on placements with three submissions holding the bases. This row is at
+the floor on *both*: **2 independent submissions** against `MIN_SUBMISSIONS = 2`,
+and **2 exact placements** against `MIN_PLACEMENTS = 2`. Lose either witness and
+there is no row. The anchor is not one of the two and adds nothing to either
+number -- `BX469914` (Wellcome Trust Sanger Institute) and `CR293496` (Sanger
+Centre) are both Hinxton, `same_submitter()` merges them, and the anchor
+annotates nothing anywhere in its 30,886 bases in any case: its entire feature
+table is one `source` line. So "corroborated" is exactly true here and
+"corroborated twice over" would not be.
+
+**THE SECOND PLACEMENT IS THERE ONLY BECAUSE OF THE 2026-08-11 SECOND-COPY FIX,
+and you should know that before you sign.** `AB242435.1` (Central Institute for
+Experimental Animals, Kawasaki) carries the element twice. Over copy 1, at
+374-881, the depositor drew `regulatory 366..881` -- 516 nt, 5'+8/3'+0. Over copy
+2, at 2089-2596, they drew `regulatory 2089..2596`, these 508 bases edge for
+edge. `verify()` scored `occurrences()[0]` and nothing else, so it saw the 516
+and never the 508: **before that fix this row measured 2 submissions and 1
+placement and was refused.** The fix is a change to the *implementation* of
+`MIN_PLACEMENTS` and not to the rule -- the rule always asked whether a
+submission "annotates a feature at exactly this extent", and that depositor did
+-- but the honest way to state this row's corroboration is that half of it was
+invisible for a day.
+
+**WHAT THE 508 nt IS RELATIVE TO THE GENE, AND WHAT DRAWS ITS EDGES: NOTHING
+DOES.** The anchor annotates no gene, so the landmarks are carried across from
+`M18735.1`, which annotates its own exon 1 at 853..1006 and the initiation codon
+at 946. Aligned to it, this row is **-431..+77** (431 + 77 = 508): it starts 431
+bases upstream of the transcription start and stops 77 bases inside exon 1, 16
+bases short of the ATG at `BX469914.4:13715`. It contains the whole promoter as
+Adra et al. describe it -- the five `GGGCGG` hexamers at -235, -57, -45, -33 and
+-28, the `CCAAT` at -117, no TATA -- and those are the only copies of either in
+the entire 1110 bp primary record. **But -431 is not a landmark** (it is 196
+bases beyond the outermost Sp1 site and nothing draws a line there) **and +77 is
+not a landmark either** (it is a point in the middle of exon 1 that misses both
+the transcription start and the ATG). Both edges are a convention two depositors
+converged on. That is precisely what `consensus_of_insdc` means and the row says
+so in as many words; if you want an edge with an argument behind it, this element
+does not have one and no amount of further fetching will produce one.
+
+**THE OLD HOLD TEXT'S "~48 SUBSTITUTIONS" IS WITHDRAWN AND IS NOT REPEATED
+ANYWHERE.** It came of measuring the element against `M18735.1` and reading a
+frameshifted comparison as divergence. Re-measured: against the anchor the
+element is a **verbatim** slice, re-checked every build; against `M18735.1` it is
+three exact blocks (element 1-64, 65-442, 443-508) covering all 508 bases with
+**zero substitutions**, separated by two single-base indels -- one G the element
+has and `M18735.1` does not, and one C `M18735.1` has and the element does not,
+twelve bases into exon 1. Those two indels are the whole reason the longest exact
+shared prefix is 64 nt. Which record is right was **not** determined: `M18735.1`
+is a 1987 C3H/He record, `BX469914.4` is a finished RPCI-23 BAC, and this project
+has no basis to call the difference strain or sequencing.
+
+**ONE THING THIS ROW BROKE THAT WAS DELIBERATELY LEFT BROKEN.** `PLF:4009`'s
+`notes` say "28 nt is the fourth shortest of the nine Class B rows in the table"
+and "the fifteen elements this stage declares". Both population counts are now
+stale -- ten and sixteen. The substance survives untouched (28 nt is still the
+fourth shortest, and still not the shortest of anything), and the row was **not**
+edited, because editing it would change a proposed row's content under a curator
+who is being asked to read it. Correcting those two numbers is a one-line change
+for a pass that is entitled to move that row; it is recorded here rather than
+made silently.
+
+```
+python features/build/build.py --show PLF:4015
 ```
 
 ---
@@ -1305,7 +1420,7 @@ design and it has now been exercised, so the qualification it needs is here:
 > row at once, all fourteen were measured under both loops before the fix
 > landed. **NONE OF THE FIVE ABOVE RETURNED. NO ROW MOVED AT ALL** -- the two
 > numbers in the table above are the same under either loop, all nine rows in
-> the table keep their extents and their `notes` byte for byte, and `features.tsv`
+> the table on that date keep their extents and their `notes` byte for byte, and `features.tsv`
 > and `provenance.tsv` rebuild identical. The reason is that only four witness
 > records in `ITEMS` carry their element more than once -- `V01146` (T7, 7x),
 > `AY288927` (SP6, 3x), `U13859` (rrnB T2, 2x) and `AJ318471` (T3, 3x) -- and
@@ -1344,9 +1459,9 @@ that caught the row; it was the extent rule, which names no vendor at all.
 
 ## Worked up and deliberately NOT issued as rows
 
-SOURCING.md section 6 budgets about 40 Class B items. Ten survived the rules and
-nine of those are in the table, the tenth having been withdrawn; five more were
-built and refused on the extent evidence (above). The rest are recorded in
+SOURCING.md section 6 budgets about 40 Class B items. Eleven survived the rules
+and ten of those are in the table, the eleventh having been withdrawn; five more
+were built and refused on the extent evidence (above). The rest are recorded in
 `stage_classb.HELD` with the reason, so that nobody re-does the work and
 concludes it was never done.
 
@@ -1358,14 +1473,16 @@ entries with separate statuses -- the CAG line became three, the dropped
 every reason changed: two were **backwards** about which of the two rules they
 failed, one had been checking the wrong accession, and one turned out to fail
 only because `verify()` scored a record's first copy of an element and not its
-second -- **that defect was fixed on 2026-08-11 and PGK's entry now records a
-measurement instead of a complaint.** Where an entry now says an extent CLEARS the corroboration floor and is
-still not a row, the missing thing is named.
+second -- **that defect was fixed on 2026-08-11, and the one entry it was
+holding down, the mouse PGK promoter, left this list on 2026-08-12 when the
+curator instructed that it be issued as `PLF:4015`.** Where an entry now says an
+extent CLEARS the corroboration floor and is still not a row, the missing thing
+is named.
 
 - **SV40 early promoter** -- The 330 nt convention is a contiguous circular interval that WRAPS the numbering origin of the SV40 record, which this schema's accession:lo-hi:strand boundary_evidence cannot express, and a rival 283 nt form does not place as a single interval at all. The region also carries a tandem repeat, so the two forms may differ in repeat copy number -- that was NOT counted and is not offered as a finding. RE-CHECKED 2026-08-11 ON A 419 nt FORM OF THE SAME CONVENTION, and the wrap is not one record's numbering quirk but every record's: the interval is 5171..5589 of a 5243 bp genome, i.e. it runs 346 bases past the origin, and the assembled 419 bases occur CONTIGUOUSLY in none of J02400.1, AF316139.1 or EF579804.1 -- all three 5243 bp, all three sharing that origin. The obstacle is the schema and not the evidence, which is a different thing from the other holds in this list and would be cleared by a boundary_evidence form that can express a circular join, not by more fetching.
-- **U6 promoter (human)** -- STILL HELD, and the reason it stood under until 2026-08-11 was backwards. It said only ONE independent submission witnesses the 249 nt extent and that it 'fails on witnesses, not on evidence'. Both halves are the wrong way round. The bases are witnessed abundantly: four independent addresses in a single afternoon's fetching hold them (Allen Institute for Brain Science PZ036121.1, George Washington University JN255690.1, AIST LC414435.1, UCSD MK318530.1) and a 2026-08-11 survey of 479 records put it at eleven. What exactly ONE submission does is DRAW those edges: OP099837.1, OP099840.1 and OP099843.1, all Drug Discovery Sciences, Boehringer Ingelheim Pharma, one address. So it clears MIN_SUBMISSIONS several times over and fails MIN_PLACEMENTS at one, which is the opposite failure and has the opposite remedy. THE EXTENT IS THE ARTICULABLE ONE, WHICH IS WHY IT IS WORTH SAYING SO. M14486.1 (human U6 gene, clone pGEM/U6, Kunkel, Texas A&M; Kunkel, Maser, Calvet & Pederson 1986, Proc Natl Acad Sci USA 83:8575-8579, PMID 3464970) annotates the PSE at 263..282, the TATA box at 298..306 and prim_transcript 329..435, so +1 is 329 and the 249 nt convention is exactly M14486.1:80-328 = -249..-1, the same rule PLF:4000 and PLF:4001 use. (That prim_transcript is invisible to this stage's own parser -- see the EF-1alpha row's caveat on fifteen-character feature keys -- and was read by hand.) TWO NESTED ALTERNATIVES DO CLEAR THE FLOOR AND ARE DELIBERATELY NOT OFFERED AS ROWS. 241 nt = M14486.1:80-320 is annotated exactly by the Allen Institute (PZ036121.1, PZ036141.1 -- one address), PX139666.1 and MK318530.1, three independent submissions; it stops nine bases short of +1 for no reason anyone has articulated. 264 nt = M14486.1:65-328 is annotated exactly by George Washington University (JN255690.1, JN255691.1 -- one address) and AIST (LC414435.1), two submissions, at the floor, and it ends at -1 like the 249. Adopting either BECAUSE the 249 failed is re-cutting an extent until two records agree with it, which is the move this stage exists to refuse; the module docstring already says such a re-cut 'is a curator's decision and not this program's'. They are recorded here so that decision is cheap, not taken. One further measurement, because it is the trap: three submissions DO draw a 249 nt extent whose sequence is not the primary record's -- one substitution at M14486.1:146 -- and MG550105.1 is one of them. Counting those would ship a sequence that is in no primary record, which is the failure the EF-1alpha and PGK entries are about.
+- **U6 promoter (human)** -- STILL HELD, and the reason it stood under until 2026-08-11 was backwards. It said only ONE independent submission witnesses the 249 nt extent and that it 'fails on witnesses, not on evidence'. Both halves are the wrong way round. The bases are witnessed abundantly: four independent addresses in a single afternoon's fetching hold them (Allen Institute for Brain Science PZ036121.1, George Washington University JN255690.1, AIST LC414435.1, UCSD MK318530.1) and a 2026-08-11 survey of 479 records put it at eleven. What exactly ONE submission does is DRAW those edges: OP099837.1, OP099840.1 and OP099843.1, all Drug Discovery Sciences, Boehringer Ingelheim Pharma, one address. So it clears MIN_SUBMISSIONS several times over and fails MIN_PLACEMENTS at one, which is the opposite failure and has the opposite remedy. THE EXTENT IS THE ARTICULABLE ONE, WHICH IS WHY IT IS WORTH SAYING SO. M14486.1 (human U6 gene, clone pGEM/U6, Kunkel, Texas A&M; Kunkel, Maser, Calvet & Pederson 1986, Proc Natl Acad Sci USA 83:8575-8579, PMID 3464970) annotates the PSE at 263..282, the TATA box at 298..306 and prim_transcript 329..435, so +1 is 329 and the 249 nt convention is exactly M14486.1:80-328 = -249..-1, the same rule PLF:4000 and PLF:4001 use. (That prim_transcript is invisible to this stage's own parser -- see the EF-1alpha row's caveat on fifteen-character feature keys -- and was read by hand.) TWO NESTED ALTERNATIVES DO CLEAR THE FLOOR AND ARE DELIBERATELY NOT OFFERED AS ROWS. 241 nt = M14486.1:80-320 is annotated exactly by the Allen Institute (PZ036121.1, PZ036141.1 -- one address), PX139666.1 and MK318530.1, three independent submissions; it stops nine bases short of +1 for no reason anyone has articulated. 264 nt = M14486.1:65-328 is annotated exactly by George Washington University (JN255690.1, JN255691.1 -- one address) and AIST (LC414435.1), two submissions, at the floor, and it ends at -1 like the 249. Adopting either BECAUSE the 249 failed is re-cutting an extent until two records agree with it, which is the move this stage exists to refuse; the module docstring already says such a re-cut 'is a curator's decision and not this program's'. They are recorded here so that decision is cheap, not taken. One further measurement, because it is the trap: three submissions DO draw a 249 nt extent whose sequence is not the primary record's -- one substitution at M14486.1:146 -- and MG550105.1 is one of them. Counting those would ship a sequence that is in no primary record, which is the failure `PLF:4014`'s caveat describes for the EF-1alpha VECTOR form. (This sentence named the PGK entry as a second example and was wrong to: `PLF:4015` ships an exact slice of a primary genomic record, so it is the counter-example and not a second case.)
 - **H1 promoter (human)** -- STILL HELD, and both halves of the old reason were wrong; the corrected reason is stronger and it fails on two legs rather than one. THE PROVENANCE GAP IS CLOSED, so 'no genomic record carrying the upstream promoter could be located' is retired. The record is X16612.1, 'Human gene for H1 RNA', 1057 bp, clone pMBH1, deposited by S. Altman at Yale (Baer, Nilsen, Costigan & Altman). It annotates the TATA box at 345..348 and precursor_RNA 375..715, and X16612.1:152-366 -- 215 nt -- is held verbatim by FOUR independent addresses: AL355075.6:176331-176545 (Genoscope, chromosome 14 clone), AF479321.1:1615-1829 (Genome Sciences, University of Washington), Neurology at the University of Goettingen (AY640625.1:2317-2531 and AY640626.1:2373-2587, one address between them) and the anchor itself. This page and `stage_classb.HELD` both said THREE until 2026-08-11; re-measured under the every-copy rule, Goettingen holds the 215 verbatim and draws it 5'+0/3'+1, which is the whole 215-versus-216 question in one number. The old reason was checking X15624, 'Human H1 RNA', which is a 340 bp transcript-level record and contains none of the promoter. THE CONSENSUS WAS NEVER THERE, which is the leg that now kills it. 'Three independent submissions agree on 216 nt' counted address STRINGS, which is precisely the error same_submitter() exists to prevent (finding 2 above). Every record found holding those 216 bases is one department: AY640625.1 and AY640626.1, Neurology, University of Goettingen, Waldweg 33 -- one address, one submission. FJ687158.1, DQ465352.1, MH749464.1, LT727092.1, AL355075.6 and AF479321.1 were each checked and hold no copy of the 216 nt at all. Corroborating submissions: ONE. AND THE 216 nt IS STILL NOT A SLICE OF ANYTHING. It is X16612.1:152-366 plus one further base, and that base is A where X16612.1:367 is T -- so it is 215 verbatim bases with a 216th that disagrees with the gene, and boundary_evidence would have nothing to point at. The genomic 215 nt form, which does slice cleanly, is annotated by NOBODY: four submissions hold it and zero draw it, so it fails MIN_PLACEMENTS at nought -- and it fails there identically under the every-copy rule, because no witness of this element carries it more than once. WHAT WOULD RESCUE IT: two genuinely independent submissions annotating exactly 215 nt (today none) or exactly 216 nt (today one, and it would still not be a verbatim slice). Nothing in the schema and nothing about the anchor is now the obstacle.
-- **PGK promoter (mouse)** -- HELD, AND IT IS THE ONE ENTRY THIS PAGE'S 2026-08-11 REWRITE GOT WRONG IN THE OTHER DIRECTION. 'NOT A VERBATIM SLICE OF ANYTHING' IS RETIRED: the 508 nt element is exact at BX469914.4:13192-13699 on the plus strand -- 'Mouse DNA sequence from clone RP23-217J7 on chromosome X', Wellcome Trust Sanger Institute -- so a citable modern anchor exists. It is not in M18735.1 (Adra, Boer & McBurney 1987, Gene 60:65-74), the 1987 Pgk-1 exon 1 record the older reason measured against: the longest exact prefix present there is 64 nt and the record then diverges, which is a 1987 record differing from the genome and NOT the engineered internal deletion the EF-1alpha entry describes. (This page said 'Adra, Boer & Klip' until 2026-08-11; the third author is McBurney, and `stage_classb.HELD` had it right.) 'ONE SUBMISSION' WAS WRONG BY AN ORDER OF MAGNITUDE -- a survey put nine independent addresses on the exact bases. **IT DIED ON MIN_PLACEMENTS AT ONE BECAUSE OF A CODE DEFECT, NOT BECAUSE OF THE EVIDENCE, AND THE DEFECT IS NOW FIXED.** CR293496.1 (Sanger Centre) annotates regulatory 4137..4644 = exactly these 508 bases. AB242435.1 (Central Institute for Experimental Animals, Kawasaki) carries the element TWICE and annotates the SECOND copy at exactly 508 nt (regulatory 2089..2596), while the first copy, at 374-881, carries a 516 nt feature (regulatory 366..881, 5'+8/3'+0). `verify()` scored `occurrences()[0]` and no other copy, so it saw the 516 and never the 508. `place_in_record()` now scores every copy, and re-measured under it this element has **two independent submissions and two exact placements** -- BX469914 and CR293496 are both Hinxton addresses and `same_submitter()` merges them, so the anchor adds no third opinion -- and it would clear both floors. **WHAT IS STILL OWED IS THE ONE DECISION NO PROGRAM MAY TAKE: issuing the row.** It needs a curated name and description, and an id APPENDED after `PLF:4014` so that none of `PLF:4000`..`PLF:4014` moves. A stage that promoted an element the moment its own code stopped under-counting it would be adjusting its own membership, which is the move every refusal in this file exists to refuse. The measurement is done; the judgement is yours. And note what the previous version of this bullet predicted -- that fixing `verify()` 'will alter the measured notes of rows already signed'. It was checked: no Class B row is signed, `SIGNOFF.tsv` carries no `PLF:40*` line at all, and `features.tsv` and `provenance.tsv` rebuild byte for byte either side of the fix.
+- **PGK promoter (mouse)** -- **NO LONGER HELD. ISSUED AS `PLF:4015` ON 2026-08-12, ON THE CURATOR'S INSTRUCTION**, and its section is above with the row. It is kept named here because a reader who remembers it as held is owed the reason it stopped being held, and that reason is not the one this list is usually about: no measurement contradicted the hold. The entry that stood here said the element cleared both floors -- two independent submissions, two exact placements -- and that what remained was "the one decision no program may take: issuing the row". Lior Lobel took it. The evidence is unchanged and the stage's refusal to promote an element by itself is unchanged; see `PLF:4015` above for the numbers, for what the 508 nt is relative to the gene, and for the two things about it a signer should weigh -- that it sits at the floor on *both* counts, and that its second placement is visible only because of the 2026-08-11 second-copy fix.
 - **AG promoter of pCAGGS, 1342 nt** -- HELD AT ONE PLACEMENT, and the old CAG entry's central claim is confirmed harder than it was stated. These 1342 bases -- LT727518.1:3457-4798, the pCAGGS record deposited by BCCM/LMBP Gent -- share ZERO 20-mers with X17403.1, the human cytomegalovirus genome, on either strand. There is no CMV sequence in the element that most maps call a CAG promoter's front half; it is chicken beta-actin running into rabbit beta-globin. WHAT KILLS IT IS NOT THAT: it is that 'widely deposited' was false. The extent appears in dozens of records and ONE submission -- the BCCM/LMBP bulk plasmid-collection deposit -- which is finding 2 of the module docstring in its purest form. One placement, floor of two. A second, independent AG-type element of 1347 nt exists (EF186083-EF186088, LUMC Leiden), also with no CMV sequence and also with one submission, so the family is not one depositor's quirk and is still not a consensus.
 - **CAG promoter, the CMV-enhancer-containing forms** -- HELD, AND THE NUMBER IS THE FINDING: fifteen distinct extents were measured and not one of them reaches two independent submissions. The 935 nt form (JN898959.1/JN898962.1, KIST, one submission) really does begin inside the cytomegalovirus enhancer -- 210 20-mers shared with X17403.1, against zero for the AG element above -- and so do the 1699, 1722, 1740, 1733, 1728, 1721, 1720, 1710, 1677, 1673, 1667 and 1647 nt forms, each with exactly one submission behind it. Fifteen single opinions is not a convention, and the reason to keep this entry separate from the AG one is that a single row named 'CAG promoter' spanning both would merge an element that contains CMV with an element that provably does not.
 - **chicken beta-actin promoter** -- HELD, AND THIS IS THE ONE TO READ TWICE, because the two legs of the rule are satisfied by two INCOMPATIBLE extents and the near-miss is exactly the shape PLF:4006 was withdrawn over. 276 nt = X00182.1:268-543 has the better boundary argument in this whole file: the record annotates a CAAT signal at 455..459 and a TATA box at 517..524, and the extent is -276..-1 against the transcription start, +1 excluded -- the PLF:4000 rule arrived at independently. It has TWO submissions annotating it exactly, and the second one must not be counted: OK413188.1 (OHSU/ONPRC) is an honest witness, and OP697986.1 is the same submitting address as OP697991.1 -- same_submitter() returns True -- which SOURCING.md section 0.6 names as a DEMONSTRATED false negative of record_is_snapgene_annotated, and which section deliberately declined to widen the screen for. The mechanical screen passes it; a curator may not. ONE honest placement. 278 nt has two honest submissions (Oxford Protein Production Facility, EF372394.1 and EU733644.1, deposited 2007 and 2008; Witten/Herdecke, PQ540283.1, 2024) and no anchor: it is the 276 nt with TWO extra G in a G-homopolymer -- measured, the run is 14 G in X00182.1 and 16 G in the vector form -- so it is a verbatim slice of no primary record and reference_nt taken through that tract will silently miss whichever half of the wild population has the other length. WHAT WOULD RESCUE IT: one more independent submission drawing 276 nt exactly. Nothing else is missing.
@@ -1374,10 +1491,12 @@ still not a row, the missing thing is named.
 - **CMV-tetO2, PTight and the remaining tet hybrids** -- HELD, AND STILL PARTLY UNSPLIT. The third and fourth elements the dropped 'tetO / TRE / Ptet' entry named -- a CMV-tetO2 hybrid and a bacterial pTet -- plus a PTight/TRE-Tight form of 315 nt that the 2026-08-11 survey turned up, have not been separated into individually named elements here and none of their extents was measured against this stage's own rule. A CMV-tetO2 element additionally OVERLAPS PLF:4005's refused interval, so it cannot be worked up independently of the decision the CMV promoter row is still waiting on. Recorded so the split is complete on paper even where the evidence is not.
 
 The recurring reasons are worth naming, and they are not the ones this list gave
-before: **holding the bases is not drawing the edges** (U6, PGK, the AG promoter
-of pCAGGS -- all three have witnesses in abundance and one placement), **the
-element is not a verbatim slice of anything** (H1's 216 nt form, the 278 nt
-chicken beta-actin form), **the schema cannot express the interval** (SV40 early
+before: **holding the bases is not drawing the edges** (U6 and the AG promoter
+of pCAGGS -- both have witnesses in abundance and one placement; PGK was the
+third until 2026-08-11, when scoring a record's second copy took it to two and
+it left this list for `PLF:4015`), **the element is not a verbatim slice of
+anything** (H1's 216 nt form, the 278 nt chicken beta-actin form), **the schema
+cannot express the interval** (SV40 early
 promoter, which wraps the numbering origin in every genome record checked), and
 **the name covers more than one element** (CAG, tetO/TRE -- now split rather than
 merely deplored). One new reason has appeared and is the most important of them:

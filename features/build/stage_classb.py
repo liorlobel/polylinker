@@ -57,21 +57,23 @@ counts as corroboration for every Class B row at once, it must be said plainly
 what it moved, and the answer is MEASURED and not assumed:
 
     NOTHING. All five refused rows are refused on the same evidence and by the
-    same numbers; all nine rows IN THE TABLE keep their extents, their offsets
-    and their `notes` byte for byte; features.tsv and provenance.tsv rebuild
-    identical. Four witness records in `ITEMS` carry their element more than
-    once -- V01146 (T7, 7x), AY288927 (SP6, 3x), U13859 (rrnB T2, 2x) and
-    AJ318471 (T3, 3x) -- and in every one of them the copies are annotated
-    alike, so scoring the first was already scoring all of them.
+    same numbers; all nine rows IN THE TABLE ON THAT DATE keep their extents,
+    their offsets and their `notes` byte for byte; features.tsv and
+    provenance.tsv rebuild identical. Four witness records in `ITEMS` carry
+    their element more than once -- V01146 (T7, 7x), AY288927 (SP6, 3x),
+    U13859 (rrnB T2, 2x) and AJ318471 (T3, 3x) -- and in every one of them the
+    copies are annotated alike, so scoring the first was already scoring all
+    of them.
 
-That was measured over the HELD list too, and not only over `ITEMS`, because a
-held element is the population a returning row would come from. Eleven of the
-extents the entries below name could be re-derived from the accessions they
-cite and were driven through this same code both ways; EXACTLY ONE of them
-moves, the mouse PGK promoter, from one exact placement to two. Nothing else
-does -- not the U6 forms, not H1, not either AG form, not chicken beta-actin,
-not PLtetO-1, and not the tetO7 heptamer, which was the one to watch because a
-tandem repeat is where multiple copies are expected. The SV40 early promoter
+That was measured over the HELD list as it stood on 2026-08-11, and not only
+over `ITEMS`, because a held element is the population a returning row would
+come from. Eleven of the extents those entries named could be re-derived from
+the accessions they cite and were driven through this same code both ways;
+EXACTLY ONE of them moves, the mouse PGK promoter, from one exact placement to
+two -- the entry that is now `PLF:4015`. Nothing else does -- not the U6 forms,
+not H1, not either AG form, not chicken beta-actin, not PLtetO-1, and not the
+tetO7 heptamer, which was the one to watch because a tandem repeat is where
+multiple copies are expected. The SV40 early promoter
 cannot be reached by this fix at all: its 419 nt form occurs contiguously in no
 record, so there is no first copy to have been scoring. TWO ENTRIES ARE NOT
 COVERED BY THAT SENTENCE AND SAY SO RATHER THAN BEING COUNTED AS CLEAN -- the
@@ -79,10 +81,22 @@ CMV-enhancer-containing CAG forms and the CMV-tetO2/PTight group state no
 accession:lo-hi this file could re-derive, so their extents were not measured
 either way, then or now.
 
-PGK is HELD and is not a row, so no row returns on this change. If one ever is
-seen to, this paragraph is the first thing to re-run: a return that no new
-evidence explains is the implementation moving the bar, and it must be reported
-as that.
+PGK WAS HELD ON THAT DATE AND WAS NOT A ROW, so no row returned on this change,
+which is what this paragraph was written to establish. If a row is ever seen to
+return on a change to this file, this paragraph is the first thing to re-run: a
+return that no new evidence explains is the implementation moving the bar, and
+it must be reported as that.
+
+PGK IS A ROW NOW, `PLF:4015`, AND IT DID NOT RETURN -- IT WAS ISSUED. That is
+the distinction this whole section exists to keep, so it is drawn here rather
+than left to the reader. On 2026-08-12 Lior Lobel instructed that the element be
+issued, and the item was APPENDED to `ITEMS` on that instruction. The stage
+still refuses to promote an element on its own, the sentence below about a
+curator's decision still stands unamended, and nothing in the corroboration rule
+was touched: the row measures two independent submissions and two exact
+placements against floors of two and two, the same numbers this paragraph
+recorded when the element was held. What was missing on 2026-08-11 was never a
+number; it was a signature on the judgement, and a human supplied it.
 
 ONE CLAIM THIS FIX ITSELF MADE HAD TO BE WITHDRAWN, which is the reason to
 distrust a widening even when it measures clean. `place_in_record()` at first
@@ -1179,6 +1193,122 @@ ITEMS: tuple[Convention, ...] = (
             "PMID 2564392, which is J04617's own publication."
         ),
     ),
+    # ISSUED ON THE CURATOR'S INSTRUCTION, 2026-08-12, by Lior Lobel. APPENDED,
+    # so it takes PLF:4015 and none of PLF:4000..PLF:4014 moves.
+    #
+    # This is the entry the module docstring's every-copy paragraph named as the
+    # ONE element that moved when `place_in_record()` started scoring every copy
+    # -- from one exact placement to two. That paragraph also said, correctly,
+    # that PGK was HELD and that no row returns on that change, because "a stage
+    # that promoted an element the moment its own code stopped under-counting
+    # would be adjusting its own membership". Nothing about that reasoning has
+    # been revised. What changed is that the decision the stage was refusing to
+    # take was taken by the human it belongs to, and this comment is the record
+    # of WHO took it, so that a reader who finds the docstring's refusal and
+    # this row in the same file is not left to guess which won.
+    Convention(
+        name="PGK promoter (mouse)",
+        aliases=("PGK1 promoter", "mPGK promoter", "Pgk-1 promoter",
+                 "mouse phosphoglycerate kinase 1 promoter"),
+        genbank_key="promoter",
+        cls="regulatory",
+        anchor="BX469914", anchor_version="BX469914.4", lo=13192, hi=13699, strand="+",
+        sequence=(
+            "TACCGGGTAGGGGAGGCGCTTTTCCCAAGGCAGTCTGGAGCATGCGCTTTAGCAGCCCCGCTGGGCACTTGGCGCTAC"
+            "ACAAGTGGCCTCTGGCCTCGCACACATTCCACATCCACCGGTAGGCGCCAACCGGCTCCGTTCTTTGGTGGCCCCTTC"
+            "GCGCCACCTTCTACTCCTCCCCTAGTCAGGAAGTTCCCCCCCGCCCCGCAGCTCGCGTCGTGCAGGACGTGACAAATG"
+            "GAAGTAGCACGTCTCACTAGTCTCGTGCAGATGGACAGCACCGCTGAGCAATGGAAGCGGGTAGGCCTTTGGGGCAGC"
+            "GGCCAATAGCAGCTTTGCTCCTTCGCTTTCTGGGCTCAGAGGCTGGGAAGGGGTGGGTCCGGGGGCGGGCTCAGGGGC"
+            "GGGCTCAGGGGCGGGGCGGGCGCCCGAAGGTCCTCCGGAGGCCCGGCATTCTGCACGCTTCAAAAGCGCACGTCTGCC"
+            "GCGCTGTTCTCCTCTTCCTCATCTCCGGGCCTTTCGACCT"),
+        exemplars=("CR293496", "AB242435"),
+        description=(
+            "The promoter of the mouse phosphoglycerate kinase 1 gene Pgk-1, which "
+            "encodes the somatic isoform of the glycolytic enzyme phosphoglycerate "
+            "kinase and lies on the X chromosome. Adra, Boer & McBurney sequenced this "
+            "region in 1987 and reported the architecture these bases have: G+C rich, "
+            "carrying the Sp1-binding hexamer GGGCGG and a CCAAT sequence, and carrying "
+            "no TATA box -- a housekeeping gene's promoter and not a regulated one -- "
+            "and the same paper showed it drives expression after DNA-mediated "
+            "transfection into mammalian cells. Counted over the 508 bases this row "
+            "ships rather than taken from the paper: 65.0% G+C, five copies of GGGCGG "
+            "(four on this strand and one on the other), one CCAAT, and no TATA "
+            "anywhere. In constructs it is used as a short constitutive driver; both "
+            "of the records that corroborate this extent are gene-targeting vectors."
+        ),
+        caveat=(
+            "WHAT THESE 508 BASES ARE RELATIVE TO THE GENE, AND WHY IT TOOK AN "
+            "ALIGNMENT TO SAY SO. The anchor annotates NOTHING -- not merely nothing "
+            "over this interval: BX469914.4 is a finished genomic clone whose feature "
+            "table holds one feature, `source 1..30886`, so it cannot place a "
+            "transcription start or an initiation codon and the 'ANCHOR RECORD'S OWN "
+            "ANNOTATION' line above is empty for that reason and not because the region "
+            "was checked and found bare. The landmarks are therefore carried across "
+            "from the primary record, M18735.1 (Adra, Boer & McBurney 1987, Gene "
+            "60:65-74, PMID 3440520, DOI 10.1016/0378-1119(87)90214-9), which is the "
+            "primary source for this promoter and annotates its own exon 1 at 853..1006 "
+            "and the initiation codon at 946. Aligned to it, this row runs from 431 "
+            "bases upstream of the 5' end of exon 1 to 77 bases inside it: -431..+77, "
+            "which is 431 + 77 = 508. It therefore includes the whole of the promoter "
+            "as that paper describes it -- the five GGGCGG hexamers sit at -235, -57, "
+            "-45, -33 and -28 and the CCAAT at -117, and those are the only copies of "
+            "either in the whole 1110 bp primary record -- and then runs on into the "
+            "5' untranslated region and stops 16 bases short of the ATG, which is at "
+            "BX469914.4:13715. "
+            "NEITHER EDGE IS DELIMITED BY ANYTHING PRIMARY, AND THAT IS THE WHOLE "
+            "CONTENT OF `boundary_rule = consensus_of_insdc` HERE. -431 is not a "
+            "landmark: it is 196 bases further out than the furthest-upstream Sp1 site "
+            "and nothing in M18735.1, in the anchor, or in the 1987 paper draws a line "
+            "there. +77 is not a landmark either -- it is a point in the middle of exon "
+            "1, chosen by neither the transcription start nor the initiation codon, "
+            "both of which it misses. This is a convention two depositors converged on, "
+            "it is not the gene telling anyone where its promoter ends, and this row "
+            "must not be read as claiming otherwise. "
+            "IT CLEARS AT EXACTLY THE FLOOR, ON BOTH COUNTS, WITH NOTHING TO SPARE: "
+            "two independent submissions against MIN_SUBMISSIONS = 2, and two exact "
+            "placements against MIN_PLACEMENTS = 2. Lose either witness and the row "
+            "fails. That is the difference between corroborated and corroborated twice "
+            "over, and a curator deciding whether to sign is entitled to have it said "
+            "rather than inferred from the numbers above. The anchor is NOT one of the "
+            "two: BX469914 (Wellcome Trust Sanger Institute) and CR293496 (Sanger "
+            "Centre) are both Hinxton addresses, same_submitter() merges them, and the "
+            "anchor annotates nothing here in any case -- so it adds neither a "
+            "submission nor an opinion about the edges. "
+            "THE SECOND PLACEMENT IS ONLY VISIBLE BECAUSE OF THE 2026-08-11 SECOND-COPY "
+            "FIX, and that is this row's honest provenance rather than a footnote. "
+            "AB242435.1 (Central Institute for Experimental Animals, Kawasaki) carries "
+            "the element TWICE: at 374-881, where the depositor drew `regulatory "
+            "366..881` -- 516 nt, 5'+8/3'+0 -- and again at 2089-2596, where the "
+            "depositor drew `regulatory 2089..2596`, exactly these 508 bases. verify() "
+            "scored occurrences()[0] and nothing else, so it saw the 516 and never the "
+            "508. Measured under that implementation this element had TWO submissions "
+            "and ONE placement and was refused; measured under place_in_record(), which "
+            "scores every copy, it has two and two. Nothing about the evidence changed "
+            "between those two measurements. "
+            "AND THE FIGURE THE OLD HELD REASON GAVE FOR THIS ELEMENT IS WITHDRAWN "
+            "RATHER THAN REPEATED. It claimed the element differs from the gene by "
+            "roughly forty-eight substitutions; that came of measuring against M18735 "
+            "instead of against the anchor, and it is not what either comparison says. "
+            "Against BX469914.4 the element is a VERBATIM slice, re-sliced and "
+            "re-checked on every build. Against M18735.1 it is three exact blocks -- "
+            "element 1-64, 65-442 and 443-508 -- covering all 508 bases with ZERO "
+            "substitutions, separated by two single-base indels: one G the element has "
+            "and M18735.1 does not, in a G run around M18735.1:486, and one C M18735.1 "
+            "has and the element does not, at M18735.1:864, twelve bases into exon 1. "
+            "Those two indels are why the longest exact PREFIX shared with M18735.1 is "
+            "64 nt, and reading that 64 as the point where the two sequences part "
+            "company is the error the old reason made. WHICH RECORD IS RIGHT WAS NOT "
+            "DETERMINED: M18735.1 is a 1987 C3H/He record and BX469914.4 is a finished "
+            "RPCI-23 BAC, so the two differences could be strain or could be sequencing, "
+            "and nothing here distinguishes them. "
+            "ISSUED ON THE CURATOR'S INSTRUCTION, 2026-08-12, BY LIOR LOBEL. The stage "
+            "refused to promote this element itself and the reason it gave still "
+            "stands; the decision was taken by the human it belongs to and not by this "
+            "program changing its mind. The row is `proposed` like every other Class B "
+            "row: issuing it puts it in the table, and only features/SIGNOFF.tsv can "
+            "put it in what `Db::reviewed()` serves."
+        ),
+    ),
 )
 
 
@@ -1186,11 +1316,11 @@ ITEMS: tuple[Convention, ...] = (
 # the list is here rather than in a commit message because the next person to
 # want one of these should not have to rediscover why it is missing.
 #
-# SOURCING.md section 6 budgets about forty Class B rows. Fifteen are declared
-# above and nine of them are rows in the table -- one withdrawn by the curator,
+# SOURCING.md section 6 budgets about forty Class B rows. Sixteen are declared
+# above and ten of them are rows in the table -- one withdrawn by the curator,
 # five refused by MIN_PLACEMENTS -- which is what survived the
 # two-independent-submissions rule and the nested-rivals rule applied honestly,
-# and saying so is worth more than thirty more rows. NONE OF THE NINE SHIPS:
+# and saying so is worth more than thirty more rows. NONE OF THE TEN SHIPS:
 # every one is `proposed`, and `Db::reviewed()` serves none of them. "Reached
 # the table" and "ships" are two different events with a curator's signature
 # between them, and this file does not use the second word for the first.
@@ -1200,6 +1330,16 @@ ITEMS: tuple[Convention, ...] = (
 # separate statuses; the rest carry the reason the measurement supports rather
 # than the one the first pass guessed. Where an entry now says an extent CLEARS
 # the corroboration floor and is still not a row, the missing thing is named.
+#
+# A FOURTH LEFT ON 2026-08-12, AND NOT FOR THE SAME KIND OF REASON. The three
+# above left because re-measurement contradicted the reason they had been held
+# for. The mouse PGK promoter's reason was not contradicted: its own entry ended
+# by saying the measurement was done and the judgement was not, and it named
+# issuing the row as the one decision this file must never take. Lior Lobel took
+# that decision on 2026-08-12 and the item was appended as PLF:4015. The entry is
+# deleted rather than kept with a note, because a list of refusals is the wrong
+# place to record an element that is no longer refused; the history of the
+# decision travels with the row, in the comment above it and in its caveat.
 HELD: tuple[tuple[str, str], ...] = (
     ("SV40 early promoter",
      "The 330 nt convention is a contiguous circular interval that WRAPS the "
@@ -1252,7 +1392,11 @@ HELD: tuple[tuple[str, str], ...] = (
      "three submissions drawing a 249 nt extent that differs from the primary record "
      "by a single substitution at M14486.1:146, which was not re-measured here. "
      "Counting a variant of that shape would ship a sequence that is in no primary "
-     "record, which is the failure the EF-1alpha and PGK entries are about."),
+     "record, which is the failure PLF:4014's caveat describes for the EF-1alpha "
+     "VECTOR form. (This sentence named the PGK entry as a second example until "
+     "2026-08-12 and was wrong to by then: 'not a verbatim slice of anything' was "
+     "retired from that entry on 2026-08-11, and PLF:4015 ships an exact slice of a "
+     "primary genomic record. It is the counter-example, not a second case.)"),
     ("H1 promoter (human)",
      "STILL HELD, and both halves of the old reason were wrong; the corrected reason "
      "is stronger and it fails on two legs rather than one. "
@@ -1292,52 +1436,6 @@ HELD: tuple[tuple[str, str], ...] = (
      "independent submissions annotating exactly 215 nt (today none) or exactly 216 "
      "nt (today one, and it would still not be a verbatim slice). Nothing in the "
      "schema and nothing about the anchor is now the obstacle."),
-    ("PGK promoter (mouse)",
-     "HELD AT ONE PLACEMENT -- but every other clause of the old reason was wrong, "
-     "and one of the corrections is about this stage's code rather than about PGK. "
-     "'NOT A VERBATIM SLICE OF ANYTHING' IS RETIRED. The 508 nt element is exact at "
-     "BX469914.4:13192-13699 on the plus strand -- 'Mouse DNA sequence from clone "
-     "RP23-217J7 on chromosome X', Wellcome Trust Sanger Institute -- so a citable "
-     "modern anchor exists. What is true is that it is not in M18735.1 (Adra, "
-     "Boer & McBurney 1987, Gene 60:65-74), the 1987 Pgk-1 exon 1 record the old "
-     "reason "
-     "measured against: the longest exact prefix of the element present there is 64 "
-     "nt, and the record then diverges. That is a 1987 record differing from the "
-     "genome, NOT the engineered internal deletion the EF-1alpha entry describes, "
-     "and calling the two 'the same shape' was wrong. "
-     "'ONE SUBMISSION' WAS WRONG BY AN ORDER OF MAGNITUDE. A 2026-08-11 survey put "
-     "nine independent addresses on the exact bases; this file's own fetching "
-     "confirms Sanger and the Central Institute for Experimental Animals directly. "
-     "MIN_SUBMISSIONS is not the problem. "
-     "IT DIED ON MIN_PLACEMENTS AT ONE, AND THE SECOND WITNESS WAS LOST TO A "
-     "LIMITATION OF verify() RATHER THAN TO THE EVIDENCE. CR293496.1 (Sanger Centre) "
-     "annotates regulatory 4137..4644 = exactly these 508 bases. AB242435.1 (Central "
-     "Institute for Experimental Animals, Kawasaki) carries the element TWICE, and "
-     "annotates the SECOND copy at exactly 508 nt (regulatory 2089..2596) while the "
-     "first carries a 516 nt feature (regulatory 366..881 over a copy at 374-881, so "
-     "5'+8/3'+0). verify() scored occurrences()[0] and nothing else, so it saw the "
-     "516 and never the 508: on the rule as IMPLEMENTED this element had one "
-     "placement, and on the rule as WRITTEN -- 'independent submissions annotate a "
-     "feature at exactly this extent' -- it had two. Note also that BX469914 and "
-     "CR293496 are both Hinxton addresses and same_submitter() merges them, so the "
-     "anchor adds no third opinion. "
-     "THE TWO DECISIONS THAT WERE OWED HAVE BOTH BEEN TAKEN, 2026-08-11, and this "
-     "entry is kept rather than deleted because the third one has not. Whether a "
-     "second copy inside one record may corroborate an extent: YES, and "
-     "place_in_record() carries the reasoning -- the depositor drew our edges, and "
-     "the unit of corroboration is the SUBMISSION, so one record is one placement "
-     "however many of its copies are drawn. The change to verify(): made, and the "
-     "clause above predicting it 'will alter the measured notes of rows already "
-     "signed' WAS WRONG -- measured on the day, no Class B row is signed at all, and "
-     "the rebuild is byte-identical in features.tsv and provenance.tsv. So on "
-     "today's evidence this element measures TWO independent submissions and TWO "
-     "exact placements and would pass both floors. "
-     "WHAT IS STILL OWED IS THE ONE DECISION THIS FILE MUST NEVER TAKE: issuing the "
-     "row. That is a curator's, it needs an id APPENDED after the last item so that "
-     "none of PLF:4000..PLF:4014 moves, and a rule that promoted an element the "
-     "moment the code stopped under-counting it would be the stage adjusting its own "
-     "membership -- which is the move every refusal in this file exists to refuse. "
-     "The measurement is done; the judgement is not."),
     ("AG promoter of pCAGGS, 1342 nt",
      "HELD AT ONE PLACEMENT, and the old CAG entry's central claim is confirmed "
      "harder than it was stated. These 1342 bases -- LT727518.1:3457-4798, the "
@@ -1781,7 +1879,8 @@ def place_in_record(rec: Record, needle: str) -> dict:
     it returned carried `occurrences` and therefore knew all along that the other
     copies were there.
 
-    MEASURED, on the mouse PGK promoter that is still HELD above. The 508 nt
+    MEASURED, on the mouse PGK promoter -- which was HELD when this was written
+    and is `PLF:4015` since the curator issued it on 2026-08-12. The 508 nt
     element is BX469914.4:13192-13699. AB242435.1 (Central Institute for
     Experimental Animals, Kawasaki) carries it TWICE: at 374-881, where the
     depositor drew `regulatory 366..881` -- 516 nt, 5'+8/3'+0 -- and again at

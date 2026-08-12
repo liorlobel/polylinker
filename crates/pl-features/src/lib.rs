@@ -2379,25 +2379,29 @@ mod tests {
     /// reverting `stage_classb.py` to `genbank_key="regulatory"` and rebuilding:
     ///
     /// ```text
-    /// the whole table still reports 'promoter' absent, but it holds 9 Class B
+    /// the whole table still reports 'promoter' absent, but it holds 10 Class B
     /// rows; Db::absent_common_kinds probes literal genbank_key values and
     /// something has stopped matching
     /// ```
     ///
     /// That count is not the twelve above and is not meant to be: the message
-    /// interpolates `PLF:4*` live, `MIN_PLACEMENTS` refused five of the fifteen
+    /// interpolates `PLF:4*` live, `MIN_PLACEMENTS` refused five of the sixteen
     /// items the stage now declares, and the curator withdrew a sixth,
     /// `PLF:4006`, on 2026-08-11 — which is why the transcript read 7, then 6,
-    /// and reads 9 since three held promoters were issued as `PLF:4012`–`4014`
-    /// on 2026-08-11. Those subtractions are not the same event and the wording
-    /// here used to blur them: a check refusing a row on its evidence is the
-    /// program working, and a human withdrawing one is a decision the program
-    /// may not take. The transcript is what reproducing the break prints *now*,
-    /// which is the only version of it a reader can check.
+    /// then 9 when three held promoters were issued as `PLF:4012`–`4014` on
+    /// 2026-08-11, and reads 10 since the curator instructed on 2026-08-12 that
+    /// the mouse PGK promoter be issued as `PLF:4015`. Those movements are not
+    /// the same event and the wording here used to blur them: a check refusing a
+    /// row on its evidence is the program working, a human withdrawing one is a
+    /// decision the program may not take, and a human *issuing* one is the same
+    /// kind of decision in the other direction — the stage had refused to
+    /// promote PGK itself and was right to. The transcript is what reproducing
+    /// the break prints *now*, which is the only version of it a reader can
+    /// check.
     ///
-    /// and it fails the other way if the nine are ever signed without this
+    /// and it fails the other way if the ten are ever signed without this
     /// test being reconsidered, because the first assertion then stops holding.
-    /// None of the nine is signed today, which is why the first assertion holds
+    /// None of the ten is signed today, which is why the first assertion holds
     /// at all: they are in the table and `Db::reviewed` serves none of them.
     #[test]
     fn the_absent_kinds_disclosure_tracks_the_reviewed_set_and_not_the_whole_table() {
