@@ -688,16 +688,24 @@ the bounding as the measurement it is rather than as a ranking, and points at
 this changed this row's digest — which cost nothing, because the row is
 `proposed` and unsigned.
 
-**AND TWO POPULATION COUNTS INSIDE THAT NOTE WENT STALE LATER THE SAME DAY,
-deliberately unfixed.** It says "the fourth shortest of the nine Class B rows in
-the table" and "the fifteen elements this stage declares"; issuing `PLF:4015`
-made those ten and sixteen. Re-measured: 28 nt is **still** the fourth shortest
-(the ten run 17, 17, 19, 28, 44, 47, 225, 285, 508, 1188) and still not the
-shortest of anything, so every assertion the note makes survives and only the
-sizes of the populations moved. The row was left byte-identical rather than
-re-cut, because `PLF:4015` was appended under a rule that no existing row change
-by a byte, and quietly editing a proposed row's prose while asking a curator to
-read it is the wrong trade. Fix it in a pass that is entitled to move this row.
+**AND TWO POPULATION COUNTS INSIDE THAT NOTE WENT STALE LATER THE SAME DAY.
+They were left alone then and corrected on 2026-08-12.** The note said "the
+fourth shortest of the nine Class B rows in the table" and "the fifteen elements
+this stage declares"; issuing `PLF:4015` made those ten and sixteen.
+Re-measured: 28 nt is **still** the fourth shortest (the ten run 17, 17, 19, 28,
+44, 47, 225, 285, 508, 1188) and still not the shortest of anything, so every
+assertion the note makes survived and only the sizes of the populations moved.
+
+Leaving it stale for a day was the right trade at the time: `PLF:4015` was
+appended under a rule that no existing row change by a byte, and quietly editing
+a proposed row's prose while a curator is being asked to read it is worse than a
+number that is one release behind. The correction came in a pass entitled to
+move the row, and the note now carries the distinction that would have prevented
+the error in the first place — **the ordinal is a fact about this row, the
+populations are facts about the stage, and only the second kind moves when an
+element is issued, withdrawn or refused.** If you have already read this row, the
+two words that changed are `nine` → `ten` and `fifteen` → `sixteen`, and its
+digest moved with them.
 
 ```
 python features/build/build.py --show PLF:4009
@@ -933,15 +941,17 @@ shared prefix is 64 nt. Which record is right was **not** determined: `M18735.1`
 is a 1987 C3H/He record, `BX469914.4` is a finished RPCI-23 BAC, and this project
 has no basis to call the difference strain or sequencing.
 
-**ONE THING THIS ROW BROKE THAT WAS DELIBERATELY LEFT BROKEN.** `PLF:4009`'s
-`notes` say "28 nt is the fourth shortest of the nine Class B rows in the table"
-and "the fifteen elements this stage declares". Both population counts are now
-stale -- ten and sixteen. The substance survives untouched (28 nt is still the
-fourth shortest, and still not the shortest of anything), and the row was **not**
-edited, because editing it would change a proposed row's content under a curator
-who is being asked to read it. Correcting those two numbers is a one-line change
-for a pass that is entitled to move that row; it is recorded here rather than
-made silently.
+**ONE THING THIS ROW BROKE, LEFT BROKEN FOR A DAY, AND SINCE FIXED.**
+`PLF:4009`'s `notes` said "28 nt is the fourth shortest of the nine Class B rows
+in the table" and "the fifteen elements this stage declares". Issuing this row
+made both counts stale — ten and sixteen. The substance was untouched throughout
+(28 nt is still the fourth shortest, and still not the shortest of anything), and
+the row was **not** edited at the time, because editing it would have changed a
+proposed row's content under a curator who is being asked to read it.
+
+Corrected on 2026-08-12, in a pass entitled to move that row rather than
+silently as part of this one. `PLF:4009`'s digest moved with it; the row is
+`proposed` and unsigned, so nothing lapsed.
 
 ```
 python features/build/build.py --show PLF:4015
