@@ -3136,8 +3136,15 @@ impl App {
                 // leaving the window title "Feature 4" as the only clue which
                 // feature was open. Set HERE and not at each call site, so a
                 // future entry point cannot forget it.
-                if index.is_some() {
-                    self.selected = index;
+                //
+                // Through `select_feature`, so the bases come with the
+                // highlight: a double-click is a click first, and the click has
+                // already selected them — restoring only half of what the
+                // deselecting second press took away would leave the editor open
+                // on a feature whose bases are no longer selected, which is the
+                // split this change exists to close.
+                if let Some(i) = index {
+                    self.select_feature(i);
                 }
             }
             Err(e) => self.notice = Some(e),
@@ -7496,7 +7503,11 @@ impl App {
                 .document()
                 .map(|d| d.molecule().features.len().saturating_sub(1))
                 .unwrap_or(0);
-            self.selected = Some(last);
+            // The bases too, through the one door: what was just written into
+            // the molecule is exactly what the user is entitled to see selected,
+            // and it puts the new feature's GC in the readout without a second
+            // gesture.
+            self.select_feature(last);
             // Taken up, so it must not be offered again — an Accept button that
             // stays clickable is how the same feature lands three times.
             if let Some(p) = self.bench.get_mut().and_then(|d| d.proposals.done_mut()) {
@@ -7741,6 +7752,10 @@ impl App {
         // borrowing it inside the row closure would fight the iterator.
         let span = doc.molecule().span();
         let circular = doc.molecule().topology.is_circular();
+        // Read here for the same reason, and said at all because the row was the
+        // one surface that explained neither of its two gestures. See
+        // [`click_line`], which the map's own tooltip shares.
+        let click_tip = click_line(doc.molecule());
 
         // `animated(false)` affects ONE thing — whether a `scroll_to_*` request
         // is lerped over `Style::scroll_animation` or applied to the offset at
@@ -7764,9 +7779,36 @@ impl App {
                 if !matches(f) {
                     continue;
                 }
-                let resp = ui
-                    .scope(|ui| {
-                        ui.horizontal(|ui| {
+                let row = ui.scope(|ui| {
+                    // THE ROW IS THE CLICK TARGET, AND UNTIL NOW ITS OWN NAME
+                    // WAS NOT.
+                    //
+                    // `Style::interaction.selectable_labels` is on by default,
+                    // which makes every `Label` in this row sense CLICK and
+                    // DRAG so its text can be selected with the mouse. Those
+                    // labels are drawn INSIDE the row and therefore sit on top
+                    // of it, and egui's hit test hands a click to the topmost
+                    // widget that senses one: measured with
+                    // `Context::interaction_snapshot`, a press at the centre of
+                    // `AmpR`'s name — the biggest target in the row and the one
+                    // a user aims at — was won by the label at
+                    // `[805, 344]..[839, 360]` with `Sense { click drag }`,
+                    // while the row at `[788, 340]..[1272, 394]` reported
+                    // `contains_pointer: true, hovered: false, clicked: false`.
+                    // Clicking a feature's name selected nothing at all, and
+                    // the row only answered where no label had been drawn.
+                    //
+                    // Off for this row and nowhere else — `scope` throws the
+                    // style away at the end — because the trade is local: the
+                    // text here is a label on a control, and the control is
+                    // worth more than the ability to sweep-select four
+                    // characters of it. The name is still reachable as text in
+                    // the feature editor, which is where it is editable.
+                    ui.style_mut().interaction.selectable_labels = false;
+                    // `cut` answers whether the NAME had to be truncated, which
+                    // the row's own tooltip needs — see below.
+                    let cut = ui
+                        .horizontal(|ui| {
                             let (rect, _) =
                                 ui.allocate_exact_size(egui::vec2(9.0, 13.0), Sense::hover());
                             ui.painter().rect_filled(
@@ -7826,14 +7868,26 @@ impl App {
                                         )
                                         .truncate(),
                                     );
-                                    // A tooltip ONLY when the row cannot show
-                                    // the whole name: one that repeats what is
-                                    // already legible is noise on every row of
-                                    // a list a user scrolls. Measured rather
-                                    // than guessed from a character count,
-                                    // because whether it fits depends on the
-                                    // glyphs and the splitter, not the length.
-                                    // Colour does not affect text metrics.
+                                    // The whole name is offered ONLY when the row
+                                    // cannot show it: a tooltip that repeats what is
+                                    // already legible is noise on every row of a list
+                                    // a user scrolls. Measured rather than guessed
+                                    // from a character count, because whether it fits
+                                    // depends on the glyphs and the splitter, not the
+                                    // length. Colour does not affect text metrics.
+                                    //
+                                    // ANSWERED HERE, SHOWN ON THE ROW. It used to be
+                                    // this label's own `on_hover_text`, and it cannot
+                                    // stay there: a non-selectable label is
+                                    // non-interactive, and egui marks a
+                                    // non-interactive widget hovered only when it is
+                                    // ON TOP of the topmost interactive one — this
+                                    // label is registered before the row that
+                                    // contains it, so it is underneath, and the
+                                    // tooltip would simply have stopped appearing.
+                                    // One tooltip per row is also the better answer:
+                                    // the name and what a click does are one hover
+                                    // rather than two stacked on the same pixels.
                                     let wanted = ui
                                         .painter()
                                         .layout_no_wrap(
@@ -7843,35 +7897,46 @@ impl App {
                                         )
                                         .rect
                                         .width();
-                                    if wanted > r.rect.width() + 0.5 {
-                                        r.on_hover_text(&f.name);
-                                    }
-                                });
-                            });
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(17.0);
-                            // Same rule, same reason: `kind` is free text in
-                            // both formats — the feature editor has a
-                            // free-text Type box — so it can be as long as a
-                            // name and would set the panel width the same way.
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&f.kind).color(pal(ui).muted).size(11.0),
-                                )
-                                .truncate(),
+                                    wanted > r.rect.width() + 0.5
+                                })
+                                .inner
+                            })
+                            .inner
+                        })
+                        .inner;
+                    ui.horizontal(|ui| {
+                        ui.add_space(17.0);
+                        // Same rule, same reason: `kind` is free text in
+                        // both formats — the feature editor has a
+                        // free-text Type box — so it can be as long as a
+                        // name and would set the panel width the same way.
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&f.kind).color(pal(ui).muted).size(11.0),
+                            )
+                            .truncate(),
+                        );
+                        if f.segments.len() > 1 {
+                            ui.label(
+                                RichText::new(format!("{} segments", f.segments.len()))
+                                    .color(pal(ui).accent)
+                                    .size(11.0),
                             );
-                            if f.segments.len() > 1 {
-                                ui.label(
-                                    RichText::new(format!("{} segments", f.segments.len()))
-                                        .color(pal(ui).accent)
-                                        .size(11.0),
-                                );
-                            }
-                        });
-                    })
-                    .response
-                    .interact(Sense::click());
+                        }
+                    });
+                    cut
+                });
+                let resp = row.response.interact(Sense::click()).on_hover_text(
+                    // The name FIRST when it did not fit, because that is the
+                    // question the user is hovering to ask; what a click does is
+                    // the same sentence on every row and reads as the footnote it
+                    // is.
+                    if row.inner {
+                        format!("{}\n{click_tip}", f.name)
+                    } else {
+                        click_tip.to_string()
+                    },
+                );
 
                 // `hot` first, so a row that is both reads as SELECTED. The
                 // two are distinguishable by consequence as well as by wash:
@@ -7952,12 +8017,27 @@ impl App {
         if hot.is_some() {
             self.hot = hot;
         }
+        // THROUGH THE ONE DOOR, both halves of the toggle. This used to set
+        // `self.selected` and nothing else, which is what made "select" mean two
+        // different things: the map click put the feature's bases in the
+        // selection and the row beside it did not, so the arc, the readout's GC
+        // and Tm, Ctrl+Shift+R and Ctrl+Shift+P all answered about a selection
+        // that the commonest gesture for picking a feature had never made.
+        //
+        // NO REVEAL from here, and that is the rule rather than an omission:
+        // selecting is unconditional, revealing stays tab-dependent. The row is
+        // already under the pointer on the tab the user is standing on, so there
+        // is nothing here to bring into view. A `Reveal::Base` set here could not
+        // work in any case: `side_panel` takes the request at the TOP of a frame
+        // and this runs below that, so it would be read on the next frame by
+        // whichever tab is open — this one, because a click on a row does not
+        // also switch tabs — and `features_tab` drops that variant.
         if let Some(i) = clicked {
-            self.selected = if self.selected == Some(i) {
-                None
+            if self.selected == Some(i) {
+                self.deselect_feature(i);
             } else {
-                Some(i)
-            };
+                self.select_feature(i);
+            }
         }
 
         // Acted on after the scroll area, because every one of these needs
@@ -8002,7 +8082,10 @@ impl App {
             index: None,
             feature: Box::new(f),
         }) {
-            self.selected = Some(last);
+            // The copy sits on the original's own bases, so selecting them says
+            // where the duplicate went — through the one door, like every other
+            // path that highlights a feature.
+            self.select_feature(last);
         }
     }
 
@@ -12259,6 +12342,15 @@ impl App {
             let head = end.min(n);
             let d = self.bench.get_mut().expect("checked at the top");
             self.edit.set_selection(d, sel, head);
+            // THE ONE PATH THAT DOES NOT GO THROUGH `App::select_feature`, and
+            // the difference is the span, not the wiring. Every other path
+            // selects the feature's whole `extent`; this one selects the
+            // smallest covering SEGMENT, which is the point of the gesture — an
+            // exon, not the gene the exon is in. Routing it would silently turn
+            // a double-click inside one part of a join into a selection of the
+            // whole join, so it keeps its own span and sets the same two fields
+            // by hand. It already sets BOTH, so it was never one of the halves
+            // this change had to close.
             self.selected = Some(i);
         }
     }
@@ -13009,13 +13101,29 @@ impl App {
     /// clicks a band that is *already* highlighted on the map can see that it is
     /// highlighted — the map draws the selection whatever tab is open — so that
     /// click is a deliberate "clear this", and clearing a selection is not a
-    /// request to be taken anywhere or to have the view moved.
+    /// request to be taken anywhere or to have the view moved. It takes the
+    /// BASES with it too, under the one guard [`App::deselect_feature`] states.
+    ///
+    /// **And the selecting half no longer asks which tab is open.** Every path
+    /// into a feature now goes through [`App::select_feature`], so the bases are
+    /// selected whatever panel is up; only the reveal below is still routed. The
+    /// three questions this comment settles are all questions about REVEALING.
     fn map_clicked_feature(&mut self, i: usize) {
         if self.selected == Some(i) {
-            self.selected = None;
+            self.deselect_feature(i);
             return;
         }
-        self.selected = Some(i);
+        // THE SELECTION IS MADE HERE, ABOVE THE MATCH, and the move up the
+        // function is the whole change: the bases used to be selected inside the
+        // `Tab::Sequence` arm, so which bases were selected depended on which
+        // panel happened to be open. It does not any more. What the match still
+        // decides is where the user is TAKEN, which is a question about them and
+        // not about the molecule.
+        //
+        // `None` from `select_feature` is not a failure to select: it is a
+        // document with no bases to select, and the Sequence arm below reads it
+        // as "this tab cannot show it" for exactly that reason.
+        let at = self.select_feature(i);
 
         // EXHAUSTIVE, and that is the point of writing eight names out rather
         // than `_ => {}`: a ninth tab cannot be added without someone deciding
@@ -13027,7 +13135,7 @@ impl App {
             // has bases. `select_feature_span` answers `None` for the two that
             // do not, and they fall through with the six below.
             Tab::Sequence => {
-                if let Some(base) = self.select_feature_span(i) {
+                if let Some(base) = at {
                     self.reveal = Some(Reveal::Base(base));
                     return;
                 }
@@ -13069,12 +13177,135 @@ impl App {
         }
     }
 
+    /// The bases feature `i` names: 1-based, inclusive, and `end < start` when
+    /// it crosses the origin.
+    ///
+    /// `None` when this document has no caret space, or when the feature has no
+    /// segments to have an extent. Split out of [`App::select_feature_span`] so
+    /// that [`App::deselect_feature`] can ask which bases a feature owns
+    /// **without** setting a selection to find out. The whole argument for
+    /// `extent` over `start()`/`end()` is at the call below, which is the only
+    /// other one.
+    fn feature_extent(&self, i: usize) -> Option<(u64, u64)> {
+        let mol = self.bench.get()?.molecule();
+        if !seqedit::Editability::of(mol).is_editable() {
+            return None;
+        }
+        mol.features
+            .get(i)?
+            .extent(mol.span(), mol.topology.is_circular())
+    }
+
+    /// Select feature `i`: the row in the panel **and** the bases it names.
+    ///
+    /// # The one door, and why there is now a door at all
+    ///
+    /// `self.selected` is the highlight — the wash on the Features row, the
+    /// widened band on the map, the enabled state of Edit…/Duplicate/Remove.
+    /// `self.edit.sel` is the SELECTION — the bases the map's arc draws, the
+    /// bases the readout takes its GC and its Tm from, and the bases
+    /// Ctrl+Shift+R and Ctrl+Shift+P copy. Until this change, of the seven paths
+    /// that highlighted a feature, ONE set both unconditionally
+    /// (`select_feature_under`, the grid's own double-click), ONE set both only
+    /// when the Sequence tab was already open (`map_clicked_feature`), and the
+    /// other five set the highlight alone: the Features row, the feature editor
+    /// opening, Duplicate, Accept on a database proposal, and Save on a new
+    /// feature. So "select a feature" meant two different things depending on
+    /// where you clicked, and both of the ways to reach a feature's GC required
+    /// standing in the sequence view to begin with.
+    ///
+    /// **Selecting is now unconditional and REVEALING is still tab-dependent.**
+    /// Which bases are selected is a fact about the document; which panel moves
+    /// to show them is a question about where the user is standing, and 0.9.0
+    /// answered that second question. This answers the first, the same way from
+    /// every path, whatever tab is open — see `map_clicked_feature` for the
+    /// routing that stayed behind.
+    ///
+    /// **It destroys a selection the user made by hand, silently, and undo does
+    /// not reach it.** Somebody with 300 bases dragged out in the Sequence tab
+    /// who clicks a feature row to see what it is loses the drag. That is what
+    /// the word "select" means and it is the same cost `show_hit`,
+    /// `show_binding` and `jump_to_base` have always charged for Ctrl+F, a
+    /// primer row and a Sanger mismatch; a feature row charging it too is one
+    /// rule instead of a fourth exception. A cost this quiet has to be stated
+    /// somewhere the user meets it BEFORE paying it, which is what [`click_line`]
+    /// is for: both the band and the row now say "click to select its bases" on
+    /// hover, rather than leaving it to be discovered by losing something.
+    ///
+    /// **The caret moves and an open typing run is committed, and neither is a
+    /// defect of this change.** `SeqEdit::set_selection` commits the run before
+    /// it assigns — that is precisely why it is the only sanctioned door, and
+    /// the defect it exists to prevent is written up on it — and it leaves the
+    /// caret at `end`, the feature's 3' end on the plus strand. A selection whose
+    /// caret sat somewhere else would type into a place the highlight does not
+    /// name. Committing a run is not an edit the user did not make: the run is
+    /// bases they typed, and the commit is what turns them into one undo step.
+    /// `show_hit`, `show_binding` and `jump_to_base` have all always done both.
+    ///
+    /// The order is not arbitrary: the highlight is set AFTER the span, so it
+    /// is unconditional by construction. A document with no bases still gets its
+    /// row highlighted; there is simply nothing to select in it.
+    fn select_feature(&mut self, i: usize) -> Option<u64> {
+        let at = self.select_feature_span(i);
+        self.selected = Some(i);
+        at
+    }
+
+    /// Clear the highlight on feature `i`, and the bases that highlight put in
+    /// the selection.
+    ///
+    /// A second click on a feature toggles it off — the Features row and the
+    /// map band have both always done that, and neither is being changed. What
+    /// is new is that the bases go with it: a highlight and a selection that
+    /// disagree are worse than either, and leaving 1,201 bases selected under no
+    /// highlight is exactly that disagreement.
+    ///
+    /// **ONLY IF THEY ARE STILL THIS FEATURE'S BASES.** The user may have
+    /// dragged out something else in the meantime, and then the two already
+    /// disagree before this click: `selected` says AmpR, the arc says the 40
+    /// bases they just dragged. Clearing those would destroy a selection this
+    /// gesture never made, so the guard clears only what it recognises — and
+    /// the end state is coherent either way, because after it there is no
+    /// highlight left to disagree with anything.
+    ///
+    /// `SeqEdit::place` with `extend: false` rather than an assignment to `sel`:
+    /// it is the sanctioned door, it commits the open typing run on the way
+    /// through, and it leaves the caret where it is. The caret is deliberately
+    /// not moved — dropping a highlight is not a request to go anywhere, which
+    /// is the same argument `map_clicked_feature` makes for not revealing.
+    ///
+    /// The `max(1)` matches `select_feature_span`'s `saturating_sub`: a SnapGene
+    /// `<Segment range="0-4"/>` keeps its literal 0, so the extent says `start
+    /// = 0` where the selection it made begins at base 1, and without this the
+    /// guard would decline to recognise its own work on exactly those files.
+    fn deselect_feature(&mut self, i: usize) {
+        self.selected = None;
+        let mine = self
+            .feature_extent(i)
+            .zip(self.selection_segment())
+            .is_some_and(|((start, end), s)| (s.start, s.end) == (start.max(1), end));
+        if !mine {
+            return;
+        }
+        let at = self.edit.caret;
+        let Some(d) = self.bench.get_mut() else {
+            return;
+        };
+        self.edit.place(d, at, false);
+    }
+
     /// Select the whole of feature `i` in the sequence view, and answer with the
     /// base the view should be showing.
     ///
     /// `None` when this document has no caret space, or when the feature has no
     /// segments to have an extent — both of which mean the Sequence tab cannot
     /// show it and the caller must route elsewhere.
+    ///
+    /// **Not called directly by anything that also highlights a row.**
+    /// [`App::select_feature`] is that door; this is the half of it that touches
+    /// the bases, and it is separate because `select_feature_under` — the
+    /// sequence view's own double-click — deliberately selects a different span
+    /// (see below) while highlighting the same row.
     ///
     /// # Which bases, and which one to scroll to
     ///
@@ -13106,13 +13337,10 @@ impl App {
     /// wrong here: the row the user is reading prints `start..end` on the plus
     /// strand, and the view must land on the number the panel showed them.
     fn select_feature_span(&mut self, i: usize) -> Option<u64> {
+        let (start, end) = self.feature_extent(i)?;
         let d = self.bench.get()?;
         let mol = d.molecule();
-        if !seqedit::Editability::of(mol).is_editable() {
-            return None;
-        }
-        let (span, circular, n) = (mol.span(), mol.topology.is_circular(), mol.len());
-        let (start, end) = mol.features.get(i)?.extent(span, circular)?;
+        let (circular, n) = (mol.topology.is_circular(), mol.len());
         // `saturating_sub` for the same reason `select_feature_under` carries
         // it, with the same measured consequence: a SnapGene
         // `<Segment range="0-4"/>` keeps its literal 0, `start - 1` wrapped to
@@ -13787,12 +14015,18 @@ impl App {
                     if adding {
                         // `SetFeature { index: None }` pushes, so the new
                         // feature is the last one. Selecting it is what puts it
-                        // under the highlight the user is already looking at.
+                        // under the highlight the user is already looking at —
+                        // and, through `select_feature`, puts the bases the form
+                        // just named into the selection as well. `checked_sub`
+                        // survives the impossible empty list rather than
+                        // selecting feature `usize::MAX`.
                         let last = self
                             .document()
                             .map(|d| d.molecule().features.len())
                             .unwrap_or(0);
-                        self.selected = last.checked_sub(1);
+                        if let Some(i) = last.checked_sub(1) {
+                            self.select_feature(i);
+                        }
                     }
                     // The Features filter matches name and kind, so renaming
                     // `SacB` to `levansucrase` under a filter of "sac" makes the
@@ -14559,7 +14793,9 @@ fn strand_glyph(s: Strand) -> &'static str {
 /// cannot show a feature, the tab switch that follows it. It said "the tab jump
 /// on click" until 2026-08-12, when the click stopped always jumping: it now
 /// reveals the feature in the panel that is open, and `map_clicked_feature`'s
-/// own doc comment is the authority on which panels those are.
+/// own doc comment is the authority on which panels those are. It is no longer
+/// written here at all — [`click_line`] owns it, because the Features row says
+/// the same thing and one gesture must not be described twice.
 fn feature_tip(f: &pl_core::Feature, mol: &pl_core::Molecule) -> String {
     let span = mol.span();
     let circular = mol.topology.is_circular();
@@ -14597,10 +14833,32 @@ fn feature_tip(f: &pl_core::Feature, mol: &pl_core::Molecule) -> String {
         second.push_str(&format!(" · {} segments", f.segments.len()));
     }
     second.push_str(&format!(" · {}", strand_word(f.strand)));
-    format!(
-        "{}\n{second}\nclick to select · double-click to edit",
-        f.name
-    )
+    format!("{}\n{second}\n{}", f.name, click_line(mol))
+}
+
+/// What a click on a feature does, in the words both surfaces use.
+///
+/// ONE STRING, TWO PLACES — the map's [`feature_tip`] and the Features row's own
+/// hover. A picture that says "click to select its bases" above a list that says
+/// nothing is how two surfaces of one application come to describe one gesture
+/// differently, and the list is the surface where the gesture was previously
+/// least explicable: it did not even say that double-click opens the editor.
+///
+/// It is also where the user meets the cost recorded in [`App::select_feature`].
+/// The click really does take the sequence selection, undo does not reach a
+/// selection, and a cost that quiet belongs in front of the user BEFORE they pay
+/// it rather than in the release notes afterwards.
+///
+/// The second wording is not a hedge. An annotation-only GenBank has features
+/// and no bases, `select_feature_span` answers `None` for it and nothing is
+/// selected, so promising bases there would be a promise the document cannot
+/// keep — the same `Editability` question, asked of the same function.
+fn click_line(mol: &pl_core::Molecule) -> &'static str {
+    if seqedit::Editability::of(mol).is_editable() {
+        "click to select its bases · double-click to edit"
+    } else {
+        "click to select · double-click to edit"
+    }
 }
 
 /// How many bases a feature really covers, or `None` if it names none.
@@ -19013,6 +19271,7 @@ mod tests {
             None,
             pl_enzymes::EnzymeSet::All,
             &marks,
+            None,
         );
         assert_eq!(
             count(&drawn),
@@ -20808,6 +21067,81 @@ mod tests {
             hit >= 6,
             "the {} chosen names occupy {hit} of 8 sectors: {drawn:?}",
             drawn.len()
+        );
+    }
+
+    /// ...AND THE ONE THE USER PICKED IS AT THE FRONT OF IT.
+    ///
+    /// The rider that comes with click-to-select: a click on a row now selects
+    /// that feature's bases, and on a map where the budget binds the band it
+    /// widened could still be the one band on the ring with no name against it.
+    /// That is the finding 0.9.0 closed for the map click, wearing the label
+    /// budget's clothes — a picture that answers "which one did I just pick?"
+    /// with a wider arc and nothing to read.
+    ///
+    /// The same 3,000-feature molecule the test above uses, so the budget
+    /// genuinely binds: 3,000 names compete for `MAX_FEATURE_LABELS` places, and
+    /// `f1234` loses. Selecting it must put it on the ring.
+    ///
+    /// The oracle is the DRAWN name, not `feature_order`, and the two are not
+    /// the same thing: the budget decides which names are candidates and
+    /// `place_ring` decides which of those find room. Asserting on the candidacy
+    /// would pass while the user still saw nothing.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: dropping `selected`
+    /// from the two promotion sites in `draw_circular` — the sort key and the
+    /// first sweep — and leaving the filter's `lit` promotion exactly as it was.
+    /// It fails with "the selected feature is still the one band with no name:
+    /// 80 names drawn, and f1234 is not among them". Eighty is `place_ring`
+    /// finding room for the whole budget at this pane size, which is why the
+    /// promotion is the only thing this measures.
+    #[test]
+    fn the_label_budget_puts_the_selected_feature_first() {
+        let mut mol = pkov();
+        mol.features.clear();
+        let span = mol.seq.len() as u64;
+        let n = 3_000u64;
+        for i in 0..n {
+            let mut f = pl_core::Feature::new(format!("f{i:04}"), "misc_feature");
+            let start = 1 + (span - 20) * i / n;
+            f.segments = vec![pl_core::Segment::new(start, start + 12)];
+            mol.features.push(f);
+        }
+        let names = |shapes: &[egui::Shape]| -> Vec<String> {
+            texts_in(shapes, 10.0, egui::FontFamily::Monospace)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect()
+        };
+        let pick = 1_234usize;
+        let name = format!("f{pick:04}");
+
+        let (before, _) = paint_map_picked(&mol, "many", 1_100.0, 900.0, None);
+        let before = names(&before);
+        assert!(
+            !before.contains(&name),
+            "the premise: {name} is one of the 3,000 the budget leaves unnamed"
+        );
+        assert!(
+            before.len() >= 20,
+            "the premise: names reach the ring at all ({} drawn)",
+            before.len()
+        );
+
+        let (after, _) = paint_map_picked(&mol, "many", 1_100.0, 900.0, Some(pick));
+        let after = names(&after);
+        assert!(
+            after.contains(&name),
+            "the selected feature is still the one band with no name: {} names drawn, \
+             and {name} is not among them",
+            after.len()
+        );
+        // AND IT COSTS ONE PLACE, not the ring. Promotion reorders the budget;
+        // it does not widen it.
+        assert!(
+            after.len() <= before.len() + 1,
+            "promoting one name added {} to the ring",
+            after.len() as i64 - before.len() as i64
         );
     }
 
@@ -28855,7 +29189,29 @@ ATGAAACGCTAA
         sel: Option<pl_core::Segment>,
         set: pl_enzymes::EnzymeSet,
     ) -> (Vec<egui::Shape>, egui::Rect) {
-        paint_map_full(mol, caption, digest, w, h, sel, set, &[])
+        paint_map_full(mol, caption, digest, w, h, sel, set, &[], None)
+    }
+
+    /// The same again, with one feature SELECTED — which is a question about the
+    /// label budget as well as about the band it widens.
+    fn paint_map_picked(
+        mol: &pl_core::Molecule,
+        caption: &str,
+        w: f32,
+        h: f32,
+        selected: Option<usize>,
+    ) -> (Vec<egui::Shape>, egui::Rect) {
+        paint_map_full(
+            mol,
+            caption,
+            &[],
+            w,
+            h,
+            None,
+            pl_enzymes::EnzymeSet::All,
+            &[],
+            selected,
+        )
     }
 
     /// The same again, with primer binding sites marked on it.
@@ -28872,6 +29228,7 @@ ATGAAACGCTAA
         sel: Option<pl_core::Segment>,
         set: pl_enzymes::EnzymeSet,
         primers: &[map::PrimerMark],
+        selected: Option<usize>,
     ) -> (Vec<egui::Shape>, egui::Rect) {
         let ctx = test_ctx();
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
@@ -28890,7 +29247,7 @@ ATGAAACGCTAA
                             mol,
                             caption,
                             digest,
-                            None,
+                            selected,
                             None,
                             sel.clone(),
                             None,
@@ -32614,6 +32971,492 @@ ATGAAACGCTAA
         assert_eq!(
             app.reveal, None,
             "the second press asked for a second reveal"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Selecting a feature selects its bases, from every path
+    //
+    // The map click has done this since 0.9.0 — and only with the Sequence tab
+    // already open. A Features ROW click set `App::selected` and nothing else,
+    // so the map's selection arc, the readout's GC and Tm, Ctrl+Shift+R and
+    // Ctrl+Shift+P all keyed off a selection that the commonest gesture for
+    // picking a feature never made. These drive the whole window for the reason
+    // the section above does: the panel and the map are both real here, and the
+    // arc is the only honest oracle for "the picture answers".
+    //
+    // THERE IS NO ONE-FRAME LAG ON A ROW CLICK, unlike a map click. The list
+    // collects the click inside `side_panel` and acts on it in the same pass,
+    // before `central` paints — so the frame that resolves the press is already
+    // a frame with the selection in it.
+    // -----------------------------------------------------------------------
+
+    /// Press and release on the row named `name` in the Features list.
+    ///
+    /// The rect comes from what the list PAINTED on the frame before, which is
+    /// the same rule [`point_on_band`] follows and for the same reason:
+    /// reconstructing the row's geometry here would be a second copy of the
+    /// layout, and a test that agrees with its own copy of the code proves
+    /// nothing about the code.
+    ///
+    /// The clock is explicit for [`press_map`]'s reason — two presses on one row
+    /// inside egui's 0.3 s window are a double-click, which opens the feature
+    /// editor rather than toggling anything.
+    fn click_row(app: &mut App, ctx: &egui::Context, name: &str, t: f64) {
+        let out = paint_window(app, ctx, window_at(t));
+        let at = feature_rows_at(&out)
+            .into_iter()
+            .find(|(s, _)| s == name)
+            .unwrap_or_else(|| panic!("the Features list painted no row for {name:?}"))
+            .1
+            .center();
+        paint_window(app, ctx, pointer_to_at(at, t + 0.01));
+        paint_window(app, ctx, pointer_button_at(at, true, t + 0.02));
+        paint_window(app, ctx, pointer_button_at(at, false, t + 0.03));
+    }
+
+    /// How many points of selection arc the map drew.
+    ///
+    /// The arc is the ONE 3.0 pt accent-coloured polyline this window paints —
+    /// `sel_arc` in `map.rs`, on the backbone at `r` — and its LENGTH is what
+    /// says which bases it claims: 1,201 bases of 8,117 is 14.8% of the
+    /// circumference, and the complement arc the same pair of carets also names
+    /// is the other 85.2%. Every test below asserts the premise that this is
+    /// zero before the click, so a stroke of some other 3.0 pt accent line
+    /// creeping into the window would show up as a failing premise rather than
+    /// as a pass.
+    ///
+    /// Summed from the polyline, so it is a chord approximation of the arc and
+    /// slightly short of it — the tolerances below are the same 15% that
+    /// `a_sequence_selection_is_drawn_on_the_map_including_across_the_origin`
+    /// uses against the same painter.
+    fn selection_arc_len(out: &egui::FullOutput, pal: &theme::Palette) -> f32 {
+        flat_shapes(&out.shapes)
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Path(p)
+                    if (p.stroke.width - 3.0).abs() < 0.01
+                        && matches!(
+                            p.stroke.color,
+                            egui::epaint::ColorMode::Solid(c) if c == pal.accent
+                        ) =>
+                {
+                    Some(
+                        p.points
+                            .windows(2)
+                            .map(|w| (w[1] - w[0]).length())
+                            .sum::<f32>(),
+                    )
+                }
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// The arc a selection of `bases` bases would cover on this map, in points.
+    fn arc_of(out: &egui::FullOutput, bases: u64, span: u64) -> f32 {
+        let (_, r) = backbone(&flat_shapes(&out.shapes));
+        bases as f32 / span as f32 * std::f32::consts::TAU * r
+    }
+
+    /// The palette the tests' own context paints with, so `selection_arc_len`
+    /// looks for the colour that was actually used.
+    ///
+    /// `Context::theme()` and not a hard-coded `true`: `test_ctx` takes egui's
+    /// own default mode and hands it to `theme::visuals`, so the accent depends
+    /// on which one that is and a test that assumed dark would be reading for a
+    /// colour nothing painted.
+    fn test_pal(ctx: &egui::Context) -> theme::Palette {
+        theme::Palette::of(ctx.theme() == egui::Theme::Dark)
+    }
+
+    /// THE HEADLINE. A click on a Features row selects the feature's bases, and
+    /// the map draws them.
+    ///
+    /// **THE POINT PRESSED IS THE CENTRE OF THE NAME**, which is where a user
+    /// aims and is exactly where the click used to be eaten: an egui `Label` is
+    /// click-and-drag-sensing by default so its text can be selected, and it is
+    /// drawn inside the row and therefore on top of it. See the
+    /// `selectable_labels` line in `features_tab` for the measurement.
+    ///
+    /// PROVEN TO FAIL against two MUTATIONS, both run.
+    ///
+    /// Restoring the code this replaces — `self.selected = if self.selected ==
+    /// Some(i) { None } else { Some(i) }` in `features_tab` — fails on the
+    /// `edit.sel` assertion with "the row click selected no bases at all", and
+    /// with that blinded on the arc, because nothing on that path ever set a
+    /// selection for the map to draw.
+    ///
+    /// Removing the `selectable_labels = false` line fails one assertion
+    /// earlier, on `app.selected` itself: `left: None, right: Some(1)`. The
+    /// click reached the name label and stopped there.
+    #[test]
+    fn a_features_row_click_selects_the_features_bases_and_the_map_draws_them() {
+        let ctx = test_ctx();
+        let pal = test_pal(&ctx);
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Features,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        assert_eq!(
+            selection_arc_len(&out, &pal),
+            0.0,
+            "the premise: nothing is selected before the click, so no arc is drawn"
+        );
+
+        click_row(&mut app, &ctx, "AmpR", 0.2);
+
+        assert_eq!(
+            app.selected,
+            Some(1),
+            "the row click did not select the row"
+        );
+        let sel = app
+            .edit
+            .sel
+            .expect("the row click selected no bases at all");
+        assert_eq!(
+            (sel.lo(), sel.hi(), sel.through_origin),
+            (2_999, 4_200, false),
+            "the selection must be AmpR's own 3,000..4,200, the coordinates its row prints"
+        );
+        assert_eq!(
+            sel.base_count(8_117),
+            1_201,
+            "1,201 bases, not the 6,916 the other arc would be"
+        );
+
+        // AND THE PICTURE ANSWERS. `App::selected` is a field; the arc is what
+        // the user sees, and it is drawn from `selection_segment` rather than
+        // from that field.
+        let out = paint_window(&mut app, &ctx, window_at(0.3));
+        let drawn = selection_arc_len(&out, &pal);
+        let want = arc_of(&out, 1_201, 8_117);
+        assert!(
+            (drawn - want).abs() < want * 0.15,
+            "the map drew {drawn:.1} pt of selection arc where 1,201 bases is {want:.1} pt \
+             (the complement would be {:.1})",
+            arc_of(&out, 8_117 - 1_201, 8_117)
+        );
+
+        // AND THE TAB DID NOT MOVE. Selecting is unconditional; revealing is
+        // not, and there is nothing to reveal on the tab the row is already on.
+        assert!(
+            matches!(app.tab, Tab::Features),
+            "a row click navigated somewhere"
+        );
+    }
+
+    /// The readout reports THAT FEATURE'S GC after a row click, with no other
+    /// input — no drag, no double-click in the grid, no map.
+    ///
+    /// This is the half of the finding that is not about pixels: GC and Tm are
+    /// computed from `SeqEdit::selected_bases`, so a feature the user had picked
+    /// in the list had no GC anywhere in the application until they picked it
+    /// again somewhere else.
+    ///
+    /// The expected percentage is computed HERE, from the coordinates this test
+    /// wrote into the feature, so the assertion is "the readout describes bases
+    /// 3,000..4,200" and not "the readout agrees with `gc_clause`".
+    ///
+    /// PROVEN TO FAIL against both of the mutations above, each run: the readout
+    /// after the click still reads `insert at 1 · before base 1, at the origin ·
+    /// every feature's coordinates shift` — the caret line, with no span in it —
+    /// because there is no selection for it to describe.
+    #[test]
+    fn the_readout_reports_the_features_gc_after_a_row_click() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Features,
+        );
+        let bases = app
+            .document()
+            .expect("open")
+            .molecule()
+            .subseq(3_000, 4_200)
+            .expect("AmpR's own bases");
+        let gc = bases
+            .iter()
+            .filter(|b| matches!(b, b'G' | b'C' | b'g' | b'c'))
+            .count();
+        let want = format!("{:.1}% GC", 100.0 * gc as f64 / bases.len() as f64);
+
+        // THE PREMISE, read on the tab the readout lives on: with nothing
+        // selected it describes a caret and no span, so there is no GC anywhere
+        // in the window to begin with.
+        app.tab = Tab::Sequence;
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let before = readout_line(&paint_window(&mut app, &ctx, window_at(0.1)));
+        assert!(
+            before.contains("insert at") && !before.contains("% GC"),
+            "the premise: with nothing selected the readout describes a caret, not a span: \
+             {before:?}"
+        );
+
+        app.tab = Tab::Features;
+        paint_window(&mut app, &ctx, window_at(0.2));
+        click_row(&mut app, &ctx, "AmpR", 0.3);
+        // Back to the tab the readout lives on. Nothing else has been done to the
+        // document — no drag, no double-click in the grid, no map click. This is
+        // the selection the row click left behind.
+        app.tab = Tab::Sequence;
+        paint_window(&mut app, &ctx, window_at(0.5));
+        let said = readout_line(&paint_window(&mut app, &ctx, window_at(0.6)));
+
+        assert!(
+            said.contains("3,000..4,200") && said.contains("1,201 bp"),
+            "the readout does not describe the feature the row click selected: {said:?}"
+        );
+        assert!(
+            said.contains(&want),
+            "the readout reports no {want} for AmpR's bases: {said:?}"
+        );
+    }
+
+    /// The readout line, with its wraps flattened.
+    ///
+    /// Monospace 11.5 is the readout's own face — `sequence_readout` sets it —
+    /// and it is NOT enough on its own: the sequence grid's own letters are
+    /// monospace at the same size, so an unfiltered sweep returns the whole
+    /// visible molecule with the readout somewhere inside it. The interpunct is
+    /// what separates them: every branch of `SeqEdit::readout` joins its clauses
+    /// with `·`, and a row of bases or a coordinate column contains none.
+    ///
+    /// The wraps are flattened because the panel is narrow enough to break the
+    /// line, which puts a newline where a space was and would cut `49.6% GC` in
+    /// half for a `contains`.
+    fn readout_line(out: &egui::FullOutput) -> String {
+        texts_in(&flat_shapes(&out.shapes), 11.5, egui::FontFamily::Monospace)
+            .into_iter()
+            .filter(|(s, _)| s.contains('·'))
+            .map(|(s, _)| s.replace('\n', " "))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// A second click on the same row clears BOTH — the highlight and the bases.
+    ///
+    /// A highlight and a selection that disagree are worse than either, and the
+    /// disagreement this closes is the one the change itself would otherwise
+    /// create: before it, a second click had no bases to leave behind.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: making
+    /// `deselect_feature` set `self.selected = None` and return — the "leave the
+    /// bases alone" option — fails with "the highlight went and the bases
+    /// stayed: Some(Selection { anchor: 2999, head: 4200, through_origin:
+    /// false })", 1,201 bases still selected under no highlight.
+    #[test]
+    fn a_second_click_on_the_same_row_clears_the_highlight_and_the_selection() {
+        let ctx = test_ctx();
+        let pal = test_pal(&ctx);
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Features,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        paint_window(&mut app, &ctx, window_at(0.1));
+
+        click_row(&mut app, &ctx, "AmpR", 0.2);
+        assert_eq!(
+            app.selected,
+            Some(1),
+            "the premise: the first click selects"
+        );
+        assert!(
+            app.edit.sel.is_some(),
+            "the premise: the first click selects the bases too"
+        );
+
+        // Well clear of egui's 0.3 s double-click window: a second CLICK, not
+        // the second half of a double-click, which would open the editor and put
+        // the selection straight back.
+        click_row(&mut app, &ctx, "AmpR", 2.0);
+
+        assert_eq!(app.selected, None, "the second click did not deselect");
+        assert!(
+            app.feature_edit.is_none(),
+            "the premise: this was two clicks and not a double-click"
+        );
+        assert_eq!(
+            app.edit.sel, None,
+            "the highlight went and the bases stayed: {:?}",
+            app.edit.sel
+        );
+        let out = paint_window(&mut app, &ctx, window_at(2.1));
+        assert_eq!(
+            selection_arc_len(&out, &pal),
+            0.0,
+            "the map is still drawing an arc for a feature nothing is highlighting"
+        );
+    }
+
+    /// An origin-spanning feature, clicked in the LIST, selects the bases it
+    /// covers and not the complement arc.
+    ///
+    /// The join form here is the one every save-and-reopen produces, and the two
+    /// ways this goes wrong are both silent: the same pair of carets names 318
+    /// bases across the origin and 7,799 the long way round, and only
+    /// `through_origin` tells them apart.
+    ///
+    /// PROVEN TO FAIL against two MUTATIONS, both run. The restored
+    /// `self.selected = …` row-click body fails with "the row click selected no
+    /// bases at all". And taking the span from `f.start()`/`f.end()` instead of
+    /// `Feature::extent` inside `feature_extent` fails with "the wrap bit is
+    /// off … Selection { anchor: 0, head: 8117, through_origin: false }" — the
+    /// whole plasmid, reported for a 318 bp feature, because the join's last
+    /// part starts at base 1.
+    #[test]
+    fn an_origin_spanning_row_click_selects_the_short_arc() {
+        let ctx = test_ctx();
+        let pal = test_pal(&ctx);
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                // 7,900..8,117 then 1..100 — `genbank::write`'s only spelling
+                // for a span that crosses the origin.
+                ("ori-crosser", "#2ca02c", &[(7_900, 8_117), (1, 100)]),
+            ],
+            Tab::Features,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        paint_window(&mut app, &ctx, window_at(0.1));
+
+        click_row(&mut app, &ctx, "ori-crosser", 0.2);
+
+        assert_eq!(
+            app.selected,
+            Some(1),
+            "the row click did not select the row"
+        );
+        let sel = app
+            .edit
+            .sel
+            .expect("the row click selected no bases at all");
+        assert!(
+            sel.through_origin,
+            "the wrap bit is off, so this selection names the 7,799 bases the \
+             feature is NOT on: {sel:?}"
+        );
+        // ANCHOR AND HEAD, not `lo`/`hi`. On a wrapped selection the ordered
+        // pair is `(100, 7,899)` and says nothing about which arc is meant.
+        assert_eq!(
+            (sel.anchor, sel.head),
+            (7_899, 100),
+            "the carets must bracket 7,900..8,117 and 1..100"
+        );
+        assert_eq!(
+            sel.base_count(8_117),
+            318,
+            "218 bases before the origin and 100 after it"
+        );
+
+        let out = paint_window(&mut app, &ctx, window_at(0.3));
+        let drawn = selection_arc_len(&out, &pal);
+        let want = arc_of(&out, 318, 8_117);
+        assert!(
+            (drawn - want).abs() < want * 0.15,
+            "the map drew {drawn:.1} pt of arc where 318 bases is {want:.1} pt — the \
+             complement would be {:.1}",
+            arc_of(&out, 8_117 - 318, 8_117)
+        );
+    }
+
+    /// Selected and hovered are told apart on the map, and the arc is what tells
+    /// them apart.
+    ///
+    /// The band emphasis does NOT: `let emphasised = selected == Some(b.index)
+    /// || hot == Some(b.index)` widens both by the same 3 pt, in both painters,
+    /// and that is asserted here as the premise rather than assumed. The
+    /// Features list is careful not to conflate the two; the map had no channel
+    /// to be careful with until a selected feature always had bases in the
+    /// selection, which is what this change delivers.
+    ///
+    /// The oracle is the LENGTH of the arc, because that is what distinguishes
+    /// the two bands on this map: AmpR is 1,201 bases and lacZ is 301, so an arc
+    /// over the wrong one is off by a factor of four.
+    ///
+    /// PROVEN TO FAIL against two MUTATIONS, both run. The restored row-click
+    /// body leaves no selection, so there is no arc and the map cannot say which
+    /// of the two identically widened bands the user picked: "the map drew -0.0
+    /// pt of arc: 269.6 is the SELECTED feature and 67.6 is the merely hovered
+    /// one". Removing the `selectable_labels = false` line fails the PREMISE
+    /// instead, at `left: 9.0, right: 12.0` — with the click eaten by the name
+    /// label nothing is selected, so only one of the two bands is emphasised and
+    /// the premise this test rests on is no longer true.
+    #[test]
+    fn a_selected_band_is_told_apart_from_a_hovered_one_on_the_map() {
+        let ctx = test_ctx();
+        let pal = test_pal(&ctx);
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Features,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        paint_window(&mut app, &ctx, window_at(0.1));
+
+        click_row(&mut app, &ctx, "AmpR", 0.2);
+        // lacZ hovered — from the list, where the pointer is nowhere near the
+        // band. `hot_shown` is what the painters read; `App::ui` promotes `hot`
+        // into it once a frame and these tests drive the two panels directly.
+        app.hot_shown = Some(0);
+        let out = paint_window(&mut app, &ctx, window_at(0.3));
+
+        // THE PREMISE: the two bands are drawn identically. Both are emphasised,
+        // so both are 12 pt wide against the 9 pt an ordinary band gets.
+        let width_of = |color: egui::Color32| -> f32 {
+            flat_shapes(&out.shapes)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Path(p)
+                        if matches!(
+                            p.stroke.color,
+                            egui::epaint::ColorMode::Solid(c) if c == color
+                        ) && p.stroke.width > 2.0 =>
+                    {
+                        Some(p.stroke.width)
+                    }
+                    _ => None,
+                })
+                .fold(0.0_f32, f32::max)
+        };
+        let selected_w = width_of(egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+        let hovered_w = width_of(egui::Color32::from_rgb(0x1f, 0x77, 0xb4));
+        assert_eq!(
+            selected_w, hovered_w,
+            "the premise: the band emphasis is one channel for both, so it cannot \
+             be what tells them apart"
+        );
+        assert!(selected_w > 0.0, "the premise: both bands were drawn");
+
+        // AND THE ARC IS THE ONE THAT CAN. It is over AmpR's 1,201 bases, not
+        // lacZ's 301.
+        let drawn = selection_arc_len(&out, &pal);
+        let want = arc_of(&out, 1_201, 8_117);
+        let hovered = arc_of(&out, 301, 8_117);
+        assert!(
+            (drawn - want).abs() < want * 0.15,
+            "the map drew {drawn:.1} pt of arc: {want:.1} is the SELECTED feature and \
+             {hovered:.1} is the merely hovered one"
         );
     }
 }
