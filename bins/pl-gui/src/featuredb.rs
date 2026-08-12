@@ -95,7 +95,7 @@ static EVERYTHING: OnceLock<Annotator<'static>> = OnceLock::new();
 /// Built lazily, so a user who never turns the unreviewed rows on never pays
 /// for the second pair of indexes. That saving used to be the whole of it,
 /// because the two tables held identical contents; since 2026-08-10 they do
-/// not — 112 rows against 89 — so the second index is now genuinely a second
+/// not — 113 rows against 89 — so the second index is now genuinely a second
 /// index and the laziness is buying real work, not just a clone.
 pub fn annotator(unreviewed: bool) -> &'static Annotator<'static> {
     if unreviewed {
@@ -239,7 +239,7 @@ mod tests {
     /// `Db::reviewed` CLONES, so `all` and `reviewed` are two objects. When
     /// this was written they also held equal contents in equal order, and the
     /// comment said the two would diverge "the day a contributed row lands
-    /// `proposed`". That day was 2026-08-10: the table now holds 112 rows and
+    /// `proposed`". That day was 2026-08-10: the table now holds 113 rows and
     /// 89 signatures, so the two orders differ from `PLF:1014` onwards and a
     /// mismatched pair would put one record's name, id and review status
     /// against another record's coordinates — which is no longer a hypothetical

@@ -1291,3 +1291,16 @@ PLF:4014	class	polylinker	-	own-work	-	2026-08-12
 PLF:4014	genbank_key	insdc-ft	promoter	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-08-12	
 PLF:4014	patent_flag	polylinker	-	own-work	-	2026-08-12	
 PLF:4014	notes	polylinker	-	own-work	-	2026-08-12	
+PLF:4015	reference_nt	ena	BX469914.4	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/BX469914?range=13192-13699	2026-08-12	9944f9479691ce014c1c7b12071e1443f931d02ed26ccf1feb99fb3f28a0e490
+PLF:4015	boundary_evidence	ena	BX469914.4	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/fasta/BX469914?range=13192-13699	2026-08-12	9944f9479691ce014c1c7b12071e1443f931d02ed26ccf1feb99fb3f28a0e490
+PLF:4015	boundary_evidence	ena	BX469914.4	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/BX469914	2026-08-11	4720490a9e0b6957a9b75e6c57203b8e6cee8adade5da970e990d9293d2c4a90
+PLF:4015	name	polylinker	-	own-work	-	2026-08-12	
+PLF:4015	aliases	polylinker	-	own-work	-	2026-08-12	
+PLF:4015	boundary_rule	polylinker	-	own-work	-	2026-08-12	
+PLF:4015	description	polylinker	-	own-work	-	2026-08-12	
+PLF:4015	boundary_evidence	ena	CR293496.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/CR293496.1	2026-08-11	d75b03486e298f89285c9c44e6da32940076ef48b1af4e816c394a082f9daac1
+PLF:4015	boundary_evidence	ena	AB242435.1	INSDC-free	https://www.ebi.ac.uk/ena/browser/api/embl/AB242435.1	2026-08-11	ae96a011c59bf15dd97725aad56c311266dea6f01037e402ee7adb815298f6fb
+PLF:4015	class	polylinker	-	own-work	-	2026-08-12	
+PLF:4015	genbank_key	insdc-ft	promoter	unresolved-see-SOURCING-Risk-4	https://www.insdc.org/submitting-standards/feature-table/	2026-08-12	
+PLF:4015	patent_flag	polylinker	-	own-work	-	2026-08-12	
+PLF:4015	notes	polylinker	-	own-work	-	2026-08-12	
