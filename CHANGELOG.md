@@ -31,11 +31,12 @@ Nothing yet.
 
 **This is a patch release, and nothing in it changes what Polylinker does to a
 sequence.** No engine, no format reader or writer, no annotator rule and no
-default moved; no row was added, withdrawn or re-measured, and no row's *content*
-moved either. A plasmid opened under 0.8.0 and the same plasmid opened under
-0.8.1 get the same answer, from the same code, against the same 89 records. Every
-entry below corrects a sentence that was false when it was written, which is why
-this release has no *Added*, *Changed* or *Removed* section at all.
+default moved. No row was added or withdrawn, and no sequence, extent, boundary
+rule or evidence citation changed anywhere in the table. A plasmid opened under
+0.8.0 and the same plasmid opened under 0.8.1 get the same answer, from the same
+code, against the same 89 records. Each of the three entries below corrects a
+sentence that was false when it was written, which is why this release has no
+*Added*, *Changed* or *Removed* section at all.
 
 **The 89 signed rows are untouched, and so is the file that signs them.**
 `features/SIGNOFF.tsv` is byte-identical to the one 0.6.0, 0.7.0 and 0.8.0
@@ -47,11 +48,16 @@ order. The nine Class B rows it holds are all `proposed` and therefore **none of
 them ships**: `Db::reviewed()` serves none of the nine, and `pl annotate`
 searches none of them without `--include-proposed`.
 
-**`features.tsv` is not byte-identical to 0.8.0, and the paragraph at the foot of
-this entry says exactly how it differs**, because "the tables did not move" is
-the kind of claim this project measures rather than asserts. One content cell
-moved, on an unsigned row; every other difference in either table is the build
-clock.
+**`features.tsv` is not byte-identical to 0.8.0, so here is what does differ.**
+Exactly one cell of row *content* — `PLF:4009`'s `notes`, the only digest-covered
+cell that moved anywhere in either table — and what changed inside it is a
+sentence *about* the row, replacing a false superlative, rather than a different
+description of what the row is. That row is `proposed` with no line in
+`SIGNOFF.tsv`, so nothing was in a position to lapse. Everything else that
+differs in either table is the build clock: `date_added`, `retrieved` and the
+`#!version` header. The paragraph at the foot of this entry measures all of it
+cell by cell, because "the tables did not move" is the claim this project checks
+hardest.
 
 ### Fixed — a count in the worklist that nothing could reconstruct
 
