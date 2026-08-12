@@ -31858,8 +31858,13 @@ ATGAAACGCTAA
         paint_window(app, ctx, window_at(t + 0.03));
     }
 
-    /// One wheel notch down with the pointer over the sequence grid.
-    fn wheel_down(app: &mut App, ctx: &egui::Context, over: egui::Pos2, t: f64) {
+    /// One wheel notch of `dy` points with the pointer over `over`.
+    ///
+    /// Negative is towards the END of the document, which is the direction a
+    /// wheel rolled towards the user sends it — the sign is egui's and is
+    /// spelled out here because the two callers below want opposite ones and a
+    /// test that scrolled the wrong way would still be a test that passed.
+    fn wheel(app: &mut App, ctx: &egui::Context, over: egui::Pos2, dy: f32, t: f64) {
         paint_window(
             app,
             ctx,
@@ -31868,7 +31873,7 @@ ATGAAACGCTAA
                     egui::Event::PointerMoved(over),
                     egui::Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Point,
-                        delta: egui::vec2(0.0, -400.0),
+                        delta: egui::vec2(0.0, dy),
                         phase: egui::TouchPhase::Move,
                         modifiers: egui::Modifiers::default(),
                     },
@@ -31876,6 +31881,17 @@ ATGAAACGCTAA
                 ..window_at(t)
             },
         );
+    }
+
+    /// One wheel notch down — further into the molecule, or further down the
+    /// list.
+    fn wheel_down(app: &mut App, ctx: &egui::Context, over: egui::Pos2, t: f64) {
+        wheel(app, ctx, over, -400.0, t);
+    }
+
+    /// One wheel notch back up, towards base 1 or towards the first row.
+    fn wheel_up(app: &mut App, ctx: &egui::Context, over: egui::Pos2, t: f64) {
+        wheel(app, ctx, over, 400.0, t);
     }
 
     /// Paint idle frames until the sequence grid stops moving, and answer with
@@ -31906,7 +31922,9 @@ ATGAAACGCTAA
         panic!("the sequence grid never stopped scrolling: {was}");
     }
 
-    /// The feature NAMES this frame put on screen, in the Features list.
+    /// Every Features row this frame put on screen, as `(name, rect)` — which
+    /// is the list's whole scroll position in one comparable value, and the
+    /// reason the two readings below are one function and not two.
     ///
     /// A `ScrollArea` culls the galleys outside its clip rect, so a name in
     /// this list is a row the user can see and a name missing from it is a row
@@ -31918,15 +31936,77 @@ ATGAAACGCTAA
     /// name in this window is therefore drawn twice, and an unfiltered sweep
     /// would report a row as visible whenever its band happened to be labelled:
     /// the premise assertions below would all pass vacuously.
-    fn feature_rows_shown(out: &egui::FullOutput) -> Vec<String> {
+    fn feature_rows_at(out: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
         texts_in(
             &flat_shapes(&out.shapes),
             12.5,
             egui::FontFamily::Proportional,
         )
-        .into_iter()
-        .map(|(s, _)| s)
-        .collect()
+    }
+
+    /// The feature NAMES this frame put on screen, in the Features list.
+    fn feature_rows_shown(out: &egui::FullOutput) -> Vec<String> {
+        feature_rows_at(out).into_iter().map(|(s, _)| s).collect()
+    }
+
+    /// Paint idle frames until the Features list stops moving, and answer with
+    /// the last one.
+    ///
+    /// [`settle_grid`]'s reason, for the other panel: a wheel event is not one
+    /// frame of scrolling — egui pays `smooth_scroll_delta` out over several
+    /// passes — so a frame read straight after the last notch is one the list is
+    /// still travelling through. The oracle is the whole row-position list and
+    /// not the set of names, because a move of less than one row changes no name
+    /// and is still a move.
+    ///
+    /// It panics rather than giving up, for `paint_settled`'s reason: a helper
+    /// that returned an unsettled frame after N tries would put the defect back
+    /// with an alibi.
+    fn settle_list(app: &mut App, ctx: &egui::Context, mut t: f64) -> egui::FullOutput {
+        let mut was = feature_rows_at(&paint_window(app, ctx, window_at(t)));
+        for _ in 0..30 {
+            t += 0.05;
+            let out = paint_window(app, ctx, window_at(t));
+            let now = feature_rows_at(&out);
+            if now == was {
+                return out;
+            }
+            was = now;
+        }
+        panic!("the Features list never stopped scrolling: {was:?}");
+    }
+
+    /// Sixty two-line rows in an 840 pt window, so the target is a long way
+    /// below the fold — which is the case the user complained about. Answers
+    /// with the app and the colour of every band, so a caller can point at one
+    /// of sixty.
+    ///
+    /// A different colour each, because [`point_on_band`] tells bands apart by
+    /// colour and sixty `CDS` features with no colour of their own are all
+    /// painted the same. See [`map_app`].
+    fn long_list_app() -> (App, Vec<egui::Color32>) {
+        let names: Vec<String> = (0..60).map(|i| format!("f{i}")).collect();
+        let hex: Vec<String> = (0..60)
+            .map(|i| format!("#{:02x}20{:02x}", 0x30 + i * 3, 0x90 + i))
+            .collect();
+        let segs: Vec<[(u64, u64); 1]> =
+            (0..60u64).map(|i| [(1 + i * 130, 100 + i * 130)]).collect();
+        let spec: Vec<FeatureSpec> = (0..60)
+            .map(|i| (names[i].as_str(), hex[i].as_str(), &segs[i][..]))
+            .collect();
+        let app = map_app(8_117, &spec, Tab::Features);
+        let colors = hex
+            .iter()
+            .map(|h| {
+                let rgb = u32::from_str_radix(&h[1..], 16).expect("a hex colour");
+                egui::Color32::from_rgb(
+                    (rgb >> 16) as u8,
+                    ((rgb >> 8) & 0xff) as u8,
+                    (rgb & 0xff) as u8,
+                )
+            })
+            .collect();
+        (app, colors)
     }
 
     /// THE HEADLINE. PROVEN TO FAIL against the code this replaces, restored in
@@ -32071,6 +32151,76 @@ ATGAAACGCTAA
             app.reveal,
             Some(Reveal::Row(1)),
             "it switched to the list without asking the list to show the row"
+        );
+    }
+
+    /// The SEVENTH tab that cannot show a feature, some of the time: Sequence on
+    /// a document that has no bases.
+    ///
+    /// "Which tab is open" and "can this document show it there" are two
+    /// questions and the routing has to ask both. An annotation-only GenBank —
+    /// a LOCUS length and none of the bases it names, which is
+    /// `Editability::SequenceAbsent` — makes `sequence_tab` paint one sentence
+    /// and no grid at all. Selecting bases that are not there and asking to
+    /// scroll a grid that was never built is the "the click did nothing" case
+    /// wearing the other hat, so this falls through to the list with the six.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: dropping the
+    /// `Editability::of(mol).is_editable()` guard from `select_feature_span`.
+    /// The Sequence arm then answers `Some` and the click stays on a tab whose
+    /// entire content is "there is nothing here to edit". Measured with the tab
+    /// assertion blinded, it asks for `Reveal::Base(0)` on the way — base ZERO,
+    /// which does not exist in the 1-based space `Reveal::Base` is documented
+    /// in, because `mol.len()` is 0 for a document with no bases and
+    /// `start.max(1).min(n)` takes the clamp over the floor.
+    #[test]
+    fn a_map_click_on_a_document_with_no_bases_goes_to_the_list() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Sequence,
+        );
+        // The bases go, the length the file declared stays: `Molecule::span`
+        // falls back to `declared_len`, so the map still has a ring to draw the
+        // bands on and there is still something to click.
+        let mut mol = app.document().expect("open").molecule().clone();
+        mol.declared_len = Some(8_117);
+        mol.seq.clear();
+        assert!(
+            mol.sequence_absent() && mol.span() == 8_117,
+            "the premise: a molecule with a declared length and no bases"
+        );
+        app.adopt(Document::of_molecule(mol));
+        app.tab = Tab::Sequence;
+
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        assert!(
+            app.seq_grid.is_none(),
+            "the premise: this document paints no sequence grid"
+        );
+        let at = point_on_band(&out, egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+
+        press_map(&mut app, &ctx, at, 0.2);
+
+        assert_eq!(app.selected, Some(1), "the wrong band was hit, or none");
+        assert!(
+            matches!(app.tab, Tab::Features),
+            "the click left the user on a Sequence tab that cannot show the feature"
+        );
+        assert_eq!(
+            app.reveal,
+            Some(Reveal::Row(1)),
+            "it must ask the LIST for the row, not the grid for a base"
+        );
+        assert!(
+            app.edit.sel.is_none(),
+            "bases were selected in a document that has none: {:?}",
+            app.edit.sel
         );
     }
 
@@ -32236,20 +32386,7 @@ ATGAAACGCTAA
     #[test]
     fn the_features_list_scrolls_the_clicked_row_into_view() {
         let ctx = test_ctx();
-        // Sixty rows of a two-line row in a 840 pt window: the target is a long
-        // way below the fold, which is the case the user complained about.
-        let names: Vec<String> = (0..60).map(|i| format!("f{i}")).collect();
-        // A different colour each, so `point_on_band` can name one band out of
-        // sixty. See `map_app`.
-        let colors: Vec<String> = (0..60)
-            .map(|i| format!("#{:02x}20{:02x}", 0x30 + i * 3, 0x90 + i))
-            .collect();
-        let segs: Vec<[(u64, u64); 1]> =
-            (0..60u64).map(|i| [(1 + i * 130, 100 + i * 130)]).collect();
-        let spec: Vec<FeatureSpec> = (0..60)
-            .map(|i| (names[i].as_str(), colors[i].as_str(), &segs[i][..]))
-            .collect();
-        let mut app = map_app(8_117, &spec, Tab::Features);
+        let (mut app, colors) = long_list_app();
 
         paint_window(&mut app, &ctx, window_at(0.0));
         let out = paint_window(&mut app, &ctx, window_at(0.1));
@@ -32257,13 +32394,7 @@ ATGAAACGCTAA
             !feature_rows_shown(&out).iter().any(|t| t == "f55"),
             "the premise: f55 is below the fold before anything scrolls"
         );
-        let rgb = u32::from_str_radix(&colors[55][1..], 16).expect("a hex colour");
-        let color = egui::Color32::from_rgb(
-            (rgb >> 16) as u8,
-            ((rgb >> 8) & 0xff) as u8,
-            (rgb & 0xff) as u8,
-        );
-        let at = point_on_band(&out, color);
+        let at = point_on_band(&out, colors[55]);
 
         click_map(&mut app, &ctx, at, 0.2);
         let out = paint_window(&mut app, &ctx, window_at(0.3));
@@ -32272,6 +32403,104 @@ ATGAAACGCTAA
         assert!(
             feature_rows_shown(&out).iter().any(|t| t == "f55"),
             "the row for f55 was never brought on screen"
+        );
+    }
+
+    /// ...AND THEN LETS GO OF IT. A reveal that fires on every frame instead of
+    /// on the frame that asked is invisible to every assertion above, and that
+    /// is the point of this one.
+    ///
+    /// `Ui::scroll_to_rect` with `align: None` does nothing while its rect is
+    /// already in view, so the frame after the click looks identical whether the
+    /// call is guarded by `reveal_row == Some(i)` or fired for `self.selected`
+    /// forever. `the_features_list_scrolls_the_clicked_row_into_view` passes
+    /// either way. The difference shows up in exactly two places and both are
+    /// checked here.
+    ///
+    /// **IT STOPS.** Ten idle frames after the reveal put every row at the same
+    /// rectangle, so nothing is still travelling and the panel can sit still. A
+    /// single frame cannot see this: a request that re-fires would be *satisfied*
+    /// on each of those frames, and satisfied looks like settled until something
+    /// disturbs it.
+    ///
+    /// **IT LETS GO.** So something disturbs it: wheeling back to the top takes
+    /// f55 off screen, and it must STAY off. A repeating `scroll_to_rect` drags
+    /// it back the instant it leaves the viewport, which is a list the user
+    /// cannot scroll away from the row they clicked — the same defect
+    /// `a_reflow_keeps_the_top_of_the_viewport_on_the_same_base` names for the
+    /// grid, wearing the one disguise the list's `align: None` gives it.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: replacing the guard
+    /// with `self.selected == Some(i)`, so the row is scrolled to on every frame
+    /// it is selected rather than on the frame the map asked. The settle half
+    /// still passes — that is the disguise — and the second half fails with "the
+    /// list would not stay where the wheel put it", f55 dragged back on screen
+    /// after twelve notches that had parked the list at its top.
+    #[test]
+    fn the_features_list_stops_scrolling_and_lets_the_user_scroll_back() {
+        let ctx = test_ctx();
+        let (mut app, colors) = long_list_app();
+
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        let parked = feature_rows_at(&out);
+        assert!(
+            !parked.iter().any(|(s, _)| s == "f55"),
+            "the premise: f55 is below the fold before anything scrolls"
+        );
+        let at = point_on_band(&out, colors[55]);
+
+        click_map(&mut app, &ctx, at, 0.2);
+
+        // IT STOPS. Ten frames in which nothing has asked for anything: no
+        // click, no wheel, no reflow.
+        let frames: Vec<Vec<(String, egui::Rect)>> = (0..10)
+            .map(|k| {
+                feature_rows_at(&paint_window(
+                    &mut app,
+                    &ctx,
+                    window_at(0.4 + k as f64 * 0.05),
+                ))
+            })
+            .collect();
+        assert!(
+            frames[0].iter().any(|(s, _)| s == "f55"),
+            "the premise: the reveal put f55 on screen and left it there"
+        );
+        assert!(
+            frames.windows(2).all(|w| w[0] == w[1]),
+            "the list never came to rest after the reveal"
+        );
+
+        // IT LETS GO. Twelve notches is 4,800 pt against a list a little over
+        // 3,800 pt tall, so this parks at the top whatever offset the reveal
+        // left behind. Asking for more travel than exists is deliberate: the
+        // assertion below is about where the list COMES TO REST, not about
+        // arithmetic on notches. Measured, five notches reached f16 and not the
+        // top, which is why the number is not five.
+        let over = frames[0]
+            .iter()
+            .find(|(s, _)| s == "f55")
+            .expect("checked above")
+            .1
+            .center();
+        for k in 0..12 {
+            wheel_up(&mut app, &ctx, over, 0.9 + k as f64 * 0.05);
+        }
+        // After the LAST notch, 0.9 + 11 * 0.05. `emath::History` panics on a
+        // clock that moves backwards, so the settle cannot start where the
+        // wheeling started.
+        let out = settle_list(&mut app, &ctx, 1.5);
+
+        assert!(
+            !feature_rows_shown(&out).iter().any(|t| t == "f55"),
+            "the list would not stay where the wheel put it: f55 was dragged back \
+             on screen by a reveal that fired again"
+        );
+        assert_eq!(
+            feature_rows_at(&out),
+            parked,
+            "the wheel could not put the list back where it started"
         );
     }
 
