@@ -94,6 +94,32 @@ which.
 
 ### Changed
 
+- **Clicking a feature on the map now reveals it in the panel that is open,
+  instead of always switching to the Features tab.** With the Sequence tab up,
+  the click selects the feature's bases and scrolls the grid to where the
+  feature *begins* — including for an origin-crossing feature, where the start
+  is the high coordinate and the selection is the short arc — 318 bases on the
+  8,117 bp molecule the test uses — rather than the 7,799-base complement the
+  same pair of carets also names. With the Features
+  tab up, the list scrolls the row into view; before this, a selected feature
+  scrolled out of sight was indicated by nothing at all, since the row's
+  translucent wash is the only per-row marker and it is clipped away. Both
+  destinations then let go: the reveal is a one-shot, so the view comes to rest
+  and the wheel can carry it away from the row or the bases it just brought into
+  view, without being dragged back. The six
+  tabs that cannot show a feature — Library, Enzymes, Primers, Reads, History,
+  File — still switch to the Features list, deliberately: a click whose only
+  visible effect is on the surface you clicked reads as a click that did not
+  work. So does the Sequence tab on a document that has no bases to show, which
+  is an annotation track or an annotation-only GenBank: it paints one sentence
+  and no grid, so there is nothing there to reveal into. A second click on the
+  same band still deselects, and now does nothing
+  else: it does not navigate and does not move the view, because the map draws
+  the selection whatever tab is open, so that click is a deliberate "clear
+  this". Double-click still opens the feature editor, and reveals once.
+- **A map click on a feature the Features filter hides says so** in the status
+  line, naming the feature and the filter text, rather than emptying the box the
+  user typed in or selecting something with no row to show for it.
 - **Counts corrected by measurement, not by assumption**: the table is
   **113 rows — 89 signed, 24 proposed** (was 112/89/23), and Stage 5 now has
   **ten** Class B rows in the table (was nine) out of **sixteen** declared

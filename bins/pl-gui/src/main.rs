@@ -991,6 +991,51 @@ enum Tab {
     File,
 }
 
+/// A one-shot request to bring something on screen, set by a map click and
+/// consumed by whichever tab was routed to on the NEXT frame.
+///
+/// One-shot is the whole design, and it is the rule
+/// `a_reflow_keeps_the_top_of_the_viewport_on_the_same_base` earned the hard
+/// way one call site down: a scroll request repeated every frame does not
+/// merely land twice, it *pins* the view and the user cannot scroll away from
+/// it at all. So this is taken with `Option::take` in `side_panel`, before the
+/// tab dispatch, and a request nobody consumes dies at the end of that frame
+/// rather than firing later when the filter or the tab changes under it.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Reveal {
+    /// Scroll the Features list until the row for this feature index is in
+    /// view. The index is into the UNFILTERED `molecule().features`, which is
+    /// the one number space `selected`, `map.clicked` and the row loop all
+    /// share.
+    Row(usize),
+    /// Scroll the Sequence grid until this 1-based base is in view.
+    Base(u64),
+}
+
+/// Does this feature survive the Features tab's filter box? `needle` must
+/// already be lowercased.
+///
+/// A free function rather than the closure it used to be, because there are now
+/// two callers and they must not be able to disagree: the list decides which
+/// rows exist, and [`App::map_clicked_feature`] decides whether the row it is
+/// about to scroll to is one of them. A second copy of this predicate would
+/// mean the click could scroll to a row the list never drew, silently.
+///
+/// Matched on QUALIFIER VALUES as well as name and kind, which is how features
+/// are actually named in GenBank: a filter that cannot find
+/// `/product="chloramphenicol acetyltransferase"` is a filter a user stops
+/// trusting, and an untrusted filter is one that gets left with stale text in
+/// it.
+fn filter_matches(f: &pl_core::Feature, needle: &str) -> bool {
+    needle.is_empty()
+        || f.name.to_lowercase().contains(needle)
+        || f.kind.to_lowercase().contains(needle)
+        || f.qualifiers.iter().any(|q| {
+            q.1.as_deref()
+                .is_some_and(|v| v.to_lowercase().contains(needle))
+        })
+}
+
 /// What a stale draft is, beyond what its header says.
 #[derive(Default)]
 struct StaleExtra {
@@ -1253,6 +1298,9 @@ struct App {
     /// whenever the two disagree; without that request a pointer coming to rest
     /// could leave the echo undrawn until something else asked for a frame.
     hot_shown: Option<usize>,
+    /// What a map click asked the open panel to bring into view, for exactly
+    /// one frame. See [`Reveal`], and `side_panel` for where it is taken.
+    reveal: Option<Reveal>,
     filter: String,
     status: String,
     /// Which enzymes the panel is showing.
@@ -2589,6 +2637,7 @@ impl App {
             selected: None,
             hot: None,
             hot_shown: None,
+            reveal: None,
             filter: String::new(),
             status: String::new(),
             enzyme_set: pl_enzymes::EnzymeSet::All,
@@ -6896,6 +6945,19 @@ impl App {
                 // other five — while the tab strip is drawn above it, so the
                 // user could select the tab and be told the one thing it does
                 // not need.
+
+                // The map's reveal request, TAKEN HERE, once, before the
+                // dispatch — not inside the tab
+                // that consumes it. A `Reveal` is a request from LAST frame's
+                // map click, and the tab it was aimed at is the tab this match
+                // is about to run; taking it anywhere else leaves a live
+                // request behind whenever the aimed-at tab does not run, which
+                // is every frame the document is closed, the filter hides the
+                // row, or the user clicked a tab strip button in between. A
+                // stale one does not sit harmlessly: it fires the moment its
+                // tab next paints, which is a view jumping on a click made
+                // minutes ago.
+                let reveal = self.reveal.take();
                 match self.tab {
                     // The one tab whose whole state is its own — `self.scan`,
                     // `self.lib_mode`, `self.lib_query`, `self.lib_absent` —
@@ -6924,9 +6986,9 @@ impl App {
                         ui.add_space(20.0);
                         ui.label(RichText::new("Nothing open.").color(pal(ui).muted));
                     }
-                    Tab::Features => self.features_tab(ui),
+                    Tab::Features => self.features_tab(ui, reveal),
                     Tab::Enzymes => self.enzymes_tab(ui),
-                    Tab::Sequence => self.sequence_tab(ui),
+                    Tab::Sequence => self.sequence_tab(ui, reveal),
                     Tab::Primers => self.primers_tab(ui),
                     Tab::History => self.history_tab(ui),
                     Tab::File => self.file_tab(ui),
@@ -7531,7 +7593,15 @@ impl App {
         }
     }
 
-    fn features_tab(&mut self, ui: &mut Ui) {
+    fn features_tab(&mut self, ui: &mut Ui, reveal: Option<Reveal>) {
+        // Only this variant means anything here. `Reveal::Base` is aimed at the
+        // sequence grid, and a click can only produce it while the Sequence tab
+        // is open, so reaching this arm with one would already be a bug — it is
+        // dropped rather than guessed at.
+        let reveal_row = match reveal {
+            Some(Reveal::Row(i)) => Some(i),
+            _ => None,
+        };
         ui.add_space(4.0);
         self.proposals_section(ui);
         ui.separator();
@@ -7623,21 +7693,10 @@ impl App {
             }
         }
         let needle = self.filter.to_lowercase();
-        // Matched here so the count beside the box and the rows below cannot
-        // disagree, and matched on QUALIFIER VALUES as well as name and kind,
-        // which is how features are actually named in GenBank: a filter that
-        // cannot find `/product="chloramphenicol acetyltransferase"` is a filter
-        // a user stops trusting, and an untrusted filter is one that gets left
-        // with stale text in it.
-        let matches = |f: &pl_core::Feature| -> bool {
-            needle.is_empty()
-                || f.name.to_lowercase().contains(&needle)
-                || f.kind.to_lowercase().contains(&needle)
-                || f.qualifiers.iter().any(|q| {
-                    q.1.as_deref()
-                        .is_some_and(|v| v.to_lowercase().contains(&needle))
-                })
-        };
+        // Bound once, so the count beside the box and the rows below cannot
+        // disagree — and through `filter_matches`, so neither can the row loop
+        // and the click that scrolls to a row.
+        let matches = |f: &pl_core::Feature| -> bool { filter_matches(f, &needle) };
         let (n_match, n_all) = {
             let m = self.document().expect("checked by caller").molecule();
             (
@@ -7683,7 +7742,24 @@ impl App {
         let span = doc.molecule().span();
         let circular = doc.molecule().topology.is_circular();
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        // `animated(false)` affects ONE thing — whether a `scroll_to_*` request
+        // is lerped over `Style::scroll_animation` or applied to the offset at
+        // once. It reaches nothing else: the wheel, the drag and the scrollbar
+        // all write `state.offset` directly and never look at this flag. It is
+        // off for two reasons, and the second is the one that decides it.
+        //
+        // The default animation is 1000 pt/s clamped to 0.1-0.3 s. Measured, a
+        // reveal across 1,081 pt of list was still 12% short of its target
+        // after fourteen frames. That makes the reveal race everything else in
+        // the frame, and in particular it makes it untestable honestly: the
+        // house settle helper, `paint_settled`, watches `App::seq_grid` and has
+        // no idea this list exists, so it would return a frame with the scroll
+        // half done and a test reading that frame would be reading a number
+        // that is on its way somewhere else. The Sequence destination lands in
+        // one frame by construction — `vertical_scroll_offset` is applied in
+        // `begin` — so this also keeps the two halves of one gesture behaving
+        // the same way.
+        egui::ScrollArea::vertical().animated(false).show(ui, |ui| {
             for (i, f) in doc.molecule().features.iter().enumerate() {
                 if !matches(f) {
                     continue;
@@ -7818,6 +7894,32 @@ impl App {
                         egui::CornerRadius::same(3),
                         pal(ui).selection(),
                     );
+                }
+                // THE ROW THE MAP ASKED FOR, brought into view.
+                //
+                // `.show()` and not `show_rows`, so every row has a real rect
+                // every frame whether or not it is on screen, and this can name
+                // a row 400 pt below the viewport. Nothing else in this window
+                // scrolls to anything, so this is not following a convention;
+                // it is setting one, and both halves of it are chosen:
+                //
+                // `Ui::scroll_to_rect` on the SAME rectangle the two washes
+                // above are painted on, rather than `resp.scroll_to_me()`,
+                // which would use `resp.rect`. The selection wash is drawn
+                // 4x2 pt outside that, so `scroll_to_me` parks the row flush
+                // with the viewport edge and clips 2 pt of the highlight the
+                // scroll exists to show. Scrolling to the exact rectangle about
+                // to be highlighted cannot be 2 pt wrong.
+                //
+                // `align: None`, which is egui's "do nothing if it is already
+                // in view" and otherwise moves by the smallest amount that
+                // brings it in. Measured against the alternatives on a parked
+                // list: `None` left a visible row exactly where it was, while
+                // `Some(Center)` moved it 36 pt for no reason. A reveal is a
+                // request to SEE something, not a request to re-lay-out a panel
+                // the user may already have arranged.
+                if reveal_row == Some(i) {
+                    ui.scroll_to_rect(resp.rect.expand2(egui::vec2(4.0, 2.0)), None);
                 }
                 if resp.hovered() {
                     hot = Some(i);
@@ -9436,8 +9538,15 @@ impl App {
     /// background tint. A tint would force `theme::on_color` per base, flipping
     /// the letters between black and white at exactly the kind of boundary the
     /// case signal sits on.
-    fn sequence_tab(&mut self, ui: &mut Ui) {
+    fn sequence_tab(&mut self, ui: &mut Ui, reveal: Option<Reveal>) {
         use seqedit::Selection;
+
+        // The mirror of `features_tab`'s: `Reveal::Row` is aimed at the list and
+        // means nothing to a grid of bases.
+        let reveal_base = match reveal {
+            Some(Reveal::Base(b)) => Some(b),
+            _ => None,
+        };
 
         let now = ui.input(|i| i.time);
         let gate = seqedit::Editability::of(self.document().expect("checked by caller").molecule());
@@ -9667,6 +9776,37 @@ impl App {
         } else {
             (0, 0)
         };
+        // The map's reveal, resolved to the same currency the reflow anchor
+        // works in: an offset in points, or nothing at all.
+        //
+        // THROUGH `vertical_scroll_offset` AND NOT `scroll_to_rect`, for two
+        // reasons that are both about `show_rows`. A row outside `range` is
+        // never built, so it has no widget and no rect and the scroll-to API
+        // cannot name it — the target here is by definition usually off screen.
+        // And `scroll_to_rect` is animated, while this lands in `begin` on the
+        // frame it is passed; `paint_settled` settles on `seq_grid`, so an
+        // animated offset would be read half-way there and the test would
+        // report a number the view is still moving away from.
+        //
+        // ALREADY VISIBLE MEANS DO NOTHING, which is `align: None`'s rule in
+        // the Features list restated for a viewport this code has to measure
+        // itself. `seq_grid` and `visible_rows` are last frame's, which is the
+        // same one-frame-old geometry the reflow anchor above trusts and for
+        // the same reason: this frame's has not been laid out yet. Clicking a
+        // band whose bases are already on screen must not shove the view.
+        let reveal_offset = reveal_base.and_then(|base| {
+            // `base` is 1-based and `row_of` takes the 0-based caret space the
+            // grid is drawn in, which is one subtraction and an off-by-one that
+            // would put base 61 on row 0 at 60 per row.
+            let row = seqedit::row_of(base.saturating_sub(1), per_row);
+            let first = self.seq_grid.map_or(0, |g| g.first_row);
+            let shown = self.edit.visible_rows.max(1);
+            // Strictly inside the visible band. The last row of `show_rows` is
+            // routinely a sliver, so `< first + shown` alone would call a row
+            // "visible" on the strength of two pixels of it.
+            let visible = self.seq_grid.is_some() && row >= first && row + 1 < first + shown;
+            (!visible).then_some(row as f32 * row_h)
+        });
         self.seq_per_row = per_row;
         self.seq_row_h = row_h;
 
@@ -9829,13 +9969,28 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 0.0;
 
                 let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
-                if reflowed {
-                    // ONLY on the frame the row width changed. Passing it on
-                    // any other frame pins the offset and the user cannot
-                    // scroll at all.
-                    area = area.vertical_scroll_offset(
-                        seqedit::row_of(anchor, per_row).saturating_sub(keep) as f32 * row_h,
-                    );
+                // ONE call site for the offset, and it stays one. Passing
+                // `vertical_scroll_offset` on any frame that did not ask for it
+                // pins the view and the user cannot scroll at all — see
+                // `a_reflow_keeps_the_top_of_the_viewport_on_the_same_base`,
+                // which was proven against exactly that mutation. Both writers
+                // below are therefore one-shot: `reflowed` is true only on the
+                // frame the row width changed, and `reveal_offset` comes from a
+                // `Reveal` that `side_panel` already took.
+                //
+                // THE REVEAL WINS A TIE, and ties do happen: dragging the
+                // splitter reflows the rows, and a map click in the same frame
+                // wants somewhere else. The anchor exists to stop the view
+                // moving when the USER did not ask it to; a reveal is the user
+                // asking. Preserving the old place instead would answer a click
+                // by carefully keeping the view where it was.
+                let offset = reveal_offset.or_else(|| {
+                    reflowed.then(|| {
+                        seqedit::row_of(anchor, per_row).saturating_sub(keep) as f32 * row_h
+                    })
+                });
+                if let Some(o) = offset {
+                    area = area.vertical_scroll_offset(o);
                 }
                 area.show_rows(ui, row_h, rows, |ui, range| {
                     visible = (range.end - range.start).max(1) as u64;
@@ -12801,20 +12956,178 @@ impl App {
             }
         }
         if let Some(i) = clicked_out {
-            self.selected = if self.selected == Some(i) {
-                None
-            } else {
-                Some(i)
-            };
-            self.tab = Tab::Features;
+            self.map_clicked_feature(i);
         }
         // After the click has been handled: egui delivers both, and a
         // double-click that left `selected` toggled off would open the editor on
         // a feature the panel is no longer highlighting. `open_feature_editor`
         // is where the highlight is put back, for every entry point at once.
+        //
+        // AND THAT SECOND CLICK IS A DESELECTING ONE, which is what keeps a
+        // double-click from revealing twice. The first press selects and asks
+        // for the reveal; the second press arrives with `selected == Some(i)`
+        // already true, takes `map_clicked_feature`'s deselect arm — which asks
+        // for nothing — and `open_feature_editor` immediately puts the
+        // selection back. One reveal per double-click, and the editor window
+        // opens over a panel that has already finished moving.
         if let Some(i) = opened_out {
             self.open_feature_editor(Some(i));
         }
+    }
+
+    /// A click on a band in the map, routed to the panel that is open.
+    ///
+    /// # What Lior asked for, and the three decisions it does not settle
+    ///
+    /// "Zoom to that feature in the panel that is currently open." The routing
+    /// is the easy half; what follows is the part that had to be decided rather
+    /// than left to fall out.
+    ///
+    /// **A tab that cannot show a feature.** Six of the eight can't: a cut
+    /// list, an oligo, a trace, an edit log, a file header and a folder of
+    /// other files all answer questions about the molecule that are not about
+    /// one feature. This switches to the Features list for them, which is what
+    /// the unconditional `self.tab = Tab::Features` it replaces did for all
+    /// eight. Doing nothing instead was the alternative and it is worse than it
+    /// sounds: the map's own highlight is the only thing that would move, the
+    /// panel would sit there showing a cut list, and a click whose entire
+    /// visible effect is on the surface you clicked reads as a click that did
+    /// not work. The rule is therefore "reveal it where you are if that is
+    /// possible, and otherwise take me somewhere it is", never "swallow it".
+    ///
+    /// **The Sequence tab on a molecule with no bases.** `shows_a_feature` says
+    /// yes and this document says no: an annotation track or an
+    /// annotation-only GenBank makes `sequence_tab` paint one sentence
+    /// explaining that there is nothing to edit, and no grid at all. Selecting
+    /// bases that are not there and asking to scroll a grid that was never
+    /// built is the "click did nothing" case wearing the other hat, so those
+    /// two documents fall through to the Features list with everything else.
+    ///
+    /// **A second click on the same feature deselects, and reveals nothing.**
+    /// The toggle is not new and is not being changed. What is new is that the
+    /// deselecting half now stops there: no tab switch, no scroll. A user who
+    /// clicks a band that is *already* highlighted on the map can see that it is
+    /// highlighted — the map draws the selection whatever tab is open — so that
+    /// click is a deliberate "clear this", and clearing a selection is not a
+    /// request to be taken anywhere or to have the view moved.
+    fn map_clicked_feature(&mut self, i: usize) {
+        if self.selected == Some(i) {
+            self.selected = None;
+            return;
+        }
+        self.selected = Some(i);
+
+        // EXHAUSTIVE, and that is the point of writing eight names out rather
+        // than `_ => {}`: a ninth tab cannot be added without someone deciding
+        // here whether it can show a feature, because the compiler will refuse
+        // the file until they do. That decision is exactly the one this change
+        // exists to stop being accidental.
+        match self.tab {
+            // The grid can show the bases the feature names — when the document
+            // has bases. `select_feature_span` answers `None` for the two that
+            // do not, and they fall through with the six below.
+            Tab::Sequence => {
+                if let Some(base) = self.select_feature_span(i) {
+                    self.reveal = Some(Reveal::Base(base));
+                    return;
+                }
+            }
+            // The list, which is both the destination when it is already open
+            // and the fallback for the six that cannot show a feature at all.
+            Tab::Features
+            | Tab::Library
+            | Tab::Enzymes
+            | Tab::Primers
+            | Tab::Reads
+            | Tab::History
+            | Tab::File => {}
+        }
+
+        self.tab = Tab::Features;
+        self.reveal = Some(Reveal::Row(i));
+        // THE ROW MAY NOT EXIST, and the filter box is the reason.
+        //
+        // `features_tab` skips a feature the filter does not match, so on a
+        // filtered list the reveal has nothing to scroll to and the user is
+        // looking at a list that does not contain the thing they just clicked.
+        // Clearing the filter for them was the other option and it is refused:
+        // the box holds a query the user typed, its count doubles as the clear
+        // affordance precisely so that nothing else has destructive reach over
+        // it, and a click on the map silently emptying it is that reach. So the
+        // selection is made, the row is not invented, and the status line says
+        // which of the two surfaces is lying to them.
+        let hidden = self.document().and_then(|d| {
+            let needle = self.filter.to_lowercase();
+            let f = d.molecule().features.get(i)?;
+            (!filter_matches(f, &needle)).then(|| f.name.clone())
+        });
+        if let Some(name) = hidden {
+            self.status = format!(
+                "{name} is selected, but the filter {:?} hides its row — clear the filter to see it",
+                self.filter
+            );
+        }
+    }
+
+    /// Select the whole of feature `i` in the sequence view, and answer with the
+    /// base the view should be showing.
+    ///
+    /// `None` when this document has no caret space, or when the feature has no
+    /// segments to have an extent — both of which mean the Sequence tab cannot
+    /// show it and the caller must route elsewhere.
+    ///
+    /// # Which bases, and which one to scroll to
+    ///
+    /// [`pl_core::Feature::extent`] rather than `start()`/`end()`, and rather
+    /// than `select_feature_under`'s smallest-covering-*segment* rule. It is the
+    /// same call the Features row makes to print its coordinates, so the row
+    /// that says `5,300..100` and the highlight in the grid name the same bases
+    /// — and it is the only one of the three that survives the GenBank join
+    /// form, in which every origin-crossing feature has a part starting at base
+    /// 1 and `start()`/`end()` collapse to the whole molecule.
+    ///
+    /// **The wrap.** `extent` answers `end < start` for a feature that crosses
+    /// the origin, and both halves of the answer are deliberate:
+    ///
+    /// - the SELECTION gets `through_origin: true`, which is the bit that
+    ///   distinguishes the 100 bases across the origin from the 8,017 the same
+    ///   pair of carets also names. The grid painter already splits that into
+    ///   two runs and the readout already appends "· crosses the origin", so
+    ///   nothing downstream needs teaching;
+    /// - the SCROLL goes to `start`, the *high* coordinate, because that is
+    ///   where the feature begins. Scrolling to the low one would land the view
+    ///   on the feature's tail with its head a whole molecule away, which is
+    ///   the answer to a question nobody asked. It is the same choice for an
+    ///   ordinary feature, where `start` is simply the first base, so there is
+    ///   one rule and not two.
+    ///
+    /// The strand is deliberately not consulted. A reverse feature's biological
+    /// 5' end is at `end`, and going there would be defensible in isolation and
+    /// wrong here: the row the user is reading prints `start..end` on the plus
+    /// strand, and the view must land on the number the panel showed them.
+    fn select_feature_span(&mut self, i: usize) -> Option<u64> {
+        let d = self.bench.get()?;
+        let mol = d.molecule();
+        if !seqedit::Editability::of(mol).is_editable() {
+            return None;
+        }
+        let (span, circular, n) = (mol.span(), mol.topology.is_circular(), mol.len());
+        let (start, end) = mol.features.get(i)?.extent(span, circular)?;
+        // `saturating_sub` for the same reason `select_feature_under` carries
+        // it, with the same measured consequence: a SnapGene
+        // `<Segment range="0-4"/>` keeps its literal 0, `start - 1` wrapped to
+        // `u64::MAX` in release, the clamp pulled that down to `n`, and a
+        // feature on bases 1..4 selected bases 5..12 — which the next Backspace
+        // would have deleted.
+        let sel = seqedit::Selection {
+            anchor: start.saturating_sub(1),
+            head: end,
+            through_origin: end < start && circular,
+        };
+        let head = end.min(n);
+        let d = self.bench.get_mut().expect("checked at the top");
+        self.edit.set_selection(d, sel, head);
+        Some(start.max(1).min(n))
     }
 
     /// The one modal in the editing surface, and it only appears when a paste
@@ -31422,5 +31735,882 @@ ATGAAACGCTAA
         // No ellipsis, and that is the toolbar's own documented rule: "…" means
         // this button reaches `rfd::FileDialog`, and New reaches a modal of ours.
         assert!(!drawn.iter().any(|(s, _)| s == "New…"));
+    }
+
+    // -----------------------------------------------------------------------
+    // A click on a band in the map, routed to the panel that is open
+    //
+    // These drive the WHOLE window — `side_panel` and then `central`, in that
+    // order, because that order decides everything here. egui requires side
+    // panels to be added before the central panel, so the panel is painted
+    // before the map has hit-tested anything, and a click handled at the end of
+    // `central` is therefore consumed by the panel on the NEXT frame. Every
+    // "and then one more frame" below is that lag and not slack.
+    //
+    // `paint`/`paint_out` cannot be used for any of it: the CentralPanel they
+    // put up is an empty `allocate_space`, so the map is never drawn, and a map
+    // that is never drawn is one that can never be clicked. A test built on
+    // them would pass with the whole routing deleted.
+    // -----------------------------------------------------------------------
+
+    fn paint_window(app: &mut App, ctx: &egui::Context, input: egui::RawInput) -> egui::FullOutput {
+        ctx.run_ui(input, |ui| {
+            app.side_panel(ui);
+            app.central(ui);
+        })
+    }
+
+    /// One feature for [`map_app`]: its name, the hex colour that makes its band
+    /// findable in the shape list, and its 1-based inclusive segments.
+    type FeatureSpec<'a> = (&'a str, &'a str, &'a [(u64, u64)]);
+
+    /// A circular plasmid carrying `features`, opened on `tab`.
+    ///
+    /// The colour is not decoration: `theme::feature_color` prefers the
+    /// feature's own hex over the one it would derive from `kind`, so giving
+    /// each a different one is what lets [`point_on_band`] tell two bands apart
+    /// in the shape list. Two `CDS` features with no colour of their own are
+    /// painted in the same colour, and a locator that picked one of those at
+    /// random would be a test that clicked wherever it liked.
+    fn map_app(n: u64, features: &[FeatureSpec], tab: Tab) -> App {
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        let seq: String = (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                b"ACGT"[(s >> 33) as usize & 3] as char
+            })
+            .collect();
+        let mut d =
+            Document::from_bytes(format!(">p\n{seq}\n").as_bytes(), "p.fa".into(), None).unwrap();
+        d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        let mut mol = d.molecule().clone();
+        for (name, color, segs) in features {
+            let mut f = pl_core::Feature::new(*name, "CDS");
+            f.strand = Strand::Forward;
+            for &(a, b) in *segs {
+                let mut seg = pl_core::Segment::new(a, b);
+                seg.color = Some((*color).into());
+                f.segments.push(seg);
+            }
+            mol.features.push(f);
+        }
+        let mut app = App::blank();
+        app.adopt(Document::of_molecule(mol));
+        app.tab = tab;
+        app
+    }
+
+    /// A pointer position the map's own hit-test will resolve to the band drawn
+    /// in `color`.
+    ///
+    /// Read off the painted arc rather than reconstructed from the ring's
+    /// geometry, and that is the whole reason this is trustworthy: the hit-test
+    /// asks whether the pointer is within half a lane of the band's radius and
+    /// inside its angular sweep, and the mid-point of the polyline the painter
+    /// emitted for that band is on its centreline by construction. Rebuilding
+    /// `center`, `base` and `angle_of` here would be a second copy of the
+    /// geometry, and a test that agrees with its own copy of the code proves
+    /// nothing about the code.
+    ///
+    /// The band body is `Shape::line(pts, Stroke::new(BAND_W, colour))`. The
+    /// width filter is what keeps the 1.0 pt join hairs — same colour, drawn
+    /// between the parts of a join and NOT over the bases — out of the answer.
+    fn point_on_band(out: &egui::FullOutput, color: egui::Color32) -> egui::Pos2 {
+        let mut best: Option<egui::Pos2> = None;
+        for s in flat_shapes(&out.shapes) {
+            if let egui::Shape::Path(p) = s {
+                let solid =
+                    matches!(p.stroke.color, egui::epaint::ColorMode::Solid(c) if c == color);
+                if solid && p.stroke.width > 2.0 && p.points.len() >= 2 {
+                    best = Some(p.points[p.points.len() / 2]);
+                }
+            }
+        }
+        best.unwrap_or_else(|| panic!("no band was painted in {color:?}"))
+    }
+
+    /// Press and release on `at`, and nothing more — so the caller can read
+    /// `App::reveal` before the next `side_panel` takes it.
+    ///
+    /// THE CLOCK IS EXPLICIT, and it has to be. Two presses on the same point
+    /// inside egui's 0.3 s double-click window are a double-click and not two
+    /// clicks, and a double-click is a real gesture here with a real handler:
+    /// a test that drifted into one while meaning to click twice would be
+    /// testing the editor instead. `RawInput::time = None` advances by the
+    /// predicted frame time, which put two clicks a dozen frames apart about
+    /// 0.2 s apart — inside the window, and silently.
+    fn press_map(app: &mut App, ctx: &egui::Context, at: egui::Pos2, t: f64) {
+        paint_window(app, ctx, pointer_to_at(at, t));
+        paint_window(app, ctx, pointer_button_at(at, true, t + 0.01));
+        paint_window(app, ctx, pointer_button_at(at, false, t + 0.02));
+    }
+
+    /// The same, plus the frame the panel consumes the request on.
+    ///
+    /// That trailing frame is the one-frame lag and not slack: the panel is
+    /// painted before the map has hit-tested, so a click handled at the end of
+    /// `central` cannot reach the panel until the pass after it.
+    fn click_map(app: &mut App, ctx: &egui::Context, at: egui::Pos2, t: f64) {
+        press_map(app, ctx, at, t);
+        paint_window(app, ctx, window_at(t + 0.03));
+    }
+
+    /// One wheel notch of `dy` points with the pointer over `over`.
+    ///
+    /// Negative is towards the END of the document, which is the direction a
+    /// wheel rolled towards the user sends it — the sign is egui's and is
+    /// spelled out here because the two callers below want opposite ones and a
+    /// test that scrolled the wrong way would still be a test that passed.
+    fn wheel(app: &mut App, ctx: &egui::Context, over: egui::Pos2, dy: f32, t: f64) {
+        paint_window(
+            app,
+            ctx,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(over),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, dy),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                ..window_at(t)
+            },
+        );
+    }
+
+    /// One wheel notch down — further into the molecule, or further down the
+    /// list.
+    fn wheel_down(app: &mut App, ctx: &egui::Context, over: egui::Pos2, t: f64) {
+        wheel(app, ctx, over, -400.0, t);
+    }
+
+    /// One wheel notch back up, towards base 1 or towards the first row.
+    fn wheel_up(app: &mut App, ctx: &egui::Context, over: egui::Pos2, t: f64) {
+        wheel(app, ctx, over, 400.0, t);
+    }
+
+    /// Paint idle frames until the sequence grid stops moving, and answer with
+    /// the row at the top of the viewport.
+    ///
+    /// A wheel event is not one frame of scrolling: egui smooths
+    /// `smooth_scroll_delta` over several passes, so the view is still
+    /// travelling after the last event and a row read immediately afterwards is
+    /// a number on its way somewhere else. Measured here — the top row read 68
+    /// straight after four notches and 75 once it had stopped, so a test that
+    /// compared "before" against "after" across a settle would report a 7-row
+    /// move that nothing in this change caused.
+    ///
+    /// It panics rather than giving up, for `paint_settled`'s reason: a helper
+    /// that returned an unsettled number after N tries would put the defect
+    /// back with an alibi.
+    fn settle_grid(app: &mut App, ctx: &egui::Context, mut t: f64) -> u64 {
+        let mut was = app.seq_grid.map_or(0, |g| g.first_row);
+        for _ in 0..30 {
+            t += 0.05;
+            paint_window(app, ctx, window_at(t));
+            let now = app.seq_grid.map_or(0, |g| g.first_row);
+            if now == was {
+                return now;
+            }
+            was = now;
+        }
+        panic!("the sequence grid never stopped scrolling: {was}");
+    }
+
+    /// Every Features row this frame put on screen, as `(name, rect)` — which
+    /// is the list's whole scroll position in one comparable value, and the
+    /// reason the two readings below are one function and not two.
+    ///
+    /// A `ScrollArea` culls the galleys outside its clip rect, so a name in
+    /// this list is a row the user can see and a name missing from it is a row
+    /// they would have to go looking for. That culling is the oracle.
+    ///
+    /// Filtered to the list's own face — proportional 12.5, from
+    /// `RichText::new(&f.name).strong().size(12.5)` — because the MAP labels
+    /// every band it has room for, in monospace 10, with the same strings. Every
+    /// name in this window is therefore drawn twice, and an unfiltered sweep
+    /// would report a row as visible whenever its band happened to be labelled:
+    /// the premise assertions below would all pass vacuously.
+    fn feature_rows_at(out: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        texts_in(
+            &flat_shapes(&out.shapes),
+            12.5,
+            egui::FontFamily::Proportional,
+        )
+    }
+
+    /// The feature NAMES this frame put on screen, in the Features list.
+    fn feature_rows_shown(out: &egui::FullOutput) -> Vec<String> {
+        feature_rows_at(out).into_iter().map(|(s, _)| s).collect()
+    }
+
+    /// Paint idle frames until the Features list stops moving, and answer with
+    /// the last one.
+    ///
+    /// [`settle_grid`]'s reason, for the other panel: a wheel event is not one
+    /// frame of scrolling — egui pays `smooth_scroll_delta` out over several
+    /// passes — so a frame read straight after the last notch is one the list is
+    /// still travelling through. The oracle is the whole row-position list and
+    /// not the set of names, because a move of less than one row changes no name
+    /// and is still a move.
+    ///
+    /// It panics rather than giving up, for `paint_settled`'s reason: a helper
+    /// that returned an unsettled frame after N tries would put the defect back
+    /// with an alibi.
+    fn settle_list(app: &mut App, ctx: &egui::Context, mut t: f64) -> egui::FullOutput {
+        let mut was = feature_rows_at(&paint_window(app, ctx, window_at(t)));
+        for _ in 0..30 {
+            t += 0.05;
+            let out = paint_window(app, ctx, window_at(t));
+            let now = feature_rows_at(&out);
+            if now == was {
+                return out;
+            }
+            was = now;
+        }
+        panic!("the Features list never stopped scrolling: {was:?}");
+    }
+
+    /// Sixty two-line rows in an 840 pt window, so the target is a long way
+    /// below the fold — which is the case the user complained about. Answers
+    /// with the app and the colour of every band, so a caller can point at one
+    /// of sixty.
+    ///
+    /// A different colour each, because [`point_on_band`] tells bands apart by
+    /// colour and sixty `CDS` features with no colour of their own are all
+    /// painted the same. See [`map_app`].
+    fn long_list_app() -> (App, Vec<egui::Color32>) {
+        let names: Vec<String> = (0..60).map(|i| format!("f{i}")).collect();
+        let hex: Vec<String> = (0..60)
+            .map(|i| format!("#{:02x}20{:02x}", 0x30 + i * 3, 0x90 + i))
+            .collect();
+        let segs: Vec<[(u64, u64); 1]> =
+            (0..60u64).map(|i| [(1 + i * 130, 100 + i * 130)]).collect();
+        let spec: Vec<FeatureSpec> = (0..60)
+            .map(|i| (names[i].as_str(), hex[i].as_str(), &segs[i][..]))
+            .collect();
+        let app = map_app(8_117, &spec, Tab::Features);
+        let colors = hex
+            .iter()
+            .map(|h| {
+                let rgb = u32::from_str_radix(&h[1..], 16).expect("a hex colour");
+                egui::Color32::from_rgb(
+                    (rgb >> 16) as u8,
+                    ((rgb >> 8) & 0xff) as u8,
+                    (rgb & 0xff) as u8,
+                )
+            })
+            .collect();
+        (app, colors)
+    }
+
+    /// THE HEADLINE. PROVEN TO FAIL against the code this replaces, restored in
+    /// place and run: `if let Some(i) = clicked_out` toggling `self.selected`
+    /// and then setting `self.tab = Tab::Features` unconditionally. It fails on
+    /// the first assertion — "the click switched away from the tab it was asked
+    /// to reveal the feature IN" — and would fail on the next one too, because
+    /// nothing on that path ever set a selection for the grid to show.
+    #[test]
+    fn a_map_click_with_the_sequence_tab_open_selects_the_span_and_stays_put() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Sequence,
+        );
+        // Twice: the side panel's width is learned from the pass before, and the
+        // map sizes its ring from labels it has to have laid out once already.
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        let at = point_on_band(&out, egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+
+        click_map(&mut app, &ctx, at, 0.2);
+
+        assert!(
+            matches!(app.tab, Tab::Sequence),
+            "the click switched away from the tab it was asked to reveal the feature IN"
+        );
+        assert_eq!(app.selected, Some(1), "the wrong band was hit, or none");
+        let sel = app
+            .edit
+            .sel
+            .expect("the Sequence tab was told to show a feature and given no bases");
+        assert_eq!(
+            (sel.lo(), sel.hi(), sel.through_origin),
+            (2_999, 4_200, false),
+            "the selection must be AmpR's own 3,000..4,200, the coordinates its row prints"
+        );
+        assert_eq!(
+            sel.base_count(8_117),
+            1_201,
+            "1,201 bases, not the 6,916 the other arc would be"
+        );
+    }
+
+    /// And the bases are brought ON SCREEN, which is the half a selection alone
+    /// does not do.
+    ///
+    /// PROVEN TO FAIL against two MUTATIONS, both run. Dropping `reveal_offset`
+    /// from the `offset` expression in `sequence_tab` — keeping the selection
+    /// and not the scroll — leaves the view on row 0: "the view is on base 1 and
+    /// AmpR starts at 3,000". And reading `self.reveal` instead of taking it in
+    /// `side_panel`, so the request survives its frame, pins the offset: the
+    /// four wheel notches then move nothing and the last assertion fires.
+    #[test]
+    fn the_sequence_view_scrolls_to_the_feature_the_map_click_selected() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Sequence,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        let g = app.seq_grid.expect("the grid was painted");
+        assert_eq!(g.first_row, 0, "the premise: the view starts at the top");
+        let per_row = g.per_row;
+        let at = point_on_band(&out, egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+
+        click_map(&mut app, &ctx, at, 0.2);
+
+        let g = app.seq_grid.expect("still painted");
+        let base_at_top = g.first_row * per_row + 1;
+        assert_eq!(
+            g.first_row,
+            seqedit::row_of(2_999, per_row),
+            "the view is on base {base_at_top} and AmpR starts at 3,000"
+        );
+
+        // AND IT LETS GO. The request is a one-shot: a `vertical_scroll_offset`
+        // passed on every frame pins the view, and the user could then never
+        // scroll away from the feature they clicked. Wheel down, and it must
+        // move — and still be there once the smoothing has run out, which is
+        // where a request that fires again the moment the row leaves the
+        // viewport would drag it back.
+        let over = egui::pos2(g.x0 + 100.0, g.top + 100.0);
+        for k in 0..4 {
+            wheel_down(&mut app, &ctx, over, 0.4 + k as f64 * 0.05);
+        }
+        let after = settle_grid(&mut app, &ctx, 0.7);
+        assert!(
+            after > g.first_row,
+            "the reveal pinned the offset: the wheel could not move the view off row {}",
+            g.first_row
+        );
+    }
+
+    /// A tab that cannot show a feature: the click still has to go somewhere,
+    /// and the somewhere is decided rather than inherited.
+    ///
+    /// Six of the eight tabs are in this class. Enzymes stands for all of them:
+    /// a cut list has no row for a feature and no bases to highlight, so
+    /// revealing the click where the user is standing is not an option, and
+    /// doing nothing would leave the map's own highlight as the entire visible
+    /// result of clicking the map.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: making the
+    /// fallthrough arm `return` instead of routing — the "leave the user where
+    /// they are" option — fails here with "a click on a band left the panel
+    /// showing a cut list".
+    #[test]
+    fn a_map_click_from_a_tab_that_cannot_show_a_feature_goes_to_the_list() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Enzymes,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        let at = point_on_band(&out, egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+
+        // The press and release only, so `reveal` can be read before the next
+        // `side_panel` takes it.
+        press_map(&mut app, &ctx, at, 0.2);
+
+        assert!(
+            matches!(app.tab, Tab::Features),
+            "a click on a band left the panel showing a cut list"
+        );
+        assert_eq!(app.selected, Some(1));
+        assert_eq!(
+            app.reveal,
+            Some(Reveal::Row(1)),
+            "it switched to the list without asking the list to show the row"
+        );
+    }
+
+    /// The SEVENTH tab that cannot show a feature, some of the time: Sequence on
+    /// a document that has no bases.
+    ///
+    /// "Which tab is open" and "can this document show it there" are two
+    /// questions and the routing has to ask both. An annotation-only GenBank —
+    /// a LOCUS length and none of the bases it names, which is
+    /// `Editability::SequenceAbsent` — makes `sequence_tab` paint one sentence
+    /// and no grid at all. Selecting bases that are not there and asking to
+    /// scroll a grid that was never built is the "the click did nothing" case
+    /// wearing the other hat, so this falls through to the list with the six.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: dropping the
+    /// `Editability::of(mol).is_editable()` guard from `select_feature_span`.
+    /// The Sequence arm then answers `Some` and the click stays on a tab whose
+    /// entire content is "there is nothing here to edit". Measured with the tab
+    /// assertion blinded, it asks for `Reveal::Base(0)` on the way — base ZERO,
+    /// which does not exist in the 1-based space `Reveal::Base` is documented
+    /// in, because `mol.len()` is 0 for a document with no bases and
+    /// `start.max(1).min(n)` takes the clamp over the floor.
+    #[test]
+    fn a_map_click_on_a_document_with_no_bases_goes_to_the_list() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Sequence,
+        );
+        // The bases go, the length the file declared stays: `Molecule::span`
+        // falls back to `declared_len`, so the map still has a ring to draw the
+        // bands on and there is still something to click.
+        let mut mol = app.document().expect("open").molecule().clone();
+        mol.declared_len = Some(8_117);
+        mol.seq.clear();
+        assert!(
+            mol.sequence_absent() && mol.span() == 8_117,
+            "the premise: a molecule with a declared length and no bases"
+        );
+        app.adopt(Document::of_molecule(mol));
+        app.tab = Tab::Sequence;
+
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        assert!(
+            app.seq_grid.is_none(),
+            "the premise: this document paints no sequence grid"
+        );
+        let at = point_on_band(&out, egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+
+        press_map(&mut app, &ctx, at, 0.2);
+
+        assert_eq!(app.selected, Some(1), "the wrong band was hit, or none");
+        assert!(
+            matches!(app.tab, Tab::Features),
+            "the click left the user on a Sequence tab that cannot show the feature"
+        );
+        assert_eq!(
+            app.reveal,
+            Some(Reveal::Row(1)),
+            "it must ask the LIST for the row, not the grid for a base"
+        );
+        assert!(
+            app.edit.sel.is_none(),
+            "bases were selected in a document that has none: {:?}",
+            app.edit.sel
+        );
+    }
+
+    /// The second click on the same band clears the selection — and reveals
+    /// nothing, because clearing a selection is not a request to be taken
+    /// anywhere.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: letting the
+    /// deselecting click fall through to the reveal instead of returning — i.e.
+    /// treating both halves of the toggle alike. It fails first on `reveal`
+    /// still being `Some(Base(3000))`, and with that assertion blinded it fails
+    /// on the behavioural one too, snapping the view from row 79 back to 49 —
+    /// the feature the user had just finished reading past.
+    #[test]
+    fn clicking_the_same_band_twice_deselects_and_does_not_move_the_view() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Sequence,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        let at = point_on_band(&out, egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+
+        click_map(&mut app, &ctx, at, 0.2);
+        assert_eq!(
+            app.selected,
+            Some(1),
+            "the premise: the first click selects"
+        );
+        let landed = app.seq_grid.expect("painted").first_row;
+
+        // The user reads on past the feature. This is what the second click must
+        // not undo.
+        let g = app.seq_grid.expect("painted");
+        let over = egui::pos2(g.x0 + 100.0, g.top + 100.0);
+        for k in 0..4 {
+            wheel_down(&mut app, &ctx, over, 0.4 + k as f64 * 0.05);
+        }
+        let moved_on = settle_grid(&mut app, &ctx, 0.6);
+        assert!(
+            moved_on > landed,
+            "the premise: the user scrolled somewhere worth not losing"
+        );
+
+        // Well clear of the double-click window, so this is a second CLICK.
+        press_map(&mut app, &ctx, at, 2.0);
+
+        assert_eq!(app.selected, None, "the second click did not deselect");
+        assert_eq!(
+            app.reveal, None,
+            "a click that took the selection AWAY asked for something to be shown"
+        );
+        assert!(
+            matches!(app.tab, Tab::Sequence),
+            "deselecting navigated somewhere"
+        );
+        assert_eq!(
+            settle_grid(&mut app, &ctx, 2.1),
+            moved_on,
+            "the deselecting click moved the view — back to row {landed}, if it revealed"
+        );
+    }
+
+    /// An origin-spanning feature, in the GenBank join form every
+    /// save-and-reopen produces.
+    ///
+    /// Two things could go wrong and both are silent. The selection could name
+    /// the OTHER arc — the same pair of carets describes 318 bases across the
+    /// origin and 7,799 bases the long way round, and only `through_origin`
+    /// tells them apart. And the view could land on the feature's tail: 7,900
+    /// is where it begins and 100 is where it ends, so scrolling to the low
+    /// coordinate would put the reader a whole molecule away from the start of
+    /// the thing they clicked.
+    ///
+    /// PROVEN TO FAIL against two MUTATIONS, both run. Taking the span from
+    /// `f.start()`/`f.end()` instead of `Feature::extent` gives
+    /// `Selection { anchor: 0, head: 8117, through_origin: false }` — the whole
+    /// plasmid, because the join's last part starts at base 1. That is not a
+    /// near miss; it is 8,117 bases reported as a 318 bp feature. And dropping
+    /// `reveal_offset` leaves the view on rows 0..8 with the feature starting on
+    /// row 131.
+    #[test]
+    fn an_origin_spanning_feature_selects_the_short_arc_and_shows_its_start() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                // 7,900..8,117 then 1..100 — `genbank::write`'s only spelling
+                // for a span that crosses the origin.
+                ("ori-crosser", "#2ca02c", &[(7_900, 8_117), (1, 100)]),
+            ],
+            Tab::Sequence,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        let per_row = app.seq_grid.expect("painted").per_row;
+        let at = point_on_band(&out, egui::Color32::from_rgb(0x2c, 0xa0, 0x2c));
+
+        click_map(&mut app, &ctx, at, 0.2);
+
+        assert_eq!(app.selected, Some(1), "the wrong band was hit, or none");
+        let sel = app.edit.sel.expect("no bases were selected");
+        assert!(
+            sel.through_origin,
+            "the wrap bit is off, so this selection names the 7,799 bases the \
+             feature is NOT on: {sel:?}"
+        );
+        // ANCHOR AND HEAD, not `lo`/`hi`. On a wrapped selection the ordered
+        // pair is `(100, 7,899)` and says nothing about which arc is meant; the
+        // anchor is the caret before base 7,900, where the feature starts.
+        assert_eq!(
+            (sel.anchor, sel.head),
+            (7_899, 100),
+            "the carets must bracket 7,900..8,117 and 1..100"
+        );
+        assert_eq!(
+            sel.base_count(8_117),
+            318,
+            "218 bases before the origin and 100 after it"
+        );
+        // ON SCREEN, not at the top of it, and the difference is egui's rather
+        // than ours: base 7,900 is 131 rows down a 136-row molecule, and there
+        // is no content past the last row to scroll under it, so the offset is
+        // clamped and the row lands 3 rows from the top instead of at it. The
+        // promise a reveal makes is that the user can see the thing, which
+        // survives the clamp; "row 131 is row 0" would not have.
+        let g = app.seq_grid.expect("painted");
+        let want = seqedit::row_of(7_899, per_row);
+        let shown = app.edit.visible_rows.max(1);
+        assert!(
+            want >= g.first_row && want < g.first_row + shown,
+            "the view shows rows {}..{} and the feature begins on row {want} — going to \
+             the LOW coordinate of a wrapped extent lands on its tail, a molecule away",
+            g.first_row,
+            g.first_row + shown
+        );
+        assert!(
+            g.first_row > 0,
+            "the view never left the origin, which is where this feature ENDS"
+        );
+    }
+
+    /// The Features list is the other destination, and it scrolls too.
+    ///
+    /// The oracle is what egui actually PAINTED. A `ScrollArea` culls the
+    /// galleys outside its clip rect, so a name in the shape list is a row on
+    /// screen and a name missing from it is a row the user would have to go
+    /// looking for. Asserting on `App::selected` instead would pass with every
+    /// line of the scrolling deleted, which is the check that cannot fail.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: deleting the
+    /// `reveal_row == Some(i)` call in the row loop leaves `f55` unpainted and
+    /// this fails with "the row for f55 was never brought on screen". There is
+    /// nothing at 71315ec to run it against — no `scroll_to_me` or
+    /// `scroll_to_rect` exists anywhere in this binary there, so that mutation
+    /// IS the state of the tree before this change.
+    #[test]
+    fn the_features_list_scrolls_the_clicked_row_into_view() {
+        let ctx = test_ctx();
+        let (mut app, colors) = long_list_app();
+
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        assert!(
+            !feature_rows_shown(&out).iter().any(|t| t == "f55"),
+            "the premise: f55 is below the fold before anything scrolls"
+        );
+        let at = point_on_band(&out, colors[55]);
+
+        click_map(&mut app, &ctx, at, 0.2);
+        let out = paint_window(&mut app, &ctx, window_at(0.3));
+
+        assert_eq!(app.selected, Some(55), "the wrong band was hit, or none");
+        assert!(
+            feature_rows_shown(&out).iter().any(|t| t == "f55"),
+            "the row for f55 was never brought on screen"
+        );
+    }
+
+    /// ...AND THEN LETS GO OF IT. A reveal that fires on every frame instead of
+    /// on the frame that asked is invisible to every assertion above, and that
+    /// is the point of this one.
+    ///
+    /// `Ui::scroll_to_rect` with `align: None` does nothing while its rect is
+    /// already in view, so the frame after the click looks identical whether the
+    /// call is guarded by `reveal_row == Some(i)` or fired for `self.selected`
+    /// forever. `the_features_list_scrolls_the_clicked_row_into_view` passes
+    /// either way. The difference shows up in exactly two places and both are
+    /// checked here.
+    ///
+    /// **IT STOPS.** Ten idle frames after the reveal put every row at the same
+    /// rectangle, so nothing is still travelling and the panel can sit still. A
+    /// single frame cannot see this: a request that re-fires would be *satisfied*
+    /// on each of those frames, and satisfied looks like settled until something
+    /// disturbs it.
+    ///
+    /// **IT LETS GO.** So something disturbs it: wheeling back to the top takes
+    /// f55 off screen, and it must STAY off. A repeating `scroll_to_rect` drags
+    /// it back the instant it leaves the viewport, which is a list the user
+    /// cannot scroll away from the row they clicked — the same defect
+    /// `a_reflow_keeps_the_top_of_the_viewport_on_the_same_base` names for the
+    /// grid, wearing the one disguise the list's `align: None` gives it.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: replacing the guard
+    /// with `self.selected == Some(i)`, so the row is scrolled to on every frame
+    /// it is selected rather than on the frame the map asked. The settle half
+    /// still passes — that is the disguise — and the second half fails with "the
+    /// list would not stay where the wheel put it", f55 dragged back on screen
+    /// after twelve notches that had parked the list at its top.
+    #[test]
+    fn the_features_list_stops_scrolling_and_lets_the_user_scroll_back() {
+        let ctx = test_ctx();
+        let (mut app, colors) = long_list_app();
+
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        let parked = feature_rows_at(&out);
+        assert!(
+            !parked.iter().any(|(s, _)| s == "f55"),
+            "the premise: f55 is below the fold before anything scrolls"
+        );
+        let at = point_on_band(&out, colors[55]);
+
+        click_map(&mut app, &ctx, at, 0.2);
+
+        // IT STOPS. Ten frames in which nothing has asked for anything: no
+        // click, no wheel, no reflow.
+        let frames: Vec<Vec<(String, egui::Rect)>> = (0..10)
+            .map(|k| {
+                feature_rows_at(&paint_window(
+                    &mut app,
+                    &ctx,
+                    window_at(0.4 + k as f64 * 0.05),
+                ))
+            })
+            .collect();
+        assert!(
+            frames[0].iter().any(|(s, _)| s == "f55"),
+            "the premise: the reveal put f55 on screen and left it there"
+        );
+        assert!(
+            frames.windows(2).all(|w| w[0] == w[1]),
+            "the list never came to rest after the reveal"
+        );
+
+        // IT LETS GO. Twelve notches is 4,800 pt against a list a little over
+        // 3,800 pt tall, so this parks at the top whatever offset the reveal
+        // left behind. Asking for more travel than exists is deliberate: the
+        // assertion below is about where the list COMES TO REST, not about
+        // arithmetic on notches. Measured, five notches reached f16 and not the
+        // top, which is why the number is not five.
+        let over = frames[0]
+            .iter()
+            .find(|(s, _)| s == "f55")
+            .expect("checked above")
+            .1
+            .center();
+        for k in 0..12 {
+            wheel_up(&mut app, &ctx, over, 0.9 + k as f64 * 0.05);
+        }
+        // After the LAST notch, 0.9 + 11 * 0.05. `emath::History` panics on a
+        // clock that moves backwards, so the settle cannot start where the
+        // wheeling started.
+        let out = settle_list(&mut app, &ctx, 1.5);
+
+        assert!(
+            !feature_rows_shown(&out).iter().any(|t| t == "f55"),
+            "the list would not stay where the wheel put it: f55 was dragged back \
+             on screen by a reveal that fired again"
+        );
+        assert_eq!(
+            feature_rows_at(&out),
+            parked,
+            "the wheel could not put the list back where it started"
+        );
+    }
+
+    /// A filter can hide the row the click just selected. The click does not
+    /// clear it, and does not pretend.
+    ///
+    /// The filter box holds a query the user typed, and the count beside it
+    /// doubles as its clear affordance precisely so that nothing else has
+    /// destructive reach over it. So the selection is made, the filter is left
+    /// alone, and the status line says which of the two surfaces is lying to
+    /// them.
+    ///
+    /// PROVEN TO FAIL against three MUTATIONS, all run. Dropping the `hidden`
+    /// block from `map_clicked_feature` — select the feature, say nothing —
+    /// leaves `status` empty. Clearing the box for the user instead, which is
+    /// the other candidate fix, fails the `filter` assertion with `left: ""`.
+    /// And reading `self.reveal` rather than taking it in `side_panel` leaves
+    /// `Some(Row(1))` live after the frame that could not consume it.
+    #[test]
+    fn a_map_click_on_a_feature_the_filter_hides_says_so_rather_than_clearing_it() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Features,
+        );
+        app.filter = "lacZ".into();
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        assert!(
+            !feature_rows_shown(&out).iter().any(|t| t == "AmpR"),
+            "the premise: the filter hides AmpR's row"
+        );
+        let at = point_on_band(&out, egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+
+        click_map(&mut app, &ctx, at, 0.2);
+
+        assert_eq!(app.selected, Some(1), "the click did not select");
+        assert_eq!(
+            app.filter, "lacZ",
+            "a map click emptied the user's filter box"
+        );
+        assert!(
+            app.status.contains("AmpR") && app.status.contains("lacZ"),
+            "nothing said why the selected feature has no row: {:?}",
+            app.status
+        );
+        // And the request died with the frame rather than waiting for the
+        // filter to change and firing then.
+        assert_eq!(
+            app.reveal, None,
+            "a reveal nobody could consume is still live"
+        );
+    }
+
+    /// Double-click still opens the editor, and the reveal does not fire twice
+    /// or fight it.
+    ///
+    /// egui delivers `clicked` on the first press and BOTH `clicked` and
+    /// `double_clicked` on the second, which is what the ordering at the call
+    /// site has always been about. The second `clicked` arrives with the
+    /// feature already selected, so it takes the deselect arm and asks for
+    /// nothing; `open_feature_editor` then puts the selection straight back.
+    /// One reveal per double-click.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: letting the deselect
+    /// arm fall through and request a reveal as well leaves `Some(Base(3000))`
+    /// set after the second press — "the second press asked for a second
+    /// reveal".
+    #[test]
+    fn a_double_click_on_a_band_opens_the_editor_and_reveals_once() {
+        let ctx = test_ctx();
+        let mut app = map_app(
+            8_117,
+            &[
+                ("lacZ", "#1f77b4", &[(100, 400)]),
+                ("AmpR", "#d62728", &[(3_000, 4_200)]),
+            ],
+            Tab::Sequence,
+        );
+        paint_window(&mut app, &ctx, window_at(0.0));
+        let out = paint_window(&mut app, &ctx, window_at(0.1));
+        let at = point_on_band(&out, egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+
+        press_map(&mut app, &ctx, at, 0.2);
+        assert_eq!(
+            app.reveal,
+            Some(Reveal::Base(3_000)),
+            "the first press must select and ask for the reveal"
+        );
+        // Inside egui's 0.3 s window, so this really is the second half of a
+        // double-click and not a second click.
+        paint_window(&mut app, &ctx, pointer_button_at(at, true, 0.26));
+        paint_window(&mut app, &ctx, pointer_button_at(at, false, 0.28));
+
+        assert!(
+            app.feature_edit.is_some(),
+            "double-clicking a band no longer opens the feature editor"
+        );
+        assert_eq!(
+            app.selected,
+            Some(1),
+            "the editor opened on a feature nothing is highlighting"
+        );
+        assert_eq!(
+            app.reveal, None,
+            "the second press asked for a second reveal"
+        );
     }
 }
