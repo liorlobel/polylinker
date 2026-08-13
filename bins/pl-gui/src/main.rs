@@ -1122,14 +1122,16 @@ fn locus_bp(genbank: &str) -> Option<u64> {
 ///    Relative ages need no timezone and are what "is it newer" wants anyway.
 ///    Do not "improve" this into a date.
 ///
-/// `ops` is here for one branch and it is the branch that mattered: a draft
-/// holding no edits is not "newer" than anything, whatever the two mtimes say.
+/// `unsaved` is here for one branch and it is the branch that mattered: a draft
+/// holding nothing the file does not is not "newer" than it, whatever the two
+/// mtimes say. `ops` is the fallback for a draft that cannot say — see below.
 fn draft_age(
     saved_at: u64,
     now: u64,
     original_mtime: Option<u64>,
     had_original: bool,
     ops: usize,
+    unsaved: Option<usize>,
 ) -> String {
     if saved_at == 0 {
         return "saved at an unknown time".into();
@@ -1144,19 +1146,37 @@ fn draft_age(
     } else {
         format!("{} day(s) ago", secs / 86_400)
     };
+    // EDITS THAT ARE IN NO FILE, and the fallback when the draft cannot say.
+    //
+    // `unsaved` is `Snapshot::unsaved`, written from `Document::unsaved_ops()`.
+    // `None` is not zero: it means an older build wrote the draft, or the saved
+    // cursor is not an ancestor of the current one and the distance genuinely
+    // does not exist. Both fall back to `ops`, which is what this line decided
+    // on before the key existed, so an old draft reads exactly as it always did.
+    //
+    // DECIDING ON `ops` WAS THE DEFECT. `ops` is every edit in the document,
+    // saved or not, so a document opened, edited, SAVED and then lost to a
+    // crash has `ops > 0` with nothing left over — the escape hatch below never
+    // fired for it, and the fall-through compares timestamps, which is a
+    // comparison the draft always wins: the autosave heartbeat restamps every
+    // draft once per thirty seconds whether or not the molecule moved, and
+    // nothing clears a draft when its document is saved, so `saved_at` walks
+    // steadily past the file's mtime. Every crash draft of a saved file was
+    // therefore advertised as "written after the file on disk was last saved".
+    let unfiled = unsaved.unwrap_or(ops);
     let against = match (had_original, original_mtime) {
         (false, _) => " · this draft was never in a file".to_string(),
-        // NO COMPARISON AT ALL when the draft holds no edits, because there is
-        // nothing in it the file does not have. The banner used to advertise a
-        // 0-edit draft of an untouched 8,117 bp `.dna` as "newer than the file
-        // on disk" — true of the two mtimes and false of the two contents — and
-        // acting on it costs the container, the nine typed primers (a draft is
-        // GenBank, so they come back as `primer_bind`) and the methylation
-        // flags. The one line that exists to help the user choose pointed at
-        // the worse copy.
-        (true, _) if ops == 0 => {
-            " · it holds no edits, so the file has everything in it".to_string()
-        }
+        // NO COMPARISON AT ALL when nothing in the draft is missing from the
+        // file. The banner used to advertise a 0-edit draft of an untouched
+        // 8,117 bp `.dna` as "newer than the file on disk" — true of the two
+        // mtimes and false of the two contents — and acting on it costs the
+        // container, the nine typed primers (a draft is GenBank, so they come
+        // back as `primer_bind`) and the methylation flags. The one line that
+        // exists to help the user choose pointed at the worse copy. The same
+        // sentence is true of a draft with forty edits in it that were all
+        // saved, which is why the number tested here is `unfiled` and not
+        // `ops`.
+        (true, _) if unfiled == 0 => " · everything in it is already in the file".to_string(),
         (true, None) => " · the file it came from is no longer there".to_string(),
         // "written after", not "newer". These are file timestamps and not a
         // comparison of contents, and "newer" reads as "better" for a draft
@@ -1933,6 +1953,7 @@ impl App {
                                                         e.and_then(|e| e.original_mtime),
                                                         s.original.is_some(),
                                                         s.ops,
+                                                        s.unsaved,
                                                     ))
                                                     .color(pal(ui).muted)
                                                     .size(11.0),
@@ -2619,6 +2640,18 @@ impl App {
                 title: tab.doc.title.clone(),
                 saved_at: stamp,
                 ops: tab.doc.log.path().len(),
+                // BOTH NUMBERS, because they answer different questions and the
+                // banner needs the second one. `ops` is every edit in the
+                // document and is what the row SHOWS; `unsaved_ops` is how many
+                // of them are in no file, and is what `draft_age` DECIDES on.
+                // Deciding on `ops` advertised every crash draft of a saved
+                // document as newer than the user's own file — see
+                // `recover::Snapshot::unsaved`. `None` is passed straight
+                // through: it means the saved cursor is not an ancestor of the
+                // current one, so the count does not exist, and `draft_age`
+                // must not be handed a zero it would read as "nothing to
+                // recover".
+                unsaved: tab.doc.unsaved_ops(),
                 abandoned,
                 genbank: pl_fileio::genbank::write(tab.doc.molecule(), &tab.doc.title, day),
             };
@@ -7247,6 +7280,36 @@ impl App {
         self.layout.panel_w = Some(r.response.rect.width());
     }
 
+    /// How many sites to put on a Library row, or `None` for a row that gets no
+    /// count at all.
+    ///
+    /// `hits_total`, NEVER `hits.len()`, and the difference is not cosmetic.
+    /// `pl_index::query::run` caps RETENTION at `MAX_RETAINED_HITS` across the
+    /// whole result set while counting every hit it finds, so once that budget
+    /// is spent a record comes back with `found` still true and an EMPTY `hits`
+    /// vec. `query.rs:230` says what printing the length of that vec amounts
+    /// to, in as many words: "A caller that prints `hits.len()` as 'the number
+    /// of sites' is printing a display artefact as a fact about a plasmid."
+    ///
+    /// It is a fact about the FOLDER, not the plasmid, which is what makes it
+    /// dangerous. Measured on 40 Mbase of random sequence searched for `ATG`,
+    /// three records holding about 62,000 start codons each were reported as
+    /// holding none; indexing one of those files on its own reported 62,757,
+    /// which an independent Biopython count of the same file — circularised,
+    /// both strands — confirms exactly. A number that changes because of what
+    /// else happens to sit in the same directory is not a count.
+    ///
+    /// So the gate is `hits_total > 0` and not `!hits.is_empty()` either: those
+    /// two differ in exactly the case above, and a record with sixty thousand
+    /// sites must not render as a row with no count on it. The coordinate lines
+    /// below the row still come from `hits`, because those are the ones there
+    /// are coordinates for.
+    ///
+    /// The CLI has the same defect at `bins/pl/src/main.rs:2845` and :2792.
+    fn hit_count(m: &pl_index::query::Match<'_>) -> Option<u64> {
+        (m.hits_total > 0).then_some(m.hits_total)
+    }
+
     fn library_tab(&mut self, ui: &mut Ui) {
         use library::{Mode, Parsed, ScanState};
 
@@ -7429,9 +7492,14 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&label).size(12.5));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if !m.hits.is_empty() {
+                                    // `hit_count`, not `m.hits.len()`: the
+                                    // second is how many coordinates a shared
+                                    // retention budget left room for, and it
+                                    // reads 0 for a record with sixty thousand
+                                    // sites in it. See `App::hit_count`.
+                                    if let Some(n) = Self::hit_count(m) {
                                         ui.label(
-                                            RichText::new(format!("{} hit", m.hits.len()))
+                                            RichText::new(format!("{n} hit"))
                                                 .color(pal(ui).muted)
                                                 .size(11.5),
                                         );
@@ -19037,6 +19105,7 @@ mod tests {
                 title: "ws-claimed.fa".into(),
                 saved_at: 1,
                 ops: 4,
+                unsaved: Some(4),
                 abandoned: false,
                 genbank: String::new(),
             }),
@@ -20838,6 +20907,7 @@ mod tests {
                         title: format!("draft{i}.fa"),
                         saved_at: 1,
                         ops: 4,
+                        unsaved: Some(4),
                         abandoned: false,
                         genbank: String::new(),
                     }),
@@ -22189,21 +22259,230 @@ mod tests {
     /// an untouched `.dna` was advertised as "newer than the file on disk" —
     /// true of the two mtimes, false of the two contents — and taking it costs
     /// the container, the typed primers and the methylation flags.
+    ///
+    /// **AND PROVEN TO FAIL AGAIN AT d8c218b**, where the escape hatch was keyed
+    /// on `ops`. `ops` is every edit in the document, saved or not, so the
+    /// commonest crash draft there is — a document opened, edited, SAVED, then
+    /// lost — had `ops > 0` with nothing left over and fell straight through to
+    /// the timestamp comparison, which the draft always wins. The
+    /// `three_edits_all_of_them_saved` row below is exactly that case, and the
+    /// assertion it now carries is the opposite of the one this test used to
+    /// make: `draft_age(2_000, 2_000, Some(1_000), true, 3)` was asserted to
+    /// contain "written after the file", which pinned the defect as correct.
+    /// The old assertion was wrong because three edits that are all in the file
+    /// are three edits the user loses nothing by discarding.
+    ///
+    /// To re-break it, change `let unfiled = unsaved.unwrap_or(ops);` in
+    /// `draft_age` to `let unfiled = ops;`.
     #[test]
     fn a_draft_holding_no_edits_is_not_advertised_as_newer() {
-        let zero = draft_age(2_000, 2_000, Some(1_000), true, 0);
+        let zero = draft_age(2_000, 2_000, Some(1_000), true, 0, Some(0));
         assert!(
             !zero.contains("newer"),
             "a 0-edit draft was called newer: {zero:?}"
         );
-        assert!(zero.contains("holds no edits"), "{zero:?}");
-        // With edits in it the comparison is still made, in the file's own terms
-        // rather than in a word that reads as "better".
-        let some = draft_age(2_000, 2_000, Some(1_000), true, 3);
+        assert!(zero.contains("already in the file"), "{zero:?}");
+        // Three edits, every one of them saved: the draft is a rendering of the
+        // file and nothing else, however much newer its mtime is.
+        let three_edits_all_of_them_saved = draft_age(2_000, 2_000, Some(1_000), true, 3, Some(0));
+        assert!(
+            three_edits_all_of_them_saved.contains("already in the file"),
+            "a draft of a SAVED document was offered as work to recover: \
+             {three_edits_all_of_them_saved:?}"
+        );
+        assert!(
+            !three_edits_all_of_them_saved.contains("written after the file"),
+            "{three_edits_all_of_them_saved:?}"
+        );
+        // With work in it that is in no file, the comparison is still made, in
+        // the file's own terms rather than in a word that reads as "better".
+        let some = draft_age(2_000, 2_000, Some(1_000), true, 3, Some(1));
         assert!(some.contains("written after the file"), "{some:?}");
         assert!(!some.contains("newer than"), "{some:?}");
         // The other direction is unchanged.
-        assert!(draft_age(1_000, 2_000, Some(3_000), true, 3).contains("on disk is newer"));
+        let older = draft_age(1_000, 2_000, Some(3_000), true, 3, Some(1));
+        assert!(older.contains("on disk is newer"), "{older:?}");
+        // A draft written by a build older than the `unsaved:` key, or one whose
+        // saved cursor is not an ancestor of the current one, says nothing —
+        // and then this line reads exactly as it always did, off `ops`.
+        let old_file = draft_age(2_000, 2_000, Some(1_000), true, 3, None);
+        assert!(old_file.contains("written after the file"), "{old_file:?}");
+        let old_empty = draft_age(2_000, 2_000, Some(1_000), true, 0, None);
+        assert!(old_empty.contains("already in the file"), "{old_empty:?}");
+    }
+
+    /// The same defect, driven through the writer instead of the formatter.
+    ///
+    /// PROVEN TO FAIL at d8c218b: `recover::Snapshot` had no `unsaved` field,
+    /// `autosave` wrote only `log.path().len()`, and the banner decided on that.
+    /// Open a plasmid, edit it, save it, crash: the draft holds one edit, the
+    /// file holds the same edit, and the Recover banner offered to replace the
+    /// user's `.dna` with a GenBank rendering of it under "written after the
+    /// file on disk was last saved". Nothing in the draft was missing from the
+    /// file, and the row's one decision-support line said otherwise.
+    ///
+    /// Driven end to end — a real `Document` with a real path, a real
+    /// `App::autosave`, the real file re-read with `recover::decode` — so that a
+    /// fix that only taught `draft_age` a new argument, and left `autosave`
+    /// writing nothing to put in it, cannot pass.
+    ///
+    /// To re-break it, change `unsaved: tab.doc.unsaved_ops(),` in `autosave` to
+    /// `unsaved: None,`.
+    #[test]
+    fn a_saved_documents_draft_is_not_offered_as_work_the_file_is_missing() {
+        let (mut app, slot0) = app_with_recovery("saved-then-crashed");
+        let dir = slot0
+            .parent()
+            .expect("the recovery directory")
+            .to_path_buf();
+        let file = temp_file("saved-then-crashed", "fa", PLASMID_A);
+        app.load(file.clone());
+        assert!(app.document().is_some(), "the premise: the file opened");
+        let doc = app.bench.get_mut().expect("a document");
+        doc.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        // THE DRAFT HAS TO EXIST BEFORE THE SAVE, and the first version of this
+        // test did not arrange that. `autosave` deliberately refuses to write an
+        // unedited document that came from a file — "the user's own file already
+        // holds it", the comment at main.rs:2585 — so marking it saved FIRST and
+        // autosaving after produces no draft at all, and the test then failed on
+        // its own premise instead of on its subject. The sequence a user
+        // actually performs is: edit, an autosave writes the draft, Ctrl+S, then
+        // the crash. What is left on disk is a draft whose every op is already
+        // in the file, which is precisely the state the banner misread.
+        app.autosave(true);
+        // The user pressed Ctrl+S. That edit is in their file now.
+        let doc = app.bench.get_mut().expect("a document");
+        doc.mark_saved();
+        // ...and the heartbeat rewrites the draft that already exists. That is
+        // the write which has to carry `unsaved: 0`.
+        app.last_autosave = None;
+        app.autosave(true);
+
+        // WHICH SLOT THE DRAFT LANDS IN IS NOT THIS TEST'S SUBJECT, and it is
+        // not slot 0: `App::blank()` is already holding a tab when `load` runs,
+        // so the loaded document claims the next free name. Since the `claim`
+        // fix a draft may legitimately sit in any slot, so the draft is FOUND
+        // rather than assumed -- an assumption here would make this test fail
+        // for a reason that has nothing to do with what it is checking.
+        let draft = || -> std::path::PathBuf {
+            let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                .expect("the recovery directory")
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_file())
+                .collect();
+            found.sort();
+            assert_eq!(
+                found.len(),
+                1,
+                "expected exactly one draft, found {found:?}"
+            );
+            found.remove(0)
+        };
+
+        // The banner's row is built from the FILE, so the file is what is read
+        // back — a fix that taught `draft_age` a new argument and left
+        // `autosave` writing nothing to put in it cannot reach here.
+        let snap = recover::decode(&std::fs::read_to_string(draft()).unwrap()).unwrap();
+        assert!(snap.saved_at > 0, "the premise: a stamped draft");
+        assert_eq!(snap.ops, 1, "the premise: the log holds an edit");
+        assert_eq!(
+            snap.unsaved,
+            Some(0),
+            "the draft did not record that its one edit is already in the file"
+        );
+        // The draft's stamp is newer than the file's mtime, which is the
+        // ordinary case — the heartbeat guarantees it — and the one the old
+        // code decided on.
+        let mtime = snap.saved_at.saturating_sub(1);
+        let line = draft_age(
+            snap.saved_at,
+            snap.saved_at,
+            Some(mtime),
+            true,
+            snap.ops,
+            snap.unsaved,
+        );
+        assert!(
+            line.contains("already in the file"),
+            "the banner offered a draft of a saved document as work the file is missing: {line:?}"
+        );
+
+        // One more edit, this one in no file, and the comparison comes back.
+        let doc = app.bench.get_mut().expect("a document");
+        doc.apply(pl_core::OpKind::ReverseComplement).unwrap();
+        app.last_autosave = None;
+        app.autosave(false);
+        let snap = recover::decode(&std::fs::read_to_string(draft()).unwrap()).unwrap();
+        assert_eq!(snap.ops, 2, "the premise: two edits in the log");
+        assert_eq!(snap.unsaved, Some(1), "one of which is in no file");
+        let line = draft_age(
+            snap.saved_at,
+            snap.saved_at,
+            Some(mtime),
+            true,
+            snap.ops,
+            snap.unsaved,
+        );
+        assert!(
+            line.contains("written after the file"),
+            "a draft holding genuinely unsaved work stopped being offered: {line:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// A Library row must count the sites the record HAS.
+    ///
+    /// PROVEN TO FAIL at d8c218b: the row printed `m.hits.len()` behind a
+    /// `!m.hits.is_empty()` gate, so a record whose coordinates the result
+    /// set's shared retention budget had no room for was drawn with no count on
+    /// it at all — while the footer one separator below added that same
+    /// record's sixty thousand hits into `total_hits`. The contradiction fits
+    /// on one screen, and which records it lands on is decided by what else
+    /// happens to sit in the indexed folder.
+    ///
+    /// To re-break it, change the body of `App::hit_count` to
+    /// `(!m.hits.is_empty()).then_some(m.hits.len() as u64)`.
+    #[test]
+    fn a_library_row_counts_the_sites_a_record_has_not_the_ones_kept() {
+        let row = pl_index::Row::default();
+        // What `query::run` hands back for a record reached after
+        // `MAX_RETAINED_HITS` was spent: matched, counted, and holding not one
+        // of its coordinates.
+        let spent = pl_index::query::Match {
+            row: &row,
+            hits: Vec::new(),
+            hits_total: 62_757,
+        };
+        assert_eq!(
+            App::hit_count(&spent),
+            Some(62_757),
+            "a record with 62,757 sites in it was drawn with no count at all"
+        );
+        // The ordinary case — every coordinate kept — is unchanged.
+        let site = pl_index::scan::Hit {
+            start: 1,
+            end: 3,
+            strand: pl_index::scan::Strand::Forward,
+            wrapped: false,
+            assumed_circular: false,
+        };
+        let ordinary = pl_index::query::Match {
+            row: &row,
+            hits: vec![site],
+            hits_total: 1,
+        };
+        assert_eq!(App::hit_count(&ordinary), Some(1));
+        // A record that matched on its name or its text alone still gets no
+        // count, rather than a "0 hit" that reads as an answer about sequence.
+        let no_sites = pl_index::query::Match {
+            row: &row,
+            hits: Vec::new(),
+            hits_total: 0,
+        };
+        assert_eq!(App::hit_count(&no_sites), None);
     }
 
     /// A second window must not be able to delete the first window's LIVE draft.
@@ -22239,6 +22518,7 @@ mod tests {
                 title: name.into(),
                 saved_at,
                 ops: 3,
+                unsaved: Some(3),
                 abandoned: false,
                 genbank: "LOCUS x 4 bp DNA linear UNK\nORIGIN\n 1 acgt\n//\n".into(),
             };

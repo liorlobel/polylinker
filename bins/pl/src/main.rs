@@ -56,7 +56,9 @@ CONVERT OPTIONS:
     --stdout                     write to stdout instead of files
 
 INDEX OPTIONS:
-    --verify                     re-read every file and check its stored hash
+    --verify                     re-read the files that stored a hash and check
+                                 it; a file too large to hash carries none, and
+                                 is named as unchecked rather than passed
     --rebuild                    ignore any existing index
     --index-at <dir>             keep the index here instead of the OS cache
     --follow-links               follow symbolic links (off by default)
@@ -2518,6 +2520,66 @@ fn report_size(lib: &pl_index::codec::Library) {
     }
 }
 
+/// Everything `pl index --verify` prints below the folder name.
+///
+/// Pulled out of `cmd_index` because the verdict is the part that was wrong,
+/// and a verdict that only exists inside a `println!` in the middle of an I/O
+/// loop cannot be asserted on without a filesystem and a subprocess.
+///
+/// # The check that could not fail
+///
+/// The sentence "every stored hash still matches the bytes on disk" used to be
+/// printed on `wrong.is_empty()` alone. `wrong` is empty when nothing
+/// disagreed **and** when nothing was compared, and the two are not the same
+/// claim: a folder holding a single file too large for `pl-scan`'s hash gate
+/// indexes fine, stores an empty `content` for it, is skipped by the loop, and
+/// was then told its hashes all match. Zero comparisons, a clean bill of
+/// health, exit 0 -- on a library that is not empty. That is the shape this
+/// audit round calls a check-that-cannot-fail, and the fix is not a better
+/// message but a third outcome: `checked == 0` is *no answer*, not a pass.
+///
+/// So there are three verdicts, and `unhashed` is reported above all of them:
+///
+///   * something disagreed -- name the files, say how to rebuild;
+///   * nothing was compared -- say exactly that, and say nothing about matching;
+///   * comparisons happened and all agreed -- the reassurance, now earned.
+///
+/// The skipped rows are *named*, not just counted, because "3 file(s) carry no
+/// stored hash" invites the reader to assume they are the three they expected;
+/// the paths let them find the 64 MB FASTA. Truncated at 20 like the
+/// disagreement list, for the same reason: a library whose every file is a
+/// placeholder should not print ten thousand lines.
+fn verify_verdict(checked: &[&str], unhashed: &[&str], wrong: &[String], root: &str) -> String {
+    let mut out = format!("{} file(s) re-read\n", checked.len());
+    if !unhashed.is_empty() {
+        out.push_str(&format!(
+            "{} file(s) carry no stored hash, so nothing was compared for them:\n",
+            unhashed.len()
+        ));
+        for p in unhashed.iter().take(20) {
+            out.push_str(&format!("  {p}\n"));
+        }
+        if unhashed.len() > 20 {
+            out.push_str(&format!("  ... and {} more\n", unhashed.len() - 20));
+        }
+    }
+    if !wrong.is_empty() {
+        out.push_str(&format!(
+            "{} file(s) changed without the index noticing:\n",
+            wrong.len()
+        ));
+        for w in wrong.iter().take(20) {
+            out.push_str(&format!("  {w}\n"));
+        }
+        out.push_str(&format!("run 'pl index {root} --rebuild'\n"));
+    } else if checked.is_empty() {
+        out.push_str("nothing in this index carries a hash to check\n");
+    } else {
+        out.push_str("every stored hash still matches the bytes on disk\n");
+    }
+    out
+}
+
 /// Build or refresh a folder's index.
 fn cmd_index(args: &[String]) -> Result<(), String> {
     let a = parse_args(
@@ -2539,21 +2601,38 @@ fn cmd_index(args: &[String]) -> Result<(), String> {
         };
 
         if a.has("verify") {
-            // Re-read every file and check its stored hash. This is what makes
-            // the mtime shortcut a *checkable* limitation rather than a
-            // theoretical one.
+            // Re-read the files that stored a hash, and check it. That is what
+            // makes the mtime shortcut a *checkable* limitation rather than a
+            // theoretical one -- for the files it can check.
+            //
+            // NOT EVERY ROW CARRIES A HASH, and the loop below skips the ones
+            // that do not: `pl-scan`'s size gate deliberately never hashes a
+            // file past its cap, and a cloud placeholder that was never
+            // downloaded has no bytes to hash, so `row.content` is empty for
+            // both. Until 2026-08-13 they were skipped *silently*, under an
+            // "every stored hash still matches the bytes on disk" printed
+            // unconditionally on `wrong.is_empty()` -- so a folder holding one
+            // 64 MB FASTA and nothing else printed "0 file(s) re-read" and then
+            // that reassurance, at exit 0, from zero comparisons. The skipped
+            // rows are now counted, named, and kept out of the verdict; see
+            // [`verify_verdict`], which is where the wording lives.
             let Some(lib) = previous.as_ref() else {
                 return Err(format!("{}: no index to verify", root.display()));
             };
-            let mut checked = 0usize;
+            let mut checked: Vec<&str> = Vec::new();
+            let mut unhashed: Vec<&str> = Vec::new();
             let mut wrong = Vec::new();
-            let mut seen: Vec<&str> = Vec::new();
             for row in &lib.rows {
-                if seen.contains(&row.path.as_str()) || row.content.is_empty() {
+                if row.content.is_empty() {
+                    if !unhashed.contains(&row.path.as_str()) {
+                        unhashed.push(&row.path);
+                    }
                     continue;
                 }
-                seen.push(&row.path);
-                checked += 1;
+                if checked.contains(&row.path.as_str()) {
+                    continue;
+                }
+                checked.push(&row.path);
                 match std::fs::read(pl_scan::abs(root, &row.path)) {
                     Ok(bytes) if pl_scan::content_id(&bytes) != row.content => {
                         wrong.push(row.path.clone())
@@ -2562,19 +2641,17 @@ fn cmd_index(args: &[String]) -> Result<(), String> {
                     _ => {}
                 }
             }
-            println!("{}\n{checked} file(s) re-read", root.display());
-            if wrong.is_empty() {
-                println!("every stored hash still matches the bytes on disk");
-            } else {
-                println!(
-                    "{} file(s) changed without the index noticing:",
-                    wrong.len()
-                );
-                for w in wrong.iter().take(20) {
-                    println!("  {w}");
-                }
-                println!("run 'pl index {} --rebuild'", root.display());
-            }
+            // One file can contribute a hashed row *and* an unhashed one -- the
+            // hash is a fact about the file, but `content` is stamped per row --
+            // and its bytes were re-read either way. Naming it as unchecked
+            // would be its own false statement, so the checked set wins.
+            unhashed.retain(|p| !checked.contains(p));
+
+            println!("{}", root.display());
+            print!(
+                "{}",
+                verify_verdict(&checked, &unhashed, &wrong, &root.display().to_string())
+            );
             continue;
         }
 
@@ -2633,6 +2710,120 @@ fn open_library(a: &Args, root: &Path) -> Result<(pl_index::codec::Library, bool
         }
     }
     Ok((lib, true))
+}
+
+/// One line of `pl find`'s text listing: the record, and what was found in it.
+///
+/// Two facts about a *record* got lost between the index and this row, and both
+/// of them are the kind that make a result read as the opposite of what it is.
+///
+/// # The count is `hits_total`, not `hits.len()`
+///
+/// `query::run` caps *retention* at [`pl_index::query::MAX_RETAINED_HITS`]
+/// across the whole result set, keeps counting past it, and records the true
+/// per-record number in `Match::hits_total`. Its own doc says what printing the
+/// other one amounts to: "A caller that prints `hits.len()` as 'the number of
+/// sites' is printing a display artefact as a fact about a plasmid." This row
+/// printed `hits.len()`.
+///
+/// Once the budget is spent the cap is 0, so later records come back with an
+/// **empty** `hits` vec while `found` is still true.
+/// `docs/AUDIT-2026-08-13-r2.md` measured that over 40 Mbase of random
+/// sequence searched for `ATG`: three records an independent Biopython count
+/// puts at about 62,000 start codons each were reported to a script as
+/// `"hits": 0`, and a record's reported count became a function of which other
+/// files happened to sit beside it in the folder. Two files are enough to see
+/// it -- 1,000,000 `A` beside 1,000 `A`, `--motif A`, against the shipped
+/// 0.10.1 binary -- and the contradiction then fits on one screen:
+/// `{"path": "b_small.fa", ..., "hits": 0}` and a text row carrying no hit
+/// clause at all, under `2 records matched, 1001000 hit(s) in total`.
+///
+/// So the count is `hits_total` and the coordinate list stays a list of what
+/// was kept: `", ..."` is therefore decided by `hits_total`, and a record whose
+/// coordinates were all dropped prints its count with no `at` clause rather
+/// than an empty one. `cmd_find` prints one line about the dropped
+/// coordinates when `Results::dropped_hits` is non-zero, the way it already
+/// does for `--limit`.
+///
+/// # Which record, and its name
+///
+/// `pl-index` indexes per record on purpose -- `pl_index::Row`'s own doc: "a
+/// 124-record `.gbk` is 124 rows" -- and the hit coordinates below are
+/// **record-local**, offsets into the packed store from `row.seq_off`. This row
+/// printed only `row.path`, so the two records of the shipped
+/// `tests/library-fixture/multi.gb` produced lines identical up to the hit
+/// list, each carrying coordinates measured from a different origin, and
+/// `--text AmpR` printed the file twice while never showing the name it
+/// matched. Both facts are indexed (`Row::record`, `Row::name`) and both
+/// already reach `--json`.
+///
+/// The rest of the tool applies this rule everywhere else -- `pl find-motif`
+/// prints "2 records in this file; only the first was searched", `pl info`
+/// prints "records 2 in this file; showing the first", `convert` and `export`
+/// refuse multi-record files outright -- which is what makes the omission a
+/// defect rather than a preference. The suffix is `#N` with N **1-based**, and
+/// absent for the first record, matching the Library tab
+/// (`bins/pl-gui/src/main.rs`) so the two surfaces name a record the same way.
+fn find_row(m: &pl_index::query::Match<'_>) -> String {
+    let hits = if m.hits_total == 0 {
+        String::new()
+    } else if m.hits.is_empty() {
+        // Counted, none kept. The old code took `hits.is_empty()` as "no sites"
+        // and printed nothing at all here.
+        format!(
+            "  {} hit{}",
+            m.hits_total,
+            if m.hits_total == 1 { "" } else { "s" }
+        )
+    } else {
+        let first: Vec<String> = m
+            .hits
+            .iter()
+            .take(4)
+            .map(|h| {
+                format!(
+                    "{}{}{}",
+                    h.start,
+                    h.strand.as_str(),
+                    if h.wrapped { "~" } else { "" }
+                )
+            })
+            .collect();
+        format!(
+            "  {} hit{} at {}{}",
+            m.hits_total,
+            if m.hits_total == 1 { "" } else { "s" },
+            first.join(", "),
+            if m.hits_total > first.len() as u64 {
+                ", ..."
+            } else {
+                ""
+            }
+        )
+    };
+    let record = if m.row.record == 0 {
+        String::new()
+    } else {
+        format!(" #{}", m.row.record + 1)
+    };
+    let name = if m.row.name.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", m.row.name)
+    };
+    format!(
+        "{:>10} bp  {:>10}  {}{}{}{}",
+        if m.row.length > 0 {
+            m.row.length
+        } else {
+            m.row.declared_len
+        },
+        m.row.topology.as_str(),
+        m.row.path,
+        record,
+        name,
+        hits
+    )
 }
 
 /// Search a library.
@@ -2789,7 +2980,10 @@ fn cmd_find(args: &[String]) -> Result<(), String> {
                 m.row.length,
                 json_str(m.row.topology.as_str()),
                 json_str(m.row.state.as_str()),
-                m.hits.len(),
+                // `hits_total`, never the length of the retained vector. See
+                // [`find_row`]: that vector is a memory bound and the count is
+                // a fact about a plasmid, and this is the field a script reads.
+                m.hits_total,
                 if i + 1 == results.matches.len().min(limit) {
                     ""
                 } else {
@@ -2824,41 +3018,7 @@ fn cmd_find(args: &[String]) -> Result<(), String> {
     }
 
     for m in results.matches.iter().take(limit) {
-        let hits = if m.hits.is_empty() {
-            String::new()
-        } else {
-            let first: Vec<String> = m
-                .hits
-                .iter()
-                .take(4)
-                .map(|h| {
-                    format!(
-                        "{}{}{}",
-                        h.start,
-                        h.strand.as_str(),
-                        if h.wrapped { "~" } else { "" }
-                    )
-                })
-                .collect();
-            format!(
-                "  {} hit{} at {}{}",
-                m.hits.len(),
-                if m.hits.len() == 1 { "" } else { "s" },
-                first.join(", "),
-                if m.hits.len() > 4 { ", ..." } else { "" }
-            )
-        };
-        println!(
-            "{:>10} bp  {:>10}  {}{}",
-            if m.row.length > 0 {
-                m.row.length
-            } else {
-                m.row.declared_len
-            },
-            m.row.topology.as_str(),
-            m.row.path,
-            hits
-        );
+        println!("{}", find_row(m));
     }
 
     println!();
@@ -2866,6 +3026,19 @@ fn cmd_find(args: &[String]) -> Result<(), String> {
         println!(
             "showing {limit} of {} matching records — raise --limit to see the rest",
             results.matches.len()
+        );
+    }
+    // The same disclosure `--limit` gets, for the other prefix. `--limit` hides
+    // whole records and says so; the retention bound hides *coordinates inside*
+    // a record and said nothing at all, so a row reading "62,757 hits at 12+,
+    // 19-, ..." could be showing four of them or none. The counts above are
+    // exact either way -- that is what `hits_total` is for -- so this line is
+    // about the positions only. Zero for every query anyone runs on purpose.
+    if results.dropped_hits > 0 {
+        println!(
+            "{} hit coordinate(s) were counted but not kept, so the positions above are a \
+             prefix — the counts are exact",
+            results.dropped_hits
         );
     }
     println!(
@@ -4149,6 +4322,79 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// One read as `pl sanger` compares it: a label, the basecaller's bases, the
+/// quality values, and **why** those values are empty when they are.
+///
+/// The last field is the whole reason this is a struct and not the tuple it
+/// used to be. `pl sanger` parses each `.ab1` into a `pl_abif::Trace`, copies
+/// three things out of it and drops the `Trace` on the floor — which put
+/// `Trace::quality_was_dropped` out of scope at the one place its answer was
+/// needed. See [`quality_absence`] for what that cost.
+struct SangerRead {
+    name: String,
+    seq: Vec<u8>,
+    qual: Vec<u8>,
+    /// `qual` is empty *and the file had qualities we could not read*.
+    quality_dropped: bool,
+}
+
+impl SangerRead {
+    fn from_trace(name: String, t: &pl_abif::Trace) -> SangerRead {
+        SangerRead {
+            name,
+            seq: t.sequence.clone(),
+            qual: t.quality.clone(),
+            quality_dropped: t.quality_was_dropped(),
+        }
+    }
+}
+
+/// The one sentence `pl` may print about a read whose quality values are empty.
+///
+/// `pl_abif::Trace::quality` comes back empty for two different reasons, and
+/// they are not interchangeable: the file genuinely carries no `PCON2`, or
+/// `PCON2` is in the directory and its payload lies outside the file. `pl-abif`
+/// built [`pl_abif::Trace::quality_was_dropped`] specifically to separate them,
+/// and says so where a caller will read it: "announcing 'no quality values in
+/// this file' about a file that has them is simply false."
+///
+/// Both CLI arms formed that sentence from emptiness alone, so a damaged
+/// `.ab1` printed output byte-identical to a control whose `PCON2` is genuinely
+/// absent — and the two lead somewhere different. "The facility sent no quality
+/// scores" is ordinary, believable and nothing to act on; "this file is
+/// damaged" is the remedy the software already knew about and was hiding. The
+/// Sanger side then reports every difference at
+/// [`pl_sanger::Confidence::Unknown`], which errs conservative, so nothing here
+/// produces a wrong base — it produces a user who re-sequences nothing because
+/// they were told the read is simply unscored.
+///
+/// The wording matches `bins/pl-gui/src/reads.rs`, the one caller that already
+/// obeyed the rule, so the two surfaces say the same thing about the same file.
+fn quality_absence(dropped: bool) -> &'static str {
+    if dropped {
+        "the quality values in this file could not be read"
+    } else {
+        "no quality values in this file"
+    }
+}
+
+/// The trailing note on one line of `pl sanger`'s difference list.
+///
+/// [`pl_sanger::Confidence::Unknown`] means this position carried no Phred
+/// score, which is the same fork [`quality_absence`] documents one line at a
+/// time: with a dropped `PCON2` the score exists and was lost, so "no quality"
+/// is as false here as it is in the header, and a reader scanning a column of
+/// `Q?  no quality` would carry the wrong conclusion away even after the
+/// header told them the truth.
+fn confidence_note(c: pl_sanger::Confidence, dropped: bool) -> &'static str {
+    match c {
+        pl_sanger::Confidence::High => "",
+        pl_sanger::Confidence::Low => "  low confidence",
+        pl_sanger::Confidence::Unknown if dropped => "  quality unreadable",
+        pl_sanger::Confidence::Unknown => "  no quality",
+    }
+}
+
 fn cmd_sanger(args: &[String]) -> Result<(), String> {
     let a = parse_args(
         args,
@@ -4189,23 +4435,25 @@ fn cmd_sanger(args: &[String]) -> Result<(), String> {
     };
 
     // Reads: either sequences on the command line or chromatograms on disk.
-    let mut reads: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut reads: Vec<SangerRead> = Vec::new();
     for s in a.get_all("read") {
-        reads.push((
-            format!("<--read {}nt>", s.len()),
-            s.as_bytes().to_vec(),
-            vec![],
-        ));
+        reads.push(SangerRead {
+            name: format!("<--read {}nt>", s.len()),
+            seq: s.as_bytes().to_vec(),
+            qual: vec![],
+            // Bases typed on the command line have no file behind them, so
+            // there is nothing that could have been lost.
+            quality_dropped: false,
+        });
     }
     for path in &a.files {
         let data = read(path)?;
         let t = pl_abif::parse(&data).map_err(|e| format!("{}: {e}", path.display()))?;
-        reads.push((
+        reads.push(SangerRead::from_trace(
             path.file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_default(),
-            t.sequence.clone(),
-            t.quality.clone(),
+            &t,
         ));
     }
     if reads.is_empty() {
@@ -4214,17 +4462,17 @@ fn cmd_sanger(args: &[String]) -> Result<(), String> {
 
     if a.has("json") {
         println!("{{\n  \"reads\": [");
-        for (i, (name, seq, qual)) in reads.iter().enumerate() {
+        for (i, rd) in reads.iter().enumerate() {
             let comma = if i + 1 == reads.len() { "" } else { "," };
-            match pl_sanger::compare(seq, qual, &reference, circular, &p) {
+            match pl_sanger::compare(&rd.seq, &rd.qual, &reference, circular, &p) {
                 None => println!(
                     "    {{\"name\": {}, \"placed\": false}}{comma}",
-                    json_str(name)
+                    json_str(&rd.name)
                 ),
                 Some(r) => {
                     print!(
                         "    {{\"name\": {}, \"placed\": true, \"reversed\": {}, \"wrapped\": {}, \"score\": {}, \"ref_start\": {}, \"ref_end\": {}, \"identity\": {:.6}, \"differences\": [",
-                        json_str(name),
+                        json_str(&rd.name),
                         r.reversed,
                         r.wrapped,
                         r.alignment.score,
@@ -4277,22 +4525,23 @@ fn cmd_sanger(args: &[String]) -> Result<(), String> {
     // the clone. The --json path of this same function has always reported
     // these honestly as {"placed": false} with no differences.
     let mut unplaced = 0usize;
-    for (name, seq, qual) in &reads {
-        let r = match pl_sanger::compare(seq, qual, &reference, circular, &p) {
+    for rd in &reads {
+        let r = match pl_sanger::compare(&rd.seq, &rd.qual, &reference, circular, &p) {
             Some(r) => r,
             None => {
-                println!("{name}: could not be placed on this reference");
+                println!("{}: could not be placed on this reference", rd.name);
                 unplaced += 1;
                 continue;
             }
         };
-        // Unknown counts here too: a file with no qualities gives no grounds
-        // to dismiss anything.
+        // Unknown counts here too: a read with no scores to weigh gives no
+        // grounds to dismiss anything.
         let high = r.count(pl_sanger::Confidence::High) + r.count(pl_sanger::Confidence::Unknown);
         worst += high;
         println!(
-            "{name}  {} nt, {} strand, covers {}..{}{}  {:.2}% identity",
-            seq.len(),
+            "{}  {} nt, {} strand, covers {}..{}{}  {:.2}% identity",
+            rd.name,
+            rd.seq.len(),
             if r.reversed { "reverse" } else { "forward" },
             r.covered.0,
             r.covered.1,
@@ -4301,7 +4550,9 @@ fn cmd_sanger(args: &[String]) -> Result<(), String> {
         );
         match r.reliable {
             Some((s, e)) => println!("  basecaller stands behind read bases {s}..{e}"),
-            None if qual.is_empty() => println!("  no quality values in this file"),
+            // Which of the two things emptiness means is decided by the file,
+            // not by the emptiness: see [`quality_absence`].
+            None if rd.qual.is_empty() => println!("  {}", quality_absence(rd.quality_dropped)),
             None => println!("  no stretch of this read is reliable"),
         }
 
@@ -4322,11 +4573,7 @@ fn cmd_sanger(args: &[String]) -> Result<(), String> {
                     Some(q) => format!("Q{q}"),
                     None => "Q?".into(),
                 },
-                match d.confidence {
-                    pl_sanger::Confidence::High => String::new(),
-                    pl_sanger::Confidence::Low => "  low confidence".into(),
-                    pl_sanger::Confidence::Unknown => "  no quality".into(),
-                }
+                confidence_note(d.confidence, rd.quality_dropped)
             );
         }
         let low = r.count(pl_sanger::Confidence::Low);
@@ -5336,9 +5583,13 @@ fn cmd_trace(args: &[String]) -> Result<(), String> {
             "{:>10} bases   {:>4} ambiguous   {}",
             t.sequence.len(),
             t.ambiguous(),
+            // `None` is NO NUMBER, and the file decides which of the two
+            // things that means -- see [`quality_absence`]. The wording is
+            // also now the GUI's, so `pl trace` and the Reads panel say the
+            // same sentence about the same bytes.
             match t.mean_quality() {
                 Some(q) => format!("mean quality {q:.1}"),
-                None => "no quality in this file".into(),
+                None => quality_absence(t.quality_was_dropped()).to_string(),
             }
         );
         if !t.sample_name.is_empty() {
@@ -6588,6 +6839,490 @@ Step 'python only in a comment' {
             "the scanner must report exactly the two steps that run `python` \
              with no precondition of their own, one of each shape; a one-line \
              step is delimited by itself, not by the close of the step after it"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit 2026-08-13 round 2, findings 3, 4, 8 and 9
+    // -----------------------------------------------------------------------
+
+    /// The body of a top-level `fn`: its signature line down to the `}` in
+    /// column zero that closes it.
+    ///
+    /// Sibling of [`doc_above`], and here for the same reason: two of the
+    /// fixes below are about *where* a sentence is allowed to be formed, and a
+    /// `SRC.contains(..)` over a six-thousand-line file cannot express that.
+    /// Every function in this file is top-level, so the first unindented `}`
+    /// after the signature is its own, and nothing here opens a raw string
+    /// whose line begins with a brace.
+    fn body_of(src: &str, item: &str) -> String {
+        let lines: Vec<&str> = src.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with(item))
+            .unwrap_or_else(|| panic!("main.rs no longer declares {item:?}"));
+        let end = lines[at..]
+            .iter()
+            .position(|l| *l == "}")
+            .unwrap_or_else(|| panic!("{item:?} has no closing brace in column zero"));
+        lines[at..=at + end].join("\n")
+    }
+
+    /// A minimal ABIF file, directory first and heap last.
+    ///
+    /// A transcription of `pl-abif`'s own `build` helper, which lives inside
+    /// that crate's `#[cfg(test)] mod tests` and is therefore reachable from
+    /// nowhere else; `crates/` takes no external dependencies and there is no
+    /// fixture crate to hold a shared copy. Sixty lines of duplication buys a
+    /// regression test for a damaged `.ab1` that ships no `.ab1`.
+    ///
+    /// The LAYOUT IS THE POINT and it is not the common one. Real instruments
+    /// usually write the directory after the data, and a tail truncation of
+    /// that layout loses the directory and is caught honestly -- "the
+    /// directory claims 4 entries ending at byte 484, but the file is 483
+    /// bytes". It is this layout, which is also what an interrupted write
+    /// produces, where the directory survives and a single entry's payload
+    /// falls off the end, so the tag is *dropped* and `Trace::quality` comes
+    /// back empty with the file still parsing.
+    fn abif(entries: &[(&[u8; 4], i32, i16, &[u8])]) -> Vec<u8> {
+        let header_len = 128;
+        let dir_off = header_len;
+        let mut dir = Vec::new();
+        let mut heap = Vec::new();
+        let heap_off = dir_off + entries.len() * 28;
+        for (name, num, etype, payload) in entries {
+            dir.extend_from_slice(*name);
+            dir.extend_from_slice(&num.to_be_bytes());
+            dir.extend_from_slice(&etype.to_be_bytes());
+            dir.extend_from_slice(&1i16.to_be_bytes());
+            dir.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+            dir.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+            if payload.len() <= 4 {
+                let mut inline = [0u8; 4];
+                inline[..payload.len()].copy_from_slice(payload);
+                dir.extend_from_slice(&inline);
+            } else {
+                dir.extend_from_slice(&((heap_off + heap.len()) as i32).to_be_bytes());
+                heap.extend_from_slice(payload);
+            }
+            dir.extend_from_slice(&0i32.to_be_bytes());
+        }
+        let mut out = vec![0u8; header_len];
+        out[..4].copy_from_slice(pl_abif::MAGIC);
+        out[4..6].copy_from_slice(&101u16.to_be_bytes());
+        out[6..10].copy_from_slice(b"tdir");
+        out[10..14].copy_from_slice(&1i32.to_be_bytes());
+        out[14..16].copy_from_slice(&1023i16.to_be_bytes());
+        out[16..18].copy_from_slice(&28i16.to_be_bytes());
+        out[18..22].copy_from_slice(&(entries.len() as i32).to_be_bytes());
+        out[22..26].copy_from_slice(&((entries.len() * 28) as i32).to_be_bytes());
+        out[26..30].copy_from_slice(&(dir_off as i32).to_be_bytes());
+        out.extend_from_slice(&dir);
+        out.extend_from_slice(&heap);
+        out
+    }
+
+    /// `pl find` states how many sites a record has, not how many it kept.
+    ///
+    /// PROVEN TO FAIL at d8c218b: the listing began `let hits = if
+    /// m.hits.is_empty() { String::new() }` and then printed `m.hits.len()`,
+    /// and the `--json` row printed `m.hits.len()` too. `query::run` caps
+    /// *retention* at `MAX_RETAINED_HITS` across the whole result set while
+    /// going on counting, so a record whose coordinates were all dropped
+    /// printed no hit text at all and reported `"hits": 0`, and one whose
+    /// coordinates were partly dropped reported the length of the surviving
+    /// vector as its number of sites.
+    ///
+    /// Measured against the shipped 0.10.1 binary, on a folder holding one
+    /// FASTA of 1,000,000 `A` and one of 1,000 `A`, `pl find --motif A`:
+    ///
+    /// ```text
+    /// {"path": "a_big.fa",   ..., "hits": 1000000},
+    /// {"path": "b_small.fa", ..., "hits": 0}
+    ///   "total_hits": 1001000
+    ///
+    ///    1000000 bp  undeclared  a_big.fa  1000000 hits at 1+, 2+, 3+, 4+, ...
+    ///       1000 bp  undeclared  b_small.fa
+    /// 2 records matched, 1001000 hit(s) in total
+    /// ```
+    ///
+    /// A thousand sites reported as none, in both output modes, with the
+    /// contradicting footer on the same screen -- and which record loses its
+    /// count depends on what else happens to sit in the folder.
+    ///
+    /// TO RE-BREAK IT: in `find_row`, replace `let hits = if m.hits_total == 0
+    /// {` with `let hits = if m.hits.is_empty() {`. That restores exactly the
+    /// old first branch, so the all-dropped record goes back to printing
+    /// nothing and the first assertion fails.
+    ///
+    /// Two more one-liners each fail it on their own, and are worth knowing
+    /// because they are the other halves of the same fix: replacing
+    /// `m.hits_total,` inside the `"  {} hit{} at {}{}"` `format!` with
+    /// `m.hits.len() as u64,` fails the partial-prefix assertion, and
+    /// replacing `m.hits_total,` in `cmd_find`'s `--json` block with
+    /// `m.hits.len(),` fails the source check at the end -- the JSON row is
+    /// built inline inside an I/O function and is the one surface here that
+    /// cannot be called from a unit test.
+    #[test]
+    fn a_find_row_counts_the_sites_and_not_the_coordinates_it_kept() {
+        let row = pl_index::Row {
+            path: "b_small.fa".into(),
+            name: "small".into(),
+            length: 1_000,
+            topology: pl_index::Topology::Undeclared,
+            ..Default::default()
+        };
+        let hit = |start: u64| pl_index::scan::Hit {
+            start,
+            end: start,
+            strand: pl_index::scan::Strand::Forward,
+            wrapped: false,
+            assumed_circular: false,
+        };
+
+        // The budget ran out before this record: counted, nothing kept.
+        let all_dropped = pl_index::query::Match {
+            row: &row,
+            hits: Vec::new(),
+            hits_total: 1_000,
+        };
+        let line = find_row(&all_dropped);
+        assert!(
+            line.contains("1000 hits"),
+            "a record with 1,000 sites was reported as having none: {line:?}"
+        );
+
+        // The budget ran out part-way through it: the count is exact, the
+        // coordinates are a prefix, and the ellipsis has to follow the count.
+        let partial = pl_index::query::Match {
+            row: &row,
+            hits: vec![hit(12), hit(19)],
+            hits_total: 1_000,
+        };
+        let line = find_row(&partial);
+        assert!(
+            line.contains("1000 hits at 12+, 19+, ..."),
+            "the retained coordinates were printed as the whole story: {line:?}"
+        );
+
+        // The control, which is every query anyone runs on purpose: nothing
+        // dropped, so nothing is claimed to be missing.
+        let whole = pl_index::query::Match {
+            row: &row,
+            hits: vec![hit(12)],
+            hits_total: 1,
+        };
+        let line = find_row(&whole);
+        assert!(line.contains("1 hit at 12+"), "{line:?}");
+        assert!(
+            !line.contains("..."),
+            "nothing was withheld, so nothing may say it was: {line:?}"
+        );
+
+        // The other control: a genuinely site-free record still says nothing.
+        let none = pl_index::query::Match {
+            row: &row,
+            hits: Vec::new(),
+            hits_total: 0,
+        };
+        assert!(!find_row(&none).contains("hit"), "{:?}", find_row(&none));
+
+        // `--json` builds its row inline, so this is the only place the same
+        // rule can be stated about it.
+        let json = body_of(include_str!("main.rs"), "fn cmd_find(");
+        assert!(
+            !json.contains("m.hits.len()"),
+            "cmd_find still prints the retained-hit count somewhere; `hits_total` \
+             is the number of sites and `hits.len()` is a memory bound"
+        );
+    }
+
+    /// Two records of one file are told apart, and named.
+    ///
+    /// PROVEN TO FAIL at d8c218b: the listing printed length, topology,
+    /// `m.row.path` and the hits, and neither `Row::record` nor `Row::name`
+    /// reached it -- though both are indexed and both already reach `--json`.
+    /// Run against the shipped 0.10.1 binary over this very fixture:
+    ///
+    /// ```text
+    ///         20 bp    circular  multi.gb  10 hits at 1+, 4-, 5+, 8-, ...
+    ///         20 bp    circular  multi.gb  4 hits at 2+, 3+, 4-, 5-
+    /// ```
+    ///
+    /// Byte-identical up to the hit list -- and the hit coordinates are
+    /// **record-local**, offsets into the packed store from each row's
+    /// `seq_off`, so the two lines quote positions measured from different
+    /// origins under one indistinguishable label. `--text AmpR`, which matches
+    /// against `Row::name`, printed the file twice and never showed the name it
+    /// had matched.
+    ///
+    /// The rest of the tool applies the opposite rule everywhere: `pl
+    /// find-motif` prints "2 records in this file; only the first was
+    /// searched", `pl info` prints "records 2 in this file; showing the first",
+    /// `convert` and `export` refuse multi-record files outright, and the
+    /// Library tab already renders `path #N`. `pl find`'s text mode was the one
+    /// surface that omitted it while printing record-local coordinates.
+    ///
+    /// This drives the real thing end to end -- `pl_scan::scan` over the
+    /// shipped `tests/library-fixture`, then `pl_index::query::run` -- rather
+    /// than hand-building rows, because the claim being pinned is that the
+    /// index really does hand `pl find` two distinguishable records for that
+    /// file and `pl find` really does distinguish them.
+    ///
+    /// TO RE-BREAK IT: in `find_row`, replace `format!(" #{}", m.row.record +
+    /// 1)` with `String::new()`. The `#2` assertion then fails. Replacing
+    /// `format!("  {}", m.row.name)` with `String::new()` fails the two name
+    /// assertions the same way; both together restore d8c218b's line exactly.
+    #[test]
+    fn the_two_records_of_one_file_are_told_apart_in_the_listing() {
+        let fixture = repo_root().join("tests").join("library-fixture");
+        let (lib, _) = pl_scan::scan(&fixture, 0, &pl_scan::ScanOptions::default());
+        let motif = pl_index::scan::Motif::new("A").expect("A is an IUPAC code");
+        let q = pl_index::query::Query {
+            motif: Some(motif),
+            ..Default::default()
+        };
+        let results = pl_index::query::run(&lib.rows, &lib.packed, &q);
+
+        let mut rows: Vec<String> = Vec::new();
+        for m in &results.matches {
+            if m.row.path == "multi.gb" {
+                rows.push(find_row(m));
+            }
+        }
+        assert_eq!(
+            rows.len(),
+            2,
+            "multi.gb holds two records and both contain an A: {rows:?}"
+        );
+        assert_ne!(
+            rows[0], rows[1],
+            "two records carrying record-local coordinates printed the same label"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("multi.gb  m1")),
+            "the first record is unsuffixed and named: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("multi.gb #2  m2")),
+            "the second record is suffixed 1-based and named: {rows:?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.contains('#')).count(),
+            1,
+            "only the records after the first take a suffix: {rows:?}"
+        );
+    }
+
+    /// `pl index --verify` does not report a pass it never measured.
+    ///
+    /// PROVEN TO FAIL at d8c218b: the verdict was printed on `wrong.is_empty()`
+    /// alone, and `wrong` is empty both when every comparison agreed and when
+    /// there were no comparisons. The loop skips every row whose `content` is
+    /// empty -- which is exactly the class `pl-scan`'s size gate deliberately
+    /// never hashes, plus cloud placeholders that were never downloaded -- and
+    /// those rows were never counted or named. Against the shipped 0.10.1
+    /// binary, on a folder holding one 64,000,061-byte FASTA and nothing else:
+    ///
+    /// ```text
+    /// $ pl index <dir> --index-at <idx> --verify
+    /// 0 file(s) re-read
+    /// every stored hash still matches the bytes on disk        (exit 0)
+    /// ```
+    ///
+    /// A clean bill of health for a non-empty library, from zero comparisons.
+    /// The mechanism is not globally inert -- editing an indexed `.gb` and
+    /// re-verifying does correctly report "1 file(s) changed without the index
+    /// noticing" -- so the silence was specific to the skipped rows, which is
+    /// what made it credible. USAGE's "re-read every file and check its stored
+    /// hash" is corrected in the same change.
+    ///
+    /// TO RE-BREAK IT: in `verify_verdict`, replace `} else if
+    /// checked.is_empty() {` with `} else if false {`. The zero-comparison case
+    /// falls through to the reassurance again and the first assertion fails.
+    #[test]
+    fn verify_does_not_report_a_pass_it_never_measured() {
+        let none = verify_verdict(&[], &["huge.fa"], &[], "root");
+        assert!(
+            !none.contains("every stored hash still matches"),
+            "a pass asserted from zero comparisons:\n{none}"
+        );
+        assert!(
+            none.contains("nothing in this index carries a hash to check"),
+            "{none}"
+        );
+        assert!(
+            none.contains("huge.fa"),
+            "the unchecked rows have to be nameable, not just countable:\n{none}"
+        );
+        assert!(none.starts_with("0 file(s) re-read\n"), "{none}");
+
+        // Control one: a comparison that happened and agreed still earns the
+        // reassurance, and says nothing about skipping when nothing was
+        // skipped. The fix must not make `--verify` unable to pass.
+        let pass = verify_verdict(&["a.gb"], &[], &[], "root");
+        assert!(
+            pass.contains("every stored hash still matches the bytes on disk"),
+            "{pass}"
+        );
+        assert!(!pass.contains("carry no stored hash"), "{pass}");
+        assert!(!pass.contains("nothing in this index"), "{pass}");
+
+        // Control two: a disagreement still outranks both, still names the
+        // file, and still says how to fix it -- while the skipped row is
+        // reported alongside rather than instead.
+        let bad = verify_verdict(&["a.gb"], &["huge.fa"], &["a.gb".to_string()], "root");
+        assert!(
+            bad.contains("1 file(s) changed without the index noticing"),
+            "{bad}"
+        );
+        assert!(bad.contains("run 'pl index root --rebuild'"), "{bad}");
+        assert!(!bad.contains("every stored hash still matches"), "{bad}");
+        assert!(bad.contains("huge.fa"), "{bad}");
+    }
+
+    /// A damaged `.ab1` is not described as carrying no quality values.
+    ///
+    /// PROVEN TO FAIL at d8c218b: `pl trace` printed "no quality in this file"
+    /// and `pl sanger` printed "no quality values in this file" whenever
+    /// `Trace::quality` was empty, from the emptiness alone.
+    /// `pl_abif::Trace::quality_was_dropped` exists to separate the two reasons
+    /// it can be empty, and `crates/pl-abif/src/lib.rs` says why in as many
+    /// words: "announcing 'no quality values in this file' about a file that
+    /// has them is simply false." Exactly one non-test caller obeyed it, the
+    /// GUI's reads panel.
+    ///
+    /// Measured against the shipped 0.10.1 binary on a fixture built exactly
+    /// as below and truncated by one byte:
+    ///
+    /// ```text
+    /// $ pl trace read_trunc.ab1
+    ///         60 bases      0 ambiguous   no quality in this file
+    /// $ pl sanger read_trunc.ab1 --ref ref.fa
+    ///   no quality values in this file
+    ///         30  ref C -> read A   Q?  no quality
+    /// ```
+    ///
+    /// -- byte-identical to what a file whose `PCON2` is genuinely absent
+    /// prints. The two lead somewhere different: "the facility sent no quality
+    /// scores" is ordinary and nothing to act on, while "this file is damaged"
+    /// is the remedy the software already knew and was hiding. Nothing
+    /// downstream produces a wrong base, because every difference then comes
+    /// back at `Confidence::Unknown`, which counts against being clean -- the
+    /// cost is a user who re-downloads nothing.
+    ///
+    /// TO RE-BREAK IT: in `quality_absence`, replace `if dropped {` with `if
+    /// false {`. The damaged fixture is then described with the plain sentence
+    /// again and the `!said.contains("no quality")` assertion fails.
+    #[test]
+    fn a_damaged_ab1_is_not_described_as_carrying_no_quality() {
+        // PCON2 is written last, so its payload is the last thing in the file
+        // and one byte off the tail loses exactly it.
+        let whole = abif(&[
+            (b"PBAS", 2, 2, b"ACGTACGTAC"),
+            (b"PCON", 2, 2, &[20, 30, 40, 50, 60, 60, 60, 60, 60, 60]),
+        ]);
+        let intact = pl_abif::parse(&whole).expect("the fixture parses");
+        assert!(
+            !intact.quality.is_empty(),
+            "the fixture has to carry quality for losing it to mean anything"
+        );
+
+        let mut damaged = whole.clone();
+        damaged.truncate(whole.len() - 1);
+        let t = pl_abif::parse(&damaged).expect("the read itself is still intact");
+        assert!(t.quality.is_empty(), "the payload really is gone");
+        assert!(t.quality_was_dropped(), "and PCON2 is why");
+
+        let said = quality_absence(t.quality_was_dropped());
+        assert!(
+            !said.contains("no quality"),
+            "a file that carries quality values was said to carry none: {said:?}"
+        );
+        assert!(said.contains("could not be read"), "{said:?}");
+
+        // The control: a file that genuinely has no PCON2 keeps the plain
+        // sentence, which is the true one about it.
+        let bare = abif(&[(b"PBAS", 2, 2, b"ACGTACGTAC")]);
+        let t = pl_abif::parse(&bare).expect("a file with no PCON2 parses");
+        assert!(t.quality.is_empty());
+        assert!(!t.quality_was_dropped());
+        assert_eq!(
+            quality_absence(t.quality_was_dropped()),
+            "no quality values in this file"
+        );
+
+        // The per-difference note takes the same fork, because a column of
+        // `Q?  no quality` would carry the wrong conclusion away even after
+        // the header line told the truth.
+        assert!(
+            !confidence_note(pl_sanger::Confidence::Unknown, true).contains("no quality"),
+            "{:?}",
+            confidence_note(pl_sanger::Confidence::Unknown, true)
+        );
+        assert_eq!(
+            confidence_note(pl_sanger::Confidence::Unknown, false),
+            "  no quality"
+        );
+        assert_eq!(
+            confidence_note(pl_sanger::Confidence::Low, true),
+            "  low confidence"
+        );
+        assert_eq!(confidence_note(pl_sanger::Confidence::High, false), "");
+    }
+
+    /// Neither CLI read verb forms the sentence itself.
+    ///
+    /// The companion to
+    /// [`a_damaged_ab1_is_not_described_as_carrying_no_quality`], and it exists
+    /// because that one cannot see the plumbing. `pl sanger` parses each
+    /// `.ab1`, copies three things out of the `Trace` and drops it -- so at
+    /// d8c218b `quality_was_dropped` was not even in scope at the line that
+    /// needed it, and a fix that only corrected the wording of a helper while
+    /// leaving the call site passing a constant would look identical from
+    /// outside. There is no way to run the binary from a unit test in this
+    /// crate (`CARGO_BIN_EXE_pl` exists only for integration targets), so the
+    /// call sites are pinned by reading them.
+    ///
+    /// PROVEN TO FAIL at d8c218b: `cmd_sanger` contained `None if
+    /// qual.is_empty() => println!("  no quality values in this file")` and
+    /// `pl_sanger::Confidence::Unknown => "  no quality".into()`, and
+    /// `cmd_trace` contained `None => "no quality in this file".into()` -- three
+    /// occurrences of the forbidden text inside the two bodies, where this test
+    /// permits none.
+    ///
+    /// TO RE-BREAK IT: in `cmd_sanger`, replace `None if rd.qual.is_empty() =>
+    /// println!("  {}", quality_absence(rd.quality_dropped)),` with `None if
+    /// rd.qual.is_empty() => println!("  no quality values in this file"),`.
+    /// The first assertion then fails on `fn cmd_sanger(`.
+    #[test]
+    fn neither_cli_read_verb_forms_the_no_quality_sentence_itself() {
+        const SRC: &str = include_str!("main.rs");
+
+        for verb in ["fn cmd_sanger(", "fn cmd_trace("] {
+            let body = body_of(SRC, verb);
+            assert!(
+                !body.contains("no quality"),
+                "{verb} spells the sentence out; only `quality_absence` and \
+                 `confidence_note` may know which of the two things an empty \
+                 `Trace::quality` means"
+            );
+        }
+
+        // ...and each of them asks with the file's own answer, not a constant.
+        let sanger = body_of(SRC, "fn cmd_sanger(");
+        assert!(
+            sanger.contains("quality_absence(rd.quality_dropped)"),
+            "pl sanger stopped passing the flag it keeps a `SangerRead` for"
+        );
+        assert!(
+            sanger.contains("confidence_note(d.confidence, rd.quality_dropped)"),
+            "the per-difference note stopped taking the flag"
+        );
+        let trace = body_of(SRC, "fn cmd_trace(");
+        assert!(
+            trace.contains("quality_absence(t.quality_was_dropped())"),
+            "pl trace stopped asking the trace"
         );
     }
 }

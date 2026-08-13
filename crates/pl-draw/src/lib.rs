@@ -247,6 +247,60 @@ pub mod ink {
     pub const LEADER_STROKE: &str = "#868d95";
 }
 
+/// The ground a figure is painted on: the colour under the ink, and the
+/// background its WCAG certificate is computed against.
+///
+/// # Why a figure carries its own ground instead of borrowing one
+///
+/// A vector file with no background element is TRANSPARENT, and a transparent
+/// figure has no colours to audit — it takes whatever is behind it, which is
+/// decided by the journal, the slide master or the word processor, long after
+/// the file leaves this program. Until 2026-08-13 [`svg_at`] emitted no ground,
+/// while `pl export --svg --check-contrast` printed `contrast ok (WCAG 2.2 AA)`
+/// for the file it wrote — a number computed against `#ffffff`, over a document
+/// measured at **91.25% of its pixels at alpha 0**. Composited onto a white page
+/// the claim is true and that is where most maps end up, which is why this was
+/// survivable for as long as it was. On the dark slide a talk uses it is not
+/// merely worse: the label ink [`ink::LABEL_FILL`] is **1.05:1** there against a
+/// requirement of 4.5, and the backbone [`ink::BACKBONE_STROKE`] is **1.35:1**
+/// against 3.0. An accessibility certificate that holds only on a background the
+/// file does not carry is the one failure mode an accessibility check exists to
+/// not have — the same defect class as the unmeasured fill recorded in
+/// [`contrast::audit`].
+///
+/// [`eps::to_eps`] had already refused that trade — "an EPS with no paint
+/// is transparent, and a plasmid map dropped on a coloured slide would otherwise
+/// show through" — and [`raster::draw`] takes its ground as a parameter that
+/// every caller in this workspace passes white. Naming the colour once, here, is
+/// what keeps the audit and the file from disagreeing: a caller that hard-codes
+/// `"#ffffff"` beside a renderer that paints something else is two sources of
+/// truth for one fact, which is exactly what `pl_gel::render::Options::background`
+/// exists to prevent on the gel picture.
+///
+/// # What still does not paint it
+///
+/// **[`pdf::pdf_at`] does not.** A map exported as PDF is still transparent — its
+/// content stream opens `q\n1 J 1 j\n0.2 0.22 0.24 RG` straight onto the backbone
+/// — so `pl export --pdf --check-contrast` remains a claim about a background the
+/// file does not have. Closing it is one operator sequence (`1 1 1 rg 0 0 w h re
+/// f`) in front of the artwork in `pdf.rs`, and this constant is the colour it
+/// should use. Said here rather than left implicit, because a constant documented
+/// as "the ground this crate paints" while one back end paints nothing would be
+/// the same kind of overstatement it was introduced to remove.
+///
+/// # Not a knob
+///
+/// `packages/circular-map/src/render.ts` emits the same `<rect>` from a
+/// `theme.background` whose default is `'transparent'`. That is the right default
+/// *there*: it draws into a live document that already has a ground, and nothing
+/// on that side issues a contrast certificate. This crate writes files that leave
+/// the machine, and [`eps`] already argued the general case against a second code
+/// path — "a second code path taken by one map in fifty is a path nothing
+/// exercises". A caller who wants the figure to show a coloured field through it
+/// can delete one element from an SVG; a reader who gets an unreadable figure
+/// cannot recover the contrast.
+pub const PAPER: &str = "#ffffff";
+
 /// What was drawn, and what could not be.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -1902,8 +1956,22 @@ pub fn linear_png_at(
 ///
 /// On the root rather than on each `<text>` because it inherits, and because
 /// the root is already where this file states document-wide typography.
+///
+/// # The ground
+///
+/// The first element in the document body is a `<rect>` covering the whole
+/// `viewBox` and filled with [`PAPER`] — see that constant for why a figure
+/// carries its own ground, and for the one back end that still does not. Until
+/// 2026-08-13 this function emitted no such element, so the file it wrote was
+/// transparent while `--check-contrast` certified its ink against white.
+///
+/// It is written in SCENE UNITS and not in millimetres. `width_mm` scales the
+/// root element and leaves every coordinate alone, as the paragraphs above
+/// promise, so a ground sized in millimetres would be a 180-unit rectangle in
+/// the corner of a 720-unit canvas — a figure with a small white square in it,
+/// which is worse than a transparent one because it looks deliberate.
 pub fn svg_at(sc: &Scene, width_mm: Option<f64>) -> String {
-    let mut body = String::new();
+    let mut body = svg_ground(sc);
     for item in &sc.items {
         match item {
             Item::Circle {
@@ -1987,6 +2055,30 @@ pub fn svg_at(sc: &Scene, width_mm: Option<f64>) -> String {
 /// The scene as SVG at its own scene units. See [`svg_at`].
 pub fn svg_of(sc: &Scene) -> String {
     svg_at(sc, None)
+}
+
+/// The ground element: one `<rect>` the size of the scene, filled with
+/// [`PAPER`].
+///
+/// A function rather than a few more lines inside [`svg_at`], for two reasons.
+/// The ground becomes a thing this file names, instead of a literal folded into
+/// a 300-character `format!` where no comment can point at it. And removing it
+/// is then a one-line change — `let mut body = svg_ground(sc)` back to
+/// `String::new()` — which is what lets a reader re-break
+/// `ground_tests::the_svg_carries_the_ground_its_contrast_certificate_is_measured_against`
+/// on purpose and watch it fail, rather than taking the test's word for it.
+///
+/// `x` and `y` are left out, exactly as the TypeScript renderer leaves them out
+/// (`render.ts`, `const bg`): SVG's initial values for both are 0, and the two
+/// renderers writing different bytes for one rectangle is the divergence this
+/// whole layer exists to close.
+fn svg_ground(sc: &Scene) -> String {
+    format!(
+        r##"<rect width="{}" height="{}" fill="{}"/>"##,
+        n(sc.width),
+        n(sc.height),
+        PAPER
+    )
 }
 
 /// A path's segments as an SVG `d` attribute.
@@ -2145,4 +2237,156 @@ pub fn commas(v: u64) -> String {
         out.push(c);
     }
     out
+}
+
+/// The ground, and the contrast certificate that names it.
+///
+/// Beside the code they pin rather than over in [`tests`]: the ground is a
+/// constant ([`PAPER`]), the writer that emits the element ([`svg_ground`]) and
+/// one line of [`svg_at`] — and the mutation that re-breaks these two tests
+/// names that line.
+/// A reader who changes it should find the check that notices in the same file.
+///
+/// The first of them reads the finished document back and re-runs
+/// [`contrast::audit`] against the background it finds *in there*, rather than
+/// against a literal `"#ffffff"`. Passing the literal is exactly what the CLI
+/// does — `contrast::audit(&scene, "#ffffff", scale)` in `bins/pl/src/main.rs`
+/// — and exactly what made its certificate a claim about nothing, so a test
+/// that did the same would reproduce the defect inside its own proof.
+#[cfg(test)]
+mod ground_tests {
+    use super::*;
+
+    /// A four-feature ring: the same molecule
+    /// `contrast::tests::every_colour_the_renderer_emits_is_one_of_the_audited_constants`
+    /// builds, so the ink under test here is the ink that test already pins to
+    /// the audited constants.
+    fn a_map() -> Scene {
+        let mut m = Molecule {
+            name: "pTEST".into(),
+            seq: b"ACGT".iter().cycle().take(4000).copied().collect(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        for (i, kind) in ["CDS", "promoter", "rep_origin", "misc_feature"]
+            .iter()
+            .enumerate()
+        {
+            let mut f = pl_core::Feature::new(format!("f{i}"), *kind);
+            f.segments.push(pl_core::Segment::new(
+                i as u64 * 500 + 1,
+                i as u64 * 500 + 400,
+            ));
+            m.features.push(f);
+        }
+        scene(&m, Options::default()).0
+    }
+
+    /// The `fill` of the first `<rect>` in a document, parsed out of the bytes.
+    ///
+    /// Deliberately not `svg_ground`'s return value: a test that asks the writer
+    /// what it wrote agrees with itself whatever it writes. `None` when the
+    /// document paints no ground at all, which is the state this whole section
+    /// is about.
+    fn ground_of(svg: &str) -> Option<String> {
+        let el = &svg[svg.find("<rect")?..];
+        let el = &el[..el.find("/>")?];
+        let v = &el[el.find(r#"fill=""#)? + 6..];
+        Some(v[..v.find('"')?].to_string())
+    }
+
+    /// PROVEN TO FAIL at d8c218b: `svg_at` started its body empty and emitted no
+    /// background element of any kind, so an exported map was transparent —
+    /// 91.25% of its pixels at alpha 0, rasterised — while
+    /// `pl export --svg --check-contrast` certified its colours against
+    /// `#ffffff` and printed `contrast ok (WCAG 2.2 AA)`. `ground_of` returned
+    /// `None` and there was nothing to audit against.
+    ///
+    /// **The mutation that re-breaks it:** on line 1974, replace
+    /// `let mut body = svg_ground(sc);` with `let mut body = String::new();`.
+    #[test]
+    fn the_svg_carries_the_ground_its_contrast_certificate_is_measured_against() {
+        let sc = a_map();
+        let svg = svg_of(&sc);
+
+        // The background is read back OUT OF THE DOCUMENT and the audit is then
+        // run against that string rather than against a literal `"#ffffff"`.
+        // That is the whole assertion: the certificate is about the ground the
+        // file actually carries, and a transparent file has no ground to name.
+        let ground = ground_of(&svg)
+            .expect("the SVG paints no ground, so a contrast certificate for it is about nothing");
+        assert_eq!(
+            ground, PAPER,
+            "the file's ground is not the colour this crate says it audits against"
+        );
+        assert!(
+            contrast::audit(&sc, &ground, 1.0).is_empty(),
+            "the shipped ink does not meet WCAG AA on the ground the file paints: {:?}",
+            contrast::audit(&sc, &ground, 1.0)
+        );
+
+        // It covers the whole viewBox. A ground smaller than the canvas leaves a
+        // transparent margin, and a label in that margin is exactly the ink the
+        // audit was least able to speak for.
+        assert!(
+            svg.contains(&format!(
+                r##"<rect width="{}" height="{}" fill="{PAPER}"/>"##,
+                n(sc.width),
+                n(sc.height)
+            )),
+            "the ground does not cover the viewBox: {svg:.400}"
+        );
+        assert!(
+            svg.contains(&svg_ground(&sc)),
+            "`svg_ground` is not what put the ground in the document"
+        );
+
+        // And it is painted BEFORE the artwork. A ground emitted last is a
+        // figure with a white sheet over it, which passes every "is there a
+        // background" check and is a blank page.
+        let at = svg.find("<rect").expect("a ground");
+        for tag in ["<path", "<text", "<circle"] {
+            let ink = svg
+                .find(tag)
+                .unwrap_or_else(|| panic!("the map drew no {tag}, so this proves nothing"));
+            assert!(at < ink, "the ground is painted over the {tag}");
+        }
+    }
+
+    /// PROVEN TO FAIL at d8c218b for the same reason as the test above — there
+    /// was no ground at any size — and it additionally pins the units, which the
+    /// other one cannot see because `svg_of` passes no millimetres.
+    ///
+    /// `width_mm` scales the ROOT ELEMENT and nothing inside it, so the ground
+    /// belongs in scene units. Written at the physical size instead it would be
+    /// an 89-unit square in the corner of a 720-unit canvas: a figure with a
+    /// small white patch in it, which reads as deliberate and would survive
+    /// review.
+    ///
+    /// **The mutation that re-breaks it:** on line 1974, replace
+    /// `let mut body = svg_ground(sc);` with `let mut body = String::new();`.
+    /// For the unit half specifically, change `n(sc.width)` in `svg_ground` to
+    /// `n(89.0)`.
+    #[test]
+    fn the_ground_is_in_scene_units_even_when_the_root_is_in_millimetres() {
+        let sc = a_map();
+        let svg = svg_at(&sc, Some(89.0));
+        let root = &svg[..svg.find('>').expect("a root element")];
+        assert!(
+            root.contains("mm"),
+            "this is meant to be the physical-size path: {root}"
+        );
+        assert!(
+            (sc.width - 89.0).abs() > 1.0,
+            "the scene is 89 units wide, so this test cannot tell the two units apart"
+        );
+        assert!(
+            svg.contains(&format!(
+                r##"<rect width="{}" height="{}" fill="{PAPER}"/>"##,
+                n(sc.width),
+                n(sc.height)
+            )),
+            "the ground is not the size of the viewBox at a stated physical width: {svg:.400}"
+        );
+    }
 }

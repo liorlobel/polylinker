@@ -58,6 +58,30 @@ const DEFAULT_THEME: Theme = {
   },
 };
 
+/**
+ * How much of the turn a linear molecule's two free ends take out of it.
+ *
+ * 6% — 21.6 degrees, 10.8 at each end — is the visible break that says "this
+ * molecule does not close". It is a module constant rather than a local inside
+ * the backbone branch because it is not only the backbone's business: on a
+ * linear molecule every base is mapped into the *remaining* 94% (see
+ * `mapLength` and `mapOrigin` in `renderCircularMap`), so the drawn break and
+ * the coordinate system make the same statement about topology.
+ *
+ * Until 2026-08-13 only the backbone knew this number. Features, ruler ticks
+ * and site ticks all went through `baseToAngle` over the full 360 degrees, so
+ * the 6% of bases nearest each end were drawn in the region the backbone had
+ * been removed from, and terminal features bridged the break. Worse: a 2,000 bp
+ * linear molecule carrying one 1..2000 feature emitted a feature path
+ * byte-identical to the same molecule drawn circular — a complete annulus
+ * painted over the mid-radius backbone, 2 differing pixels out of 384,400 when
+ * the two were rasterised and diffed. A gBlock or a PCR product annotated end
+ * to end rendered as a plasmid, which is precisely the reading the gap exists
+ * to deny, and `malformed` was empty because nothing was malformed: the
+ * renderer drew exactly what it had been asked to draw, on the wrong circle.
+ */
+const LINEAR_GAP = 0.06 * TAU;
+
 /** Rough advance width of a string, as a multiple of font size.
  *
  *  0.55 is a reasonable mean for the digits and mixed-case Latin that feature
@@ -174,6 +198,45 @@ export function renderCircularMap(
   const features = molecule.features ?? [];
   const sites = molecule.sites ?? [];
 
+  // The base-to-angle mapping for *this* molecule, expressed as the
+  // `(length, originAtTop)` pair that every call site below hands to
+  // `baseToAngle` — including `arcPath`, which maps its own two endpoints
+  // internally and therefore cannot be steered any other way.
+  //
+  // A circular molecule maps as it always did: the whole turn, rotated so
+  // `originAtTop` sits at 12 o'clock.
+  //
+  // A linear one has to land base 1 on one free end of the backbone arc and the
+  // far end of base `length` on the other, i.e. base `b` at
+  // `LINEAR_GAP / 2 + (b - 1) / length * (TAU - LINEAR_GAP)`. Rather than write
+  // that expression out at five call sites — and be unable to write it at all
+  // inside `arcPath`, which lives in `geometry.ts` and takes only these two
+  // parameters — it is expressed as the circle it is: the linear molecule plus
+  // a phantom stretch of `length * LINEAR_GAP / (TAU - LINEAR_GAP)` bases
+  // filling the gap, with the origin rotated back over half of that stretch.
+  //
+  //   mapLength = length * TAU / (TAU - LINEAR_GAP)
+  //   mapOrigin = 1 - LINEAR_GAP * length / (2 * (TAU - LINEAR_GAP))
+  //
+  // Substituted into `baseToAngle`, `(b - mapOrigin) / mapLength * TAU` is
+  // exactly `LINEAR_GAP / 2 + (b - 1) * (TAU - LINEAR_GAP) / length` — an
+  // identity, not an approximation. Every base a caller can reach, 1 through
+  // `length + 1` (the exclusive end `arcPath` asks about), lands strictly
+  // inside `[0, mapLength)`, so the positive modulo in `baseToAngle` never
+  // wraps. That is the half that matters most: it was the wrap that turned a
+  // whole-length feature into a closed ring, because base `length + 1` came
+  // back to base 1's angle and `arcPath` completed the arc the long way round.
+  //
+  // `originAtTop` is deliberately dropped for a linear molecule. There is no
+  // origin to rotate — base 1 is the 5' end, a physical fact rather than a
+  // numbering convention — and honouring it would mean cutting the molecule
+  // somewhere in its middle and drawing the two halves as though they joined,
+  // which is the same lie about topology in a different place.
+  const mapLength = circular ? length : length * (TAU / (TAU - LINEAR_GAP));
+  const mapOrigin = circular
+    ? originAtTop
+    : 1 - (LINEAR_GAP * length) / (2 * (TAU - LINEAR_GAP));
+
   const ring: Ring = { cx: width / 2, cy: height / 2 };
 
   // Reserve the widest label on each side, plus the leader, so the ring is as
@@ -202,10 +265,13 @@ export function renderCircularMap(
     );
   } else {
     // A linear molecule drawn on the same ring would be a lie about topology;
-    // it gets an arc with visible free ends instead.
-    const gap = 0.06 * TAU;
-    const p0 = polar(ring, (ro + ri) / 2, gap / 2);
-    const p1 = polar(ring, (ro + ri) / 2, TAU - gap / 2);
+    // it gets an arc with visible free ends instead. `mapLength`/`mapOrigin`
+    // above put base 1 on the first of those ends and the far end of base
+    // `length` on the second, so the break is empty of content by construction
+    // rather than by luck — nothing is drawn across it, and a feature that runs
+    // to either end of the molecule stops where the backbone stops.
+    const p0 = polar(ring, (ro + ri) / 2, LINEAR_GAP / 2);
+    const p1 = polar(ring, (ro + ri) / 2, TAU - LINEAR_GAP / 2);
     body.push(
       `<path d="M${n(p0.x)},${n(p0.y)} A${n((ro + ri) / 2)},${n((ro + ri) / 2)} 0 1 1 ${n(p1.x)},${n(p1.y)}" ` +
         `fill="none" stroke="${theme.backboneStroke}" stroke-width="1.25"/>`,
@@ -217,7 +283,7 @@ export function renderCircularMap(
     const target = options.tickCount ?? 12;
     const step = niceStep(length / target);
     for (let base = step; base <= length; base += step) {
-      const a = baseToAngle(base, length, originAtTop);
+      const a = baseToAngle(base, mapLength, mapOrigin);
       body.push(
         `<path d="${radialLine(ring, a, ri - 4, ri - 9)}" stroke="${theme.tickStroke}" stroke-width="1" fill="none"/>`,
       );
@@ -241,7 +307,11 @@ export function renderCircularMap(
   features.forEach((f, index) => {
     const colour = featureColor(f, theme);
     const span = featureSpan(f, length, circular);
-    const degrees = (span / length) * 360;
+    // Degrees of arc this feature will actually occupy, so over `mapLength`
+    // rather than `length`: on a linear molecule the two differ by 6%, and the
+    // only consumer is the tiny-feature threshold below, which should be
+    // measuring the arc that gets drawn and not one 6% wider than it.
+    const degrees = (span / mapLength) * 360;
     const strand = f.strand ?? 'none';
     const ranges = f.segments.flatMap((s) => segmentRanges(s, length, circular));
     if (ranges.length === 0) {
@@ -269,7 +339,7 @@ export function renderCircularMap(
       if (tiny) {
         // Below a degree or so an arrowhead is smaller than a pixel and reads
         // as dirt on the figure. A tick is honest at any size.
-        const a = baseToAngle(r.from + 1, length, originAtTop);
+        const a = baseToAngle(r.from + 1, mapLength, mapOrigin);
         body.push(
           `<path d="${radialLine(ring, a, ri, ro)}" stroke="${colour}" ` +
             `stroke-width="1.75" fill="none"${idAttr}>${title}</path>`,
@@ -284,8 +354,8 @@ export function renderCircularMap(
             outerRadius: ro,
             arrow: i === arrowOn ? (strand === 'reverse' ? 'start' : 'end') : 'none',
           },
-          length,
-          originAtTop,
+          mapLength,
+          mapOrigin,
         );
         const fill = f.fragment ? 'none' : colour;
         const stroke = f.fragment ? colour : theme.featureStroke;
@@ -300,7 +370,7 @@ export function renderCircularMap(
     anchors.push({
       index,
       text: f.name,
-      angle: baseToAngle(featureMidBase(f, length, circular), length, originAtTop),
+      angle: baseToAngle(featureMidBase(f, length, circular), mapLength, mapOrigin),
       // Bigger features hold their position; small ones give way.
       weight: 1 + Math.log10(1 + span),
     });
@@ -312,7 +382,33 @@ export function renderCircularMap(
       malformed.push({ name: s.name, reason: `position ${s.position} is not a number` });
       return;
     }
-    const a = baseToAngle(s.position, length, originAtTop);
+    // The same refuse-and-report the feature loop above does, and for the same
+    // reason — this branch used to check only that the position was a *number*.
+    //
+    // Anything finite went straight to `baseToAngle`, whose positive modulo
+    // exists to let a base before the chosen origin still land on the circle
+    // and will just as happily fold a cut at base 5,000 of a 1,000 bp molecule
+    // onto base 1,000. The caption is built from the raw value a few lines
+    // down, so the figure then carried the tick at one base and the words
+    // `EcoRI (5,000)` beside it: a site the reader can measure off the drawing
+    // *and* read off the label, at two different coordinates, neither of them
+    // real. On a linear molecule there is not even a modular reading to appeal
+    // to — 1,001 of 1,000 is nowhere at all — and `malformed` stayed empty
+    // through every one of these, which is the one signal a caller has that a
+    // map is incomplete.
+    //
+    // `geometry.ts` states the principle for the feature path: fabrication is
+    // worse than loss. A site the file could not place honestly is dropped from
+    // the drawing and named here instead, so a caller can say so beside the
+    // figure rather than publish a coordinate that cannot exist.
+    if (s.position < 1 || s.position > length) {
+      malformed.push({
+        name: s.name,
+        reason: `position ${s.position} does not fall within 1..${length}`,
+      });
+      return;
+    }
+    const a = baseToAngle(s.position, mapLength, mapOrigin);
     body.push(
       `<path d="${radialLine(ring, a, ro, ro + 6)}" stroke="${theme.tickStroke}" stroke-width="1" fill="none"/>`,
     );

@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { renderCircularMap } from '../src/render.ts';
-import { baseToAngle, polar, segmentRanges } from '../src/geometry.ts';
-import type { Molecule } from '../src/types.ts';
+import { TAU, baseToAngle, polar, segmentRanges } from '../src/geometry.ts';
+import type { Molecule, Strand } from '../src/types.ts';
 
 const pUC19ish: Molecule = {
   name: 'pUC19',
@@ -36,6 +36,53 @@ function tagsBalanced(svg: string): boolean {
     }
   }
   return stack.length === 0;
+}
+
+/** Default canvas is 620x620, so the ring centre is here. Every test below that
+ *  measures an angle renders at that size explicitly rather than leaning on the
+ *  default, so the centre is something the test states rather than inherits. */
+const CX = 310;
+const CY = 310;
+
+/**
+ * Every point a path command lands on, in document order.
+ *
+ * Not a bare scan for number pairs, because `A` is not shaped like one: its
+ * first two numbers are radii and the next three are flags, so only its last
+ * pair is a coordinate. `A238.2,238.2 0 1 0 354.63,76.02` read as a pair-scan
+ * yields a perfectly plausible point at (238.2, 238.2) — which lands inside
+ * every region the tests below check, so the wrong parse would not announce
+ * itself by failing, it would just quietly stop measuring the real path.
+ */
+function pathPoints(d: string): Array<{ x: number; y: number }> {
+  const out: Array<{ x: number; y: number }> = [];
+  const re = /([MLA])([^MLAZ]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(d)) !== null) {
+    const nums = (m[2].match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+    const pair = m[1] === 'A' ? nums.slice(-2) : nums.slice(0, 2);
+    if (pair.length === 2) out.push({ x: pair[0], y: pair[1] });
+  }
+  return out;
+}
+
+/** The renderer's own angular convention, read back off a drawn point:
+ *  radians clockwise from 12 o'clock, in `[0, TAU)`. The inverse of `polar`. */
+function angleOf(p: { x: number; y: number }): number {
+  const a = Math.atan2(p.x - CX, CY - p.y);
+  return a < 0 ? a + TAU : a;
+}
+
+function radiusOf(p: { x: number; y: number }): number {
+  return Math.hypot(p.x - CX, p.y - CY);
+}
+
+/** The `d` of every filled feature band, in the order the renderer emitted
+ *  them — which is segment order. Leader lines and the linear backbone are
+ *  `fill="none"`, ruler and site ticks name their stroke before their fill, so
+ *  requiring a hex `fill` immediately after `d` selects feature bands alone. */
+function featureBands(svg: string): string[] {
+  return [...svg.matchAll(/<path d="([^"]+)" fill="(#[0-9a-fA-F]{3,8})"/g)].map((m) => m[1]);
 }
 
 test('produces a well-formed, self-contained svg', () => {
@@ -163,6 +210,74 @@ test('every feature and site gets a label, on a map with room', () => {
   }
 });
 
+/**
+ * A cut site the file puts outside the molecule is refused and reported, the
+ * way an out-of-range feature already was.
+ *
+ * PROVEN TO FAIL at d8c218b: the site loop's only guard was
+ * `!Number.isFinite(s.position)`. Every finite position went on to
+ * `baseToAngle`, whose positive modulo — which exists so that a base *before*
+ * the chosen origin still lands on the circle — folded it onto some in-range
+ * base, while the label a few lines down was built from the **raw** number. On
+ * this molecule d8c218b drew ticks at bases 1000, 1000 and 960 and captioned
+ * them `EcoRI (5,000)`, `BamHI (0)` and `SalI (-40)`: a site the reader can
+ * measure off the drawing and read off the label at two different coordinates,
+ * neither of them a base this molecule has. `malformed` was `[]` — and in the
+ * same render, two *features* carrying those same coordinates were refused and
+ * reported, which is the whole of the difference. On a linear molecule there is
+ * not even a modular reading to appeal to: base 1,001 of 1,000 is nowhere.
+ *
+ * `geometry.ts` states the rule the site path was not following: collapsing an
+ * out-of-range coordinate onto a real base "is fabrication rather than loss,
+ * which is worse".
+ *
+ * The count assertion is what closes the loophole of drawing the tick anyway
+ * and merely suppressing the label: the tick and the label's anchor are pushed
+ * together, so a site that reaches the drawing reaches `labels` or
+ * `hiddenLabels` with it.
+ *
+ * TO RE-BREAK IT: in `renderCircularMap`'s site loop (src/render.ts), change
+ * the line `if (s.position < 1 || s.position > length) {` to `if (false) {`.
+ */
+test('a restriction site outside the molecule is reported, not folded onto a real base', () => {
+  const { svg, labels, hiddenLabels, malformed } = renderCircularMap(
+    {
+      name: 'p1000',
+      length: 1000,
+      topology: 'circular',
+      sites: [
+        { name: 'EcoRI', position: 5000 },
+        { name: 'BamHI', position: 0 },
+        { name: 'SalI', position: -40 },
+        { name: 'PstI', position: 400, unique: true },
+      ],
+    },
+    { width: 700, height: 700 },
+  );
+
+  assert.deepEqual(labels.map((l) => l.text), ['PstI (400)']);
+  assert.deepEqual(malformed.map((m) => m.name).sort(), ['BamHI', 'EcoRI', 'SalI']);
+  assert.equal(labels.length + hiddenLabels.length + malformed.length, 4);
+  for (const refused of ['EcoRI', 'BamHI', 'SalI']) {
+    assert.ok(!svg.includes(refused), `${refused} was drawn on a base it does not cut`);
+  }
+  assert.ok(!svg.includes('5,000'), 'the figure prints a coordinate the molecule has not got');
+  // ...and a site that really is in range is still drawn, because refusing
+  // everything would be a safe renderer that draws the wrong picture.
+  assert.ok(svg.includes('PstI (400)'), 'the real site must survive');
+
+  // A linear molecule has no modular reading at all, so one past the end is as
+  // unplaceable as five times the length.
+  const past = renderCircularMap({
+    name: 'insert',
+    length: 1000,
+    topology: 'linear',
+    sites: [{ name: 'XhoI', position: 1001 }, { name: 'NotI', position: 1000 }],
+  });
+  assert.deepEqual(past.malformed.map((m) => m.name), ['XhoI']);
+  assert.deepEqual(past.labels.map((l) => l.text), ['NotI (1,000)']);
+});
+
 test('no two placed labels overlap', () => {
   const { labels } = renderCircularMap(pUC19ish, { width: 700, height: 700, fontSize: 12 });
   const bySide = { start: [] as number[], end: [] as number[] };
@@ -222,26 +337,101 @@ test('a reversed interval on a linear molecule does not silently wrap', () => {
   assert.equal(ranges.length, 1, 'a linear molecule has no origin to cross');
 });
 
+/**
+ * A join is one gene, so it gets one arrowhead — on the segment the gene ends
+ * on, pointing the way the gene is read.
+ *
+ * PROVEN TO FAIL at d8c218b: not as shipped, but against three mutations of
+ * `renderCircularMap`'s feature loop that d8c218b's version of this test passes,
+ * which is the same defect. That version's only assertion was
+ * `svg.match(/<path[^>]*fill="#[^"]*"/g).length === 3` — a count of how many
+ * bands carry a hex fill, which is three whether each band is a plain arc or a
+ * complete arrowhead, because `arcPath` returns one `d` per range either way.
+ * The property in the title, and the one this package's README sells two
+ * paragraphs after promising the suite "checks that claim directly rather than
+ * taking it on trust", was never looked at. All three of the following left the
+ * whole 44-test suite green: `i === arrowOn` widened to `arrowOn >= 0`, which
+ * puts an arrowhead on **every exon**; `arrowOn` forced to `-1`, which removes
+ * the arrowhead from **every feature on every map**; and the
+ * `strand === 'reverse' ? 'start' : 'end'` conditional swapped, which points
+ * every arrowhead the **wrong way** down the molecule. Nothing else in the
+ * package covers it either — `hostile.test.ts`'s `arcPath` case asserts only
+ * `startsWith('M') && includes('A') && !NaN`, satisfied by all three, and
+ * `agreement.json` records four root attributes and not one arc.
+ *
+ * Two things are read off the geometry here rather than counted:
+ *
+ *   - An arrowhead is the only thing that puts **interior `L` commands** into
+ *     `arcPath`'s output. A plain band is `M · A · L · A · Z`: exactly one `L`,
+ *     the radial step from the outer arc to the inner one. An arrowhead adds
+ *     the two barbs and the point, for four. So "more than one `L`" is
+ *     "this band is the arrowed one", exactly.
+ *   - The point of the arrowhead is the only vertex at the ring's **mid**
+ *     radius — every other vertex sits at `ri`, `ro`, or one barb outside
+ *     either — so the direction the arrow points is `angleOf` that vertex, and
+ *     it must be the far end of the terminal exon on the forward strand and the
+ *     near end of the first exon on the reverse. Without this second half the
+ *     `'start'`/`'end'` swap survives: it moves the arrowhead within its
+ *     segment without changing which segment carries it, so the `L`-counts are
+ *     4,1,1 either way.
+ *
+ * TO RE-BREAK IT: in `renderCircularMap` (src/render.ts), change
+ * `arrow: i === arrowOn ? …` to `arrow: arrowOn >= 0 ? …`.
+ */
 test('a multi-segment feature draws one arrow, not one per exon', () => {
-  const { svg } = renderCircularMap({
-    name: 'joined',
-    length: 3000,
-    features: [
+  const exons = [
+    { start: 100, end: 400 },
+    { start: 700, end: 1000 },
+    { start: 1400, end: 1800 },
+  ];
+  const bands = (strand: Strand): string[] => {
+    const { svg } = renderCircularMap(
       {
-        name: 'spliced',
-        type: 'CDS',
-        strand: 'forward',
-        segments: [
-          { start: 100, end: 400 },
-          { start: 700, end: 1000 },
-          { start: 1400, end: 1800 },
-        ],
+        name: 'joined',
+        length: 3000,
+        features: [{ name: 'spliced', type: 'CDS', strand, segments: exons }],
       },
-    ],
-  });
-  const paths = svg.match(/<path[^>]*fill="#[^"]*"/g) ?? [];
-  assert.equal(paths.length, 3, 'expected one path per segment');
-  assert.ok(tagsBalanced(svg));
+      { width: 620, height: 620 },
+    );
+    assert.ok(tagsBalanced(svg));
+    const ds = featureBands(svg);
+    assert.equal(ds.length, 3, `expected one path per segment, got ${ds.length}`);
+    return ds;
+  };
+  /** Which of the three bands carry an arrowhead. */
+  const arrowed = (ds: string[]): boolean[] =>
+    ds.map((d) => (d.match(/L/g) ?? []).length > 1);
+  /** Where the arrowhead on this band points. */
+  const tipAngle = (d: string): number => {
+    const pts = pathPoints(d);
+    const rs = pts.map(radiusOf);
+    // `ro + barb` and `ri - barb` are the extremes and the barb is symmetric,
+    // so their mean is the mid radius the point sits on.
+    const mid = (Math.max(...rs) + Math.min(...rs)) / 2;
+    let best = 0;
+    for (let i = 1; i < pts.length; i++) {
+      if (Math.abs(rs[i] - mid) < Math.abs(rs[best] - mid)) best = i;
+    }
+    return angleOf(pts[best]);
+  };
+
+  const forward = bands('forward');
+  assert.deepEqual(arrowed(forward), [false, false, true], 'the arrow is on the terminal exon');
+  // The end of exon 3 is base 1800, whose far edge is where base 1801 begins.
+  assert.ok(
+    Math.abs(tipAngle(forward[2]) - baseToAngle(1801, 3000)) < 1e-3,
+    'a forward arrow must point at the high-coordinate end of its exon',
+  );
+
+  const reverse = bands('reverse');
+  assert.deepEqual(arrowed(reverse), [true, false, false], 'the arrow is on the first exon');
+  assert.ok(
+    Math.abs(tipAngle(reverse[0]) - baseToAngle(100, 3000)) < 1e-3,
+    'a reverse arrow must point at the low-coordinate end of its exon',
+  );
+
+  // And a feature with no strand claims no direction at all.
+  assert.deepEqual(arrowed(bands('none')), [false, false, false]);
 });
 
 test('a fragment is drawn as an outline, a whole feature is filled', () => {
@@ -274,6 +464,96 @@ test('linear and circular molecules are drawn differently', () => {
   const lin = renderCircularMap({ name: 'a', length: 1000, topology: 'linear' }).svg;
   assert.ok(circ.includes('<circle'), 'a circular molecule gets a closed backbone');
   assert.ok(!lin.includes('<circle'), 'a linear molecule must not be drawn as a closed ring');
+});
+
+/**
+ * A linear molecule's coordinate system must have the same free ends its
+ * backbone does.
+ *
+ * PROVEN TO FAIL at d8c218b, where the 6% break was a local inside the backbone
+ * branch and nothing else knew about it. Features, ruler ticks and site ticks
+ * all went through `baseToAngle` over the full 360 degrees, so the backbone
+ * claimed 338.40 degrees while the coordinate system spread the molecule over
+ * 359.64 and the 6% of bases nearest each end were drawn in the region the
+ * backbone had been removed from. Terminal features bridged the break and the
+ * map read as closed — the one thing the break is there to deny.
+ *
+ * At its worst it was not a near miss but an exact collision: this 2,000 bp
+ * molecule with its one whole-length feature emitted a feature path
+ * **byte-identical** to the same molecule drawn circular, a complete annulus
+ * painted over the mid-radius backbone. Rasterised and diffed, the linear and
+ * circular figures differed by 2 pixels out of 384,400, max channel delta
+ * 26/255. A gBlock or a PCR product annotated end to end rendered as a plasmid,
+ * and `malformed` was empty, because nothing was malformed: the renderer drew
+ * what it was asked to draw, on the wrong circle.
+ *
+ * The old test for this could not fail either — it asserted only
+ * `!lin.includes('<circle')`, so emitting the backbone as two half-arcs with
+ * `gap = 0`, a fully closed ring for a linear molecule, left the suite green.
+ * Here the break is measured off the drawn arc and every other coordinate is
+ * required to fall inside it, so the two cannot drift apart again in either
+ * direction: close the gap and the containment assertions have nothing left to
+ * contain; widen the mapping and the coordinates leave the arc.
+ *
+ * TO RE-BREAK IT: in `renderCircularMap` (src/render.ts), change
+ * `const mapLength = circular ? length : length * (TAU / (TAU - LINEAR_GAP));`
+ * to `const mapLength = length;`.
+ */
+test('a linear molecule draws its bases between its own free ends', () => {
+  const length = 2000;
+  const whole = { name: 'insert', type: 'CDS', segments: [{ start: 1, end: length }] };
+  const size = { width: 620, height: 620 };
+  const lin = renderCircularMap({ name: 'gBlock', length, topology: 'linear', features: [whole] }, size);
+  const circ = renderCircularMap({ name: 'gBlock', length, topology: 'circular', features: [whole] }, size);
+
+  // The two free ends, read back off the arc the renderer actually drew rather
+  // than recomputed from the constant. `#33383d` is the default backboneStroke.
+  const arc = /<path d="([^"]+)" fill="none" stroke="#33383d" stroke-width="1\.25"\/>/.exec(lin.svg)?.[1];
+  assert.ok(arc, 'a linear molecule must be drawn as an open arc, not a circle');
+  const ends = pathPoints(arc!);
+  assert.equal(ends.length, 2, 'an open arc has exactly two endpoints');
+  const g0 = angleOf(ends[0]);
+  const g1 = angleOf(ends[1]);
+  const gap = TAU - (g1 - g0);
+  assert.ok(
+    gap > 0.01 * TAU && gap < 0.2 * TAU,
+    `the break must be visible and must not eat the map: ${(gap / TAU) * 360} degrees`,
+  );
+
+  const band = featureBands(lin.svg);
+  assert.equal(band.length, 1);
+  const angles = pathPoints(band[0]).map(angleOf);
+  for (const a of angles) {
+    assert.ok(
+      a >= g0 - 1e-3 && a <= g1 + 1e-3,
+      `a feature corner at ${(a / TAU) * 360} degrees is outside the backbone`,
+    );
+  }
+  // Not merely inside: base 1 lands on one free end and base `length` on the
+  // other, so a molecule annotated end to end fills the arc and stops there.
+  assert.ok(Math.abs(Math.min(...angles) - g0) < 1e-3, 'base 1 is not on the first free end');
+  assert.ok(Math.abs(Math.max(...angles) - g1) < 1e-3, 'base 2000 is not on the second');
+
+  // Ruler ticks share the mapping or the numbers beside the arc name the wrong
+  // bases. The last tick is the one that used to fall in the break.
+  const ticks = [
+    ...lin.svg.matchAll(/<path d="(M[^"]+)" stroke="#6b7280" stroke-width="1" fill="none"\/>/g),
+  ].map((m) => m[1]);
+  assert.ok(ticks.length > 0, 'no ruler was drawn, so this proves nothing');
+  for (const t of ticks) {
+    for (const a of pathPoints(t).map(angleOf)) {
+      assert.ok(
+        a >= g0 - 1e-3 && a <= g1 + 1e-3,
+        `a ruler tick at ${(a / TAU) * 360} degrees is outside the backbone`,
+      );
+    }
+  }
+
+  assert.notEqual(
+    band[0],
+    featureBands(circ.svg)[0],
+    'the linear molecule drew the same closed annulus as the plasmid',
+  );
 });
 
 test('feature names containing xml metacharacters are escaped', () => {

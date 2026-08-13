@@ -67,3 +67,33 @@ crates/pl-core/vectors/*.tsv -text
 # repository can report, so the bytes are pinned exactly as published.
 crates/pl-update/tests/fixtures/*SHA256SUMS.txt -text
 crates/pl-update/tests/fixtures/*.sig -text
+
+# The licence evidence archive, added 2026-07-28 with the Stage 0.3 scaffolding.
+# `legal/MANIFEST.json` records a byte count and a sha256 for each of the seven
+# archived documents *as they were fetched*, which is LF, and
+# `features/build/archive_legal.py --check` re-hashes them from disk.
+# `features/README.md:126` hands that command to a recipient as the way to
+# verify the evidence package, and `features/SOURCING.md` names this archive as
+# the whole mitigation for "the evidence package does not self-evidence" — so
+# this is the one hash-asserted file set here whose audience is someone who has
+# just cloned.
+#
+# With core.autocrlf on — the Windows default — checkout rewrites six of the
+# seven as CRLF (`wwpdb-usage-policies.html`: 14,815 bytes as published, 15,075
+# after 260 line ends grow a byte each), and `--check` prints `HASH` against
+# each one and exits 1 with `6 problem(s): the archive does not match its own
+# manifest`. Nothing has been tampered with and the blobs in the object store
+# still hash to their recorded values; only the checkout differs. This survived
+# four audits because the maintainer's own tree holds LF and reports 7/7 green,
+# so the false alarm is visible only to the recipient the archive exists to
+# convince — and a verifier that cries tamper on a clean clone is a verifier
+# that reader learns to ignore, which costs more than the check is worth.
+#
+# The seventh, `uniprot-help-license.json`, survives a CRLF checkout today only
+# because the REST endpoint returned one line with no newline in it, so the
+# conversion has nothing to rewrite. That is a property of one response, not of
+# this directory: re-running the archiver against a reformatted endpoint would
+# quietly move it into the broken six. Hence `legal/**` rather than a pin on
+# the six that currently happen to break, and hence `-text` on `MANIFEST.json`
+# too, which the archiver rewrites and every hash above is read out of.
+legal/** -text
