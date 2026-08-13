@@ -321,10 +321,73 @@ pub struct PrimerMark {
     pub focus: bool,
 }
 
+/// A cut site under the pointer: everything the tooltip names, and the ONE base
+/// a click there answers with.
+///
+/// # Why the two travel together
+///
+/// They are two different questions about one hover and they used to be one
+/// field, `Option<Vec<(String, u64)>>`, which could answer the first and had no
+/// room for the second. A hover over `XmaI  6,917 / SmaI  6,919` must LIST both
+/// cuts — collapsing them is the error `ring::Site::label` exists to prevent —
+/// and a click on it must SELECT one base, because a selection of two bases 2
+/// apart is a selection of the three between them and that is a third thing
+/// neither enzyme does.
+///
+/// Bundled into one struct rather than added as a parallel `Option<u64>` so the
+/// two cannot disagree: there is no hover without a resolved cut, which is
+/// exactly the invariant the cursor rule at the end of [`show`] rests on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteHit {
+    /// The (enzyme, position) pairs on the tick or label under the pointer — all
+    /// of them, in the order the label draws them.
+    ///
+    /// `map.rs` returns WHAT is under the pointer and `main.rs` composes the
+    /// WORDS: this module has `&[Digest]` but not `DigestState`, so it cannot
+    /// answer the methylation question, and a fourth surface with its own answer
+    /// to that question would widen the split-brain the review documents as
+    /// finding 5.
+    ///
+    /// A folded tick carries one entry per enzyme with its OWN coordinate, never
+    /// `XmaI/SmaI  6,917`. `ring::Site::label` refuses to collapse a range
+    /// because XmaI leaves a 4-nt 5' overhang and SmaI is blunt; a tooltip that
+    /// collapsed it would re-introduce exactly the error that form exists to
+    /// prevent.
+    pub entries: Vec<(String, u64)>,
+    /// The base a click here selects — one of `entries`' positions, never a new
+    /// number. Which one is decided by [`cut_under`]; see its header for the
+    /// measurement the rule was chosen from.
+    pub cut: u64,
+}
+
+impl SiteHit {
+    /// Zip the label's names and positions into entries, around a decided `cut`.
+    ///
+    /// `cut` is passed in rather than derived here because the two hit surfaces
+    /// answer it differently and both answers are right: a TICK stands on one
+    /// base, and a LABEL is a run of characters that can be pointed inside.
+    fn of(names: &[String], positions: &[u64], cut: u64) -> Self {
+        SiteHit {
+            entries: names
+                .iter()
+                .cloned()
+                .zip(positions.iter().copied())
+                .collect(),
+            cut,
+        }
+    }
+}
+
 pub struct MapResponse {
     /// Feature index under the pointer, if any.
     pub hovered: Option<usize>,
     /// Feature index clicked this frame.
+    ///
+    /// **A FEATURE index, and that asymmetry is where the surprise was.** `out
+    /// .clicked = out.hovered` promotes the band-and-name channel only, so for
+    /// four releases a click on a cut site had nowhere to go and silently did
+    /// nothing while the cursor over it was a pointing hand. The cut channel is
+    /// [`MapResponse::clicked_site`] and is promoted beside this one.
     pub clicked: Option<usize>,
     /// Feature index double-clicked this frame.
     ///
@@ -342,22 +405,118 @@ pub struct MapResponse {
     /// with the whole string a hover away costs nothing, while dropping the
     /// scale annotation cost the map its only statement of size.
     pub caption_full: Option<(Rect, String)>,
-    /// The (enzyme, position) pairs on the tick or label under the pointer.
+    /// The cut site under the pointer, and the base a click on it would select.
+    pub hovered_site: Option<SiteHit>,
+    /// The base a click on a cut site selected this frame.
     ///
-    /// `map.rs` returns WHAT is under the pointer and `main.rs` composes the
-    /// WORDS: this module has `&[Digest]` but not `DigestState`, so it cannot
-    /// answer the methylation question, and a fourth surface with its own answer
-    /// to that question would widen the split-brain the review documents as
-    /// finding 5.
-    ///
-    /// A folded tick carries one entry per enzyme with its OWN coordinate, never
-    /// `XmaI/SmaI  6,917`. `ring::Site::label` refuses to collapse a range
-    /// because XmaI leaves a 4-nt 5' overhang and SmaI is blunt; a tooltip that
-    /// collapsed it would re-introduce exactly the error that form exists to
-    /// prevent.
-    pub hovered_site: Option<Vec<(String, u64)>>,
+    /// One number and not the whole [`SiteHit`]: the caller's job is to put the
+    /// caret on a base, and it still has `hovered_site` in the same frame for
+    /// anything it wants to SAY about that base.
+    pub clicked_site: Option<u64>,
     /// Where the map was painted, so the caller can attach a tooltip to it.
     pub pane: Rect,
+}
+
+/// Which cut a pointer at `x` inside a drawn site label is asking for.
+///
+/// # The ambiguity, measured before it was decided
+///
+/// A site label can carry several enzymes at several positions — `ring::
+/// merge_sites` folds cuts whose ticks are the same tick — so one label has
+/// more than one answer and something has to choose. Measured on the user's own
+/// pKoV (8,117 bp, 22 real unique cutters) by instrumenting this function's
+/// caller and painting at five pane sizes:
+///
+/// | pane | `within` | labels | merged | enzymes inside a merged label |
+/// |------|---------|--------|--------|------------------------------|
+/// | 500x500   | 13 | 22 | 0 | 0 of 22 |
+/// | 706x756   |  8 | 22 | 0 | 0 of 22 |
+/// | 880x620   |  7 | 19 | 3 | 6 of 22 |
+/// | 1400x950  |  4 | 20 | 2 | 4 of 22 |
+/// | 1900x1000 |  4 | 20 | 2 | 4 of 22 |
+///
+/// and on two more molecules: 1 of 8 labels on a random 8,117 bp plasmid
+/// digested with the whole shipped table (`AarI/PaqCI`, both at 6,355), and 1 of
+/// 26 on `prototype/demo-construct.gb` (`PstI/SbfI`, both at 1,851).
+///
+/// Two things fall out of that table and neither was guessable:
+///
+/// 1. **Merged labels are common, not rare.** Up to 3 of 19 labels and 6 of 22
+///    enzymes on the file this application was written for. "Make only the
+///    unambiguous sites clickable" would therefore leave a quarter of the ring
+///    inert — and it is the wrong quarter, because every merged pair on pKoV is
+///    `SalI/XbaI`, `SphI/NsiI` or `XmaI/SmaI`: the isoschizomer and polylinker
+///    pairs a cloner is choosing BETWEEN, which is when the exact cut matters
+///    most.
+/// 2. **The count goes DOWN as `within` goes up**, which looks backwards until
+///    you see why: the fold happens at 500x500 too, but the merged form does not
+///    fit `room` there, so the `else` branch splits it back into one label per
+///    enzyme. Merging is a property of the pane as well as the molecule.
+///
+/// # Why not the nearest tick
+///
+/// Because there is no nearest tick. The paint loop draws ONE tick per LABEL, at
+/// `labels[i].1` — the anchor, which is `positions.first()` — and `merge_sites`'
+/// criterion is precisely that the arc between the folded cuts is narrower than
+/// that tick's own stroke. Two ticks 2 bp apart on pKoV are 0.4 pt apart at the
+/// widest pane measured above. No pointer can separate them, at any cost in
+/// geometry, and a response field carrying per-position tick rects would be a
+/// field full of coincident rectangles.
+///
+/// # What can be pointed at
+///
+/// The TEXT. `XmaI  6,917 / SmaI  6,919` is two runs of characters at two
+/// different places on screen, and the reader who wants SmaI's cut is looking
+/// straight at the digits `6,919`. So the label is walked run by run —
+/// `ring::Site::label_runs`, the same function that composed the string, so the
+/// split and the drawing cannot disagree — and the pointer picks the run it is
+/// nearest to. A one-run label answers with its own position from the same code
+/// and needs no special case.
+///
+/// `shown` is the DRAWN text and may be shorter than the full label:
+/// `shortened_to` drops a coordinate and then reaches for an ellipsis, and
+/// `EcoRI  7,530` really is drawn as `EcoRI` at a small enough `room`. A run
+/// whose characters are not on the map cannot be what a click answers, so only
+/// runs that survive as a prefix of `shown` are candidates, and a label
+/// shortened past even its first run falls back to `anchor` — the base the tick
+/// is drawn at, which is the same answer the tick itself gives.
+fn cut_under(
+    shown: &str,
+    runs: &[(String, u64)],
+    anchor: u64,
+    left: f32,
+    x: f32,
+    measure: &dyn Fn(&str) -> f32,
+) -> u64 {
+    // `(x0, x1, position)` for each run whose text really reached the screen.
+    // Widths from cumulative prefixes rather than per-run sums: the face is
+    // monospace so the two agree, and the prefix is what `p.text` actually lays
+    // out.
+    let mut spans: Vec<(f32, f32, u64)> = Vec::new();
+    let mut prefix = String::new();
+    for (k, (text, pos)) in runs.iter().enumerate() {
+        if k > 0 {
+            prefix.push_str(ring::RUN_SEP);
+        }
+        let x0 = left + measure(&prefix);
+        prefix.push_str(text);
+        if !shown.starts_with(&prefix) {
+            break;
+        }
+        spans.push((x0, left + measure(&prefix), *pos));
+    }
+    // Nearest by distance to the run's own extent, zero when the pointer is
+    // inside it. A midpoint rule would need the separator's width split in two
+    // and would answer differently at the label's outer edges; this answers the
+    // end run for anything past it, which is where the pointer is when the user
+    // has aimed at the label and undershot.
+    spans
+        .iter()
+        .min_by(|a, b| {
+            let d = |s: &(f32, f32, u64)| (s.0 - x).max(x - s.1).max(0.0);
+            d(a).total_cmp(&d(b))
+        })
+        .map_or(anchor, |s| s.2)
 }
 
 /// Draw the molecule. `selected` highlights one feature; `hot` is the one the
@@ -474,6 +633,7 @@ pub fn show(
         double_clicked: None,
         caption_full: None,
         hovered_site: None,
+        clicked_site: None,
         pane: rect,
     };
 
@@ -515,7 +675,18 @@ pub fn show(
     }
 
     if response.clicked() {
-        out.clicked = out.hovered;
+        // THE SITE FIRST, and the `else` is not tidiness. A cut is a POINT and a
+        // band is a SPAN, so when one press is inside both — which the layout
+        // makes hard and does not forbid, since a leader may run over an inward
+        // lane — the point is the more specific statement of what was aimed at.
+        // Without the `else` both handlers would fire and the second would
+        // overwrite the first's selection, which is a coin toss written as two
+        // statements.
+        if let Some(hit) = &out.hovered_site {
+            out.clicked_site = Some(hit.cut);
+        } else {
+            out.clicked = out.hovered;
+        }
     }
     if response.double_clicked() {
         out.double_clicked = out.hovered;
@@ -530,6 +701,15 @@ pub fn show(
     // and one reviewer independently concluded the map was inert while
     // click-to-select, double-click-to-edit and hover were all wired and
     // working.
+    //
+    // **AND UNTIL THIS CHANGE THE SECOND HALF OF IT WAS A LIE.**
+    // `out.hovered_site.is_some()` put a pointing hand over every tick and every
+    // site label while `out.clicked = out.hovered` promoted the FEATURE channel
+    // only, so a click there did nothing at all. Inert beside a picture is
+    // merely disappointing; inert beside a band that selects its bases reads as
+    // broken. The line is unchanged and is now true, because the two conditions
+    // are exactly the two `response.clicked()` above acts on — a feature index
+    // and a `SiteHit`, and a `SiteHit` cannot exist without a `cut`.
     if out.hovered.is_some() || out.hovered_site.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -1233,16 +1413,30 @@ fn draw_circular(
     // tooltip over a folded tick can print `XmaI 6,917` and `SmaI 6,919` on two
     // lines rather than collapsing them.
     let mut site_positions: Vec<Vec<u64>> = Vec::new();
+    // Parallel again: the label's own text broken at the boundaries between the
+    // runs that each name ONE cut, so a click inside a merged label can answer
+    // with the cut whose digits the pointer is on. From `Site::label_runs`, the
+    // function `Site::label` itself is built out of — see `cut_under`, which is
+    // the only reader, for the measurement behind wanting it at all.
+    let mut site_runs: Vec<Vec<(String, u64)>> = Vec::new();
     for s in folded {
         if s.names.len() == 1 || measure(&s.label()) <= room {
             labels.push((s.label(), s.anchor()));
             names_in.push(s.names.clone());
             site_positions.push(s.positions.clone());
+            site_runs.push(s.label_runs());
         } else {
             for (n, p) in s.names.iter().zip(&s.positions) {
-                labels.push((format!("{n}  {}", crate::doc::fmt_int(*p)), *p));
+                let text = format!("{n}  {}", crate::doc::fmt_int(*p));
+                labels.push((text.clone(), *p));
                 names_in.push(vec![n.clone()]);
                 site_positions.push(vec![*p]);
+                // ONE run, from the string this branch actually pushed, rather
+                // than from a rebuilt `Site`: `crate::doc::fmt_int` and
+                // `ring::commas` are two thousands-separators in two crates, and
+                // a run whose text is not the drawn text would fail
+                // `cut_under`'s prefix check on every hover.
+                site_runs.push(vec![(text, *p)]);
             }
         }
     }
@@ -1265,6 +1459,7 @@ fn draw_circular(
         labels.push((bands[i].name.clone(), bands[i].anchor));
         names_in.push(Vec::new());
         site_positions.push(Vec::new());
+        site_runs.push(Vec::new());
         feature_of.push(i);
     }
 
@@ -2141,15 +2336,28 @@ fn draw_circular(
                 polar(center, (outer + tick_r) * 0.5, a),
                 egui::vec2(LANE_STEP, LANE_STEP),
             );
-            if box_.contains(ptr) || (is_site && tick.contains(ptr)) {
+            let on_label = box_.contains(ptr);
+            let on_tick = is_site && tick.contains(ptr);
+            if on_label || on_tick {
                 if is_site {
-                    out.hovered_site = Some(
-                        names_in[i]
-                            .iter()
-                            .cloned()
-                            .zip(site_positions[i].iter().copied())
-                            .collect(),
-                    );
+                    out.hovered_site = Some(SiteHit::of(
+                        &names_in[i],
+                        &site_positions[i],
+                        // THE TICK ANSWERS WITH THE BASE IT IS DRAWN AT, which
+                        // is `labels[i].1` — `Site::anchor`, the first position —
+                        // because that is the angle the paint loop above put the
+                        // mark at. One tick per LABEL, not per position: a click
+                        // on a single mark returning the base that mark stands on
+                        // is right by construction and needs no rule.
+                        //
+                        // The LABEL is where the choice lives, and it is made
+                        // from the drawn text. See `cut_under`.
+                        if on_label {
+                            cut_under(&shown, &site_runs[i], *pos, left, ptr.x, &measure)
+                        } else {
+                            *pos
+                        },
+                    ));
                 } else {
                     out.hovered = Some(feature_of[i - n_sites]);
                 }
@@ -2568,6 +2776,102 @@ fn draw_linear(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The run walk, at every x across a merged label and at a shortened one.
+    ///
+    /// PROVEN TO FAIL against two MUTATIONS, both run. Leaving the separator out
+    /// of the cumulative prefix shifts every boundary after the first left by the
+    /// width of `" / "`, which moves the seam three characters and fails at 13.
+    /// And dropping the `shown.starts_with(&prefix)` guard makes a label cut
+    /// short answer with SmaI's 6,919 — a coordinate whose digits are not on the
+    /// map, read out of characters the reader cannot see.
+    ///
+    /// The second of those needed a THIRD case to bite, and the first version of
+    /// this test did not have it: with one run the guard changes nothing, because
+    /// the only candidate and the fallback are the same number. It is a label
+    /// with TWO runs, cut between them, that separates the two behaviours — and
+    /// the mutation passed until that case was added, which is the whole of what
+    /// "a check that cannot fail proves nothing" is about.
+    ///
+    /// That combination is not reachable through `draw_circular` today: a merged
+    /// label is only built when `measure(&s.label()) <= room`, and `shortened_to`
+    /// returns a text that short unchanged. The guard is here because `cut_under`
+    /// is handed the DRAWN string and cannot know that, and because the
+    /// single-run half of it — `EcoRI  7,530` really is drawn as `EcoRI` at a
+    /// small enough pane — is reachable and is the case below it.
+    ///
+    /// A UNIT test beside the four end-to-end ones, because those can only aim at
+    /// a quarter and three quarters of the way across a real label: they prove
+    /// the wiring, and this proves the rule at the seam and past both ends, where
+    /// the arithmetic is.
+    ///
+    /// The measure is a fixed advance per character rather than a real face. The
+    /// label font is monospace, so one number is the whole of what `measure`
+    /// contributes here, and a test that laid out glyphs would be testing epaint.
+    #[test]
+    fn a_pointer_inside_a_merged_label_resolves_to_the_run_it_is_on() {
+        const ADV: f32 = 6.0;
+        let measure = |s: &str| s.chars().count() as f32 * ADV;
+        let runs = vec![
+            ("XmaI  6,917".to_string(), 6_917u64),
+            ("SmaI  6,919".to_string(), 6_919),
+        ];
+        let label = "XmaI  6,917 / SmaI  6,919";
+        assert_eq!(measure(label), 25.0 * ADV, "the premise: 25 characters");
+        let left = 100.0;
+        // The two runs occupy 0..11 and 14..25 characters from `left`, with the
+        // three-character separator between them.
+        for (chars, want) in [
+            (0.0f32, 6_917u64),
+            (5.0, 6_917),
+            (10.9, 6_917),
+            (11.5, 6_917), // in the separator, nearer XmaI
+            (13.0, 6_919), // in the separator, nearer SmaI
+            (14.1, 6_919),
+            (25.0, 6_919),
+            // Past either end of the label. The hit box is the text plus 2 pt, so
+            // a pointer can be a whisker outside and still be a hit; it must
+            // answer with the run it is beside and not with the far one.
+            (-0.3, 6_917),
+            (25.3, 6_919),
+        ] {
+            assert_eq!(
+                cut_under(label, &runs, 6_917, left, left + chars * ADV, &measure),
+                want,
+                "at {chars} characters across `{label}`"
+            );
+        }
+
+        // A two-run label cut short between the runs. SmaI's digits are not on
+        // the map, so nothing a pointer does over the ellipsis may answer with
+        // 6,919 — the reader would be sent to a base the picture never named.
+        assert_eq!(
+            cut_under(
+                "XmaI  6,917 / S...",
+                &runs,
+                6_917,
+                left,
+                left + 17.0 * ADV,
+                &measure
+            ),
+            6_917,
+            "a run whose characters were dropped answered a click anyway"
+        );
+
+        // And a label cut before its first run's coordinate: no run survives, so
+        // the answer is the anchor — the base the tick is drawn at.
+        let one = vec![("EcoRI  7,530".to_string(), 7_530u64)];
+        assert_eq!(
+            cut_under("EcoRI", &one, 7_530, left, left + 3.0 * ADV, &measure),
+            7_530
+        );
+        // The same label drawn whole still answers from its own run.
+        assert_eq!(
+            cut_under("EcoRI  7,530", &one, 1, left, left + 3.0 * ADV, &measure),
+            7_530,
+            "a drawn run must beat the anchor, or the fallback is the only path"
+        );
+    }
 
     /// PROVEN TO FAIL against the working tree as handed over, on every feature
     /// of every fixture: `bands` passed the MOLECULE's length where

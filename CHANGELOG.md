@@ -51,6 +51,52 @@ which.
   a tab-strip button focused is appended to the plasmid, taking an 8,117 bp
   fixture to 8,118.
 
+- **The map's cut sites promised a click and answered none.** `MapResponse`
+  carried `clicked` and `double_clicked`, both *feature* indices, and a
+  `hovered_site` with nowhere to go — while `map.rs` set
+  `CursorIcon::PointingHand` over every tick and every site label. On the
+  8,117 bp plasmid this application was written for that is a pointing hand over
+  22 of the ring's roughly 31 labels, every one of them inert. Before 0.9.0 it
+  was merely inert; beside a band that now selects its bases it read as broken.
+
+  **A click on a cut now selects that base**, from the ring and from the Enzymes
+  table, whose coordinates were equally inert text four inches from the sequence
+  they name.
+
+  **The awkward part is a merged label, and it was measured before it was
+  decided.** `ring::merge_sites` folds cuts whose ticks are the same tick, so one
+  label can carry several enzymes at several positions and a click on it has no
+  single answer. Instrumented on the user's own pKoV at five pane sizes: **up to
+  3 of 19 labels are merged, covering 6 of the 22 enzymes** — and every merged
+  pair on that file is `SalI/XbaI`, `SphI/NsiI` or `XmaI/SmaI`, the isoschizomer
+  and polylinker pairs a cloner is choosing *between*. So "make only the
+  unambiguous sites clickable" would leave a quarter of the ring dead, and the
+  wrong quarter. Two more molecules and two more pairs, both at one shared base.
+
+  Pointing at the nearer *tick* is not available at any price: the fold criterion
+  is that the arc between the cuts is narrower than the tick's own stroke, one
+  tick is drawn per label, and the two cuts of `XmaI  101 / SmaI  103` are
+  **0.4 pt apart** on the ring measured here. What can be pointed at is the
+  **text**, so the label is split into the runs that each name one cut — by
+  `Site::label_runs`, the function `Site::label` is now built from, so the split
+  and the drawing cannot drift — and a click answers with the enzyme whose digits
+  the pointer is on. The status line names it, because nothing in the picture
+  can.
+
+  Two cuts 2 bp apart is not a rounding error: XmaI is `C^CCGGG` and SmaI is
+  `CCC^GGG`, four bases of 5' overhang against a blunt end.
+
+  **It takes you to the Sequence tab, always**, which is where a Sanger mismatch
+  has always gone and not where a feature goes. 0.9.0's rule is unchanged —
+  reveal it where you are if that is possible, otherwise take you somewhere it
+  is — but a *base coordinate* has a representation in exactly one of the eight
+  tabs. The Features list is 0.9.0's universal fallback because every feature has
+  a row there; a cut has none.
+
+  **And the cost is the same one 0.9.1 disclosed**: this replaces a selection you
+  dragged out by hand, and undo does not reach it. Both surfaces say so on hover
+  before the click.
+
 ### Added
 
 - **A focus ring on the sequence grid**, because a grid that holds the keyboard
@@ -111,12 +157,28 @@ Not here: the go-to-base box finding 9 also asked for. That is a separate
 feature. It is now cheaper rather than dearer to build, because the surface such
 a box would hand control back to can hold the keyboard and can say that it does.
 
+- **A cut-site test measured the label a whole text width from where the widget
+  was.** `egui::Label` takes its horizontal alignment from the enclosing layout,
+  and inside `Layout::right_to_left` — which is how the Enzymes table's
+  coordinate column is laid out — the galley's anchor is its RIGHT edge. The test
+  helper read every drawn string as `from_min_size(pos, size)`, so it reported
+  the column at 1,272..1,305 in a 1,280 pt window when the widget was really at
+  1,239..1,272, and a click on the "centre of the text" pressed nothing. Nothing
+  was wrong with the application; the reading of it was. It is fixed at the
+  helper, where it is identical for every left-aligned galley the map tests use.
+
 Also not here, and pre-existing: **the view does not follow the caret.** Only a
 reflow or a map reveal sets a scroll offset, so a keyboard user can now drive the
 caret off the bottom of the view and lose sight of it. It behaves exactly as it
 did in 0.9.1 — what changed is that the caret can be driven from the keyboard at
 all, which is what makes the gap reachable. It is the natural companion to the
 go-to-base box and belongs with it.
+
+One thing that WAS quietly wrong and is now fixed alongside it: `jump_to_base`
+set the tab and no scroll offset, so a double-clicked Sanger mismatch at base
+4,001 switched to a Sequence tab still sitting on row 1. It asks for
+`Reveal::Base` now, which is what makes the new cut-site click land somewhere
+you can see — and it fixes the Reads tab's jump on the way past.
 
 ## [0.9.1] - 2026-08-13
 

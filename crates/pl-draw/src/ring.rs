@@ -315,6 +315,43 @@ impl Site {
     /// plans a blunt ligation against a sticky end and the map looks calmer than
     /// it did before.
     ///
+    /// The runs of [`label`](Site::label) that each name exactly ONE cut
+    /// position, joined by [`RUN_SEP`].
+    ///
+    /// # Why a caller needs the split and not only the string
+    ///
+    /// A merged label is one target carrying several answers, and something has
+    /// to decide which one a click on it means. The two positions cannot be told
+    /// apart by pointing at the TICK — [`merge_sites`]' whole criterion is that
+    /// the arc between them is narrower than the tick's own stroke, so there is
+    /// one mark and no pointer resolution could ever separate them. What CAN be
+    /// pointed at is the text: `XmaI  6,917 / SmaI  6,919` is two runs of
+    /// characters at two different places on the screen, and the reader who
+    /// wants SmaI's cut is looking straight at the digits `6,919`.
+    ///
+    /// So the split has to come from the same function that composed the string,
+    /// or the two drift and what drifts is which base a click selects. That is
+    /// why [`label`](Site::label) is now defined in terms of this rather than
+    /// beside it.
+    ///
+    /// **The equal-position case is ONE run, not one per name.** `XmaI/SmaI
+    /// 6,917` names two enzymes and a single base, so there is nothing for a
+    /// click to disambiguate: whichever half of it you point at, the cut is at
+    /// 6,917. Returning two runs there would invent a distinction the molecule
+    /// does not have.
+    pub fn label_runs(&self) -> Vec<(String, u64)> {
+        let lo = self.positions.iter().copied().min().unwrap_or(1);
+        let hi = self.positions.iter().copied().max().unwrap_or(1);
+        if lo == hi {
+            return vec![(format!("{}  {}", self.names.join("/"), commas(lo)), lo)];
+        }
+        self.names
+            .iter()
+            .zip(&self.positions)
+            .map(|(n, p)| (format!("{n}  {}", commas(*p)), *p))
+            .collect()
+    }
+
     /// A **range** — `SacI/KpnI/XmaI/SmaI/BamHI  281-292` — was the first
     /// attempt and is the same failure one step further out. Five names against
     /// two numbers: the mapping is not recoverable, and the two numbers printed
@@ -331,20 +368,22 @@ impl Site {
     /// back out of it — which is the invariant
     /// `every_position_in_a_fold_is_readable_back_out_of_the_label` asserts.
     pub fn label(&self) -> String {
-        let lo = self.positions.iter().copied().min().unwrap_or(1);
-        let hi = self.positions.iter().copied().max().unwrap_or(1);
-        if lo == hi {
-            format!("{}  {}", self.names.join("/"), commas(lo))
-        } else {
-            self.names
-                .iter()
-                .zip(&self.positions)
-                .map(|(n, p)| format!("{n}  {}", commas(*p)))
-                .collect::<Vec<_>>()
-                .join(" / ")
-        }
+        self.label_runs()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .join(RUN_SEP)
     }
 }
+
+/// What [`Site::label`] joins its runs with.
+///
+/// A constant rather than a literal in the `join`, because a caller that
+/// hit-tests INSIDE a drawn label has to walk the same string to know where one
+/// run ends and the next begins. Two copies of `" / "` would be two copies of
+/// the layout, and what would drift between them is which base a click on a
+/// merged label selects.
+pub const RUN_SEP: &str = " / ";
 
 /// Fold sites whose ticks are the same tick, `within` bases of each other.
 ///
@@ -966,6 +1005,78 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The split a caller hit-tests with reassembles into the string it draws.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: `label` joining its
+    /// runs with a literal `", "` instead of [`RUN_SEP`] — the shape this had
+    /// before the two were one function, when the separator was written out at
+    /// the `join` and nowhere else. `label()` comes back
+    /// `XmaI  6,917, SmaI  6,919` and this fails on the round trip.
+    ///
+    /// That is the failure worth catching, because the two are used at different
+    /// times: `label()` composes the string a painter draws, and `label_runs()`
+    /// tells a hit-test where inside that drawn string one enzyme's characters
+    /// stop and the next one's begin. A separator that differed by one character
+    /// would move every boundary after the first by six points — one character
+    /// at the map's face — and the click would answer with the wrong enzyme near
+    /// the seam and be right everywhere else.
+    #[test]
+    fn a_labels_runs_join_back_into_the_label() {
+        for names in [
+            vec![("XmaI", 6_917u64), ("SmaI", 6_919)],
+            vec![("EcoRI", 7_530)],
+            vec![("BspQI", 2_639), ("SapI", 2_639)],
+            vec![("SacI", 281), ("KpnI", 287), ("XmaI", 287), ("SmaI", 289)],
+        ] {
+            let s = Site {
+                names: names.iter().map(|(n, _)| (*n).to_string()).collect(),
+                positions: names.iter().map(|(_, p)| *p).collect(),
+            };
+            let runs = s.label_runs();
+            assert_eq!(
+                runs.iter()
+                    .map(|(t, _)| t.clone())
+                    .collect::<Vec<_>>()
+                    .join(RUN_SEP),
+                s.label(),
+                "the runs do not reassemble into the label they were split from"
+            );
+            // And each run's own coordinate is inside its own text, which is what
+            // makes a run a place a reader can point at and mean one cut.
+            for (text, pos) in &runs {
+                assert!(
+                    text.contains(&commas(*pos)),
+                    "the run {text:?} does not carry the {pos} it answers with"
+                );
+            }
+        }
+    }
+
+    /// One coordinate means one run, however many enzymes share it.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: dropping the
+    /// `lo == hi` branch from `label_runs` so every name gets its own run. The
+    /// label then reads `BspQI  2,639 / SapI  2,639` — the repetition
+    /// `enzymes_that_cut_the_same_base_share_one_coordinate` exists to prevent —
+    /// and this fails on the run count first.
+    ///
+    /// Splitting there would also be a lie about the CLICK. The two enzymes nick
+    /// the same bond, so pointing at one half of `BspQI/SapI  2,639` and at the
+    /// other half are the same question with the same answer; two runs would
+    /// invent a distinction the molecule does not have and make the hit test
+    /// arbitrate something that is not ambiguous.
+    #[test]
+    fn enzymes_at_one_base_are_one_run_however_many_of_them_there_are() {
+        let s = Site {
+            names: vec!["BspQI".into(), "SapI".into(), "LguI".into()],
+            positions: vec![2_639, 2_639, 2_639],
+        };
+        assert_eq!(
+            s.label_runs(),
+            vec![("BspQI/SapI/LguI  2,639".into(), 2_639)]
+        );
     }
 
     #[test]
