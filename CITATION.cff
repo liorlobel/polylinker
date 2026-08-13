@@ -45,8 +45,8 @@ repository-code: https://github.com/liorlobel/polylinker
 license:
   - MIT
   - Apache-2.0
-version: 0.10.1
-date-released: 2026-08-13
+version: 0.10.2
+date-released: 2026-08-14
 keywords:
   - plasmid
   - molecular cloning
