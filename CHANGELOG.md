@@ -27,6 +27,113 @@ which.
 
 Nothing yet.
 
+## [0.10.2] - 2026-08-14
+
+**v0.10.1 misplaced features on a double digest, and this is the release that
+stops it.** A second audit round — eleven units over the v0.10.1 tree, and the
+first round of the day that ran the repository's own oracles rather than reading
+the code — raised 41 findings, of which 14 survived adversarial refutation. All
+14 are fixed here.
+
+### Fixed
+
+- **A flipped fragment moved every feature laid down behind it.** `build`
+  advanced its product cursor by the fragment's WATSON length in every case,
+  while a flipped fragment contributes its CRICK length. The two differ by the
+  difference in the two ends' overhang widths, so on a digest by enzymes of
+  unequal width every feature after a flipped fragment shifted by that much.
+  Measured over ten common enzymes swept pairwise on a four-fragment circle:
+  **43 of 840 carried features landed on bases that are not their own** — shifted
+  by two for NdeI against a four-base cutter, by four for blunt SmaI.
+
+  v0.10.1 guarded this behind a comment asserting that "no digest is known that
+  both produces such a fragment and seals it flipped, so it is guarded rather
+  than corrected here". That sentence shipped a few hours earlier and was false
+  when it was written. `place`'s bounds check does not catch it, because the
+  shifted coordinate is still inside the product: the feature is placed,
+  silently, on the wrong bases. A double digest is the most ordinary operation
+  this panel performs.
+
+  **A two-fragment fixture cannot see this**, which is why it survived: two
+  fragments of a double digest carry one end of each enzyme, so neither can be
+  sealed either way round and nothing ever flips. The test now sweeps four
+  fragments and ASSERTS its own reach counters, so an edit that stops reaching
+  the case fails loudly rather than going quietly green.
+
+- **A multi-exon feature on an inverted fragment spliced its exons backwards.**
+  Mirroring each span is not enough; the segment LIST is in join order and had to
+  be reversed with it, or the feature exports as `complement(join(hi,lo))` and
+  every outside reader — including this program's own GenBank reader — splices it
+  in the wrong order.
+
+- **`pl find` printed the retained-hit count as the site count**, so a record
+  with 124,700 sites whose coordinates were dropped by a cap read as having 0.
+  It now prints what the record HAS, says when the coordinates shown are a
+  prefix, and tells the two records of one multi-record file apart instead of
+  presenting record-local coordinates under identical labels.
+
+- **`pl index --verify` announced that "every stored hash still matches the bytes
+  on disk" after comparing zero hashes.** It now counts and names the rows it
+  skipped, and says plainly when nothing in the index carries a hash to check.
+
+- **`pl trace` and `pl sanger` told the user a damaged `.ab1` carries no quality
+  values** — the exact sentence `pl-abif`'s own documentation calls false. The
+  GUI had been fixed; the two CLI arms had not.
+
+- **19 of 113 database rows had no id-to-content pin.** `audit_ids` never read
+  `reference_aa`, so the peptide-only rows were unpinned while the audit printed
+  that the ids "still mean the same sequence" about rows whose sequence it had
+  not compared. Ids here come from an item's INDEX in a tuple, so a deletion
+  renumbers everything after it; this audit is the only thing standing between
+  that and a published id silently repointing at different content.
+
+- **`legal/` was not pinned to LF**, so on a fresh Windows clone
+  `archive_legal.py --check` declared six of the seven licence documents
+  tampered with. A verifier that cries tamper on a clean checkout trains its
+  reader to ignore it.
+
+- **An exported SVG or PDF map has no background, but `--check-contrast`
+  certified it against `#ffffff`** — the exact failure the EPS and PNG back ends
+  of the same command were written to avoid. The certificate now states the
+  background it assumed.
+
+- **`packages/circular-map`**: a restriction site outside `1..length` was drawn
+  at a wrapped base with its impossible coordinate printed on the figure and
+  nothing in `malformed`; a linear molecule's backbone drew its free ends 10.8
+  degrees inside the mapping every feature and ruler tick uses, so terminal
+  features bridged the gap and the map read as closed — the one thing that gap
+  exists to say.
+
+- **The Recover banner could not see a crashed session's draft unless it sat in
+  slot 0**, and advertised every draft of a document that WAS saved as newer than
+  the user's file — offering to replace a saved file with a draft containing
+  nothing the file does not.
+
+### Fixed — two more checks that could not fail
+
+- `a multi-segment feature draws one arrow, not one per exon` counted paths and
+  never arrowheads. It now counts arrowheads and reads the tip's direction —
+  the second half added because the prescribed fix alone still could not catch
+  one of the three mutations it was written against.
+- The `--verify` reassurance above is the other.
+
+### Verification
+
+Every fix carries a test, and **all fourteen mutations were run centrally, each
+preceded by a control run of the unmutated tree**. That control caught three
+proofs that would otherwise have passed vacuously — a flag that does not exist,
+a test runner the package does not use, and a mutation that broke the build
+rather than a test. Five mutations had to be targeted by line number, because
+each string also occurs in the doc comment that quotes the fix.
+
+Round 2 also ran all 24 shipped oracles against the release binary: 383 pydna
+fragments, 8,657 fontTools outline commands, 4,312 SciPy spline points at worst
+relative difference 4.9e-13, 1,268 live checks through the imported Python
+module, 1.29 MB through zlib both one-shot and byte-at-a-time. **Zero
+disagreements.** Vacuity was tested by driving every corpus-taking oracle with an
+empty input set: 11 of 11 refused correctly.
+
+
 ## [0.10.1] - 2026-08-13
 
 Nineteen defect fixes and nothing else — no new capability, no format
@@ -2627,7 +2734,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.2
 [0.10.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.1
 [0.10.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.0
 [0.9.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.9.1
