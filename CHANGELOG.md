@@ -25,6 +25,16 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.10.1] - 2026-08-13
+
+Nineteen defect fixes and nothing else — no new capability, no format
+change, no CLI verb. The two that matter put a wrong coordinate in front of
+a biologist: an origin-crossing feature that lost its wrapped half whenever
+the plasmid was rotated, and a flipped fragment whose features landed four
+bases off in every ordinary six-cutter subcloning.
+
 ### Fixed
 
 Nineteen defects from [`docs/AUDIT-2026-08-13.md`](docs/AUDIT-2026-08-13.md),
@@ -2617,7 +2627,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.1
 [0.10.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.0
 [0.9.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.9.1
 [0.9.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.9.0
