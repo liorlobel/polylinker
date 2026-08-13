@@ -1623,15 +1623,32 @@ fn build(
         // here would drift the layout by an overhang per junction.
         //
         // It is NOT the basis for the mirror below — see [`place`], which takes
-        // the crick length and `ovhg` for that — and it is one strand's length
-        // where a flipped fragment contributes the other's. Those two agree for
-        // every fragment whose ends leave overhangs of equal length, which is
-        // every fragment of a single-enzyme digest and every fragment of a
-        // digest by enzymes that share an overhang width. Where they disagree
-        // the whole tail of the product's features shifts, and `place`'s bounds
-        // check is what stops that becoming a coordinate off the molecule; no
-        // digest is known that both produces such a fragment and seals it
-        // flipped, so it is guarded rather than corrected here.
+        // the crick length and `ovhg` for that — and it MUST stay watson for
+        // `place`'s interval test, because a feature's offset arrives in the
+        // parent's coordinates and those are watson's.
+        //
+        // **THE CURSOR IS A SEPARATE QUESTION, AND IT IS WHERE THIS WAS WRONG.**
+        // A flipped fragment contributes its CRICK length to the product. The
+        // two agree whenever a fragment's ends leave overhangs of equal width —
+        // every fragment of a single-enzyme digest, and every fragment of a
+        // digest by enzymes sharing a width — and otherwise differ by exactly
+        // the difference in those widths, so every feature laid down after the
+        // flipped fragment shifts by that much.
+        //
+        // This advanced by watson in both cases, behind a comment claiming that
+        // "no digest is known that both produces such a fragment and seals it
+        // flipped, so it is guarded rather than corrected here". That sentence
+        // shipped in v0.10.1 and was false when it was written. Ten common
+        // enzymes swept pairwise over a four-fragment circle: 256 of 848
+        // flipped placements are of a fragment whose ends differ in width, and
+        // 43 of 840 carried features landed on bases that are not their own —
+        // shifted by two for NdeI against a four-base cutter, by four for blunt
+        // SmaI. `place`'s bounds check does NOT catch it, because the shifted
+        // coordinate is still inside the product: the feature is placed,
+        // silently, on the wrong bases, in a construct somebody orders primers
+        // against. A double digest is the most ordinary thing this panel does.
+        //
+        // See `a_flipped_fragment_does_not_shift_the_features_behind_it`.
         let flen = frags[*idx].watson.len() as u64;
         if let Some((fs, _)) = described[*idx].from {
             let slot = Slot {
@@ -1667,7 +1684,11 @@ fn build(
                 carried += 1;
             }
         }
-        at += flen;
+        at += if *flipped {
+            frags[*idx].crick.len() as u64
+        } else {
+            flen
+        };
     }
 
     // COUNTED ONCE, over the union of the parents this construct is made of.
@@ -1857,6 +1878,147 @@ mod tests {
 
     fn rc(s: &str) -> String {
         String::from_utf8(pl_core::reverse_complement(s.as_bytes())).expect("ASCII in, ASCII out")
+    }
+
+    /// A flipped fragment must not move the features laid down behind it.
+    ///
+    /// PROVEN TO FAIL at d8c218b (v0.10.1), where this reported `misplaced=43`
+    /// of 840 carried features: `build` advanced its product cursor by the
+    /// fragment's WATSON length in every case, while a flipped fragment
+    /// contributes its CRICK length. The two differ by the difference in the
+    /// two ends' overhang widths, so on a digest by enzymes of unequal width
+    /// every feature laid down after a flipped fragment shifted by that much --
+    /// NdeI's two against a four-base cutter, blunt SmaI's zero against four.
+    ///
+    /// TO RE-BREAK IT: in `build`, replace the whole `at +=` expression with
+    /// `at += flen;`.
+    ///
+    /// **A TWO-FRAGMENT FIXTURE CANNOT SEE THIS, AND THE FIRST ATTEMPT USED
+    /// ONE.** Two fragments of a double digest carry one end of each enzyme, so
+    /// neither can be sealed either way round and nothing ever flips: that run
+    /// reported `flip=0` and passed against the broken code. Four fragments --
+    /// two sites of each enzyme -- is the smallest fixture that both flips and
+    /// mismatches. The `flip` and `mismatch` counters are ASSERTED, not merely
+    /// printed, so an edit that stops reaching the case fails here instead of
+    /// going quietly green.
+    #[test]
+    fn a_flipped_fragment_does_not_shift_the_features_behind_it() {
+        let names = [
+            "EcoRI", "BamHI", "NdeI", "SmaI", "PstI", "SacI", "KpnI", "XhoI", "HindIII", "SalI",
+        ];
+        let mut checked = 0usize;
+        let mut flip = 0usize;
+        let mut mismatch = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for a in 0..names.len() {
+            for b in 0..names.len() {
+                if a == b {
+                    continue;
+                }
+                let (ea, eb) = (names[a], names[b]);
+                let sa = match pl_enzymes::ENZYMES.iter().find(|e| e.name == ea) {
+                    Some(e) => e.site.to_string(),
+                    None => continue,
+                };
+                let sb = match pl_enzymes::ENZYMES.iter().find(|e| e.name == eb) {
+                    Some(e) => e.site.to_string(),
+                    None => continue,
+                };
+                if !sa.bytes().all(|c| b"ACGT".contains(&c))
+                    || !sb.bytes().all(|c| b"ACGT".contains(&c))
+                {
+                    continue;
+                }
+                // Two sites of each enzyme, so a fragment can carry the same
+                // enzyme at both ends and therefore be sealed either way round.
+                let seq = format!(
+                    "{}CCCCTTTAAAGGG{}CCCAAATTTCCC{}GGGTTTAAACCC{}TTTGGGAAA",
+                    sa, sb, sa, sb
+                );
+                let mut m = mol(&seq, true);
+                m.name = "p".into();
+                let mut f1 = Feature::new("alpha", "CDS");
+                f1.strand = Strand::Forward;
+                f1.segments
+                    .push(Segment::new((sa.len() + 3) as u64, (sa.len() + 12) as u64));
+                m.features.push(f1);
+                let mut f2 = Feature::new("beta", "CDS");
+                f2.strand = Strand::Forward;
+                let off = sa.len() + 16 + sb.len();
+                f2.segments
+                    .push(Segment::new((off + 3) as u64, (off + 12) as u64));
+                m.features.push(f2);
+
+                let p = plan(
+                    &m,
+                    None,
+                    Method::Restriction,
+                    &ticked(&[ea, eb]),
+                    &Primers::default(),
+                    true,
+                    25,
+                );
+                if p.note.is_some() {
+                    continue;
+                }
+                let parent = String::from_utf8_lossy(&m.seq)
+                    .to_string()
+                    .to_ascii_uppercase();
+                for pr in &p.prods {
+                    for (i, fl) in pr.order.iter() {
+                        if *fl {
+                            flip += 1;
+                            if p.frags[*i].left.len() != p.frags[*i].right.len() {
+                                mismatch += 1;
+                            }
+                        }
+                    }
+                    let prod = String::from_utf8_lossy(&pr.mol.seq)
+                        .to_string()
+                        .to_ascii_uppercase();
+                    for f in &pr.mol.features {
+                        let s = &f.segments[0];
+                        if s.start < 1 || s.end as usize > prod.len() || s.start > s.end {
+                            continue;
+                        }
+                        let got = prod[(s.start - 1) as usize..s.end as usize].to_string();
+                        let ws = m
+                            .features
+                            .iter()
+                            .find(|g| g.name == f.name)
+                            .expect("the parent feature")
+                            .segments[0]
+                            .clone();
+                        let want_f = parent[(ws.start - 1) as usize..ws.end as usize].to_string();
+                        let want_r = String::from_utf8_lossy(&pl_core::reverse_complement(
+                            want_f.as_bytes(),
+                        ))
+                        .to_string();
+                        checked += 1;
+                        if got != want_f && got != want_r {
+                            bad.push(format!(
+                                "{ea}+{eb} {} at {}..{} reads {got}, parent says {want_f}",
+                                f.name, s.start, s.end
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "checked={checked} flip={flip} mismatch={mismatch} misplaced={}",
+            bad.len()
+        );
+        assert!(
+            checked > 500 && flip > 100 && mismatch > 100,
+            "the sweep stopped reaching the case it exists for: checked={checked} flip={flip} mismatch={mismatch}"
+        );
+        assert!(
+            bad.is_empty(),
+            "{} carried feature(s) point at bases that are not their own; first: {}",
+            bad.len(),
+            bad.first().map(String::as_str).unwrap_or("")
+        );
     }
 
     #[test]
