@@ -512,6 +512,41 @@ fn pal(ui: &Ui) -> Palette {
     Palette::of(ui.visuals().dark_mode)
 }
 
+/// The sequence grid's widget id.
+///
+/// **STATED ONCE, BECAUSE TWO PLACES NOW HAVE TO AGREE ABOUT IT AND ONE OF
+/// THEM DECIDES WHETHER TYPING EDITS THE MOLECULE.** The grid allocates itself
+/// with this id (`sequence_tab`) and `sequence_keys` compares the focused id
+/// against it to decide whether a keystroke is the grid's. A literal in each
+/// would drift the first time somebody renames one, and the failure is silent
+/// in the worst direction: the guard stops recognising the grid, Tab lands
+/// there, and every key goes dead again with no test able to see it — which is
+/// the defect this function exists to close. `MOLECULE_MENU` above is here for
+/// the same reason.
+///
+/// A function and not a `const`, because `egui::Id::new` is not `const fn`: it
+/// hashes.
+fn seq_grid_id() -> egui::Id {
+    egui::Id::new("pl-sequence-grid")
+}
+
+/// The ink of the sequence grid's focus ring, per theme.
+///
+/// Nothing new: this IS [`theme::accent_ink`], whose own documentation names
+/// "focus and selection strokes" as the role it exists for. It is given a name
+/// here so that the painter and
+/// `the_sequence_focus_ring_clears_three_to_one_in_both_themes` read the same
+/// expression rather than two copies of it — a contrast assertion about a
+/// colour the application does not paint is worth nothing, and that is exactly
+/// the shape of mistake a second literal makes.
+///
+/// **THE PAIR IS THE POINT.** `#E69F00` is 2.25:1 on white; a single-constant
+/// ring is invisible in one of the two themes and looks merely pale rather than
+/// broken. `accent_ink` swaps with the theme for that reason.
+fn seq_focus_ink(dark: bool) -> egui::Color32 {
+    theme::accent_ink(dark)
+}
+
 /// How wide the disclosure caret's own space is, and how tall the triangle in it.
 const CARET_W: f32 = 7.0;
 const CARET_H: f32 = 3.5;
@@ -10085,11 +10120,53 @@ impl App {
                     // A stable id, not the auto id: `show_rows` shifts auto ids
                     // by the first visible row, so an auto id would change
                     // identity on every scroll and drop the drag mid-gesture.
-                    let resp = ui.interact(
-                        rect,
-                        egui::Id::new("pl-sequence-grid"),
-                        Sense::click_and_drag(),
-                    );
+                    //
+                    // `seq_grid_id()` and not a literal, because `sequence_keys`
+                    // now compares the focused id against this one to decide
+                    // whether a keystroke belongs to the grid. Two literals
+                    // would drift silently and in the worst direction.
+                    let resp = ui.interact(rect, seq_grid_id(), Sense::click_and_drag());
+                    // THE ARROW KEYS ARE THE GRID'S WHILE THE GRID HOLDS THE
+                    // FOCUS, AND THE TAB KEY IS NEVER THE GRID'S.
+                    //
+                    // Without this, egui reads an unfiltered arrow as focus
+                    // NAVIGATION — `Focus::begin_pass` turns Left/Right/Up/Down
+                    // into a `FocusDirection` and `end_pass` hands the keyboard
+                    // to whatever `find_widget_in_direction` finds. That is not
+                    // hypothetical here: measured at 189be8a with the grid
+                    // focused, ArrowLeft moved the focus to the side panel's
+                    // resize handle and ArrowUp to the `pl-seq-code` combo, so
+                    // the first press to move the caret would also have been the
+                    // last. Right and Down found nothing, which is a fact about
+                    // where these particular widgets sit and would stop being
+                    // true the moment one moved.
+                    //
+                    // `tab` and `escape` stay FALSE deliberately, and they are
+                    // the way out. A keyboard user who can enter the sequence
+                    // and not leave it is worse off than one who never got in,
+                    // so Tab and Shift+Tab keep moving the focus on and Escape
+                    // keeps clearing it — egui does not consume Escape, so the
+                    // press that leaves the grid is also the press that closes
+                    // the Find bar, which is what it means everywhere else in
+                    // this application. `tab_reaches_the_sequence_grid_and_tab_again_leaves_it`
+                    // presses all three.
+                    //
+                    // `set_focus_lock_filter` only takes while the id both HAS
+                    // the focus and HAD it last frame, so the filter is live
+                    // from the second frame of focus onwards. `TextEdit` is
+                    // subject to exactly the same delay; a user cannot press an
+                    // arrow inside the same frame as the Tab that got them here.
+                    ui.memory_mut(|m| {
+                        m.set_focus_lock_filter(
+                            seq_grid_id(),
+                            egui::EventFilter {
+                                tab: false,
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                                escape: false,
+                            },
+                        );
+                    });
                     let x0 = rect.left() + layout.bases_x;
                     grid = Some(GridGeom {
                         x0,
@@ -11023,6 +11100,50 @@ impl App {
                         }
                     }
 
+                    // THE GRID SAYS WHEN IT HOLDS THE KEYBOARD.
+                    //
+                    // A widget that takes the focus and looks identical either
+                    // way is a worse defect than the one this change fixes: it
+                    // was at least *consistent* for the keys to be dead, and a
+                    // grid that silently becomes live is a grid that gets typed
+                    // into by accident. Nothing was drawn here before because,
+                    // before this change, there was nothing true to say —
+                    // holding the focus meant the keys were OFF.
+                    //
+                    // `SC 1.4.11`'s 3:1 for a graphical object is the bar this
+                    // is measured against, in `theme::contrast`, in both themes,
+                    // by `the_sequence_focus_ring_clears_three_to_one_in_both_themes`:
+                    // 7.08:1 dark and 5.35:1 light on `theme::panel_fill`. The
+                    // colour is `seq_focus_ink`, which is `theme::accent_ink`,
+                    // whose documentation names focus strokes as the role it
+                    // exists to fill — and which is a PAIR because `#E69F00` is
+                    // 2.25:1 on white and would be an invisible ring in the
+                    // light theme.
+                    //
+                    // Clipped to the VIEWPORT and not merely to the band. `rect`
+                    // spans the rows `show_rows` allocated, whose top edge sits
+                    // above the scroll viewport whenever the view is scrolled
+                    // part-way through a row — so a ring drawn on `rect` alone
+                    // would have its top and bottom edges outside the visible
+                    // area at most scroll positions, which is the whole content
+                    // of SC 2.4.11. Intersecting with `ui.clip_rect()` puts all
+                    // four edges where they can be seen, and `StrokeKind::Inside`
+                    // keeps the 2 pt from being half-clipped at the boundary.
+                    //
+                    // 2.0 pt, not 1.0: SC 2.4.13 asks for at least the area of a
+                    // 2 px perimeter, and a hairline here would be competing
+                    // with the ruler ticks and the ribbon outlines, which are
+                    // hairlines by design.
+                    if resp.has_focus() {
+                        let ring = rect.intersect(ui.clip_rect());
+                        painter.rect_stroke(
+                            ring,
+                            2.0,
+                            egui::Stroke::new(2.0, seq_focus_ink(ui.visuals().dark_mode)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+
                     if let Some(pos) = resp.interact_pointer_pos() {
                         // A click on a residue lane selects that residue's
                         // codon; a click on either STRAND places the caret. The
@@ -11757,8 +11878,12 @@ impl App {
             // A `ComboBox` and not a `DragValue`, for the reason the code combo
             // beside it is one — `DragValue` calls `request_focus` on click, so
             // it would take the keyboard and `sequence_keys` bails while
-            // anything is focused. A short list of the thresholds people
-            // actually use also beats a spinner over 100,000 values.
+            // anything OTHER THAN THE SEQUENCE GRID is focused. Narrowing that
+            // guard to identity did not soften this: a focused `DragValue` is
+            // not the grid, so it would still silence the sequence, and it would
+            // do it on a CLICK rather than on a Tab. A short list of the
+            // thresholds people actually use also beats a spinner over 100,000
+            // values.
             if self.layout.orf_track {
                 let mut aa = self.layout.orf_min_aa;
                 egui::ComboBox::from_id_salt("pl-orf-min-aa")
@@ -12358,10 +12483,46 @@ impl App {
     /// Keyboard and clipboard for the sequence view.
     ///
     /// Events are consumed only while this tab is showing and nothing else has
-    /// focus, so a keystroke meant for the feature filter or the library query
-    /// never lands in the sequence.
+    /// focus, so a keystroke meant for the Find box or the library query never
+    /// lands in the sequence.
     fn sequence_keys(&mut self, ui: &mut Ui, now: f64) {
-        if ui.ctx().memory(|m| m.focused()).is_some() {
+        // "NOTHING ELSE HAS THE KEYS", not "nothing has the keys".
+        //
+        // This read `m.focused().is_some()`, and the grid is a focusable
+        // widget: `sequence_tab` allocates it `Sense::click_and_drag()`, which
+        // in egui 0.35 is `CLICK | FOCUSABLE | DRAG` (`sense.rs`), and
+        // `Context::create_widget` puts every focusable widget into the tab
+        // order. So Tab could land on the grid — MEASURED at 189be8a as the
+        // fifteenth press from a fresh window — and the instant it did, this
+        // line turned off every arrow key, every typed base, Backspace, Delete
+        // and Ctrl+A, on the one widget holding the focus, with nothing on
+        // screen to say why. `docs/UX-REVIEW-2026-07-31.md` finding 9 measured
+        // the consequence and drew the reasonable conclusion: "sequence editing
+        // requires a mouse".
+        //
+        // **THIS IS NOT `global_shortcuts`' NARROWING AND MUST NOT BECOME IT.**
+        // That guard went to `ctx.text_edit_focused()`, because an ACCELERATOR
+        // is meant to work from anywhere except a text box. This one types
+        // CHARACTERS into a document, so the set of widgets it must not steal
+        // from is every widget that is not the grid — `map.rs` states the same
+        // rule for Space and Enter, and the ORF-threshold `ComboBox` two
+        // functions up is a combo rather than a `DragValue` *because* of it.
+        // `text_edit_focused` here was run as a mutation and it is not
+        // theoretical:
+        // `a_base_typed_with_a_tab_strip_button_focused_does_not_reach_the_document`
+        // fails under it, taking the fixture from 8,117 bp to 8,118 — a base
+        // appended to the plasmid by a keystroke aimed at a focused tab button.
+        //
+        // So the predicate is IDENTITY, which is strictly narrower than either:
+        // it yields to text boxes and to buttons exactly as the old line did,
+        // and admits precisely one case that used to be refused. Deleting it
+        // outright fails both guard tests; see their doc comments for the
+        // numbers.
+        if ui
+            .ctx()
+            .memory(|m| m.focused())
+            .is_some_and(|id| id != seq_grid_id())
+        {
             return;
         }
         // A paste is waiting on an answer. `egui::Window` is not modal and
@@ -25499,6 +25660,31 @@ mod tests {
 
     fn paint_out(app: &mut App, ctx: &egui::Context, input: egui::RawInput) -> egui::FullOutput {
         ctx.run_ui(input, |ui| {
+            // BEFORE the panel, exactly as `App::ui` orders them, and the order
+            // is the whole reason this line exists: the Find box is a text box
+            // that can hold the keyboard while the sequence grid is on screen,
+            // because it is a top panel across the window rather than something
+            // inside a tab. A harness that omitted it could not be pointed at
+            // that case at all, and
+            // `a_base_typed_into_the_find_box_does_not_reach_the_document` is
+            // the case.
+            //
+            // Not the only such box, and the other one is worth naming rather
+            // than leaving for somebody to find: the clone panel's `forward`
+            // and `reverse` primer fields (`clone.rs`) are also live over the
+            // sequence, because `sequence_keys` returns early for the design
+            // panel and the feature editor and NOT for that one — `clone.rs`
+            // says so itself, in the doc comment on `Panel::stale`. This
+            // harness does not paint it, so the test below exercises the Find
+            // box; the guard is one identity comparison and cannot tell the two
+            // apart.
+            //
+            // Free for every test that does not open the Find bar: `find_bar`
+            // returns before allocating anything when `!self.find.open`, so no
+            // panel is created, no space is taken and no shape is emitted.
+            // Nothing here moved when this line was added; the suite is the
+            // proof.
+            app.find_bar(ui);
             app.side_panel(ui);
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.allocate_space(ui.available_size());
@@ -33691,6 +33877,658 @@ ATGAAACGCTAA
             (drawn - want).abs() < want * 0.15,
             "the map drew {drawn:.1} pt of arc: {want:.1} is the SELECTED feature and \
              {hovered:.1} is the merely hovered one"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // the keyboard reaches the sequence
+    //
+    // UX-REVIEW-2026-07-31 finding 9. The guard these press on is
+    // `sequence_keys`' first line, and the two halves of it pull in opposite
+    // directions: too broad and the grid is unreachable, too narrow and a base
+    // typed into the Find box is appended to the plasmid. The stand-down tests
+    // are first in the file for that reason.
+    // -----------------------------------------------------------------------
+
+    /// One key press with the modifiers a real keyboard would carry, in the
+    /// 1280 x 840 window the rest of these tests lay out in.
+    ///
+    /// Not `plain`/`ctrl` from the shortcut tests above: those build a
+    /// `RawInput::default()` with NO `screen_rect`, so the panel lays out at
+    /// egui's fallback size and the sequence grid is a different width — and
+    /// width is what `per_row` and therefore every caret assertion is made of.
+    fn seq_key(key: egui::Key, modifiers: egui::Modifiers) -> egui::RawInput {
+        egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..window()
+        }
+    }
+
+    /// A typed character, as egui delivers one: `Event::Text`, not `Event::Key`.
+    fn seq_text(s: &str) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::Text(s.to_string())],
+            ..window()
+        }
+    }
+
+    /// Tab until the sequence grid holds the focus, and say how many it took.
+    ///
+    /// **A COUNT, NOT A CONSTANT.** Hard-coding "15" would make every one of
+    /// these tests fail the day a control is added to the sequence header, for
+    /// a reason that has nothing to do with what they assert. The cap is one
+    /// lap of the tab order with room to spare, and the assertion is that the
+    /// grid was reached at all — which is the property finding 9 asked for.
+    ///
+    /// **ONE PLAIN FRAME AFTER IT LANDS, AND THAT FRAME IS LOAD-BEARING.**
+    /// `Memory::set_focus_lock_filter` refuses unless the id both HAS the focus
+    /// and HAD it last frame, so on the frame Tab arrives the grid's
+    /// `EventFilter` is still the default and arrows are still read as focus
+    /// navigation. A helper that returned on the landing frame would leave every
+    /// caller testing the one frame in the session where the filter is not yet
+    /// live — which is not the state a user is ever in, since the window keeps
+    /// painting between their Tab and their next key. It is also not a
+    /// theoretical gap: written that way, this file's own
+    /// `tab_reaches_the_sequence_grid_and_tab_again_leaves_it` PASSED against a
+    /// mutation that locked Tab and Escape to the grid, because the exit presses
+    /// all landed inside that window.
+    fn tab_to_seq_grid(app: &mut App, ctx: &egui::Context) -> usize {
+        for n in 1..=40 {
+            paint(app, ctx, seq_key(egui::Key::Tab, egui::Modifiers::NONE));
+            if ctx.memory(|m| m.focused()) == Some(seq_grid_id()) {
+                paint(app, ctx, window());
+                assert_eq!(
+                    ctx.memory(|m| m.focused()),
+                    Some(seq_grid_id()),
+                    "the grid dropped the focus on the frame after Tab landed"
+                );
+                return n;
+            }
+        }
+        panic!("40 Tab presses never reached the sequence grid");
+    }
+
+    /// The fixture, settled, with the grid holding the keyboard and its event
+    /// filter live.
+    fn seq_app_focused(ctx: &egui::Context) -> App {
+        let mut app = seq_app();
+        let _ = paint_settled(&mut app, ctx, window());
+        tab_to_seq_grid(&mut app, ctx);
+        app
+    }
+
+    // -- the stand-down, which comes first -----------------------------------
+
+    /// **THE REGRESSION THIS CHANGE COULD HAVE CAUSED IS WORSE THAN THE BUG IT
+    /// FIXES**, so this is written and run before the tests for the fix.
+    ///
+    /// PROVEN TO FAIL by deleting `sequence_keys`' focus guard outright — the
+    /// simplest wrong narrowing, and the one an author reaching for "let the
+    /// grid have its keys" writes first. With the guard gone this fixture
+    /// grows from 8,117 bp to 8,118 and the typed base is in the molecule,
+    /// silently, while the user is looking at a search box.
+    ///
+    /// **THE FIND BOX AND NOT THE FEATURES FILTER**, and the difference is not
+    /// cosmetic. `sequence_keys` runs inside `sequence_tab`, so it only ever
+    /// executes while the Sequence tab is showing — and the Features filter is
+    /// drawn by `features_tab`, which is not. egui clears the focus of a widget
+    /// that stops registering (`Focus::end_pass`'s dead-man's switch), so the
+    /// filter cannot be holding the keyboard when this guard is consulted. The
+    /// Find bar is an `egui::Panel::top` painted by `App::ui` ABOVE the side
+    /// panel, so its box and the sequence grid are on screen together.
+    ///
+    /// It is not the ONLY box that can be robbed, and the second one is named
+    /// here rather than left to be discovered: the clone panel's `forward` and
+    /// `reverse` primer fields are live over the sequence too, because
+    /// `sequence_keys` returns early for the design panel and the feature
+    /// editor and not for that one — `clone.rs` says exactly this in
+    /// `Panel::stale`'s doc comment. The Find box is the one pressed here
+    /// because it is the one `paint_out` paints; the guard is a single identity
+    /// comparison and has no way to treat the two differently.
+    #[test]
+    fn a_base_typed_into_the_find_box_does_not_reach_the_document() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        app.find.open = true;
+        app.find_focus = true;
+        let _ = paint_settled(&mut app, &ctx, window());
+        // THE PREMISE, and it is the whole test: without it "nothing happened"
+        // could mean the box never took the keyboard.
+        assert!(
+            ctx.text_edit_focused(),
+            "the Find box did not take the keyboard, so this proves nothing"
+        );
+        let before = app.document().unwrap().molecule().len();
+        let caret = app.edit.caret;
+
+        // THE POSITIVE HALF FIRST, and it has to be first: the Backspace below
+        // is aimed at this same box and deletes what was typed into it, so a
+        // query checked at the end of the run is empty either way — whether the
+        // base reached the box or never arrived at all. A guard that stood down
+        // by swallowing the keystroke would pass every molecule assertion here
+        // and still have taken the user's typing.
+        paint(&mut app, &ctx, seq_text("A"));
+        assert_eq!(app.find.query, "A", "the base did not reach the Find box");
+
+        // And now the three that destroy something if they land in the wrong
+        // place: an arrow that moves the caret, a Backspace that deletes a base,
+        // and a Ctrl+A that selects the molecule ready for the next keystroke to
+        // replace all 8,117 of them.
+        for input in [
+            seq_key(egui::Key::ArrowRight, egui::Modifiers::NONE),
+            seq_key(egui::Key::Backspace, egui::Modifiers::NONE),
+            seq_key(egui::Key::A, egui::Modifiers::COMMAND),
+        ] {
+            paint(&mut app, &ctx, input);
+        }
+
+        assert_eq!(
+            app.document().unwrap().molecule().len(),
+            before,
+            "a keystroke aimed at the Find box edited the molecule"
+        );
+        assert_eq!(
+            app.edit.caret, caret,
+            "a keystroke aimed at the Find box moved the caret"
+        );
+        assert!(
+            app.edit.sel.is_none(),
+            "Ctrl+A in the Find box selected the molecule"
+        );
+    }
+
+    /// The other half of the stand-down, and the reason this guard is NOT
+    /// narrowed to `Context::text_edit_focused` the way `global_shortcuts` was.
+    ///
+    /// PROVEN TO FAIL against exactly that narrowing: replacing the predicate
+    /// with `if ctx.text_edit_focused() { return; }` leaves a focused tab-strip
+    /// button — a `selectable_label`, `Sense::click()`, `CLICK | FOCUSABLE` —
+    /// answering "no", so the typed base lands in the molecule and this fixture
+    /// goes from 8,117 bp to 8,118.
+    ///
+    /// The two guards want different things and this is where that shows.
+    /// `global_shortcuts` dispatches ACCELERATORS, which a user expects to work
+    /// from anywhere except a text box; `sequence_keys` types CHARACTERS into a
+    /// document, and the set of widgets it must not steal from is every widget
+    /// that is not the grid. `map.rs` states the same rule for Space and Enter.
+    #[test]
+    fn a_base_typed_with_a_tab_strip_button_focused_does_not_reach_the_document() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        let _ = paint_settled(&mut app, &ctx, window());
+        paint(
+            &mut app,
+            &ctx,
+            seq_key(egui::Key::Tab, egui::Modifiers::NONE),
+        );
+        // THE PREMISE: something holds the keyboard, it is not a text box, and
+        // it is not the grid. All three, or "nothing happened" is not evidence.
+        let held = ctx.memory(|m| m.focused());
+        assert!(held.is_some(), "the Tab focused nothing");
+        assert!(!ctx.text_edit_focused(), "the Tab landed on a text box");
+        assert_ne!(held, Some(seq_grid_id()), "the Tab landed on the grid");
+
+        let before = app.document().unwrap().molecule().len();
+        let caret = app.edit.caret;
+        paint(&mut app, &ctx, seq_text("A"));
+        paint(
+            &mut app,
+            &ctx,
+            seq_key(egui::Key::ArrowRight, egui::Modifiers::NONE),
+        );
+        assert_eq!(
+            app.document().unwrap().molecule().len(),
+            before,
+            "a base typed at a focused button was appended to the molecule"
+        );
+        assert_eq!(
+            app.edit.caret, caret,
+            "an arrow key at a focused button \
+             moved the caret"
+        );
+    }
+
+    // -- and now the fix -----------------------------------------------------
+
+    /// PROVEN TO FAIL at 189be8a: `sequence_keys` returns on
+    /// `m.focused().is_some()`, so the caret stays at 100 through every arrow
+    /// press. Measured before the fix — three ArrowRights, caret 100, 100, 100.
+    ///
+    /// The second half is the `EventFilter`, and it is not decoration. egui
+    /// reads unfiltered arrow keys as FOCUS NAVIGATION (`Focus::begin_pass`),
+    /// and `find_widget_in_direction` really does find something here:
+    /// measured at 189be8a with the grid focused, ArrowLeft moved the focus to
+    /// the side panel's resize handle and ArrowUp to the `pl-seq-code` combo.
+    /// Right and Down happened to find nothing — which is a fact about this
+    /// layout, not about the mechanism, and is exactly the kind of accident
+    /// that stops being true when a control moves.
+    #[test]
+    fn an_arrow_key_with_the_sequence_grid_focused_moves_the_caret() {
+        let ctx = test_ctx();
+        let mut app = seq_app_focused(&ctx);
+        app.edit.caret = 100;
+
+        paint(
+            &mut app,
+            &ctx,
+            seq_key(egui::Key::ArrowRight, egui::Modifiers::NONE),
+        );
+        assert_eq!(app.edit.caret, 101, "ArrowRight did not move the caret");
+
+        // Every direction, and the focus after each: an arrow that moves the
+        // caret and then hands the keyboard to the splitter has fixed nothing.
+        let per_row = app.edit.per_row();
+        for (key, want) in [
+            (egui::Key::ArrowLeft, 100),
+            (egui::Key::ArrowDown, 100 + per_row),
+            (egui::Key::ArrowUp, 100),
+        ] {
+            paint(&mut app, &ctx, seq_key(key, egui::Modifiers::NONE));
+            assert_eq!(
+                app.edit.caret, want,
+                "{key:?} put the caret in the wrong place"
+            );
+            assert_eq!(
+                ctx.memory(|m| m.focused()),
+                Some(seq_grid_id()),
+                "{key:?} was read as focus navigation and took the keyboard off the grid"
+            );
+        }
+
+        // And a typed base, which is the thing finding 9 measured as
+        // impossible: "Tab x10 ... then `aaaa`, later `acgt` - zero edits".
+        //
+        // `effective_len` and then `commit`, and the two steps are not
+        // ceremony. A typed base opens a RUN, which is deliberately not in the
+        // log until it settles — `sequence_tab` reads `effective_len` for
+        // exactly this reason and the enzyme strip stands down while it is
+        // open. Asserting only on `molecule().len()` would read one keystroke
+        // behind and call a working edit a failure; asserting only on
+        // `effective_len` would not show the edit ever reaching the document.
+        let before = app.document().unwrap().molecule().len();
+        paint(&mut app, &ctx, seq_text("A"));
+        let mol_len = |app: &App| app.document().unwrap().molecule().len();
+        assert_eq!(
+            app.edit.effective_len(app.document().unwrap().molecule()),
+            before + 1,
+            "a base typed into the focused grid did not reach the sequence"
+        );
+        let d = app.bench.get_mut().expect("the fixture has a document");
+        app.edit.commit(d);
+        assert_eq!(
+            mol_len(&app),
+            before + 1,
+            "the typed base never settled into the molecule"
+        );
+    }
+
+    /// PROVEN TO FAIL at 189be8a: Ctrl+A with the grid focused left
+    /// `app.edit.sel` at `None`.
+    ///
+    /// Paired with its own negative control in the same test rather than
+    /// trusting the Find-box test above to cover it, because "selects the
+    /// molecule, not the filter text" is one claim about two surfaces and a
+    /// test that only presses one of them cannot tell a narrowed guard from a
+    /// deleted one.
+    #[test]
+    fn ctrl_a_with_the_sequence_grid_focused_selects_the_molecule() {
+        let ctx = test_ctx();
+        let mut app = seq_app_focused(&ctx);
+        let n = app.document().unwrap().molecule().len();
+        paint(
+            &mut app,
+            &ctx,
+            seq_key(egui::Key::A, egui::Modifiers::COMMAND),
+        );
+        let sel = app
+            .edit
+            .sel
+            .expect("Ctrl+A on the focused grid selected nothing");
+        assert_eq!(
+            (sel.anchor, sel.head),
+            (0, n),
+            "Ctrl+A did not take the whole molecule"
+        );
+
+        // The control: the same chord, the same frame shape, with the Find box
+        // holding the keyboard instead.
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        app.find.open = true;
+        app.find_focus = true;
+        let _ = paint_settled(&mut app, &ctx, window());
+        assert!(ctx.text_edit_focused(), "the premise");
+        paint(
+            &mut app,
+            &ctx,
+            seq_key(egui::Key::A, egui::Modifiers::COMMAND),
+        );
+        assert!(
+            app.edit.sel.is_none(),
+            "Ctrl+A meant for the Find box selected the molecule"
+        );
+    }
+
+    /// Every focus ring painted by this change, as `(rect, colour, width)`.
+    fn seq_focus_rings(out: &egui::FullOutput) -> Vec<(egui::Rect, egui::Color32, f32)> {
+        flat_shapes(&out.shapes)
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r)
+                    if r.fill == egui::Color32::TRANSPARENT && r.stroke.width >= 1.5 =>
+                {
+                    Some((r.rect, r.stroke.color, r.stroke.width))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// [`test_ctx`] with the LIGHT theme installed, by the two lines `App::new`
+    /// runs — not by poking `dark_mode`, which would leave a `Visuals` half from
+    /// egui and half from this design system.
+    fn test_ctx_light() -> egui::Context {
+        let ctx = test_ctx();
+        ctx.all_styles_mut(|style| {
+            style.visuals = theme::visuals(false);
+            theme::style(style);
+        });
+        // Asked of a real `Ui`, which is what the painter reads. `all_styles_mut`
+        // writes both theme slots, so interrogating either one directly would
+        // answer about the write rather than about what a widget will see.
+        let mut dark = true;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            dark = ui.visuals().dark_mode;
+        });
+        assert!(!dark, "the light theme did not take");
+        ctx
+    }
+
+    /// PROVEN TO FAIL at 189be8a, and it could not have failed any other way:
+    /// nothing at all is drawn for focus there, so the focused and unfocused
+    /// frames are shape-for-shape identical and the differential is empty. The
+    /// failure was "a focused grid drew 0 rings, not one".
+    ///
+    /// **A GRID THAT HOLDS THE KEYBOARD AND LOOKS EXACTLY LIKE ONE THAT DOES
+    /// NOT IS A WORSE DEFECT THAN THE ONE BEING FIXED.** Before this change
+    /// there was nothing to see because there was nothing to say — holding the
+    /// focus meant the keys were OFF. The moment Tab does something, silence
+    /// becomes a lie.
+    ///
+    /// Differential against the same fixture unfocused, so it measures what
+    /// FOCUS contributes and not what the grid already draws. An absolute count
+    /// would pass on the caret, the selection wash, or any hairline that happens
+    /// to be a stroked rectangle.
+    ///
+    /// **BOTH THEMES, because the ring's colour is a pair and the light half is
+    /// the one that can go invisible.** This is also the join that gives
+    /// `the_sequence_focus_ring_clears_three_to_one_in_both_themes` its
+    /// standing: that test measures a ratio for a colour, and this one is the
+    /// proof that the colour is the one actually painted. Either alone proves
+    /// nothing about what the user sees.
+    #[test]
+    fn a_focused_sequence_grid_is_drawn_differently_from_an_unfocused_one() {
+        let rings = |dark: bool, focus: bool| {
+            let ctx = if dark { test_ctx() } else { test_ctx_light() };
+            let mut app = seq_app();
+            let _ = paint_settled(&mut app, &ctx, window());
+            if focus {
+                tab_to_seq_grid(&mut app, &ctx);
+            }
+            // Settled, and with NO events in the input: `paint_settled` repeats
+            // the frame it is handed, so a Tab left in there would tab again.
+            let out = paint_settled(&mut app, &ctx, window());
+            let held = ctx.memory(|m| m.focused()) == Some(seq_grid_id());
+            assert_eq!(held, focus, "the fixture did not reach the state it names");
+            seq_focus_rings(&out)
+        };
+
+        for dark in [true, false] {
+            let mode = if dark { "dark" } else { "light" };
+            let unfocused = rings(dark, false);
+            let focused = rings(dark, true);
+            assert!(
+                unfocused.is_empty(),
+                "an UNFOCUSED grid drew a focus ring in {mode}: {unfocused:?}"
+            );
+            assert_eq!(
+                focused.len(),
+                1,
+                "a focused grid drew {} rings in {mode}, not one",
+                focused.len()
+            );
+
+            // It is not a hairline and it is not a stray corner somewhere: the
+            // ring has to be a band of sequence, and wide enough to see. SC
+            // 2.4.13 asks for at least the area of a 2 px perimeter.
+            let (rect, color, width) = focused[0];
+            assert!(width >= 2.0, "the ring is {width} pt wide in {mode}");
+            assert!(
+                rect.width() > 100.0 && rect.height() > 100.0,
+                "the ring is {rect:?} in {mode}, which is not a band of sequence"
+            );
+            assert_eq!(
+                color,
+                seq_focus_ink(dark),
+                "the {mode} ring is not the colour \
+                 `the_sequence_focus_ring_clears_three_to_one_in_both_themes` measures; \
+                 that test would be measuring a colour nothing paints"
+            );
+            eprintln!("FOCUS RING {mode}: rect={rect:?} colour={color:?} width={width}");
+        }
+    }
+
+    /// The ring stays inside the scroll viewport once the view is scrolled, and
+    /// the intersection that keeps it there is doing something.
+    ///
+    /// **THIS IS THE ONLY CHECK ON THE SC 2.4.11 CLAIM, and without it that
+    /// claim would be a comment.** `show_rows` allocates a band covering the
+    /// visible ROWS, and once the view is scrolled part-way through a row that
+    /// band's top edge sits ABOVE the viewport — so a ring drawn on the band
+    /// alone has its top edge off screen at nearly every scroll position, which
+    /// is precisely what "focus not obscured" is about. The painter intersects
+    /// the band with `ui.clip_rect()` for that reason.
+    ///
+    /// PROVEN TO FAIL against the obvious simplification — dropping the
+    /// `.intersect(ui.clip_rect())` and stroking `rect` — which is the mutation
+    /// this test exists to stop, since every other assertion in this file passes
+    /// under it.
+    #[test]
+    fn the_focus_ring_stays_inside_the_viewport_when_the_sequence_is_scrolled() {
+        let ctx = test_ctx();
+        let mut app = seq_app_focused(&ctx);
+        // The wheel, driven through THIS file's `paint` and not through
+        // `wheel_down`. That helper runs the other harness in this module —
+        // `paint_window`, which paints `App::central` where `paint_out` paints a
+        // bare `CentralPanel` — and the two lay the panel out at different
+        // widths, 809 pt against 811. Mixing them in one test means the grid
+        // never settles, which is exactly what it did.
+        //
+        // The wheel and not the caret, because moving the caret does NOT scroll
+        // this view: the only two things that set an offset are a reflow and the
+        // map's `Reveal`. That is a pre-existing gap and not this change's to
+        // close; what matters here is only that the view ends up scrolled.
+        let g = app.seq_grid.expect("the grid was painted");
+        let over = egui::pos2(g.x0 + 20.0, g.top + g.row_h * 3.0);
+        for i in 0..10 {
+            paint(
+                &mut app,
+                &ctx,
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(over),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -37.0),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..window_at(1.0 + i as f64 * 0.1)
+                },
+            );
+        }
+        let out = paint_settled(&mut app, &ctx, window());
+        let g = app.seq_grid.expect("still painted");
+        assert!(
+            g.first_row > 0,
+            "the fixture never scrolled, so this proves nothing"
+        );
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            Some(seq_grid_id()),
+            "the scroll took the keyboard off the grid"
+        );
+
+        let rings = seq_focus_rings(&out);
+        assert_eq!(rings.len(), 1, "expected one ring, got {}", rings.len());
+        let ring = rings[0].0;
+        // The band's own top, which `GridGeom` records: `top: rect.top()`. If
+        // the ring were stroked on the band it would start here.
+        assert!(
+            ring.top() > g.top,
+            "the ring starts at {} and the row band starts at {} — the ring's top \
+             edge is at or above the band's, so the viewport clip did nothing and \
+             the top of the focus indicator is scrolled off screen",
+            ring.top(),
+            g.top
+        );
+        eprintln!(
+            "SCROLLED: first_row={} band_top={:.1} ring={:?}",
+            g.first_row, g.top, ring
+        );
+    }
+
+    /// The ring's contrast against the panel it is drawn on, MEASURED with the
+    /// application's own `theme::contrast`, in both themes.
+    ///
+    /// **THIS TEST DOES NOT FAIL AT 189be8a BY BEHAVING DIFFERENTLY, AND SAYING
+    /// SO IS PART OF IT.** It fails there by not compiling — `seq_focus_ink`
+    /// does not exist, because no ring does — and once it compiles it is a
+    /// statement about two constants, which no amount of running the
+    /// application can falsify. On its own it would be exactly the check that
+    /// cannot fail.
+    ///
+    /// What gives it standing is the join:
+    /// `a_focused_sequence_grid_is_drawn_differently_from_an_unfocused_one`
+    /// reads the colour out of a real painted frame in each theme and asserts it
+    /// IS `seq_focus_ink`, so between them the ratio below is a ratio about the
+    /// pixels a user sees. Neither test is worth having without the other, and
+    /// each names the other for that reason.
+    ///
+    /// **3:1, THE SC 1.4.11 THRESHOLD FOR A GRAPHICAL OBJECT**, which is what a
+    /// ring is — it carries no text, so the 4.5:1 for body text does not apply
+    /// and the 3:1 for a non-text contrast does. **Measured, not assumed:
+    /// 7.08:1 dark and 5.35:1 light.** SC 2.4.11 (focus not obscured) is
+    /// answered by the painter clipping the ring to the scroll VIEWPORT rather
+    /// than the row band — see the comment there — and is not asserted here;
+    /// this test is about ink.
+    ///
+    /// The accent pair is the reason a single constant will not do: `#E69F00`
+    /// is 2.25:1 on white, so the light theme gets `ACCENT_DEEP` and the dark
+    /// theme the bright one. See `theme::accent_ink`, whose own doc comment
+    /// names focus strokes as one of its two roles.
+    ///
+    /// The negative control is the other half of the pair — the value that
+    /// would be used if somebody "simplified" the ring to one constant — and it
+    /// is asserted to FAIL, so this test is known to be able to say no.
+    #[test]
+    fn the_sequence_focus_ring_clears_three_to_one_in_both_themes() {
+        for dark in [true, false] {
+            let mode = if dark { "dark" } else { "light" };
+            let bg = theme::panel_fill(dark);
+            let got = theme::contrast(seq_focus_ink(dark), bg);
+            eprintln!("FOCUS RING {mode}: {got:.2}:1 on {bg:?}");
+            assert!(
+                got >= 3.0,
+                "the sequence focus ring is {got:.2}:1 on the {mode} panel, under the \
+                 3:1 SC 1.4.11 asks of a graphical object"
+            );
+            // The wrong half of the accent pair, which is what a single-constant
+            // ring would paint in one of the two themes.
+            let wrong = theme::accent_fill(dark);
+            assert!(
+                theme::contrast(wrong, bg) < 3.0,
+                "the negative control passes in {mode}, so this test cannot say no"
+            );
+        }
+    }
+
+    /// The way in and the way out, in one test, because either alone is a trap:
+    /// a grid a keyboard user can enter and not leave is worse than one they
+    /// never reach.
+    ///
+    /// **THIS TEST PASSES AT 189be8a, and that is the honest report.** Tab
+    /// already reached the grid there and Tab already left it — which is
+    /// precisely how the defect happened, so there was never anything wrong
+    /// with the doors. What this pins is that the `EventFilter` added beside
+    /// them did not quietly nail them shut, and the proof it can say no is a
+    /// mutation rather than a revision: setting that filter to `tab: true,
+    /// escape: true` — the obvious "let the grid keep its keys" reading, and
+    /// what `TextEdit::lock_focus` does — fails the Tab clause with "Tab could
+    /// not leave the grid" and the Escape clause with "Escape could not leave
+    /// the grid". Run, not reasoned about.
+    ///
+    /// Shift+Tab is the one direction that cannot be taken on trust: it works
+    /// through a different branch of `Focus::interested_in_focus` than Tab does,
+    /// and it is deferred a frame.
+    #[test]
+    fn tab_reaches_the_sequence_grid_and_tab_again_leaves_it() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        let _ = paint_settled(&mut app, &ctx, window());
+        let n = tab_to_seq_grid(&mut app, &ctx);
+        eprintln!("the grid is Tab press {n} of the panel's order");
+
+        // OUT, forwards.
+        paint(
+            &mut app,
+            &ctx,
+            seq_key(egui::Key::Tab, egui::Modifiers::NONE),
+        );
+        assert_ne!(
+            ctx.memory(|m| m.focused()),
+            Some(seq_grid_id()),
+            "Tab could not leave the grid"
+        );
+
+        // OUT, backwards. egui defers a Shift+Tab by one frame — `id_next_frame`
+        // in `Focus::interested_in_focus`, commented there as "frame-delay so
+        // gained_focus works" — so the plain frame after it is part of the
+        // gesture and not padding.
+        let mut app = seq_app_focused(&ctx);
+        paint(
+            &mut app,
+            &ctx,
+            seq_key(egui::Key::Tab, egui::Modifiers::SHIFT),
+        );
+        paint(&mut app, &ctx, window());
+        assert_ne!(
+            ctx.memory(|m| m.focused()),
+            Some(seq_grid_id()),
+            "Shift+Tab could not leave the grid"
+        );
+
+        // OUT, by Escape. egui clears the focus on it and does NOT consume the
+        // event, which is why `EventFilter::escape` stays false here: a grid
+        // that swallowed Escape would be a grid with no cancel.
+        let mut app = seq_app_focused(&ctx);
+        paint(
+            &mut app,
+            &ctx,
+            seq_key(egui::Key::Escape, egui::Modifiers::NONE),
+        );
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            None,
+            "Escape could not leave the grid"
         );
     }
 }

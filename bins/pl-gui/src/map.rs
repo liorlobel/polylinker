@@ -441,13 +441,22 @@ pub fn show(
     // for `hover_pos`, `clicked` and `double_clicked`; there is no key handling
     // here at all.
     //
-    // While it holds the focus, `sequence_keys` stands down — that guard is
-    // still "anything is focused", deliberately, because a focused widget that
-    // wants Space or Enter should not have those keys diverted into the
-    // molecule. So Tab landing here left the sequence view refusing every
-    // printable key with nothing on screen to say why. (It cost the
-    // accelerators too, until `global_shortcuts` was narrowed to
-    // `text_edit_focused`.)
+    // While it holds the focus, `sequence_keys` stands down, and it still will:
+    // that guard is now "anything OTHER THAN THE SEQUENCE GRID is focused", and
+    // the ring is not the sequence grid. The reason it is not simply narrowed to
+    // text boxes is unchanged and is the reason it is worth restating here — a
+    // focused widget that wants Space or Enter must not have those keys diverted
+    // into the molecule, and this ring is exactly such a widget the moment it is
+    // given any keyboard behaviour at all.
+    //
+    // So Tab landing here left the sequence view refusing every printable key
+    // with nothing on screen to say why. (It cost the accelerators too, until
+    // `global_shortcuts` was narrowed to `text_edit_focused`.) The SEQUENCE GRID
+    // hit the same trap through the same bit and was fixed the other way round,
+    // by keeping its keys and drawing a focus ring — see `seq_grid_id` and
+    // `sequence_keys` in `main.rs`. Which of the two answers is right depends
+    // entirely on whether the widget has keyboard behaviour worth reaching, and
+    // the paragraph below is this file's answer for the map.
     //
     // Not a click bug: egui has no focus-on-click for ordinary widgets, only
     // `TextEdit` and `DragValue` call `request_focus` when clicked, so clicking
