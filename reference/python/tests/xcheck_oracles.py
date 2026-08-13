@@ -11,7 +11,11 @@ every one of them was found by reading, never by a red gate:
   * `validate_digest.py` exited 0 when it compared zero files, and exited 0 when
     it found mismatches;
   * `drive_wasm.mjs` was wired into the gate under the name "wasm module vs
-    native binary" with no corpus, so it compared nothing;
+    native binary" with no corpus, so it compared nothing -- and the fix went
+    into the wiring only, preconditioning the step on the corpus path EXISTING,
+    which left the script itself with no floor: a directory holding zero `.dna`
+    files still printed `identical: 0/0` and `ALL WASM CHECKS PASSED` and
+    exited 0, until 2026-08-13;
   * `test_roundtrip.py` counted every problem it found, printed the number, and
     exited 0 regardless -- README.md and CONTRIBUTING.md both named it as a
     check to run yourself;
@@ -19,19 +23,28 @@ every one of them was found by reading, never by a red gate:
     every coordinate emitted" while its token scanner dropped every line
     containing ` show`, which is every label the emitter writes.
 
-A check that cannot fail is worse than no check, because it is counted. So the
-two properties below are pinned by *injecting the broken behaviour* and
-demanding the oracle notice, and each is paired with a control that the
-neighbouring correct case still passes -- a case that goes red for everything
-proves as little as one that goes green for everything.
+A check that cannot fail is worse than no check, because it is counted. So every
+property below is pinned by *injecting the broken behaviour* and demanding the
+oracle notice, and each is paired with a control that the neighbouring correct
+case still passes -- a case that goes red for everything proves as little as one
+that goes green for everything.
 
 Standard library only, like everything else here, and no fixtures: the inputs
 are synthesised, so this runs on a bare checkout with no corpus and no build.
+One dependency is declared rather than hidden: `drive_wasm.mjs` is a Node
+script, nothing but Node can execute one, and the four cases that pin it
+therefore shell out to `node`. If `node` is missing those four REPORT A FAILURE
+and name the reason, rather than skipping -- a silent skip in this file would be
+the exact shape of the defect the file exists to punish, and `node` is already
+required by the workflow's `wasm` job and by four steps of `tools/ci.ps1`.
 """
 import glob
 import io
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import contextlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -285,6 +298,212 @@ def icon_control_identical():
     # The control.
     p = xcheck_icon.compare([("frame vs blob", BLUE * 4, BLUE * 4)])
     return not p, f"reported {p}"
+
+
+# --------------------------------------------------------------------------
+# drive_wasm.mjs -- the corpus comparison must not pass having compared nothing
+# --------------------------------------------------------------------------
+#
+# The wasm build has exactly one oracle: `drive_wasm.mjs` pushes every `.dna` in
+# a corpus through the real `.wasm` and through `pl.exe` and demands the two
+# agree. Until 2026-08-13 the loop that does it had no floor. `if (disagree)
+# failures++` and `if (differ) failures++` are its only two ways of going red
+# and neither can fire over an empty file list, so a corpus directory holding no
+# `.dna` at all -- a GenBank-only folder, a corpus that moved, a OneDrive tree
+# whose files are still placeholders -- printed `files compared : 0`,
+# `identical: 0/0`, `ALL WASM CHECKS PASSED`, and exited 0. The gate believed it
+# had closed this, having preconditioned the step on `Test-Path $Corpus` -- which
+# asks whether a DIRECTORY EXISTS and not whether anything in it was compared, so
+# the hole outlived the fix written to close it.
+#
+# Pinning it costs more machinery than the three oracles above, and the reason
+# is worth stating: it is a Node script, and Python cannot execute one. So these
+# cases lift the block under test STRAIGHT OUT OF THE SHIPPED FILE -- everything
+# from the `corpus: wasm vs native` banner to the last line -- paste it under a
+# preamble supplying the handful of names it reads from the rest of the script,
+# and run that under `node`. Nothing is transcribed and nothing is re-stated:
+# change the guard in `crates/pl-wasm/tests/drive_wasm.mjs` and these four cases
+# change with it, which is the only arrangement worth having in a file whose
+# whole subject is checks that drifted away from what they claimed to check.
+#
+# The preamble's molecule agrees with itself, so the comparisons inside the
+# block are real but are never the thing being asserted. What is asserted is
+# what the block does with zero files, with one file, with one file the two
+# builds disagree about, and with no corpus argument at all -- that last one
+# because the guard must NOT fire in the mode two shipped invocations use
+# deliberately, and a fix that reddened the corpus-less legs of CI would have
+# been worse than the defect it closed.
+
+_DRIVE_WASM = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "..", "..", "crates", "pl-wasm", "tests", "drive_wasm.mjs"))
+
+# Sliced at the banner rather than at a line number: an edit anywhere above it
+# then cannot silently change which region these cases run, and if the banner
+# ever goes away `_drive_wasm` says so instead of quietly testing the wrong one.
+_CORPUS_BANNER = "/* ---------- corpus: wasm vs native ---------- */"
+
+# `__NATIVE_BP__` is substituted per case; every other brace here is JavaScript.
+_STUBS = r"""/* Written by reference/python/tests/xcheck_oracles.py. Not part of the tree.
+
+   Everything drive_wasm.mjs binds ABOVE the block spliced in below, in a form
+   that needs no .wasm module and no native binary: with an empty file list the
+   block touches none of it, and with a file in the list one molecule that
+   agrees with itself drives every comparison the block makes. */
+import { readdirSync } from "node:fs";
+import { join, extname, basename } from "node:path";
+
+const [corpus, plPath] = process.argv.slice(2);
+
+const GENBANK =
+  "LOCUS       synthetic                 12 bp    DNA     circular SYN 26-JUN-2026\n" +
+  "ORIGIN\n" +
+  "        1 aaaaaaaaaaaa\n" +
+  "//\n";
+const FROM_WASM = { bp: 12, circular: true, lowercase: 0, features: [], primers: [] };
+const FROM_NATIVE = {
+  bp: __NATIVE_BP__, circular: true, lowercase: 0,
+  n_features: 0, n_primers: 0, n_binding_sites: 0, features: [],
+};
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+let outBuf = enc.encode(JSON.stringify(FROM_WASM));
+let failures = 0;
+
+const readFileSync = () => new Uint8Array([0]);
+const open = () => { outBuf = enc.encode(JSON.stringify(FROM_WASM)); return 0; };
+const out = () => outBuf;
+const outText = () => dec.decode(outBuf);
+const outJson = () => JSON.parse(dec.decode(outBuf));
+const withStr = (s, fn) => fn(0, enc.encode(s).length);
+const w = {
+  pl_sequence() { outBuf = enc.encode("a".repeat(FROM_WASM.bp)); },
+  pl_to_genbank() { outBuf = enc.encode(GENBANK); return 0; },
+};
+const execFileSync = (_bin, args) =>
+  args[0] === "info" ? JSON.stringify([FROM_NATIVE]) : GENBANK;
+
+"""
+
+
+def _drive_wasm(corpus_files=None, native_bp=12):
+    """Run drive_wasm.mjs's own corpus block over a synthesised corpus.
+
+    `corpus_files` is None for the two-argument invocation the workflow and the
+    `wasm module self-checks` step both make, where no corpus is passed at all;
+    otherwise it is a list of names created beside two decoys and an empty
+    subdirectory. That shape is not invented -- it is the one the 2026-08-13
+    audit reproduced the defect on, the in-repo `tests/library-fixture`: real
+    `.gb` and `.fa` files, one subdirectory, zero `.dna`. `native_bp` is what
+    the stub native binary reports, so a caller can make the builds disagree.
+
+    Returns `(returncode, output)`, or `(None, why)` when the case could not be
+    run at all. The callers report that second form as a FAILURE. It is the one
+    place in this file where something could be skipped, and skipping is what
+    every entry in the header did wrong.
+    """
+    node = shutil.which("node")
+    if node is None:
+        return None, ("`node` is not on PATH, so the only oracle that exists "
+                      "for the browser build cannot be driven; this is a "
+                      "failure rather than a skip on purpose")
+    try:
+        with open(_DRIVE_WASM, encoding="utf-8") as f:
+            source = f.read()
+    except OSError as e:
+        return None, f"{e}"
+    cut = source.find(_CORPUS_BANNER)
+    if cut < 0:
+        return None, f"{_DRIVE_WASM} no longer contains {_CORPUS_BANNER!r}"
+
+    program = _STUBS.replace("__NATIVE_BP__", str(native_bp)) + source[cut:]
+    with tempfile.TemporaryDirectory() as tmp:
+        harness = os.path.join(tmp, "corpus_block.mjs")
+        with open(harness, "w", encoding="utf-8") as f:
+            f.write(program)
+        argv = [node, harness]
+        if corpus_files is not None:
+            corpus = os.path.join(tmp, "corpus")
+            os.makedirs(os.path.join(corpus, "subdir"))
+            for name in ("notes.gb", "primers.fa", *corpus_files):
+                with open(os.path.join(corpus, name), "w", encoding="utf-8") as f:
+                    f.write(">decoy\nacgtacgtacgt\n")
+            argv += [corpus, os.path.join(tmp, "pl")]
+        done = subprocess.run(argv, capture_output=True, encoding="utf-8",
+                              errors="replace")
+    return done.returncode, (done.stderr.strip() or done.stdout.strip())
+
+
+@case("drive_wasm refuses a corpus that turned out to hold no .dna files")
+def drive_wasm_empty_corpus():
+    # The injection is the absence of the guard, and it is not hypothetical: the
+    # audit ran the shipped script at f0e4a6f against `tests/library-fixture`
+    # and got `files compared : 0`, `identical: 0/0`, `ALL WASM CHECKS PASSED`,
+    # exit 0.
+    #
+    # PROVEN TO FAIL at f0e4a6f: the corpus block ran its two loops over an
+    # empty list and exited 0 having compared no molecules.
+    # Mutation that re-breaks it: delete the four lines
+    # `if (!files.length) { console.error(...); process.exit(2); }` that follow
+    # `files.sort();` in crates/pl-wasm/tests/drive_wasm.mjs.
+    #
+    # `rc == 2` and not `rc != 0`, for the reason recorded in
+    # `roundtrip_reports_problems` above: a check written against the loose form
+    # once passed against the very code it was written to catch. 2 also carries
+    # the distinction the script draws -- 1 is the two builds disagreeing, a
+    # finding about the code; 2 is the harness pointed somewhere useless, a
+    # finding about the invocation.
+    rc, said = _drive_wasm(corpus_files=[])
+    if rc is None:
+        return False, said
+    return (rc == 2 and "held no .dna files" in said,
+            f"exit status was {rc!r}, expected 2; it said {said[-200:]!r}")
+
+
+@case("drive_wasm still compares a corpus that has a .dna in it")
+def drive_wasm_control_one_file():
+    # The control, and the one that stops the guard being written as an
+    # unconditional refusal. One `.dna` whose two builds agree must still be a
+    # pass: exit 0, having compared exactly one molecule.
+    rc, said = _drive_wasm(corpus_files=["plasmid.dna"])
+    if rc is None:
+        return False, said
+    return (rc == 0 and "files compared : 1" in said,
+            f"exit status was {rc!r}, expected 0; it said {said[-300:]!r}")
+
+
+@case("drive_wasm still reports a wasm/native disagreement")
+def drive_wasm_disagreement_still_seen():
+    # The neighbouring behaviour the floor must not have displaced. This is the
+    # thing the step is named after -- one build saying 12 bp and the other 11 --
+    # and it has to keep going red, and go red as 1 rather than as 2, or the
+    # floor has quietly replaced the comparison instead of guarding it.
+    rc, said = _drive_wasm(corpus_files=["plasmid.dna"], native_bp=11)
+    if rc is None:
+        return False, said
+    return (rc == 1 and "bp 12 vs 11" in said,
+            f"exit status was {rc!r}, expected 1; it said {said[-300:]!r}")
+
+
+@case("drive_wasm without a corpus argument still passes, as two CI legs need")
+def drive_wasm_no_corpus_still_skips():
+    # The other control, and the one that costs something if it is got wrong.
+    # `.github/workflows/ci.yml`'s "Drive the real module" and `tools/ci.ps1`'s
+    # "wasm module self-checks" both call this script with TWO arguments on
+    # purpose: they have no corpus to give and they exist to exercise the ABI on
+    # the hand-made inputs. The floor lives inside the `else` of `if (!corpus)`
+    # so that those legs still take the announced skip and still exit 0. A guard
+    # hoisted above that branch would redden both of them, which would have been
+    # a worse defect than the one being fixed here.
+    #
+    # Mutation that re-breaks it: move the `if (!files.length)` guard out of the
+    # `else` branch, e.g. up beside the `if (!corpus)` test.
+    rc, said = _drive_wasm(corpus_files=None)
+    if rc is None:
+        return False, said
+    return (rc == 0 and "no corpus given" in said,
+            f"exit status was {rc!r}, expected 0; it said {said[-300:]!r}")
 
 
 def main():

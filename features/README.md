@@ -609,19 +609,78 @@ through stop codon of the frame that translates to the verified reference
 protein*, and `GTG`/`TTG` are real initiation codons read as formyl-Met when they
 initiate. tet(A) genuinely begins `GTG`.
 
-The two most recent, PLF:1017 (`dhfrI`) and PLF:1026 (`pat`), are also the
-sharpest illustration of why the initiator is a per-row fact and not a family
-one: PLF:1025 (`bar`) is the same enzyme as `pat`, the same length in
-nucleotides and in residues, and begins `ATG`. The `bar` row's `notes` record
-that the two INSDC records for that gene differ at exactly one base — position
-1, `ATG` against `GTG` — and which one this database pinned.
+The two added last — PLF:1017 (`dhfrI`) and PLF:1026 (`pat`), the two
+highest-numbered of the nine and the only two of the nine still `proposed` — are
+also the sharpest illustration of why the initiator is a per-row fact and not a
+family one: PLF:1025 (`bar`) is the same enzyme as `pat`, 552 nt and 183 aa
+exactly as `pat` is, and begins `ATG`. The `bar` row's `notes` record that the
+two INSDC records for that gene differ at exactly one base — position 1, `ATG`
+against `GTG` — and which one this database pinned. *Added last* here means the
+id block and the git history, **not** `date_added`: every row in the shipped
+file reads `date_added = 2026-08-12`, because `build.py` regenerates the whole
+table and stamps `PLF_BUILD_DATE` on all 113 rows, so that column can never
+order two rows against each other and no sentence in this file should be read as
+if it could.
 
 The enum's string form is nonetheless narrower than its definition, and
 `BoundaryRule::is_derived()` treats this rule as the strongest derivation claim
-in the schema, so an auditor reading the label literally would think seven rows
-misclaim it. The value is not being renamed — it is published — so the fact is
-recorded here and in the enum's own doc comment instead, and every affected row
-states its initiator codon in `notes`, measured rather than assumed.
+in the schema, so an auditor reading the label literally would think **all nine**
+of the rows listed above misclaim it. **Seven** of those nine are signed off in
+`SIGNOFF.tsv`, which is the number `BoundaryRule::OrfAtgToStop`'s own doc comment
+states, because that comment counts the shipped rows — the rows `Db::reviewed()`
+returns and therefore the only ones `pl annotate` or the desktop app can put on
+anybody's map. The other two are PLF:1017 and PLF:1026: in this table, in the
+count of nine, and searched by nothing. Both numbers are true of the sets they
+count and neither is the other's correction. The value is not being renamed — it
+is published — so the fact is recorded here and in the enum's own doc comment
+instead, and every affected row states its initiator codon in `notes`, measured
+rather than assumed.
+
+One correction to an earlier version of this paragraph, found the way the two in
+the section above were — by counting, not by reading. It closed on **seven**
+rows sixteen lines below an opening that said nine. Seven was right when it was
+written: at `47f232b` the opening sentence also said seven and named seven ids.
+`e918bd6` added PLF:1017 and PLF:1026, rewrote the opening seven → nine with the
+id list extended, and left the closing clause byte-identical, so a paragraph
+whose whole subject is a count that must be checked contradicted itself in one
+diff hunk — and shipped that way in seven releases, v0.6.0 through v0.10.0. Both
+counts now name the set they are over, and both come out of the shipped file:
+
+```bash
+python - <<'EOF'
+import csv, io
+lines = [l for l in open("features/features.tsv", encoding="utf-8")
+         if not l.startswith("#")]
+rows = list(csv.DictReader(io.StringIO("".join(lines)), delimiter="\t"))
+odd = [r for r in rows
+       if r["boundary_rule"] == "orf_atg_to_stop"
+       and r["reference_nt"][:3] in ("GTG", "TTG")]
+print(len(odd), sum(r["review_status"] == "reviewed" for r in odd),
+      [r["id"] for r in odd])
+EOF
+```
+
+which prints `9 7` and the nine ids in the opening sentence, in that order.
+Nothing yet fails the build if this paragraph drifts again: the only test that
+reads this file, `the_readmes_state_the_signoff_count_the_database_has` in
+`crates/pl-features/src/lib.rs`, pins the sign-off headline and nothing else. A
+check that recomputed the pair above and searched for both numbers would be the
+same shape as that one, and is the honest fix; it is not written yet, and saying
+so is cheaper than a reader assuming it exists.
+
+The **seven** is the half most likely to go stale next, and it will go stale in
+two files at once. `PROPOSED.md` recommends SIGN for both PLF:1017 and PLF:1026,
+so signing one makes it eight and signing both makes it nine — here *and* in
+`BoundaryRule::OrfAtgToStop`'s doc comment, which carries the same figure over
+the same set. That the two agree today is not design: that comment was written at
+`47f232b`, where `features.tsv` held 70 rows, every one of them `proposed`, and
+exactly seven of them carried this rule over a non-`ATG` initiator. Its "seven
+shipped rows" was a whole-table count of a table that shipped nothing, and a
+later build quietly turned it into a shipped-subset count that happens to agree.
+Signing either row means editing three things together: this paragraph, the
+sentence above that calls PLF:1017 and PLF:1026 the only two of the nine still
+`proposed`, and that doc comment. The nine in the opening sentence stays nine
+through all of it, because it counts rows in the table and signing adds none.
 
 ### What this is not
 
@@ -850,9 +909,14 @@ that makes the *claim* ("this is a tag on a protein") mean something.
   `require_start`, so which codons may initiate decides which ORFs exist at all.
   The default is now **table 11** — seven initiators, including `GTG` — and it
   was table 1 until 2026-07-28, under which an N-terminal tag on `TetA`,
-  `AprR`, `HygR`, `lacI` or lambda `int` (five of this database's 52 CDS rows,
-  all beginning `GTG`; there are nine such rows in all) was dropped with no
-  output of any kind. C-terminal
+  `AprR`, `HygR`, `lacI` or lambda `int` — five of this database's 52 CDS rows,
+  and exactly the signed rows that begin `GTG` — was dropped with no
+  output of any kind. Five and not the nine of *Boundary rules and alternative
+  initiation codons* above, because that nine is over the whole table and over
+  both non-`ATG` initiators: two more `GTG` rows (PLF:1017, PLF:1026) are
+  `proposed`, so no genetic code setting can lose an annotation that was never
+  searched for, and the two `TTG` rows (PLF:0015, PLF:0023) were never at risk
+  because table 1 accepts `TTG`. C-terminal
   tags on the same genes were accidentally rescued by an internal downstream
   `ATG`, so the miss bit hardest at the N-terminus, which is where His, FLAG and
   Strep tags usually go. Under table 1 the miss is still real for `GTG`, `ATT`,

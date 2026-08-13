@@ -276,6 +276,17 @@ export function esc(s: string): string {
  * rather than rendering something the caller did not mean. Anything unrecognised
  * is refused, which is the correct direction to fail for a value that is only
  * ever cosmetic.
+ *
+ * There is a second job here, and it went unnoticed until 2026-08-13. What this
+ * function returns is interpolated into `fill="..."` and `stroke="..."` without
+ * passing through `esc`, so a colour is the one string in a figure that reaches
+ * an attribute value unescaped, and this is therefore the last place that can
+ * keep a character XML 1.0 forbids out of the document. The functional-notation
+ * class below used to admit VT and FF. One of those bytes in a colour out of a
+ * downloaded file does not produce a wrong fill: it produces a file no
+ * conformant parser will open at all, which is the whole figure lost rather
+ * than one feature miscoloured. See the note on that line, and
+ * `pl_draw::safe_color`, corrected in the same change.
  */
 export function safeColor(value: string | undefined, fallback: string): string {
   // Type-checked, not just truthiness-checked. This is the laundering boundary
@@ -293,7 +304,23 @@ export function safeColor(value: string | undefined, fallback: string): string {
   // port checks bytes and would refuse those; rather than carry a divergence
   // that only shows up on input neither implementation should accept, both
   // refuse it. See `crates/pl-draw/tests/agreement.rs`.
-  if (/^(?:rgba?|hsla?)\([0-9eE+\-.,%/ \t\n\v\f\r]*\)$/.test(v)) return v;
+  //
+  // Tab, LF and CR only. VT (`\v`, U+000B) and FF (`\f`, U+000C) were in this
+  // class until 2026-08-13, and neither is an XML 1.0 `Char` — the production
+  // is `#x9 | #xA | #xD | [#x20-#xD7FF] | ...`. A colour such as
+  // `rgb(79,127,208\v)` out of a `.dna` or GenBank file was therefore
+  // returned unchanged and written straight into a `fill` attribute, and the
+  // whole rendered document then failed to parse — not one wrong colour, no
+  // figure at all. `esc` above has dropped exactly those two codepoints, in
+  // exactly this notation, since it was written; this line had simply never
+  // been read next to it. `.trim()` hides the easy cases, both bytes being
+  // Unicode whitespace, but it cannot reach an interior one.
+  //
+  // Removed here and from `pl_draw::safe_color` in one change, with
+  // `crates/pl-draw/tests/agreement.json` regenerated in it, so the two
+  // implementations stay pinned to each other rather than drifting apart on a
+  // case the fixture used to record as agreed.
+  if (/^(?:rgba?|hsla?)\([0-9eE+\-.,%/ \t\n\r]*\)$/.test(v)) return v;
   // A bare CSS colour keyword, plus the two SVG paint keywords.
   if (/^[a-zA-Z]{1,32}$/.test(v)) return v;
   return fallback;

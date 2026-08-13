@@ -512,17 +512,62 @@ pub extern "C" fn pl_digest_json() -> i32 {
 /// anywhere saying so.
 ///
 /// The refusal is written into the **output buffer** and not only signalled by
-/// the return code, because the shipped page discards the return value of these
-/// two exports and downloads the buffer regardless
-/// (`prototype/dna-reader.template.html`, the `expGb`/`expFa` handlers). A
-/// code-only signal would have been a silent no-op there — the same defect in
-/// a new place. A download whose contents are the refusal is ugly; a download
-/// that looks like the user's plasmid and is not is worse.
+/// the return code. It had to be, because the shipped page discarded the return
+/// value of these two exports and downloaded the buffer regardless, so a
+/// code-only signal would have been a silent no-op there — the same defect in a
+/// new place. It still has to be, for the opposite reason: those handlers were
+/// fixed and now read `if (rc !== 0) { fail(coreText()); return; }`
+/// (`prototype/dna-reader.template.html`, the `expGb`/`expFa` handlers), and
+/// `coreText()` is this buffer. The reason the user sees is the string put here.
+/// A download whose contents are the refusal is ugly; a download that looks like
+/// the user's plasmid and is not is worse; and a refusal with no reason in it is
+/// a dialog that says only "no".
 fn truncation_refusal(report: &LoadReport) -> Option<String> {
     report.truncated().then(|| {
         format!(
             "this file holds {} records and writing it here would keep only the first. Split the file first.",
             report.records
+        )
+    })
+}
+
+/// Why a GenBank export refuses a molecule the format cannot hold whole.
+///
+/// `genbank::write` is `write_reporting(..).0` and its own doc says to prefer
+/// the reporting form "anywhere the caller can tell the user what the format
+/// could not carry — an annotation GenBank has no form for leaves no trace in
+/// the file it is missing from". This module called `write`, so a feature whose
+/// every segment has no GenBank location, a primer binding site past the end, a
+/// control character flattened out of DEFINITION and an ORIGIN character
+/// rewritten as `n` were all computed, formatted into strings, and dropped —
+/// and what came back to the page was a complete, plausible `.gb` of the user's
+/// plasmid with something missing from it. That is the shape
+/// [`truncation_refusal`] above exists for, one class down: a download that
+/// looks like the user's plasmid and is not.
+///
+/// **This buffer is the only channel there is.** The desktop GUI writes the
+/// file AND says what it cost, because it has a status line to say it in; `pl
+/// convert` does the same through stderr. Here there is one output buffer and
+/// one return code, so a write cannot both hand over the bytes and hand over
+/// the report. Between shipping a lossy file silently and refusing with the
+/// reason in the buffer, this crate has already chosen once — see
+/// `truncation_refusal` — and the page reads it the way that choice needs:
+/// `expGb` checks the return code and calls `fail(coreText())` rather than
+/// downloading, so the refusal is shown and nothing is saved.
+///
+/// **The consequence, stated plainly:** `pl convert file.gb --to genbank`
+/// writes such a file and prints the report; this returns 1 and writes none. A
+/// byte-for-byte comparison of the two over a corpus (`tests/drive_wasm.mjs`,
+/// which CI runs without a corpus directory) would now differ on any file with
+/// a non-empty report. That divergence is deliberate and it is the honest way
+/// round: the terminal has a second channel for the hedge and the browser does
+/// not, and a hedge that cannot be printed must not be swallowed.
+fn unwritable_refusal(unwritable: &[String]) -> Option<String> {
+    (!unwritable.is_empty()).then(|| {
+        format!(
+            "GenBank has no form for {} thing(s) in this file, so writing it here would hand back a plausible plasmid with those parts missing and nothing saying so: {}. Nothing was written.",
+            unwritable.len(),
+            unwritable.join("; ")
         )
     })
 }
@@ -550,7 +595,16 @@ pub unsafe extern "C" fn pl_to_genbank(
             set_out(error_json(&msg));
             return 1;
         }
-        let text = genbank::write(mol, &title, (day, month as usize, year));
+        // `write_reporting`, never `write`: see [`unwritable_refusal`] for what
+        // the plain wrapper threw away and why this refuses instead of handing
+        // back a plasmid with parts of it quietly absent.
+        let date = (day, month as usize, year);
+        let (text, unwritable) = genbank::write_reporting(mol, &title, date);
+        if let Some(msg) = unwritable_refusal(&unwritable) {
+            drop(st_ref);
+            set_out(error_json(&msg));
+            return 1;
+        }
         drop(st_ref);
         set_out(text);
         0
@@ -862,6 +916,63 @@ mod tests {
         assert_eq!(back.seq, b"GAATTCaaaaaaaaaaGGATCCtttttttttt".to_vec());
         assert!(back.topology.is_circular());
         assert_eq!(back.features.len(), 1);
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f: `pl_to_genbank` called `genbank::write`,
+    /// which is `write_reporting(..).0`, so a feature the format has no
+    /// location for was skipped by the writer and the page downloaded a
+    /// complete, plausible `.gb` of the user's plasmid with that feature
+    /// silently absent — rc 0, empty report, nothing anywhere saying so.
+    ///
+    /// MUTATION THAT RE-BREAKS IT: in `pl_to_genbank`, replace
+    /// `let (text, unwritable) = genbank::write_reporting(mol, &title, date);`
+    /// with `let (text, unwritable) = (genbank::write(mol, &title, date),
+    /// Vec::<String>::new());`. `unwritable_refusal` then always returns `None`,
+    /// rc is 0 and the buffer holds the lossy file.
+    #[test]
+    fn a_genbank_export_refuses_rather_than_dropping_what_it_cannot_write() {
+        // Twelve bases, and a feature at 30..40. `parse_location` accepts that
+        // — it checks only `end >= start && start > 0` and has no length to
+        // compare against, which is why pl-fileio ships a corpus survey for the
+        // class — and `location_parts(30, 40, 12)` then returns `None`, so the
+        // writer skips the feature. The skip is not the finding; the silence
+        // was. Built by concatenation and not with `\`-continued source lines:
+        // that escape eats the leading whitespace of the next line and a
+        // GenBank feature table is column-significant.
+        let gb = concat!(
+            "LOCUS       x                        12 bp    DNA     linear SYN 26-JUL-2026\n",
+            "FEATURES             Location/Qualifiers\n",
+            "     misc_feature    30..40\n",
+            "                     /label=\"tet leader\"\n",
+            "ORIGIN\n        1 acgtacgtacgt\n//\n"
+        );
+        let (rc, json) = open(gb.as_bytes());
+        assert_eq!(rc, 0, "{json}");
+        assert!(json.contains("tet leader"), "the premise: {json}");
+
+        let title = "past-end.gb";
+        let rc = unsafe { pl_to_genbank(title.as_ptr(), title.len(), 26, 7, 2026) };
+        let out = STATE.with(|st| String::from_utf8(st.borrow().out.clone()).unwrap());
+        assert_eq!(rc, 1, "the export must refuse: {out}");
+        assert!(out.starts_with(r#"{"error":"#), "{out}");
+        assert!(
+            out.contains("tet leader"),
+            "and name what would have gone missing: {out}"
+        );
+        assert!(
+            !out.contains("LOCUS"),
+            "nothing that looks like the plasmid may be handed back: {out}"
+        );
+
+        // THE CONTROL, so the fix cannot be "refuse everything": a molecule
+        // GenBank can hold whole still exports, at rc 0, with the file in the
+        // buffer.
+        let (rc, json) = open(&dna_fixture());
+        assert_eq!(rc, 0, "{json}");
+        let rc = unsafe { pl_to_genbank(title.as_ptr(), title.len(), 26, 7, 2026) };
+        let out = STATE.with(|st| String::from_utf8(st.borrow().out.clone()).unwrap());
+        assert_eq!(rc, 0, "{out}");
+        assert!(out.contains("LOCUS"), "{out}");
     }
 
     #[test]

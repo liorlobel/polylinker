@@ -15,6 +15,14 @@
 //! RECOVERED here by matching the fragment against the parent, and a feature
 //! travels only when its whole span sits inside one identified fragment.
 //!
+//! THAT INTERVAL IS MODULAR when the parent is a circle. A plasmid cut once
+//! gives a fragment that begins at the cut, runs to the end of the file and
+//! carries on from base 1 — so "inside the fragment" is a statement about an
+//! ARC and not about `fs <= x <= fe`, and [`locate`] duly reports an end past
+//! the parent's length to say so. Reading that interval as a plain one left
+//! every feature upstream of the cut out of a religation that is otherwise the
+//! plasmid you started with; [`place`] is where the arithmetic now lives.
+//!
 //! Where a fragment cannot be placed unambiguously, nothing from it is carried
 //! and the count says so. A feature put at the wrong coordinate in a construct
 //! somebody then orders primers against is worse than a feature that is simply
@@ -30,7 +38,21 @@ pub struct Frag {
     pub len: usize,
     pub left: String,
     pub right: String,
-    /// 1-based inclusive span in the parent, when the fragment could be placed.
+    /// Where this fragment sits in its parent, when it could be placed.
+    ///
+    /// 1-based, inclusive, and **not always an interval**: `(fs, fe)` with `fe`
+    /// past the parent's length is a fragment that runs off the end of the file
+    /// and continues at base 1, which is what a fragment of a circle does unless
+    /// a cut happens to land on the origin. A plasmid cut once with a unique
+    /// enzyme is the everyday case — its single fragment comes back as
+    /// `(cut + 1, cut + n)`.
+    ///
+    /// So neither number may be shown to a user as it stands, and neither may be
+    /// compared with `<=` to decide whether a feature is inside: [`span`]
+    /// renders it and [`place`] tests it, both modulo the parent's length. Read
+    /// as a plain interval, `fe` names a base the parent does not have — "from
+    /// 6..49" for a 44 bp plasmid — and every feature in the wrapped tail is
+    /// declared outside a fragment that physically contains it.
     pub from: Option<(u64, u64)>,
     /// Why `from` is `None`, when the reason is knowable.
     ///
@@ -60,6 +82,15 @@ pub struct Prod {
     /// Fragment indices in the order used, and whether each was flipped.
     pub order: Vec<(usize, bool)>,
     /// Features carried over, and features that could not be.
+    ///
+    /// `dropped` is counted ONCE PER FEATURE, over the union of the parents this
+    /// construct is made of — every feature of a contributing molecule either
+    /// travelled or did not, so `carried + dropped` is exactly that union's
+    /// size. It used to be a running tally taken inside the walk over fragments,
+    /// which counted a parent's whole feature list once for every piece of it
+    /// this product used: a two-fragment religation that loses nothing reported
+    /// "10 carried, 10 dropped", and the methods paragraph said the same in
+    /// words a user pastes into a notebook.
     pub carried: usize,
     pub dropped: usize,
     /// What was sealed at each junction, already in words.
@@ -551,7 +582,16 @@ pub fn show(
                             f.left,
                             f.right,
                             match (f.from, &f.unplaced) {
-                                (Some((a, b)), _) => format!("   from {a}..{b}"),
+                                // THROUGH `span`, because `from` is not an
+                                // interval on a circle: printing its second
+                                // number raw gave "from 6..49" for a 44 bp
+                                // plasmid, a coordinate the molecule does not
+                                // have, in the list a user reads to work out
+                                // which band is their vector.
+                                (Some(from), _) => format!(
+                                    "   from {}",
+                                    span(from, parent_len(f, mol, donor_mol))
+                                ),
                                 // An amplicon knows WHY it could not be placed,
                                 // and it is not ambiguity — see `Frag::unplaced`.
                                 (None, Some(why)) => format!("   {why}"),
@@ -653,11 +693,19 @@ pub fn show(
                     } else {
                         pal.muted
                     });
+                    // THE REASONS, all of them. This sentence used to name two —
+                    // cut in half, or from an ambiguous fragment — while the
+                    // count also included every feature of a parent whose other
+                    // fragments this construct does not use, which is most of a
+                    // vector in any subcloning. A hover that lists two causes
+                    // for a number produced by four sends a user hunting for
+                    // damage that is not there.
                     ui.label(carried).on_hover_text(
                         "A feature travels only when its whole span sits inside one fragment \
-                         that could be placed in the parent. Anything cut in half, or from a \
-                         fragment whose origin is ambiguous, is left behind rather than put \
-                         at a coordinate that merely looks right.",
+                         this construct uses, and that fragment could be placed in the parent. \
+                         Anything cut in half, anything on a piece this construct leaves out, \
+                         and anything from a fragment whose origin is ambiguous stays behind \
+                         rather than being put at a coordinate that merely looks right.",
                     );
                     if ui.button("Open").clicked() {
                         p.wanted = Some(i);
@@ -817,6 +865,14 @@ fn end_label(e: &pl_clone::End) -> String {
 /// case that matters — a tandem repeat, or a short fragment — and picking the
 /// first match there would put somebody's features at a coordinate that merely
 /// looks plausible.
+///
+/// THE END MAY EXCEED THE PARENT'S LENGTH, and deliberately: the match is taken
+/// in the doubled string and returned as `(s + 1, s + len)` with no `% n`, so a
+/// fragment that crosses the origin says "I start at 6 and run 44 bases" as
+/// `(6, 49)` on a 44 bp plasmid rather than as the empty-looking `(6, 5)`. The
+/// two callers that show a number to a user fold it back through [`span`]; the
+/// one that decides whether a feature is inside works modulo `n` in [`place`].
+/// Nobody may treat the pair as a plain interval — see [`Frag::from`].
 fn locate(frag: &str, parent: &str, circular: bool) -> Option<(u64, u64)> {
     if frag.is_empty() || frag.len() > parent.len() {
         return None;
@@ -843,6 +899,53 @@ fn locate(frag: &str, parent: &str, circular: bool) -> Option<(u64, u64)> {
     }
     let s = hit?;
     Some((s as u64 + 1, (s + fb.len()) as u64))
+}
+
+/// A fragment's parent span, written in coordinates the parent actually has.
+///
+/// [`locate`] reports an origin-crossing fragment with its end past the parent's
+/// length, because that is the only way to say "44 bases starting at 6" in one
+/// pair of numbers. Shown raw, that is a lie about the molecule: the fragment
+/// list printed "from 6..49" for a 44 bp plasmid, and the methods paragraph
+/// printed "assembled from 1201..5400" for a 5,000 bp one — text written to be
+/// pasted into a manuscript, naming a base nobody can go and look at.
+///
+/// So the end is folded back into `1..=n` and the wrap is SAID rather than left
+/// for the reader to infer, because `6..5` on its own reads like an off-by-one
+/// or an empty range instead of what it is: a fragment that runs off the end of
+/// the file and continues at base 1.
+fn span((fs, fe): (u64, u64), n: u64) -> String {
+    // A parent with no bases cannot have placed a fragment at all, so this arm
+    // is unreachable through `plan`; it exists so the `%` below can never be a
+    // division by zero on a hand-built `Frag`.
+    if n == 0 || fe == 0 {
+        return format!("{fs}..{fe}");
+    }
+    let end = (fe - 1) % n + 1;
+    if fe > n {
+        format!("{fs}..{end} through the origin")
+    } else {
+        format!("{fs}..{end}")
+    }
+}
+
+/// How long the molecule this fragment came out of is.
+///
+/// Measured the way [`locate`] measured it — through `from_utf8_lossy` — rather
+/// than as `seq.len()`, so the modulus used to fold a coordinate is the same
+/// number the coordinate was produced against. For an ASCII molecule, which is
+/// every molecule that reaches here, the two are equal; for one carrying a stray
+/// byte they are not, and a modulus that is one base out puts the fold one base
+/// out with it.
+fn parent_len(f: &Frag, mol: &Molecule, donor: Option<&Molecule>) -> u64 {
+    let m = match f.parent {
+        0 => mol,
+        // A fragment attributed to a donor that is no longer there cannot
+        // happen — `plan` builds both lists in one pass — and falling back to
+        // the open molecule keeps that impossibility from becoming a panic.
+        _ => donor.unwrap_or(mol),
+    };
+    String::from_utf8_lossy(&m.seq).len() as u64
 }
 
 /// A finished molecule and how it was put together: the fragments in order, and
@@ -1250,8 +1353,12 @@ pub fn report(
             } else {
                 String::new()
             };
+            // THROUGH `span`, for the reason that function gives: this sentence
+            // is written to be pasted into a methods section, and "assembled
+            // from 1201..5400" on a 5,000 bp plasmid states as fact a position
+            // that molecule does not have.
             let at = match f.from {
-                Some((a, b)) => format!("{a}..{b}"),
+                Some(from) => span(from, parent_len(f, mol, donor)),
                 None => "position not determined".into(),
             };
             format!(
@@ -1281,8 +1388,15 @@ pub fn report(
         prod.carried
     ));
     if prod.dropped > 0 {
+        // THE REASON, corrected twice over. The clause used to say only "did not
+        // sit whole inside one placeable fragment", which left out the other
+        // half of what the number counts — a feature on a piece this construct
+        // does not use, which in a subcloning is most of the donor. And it
+        // carried a run of fourteen spaces mid-sentence, a heredoc artifact that
+        // reached the clipboard exactly as written.
         out.push_str(&format!(
-            "; {} were not, because their span did not sit whole inside one placeable              fragment",
+            "; {} were not, because their span did not sit whole inside one placeable \
+             fragment this construct used",
             prod.dropped
         ));
     }
@@ -1445,6 +1559,12 @@ fn refusal(e: &pl_clone::PcrError) -> String {
 /// here, and getting it wrong does not fail loudly: the coordinates would still
 /// be inside the construct, so a vector's resistance marker would simply appear
 /// on the insert's gene, at a span that looks entirely reasonable.
+///
+/// The per-feature arithmetic is [`place`]'s, and the reason it is a function
+/// rather than four lines inside the walk below is that it has to know the
+/// fragment's GEOMETRY — both strand lengths and `ovhg` — and not merely where
+/// the fragment sits. A mirror written from the watson length alone put every
+/// feature of an inverted fragment one overhang out of place.
 fn build(
     sources: &[Source],
     frags: &[pl_clone::Dseq],
@@ -1486,60 +1606,83 @@ fn build(
     // starts in the product.
     let mut at: u64 = 0;
     let mut carried = 0usize;
-    let mut dropped = 0usize;
+    // WHICH features travelled, not how many times a fragment failed to take
+    // one. `dropped` used to be incremented inside this loop, which runs once
+    // per FRAGMENT while `parent.features` is the whole parent's list — so every
+    // feature was counted as dropped once for each fragment it is not in, and a
+    // two-piece religation that loses nothing printed "10 carried, 10 dropped".
+    // `carried + dropped` exceeding the parent's feature count is
+    // self-contradictory on its face, and it was on screen and in the methods
+    // paragraph. The count is taken once, after the walk, from this set.
+    let mut travelled: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (idx, flipped) in order {
         let parent = sources[described[*idx].parent].mol;
-        let seq = sources[described[*idx].parent].seq.as_str();
-        // Watson length, matching what locate measured and what join`n        // concatenates. len() spans the single-stranded ends too, and using it
+        // THE LAYOUT'S BASIS IS WATSON'S LENGTH, which is what `locate` measured
+        // the fragment against and what `join` concatenates for an unflipped
+        // piece. `Dseq::len()` spans the single-stranded ends too, so using it
         // here would drift the layout by an overhang per junction.
+        //
+        // It is NOT the basis for the mirror below — see [`place`], which takes
+        // the crick length and `ovhg` for that — and it is one strand's length
+        // where a flipped fragment contributes the other's. Those two agree for
+        // every fragment whose ends leave overhangs of equal length, which is
+        // every fragment of a single-enzyme digest and every fragment of a
+        // digest by enzymes that share an overhang width. Where they disagree
+        // the whole tail of the product's features shifts, and `place`'s bounds
+        // check is what stops that becoming a coordinate off the molecule; no
+        // digest is known that both produces such a fragment and seals it
+        // flipped, so it is guarded rather than corrected here.
         let flen = frags[*idx].watson.len() as u64;
-        match described[*idx].from {
-            None => {
-                // Unplaceable fragment: count what it would have carried so the
-                // number on screen is the truth rather than a silent zero.
-                dropped += parent
-                    .features
-                    .iter()
-                    .filter(|f| within(f, 1, seq.len() as u64))
-                    .count()
-                    .min(parent.features.len());
-            }
-            Some((fs, fe)) => {
-                for f in &parent.features {
-                    if !within(f, fs, fe) {
-                        dropped += 1;
-                        continue;
-                    }
-                    let mut moved = f.clone();
-                    moved.segments = f
-                        .segments
-                        .iter()
-                        .map(|s| {
-                            // Offset inside the fragment, 0-based.
-                            let a = s.start - fs;
-                            let b = s.end - fs;
-                            let (a, b) = if *flipped {
-                                (flen - 1 - b, flen - 1 - a)
-                            } else {
-                                (a, b)
-                            };
-                            Segment::new(at + a + 1, at + b + 1)
-                        })
-                        .collect();
-                    if *flipped {
-                        moved.strand = match f.strand {
-                            Strand::Forward => Strand::Reverse,
-                            Strand::Reverse => Strand::Forward,
-                            other => other,
-                        };
-                    }
-                    mol.features.push(moved);
-                    carried += 1;
+        if let Some((fs, _)) = described[*idx].from {
+            let slot = Slot {
+                fs,
+                // The parent's own length, as `locate` measured it, so the
+                // interval below can be modular. An unplaceable fragment needs
+                // none of this: nothing from it travels, and the features it
+                // would have carried are counted as dropped by not being in
+                // `travelled`.
+                n: sources[described[*idx].parent].seq.len() as u64,
+                watson: flen,
+                crick: frags[*idx].crick.len() as i64,
+                ovhg: frags[*idx].ovhg,
+                flipped: *flipped,
+                at,
+                product: full.len() as u64,
+            };
+            for (fi, f) in parent.features.iter().enumerate() {
+                let Some(segments) = place(f, &slot) else {
+                    continue;
+                };
+                let mut moved = f.clone();
+                moved.segments = segments;
+                if *flipped {
+                    moved.strand = match f.strand {
+                        Strand::Forward => Strand::Reverse,
+                        Strand::Reverse => Strand::Forward,
+                        other => other,
+                    };
                 }
+                mol.features.push(moved);
+                travelled.insert((described[*idx].parent, fi));
+                carried += 1;
             }
         }
         at += flen;
     }
+
+    // COUNTED ONCE, over the union of the parents this construct is made of.
+    // Every feature of a contributing parent either travelled or did not, and
+    // the ones that did not are exactly what "dropped" has always claimed to
+    // mean. `saturating_sub` cannot fire — a fragment carries a feature at most
+    // once and `travelled` is keyed by (parent, feature), so it can never hold
+    // more entries than the parents have features — and it is written this way
+    // rather than as `-` so that a future third caller of `build` cannot turn a
+    // miscount into a panic.
+    let dropped = used_parents
+        .iter()
+        .map(|p| sources[*p].mol.features.len())
+        .sum::<usize>()
+        .saturating_sub(travelled.len());
 
     Prod {
         mol,
@@ -1551,16 +1694,121 @@ fn build(
     }
 }
 
-/// Is every segment of this feature inside `[lo, hi]`, 1-based inclusive?
+/// One fragment as it sits in the finished product: everything [`place`] needs
+/// to turn a parent coordinate into a product coordinate, and nothing else.
 ///
-/// Whole-feature only. Half a promoter carried into a construct is a claim the
-/// parent never made, and the coordinates would be right while the biology was
-/// wrong.
-fn within(f: &Feature, lo: u64, hi: u64) -> bool {
-    !f.segments.is_empty()
-        && f.segments
-            .iter()
-            .all(|s| s.start >= lo && s.end <= hi && s.start <= s.end)
+/// A struct rather than eight arguments because the geometry travels together
+/// and half of it is easy to leave behind — which is precisely what happened:
+/// the mirror for a flipped fragment was written from `watson` alone, and
+/// `crick` and `ovhg` were never consulted anywhere in the walk.
+struct Slot {
+    /// 1-based position in the parent of the fragment's first watson base.
+    fs: u64,
+    /// The parent's length, so the fragment's interval can be modular.
+    n: u64,
+    /// The fragment's watson length: how far the fragment reaches along the
+    /// parent, and how far the product's cursor advances past it.
+    watson: u64,
+    /// The fragment's crick length. `i64` because the mirror subtracts from it.
+    crick: i64,
+    /// The fragment's `ovhg`: where crick's 3' end sits relative to watson's 5'
+    /// start, negative when watson protrudes on the left.
+    ovhg: i64,
+    /// Laid in end-for-end, so the product takes `crick` where the parent's
+    /// coordinates were measured along `watson`.
+    flipped: bool,
+    /// 0-based offset of this slot's first base in the product.
+    at: u64,
+    /// The product's length, for the bounds check at the end.
+    product: u64,
+}
+
+/// Where a parent's feature lands in the product, if it lands at all.
+///
+/// # Whole or not at all
+///
+/// Half a promoter carried into a construct is a claim the parent never made,
+/// and its coordinates would be right while the biology was wrong — so the
+/// segments are collected into an `Option` and one that cannot be placed refuses
+/// the whole feature. A feature with no segments is not a span to carry either;
+/// that guard came from `within`, which this function replaces.
+///
+/// # The interval is modular
+///
+/// `slot.fs` and the fragment's watson length describe an ARC of the parent, not
+/// an interval: a plasmid cut once gives a fragment that starts at the cut, runs
+/// off the end of the file and continues at base 1. Testing `s.start >= fs` left
+/// every feature in that wrapped tail out of a religation that is otherwise the
+/// plasmid you started with — on a real vector cut in its MCS, that is every
+/// feature upstream of the MCS — and told the user they had been "cut in half".
+/// `(s.start + n - fs) % n` is the offset that answers the question the plain
+/// comparison was asking.
+///
+/// # The mirror is crick's, not watson's
+///
+/// A flipped fragment contributes `flip(f).watson`, which IS `f.crick`, and
+/// crick is the reverse complement of a window offset from watson's by the
+/// overhang: `crick[j] = comp(full[b1 - 1 - j])` with `b1 = t0 - ovhg + c`. With
+/// `a = p - t0` that gives `j = c - 1 - ovhg - a`, and the `w - 1 - a` this code
+/// used before agrees with it only when `ovhg == c - w`. For the ordinary
+/// restriction fragment — the same 5' overhang at both ends, so `c == w` and
+/// `ovhg == -k` — it was `k` too small, and k is 4 for EcoRI, BamHI, BglII,
+/// HindIII, XhoI, SalI, NheI, SpeI, XbaI and every other four-base 5' cutter.
+/// Every feature on an inverted fragment was four bases to the 5' side of its
+/// own sequence: on a CDS, a frameshift in what the map draws and what the
+/// exported GenBank claims, in a construct the user opens and orders primers
+/// against.
+///
+/// # Off the end of the product
+///
+/// `j` can fall outside `0..watson`, and legitimately so: the first `k` bases of
+/// a flipped fragment's watson are its 5' overhang, which is single-stranded, so
+/// their partners in the product come from the NEXT fragment's overhang — the
+/// two annealed, which is what the junction is. `at + j` lands there and is
+/// right. It is right, that is, when there IS a next fragment: for the last
+/// fragment of a circle the same arithmetic runs past the end of the molecule,
+/// where the bases are real but their coordinate is on the other side of the
+/// origin. Rather than emit a position the product does not have, or invent the
+/// two-segment wrapped feature this module refuses to carry in the other
+/// direction, such a feature does not travel and is counted as dropped.
+fn place(f: &Feature, slot: &Slot) -> Option<Vec<Segment>> {
+    if f.segments.is_empty() {
+        return None;
+    }
+    f.segments
+        .iter()
+        .map(|s| {
+            // A coordinate the parent does not have is not a coordinate.
+            // `s.start >= 1` and `s.end <= n` were implied by the old interval
+            // test (`s.start >= fs >= 1`, `s.end <= fe`) and have to be said out
+            // loud now that the test is modular, which would otherwise fold a
+            // nonsense position into a real one. `s.start <= s.end` refuses a
+            // feature that itself crosses the origin: it cannot be expressed as
+            // one span in the product either.
+            if slot.n == 0 || s.start == 0 || s.start > s.end || s.end > slot.n {
+                return None;
+            }
+            let a = (s.start + slot.n - slot.fs) % slot.n;
+            let b = a + (s.end - s.start);
+            // Whole span inside the fragment, measured along the arc from its
+            // start rather than between two endpoints.
+            if b >= slot.watson {
+                return None;
+            }
+            let (lo, hi) = if slot.flipped {
+                let m = slot.crick - 1 - slot.ovhg;
+                // `b` maps low and `a` maps high: the mirror reverses the order.
+                (m - b as i64, m - a as i64)
+            } else {
+                (a as i64, b as i64)
+            };
+            let (lo, hi) = (slot.at as i64 + lo + 1, slot.at as i64 + hi + 1);
+            if lo < 1 || hi > slot.product as i64 {
+                return None;
+            }
+            Some(Segment::new(lo as u64, hi as u64))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1582,6 +1830,33 @@ mod tests {
 
     fn ticked(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The bases a molecule really has over a 1-based inclusive span.
+    ///
+    /// THE ORACLE FOR EVERY FEATURE ASSERTION BELOW, and it is deliberately not
+    /// an assertion about coordinates. The whole failure mode of a feature remap
+    /// is a span that sits comfortably inside the construct and names the wrong
+    /// bases; a number compared against a number cannot see that, and the two
+    /// defects this file's tests exist to hold down — an inverted fragment
+    /// mirrored on the wrong strand length, and a fragment interval read as
+    /// though a circle had no origin — both produce coordinates that look
+    /// entirely reasonable.
+    fn bases(m: &Molecule, a: u64, b: u64) -> String {
+        let seq = String::from_utf8_lossy(&m.seq).to_string();
+        seq[(a - 1) as usize..b as usize].to_ascii_uppercase()
+    }
+
+    /// The carried feature of that name, or a failure that says which is missing.
+    fn named<'a>(m: &'a Molecule, name: &str) -> &'a Feature {
+        m.features
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("{name} did not travel into the product"))
+    }
+
+    fn rc(s: &str) -> String {
+        String::from_utf8(pl_core::reverse_complement(s.as_bytes())).expect("ASCII in, ASCII out")
     }
 
     #[test]
@@ -1614,14 +1889,39 @@ mod tests {
     }
 
     /// The whole point: cut and put it back, and get the same molecule.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f for its SECOND feature. `within(f, fs, fe)` was
+    /// a plain interval test, and the one fragment of a circle cut once has
+    /// `from = (6, 49)` on this 44 bp plasmid — it starts at the cut, runs off
+    /// the end of the file and comes back at base 1. Every feature between base
+    /// 1 and the cut therefore failed `s.start >= fs`, was counted as dropped,
+    /// and was left out of a construct that is otherwise base-for-base the
+    /// plasmid you started with. On a real vector cut in its MCS that is every
+    /// feature upstream of the MCS.
+    ///
+    /// TO RE-BREAK IT: in `place`, replace
+    /// `let a = (s.start + slot.n - slot.fs) % slot.n;` with
+    /// `if s.start < slot.fs { return None; } let a = s.start - slot.fs;`.
+    ///
+    /// The fixture's first four bases were `AAAA` when this test only had to cut
+    /// and re-close; they are `TCGA` because a feature read back off a run of A
+    /// says nothing about where it landed.
     #[test]
     fn a_single_cut_religates_to_the_same_length_and_keeps_its_features() {
-        let seq = "AAAAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCC";
+        let seq = "TCGAGGATCCTTTTGCGCGCATATATCCCGGGAAAATTTTCCCC";
         let mut m = mol(seq, true);
         let mut f = Feature::new("a gene", "CDS");
         f.strand = Strand::Forward;
         f.segments.push(Segment::new(15, 30));
         m.features.push(f);
+        // ENTIRELY BEFORE THE CUT, which is the case a plain interval cannot
+        // express: the fragment begins at base 6 and comes back round to base 5,
+        // so these four bases are inside it and no comparison against `fs` will
+        // ever say so.
+        let mut before_cut = Feature::new("upstream", "misc_feature");
+        before_cut.strand = Strand::Forward;
+        before_cut.segments.push(Segment::new(1, 4));
+        m.features.push(before_cut);
 
         let p = plan(
             &m,
@@ -1633,7 +1933,15 @@ mod tests {
             25,
         );
         assert_eq!(p.frags.len(), 1, "one site in a circle gives one fragment");
-        assert!(p.frags[0].from.is_some(), "the fragment must be placeable");
+        // THE SHAPE OF THE INTERVAL, pinned. 49 is past the end of a 44 bp
+        // molecule on purpose — it is how `locate` says "44 bases starting at
+        // 6" — and everything downstream has to read it that way rather than as
+        // `6..=49`.
+        assert_eq!(
+            p.frags[0].from,
+            Some((6, 49)),
+            "the fragment of a circle cut once wraps the origin"
+        );
         assert_eq!(p.frags[0].left, "5' GATC");
         assert_eq!(p.prods.len(), 1, "{:?}", p.note);
 
@@ -1644,11 +1952,170 @@ mod tests {
             seq.len(),
             "religation changed the length"
         );
-        assert_eq!(prod.carried, 1, "the feature did not travel");
+        assert_eq!(prod.carried, 2, "a feature did not travel");
         assert_eq!(prod.dropped, 0);
-        // And it still covers the same bases, wherever the circle now starts.
-        let s = &prod.mol.features[0].segments[0];
-        assert_eq!(s.end - s.start, 15, "the feature changed length");
+        // And each still covers the same bases, wherever the circle now starts.
+        let gene = &named(&prod.mol, "a gene").segments[0];
+        assert_eq!(gene.end - gene.start, 15, "the feature changed length");
+        assert_eq!(
+            bases(&prod.mol, gene.start, gene.end),
+            bases(&m, 15, 30),
+            "the feature after the cut points at the wrong bases"
+        );
+        let up = &named(&prod.mol, "upstream").segments[0];
+        assert_eq!(
+            bases(&prod.mol, up.start, up.end),
+            bases(&m, 1, 4),
+            "the feature before the cut points at the wrong bases"
+        );
+    }
+
+    /// A fragment laid in end-for-end must carry its features to the bases they
+    /// name — and until this test, NO test in this file exercised one at all.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: the mirror was `(flen - 1 - b, flen - 1 - a)`
+    /// with `flen = frags[idx].watson.len()`, and a flipped fragment contributes
+    /// its CRICK strand, which is a window offset from watson's by the enzyme's
+    /// overhang. Every carried feature therefore landed four bases to the 5'
+    /// side of its own sequence — four for EcoRI, BamHI, BglII, HindIII, XhoI,
+    /// SalI, NheI, SpeI, XbaI and every other four-base 5' cutter. Measured on
+    /// this fixture: `gfp` read back as `ATGGTG` where the parent says `CTTGCA`,
+    /// whose reverse complement is `TGCAAG`. On a CDS that is a frameshift in
+    /// what the map draws and what the exported GenBank claims.
+    ///
+    /// TO RE-BREAK IT: in `place`, replace `let m = slot.crick - 1 - slot.ovhg;`
+    /// with `let m = slot.watson as i64 - 1;`.
+    ///
+    /// WHY THIS FIXTURE. Two EcoRI sites, one of them straddling the origin so
+    /// that NEITHER fragment wraps — the wrap is a different defect's case and
+    /// this test must be able to fail for one reason only. Both fragments then
+    /// carry an `AATT` end at each end, and `rc("AATT") == "AATT"`, so each
+    /// seals in either orientation: `ligate` enumerates the inverted circle
+    /// beside the plain religation and the panel offers both with an Open
+    /// button. This is everyday non-directional cloning, not a corner.
+    #[test]
+    fn an_inverted_fragment_carries_its_features_to_the_bases_they_name() {
+        let seq = "AATTCGGCATTACGTACGAATTCTTGCACCATGGAG";
+        let mut m = mol(seq, true);
+        m.name = "pInv".into();
+        // In the first fragment, which `ligate` pins unflipped in every product,
+        // so this one holds the arm that was already right.
+        let mut marker = Feature::new("bla", "CDS");
+        marker.strand = Strand::Forward;
+        marker.segments.push(Segment::new(8, 13));
+        m.features.push(marker);
+        // In the second, off-centre and clear of the four-base overhang at each
+        // end: off-centre because a feature in the middle of a fragment is
+        // mirrored onto itself and would pass either way.
+        let mut gene = Feature::new("gfp", "CDS");
+        gene.strand = Strand::Forward;
+        gene.segments.push(Segment::new(23, 28));
+        m.features.push(gene);
+
+        let p = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["EcoRI"]),
+            &Primers::default(),
+            false,
+            25,
+        );
+        assert!(p.note.is_none(), "{:?}", p.note);
+        assert_eq!(p.frags.len(), 2, "two sites in a circle give two fragments");
+        // Neither wraps, which is what makes this fixture about the mirror only.
+        assert_eq!(p.frags[0].from, Some((1, 18)));
+        assert_eq!(p.frags[1].from, Some((19, 36)));
+
+        let inverted = p
+            .prods
+            .iter()
+            .find(|pr| pr.order.iter().any(|(_, flipped)| *flipped))
+            .expect("no product laid a fragment in end-for-end");
+        assert!(inverted.circular);
+        assert_eq!(inverted.carried, 2, "a feature did not travel");
+
+        // READ BACK OFF THE PRODUCT'S OWN BASES. `bla` came off the fragment
+        // laid forwards and must read as the parent's bases; `gfp` came off the
+        // one laid backwards and must read as their reverse complement.
+        let bla = &named(&inverted.mol, "bla").segments[0];
+        assert_eq!(
+            bases(&inverted.mol, bla.start, bla.end),
+            bases(&m, 8, 13),
+            "the forward fragment's feature moved"
+        );
+        let gfp = &named(&inverted.mol, "gfp").segments[0];
+        assert_eq!(
+            bases(&inverted.mol, gfp.start, gfp.end),
+            rc(&bases(&m, 23, 28)),
+            "the inverted fragment's feature points at the wrong bases"
+        );
+        // And it reads on the other strand now, because its bases do.
+        assert_eq!(named(&inverted.mol, "gfp").strand, Strand::Reverse);
+        assert_eq!(named(&inverted.mol, "bla").strand, Strand::Forward);
+    }
+
+    /// A feature reaching into a junction's overhang travels while there is a
+    /// neighbour to hold its other strand, and does not when there is not.
+    ///
+    /// The first `k` bases of a fragment's watson are single-stranded — they are
+    /// the 5' overhang — so on an inverted fragment their partners in the
+    /// product come from the NEXT fragment's overhang, annealed to them, which
+    /// is what the junction is. `place` lands them there and is right to. For
+    /// the LAST fragment of a circle the same arithmetic runs past the end of
+    /// the molecule, where the bases are real but their coordinate is on the far
+    /// side of the origin, so the feature does not travel at all.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: the old mirror put this feature at 31..35,
+    /// reading `TGCAA` where the parent says `ATTCT` — inside the construct, on
+    /// the wrong bases, with nothing saying so.
+    ///
+    /// TO RE-BREAK IT: in `place`, delete
+    /// `if lo < 1 || hi > slot.product as i64 { return None; }`.
+    #[test]
+    fn a_feature_over_a_junction_overhang_is_dropped_rather_than_placed_off_the_end() {
+        let seq = "AATTCGGCATTACGTACGAATTCTTGCACCATGGAG";
+        let mut m = mol(seq, true);
+        // Starts one base into the second fragment's four-base 5' overhang.
+        let mut edge = Feature::new("edge", "misc_feature");
+        edge.strand = Strand::Forward;
+        edge.segments.push(Segment::new(20, 24));
+        m.features.push(edge);
+
+        let p = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["EcoRI"]),
+            &Primers::default(),
+            false,
+            25,
+        );
+        assert_eq!(p.frags.len(), 2);
+
+        // THE CONTROL, and it is what stops this being a test that passes by
+        // carrying nothing: laid forwards, the same feature travels and reads
+        // back as the parent's bases.
+        let plain = p
+            .prods
+            .iter()
+            .find(|pr| pr.order.iter().all(|(_, flipped)| !*flipped))
+            .expect("no plain religation");
+        assert_eq!(plain.carried, 1);
+        let s = &named(&plain.mol, "edge").segments[0];
+        assert_eq!(bases(&plain.mol, s.start, s.end), bases(&m, 20, 24));
+
+        let inverted = p
+            .prods
+            .iter()
+            .find(|pr| pr.order.iter().any(|(_, flipped)| *flipped))
+            .expect("no product laid a fragment in end-for-end");
+        assert_eq!(
+            inverted.carried, 0,
+            "a feature was placed at a coordinate the product does not have"
+        );
+        assert!(inverted.mol.features.is_empty());
+        assert_eq!(inverted.dropped, 1, "and it must be counted as dropped");
     }
 
     /// Stage 4 through the panel: a gene out of one plasmid, into another.
@@ -2310,6 +2777,20 @@ mod tests {
     }
 
     /// A feature spanning a cut site cannot travel whole, so it does not travel.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f, but only since the `>= 1` below became `== 1`.
+    /// `dropped` was incremented inside a loop over `parent.features` that runs
+    /// once per FRAGMENT, so this parent's single feature was counted twice —
+    /// once for each of the two pieces it is not inside — so the old
+    /// `assert!(dropped >= 1)` passed at 1 and at 2 alike. It could not fail
+    /// for the thing its own name claims, which is why the number is now
+    /// pinned.
+    ///
+    /// TO RE-BREAK IT: in `build`, replace the two lines
+    /// `used_parents` / `.map(|p| sources[*p].mol.features.len())` of the
+    /// `dropped` binding with `order` /
+    /// `.map(|(i, _)| sources[described[*i].parent].mol.features.len())`, which
+    /// counts a parent's features once per FRAGMENT again.
     #[test]
     fn a_feature_cut_in_half_is_dropped_and_counted() {
         let seq = "AAAAGGATCCTTTTGCGCGCATATATGGATCCAAAATTTTCCCC";
@@ -2331,7 +2812,85 @@ mod tests {
         assert_eq!(p.frags.len(), 2, "two sites, two fragments");
         for prod in &p.prods {
             assert_eq!(prod.carried, 0, "a straddling feature must not travel");
-            assert!(prod.dropped >= 1, "and it must be counted as dropped");
+            assert_eq!(
+                prod.dropped, 1,
+                "one feature was lost, and the parent has one feature"
+            );
+        }
+    }
+
+    /// Two pieces of one plasmid, a feature in each, and nothing lost.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: `dropped` was counted per FRAGMENT over the
+    /// whole parent's feature list, so a feature carried by fragment A was
+    /// counted as dropped while fragment B was being walked, and vice versa.
+    /// This construct — every base of the plasmid, both features present — was
+    /// reported as `2 feature(s) carried, 2 dropped`, in the panel's warning
+    /// colour, under a hover promising that anything dropped had been cut in
+    /// half. On a 3 kb plasmid with ten features it reads "10 carried, 10
+    /// dropped" and sends the user hunting for damage that is not there. The
+    /// same number goes into the Copy-record paragraph, where `carried +
+    /// dropped` exceeding the parent's feature count is self-contradictory on
+    /// its face.
+    ///
+    /// TO RE-BREAK IT: in `build`, replace the two lines
+    /// `used_parents` / `.map(|p| sources[*p].mol.features.len())` of the
+    /// `dropped` binding with `order` /
+    /// `.map(|(i, _)| sources[described[*i].parent].mol.features.len())`.
+    #[test]
+    fn two_fragments_of_one_parent_carry_a_feature_each_and_drop_nothing() {
+        let seq = "AAAAGGATCCTTTTGCGCGCATATATGGATCCAAAATTTTCCCC";
+        let mut m = mol(seq, true);
+        // BamHI cuts after bases 5 and 27, giving fragments at 6..27 and
+        // 28..49 — the second wraps the origin. One feature sits whole inside
+        // each, so a religation loses nothing at all.
+        let mut left = Feature::new("left", "CDS");
+        left.strand = Strand::Forward;
+        left.segments.push(Segment::new(12, 22));
+        m.features.push(left);
+        let mut right = Feature::new("right", "CDS");
+        right.strand = Strand::Forward;
+        right.segments.push(Segment::new(33, 40));
+        m.features.push(right);
+
+        let p = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["BamHI"]),
+            &Primers::default(),
+            false,
+            25,
+        );
+        assert_eq!(p.frags.len(), 2, "two sites, two fragments");
+        assert!(!p.prods.is_empty(), "{:?}", p.note);
+        for prod in &p.prods {
+            assert_eq!(
+                prod.carried, 2,
+                "{:?}: a feature did not travel",
+                prod.order
+            );
+            assert_eq!(
+                prod.dropped, 0,
+                "{:?}: a religation that loses nothing reported a loss",
+                prod.order
+            );
+        }
+
+        // And the pieces really are where they say: read back off the plain
+        // religation, which is the parent rotated to start at the cut.
+        let plain = p
+            .prods
+            .iter()
+            .find(|pr| pr.order.iter().all(|(_, flipped)| !*flipped))
+            .expect("no plain religation");
+        for (name, a, b) in [("left", 12u64, 22u64), ("right", 33, 40)] {
+            let s = &named(&plain.mol, name).segments[0];
+            assert_eq!(
+                bases(&plain.mol, s.start, s.end),
+                bases(&m, a, b),
+                "{name} points at the wrong bases"
+            );
         }
     }
 

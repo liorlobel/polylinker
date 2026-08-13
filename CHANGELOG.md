@@ -25,7 +25,133 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+Nineteen defects from [`docs/AUDIT-2026-08-13.md`](docs/AUDIT-2026-08-13.md),
+the sixteen-unit audit of the v0.10.0 tree. Two of them put a wrong coordinate
+in front of a biologist; the rest are a hedge lost at a boundary, a count that
+was wrong on screen while the value underneath it was right, or a test whose
+name claimed a distinction its body never drew.
+
+**Every fix carries a test, and every one of those tests was proven to fail by
+reverting only its own production change** — sixteen mutations applied one at a
+time, each run against its crate's suite. That is worth stating because this
+change fixes four tests that could not fail, and a fix for a check that cannot
+fail is worth nothing if nobody runs the check.
+
+- **A rotation lost the wrapped half of an origin-crossing feature.**
+  `Feature::extent` recognised a crossing in exactly one *spelling* — the join
+  `genbank::write` emits, whose last part starts at base 1 — while
+  `Molecule::rotate` remaps endpoints in place and never re-normalises. Rotating
+  a plasmid therefore produced a join whose FIRST part wraps, which the
+  recogniser never tested for, and the fallback returned an inner subset where
+  its own doc comment promised an outer bound. Measured: a 17 bp promoter on a
+  2,686 bp circle became a 7 bp feature at bases that are not its own.
+
+  It is now read off the SHAPE — a segment that itself wraps, or a cut at the
+  origin found at any adjacent pair rather than only the last — so the answer no
+  longer depends on which surface wrote the file. The ordinary multi-exon join
+  `join(100..200,300..400)`, which really does run 100..400 and is not a wrap, is
+  unchanged and tested beside it.
+
+  The audit's own prescribed fix was **wrong** and was not taken: it would have
+  returned the wrapping segment's start, which on the same fixture answers
+  `(400, 399)` — a whole-plasmid span for a 60 bp CDS. Which segment wraps says
+  where the *origin* fell, not where the feature begins.
+
+- **A flipped fragment carried its features `|ovhg|` bases off — four, for every
+  common six-cutter.** The clone panel mirrored a feature about `watson.len()`,
+  which is the right basis for the LAYOUT and the wrong one for the mirror,
+  because a sticky end is precisely the case where the two strands differ in
+  length. Measured on an ordinary non-directional EcoRI subcloning: a gene read
+  `AAGGGCCCTTTA` where the parent says `GCCCTTTAAAGG` — the same bases rotated by
+  four — inside the construct, on the wrong bases, with nothing saying so. The
+  unflipped path was correct, which is why it hid: no test in that file
+  exercised a flipped fragment at all.
+
+- **A fragment that wrapped the origin dropped every feature in its tail**, and
+  reported a start coordinate that does not exist in the parent — in the fragment
+  list and in the Copy-record methods text, which is written to be pasted into a
+  paper. The interval test is modular now, and the rendered coordinate is folded
+  back into `1..=n`.
+
+- **A clean religation reported features dropped that were not.** The counter ran
+  inside a loop over the parent's features once per FRAGMENT, so every feature
+  was counted once for every piece it is not in.
+
+- **GenBank export threw away its own loss report** and still cleared the dirty
+  dot, in the GUI and in the wasm build. Both call `write_reporting` now, and a
+  write that dropped a feature no longer marks the document saved. This closes an
+  item `docs/AUDIT-2026-07-28.md:499` logged honestly as deferred.
+
+- **Saving as FASTA under-reported what it destroys** — primers and notes were
+  dropped uncounted, which cleared the dirty flag, stood the unsaved-changes
+  guard down, and let exit delete the recovery draft that held the edited bases
+  and the primers together.
+
+- **Methylation read as a verdict when it was an absence.** Every non-`.dna`
+  molecule reports all-false, and that was rendered identically to a `.dna` that
+  genuinely says none. It now says "not recorded in this file (treated as
+  unmethylated)". Wiring an actual control is a feature and is not in this
+  change; the comment says so.
+
+- **The MCP `annotate` tool dropped the hedges the CLI prints**, so an assistant
+  received a bare `681 to 80` for a hit that crosses the origin and would either
+  relay it or "correct" it to `80 to 681` — a 601-base arc containing none of the
+  feature. Third time this class has been fixed in that file, and the first time
+  the origin note was swept.
+
+- **An index could silently empty itself.** `--follow-links` is not persisted, so
+  opening the Library tab on a folder indexed with it walked without the flag,
+  deleted the linked rows, and wrote `complete: true` — a positive assertion of
+  completeness over a library it had just emptied. A skipped link is now treated
+  as a partial walk for the deletion pass, so the worst case is a stale row.
+
+- **`Dseq::to_string_full` sliced a strand off a UTF-8 boundary**, and `pcr`'s
+  template guard ran three lines after the call that panics. Both fixed: the
+  method operates on bytes and the guard moved ahead of it, so no public method
+  of `Dseq` panics on a file-derived value.
+
+- **A colour string could make an entire exported SVG unopenable.** The sanitiser
+  passed U+000B and U+000C into an unescaped attribute, neither of which is legal
+  in XML's `Char` production. Beyond removing those two, the well-formedness check
+  now rejects anything outside `Char`, so the next hole in a sanitiser is caught
+  by the existing hostile-input tests rather than by a user holding a figure no
+  viewer will open.
+
+- **The linear ruler labelled a base that does not exist**, `span + 1`, because
+  its loop was inclusive where the circular one is exclusive.
+
+- **A rejected keystroke's warning lived about one second instead of the
+  documented five**, because `settle` destroyed the notice whose expiry rule
+  `clear_notice` already owns.
+
+### Fixed — four checks that could not fail
+
+Each was green while proving nothing, which is worse than absent, because it
+reports as coverage.
+
+- **The wasm corpus comparison passed vacuously when the corpus was empty** — it
+  reported success having compared nothing. It exits non-zero now, and
+  `xcheck_oracles.py` actually runs the case its own header already named.
+- **`a_faithful_save_clears_the_dirty_state_and_a_lossy_one_does_not` contained
+  no lossy save.** The decision is split out of the file picker into
+  `fasta_losses`, so both arms can be driven without a dialog.
+- **The MCP melting-temperature test asserted no temperature.** It computes the
+  expected value from `pl_thermo` inside the test now, so the assertion cannot
+  drift from the implementation.
+- **The gate's own Python-precondition audit mis-delimited a one-line `Step`**,
+  exempting exactly the shape most likely to be written casually. It now has the
+  planted-input control this project uses everywhere else — one naked one-line
+  step that must be reported, one guarded one that must not.
+
+### Fixed — prose asserting what the code does not do
+
+- `no_double_digest_produces_a_fragment_with_no_base_pairs` claimed to sweep
+  every shipped enzyme and named eight, all with the same overhang geometry. It
+  sweeps all 58 now.
+- `features/README.md` said "seven rows" two paragraphs after listing nine.
+- `featedit.rs`'s module header described `extent`'s old recognition rule.
 
 ## [0.10.0] - 2026-08-13
 

@@ -6313,6 +6313,135 @@ mod tests {
         );
     }
 
+    /// The byte offset just past the `}` that returns `line` to brace depth
+    /// zero, or `None` when the line opens a body it does not close.
+    ///
+    /// This is the whole of the one-line-step delimiter, and it is its own
+    /// function so that the mutation which re-breaks
+    /// [`the_step_scanner_reads_a_one_line_step_by_itself`] is one line:
+    /// replacing the call in [`scan_gate_steps`] with `let closes_here:
+    /// Option<usize> = None;` restores, exactly, the walk-to-the-next-`}`-line
+    /// behaviour that shipped at f0e4a6f.
+    ///
+    /// Depth, not "the first `}`". `Step 'x' { if ($a) { python p.py } }` is a
+    /// one-liner whose body closes at the SECOND brace; reading the first one
+    /// as the close would leave ` }` as the tail and count that as a
+    /// precondition -- the same false exemption this helper exists to remove,
+    /// arrived at from the other direction. The `depth > 0` guard means a line
+    /// that somehow reaches a `}` before any `{` is reported as unclosed by
+    /// the caller (which panics, loudly) rather than as closing at offset zero.
+    fn one_line_step_close(line: &str) -> Option<usize> {
+        let mut depth = 0usize;
+        for (at, c) in line.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        // Just past the brace: whatever follows it on this line
+                        // is the step's tail, which is where a one-line step's
+                        // precondition lives. `len_utf8()` rather than `+ 1`
+                        // because `char_indices` yields BYTE offsets and the
+                        // caller slices with this one -- `}` is one byte, so
+                        // the two agree here, but a step name carrying a
+                        // multi-byte character earlier in the line is why the
+                        // offset has to be counted in bytes throughout.
+                        return Some(at + c.len_utf8());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Every gate step in `ci` that invokes `python` without declaring a
+    /// precondition -- 1-based line number, and the name inside its quotes --
+    /// together with the number of `Step` lines seen in all.
+    ///
+    /// Taking the file's text instead of reading `tools/ci.ps1` itself is the
+    /// same split as `plan_dna`/`write_dna` elsewhere in this crate, and it is
+    /// here for the reason spelled out in
+    /// [`the_step_scanner_reads_a_one_line_step_by_itself`]: a scanner that can
+    /// only ever be pointed at one file is a scanner whose failure mode nobody
+    /// has seen. [`every_gate_step_that_needs_python_says_so`] passes it the
+    /// real file; the control passes it planted steps whose verdicts are known
+    /// in advance, and that is the only one of the two that can fail on the
+    /// delimiter.
+    ///
+    /// # How a step is delimited
+    ///
+    /// A step opens on a line starting `Step '` and ends where its `{ ... }`
+    /// body returns to brace depth zero. `tools/ci.ps1` writes that in two
+    /// shapes, and telling them apart is the whole job:
+    ///
+    /// * **Over several lines** -- 69 of the 73 steps at f0e4a6f. The body is
+    ///   indented and the closing brace is not, so the step ends at the next
+    ///   line starting `}`. That line is `}` alone when the step declares no
+    ///   precondition and `} { ... }` when it declares one.
+    /// * **On one line** -- the other four, `tools/ci.ps1:339-344`: `rustfmt`,
+    ///   `clippy`, `unit tests` and `release build`. Depth returns to zero on
+    ///   the `Step '` line itself, so the step ends where it began, and its
+    ///   precondition -- if it has one -- is whatever follows the closing brace
+    ///   on that same line.
+    ///
+    /// Until 2026-08-13 only the first shape was implemented, and the doc here
+    /// asserted it as a property of the file ("bodies are indented and `Step`
+    /// lines and their closing braces are not"), which was false for four
+    /// steps and is why the second bullet had to be discovered rather than
+    /// read. What it cost is in the control's doc comment.
+    ///
+    /// A `Step` that never closes panics rather than being skipped silently,
+    /// and the caller floors the step count, so a reformatting that breaks the
+    /// delimiter fails a test instead of quietly emptying it.
+    fn scan_gate_steps(ci: &str) -> (usize, Vec<(usize, &str)>) {
+        let lines: Vec<&str> = ci.lines().collect();
+
+        let mut steps = 0usize;
+        let mut naked: Vec<(usize, &str)> = Vec::new();
+        for (i, &line) in lines.iter().enumerate() {
+            if !line.starts_with("Step '") {
+                continue;
+            }
+            steps += 1;
+            let name = line.split('\'').nth(1).unwrap_or("?");
+
+            let closes_here = one_line_step_close(line);
+            let (end, tail) = match closes_here {
+                // A one-liner delimits itself. Walking forward from here would
+                // reach the close of some LATER step and read that step's
+                // precondition as this one's.
+                Some(at) => (i, &line[at..]),
+                None => {
+                    let end = (i + 1..lines.len())
+                        .find(|j| lines[*j].starts_with('}'))
+                        .unwrap_or_else(|| panic!("Step '{name}' at line {} never closes", i + 1));
+                    // The closing line is `}` alone, or `} { ... }`; either
+                    // way the tail is what follows that brace. Equivalent to
+                    // the older `lines[end].trim() != "}"`, and written this
+                    // way so both shapes read the precondition out of the same
+                    // expression.
+                    (end, lines[end].strip_prefix('}').unwrap_or(""))
+                }
+            };
+            let has_precondition = !tail.trim().is_empty();
+
+            // `python` INVOKED, which is a whitespace-delimited token of its
+            // own -- not `reference/python/tests/xcheck_png.py`, which is an
+            // argument, and not a comment line explaining the mechanism.
+            let runs_python = lines[i..=end]
+                .iter()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .flat_map(|l| l.split_whitespace())
+                .any(|t| t == "python");
+            if runs_python && !has_precondition {
+                naked.push((i + 1, name));
+            }
+        }
+
+        (steps, naked)
+    }
+
     /// A gate step that shells out to Python is skipped without it, not failed.
     ///
     /// `tools/ci.ps1`'s own header states this as the file's contract: "Steps
@@ -6344,54 +6473,121 @@ mod tests {
     /// A false red, not a false green -- but the whole argument for a local
     /// gate is that a red one means something.
     ///
-    /// # How a step is delimited
+    /// # What this test can and cannot fail on
     ///
-    /// Bodies are indented and `Step` lines and their closing braces are not,
-    /// so a step runs from a line starting `Step '` to the next line starting
-    /// `}`. That closing line is `}` on its own when there is no precondition
-    /// and `} { ... }` when there is. A `Step` that never closes panics rather
-    /// than being skipped silently, and the step count is floored, so a
-    /// reformatting that breaks the delimiter fails this test instead of
-    /// quietly emptying it.
+    /// It is an audit of one file on disk: it fails when `tools/ci.ps1`
+    /// acquires a naked `python` step, and `assert!(steps > 30)` fails when the
+    /// delimiter stops finding steps at all. It does NOT exercise the
+    /// delimiter's edge, because the file it reads does not currently contain
+    /// the shape that breaks it -- at f0e4a6f the mis-delimited one-liners are
+    /// `rustfmt`, `clippy`, `unit tests` and `release build`, none of which
+    /// mentions Python, and all four happen to borrow a BARE `}` from
+    /// `ci.ps1:378`, which is the correct verdict by accident. Both the broken
+    /// and the fixed scanner return an empty list here. The delimiter itself is
+    /// pinned by [`the_step_scanner_reads_a_one_line_step_by_itself`], on
+    /// planted input; how a step is delimited is documented on
+    /// [`scan_gate_steps`].
     #[test]
     fn every_gate_step_that_needs_python_says_so() {
         let ci = std::fs::read_to_string(repo_root().join("tools").join("ci.ps1"))
             .expect("tools/ci.ps1 is readable");
-        let lines: Vec<&str> = ci.lines().collect();
-
-        let mut steps = 0usize;
-        let mut naked: Vec<String> = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
-            if !line.starts_with("Step '") {
-                continue;
-            }
-            steps += 1;
-            let name = line.split('\'').nth(1).unwrap_or("?");
-            let end = (i + 1..lines.len())
-                .find(|j| lines[*j].starts_with('}'))
-                .unwrap_or_else(|| panic!("Step '{name}' at ci.ps1:{} never closes", i + 1));
-            let has_precondition = lines[end].trim() != "}";
-            // `python` INVOKED, which is a whitespace-delimited token of its
-            // own -- not `reference/python/tests/xcheck_png.py`, which is an
-            // argument, and not a comment line explaining the mechanism.
-            let runs_python = lines[i..=end]
-                .iter()
-                .filter(|l| !l.trim_start().starts_with('#'))
-                .flat_map(|l| l.split_whitespace())
-                .any(|t| t == "python");
-            if runs_python && !has_precondition {
-                naked.push(format!("ci.ps1:{} Step '{name}'", i + 1));
-            }
-        }
+        let (steps, naked) = scan_gate_steps(&ci);
 
         assert!(steps > 30, "only {steps} steps found; the parser is broken");
 
+        let naked: Vec<String> = naked
+            .iter()
+            .map(|(line, name)| format!("ci.ps1:{line} Step '{name}'"))
+            .collect();
         assert!(
             naked.is_empty(),
             "{} gate step(s) run `python` with no precondition, so a machine \
              without it gets FAIL where the file's header promises SKIP:\n  - {}",
             naked.len(),
             naked.join("\n  - ")
+        );
+    }
+
+    /// The control for [`every_gate_step_that_needs_python_says_so`]: five
+    /// planted steps and the verdict the scanner must return for each.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: the scanner delimited every step by walking
+    /// forward, unconditionally, to the next line starting `}` and reading
+    /// `has_precondition` off that line -- so a step written entirely on one
+    /// line, which returns to brace depth zero where it began, was read over
+    /// the whole of the FOLLOWING step and inherited that step's precondition.
+    /// Against `PROBE` below, that delimiter -- which is what the mutation named
+    /// next restores; f0e4a6f read `tools/ci.ps1` itself and could not be handed
+    /// a fixture at all -- reports `[(1, "guarded one-liner"),
+    /// (2, "multi-line, naked")]`: it names the guarded one-liner, which
+    /// declares `{ Have python }` right there on its own line, and misses the
+    /// naked one at line 5, which borrows the `} { Have python }` of the step
+    /// after it.
+    ///
+    /// TO RE-BREAK IT: in `scan_gate_steps`, replace `let closes_here =
+    /// one_line_step_close(line);` with `let closes_here: Option<usize> =
+    /// None;`. That leaves [`one_line_step_close`] with no caller, so the
+    /// mutated tree also warns `dead_code` -- expected, and not the proof; the
+    /// proof is that `assert_eq!` below reports the two verdicts swapped.
+    ///
+    /// # Why the planted input, and not just the file
+    ///
+    /// A one-line naked `python` step is the shape most likely to be written
+    /// casually -- `Step 'quick py probe' { python tools/probes/x.py }` -- and
+    /// it was the one shape the check could not see. Over the 73 `Step`
+    /// positions in `tools/ci.ps1` at f0e4a6f, the next `}`-starting line
+    /// carries a precondition at 49 of them and is bare at 24, so roughly
+    /// two-thirds of the places such a step could be inserted would have
+    /// exempted it silently. The step would then FAIL through `Step`'s catch on
+    /// `CommandNotFoundException` on every Rust-only machine -- the exact
+    /// outcome the sibling test's doc says the precondition mechanism exists to
+    /// prevent -- while the test whose job is to catch that stayed green. The
+    /// only self-check was `assert!(steps > 30)`, which 73 satisfies whatever
+    /// the spans are.
+    ///
+    /// `ci.ps1`'s own step "every integration suite is run by a gate" plants
+    /// probe input to prove its parser can fail. This one did not, so it is the
+    /// same fix: hand the scanner steps whose right answers are known.
+    ///
+    /// # The five steps
+    ///
+    /// Four of them cross one-line against multi-line and naked against
+    /// guarded, so the fix is pinned in both directions: a naked one-liner must
+    /// be reported and a guarded one must not, while the two multi-line steps
+    /// are the null control whose verdicts must not move. The fifth is the
+    /// older comment filter -- untouched by this fix, and asserted here because
+    /// planted input is the only place it can be stated as an expectation: a
+    /// step that names `python` only inside a `#` comment runs nothing and must
+    /// not be reported.
+    #[test]
+    fn the_step_scanner_reads_a_one_line_step_by_itself() {
+        // Deliberately ordered so that BOTH one-liners are misread at f0e4a6f:
+        // the guarded one at line 1 borrows the bare `}` at line 4 (and is
+        // falsely reported), the naked one at line 5 borrows the
+        // `} { Have python }` at line 8 (and is falsely exempted).
+        const PROBE: &str = r#"Step 'guarded one-liner' { python tools/probe.py } { Have python }
+Step 'multi-line, naked' {
+    python tools/probe.py
+}
+Step 'naked one-liner' { python tools/probe.py }
+Step 'multi-line, guarded' {
+    python tools/probe.py
+} { Have python }
+Step 'python only in a comment' {
+    # this line says python and runs nothing
+    cargo test -p pl-probe
+}
+"#;
+
+        let (steps, naked) = scan_gate_steps(PROBE);
+
+        assert_eq!(steps, 5, "the planted file has five `Step '` lines");
+        assert_eq!(
+            naked,
+            [(2, "multi-line, naked"), (5, "naked one-liner")],
+            "the scanner must report exactly the two steps that run `python` \
+             with no precondition of their own, one of each shape; a one-line \
+             step is delimited by itself, not by the close of the step after it"
         );
     }
 }

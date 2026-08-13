@@ -207,24 +207,102 @@ impl Feature {
     /// multi-exon join (`join(100..200,300..400)` really does run 100..400),
     /// which is why they are not simply replaced.
     ///
+    /// # The crossing is read off the shape, not off the spelling
+    ///
+    /// This used to test for one spelling and one only — the final part
+    /// beginning at base 1 with the part before it ending at the last base,
+    /// which is what `genbank::write` emits and what nothing else emits.
+    /// [`Molecule::rotate`] remaps every endpoint in place and neither
+    /// re-splits nor re-orders the segment list, so it manufactures shapes that
+    /// spelling cannot describe, and for those the fallback below was not
+    /// merely loose: it was wrong in the dangerous direction, naming a span
+    /// *inside* the feature instead of around it. Two measured cases, both from
+    /// docs/AUDIT-2026-08-13.md §1:
+    ///
+    /// - a 2,686 bp circle carrying a 17 bp feature as `join(2677..2686,1..7)`.
+    ///   `rotate(2680)` leaves `[(2684,7),(8,14)]` — the crossing is now inside
+    ///   the *first* segment, which the old test never asked about — and the
+    ///   answer came back `(8, 14)`: seven bases, none of them among the ten in
+    ///   the wrapped segment.
+    /// - a 400 bp plasmid whose 60 bp CDS is `join(381..400,1..40)`.
+    ///   `rotate(2)` leaves `[(380,399),(400,39)]` and the answer was
+    ///   `(380, 399)`, so the Features row read "380..399", the tooltip read
+    ///   "20 bp (20 aa)" — because the residue count comes from a sum over the
+    ///   segments and is right — and clicking the row selected 20 of the CDS's
+    ///   60 bases and handed that to the design panel as the target.
+    ///   `rotate(390)` on the same feature gave `(12, 51)`, a *start* 380 bases
+    ///   from the real one, and "set origin at selected feature" then renumbered
+    ///   the plasmid around base 12.
+    ///
+    /// It also did not survive a save. `genbank::location_parts` writes a
+    /// wrapping segment as two parts, so the rotated feature above returns from
+    /// its own file as `join(392..400,1..11,12..51)`, whose last part starts at
+    /// 12: the old test missed it again and a 60 bp CDS reported as the whole
+    /// plasmid — verbatim the symptom docs/AUDIT-2026-07-29.md declares fixed.
+    ///
+    /// So the crossing is recognised structurally, in either shape a circular
+    /// molecule can hold it, and the answer no longer depends on which file the
+    /// molecule came from or on where it happens to be numbered:
+    ///
+    /// - **a segment that wraps on its own** (`end < start`) *is* the crossing,
+    ///   wherever it sits in the list. The annotator, the feature editor and
+    ///   `rotate` all produce that. A segment whose `end` is 0 is not a wrap but
+    ///   the `<Segment range="5-0"/>` shape [`Molecule::validate`] reports, and
+    ///   reading it as one would invent a span [`Molecule::subseq`] refuses to
+    ///   slice, so it does not count here.
+    /// - **a join cut at the origin**: any part ending at `span` immediately
+    ///   followed by one starting at base 1. That is INSDC's only spelling for a
+    ///   crossing, and asking it of every adjacent pair rather than only of the
+    ///   last one is what reads the three-part join a save writes.
+    ///
+    /// In both, the pair is `(first.start, last.end)`. `Feature::segments` is
+    /// stored in join order — `genbank::parse` says so where it reverses the
+    /// parts of `join(complement(a),complement(b))` to keep that invariant —
+    /// and `rotate` preserves the order it was handed, so the run begins at the
+    /// first segment and ends at the last one. Which segment wraps says where
+    /// the origin falls, not where the feature starts: it is the first segment
+    /// in one case above and the last in the other.
+    ///
+    /// `last.end < first.start` is required as well, doing exactly the job it
+    /// did in the old spelling-based test: it keeps an ordinary join that merely
+    /// happens to begin at base 1 (`join(1..200,300..400)`) out of the branch,
+    /// and with it any list too scrambled to be one run.
+    ///
     /// For a feature with introns *and* an origin crossing the result is an
     /// outer bound: the pair covers the intervening bases the segments do not.
-    /// Draw from `segments`; use this to say where a feature is.
+    /// Draw from `segments`; use this to say where a feature is. The min/max
+    /// fallback is now reached only by lists neither shape can read as one run
+    /// — two segments that each wrap, say — and for those it promises nothing
+    /// beyond the min and the max that it is.
     pub fn extent(&self, span: u64, circular: bool) -> Option<(u64, u64)> {
         let first = self.segments.first()?;
         let last = self.segments.last()?;
         if self.segments.len() == 1 {
             return Some((first.start, first.end));
         }
-        // GenBank has exactly one spelling for a span that crosses the origin:
-        // a join whose penultimate part ends at the last base and whose final
-        // part begins at base 1. `location_parts` emits that and nothing else,
-        // so recognising it here is recognising our own output. The
-        // `last.end < first.start` test is what keeps an ordinary join that
-        // merely happens to start at base 1 out of this branch.
-        if circular && span > 0 && last.start == 1 && last.end < first.start {
-            let prev = &self.segments[self.segments.len() - 2];
-            if prev.end == span {
+        if circular && span > 0 {
+            // The crossing carried inside one segment. Two of them is not one
+            // run and not a shape this model can hold, so such a list keeps the
+            // fallback rather than having a run invented for it.
+            let wrapping = self
+                .segments
+                .iter()
+                .filter(|s| s.end < s.start && s.end > 0)
+                .count();
+            // The crossing spelled as a cut between two parts. `location_parts`
+            // emits that and nothing else, so recognising it here is recognising
+            // our own output — but the cut is wherever the origin fell, not
+            // necessarily before the final part.
+            let cut_at_origin = self
+                .segments
+                .windows(2)
+                .any(|w| w[0].end == span && w[1].start == 1);
+            let one_run = match wrapping {
+                0 => cut_at_origin,
+                1 => true,
+                _ => false,
+            };
+            if one_run && last.end < first.start {
                 return Some((first.start, last.end));
             }
         }
@@ -779,6 +857,28 @@ impl Molecule {
     /// A coordinate that does not name a real base is left exactly where it is
     /// rather than being moved onto one; see the note on `remap` below for the
     /// fabrication that prevents.
+    ///
+    /// Endpoints are remapped **in place**. The segment list is not re-split,
+    /// re-ordered or coalesced afterwards, so a feature that still crosses the
+    /// origin after the rotation comes out in a shape no file would have
+    /// spelled: `join(2677..2686,1..7)` on a 2,686 bp circle becomes
+    /// `[(2684,7),(8,14)]`, with the crossing now inside the *first* segment and
+    /// the second segment following it across the join. That is deliberate, and
+    /// it is the reason [`Feature::extent`] recognises a crossing by shape
+    /// rather than by spelling — for a while it did not, and the same feature
+    /// read as seven bases at the wrong coordinates (docs/AUDIT-2026-08-13.md
+    /// §1).
+    ///
+    /// Normalising here was considered and rejected. Merging `(2684,7)` with
+    /// `(8,14)` means choosing which segment's `color`, `kind` and `translated`
+    /// bit survives, and SnapGene's per-segment translation bit has no other
+    /// spelling in this model, so the merge would silently drop one; splitting a
+    /// wrap the other way invents a segment boundary the source never had, and a
+    /// later rotation would not take it out again. The one place the shape
+    /// genuinely has to change is the GenBank writer, because the format has no
+    /// way to say `2684..7`, and `genbank::location_parts` splits it there —
+    /// there and nowhere else. Everything that asks *where a feature is* asks
+    /// [`Feature::extent`], which is where the question is answered.
     pub fn rotate(&mut self, origin: u64) -> bool {
         let n = self.len();
         if !self.topology.is_circular() || n == 0 || origin == 0 || origin > n {
@@ -1323,6 +1423,196 @@ mod tests {
         // On a linear molecule there is no origin to cross.
         assert_eq!(joined.extent(n, false), Some((1, 2686)));
         assert_eq!(Feature::new("nowhere", "CDS").extent(n, true), None);
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f: `extent` recognised an origin crossing only in
+    /// the spelling `genbank::write` emits — the final part beginning at base 1
+    /// with the part before it ending at the last base — while `rotate` remaps
+    /// endpoints in place and never re-splits or re-orders. A rotation that
+    /// leaves the feature across the origin therefore moved the crossing into a
+    /// segment the recogniser never asked about, and the min/max fallback
+    /// answered with a span *inside* the feature. This fixture is the one the
+    /// audit ran: it printed `segments=[(2684,7),(8,14)] extent=(8,14)` — seven
+    /// bases, none of them among the ten in the wrapped segment — for a feature
+    /// that annotates seventeen.
+    ///
+    /// The two halves are not the same shape and the fix has to read both: after
+    /// `rotate(2680)` the wrapping segment is the FIRST in the list, and after
+    /// `rotate(2)` on the 400 bp fixture it is the LAST. Which one wraps says
+    /// where the origin fell, not where the feature starts.
+    ///
+    /// Re-break it with: in `Feature::extent`, change the `one_run` match arm
+    /// `1 => true,` to `1 => false,`.
+    #[test]
+    fn extent_survives_a_rotation_that_leaves_a_feature_across_the_origin() {
+        // The length of an extent pair, read the way every caller has to read
+        // one: `end < start` is a wrap, so the bases run from `a` to the last
+        // base and on through the origin to `b`. This is the arithmetic the
+        // audit's probe used, kept here so the assertion is about bases and not
+        // about two numbers agreeing with two other numbers.
+        let bases_between = |n: u64, (a, b): (u64, u64)| {
+            if b >= a {
+                b - a + 1
+            } else {
+                n - a + 1 + b
+            }
+        };
+        // Period 16, so a 17 bp window cannot match a differently-placed one by
+        // coincidence the way a plain `ACGT` repeat would.
+        let pattern = b"ACGTTGCAAGTCCATG";
+
+        // A 2,686 bp circle carrying a 17 bp feature in exactly the join
+        // `genbank::write` emits and `genbank::parse` reads back.
+        let seq: Vec<u8> = (0..2686usize).map(|i| pattern[i % pattern.len()]).collect();
+        let mut m = circular(&seq);
+        let n = m.span();
+        assert_eq!(n, 2686);
+        let mut f = Feature::new("wrapper", "promoter");
+        f.segments.push(Segment::new(2677, n));
+        f.segments.push(Segment::new(1, 7));
+        m.features.push(f);
+
+        let before = m.features[0].extent(n, true).expect("it has segments");
+        assert_eq!(before, (2677, 7));
+        assert_eq!(bases_between(n, before), 17);
+        let annotated = m.subseq(before.0, before.1).expect("a sliceable wrap");
+        assert_eq!(annotated.len(), 17);
+
+        assert!(m.rotate(2680));
+        let segs: Vec<(u64, u64)> = m.features[0]
+            .segments
+            .iter()
+            .map(|s| (s.start, s.end))
+            .collect();
+        assert_eq!(
+            segs,
+            vec![(2684, 7), (8, 14)],
+            "the premise: rotate remaps in place, so the crossing is now inside \
+             the FIRST segment and that segment wraps"
+        );
+
+        let after = m.features[0]
+            .extent(n, true)
+            .expect("it still has segments");
+        assert_eq!(
+            bases_between(n, after),
+            17,
+            "a rotation moves a feature, it does not shorten one: {after:?}"
+        );
+        assert_eq!(after, (2684, 14));
+        assert_eq!(
+            m.subseq(after.0, after.1).expect("still a sliceable wrap"),
+            annotated,
+            "and it is the same seventeen bases, not a different span of the \
+             same length"
+        );
+
+        // The finding's failure scenario, where the rotation puts the crossing
+        // in the LAST segment instead of the first: a 400 bp plasmid whose CDS
+        // is `join(381..400,1..40)` — 60 bp, 20 aa, and the form every
+        // save-and-reopen produces.
+        let seq: Vec<u8> = (0..400usize).map(|i| pattern[i % pattern.len()]).collect();
+        let mut cds = circular(&seq);
+        let mut f = Feature::new("orf", "CDS");
+        f.segments.push(Segment::new(381, 400));
+        f.segments.push(Segment::new(1, 40));
+        cds.features.push(f);
+        let before = cds.features[0].extent(400, true).expect("it has segments");
+        assert_eq!(before, (381, 40));
+        let annotated = cds.subseq(before.0, before.1).expect("a sliceable wrap");
+        assert_eq!(annotated.len(), 60);
+
+        // `rotate(2)` and `rotate(390)` both leave the CDS across the origin —
+        // the broken cases. `rotate(200)` puts the new origin outside it, which
+        // is the benign case that was always right and must stay right.
+        for (origin, expect) in [(2u64, (380u64, 39u64)), (390, (392, 51)), (200, (182, 241))] {
+            let mut rotated = cds.clone();
+            assert!(rotated.rotate(origin));
+            let got = rotated.features[0]
+                .extent(400, true)
+                .expect("it still has segments");
+            assert_eq!(got, expect, "rotate({origin})");
+            assert_eq!(
+                bases_between(400, got),
+                60,
+                "rotate({origin}) changed how many bases a 60 bp CDS covers"
+            );
+            assert_eq!(
+                rotated.subseq(got.0, got.1).expect("a sliceable span"),
+                annotated,
+                "rotate({origin}) moved the extent off the bases the CDS names"
+            );
+        }
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f: the old recogniser asked only whether the
+    /// FINAL part began at base 1 with the part before it ending at the last
+    /// base. A wrap that has been through `rotate` and then a save is not
+    /// spelled that way: `genbank::location_parts` writes a wrapping segment as
+    /// two parts, so `[(392,11),(12,51)]` leaves as `join(392..400,1..11,12..51)`
+    /// and comes back as three segments whose last part starts at 12. The guard
+    /// failed and the min/max fallback reported `(1, 400)` — a 60 bp CDS
+    /// claiming the whole plasmid, which is verbatim the symptom
+    /// docs/AUDIT-2026-07-29.md quotes as fixed. `pl info --json`, the wasm
+    /// build and the Features panel all serve that pair straight out of the
+    /// saved file, with no rotate verb anywhere in sight.
+    ///
+    /// The controls below are correct at f0e4a6f as well, and are here because
+    /// the fix must not over-fire: an ordinary multi-exon join really does run
+    /// from its first base to its last, and that is what Biopython reports for
+    /// it too.
+    ///
+    /// Re-break it with: in `Feature::extent`, replace `.any(|w| w[0].end ==
+    /// span && w[1].start == 1)` with `.last().is_some_and(|w| w[0].end == span
+    /// && w[1].start == 1)`.
+    #[test]
+    fn extent_reads_a_join_cut_at_the_origin_wherever_the_cut_falls() {
+        let n = 400u64;
+        let mut saved = Feature::new("orf", "CDS");
+        saved.segments.push(Segment::new(392, 400));
+        saved.segments.push(Segment::new(1, 11));
+        saved.segments.push(Segment::new(12, 51));
+        assert_eq!(
+            (saved.start(), saved.end()),
+            (1, 400),
+            "the premise: min/max reports the entire plasmid for this shape"
+        );
+        assert_eq!(saved.extent(n, true), Some((392, 51)));
+
+        // The canonical two-part join `genbank::write` emits is the same
+        // recognition with the cut in the only place it used to be looked for.
+        let mut joined = Feature::new("wrapper", "promoter");
+        joined.segments.push(Segment::new(2677, 2686));
+        joined.segments.push(Segment::new(1, 7));
+        assert_eq!(joined.extent(2686, true), Some((2677, 7)));
+
+        // An ordinary multi-exon join is NOT a crossing and keeps the
+        // conventional span.
+        let mut spliced = Feature::new("spliced", "CDS");
+        spliced.segments.push(Segment::new(100, 200));
+        spliced.segments.push(Segment::new(300, 400));
+        assert_eq!(spliced.extent(n, true), Some((100, 400)));
+
+        // Nor is a join that merely begins at base 1 and ends at the last one.
+        let mut from_one = Feature::new("from one", "CDS");
+        from_one.segments.push(Segment::new(1, 200));
+        from_one.segments.push(Segment::new(300, 400));
+        assert_eq!(from_one.extent(n, true), Some((1, 400)));
+
+        // Two segments that each wrap is not one run and is not a shape this
+        // model can hold, so it keeps the min/max fallback rather than having a
+        // run invented for it.
+        let mut twice = Feature::new("impossible", "misc_feature");
+        twice.segments.push(Segment::new(390, 10));
+        twice.segments.push(Segment::new(200, 100));
+        assert_eq!(
+            twice.extent(n, true),
+            Some((twice.start(), twice.end())),
+            "an unreadable list gets the fallback, not a guess"
+        );
+
+        // A linear molecule has no origin to cross, whatever the parts say.
+        assert_eq!(saved.extent(n, false), Some((1, 400)));
     }
 
     #[test]

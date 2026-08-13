@@ -413,6 +413,52 @@ pub fn esc(s: &str) -> String {
 /// Colours arrive inside `.dna` files from Addgene and from collaborators, so
 /// they are not author-controlled. The same check the TypeScript renderer
 /// makes, for the same reason.
+///
+/// # Two jobs, and the second one went unnoticed from `442496c` to 0.10.0
+///
+/// The obvious job is injection: a colour of `#fff" onload="…` would otherwise
+/// close the `fill` attribute and hang an event handler on whatever page embeds
+/// the figure. The quieter job is that whatever this function returns is
+/// interpolated into `fill="{fill}"` and `stroke="{stroke}"` by [`svg_at`] with
+/// **no escaping at all** — [`esc`] is applied to `<title>` and `<text>`
+/// content only — so this is also the last place that can keep a byte XML
+/// forbids out of the document.
+///
+/// Until 2026-08-13 the functional-notation arm below listed `\x0b` (VT) and
+/// `\x0c` (FF) among the bytes it would pass, and neither is in the XML 1.0
+/// `Char` production — `#x9 | #xA | #xD | [#x20-#xD7FF] | …`, the very
+/// production [`esc`] cites and obeys immediately above this function.
+/// `str::trim` removes a *leading or trailing* VT/FF, both being `White_Space`,
+/// but it cannot reach an interior one, so `rgb(79,127,208\x0b)` survived every
+/// arm of the check: strip the prefix and the suffix and what is left is digits,
+/// commas and the VT.
+///
+/// The cost was not one wrong colour. A GenBank record carrying
+/// `/ApEinfo_fwdcolor="rgb(79,127,208\x0b)"` — or the equivalent `color=` on a
+/// `.dna` `<Segment>`; `genbank::decode_quoted` copies the characters of a
+/// quoted value verbatim and `snapgene`'s reader stores the attribute as it
+/// stands — made `pl export --svg` write that byte into an attribute value, and
+/// every conformant parser refuses the **whole document** at it: the entire
+/// figure is lost, not one feature's fill. The PDF, EPS and PNG of the same
+/// scene opened normally, so three of four exports of one file disagreed, and
+/// the SVG is the one with no report channel — the raster writer accumulates
+/// `raster::Report::unparsed_colours` for `pl export --png` to print, and the
+/// vector writers have nothing equivalent.
+///
+/// So the rule here is now [`esc`]'s: of the C0 controls only tab, LF and CR are
+/// legal XML, and only those three are admitted inside the parentheses. Nothing
+/// real is refused by that — VT was measured at zero occurrences across the file
+/// corpus (`docs/AUDIT-2026-07.md`, A3) — and the direction of failure is the
+/// safe one: a feature drawn in the fallback grey, rather than a file the reader
+/// will not open.
+///
+/// `packages/circular-map/src/geometry.ts::safeColor` carries the identical set,
+/// spelled out byte by byte for the same reason, and
+/// `tests/agreement.rs::colour_sanitising_agrees` replays `rgb(1,\x0b2,3)`
+/// through both implementations. That fixture case recorded the pass-through as
+/// the agreed answer until this change; it now records the refusal, which is why
+/// `crates/pl-draw/tests/agreement.json` had to move in the same commit as this
+/// line and the TypeScript regex.
 pub fn safe_color(v: Option<&str>, fallback: &str) -> String {
     let Some(v) = v.map(str::trim).filter(|s| !s.is_empty()) else {
         return fallback.to_string();
@@ -425,13 +471,18 @@ pub fn safe_color(v: Option<&str>, fallback: &str) -> String {
     // rgb()/rgba()/hsl()/hsla() carrying only numbers, %, commas, slashes and
     // spaces. Real files use these, and refusing them would silently grey out
     // a map that another tool coloured correctly.
+    //
+    // The whitespace admitted is space, tab, LF and CR — the four XML 1.0 calls
+    // whitespace, and the only four this can pass without risking the document.
+    // VT and FF used to be in this list; see the header for what one of them in
+    // a downloaded file did to an exported SVG.
     let func_ok = ["rgb(", "rgba(", "hsl(", "hsla("].iter().any(|p| {
         v.strip_prefix(p)
             .and_then(|rest| rest.strip_suffix(')'))
             .is_some_and(|inner| {
                 inner
                     .bytes()
-                    .all(|b| b.is_ascii_digit() || b"eE+-.,%/ \t\n\x0b\x0c\r".contains(&b))
+                    .all(|b| b.is_ascii_digit() || b"eE+-.,%/ \t\n\r".contains(&b))
             })
     });
 
