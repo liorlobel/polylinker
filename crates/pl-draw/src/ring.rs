@@ -315,6 +315,33 @@ impl Site {
     /// plans a blunt ligation against a sticky end and the map looks calmer than
     /// it did before.
     ///
+    /// A **range** — `SacI/KpnI/XmaI/SmaI/BamHI  281-292` — was the first
+    /// attempt and is the same failure one step further out. Five names against
+    /// two numbers: the mapping is not recoverable, and the two numbers printed
+    /// are the ones belonging to the outermost pair, so KpnI's 287, XmaI's 287
+    /// and SmaI's 289 appear nowhere on a figure that names all three. It also
+    /// scaled the wrong way — the threshold was a label *height* in bases, so
+    /// shrinking the window widened it, and pKoV folded sites 126 bp apart at a
+    /// 704 pt pane. Resizing a window changed what the map claimed about the
+    /// molecule.
+    ///
+    /// So: one coordinate when they genuinely share a base, and otherwise every
+    /// name carrying its own. `XmaI  6,917 / SmaI  6,919` is wider than either
+    /// name and narrower than two lines, and every input position is readable
+    /// back out of it — which is the invariant
+    /// `every_position_in_a_fold_is_readable_back_out_of_the_label` asserts.
+    ///
+    /// Composed from [`label_runs`](Site::label_runs) rather than beside it, so
+    /// a caller that hit-tests inside the drawn string cannot disagree with the
+    /// painter about where one enzyme's characters end.
+    pub fn label(&self) -> String {
+        self.label_runs()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .join(RUN_SEP)
+    }
+
     /// The runs of [`label`](Site::label) that each name exactly ONE cut
     /// position, joined by [`RUN_SEP`].
     ///
@@ -350,29 +377,6 @@ impl Site {
             .zip(&self.positions)
             .map(|(n, p)| (format!("{n}  {}", commas(*p)), *p))
             .collect()
-    }
-
-    /// A **range** — `SacI/KpnI/XmaI/SmaI/BamHI  281-292` — was the first
-    /// attempt and is the same failure one step further out. Five names against
-    /// two numbers: the mapping is not recoverable, and the two numbers printed
-    /// are the ones belonging to the outermost pair, so KpnI's 287, XmaI's 287
-    /// and SmaI's 289 appear nowhere on a figure that names all three. It also
-    /// scaled the wrong way — the threshold was a label *height* in bases, so
-    /// shrinking the window widened it, and pKoV folded sites 126 bp apart at a
-    /// 704 pt pane. Resizing a window changed what the map claimed about the
-    /// molecule.
-    ///
-    /// So: one coordinate when they genuinely share a base, and otherwise every
-    /// name carrying its own. `XmaI  6,917 / SmaI  6,919` is wider than either
-    /// name and narrower than two lines, and every input position is readable
-    /// back out of it — which is the invariant
-    /// `every_position_in_a_fold_is_readable_back_out_of_the_label` asserts.
-    pub fn label(&self) -> String {
-        self.label_runs()
-            .into_iter()
-            .map(|(t, _)| t)
-            .collect::<Vec<_>>()
-            .join(RUN_SEP)
     }
 }
 

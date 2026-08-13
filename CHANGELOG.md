@@ -97,6 +97,31 @@ which.
   dragged out by hand, and undo does not reach it. Both surfaces say so on hover
   before the click.
 
+  Checked on a real file as well as on the fixture written to make the proof
+  easy: every one of the 26 cut ticks on `prototype/demo-construct.gb` is
+  clicked, and the base it selects is compared against the number the Enzymes
+  table *printed* beside that enzyme's name — **22 enzymes named by both
+  surfaces, agreeing on all 22**, with neither number computed by the test.
+
+  Two enzymes get no tick answer at all: **NotI** at 643 and **BamHI** at 1,829,
+  each with a neighbour a few bases away whose hit box is the same fixed square
+  and, where two overlap, wins. That is pre-existing and unchanged. What is new
+  is that both are now known to be reachable by their own label instead of
+  assumed to be — a cut whose tick nobody can hit and whose label nobody can hit
+  would be this same defect surviving in the two places hardest to see it.
+
+- **A multi-cutter's positions could have been printed backwards, and nothing
+  would have noticed.** Making each coordinate clickable turned one string into
+  one widget per number, laid out right-to-left — where the *first* widget added
+  is the *rightmost*. That is a new way for `AvrII 830, 1,125, 2,069, 2,761` to
+  come out as `2,761 2,069, 1,125, 830,`, with the commas hanging off the wrong
+  ends and a reader planning a digest sent 1,931 bases away; the old single
+  joined string could not be out of order because nothing ordered it. The order
+  was right and stayed right — but the entire GUI suite, 676 tests at the time,
+  passed with the reversal in place, because nothing else looks at a row with
+  more than one number on it. It is now checked both ways: how the row reads,
+  and which base each number actually answers with.
+
 ### Added
 
 - **A focus ring on the sequence grid**, because a grid that holds the keyboard
