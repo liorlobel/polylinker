@@ -1014,7 +1014,10 @@ enum CentralView {
     Gel,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+// `Debug` so a test can compare two whole panel states in one `assert_eq!` and
+// have the failure name the tab it landed on. `Reveal` next door carries it for
+// the same reason.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Features,
     Library,
@@ -8256,6 +8259,11 @@ impl App {
 
         let picked = self.gel.picked.clone();
         let mut toggles: Vec<(String, bool)> = Vec::new();
+        // The cut position a row was clicked on, collected rather than acted on
+        // in place: `jump_to_base` takes `&mut self` and the closure below is
+        // already holding `d`, the document the digest was read from. Same shape
+        // as `toggles`, and the same reason.
+        let mut jump: Option<u64> = None;
         let uniq: Vec<_> = shown.iter().filter(|(_, x)| x.is_unique_cutter()).collect();
         let multi: Vec<_> = shown
             .iter()
@@ -8269,7 +8277,7 @@ impl App {
                 for (i, e) in &uniq {
                     let mut on = picked.contains(e.enzyme.name);
                     let was = on;
-                    enzyme_row(
+                    jump = enzyme_row(
                         ui,
                         e.enzyme.name,
                         e.enzyme.site,
@@ -8279,7 +8287,8 @@ impl App {
                         poor_single_site_note(e.enzyme.name, e.count()),
                         &end_note(e.enzyme, &cutters),
                         &mut on,
-                    );
+                    )
+                    .or(jump);
                     if on != was {
                         toggles.push((e.enzyme.name.to_string(), on));
                     }
@@ -8295,7 +8304,7 @@ impl App {
                 for (i, e) in &multi {
                     let mut on = picked.contains(e.enzyme.name);
                     let was = on;
-                    enzyme_row(
+                    jump = enzyme_row(
                         ui,
                         e.enzyme.name,
                         e.enzyme.site,
@@ -8305,7 +8314,8 @@ impl App {
                         poor_single_site_note(e.enzyme.name, e.count()),
                         &end_note(e.enzyme, &cutters),
                         &mut on,
-                    );
+                    )
+                    .or(jump);
                     if on != was {
                         toggles.push((e.enzyme.name.to_string(), on));
                     }
@@ -8356,6 +8366,15 @@ impl App {
             // is not one.
             self.gel.seeded = true;
             self.gel.seed_note = None;
+        }
+        // THE SAME DOOR THE MAP'S TICKS GO THROUGH, and deliberately the same
+        // one: "a cut at 7,530" and "base 7,530" is one relationship, and two
+        // surfaces answering it two ways would be the split-brain this codebase
+        // keeps having to close. `jump_to_base` carries the whole argument for
+        // why this leaves the Enzymes tab rather than revealing the row the user
+        // is already reading.
+        if let Some(at) = jump {
+            self.jump_to_base(at);
         }
     }
 
@@ -8648,6 +8667,56 @@ impl App {
     /// `sel` behind a run's back is a documented past defect.
     ///
     /// This is a VIEW change. It selects a base; it does not alter one.
+    ///
+    /// # Why this FORCES the Sequence tab, when a feature click does not
+    ///
+    /// v0.9.0 settled the rule for a map click — "reveal it where you are if
+    /// that is possible, and otherwise take me somewhere it is" — and v0.9.1
+    /// settled the split it rests on: selecting is unconditional, revealing is
+    /// tab-dependent. Both still hold here. What changes is the ANSWER, because
+    /// the thing being revealed is a base coordinate and not a feature, and the
+    /// two are not shown in the same places.
+    ///
+    /// Ask each of the eight tabs whether it can show base 7,530:
+    ///
+    /// * **Sequence** — yes. The grid has that cell and draws the selection on
+    ///   it. It is the only one.
+    /// * **Features** — no, and this is the whole asymmetry.
+    ///   [`App::map_clicked_feature`] can fall through to the Features list for
+    ///   six tabs because every feature HAS a row there. A cut has none: it is
+    ///   not an annotation, it is a property of the sequence and an enzyme. So
+    ///   v0.9.0's universal fallback is not a candidate at all.
+    /// * **Enzymes** — it prints the coordinate, and that is exactly why it is
+    ///   not the destination. The user who clicked a cut position in the Enzymes
+    ///   table was already looking at the number; revealing it to them there
+    ///   would move nothing, which is v0.9.0's own "a click whose entire visible
+    ///   effect is on the surface you clicked reads as a click that did not
+    ///   work".
+    /// * **Library, Primers, Reads, History, File** — no.
+    ///
+    /// The first clause of the rule can therefore only ever fire when Sequence
+    /// is already open, where forcing it is a no-op; every other tab takes the
+    /// second clause. A tab-dependent `match` here would be eight arms spelling
+    /// out one destination, and it would read as though there were a choice.
+    ///
+    /// This is what makes a cut site like a **Sanger mismatch** — the caller
+    /// this function was written for — and unlike a feature. The Reads tab
+    /// cannot show a reference base either, so that caller has always taken the
+    /// second clause too; it was never an exception to the routing, it was the
+    /// routing with only one arm reachable.
+    ///
+    /// **It also asks the grid to SCROLL, which it did not do before.** Setting
+    /// the tab put base 7,530 in a view still sitting on row 0, so the caret was
+    /// somewhere the user could not see and the gesture looked inert — the same
+    /// defect this whole change is about, one tab over. `Reveal::Base` is a
+    /// one-shot request that `sequence_tab` turns into a scroll offset, and it
+    /// does nothing when the base is already on screen.
+    ///
+    /// **It destroys a selection made by hand, and undo does not reach it.**
+    /// Unchanged and stated again because there is now a third way to pay it:
+    /// `show_hit`, `show_binding` and this have always charged it, and the map's
+    /// ticks and the Enzymes table's coordinates now charge it too. Both say so
+    /// on hover before the click, which is the rule [`click_line`] set.
     fn jump_to_base(&mut self, at: u64) {
         let Some(d) = self.bench.get_mut() else {
             return;
@@ -8666,6 +8735,7 @@ impl App {
             at,
         );
         self.tab = Tab::Sequence;
+        self.reveal = Some(Reveal::Base(at));
     }
 
     /// Every edit, in order, with the point you are standing at.
@@ -12901,7 +12971,8 @@ impl App {
         let mut hovered_out = None;
         let mut clicked_out = None;
         let mut opened_out = None;
-        let mut site_out: Option<Vec<(String, u64)>> = None;
+        let mut site_out: Option<map::SiteHit> = None;
+        let mut cut_out: Option<u64> = None;
         let mut pane_out: Option<egui::Rect> = None;
         // Straight from `selection_segment`, never re-derived from
         // `self.edit.sel` at the call site: that function is already the app's
@@ -13142,6 +13213,7 @@ impl App {
             clicked_out = r.clicked;
             opened_out = r.double_clicked;
             site_out = r.hovered_site;
+            cut_out = r.clicked_site;
             pane_out = Some(r.pane);
         });
 
@@ -13178,11 +13250,19 @@ impl App {
         // to that question would widen the split-brain the review calls
         // finding 5.
         if let (Some(pane), Some(d)) = (pane_out, self.document()) {
-            let tip = if let Some(sites) = &site_out {
-                let lines: Vec<String> = sites
+            let tip = if let Some(hit) = &site_out {
+                let mut lines: Vec<String> = hit
+                    .entries
                     .iter()
                     .map(|(name, pos)| site_tip_line(&d.digest, name, *pos))
                     .collect();
+                // WHAT A CLICK WILL DO, on the affordance itself and before it is
+                // used. The map now costs a hand-made selection to click — the
+                // same cost the Features row discloses through `click_line` —
+                // and on a merged label it also has to say WHICH of the two cuts
+                // the pointer is currently resolving to, because that is the one
+                // thing the list of entries above cannot show.
+                lines.push(format!("click to select base {}", fmt_int(hit.cut)));
                 Some(lines.join("\n"))
             } else {
                 hovered_out
@@ -13210,6 +13290,25 @@ impl App {
         }
         if let Some(i) = clicked_out {
             self.map_clicked_feature(i);
+        }
+        // The other channel, which `map::show` makes mutually exclusive with the
+        // one above rather than leaving the arbitration here — see the `else` at
+        // its `response.clicked()`.
+        if let Some(at) = cut_out {
+            // The words come from the ENTRIES and not from the digest, so the
+            // status line names the enzyme the pointer resolved to and not every
+            // enzyme at the tick. On `XmaI  6,917 / SmaI  6,919` those are
+            // different sentences and only one of them is about the click.
+            let named: Vec<&str> = site_out
+                .iter()
+                .flat_map(|h| h.entries.iter())
+                .filter(|(_, p)| *p == at)
+                .map(|(n, _)| n.as_str())
+                .collect();
+            self.jump_to_base(at);
+            if !named.is_empty() {
+                self.status = format!("{} · base {} selected", named.join("/"), fmt_int(at));
+            }
         }
         // After the click has been handled: egui delivers both, and a
         // double-click that left `selected` toggled off would open the editor on
@@ -15463,6 +15562,14 @@ fn end_note(e: &pl_enzymes::Enzyme, cutters: &[&'static pl_enzymes::Enzyme]) -> 
     EndNote { chip: side, hover }
 }
 
+/// One row of the Enzymes tab. Answers with the cut position the user clicked,
+/// if they clicked one.
+///
+/// A RETURN VALUE and not a `&mut Option<u64>` out-parameter, so the tab's own
+/// loop is where the answer is acted on: `enzymes_tab` is already holding a
+/// borrow of the document the digest came from, and a row that reached into
+/// `App` would have to take it a second way. The gel checkbox next to it is
+/// collected the same way and for the same reason.
 #[allow(clippy::too_many_arguments)]
 fn enzyme_row(
     ui: &mut Ui,
@@ -15474,7 +15581,8 @@ fn enzyme_row(
     poor_single_site: Option<&'static str>,
     end: &EndNote,
     in_gel: &mut bool,
-) {
+) -> Option<u64> {
+    let mut jump: Option<u64> = None;
     ui.horizontal(|ui| {
         ui.add(egui::Checkbox::without_text(in_gel))
             .on_hover_text("Run this enzyme on the gel.");
@@ -15528,16 +15636,62 @@ fn enzyme_row(
         )
         .on_hover_text(&end.hover);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let shown: Vec<String> = positions.iter().take(4).map(|p| fmt_int(*p)).collect();
-            let more = if positions.len() > 4 { MORE_MARK } else { "" };
-            ui.label(
-                RichText::new(format!("{}{more}", shown.join(", ")))
-                    .monospace()
-                    .size(11.0)
-                    .color(pal(ui).muted),
-            );
+            // ONE WIDGET PER COORDINATE, where there used to be one label
+            // holding a joined string. A cut position is the only number in this
+            // table that names a place in the molecule, and until now it was
+            // inert text: the number `7,530` was printed four inches from the
+            // sequence it describes with no way to get from one to the other.
+            //
+            // The right-to-left layout means widgets are ADDED in the reverse of
+            // the order they read, so the list is walked backwards and the
+            // overflow mark goes in first. Getting this wrong reverses a cut
+            // list, which on a multi-cutter is a wrong answer that looks like a
+            // right one.
+            let shown: Vec<u64> = positions.iter().copied().take(4).collect();
+            if positions.len() > 4 {
+                ui.label(
+                    RichText::new(MORE_MARK)
+                        .monospace()
+                        .size(11.0)
+                        .color(pal(ui).muted),
+                );
+            }
+            for (k, p) in shown.iter().copied().enumerate().rev() {
+                let sep = if k + 1 < shown.len() { "," } else { "" };
+                let r = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(format!("{}{sep}", fmt_int(p)))
+                                .monospace()
+                                .size(11.0)
+                                .color(pal(ui).muted),
+                        )
+                        // `Label::sense` and not a `Link`: a hyperlink's accent
+                        // colour and underline would make a column of ordinary
+                        // coordinates read as a column of references to
+                        // somewhere else, and there are up to four of them on
+                        // every row of a list that is mostly numbers.
+                        .sense(Sense::click()),
+                    )
+                    // WHICH MEANS THE CURSOR HAS TO BE SET BY HAND. `Label` does
+                    // not do it for a sense it was given after the fact, and a
+                    // click target that does not say so is the defect this whole
+                    // change is fixing, one panel over.
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    // The cost, before it is paid rather than after — the rule
+                    // `click_line` set for the map band and the Features row.
+                    .on_hover_text(format!(
+                        "click to select base {} in the sequence — this replaces whatever is \
+                         selected now",
+                        fmt_int(p)
+                    ));
+                if r.clicked() {
+                    jump = Some(p);
+                }
+            }
         });
     });
+    jump
 }
 
 /// One line of the map's site tooltip: the enzyme, THIS cut's coordinate, its
@@ -29332,6 +29486,673 @@ ATGAAACGCTAA
         ]
     }
 
+    // -----------------------------------------------------------------------
+    // A click on a cut site, from the ring and from the table
+    //
+    // The gap these close: `MapResponse` had `clicked` and `double_clicked`,
+    // both FEATURE indices, and `hovered_site` — so a press over a tick or a
+    // site label resolved to nothing at all while `map.rs` set
+    // `CursorIcon::PointingHand` for it. On the user's own pKoV that is 22 of
+    // the ring's ~31 labels promising a click and answering none. The Enzymes
+    // tab's coordinates were inert text on the same molecule, four inches from
+    // the bases they name.
+    // -----------------------------------------------------------------------
+
+    /// EcoRI's tick, which is one enzyme at one base, so nothing has to be
+    /// disambiguated and the answer can only be 4,001.
+    ///
+    /// PROVEN TO FAIL against the code this replaces, restored in place and run:
+    /// with `MapResponse::clicked_site` gone and `response.clicked()` promoting
+    /// only `out.hovered`, it fails on the first assertion — the click left the
+    /// panel on the Enzymes tab and selected nothing, because a cut had no
+    /// channel to be clicked through.
+    ///
+    /// It starts on the ENZYMES tab on purpose. That is where somebody choosing
+    /// a linearisation site is standing, it is the tab whose own table this
+    /// change also wires, and it is what makes the routing decision visible:
+    /// `jump_to_base` takes the user to the Sequence tab because that is the
+    /// only panel a base coordinate has a representation in — see its header for
+    /// the whole argument.
+    #[test]
+    fn a_click_on_a_single_enzyme_tick_selects_that_cut_position() {
+        let ctx = test_ctx();
+        let mut app = cut_app(Tab::Enzymes);
+        digested(&mut app);
+        let out = wide_map(&mut app, &ctx, 0.0);
+
+        let (centre, _) = backbone(&flat_shapes(&out.shapes));
+        let ticks = site_ticks(&out);
+        assert_eq!(
+            ticks.len(),
+            2,
+            "the premise: two ticks — XmaI/SmaI folded into one, and EcoRI's own"
+        );
+        // EcoRI cuts at 4,001 of 8,117, which is very nearly half way round, so
+        // its tick is the one BELOW the centre. Asserted rather than assumed:
+        // picking the wrong tick would make this a test about the merged label.
+        let at = *ticks
+            .iter()
+            .find(|p| p.y > centre.y)
+            .expect("EcoRI's tick is below the centre of the ring");
+
+        click_wide(&mut app, &ctx, at, 0.2);
+
+        assert!(
+            matches!(app.tab, Tab::Sequence),
+            "a click on a cut left the user on the Enzymes tab, where a base has \
+             no representation"
+        );
+        let sel = app.edit.sel.expect("the tick selected no bases at all");
+        assert_eq!(
+            (sel.lo(), sel.hi(), sel.through_origin),
+            (4_000, 4_001, false),
+            "the caret space is 0-based and EcoRI cuts at 1-based 4,001"
+        );
+        assert_eq!(sel.base_count(8_117), 1, "a cut is one base, not a span");
+        // AND THE GRID WENT THERE. Selecting base 4,001 and leaving the view on
+        // row 0 is the same "click that did nothing" this whole change is about,
+        // one panel over: `jump_to_base` set the tab and no `Reveal` until now.
+        let g = app.seq_grid.expect("the Sequence tab painted a grid");
+        assert_eq!(
+            g.first_row,
+            seqedit::row_of(4_000, g.per_row),
+            "the view is on base {} and the cut is at 4,001",
+            g.first_row * g.per_row + 1
+        );
+    }
+
+    /// The merged label, which is one target with two answers in it.
+    ///
+    /// PROVEN TO FAIL against the MUTATION, which was run: answering with
+    /// `labels[i].1` — `Site::anchor`, the first position, which is the cheap
+    /// "jump to the first entry" option — for the label as well as for the tick.
+    /// The XmaI half still passes and the SmaI half fails with "clicking the
+    /// digits `103` selected base 101".
+    ///
+    /// **Which is not a rounding error.** XmaI is `C^CCGGG` and SmaI is
+    /// `CCC^GGG`: isoschizomers of one recognition site cut at different bonds,
+    /// four bases of 5' overhang against a blunt end, and choosing between them
+    /// is the entire reason a cloner reads both names. Two bases is the whole
+    /// difference and it is the difference that matters.
+    ///
+    /// The pointer lands a quarter and three quarters of the way across the
+    /// drawn label. The label is `XmaI  101 / SmaI  103` — nine characters, a
+    /// three-character separator, nine characters — so those two points are
+    /// inside the first and the last run with a character and a half to spare at
+    /// this face, and the assertion is about which run, not about the arithmetic
+    /// that found it.
+    #[test]
+    fn a_click_on_a_merged_label_answers_with_the_enzyme_under_the_pointer() {
+        let ctx = test_ctx();
+        // (fraction across the label, the enzyme it is pointing at, its cut)
+        for (turn, (across, enzyme, cut)) in [(0.25f32, "XmaI", 101u64), (0.75, "SmaI", 103)]
+            .into_iter()
+            .enumerate()
+        {
+            // The clock only ever goes forward through one `Context`; see
+            // `wide_map`.
+            let t0 = turn as f64;
+            let mut app = cut_app(Tab::Sequence);
+            digested(&mut app);
+            let out = wide_map(&mut app, &ctx, t0);
+            let label = texts_in(&flat_shapes(&out.shapes), 10.0, egui::FontFamily::Monospace)
+                .into_iter()
+                .find(|(t, _)| t == "XmaI  101 / SmaI  103")
+                .map(|(_, r)| r)
+                .expect(
+                    "the premise: the two cuts are drawn as ONE label carrying both \
+                     enzymes and both coordinates",
+                );
+            let at = egui::pos2(label.left() + label.width() * across, label.center().y);
+
+            click_wide(&mut app, &ctx, at, t0 + 0.2);
+
+            let sel = app
+                .edit
+                .sel
+                .unwrap_or_else(|| panic!("pointing at {enzyme} selected no bases"));
+            assert_eq!(
+                (sel.lo(), sel.hi()),
+                (cut - 1, cut),
+                "the pointer was on {enzyme}'s own digits and the click selected base {}",
+                sel.hi()
+            );
+            // AND IT SAYS WHICH ONE. The two cuts are 0.4 pt apart on this ring,
+            // so nothing in the picture can tell the user which of the pair the
+            // click resolved to; the status line is the only place that answer
+            // exists.
+            assert!(
+                app.status.contains(enzyme) && app.status.contains(&fmt_int(cut)),
+                "the status line does not name the enzyme and base the click landed on: {:?}",
+                app.status
+            );
+            let other = if enzyme == "XmaI" { "SmaI" } else { "XmaI" };
+            assert!(
+                !app.status.contains(other),
+                "the status line names {other} as well, which is the collapse \
+                 `Site::label` exists to prevent: {:?}",
+                app.status
+            );
+        }
+    }
+
+    /// The other end of the same job: the coordinate in the Enzymes table.
+    ///
+    /// PROVEN TO FAIL against the code this replaces, restored in place and run:
+    /// `enzyme_row` drew the positions as one joined `ui.label`, so there was no
+    /// widget to click and the press fell through to the scroll area. It fails
+    /// on the comparison, with `(Enzymes, None, None)` against the ring's
+    /// `(Sequence, Some((4000, 4001)), Some(66))` — still on the Enzymes tab,
+    /// nothing selected, no grid.
+    ///
+    /// Asserted against the TICK's own result rather than against numbers
+    /// written out again here, because the claim is not "the table selects
+    /// 4,001" — it is "a cut at 4,001 and base 4,001 are one relationship, and
+    /// the two surfaces that name it answer the same way". Two hard-coded copies
+    /// of the expected state would pass just as happily with the two surfaces
+    /// disagreeing about the tab, the reveal or the caret.
+    #[test]
+    fn a_click_on_the_enzymes_tables_position_lands_where_the_tick_does() {
+        let ctx = test_ctx();
+
+        // What the ring does, recorded first.
+        let mut by_ring = cut_app(Tab::Enzymes);
+        digested(&mut by_ring);
+        let out = wide_map(&mut by_ring, &ctx, 0.0);
+        let (centre, _) = backbone(&flat_shapes(&out.shapes));
+        let tick = *site_ticks(&out)
+            .iter()
+            .find(|p| p.y > centre.y)
+            .expect("EcoRI's tick");
+        click_wide(&mut by_ring, &ctx, tick, 0.2);
+        let ring_state = (
+            by_ring.tab,
+            by_ring.edit.sel.map(|s| (s.lo(), s.hi())),
+            by_ring.seq_grid.map(|g| g.first_row),
+        );
+        assert_eq!(
+            ring_state.1,
+            Some((4_000, 4_001)),
+            "the premise: the ring answers with EcoRI's cut"
+        );
+
+        // And now the table, on its own copy of the same molecule.
+        let mut by_table = cut_app(Tab::Enzymes);
+        digested(&mut by_table);
+        paint_window(&mut by_table, &ctx, wide_at(1.0));
+        let out = paint_window(&mut by_table, &ctx, wide_at(1.1));
+        let cell = texts_in(&flat_shapes(&out.shapes), 11.0, egui::FontFamily::Monospace)
+            .into_iter()
+            .find(|(t, _)| t == "4,001")
+            .map(|(_, r)| r)
+            .expect("the premise: the Enzymes table prints EcoRI's cut position");
+
+        click_wide(&mut by_table, &ctx, cell.center(), 1.2);
+
+        assert_eq!(
+            (
+                by_table.tab,
+                by_table.edit.sel.map(|s| (s.lo(), s.hi())),
+                by_table.seq_grid.map(|g| g.first_row),
+            ),
+            ring_state,
+            "the table and the tick answer the same question two different ways"
+        );
+    }
+
+    /// The cursor promises exactly what a click delivers, and nothing else.
+    ///
+    /// PROVEN TO FAIL at 7e314e6 and against the code this replaces: there
+    /// `map.rs` set `PointingHand` whenever `hovered_site.is_some()` while
+    /// `response.clicked()` promoted only the feature channel, so both the tick
+    /// and the site label are hands that answer nothing and this fails on the
+    /// first of them. Also PROVEN TO FAIL against the MUTATION of the fix —
+    /// narrowing the cursor to `out.hovered.is_some()` alone, the "make the
+    /// promise smaller" option — which fails the other way round on the same two
+    /// points: a click that works under an ordinary arrow.
+    ///
+    /// The oracle is not a list of places that should be hands. It is a CLICK,
+    /// driven at the same point on a fresh copy of the same document, with the
+    /// whole of the app's visible answer compared before and after. So the
+    /// assertion is literally the sentence being made true, and adding a new
+    /// clickable thing to the map without a cursor for it fails here without
+    /// anybody remembering to extend a list.
+    #[test]
+    fn the_pointing_hand_appears_over_exactly_what_a_click_answers() {
+        let ctx = test_ctx();
+        let mut probe = cut_app(Tab::Sequence);
+        digested(&mut probe);
+        let out = wide_map(&mut probe, &ctx, 0.0);
+        let shapes = flat_shapes(&out.shapes);
+        let (centre, _) = backbone(&shapes);
+        let labels = texts_in(&shapes, 10.0, egui::FontFamily::Monospace);
+        let label_rect = |want: &str| {
+            labels
+                .iter()
+                .find(|(t, _)| t == want)
+                .unwrap_or_else(|| panic!("no {want:?} label on the map"))
+                .1
+        };
+        let merged = label_rect("XmaI  101 / SmaI  103");
+        let ticks = site_ticks(&out);
+        let band = point_on_band(&out, egui::Color32::from_rgb(0xd6, 0x27, 0x28));
+
+        let points: Vec<(&str, egui::Pos2)> = vec![
+            (
+                "EcoRI's tick",
+                *ticks.iter().find(|p| p.y > centre.y).expect("EcoRI's tick"),
+            ),
+            (
+                "the folded XmaI/SmaI tick",
+                *ticks
+                    .iter()
+                    .find(|p| p.y < centre.y)
+                    .expect("the folded tick"),
+            ),
+            (
+                "the XmaI end of the merged label",
+                egui::pos2(merged.left() + 6.0, merged.center().y),
+            ),
+            (
+                "the SmaI end of the merged label",
+                egui::pos2(merged.right() - 6.0, merged.center().y),
+            ),
+            ("EcoRI's own label", label_rect("EcoRI  4,001").center()),
+            ("the ori band", band),
+            // And the negatives, which are what stop this passing by making
+            // everything a hand. The centre carries the caption and has a hover
+            // tooltip of its own, so it is the one place a hover DOES something
+            // and a click does not.
+            ("the centre caption", centre),
+            ("blank pane, off the ring", egui::pos2(60.0, 80.0)),
+        ];
+
+        for (k, (what, at)) in points.into_iter().enumerate() {
+            // One `Context`, one clock, and it only goes forward; see `wide_map`.
+            let t0 = 1.0 + k as f64;
+            let hovered = paint_window(&mut probe, &ctx, wide_pointer_to(at, t0));
+            let hand = hovered.platform_output.cursor_icon == egui::CursorIcon::PointingHand;
+
+            // A fresh document each time, so one point's answer cannot be
+            // another point's premise — the second click on a band deselects.
+            let mut app = cut_app(Tab::Sequence);
+            digested(&mut app);
+            wide_map(&mut app, &ctx, t0 + 0.2);
+            let before = (
+                app.tab,
+                app.selected,
+                app.edit.sel,
+                app.seq_grid.map(|g| g.first_row),
+                app.status.clone(),
+            );
+            click_wide(&mut app, &ctx, at, t0 + 0.4);
+            let answered = (
+                app.tab,
+                app.selected,
+                app.edit.sel,
+                app.seq_grid.map(|g| g.first_row),
+                app.status.clone(),
+            ) != before;
+
+            assert_eq!(
+                hand,
+                answered,
+                "over {what}: the cursor is {} and a click {}",
+                if hand { "a pointing hand" } else { "an arrow" },
+                if answered { "answers" } else { "does nothing" }
+            );
+        }
+    }
+
+    /// Every tick on a REAL plasmid's ring, against the numbers the Enzymes
+    /// table prints beside the same enzyme's name.
+    ///
+    /// The three tests above are driven on [`cut_app`], which is 8,117 bases of
+    /// `A` with two recognition sites typed into it. That fixture is the right
+    /// one for them — it is the only way to put `XmaI/SmaI` on a ring with
+    /// nothing else competing for `room` — but everything it proves, it proves
+    /// about a molecule written to make the proof easy. This is the same claim
+    /// asked of `prototype/demo-construct.gb`: 3,180 bp, 38 cutters, ten
+    /// features, and a label column the packer has to fight for.
+    ///
+    /// **The two surfaces are read independently and neither is computed here.**
+    /// The table's number is the STRING it painted, found on the same row as the
+    /// enzyme name it painted. The ring's number is what the app SELECTED after
+    /// a click, with the enzyme taken from the status line it wrote. Nothing in
+    /// this test digests anything, so a shared error in the digest cannot make
+    /// it pass — the shared thing would have to be wrong in the drawing and in
+    /// the selecting, identically, which is the disagreement it exists to catch.
+    ///
+    /// PROVEN TO FAIL against three things, each restored in place and run:
+    ///
+    /// * the code this replaces — `response.clicked()` promoting only
+    ///   `out.hovered` — where no tick answers at all and it stops at "tick 0
+    ///   selected nothing";
+    /// * `jump_to_base(at + 1)` at the map's call site, where it stops at "the
+    ///   ring's answer for DraI: left `Some(433)`, right `Some(432)`";
+    /// * and the one the enzyme-by-enzyme loop at the end is here for, because
+    ///   the two above are both caught by the named premises before that loop is
+    ///   reached: `enzyme_row` printing `p + 1` only for `2_000..3_000`, so
+    ///   DraI, EcoRI and ClaI still agree and the disagreement is somewhere
+    ///   nobody wrote down. It fails "ApaI: the table prints 2283 and the ring
+    ///   selected 2282" — the enzyme and both numbers, which is the shape of
+    ///   failure this test exists to produce.
+    ///
+    /// A FRESH `App` per tick, reloaded from the file. The map's layout depends
+    /// on the selection drawn on it, so one click moves every later tick by up
+    /// to 10 pt — measured, and the reason the first version of this walked into
+    /// its own tail and clicked a feature band. Each probe therefore reads the
+    /// tick list from the very document it is about to click.
+    ///
+    /// The 26 ticks answer for 25 of the 27 enzymes they are drawn for, and the
+    /// two that go unanswered are **NotI** at 643 and **BamHI** at 1,829 —
+    /// measured, not deduced. Both have a near neighbour (SacII at 649, and the
+    /// 1,818/1,835 pair) whose hit box is the same fixed `LANE_STEP` square, and
+    /// where two boxes overlap the later `i` in the paint loop wins. That is
+    /// pre-existing, is unchanged by this work, and is deliberately NOT what
+    /// this test asserts: it asserts that every answer the ring gives is the
+    /// RIGHT answer for the enzyme it names, which is the difference between a
+    /// coarse target and a wrong one.
+    ///
+    /// What it does assert about those two is that they are still reachable, by
+    /// their own labels, with their own coordinates — because a tick nobody can
+    /// hit and a label nobody can hit is a cut with no way to it at all.
+    #[test]
+    fn every_tick_on_a_real_plasmid_agrees_with_the_enzymes_table() {
+        let ctx = test_ctx();
+        let load = || {
+            let mut app = App::blank();
+            app.load(PathBuf::from("../../prototype/demo-construct.gb"));
+            digested(&mut app);
+            app.tab = Tab::Enzymes;
+            app
+        };
+
+        // WHAT THE TABLE SAYS. The name is monospace 11.5 and the coordinates
+        // monospace 11.0, both drawn by `enzyme_row` into one `ui.horizontal`,
+        // so "the same row" is "the same centre y" — and the recognition site is
+        // 11.0 too, which is why the coordinate is the one nearest the right
+        // edge rather than merely the one that is 11.0.
+        let mut app = load();
+        let out = wide_map(&mut app, &ctx, 0.0);
+        let shapes = flat_shapes(&out.shapes);
+        let numbers = texts_in(&shapes, 11.0, egui::FontFamily::Monospace);
+        let mut table: std::collections::BTreeMap<String, u64> = Default::default();
+        for (name, at) in texts_in(&shapes, 11.5, egui::FontFamily::Monospace) {
+            let coord = numbers
+                .iter()
+                .filter(|(_, r)| {
+                    (r.center().y - at.center().y).abs() < 0.5 && r.left() > at.right()
+                })
+                .max_by(|a, b| a.1.right().total_cmp(&b.1.right()));
+            if let Some((text, _)) = coord {
+                if let Ok(n) = text.replace(',', "").parse::<u64>() {
+                    table.insert(name.trim().to_string(), n);
+                }
+            }
+        }
+        // Named, and checkable against `pl digest prototype/demo-construct.gb`
+        // rather than against anything this file computes. If the fixture is
+        // ever regenerated these are the numbers that have to move with it.
+        assert_eq!(table.get("DraI"), Some(&432), "the table's DraI row");
+        assert_eq!(table.get("ClaI"), Some(&3_122), "the table's ClaI row");
+        assert_eq!(table.get("EcoRI"), Some(&1_808), "the table's EcoRI row");
+        assert!(
+            table.len() >= 20,
+            "only {} rows were read out of the table, so this would agree with \
+             the ring by having nothing to disagree about: {table:?}",
+            table.len()
+        );
+
+        // WHAT THE RING DOES.
+        let n_ticks = site_ticks(&wide_map(&mut load(), &ctx, 1.0)).len();
+        assert_eq!(n_ticks, 26, "the premise: 26 cut ticks are drawn");
+        let mut ring: std::collections::BTreeMap<String, u64> = Default::default();
+        for k in 0..n_ticks {
+            let t0 = 100.0 + 10.0 * k as f64;
+            let mut app = load();
+            let ticks = site_ticks(&wide_map(&mut app, &ctx, t0));
+            assert_eq!(ticks.len(), n_ticks, "the ring redrew differently at {k}");
+            click_wide(&mut app, &ctx, ticks[k], t0 + 1.0);
+            let at = app
+                .edit
+                .sel
+                .unwrap_or_else(|| panic!("tick {k} selected nothing"))
+                .hi();
+            // `NAME · base N selected`, and on a shared base `PstI/SbfI · ...`.
+            // Checked for that shape BEFORE it is split, because the status the
+            // click did not write is the document's own `GenBank · 3,180 bp ·
+            // circular`, which splits just as happily and would quietly file
+            // this tick's base under an enzyme called "GenBank".
+            assert_eq!(
+                app.status,
+                format!(
+                    "{} · base {} selected",
+                    app.status.split(" · ").next().unwrap_or_default(),
+                    fmt_int(at)
+                ),
+                "tick {k} selected base {at} and wrote no status naming it"
+            );
+            // Split rather than matched whole, so PstI and SbfI each get their
+            // own row to be checked against — they are two rows in the table.
+            let names = app
+                .status
+                .split(" · ")
+                .next()
+                .unwrap_or_else(|| panic!("tick {k} wrote no status"))
+                .to_string();
+            for name in names.split('/') {
+                ring.insert(name.to_string(), at);
+            }
+        }
+        assert_eq!(ring.get("DraI"), Some(&432), "the ring's answer for DraI");
+
+        // AND THEY AGREE, enzyme by enzyme, on every one both surfaces name.
+        let mut both = 0;
+        for (name, ring_at) in &ring {
+            if let Some(table_at) = table.get(name) {
+                both += 1;
+                assert_eq!(
+                    ring_at, table_at,
+                    "{name}: the table prints {table_at} and the ring selected {ring_at}"
+                );
+            }
+        }
+        assert!(
+            both >= 18,
+            "only {both} enzymes were named by both surfaces, which is too few \
+             for agreement to mean anything — ring {ring:?}, table {table:?}"
+        );
+
+        // THE TWO NO TICK ANSWERS FOR. Their labels are the only way to their
+        // cuts, so a label that did not answer would leave them unreachable
+        // altogether — which is the original defect, surviving in the two places
+        // hardest to notice it.
+        for (enzyme, label, cut) in [
+            ("NotI", "NotI  643", 643u64),
+            ("BamHI", "BamHI  1,829", 1_829),
+        ] {
+            assert!(
+                !ring.contains_key(enzyme) && table.contains_key(enzyme),
+                "the premise: {enzyme} is a row in the table and no tick answers \
+                 with it — ring {ring:?}"
+            );
+            let mut app = load();
+            let out = wide_map(&mut app, &ctx, 900.0 + cut as f64);
+            let at = texts_in(&flat_shapes(&out.shapes), 10.0, egui::FontFamily::Monospace)
+                .into_iter()
+                .find(|(t, _)| t == label)
+                .map(|(_, r)| r)
+                .unwrap_or_else(|| panic!("the premise: the ring draws {label:?}"));
+            click_wide(&mut app, &ctx, at.center(), 901.0 + cut as f64);
+            assert_eq!(
+                app.edit.sel.map(|s| s.hi()),
+                Some(cut),
+                "{label} is the only way to {enzyme}'s cut and it did not \
+                 answer: {:?}",
+                app.status
+            );
+        }
+    }
+
+    /// A multi-cutter's coordinates read in ascending order, and the number you
+    /// point at is the base you get.
+    ///
+    /// # Why this is a new hazard and not an old one
+    ///
+    /// Until the change this test arrived with, a row's positions were ONE
+    /// `ui.label` holding `shown.join(", ")` — a single string that could not be
+    /// out of order because nothing ordered it. They are now one clickable
+    /// widget per coordinate, added inside `Layout::right_to_left`, where
+    /// widgets are placed from the right edge LEFTWARD: the first one added is
+    /// the RIGHTMOST. So the loop runs `.rev()`, and dropping that one call
+    /// reverses every multi-cutter row while leaving all 26 unique cutters — and
+    /// therefore every other test in this file — completely unchanged.
+    ///
+    /// PROVEN TO FAIL against exactly that MUTATION, which was run: `.rev()`
+    /// removed from `enzyme_row`'s coordinate loop. **The whole `pl-gui` suite
+    /// passed with it removed — 676 tests, none of which look at a row with more
+    /// than one number on it** — and this one fails with AvrII's cuts read out
+    /// as `2,761 2,069, 1,125, 830,`, the commas hanging off the wrong ends.
+    ///
+    /// It also drives a CLICK on the leftmost number, because the display order
+    /// and the answer come from different halves of the same loop: `k` decides
+    /// where the widget goes and `p` decides what it selects. A row that read
+    /// correctly while answering from the mirrored position would be the worse
+    /// bug of the two, and only a click can tell them apart. PROVEN against that
+    /// MUTATION too — `jump = Some(shown[shown.len() - 1 - k])`, which leaves
+    /// the row reading perfectly and fails here with `Some((2760, 2761))`.
+    ///
+    /// # The cursor, at this end of the job
+    ///
+    /// `the_pointing_hand_appears_over_exactly_what_a_click_answers` holds the
+    /// MAP to "a hand exactly where a click answers". The table is the other
+    /// surface this change made clickable and the same rule has to hold there,
+    /// so the last third of this drives a real click at two points on ONE row —
+    /// the coordinate, and the recognition site 200 pt to its left, identical in
+    /// size and family and differing only in sense — and compares the cursor
+    /// against whether the app's visible state moved.
+    ///
+    /// PROVEN TO FAIL BOTH WAYS, both mutations run:
+    ///
+    /// * `on_hover_cursor` dropped from the coordinate — a click target with no
+    ///   hand — fails `(false, true)` against `(true, true)`;
+    /// * the recognition site given `Sense::click()` and a hand of its own — the
+    ///   original defect, reintroduced one widget over — fails `(true, false)`
+    ///   against `(false, false)`.
+    ///
+    /// `Label::sense` is the reason the first is a live risk rather than a
+    /// theoretical one: egui sets no cursor for a sense given after the fact, so
+    /// every future clickable label here has to remember, and this is what
+    /// remembers for it.
+    ///
+    /// A tall window because the multi-cutters are painted below the 24 unique
+    /// cutters in the same scroll area, and at the 900 pt height the other tests
+    /// use they are simply not drawn.
+    #[test]
+    fn a_multi_cutters_positions_read_in_order_and_answer_where_they_point() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        app.load(PathBuf::from("../../prototype/demo-construct.gb"));
+        digested(&mut app);
+        app.tab = Tab::Enzymes;
+        let tall = |t: f64| egui::RawInput {
+            time: Some(t),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1800.0, 2400.0),
+            )),
+            ..Default::default()
+        };
+        // Twice: the side panel's width is learned from the pass before.
+        paint_window(&mut app, &ctx, tall(0.0));
+        let out = paint_window(&mut app, &ctx, tall(0.1));
+        let shapes = flat_shapes(&out.shapes);
+        let numbers = texts_in(&shapes, 11.0, egui::FontFamily::Monospace);
+        let name = texts_in(&shapes, 11.5, egui::FontFamily::Monospace)
+            .into_iter()
+            .find(|(t, _)| t.trim() == "AvrII")
+            .map(|(_, r)| r)
+            .expect("the premise: AvrII has a row in the Enzymes table");
+        // Everything 11.0 and monospace on AvrII's row, right of its name, left
+        // to right. That collects the recognition site as well, which is why the
+        // expectation below names it: a filter that dropped it could just as
+        // easily be dropping a coordinate.
+        let mut row: Vec<(String, egui::Rect)> = numbers
+            .into_iter()
+            .filter(|(_, r)| {
+                (r.center().y - name.center().y).abs() < 0.5 && r.left() > name.right()
+            })
+            .collect();
+        row.sort_by(|a, b| a.1.left().total_cmp(&b.1.left()));
+        assert_eq!(
+            row.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
+            ["CCTAGG", "830,", "1,125,", "2,069,", "2,761"],
+            "AvrII cuts demo-construct at 830, 1,125, 2,069 and 2,761 — check \
+             against `pl digest prototype/demo-construct.gb`"
+        );
+
+        // AND THE LEFTMOST NUMBER IS THE FIRST CUT, not the last one wearing its
+        // place. 830 and 2,761 are 1,931 bases apart, so a mirrored row would
+        // send a reader planning a digest to the far end of the plasmid.
+        assert_eq!(row[1].0, "830,", "the leftmost coordinate");
+
+        // THE CURSOR PROMISES EXACTLY WHAT A CLICK DELIVERS — the same rule
+        // `the_pointing_hand_appears_over_exactly_what_a_click_answers` holds
+        // the map to, asked of the other end of the same job. `Label::sense`
+        // does not set a cursor, so the coordinate sets one by hand; the
+        // recognition site beside it is an ordinary `ui.label` and must stay an
+        // arrow. Both probed on ONE row, where the two are 200 pt apart and
+        // identical in size and family, so nothing but the sense differs.
+        let probe = |app: &mut App, at: egui::Pos2, t: f64| -> (bool, bool) {
+            let before = (app.tab, app.edit.sel, app.status.clone());
+            let hover = paint_window(app, &ctx, {
+                let mut i = tall(t);
+                i.events = vec![egui::Event::PointerMoved(at)];
+                i
+            });
+            let hand = hover.platform_output.cursor_icon == egui::CursorIcon::PointingHand;
+            for (pressed, dt) in [(true, 0.1), (false, 0.2)] {
+                paint_window(app, &ctx, {
+                    let mut i = tall(t + dt);
+                    i.events = vec![
+                        egui::Event::PointerMoved(at),
+                        egui::Event::PointerButton {
+                            pos: at,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ];
+                    i
+                });
+            }
+            paint_window(app, &ctx, tall(t + 0.3));
+            (hand, (app.tab, app.edit.sel, app.status.clone()) != before)
+        };
+
+        // The recognition site first, because it is the negative and a version
+        // of this that ran it second would be reading a state the coordinate had
+        // already changed.
+        assert_eq!(
+            probe(&mut app, row[0].1.center(), 1.0),
+            (false, false),
+            "the recognition site `CCTAGG` is not a click target and must not \
+             offer a hand"
+        );
+        assert_eq!(
+            probe(&mut app, row[1].1.center(), 3.0),
+            (true, true),
+            "the coordinate `830,` is a click target and must say so before it \
+             is used"
+        );
+        assert_eq!(
+            app.edit.sel.map(|s| (s.lo(), s.hi())),
+            Some((829, 830)),
+            "the number drawn `830,` did not select base 830"
+        );
+    }
+
     /// One frame of nothing but the map, filling a pane of the given size.
     ///
     /// `Frame::NONE`, so the pane the map is handed *is* the rect returned and
@@ -29479,9 +30300,28 @@ ATGAAACGCTAA
                 egui::Shape::Text(t) => {
                     let f = &t.galley.job.sections.first()?.format.font_id;
                     ((f.size - size).abs() < 0.01 && f.family == family).then(|| {
+                        // `galley.rect` TRANSLATED, not `from_min_size(pos, size)`,
+                        // and the difference is a whole text width.
+                        //
+                        // `TextShape::pos` is the galley's ANCHOR and the anchor
+                        // depends on `job.halign`. `Painter::text` and every map
+                        // label go through `layout_no_wrap`, which is `Align::LEFT`,
+                        // so the two expressions agree there and this changes
+                        // nothing for any map test. `egui::Label` takes its halign
+                        // from the enclosing layout, and inside
+                        // `Layout::right_to_left` that is `Align::RIGHT`: the
+                        // galley's own rect then runs from `-width` to `0` and the
+                        // glyphs are drawn LEFT of `pos`.
+                        //
+                        // Measured on the Enzymes tab's coordinate column at a
+                        // 1,280 pt window: the widget really occupies 1,239..1,272
+                        // and the old expression reported 1,272..1,305 — 25 pt
+                        // outside the window, so a test that clicked the "centre of
+                        // the text" pressed nothing at all. The widget was always
+                        // where it looked; the reading of it was not.
                         (
                             t.galley.text().to_string(),
-                            egui::Rect::from_min_size(t.pos, t.galley.size()),
+                            t.galley.rect.translate(t.pos.to_vec2()),
                         )
                     })
                 }
@@ -32376,6 +33216,174 @@ ATGAAACGCTAA
             }
         }
         best.unwrap_or_else(|| panic!("no band was painted in {color:?}"))
+    }
+
+    /// A circular plasmid whose every cut site was put there on purpose.
+    ///
+    /// **POLY-A, and that is the whole trick.** No recognition site in the
+    /// shipped table is written in one letter, so an 8,117 bp run of `A` has
+    /// zero cutters and every enzyme the digest finds is one this function
+    /// spelled out. A random sequence has nine unique cutters of its own (see
+    /// `map_app`), and a test that clicked one of those would be a test about
+    /// whatever the generator happened to produce.
+    ///
+    /// Two sites, chosen for what they do to the LABEL and not for the biology:
+    ///
+    /// * `CCCGGG` near the origin. XmaI is `C^CCGGG` and SmaI is `CCC^GGG`, so
+    ///   one hexamer gives two cuts 2 bp apart — under a tick's stroke at every
+    ///   pane size, which is exactly `merge_sites`' fold criterion, so they
+    ///   arrive as ONE label carrying two enzymes at two positions. This is the
+    ///   ambiguous case, and it is a real one: the same pair is on the user's own
+    ///   pKoV at 6,917/6,919.
+    /// * `GAATTC` most of the way round. EcoRI, and its own tick.
+    ///
+    /// The coordinates are deliberately small — the sites are placed near base
+    /// 100 and base 4,000, not near 8,000 — because a merged label is only drawn
+    /// merged while it FITS `room`, and `XmaI  102 / SmaI  104` is six characters
+    /// narrower than the same pair at five-digit coordinates. `probe_labels`
+    /// prints what actually came out.
+    fn cut_app(tab: Tab) -> App {
+        let mut seq = vec![b'A'; 8_117];
+        seq[99..105].copy_from_slice(b"CCCGGG");
+        seq[3_999..4_005].copy_from_slice(b"GAATTC");
+        let seq = String::from_utf8(seq).expect("ASCII");
+        let mut d =
+            Document::from_bytes(format!(">p\n{seq}\n").as_bytes(), "p.fa".into(), None).unwrap();
+        d.apply(pl_core::OpKind::SetTopology(pl_core::Topology::Circular))
+            .unwrap();
+        let mut mol = d.molecule().clone();
+        // One feature, with a name three characters long. It is here so the
+        // cursor test can ask about a BAND as well as a tick — the two channels
+        // whose asymmetry is the whole defect — and it is short because a
+        // feature name competes with the site labels for `room`, and `room` is
+        // what decides whether the merged label survives as one label.
+        let mut f = pl_core::Feature::new("ori", "CDS");
+        f.strand = Strand::Forward;
+        let mut seg = pl_core::Segment::new(2_000, 2_600);
+        seg.color = Some("#d62728".into());
+        f.segments.push(seg);
+        mol.features.push(f);
+        let mut app = App::blank();
+        app.adopt(Document::of_molecule(mol));
+        app.tab = tab;
+        app
+    }
+
+    /// The window the cut-site tests drive, and why it is not [`window`].
+    ///
+    /// 1,800 x 900, not 1,280 x 840. `ring::label_room` is
+    /// `pane_half - (tick_r + gap)` capped by the row span, and measured through
+    /// `probe_labels` on this very molecule it comes to 73 pt at 1,280 and 233 at
+    /// 1,800 — while `XmaI  101 / SmaI  103` typesets 126.0 pt wide. So at the
+    /// default window the fold still happens and the merged form does not fit, so
+    /// `draw_circular` takes its `else` branch and splits the pair back into two
+    /// ordinary labels; at 1,800 it stays one label with two answers in it.
+    ///
+    /// Which is the second thing the measurement in `map::cut_under` records: a
+    /// merged label is a property of the pane as well as of the molecule, and a
+    /// test for the merged case has to be run at a pane that produces one.
+    fn wide_at(t: f64) -> egui::RawInput {
+        egui::RawInput {
+            time: Some(t),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1800.0, 900.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    fn wide_pointer_to(at: egui::Pos2, t: f64) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::PointerMoved(at)],
+            ..wide_at(t)
+        }
+    }
+
+    fn wide_button(at: egui::Pos2, pressed: bool, t: f64) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..wide_at(t)
+        }
+    }
+
+    /// [`press_map`] in the wide window, plus the frame the panel consumes the
+    /// request on — the one-frame lag [`click_map`] documents, not slack.
+    fn click_wide(app: &mut App, ctx: &egui::Context, at: egui::Pos2, t: f64) {
+        paint_window(app, ctx, wide_pointer_to(at, t));
+        paint_window(app, ctx, wide_button(at, true, t + 0.01));
+        paint_window(app, ctx, wide_button(at, false, t + 0.02));
+        paint_window(app, ctx, wide_at(t + 0.03));
+    }
+
+    /// The map painted twice in the wide window, settled enough to read.
+    ///
+    /// Twice because the side panel's width is learned from the pass before and
+    /// the map sizes its ring from labels it has to have laid out once already —
+    /// the same reason every map-click test above paints two frames.
+    ///
+    /// THE CLOCK IS A PARAMETER AND MUST ONLY GO FORWARD. `emath::History`
+    /// panics with "Time shouldn't move backwards" the moment a second document
+    /// is driven through the same `Context` from t = 0, which is what a test
+    /// that loops over fresh `App`s does. It is a real constraint and not a
+    /// harness quirk: one `Context` is one running application.
+    fn wide_map(app: &mut App, ctx: &egui::Context, t: f64) -> egui::FullOutput {
+        paint_window(app, ctx, wide_at(t));
+        paint_window(app, ctx, wide_at(t + 0.1))
+    }
+
+    /// The midpoint of every cut-site tick the map painted.
+    ///
+    /// Read off the paint list, like [`point_on_band`], rather than rebuilt from
+    /// `center`, `outer` and `angle_of`: the hit rect is
+    /// `Rect::from_center_size` on the midpoint of the segment the painter
+    /// emitted, so the midpoint of that same segment is inside it by
+    /// construction. A test that recomputed the geometry would be agreeing with
+    /// its own copy of the code.
+    ///
+    /// Picked out by stroke, and the discriminator is the COLOUR: a cut tick is
+    /// `(1.0, pal.muted)` and the ruler's ticks — the other radial hairlines on
+    /// this ring — are `(1.0, pal.line)`, which is a different value in both
+    /// themes. Width alone would collect the ruler and count it as a cut.
+    ///
+    /// Then narrowed to the hairlines that are RADIAL and OUTSIDE the backbone,
+    /// because this walks the whole window and the details panel is full of
+    /// muted hairlines of its own — the sequence grid's rules came back in the
+    /// first version of this helper, 78 of them, and one is a click target for
+    /// something else entirely.
+    fn site_ticks(out: &egui::FullOutput) -> Vec<egui::Pos2> {
+        let shapes = flat_shapes(&out.shapes);
+        let (c, r) = backbone(&shapes);
+        let muted = [
+            theme::Palette::of(true).muted,
+            theme::Palette::of(false).muted,
+        ];
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::LineSegment { points, stroke }
+                    if (stroke.width - 1.0).abs() < 0.01 && muted.contains(&stroke.color) =>
+                {
+                    let (a, b) = (points[0] - c, points[1] - c);
+                    // Same ray from the centre — `a.x * b.y - a.y * b.x` is zero
+                    // for two parallel vectors — and both ends beyond the
+                    // backbone, which is where the annulus the ticks live in
+                    // starts.
+                    let radial = (a.x * b.y - a.y * b.x).abs() < 0.5;
+                    (radial && a.length() > r && b.length() > r)
+                        .then(|| points[0] + (points[1] - points[0]) * 0.5)
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Press and release on `at`, and nothing more — so the caller can read
