@@ -1029,8 +1029,16 @@ enum Tab {
     File,
 }
 
-/// A one-shot request to bring something on screen, set by a map click and
-/// consumed by whichever tab was routed to on the NEXT frame.
+/// A one-shot request to bring something on screen, consumed by whichever tab
+/// was routed to on the NEXT frame.
+///
+/// THREE PRODUCERS, NOT ONE. This read "set by a map click", which was true
+/// while the map was the only one. Since 0.10.0 a click on a coordinate in the
+/// Enzymes table raises one too, and so does a double-click on a discrepancy in
+/// the Reads tab — both through `jump_to_base`, which is the one door. The
+/// consumer is deliberately blind to which: a `Reveal` is a coordinate and a
+/// tab, and naming a single producer here is how a reader ends up adding a
+/// fourth without looking at what the other three already agreed.
 ///
 /// One-shot is the whole design, and it is the rule
 /// `a_reflow_keeps_the_top_of_the_viewport_on_the_same_base` earned the hard
@@ -6991,10 +6999,11 @@ impl App {
                 // user could select the tab and be told the one thing it does
                 // not need.
 
-                // The map's reveal request, TAKEN HERE, once, before the
+                // The pending reveal request, TAKEN HERE, once, before the
                 // dispatch — not inside the tab
-                // that consumes it. A `Reveal` is a request from LAST frame's
-                // map click, and the tab it was aimed at is the tab this match
+                // that consumes it. A `Reveal` is a request from LAST frame —
+                // from the map, the Enzymes table or the Reads tab; see the
+                // type — and the tab it was aimed at is the tab this match
                 // is about to run; taking it anywhere else leaves a live
                 // request behind whenever the aimed-at tab does not run, which
                 // is every frame the document is closed, the filter hides the

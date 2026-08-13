@@ -94,14 +94,14 @@ One tag. Everything else follows from it.
 #    -- substitute both; they are written concretely because a placeholder is
 #    the thing people paste by accident, and they are one release behind the
 #    moment a release lands:
-sed -i 's/version = "0.9.0"/version = "0.9.1"/g' Cargo.toml
+sed -i 's/version = "0.9.1"/version = "0.10.0"/g' Cargo.toml
 #    Then check it took, because a typo in the left-hand side is a silent no-op.
 #    BOTH greps, and they used to be one: the old line ran only the NEW-version
 #    count and left "and 0.7.0 must print 0" as a comment, which is the half that
 #    catches a sed that matched nothing. `grep -c` exits 1 when it prints 0, so
 #    run them as two commands rather than chaining them with &&:
-grep -c 'version = "0.9.1"' Cargo.toml   # must print 17
-grep -c 'version = "0.9.0"' Cargo.toml   # must print 0
+grep -c 'version = "0.10.0"' Cargo.toml   # must print 17
+grep -c 'version = "0.9.1"' Cargo.toml    # must print 0
 cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
 #    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
 #    are the two files a tag does not update and nothing checks.
@@ -130,8 +130,8 @@ pwsh -NoProfile -File tools/ci.ps1
 
 # 4. Tag, on main, after the release commit has landed there. This is the only
 #    step that publishes anything.
-git tag -a v0.9.1 -m "Polylinker 0.9.1"
-git push origin v0.9.1
+git tag -a v0.10.0 -m "Polylinker 0.10.0"
+git push origin v0.10.0
 ```
 
 ### Step 2 is no longer the only thing standing between a tag and a red gate
@@ -560,7 +560,7 @@ prints the plan and stops.
 
 ### File associations
 
-`docs/PLAN.md:212` — *ask, don't take*. It costs nothing to honour, because
+`docs/PLAN.md:222` — *ask, don't take*. It costs nothing to honour, because
 since Windows 8 an installer cannot legitimately set a default anyway: the
 default lives under `Explorer\FileExts\<ext>\UserChoice` behind a per-user hash
 only the shell can compute.
@@ -578,7 +578,7 @@ Claiming the default for a file type you invented is not what PLAN.md forbids.
 Reversible with `-Unassociate`, by the uninstaller, or by deleting one visible
 HKCU subtree.
 
-The app side already worked: `App::open_argv` (`bins/pl-gui/src/main.rs:2405`)
+The app side already worked: `App::open_argv` (`bins/pl-gui/src/main.rs:2894`)
 takes every argument as a path and says so in its own doc comment.
 
 ### Upgrade
@@ -857,7 +857,7 @@ if any network or scheduling facility appears anywhere in `tools/installer/`.
 
 Note that `docs/PLAN.md` §5.1 still describes a Tauri stack with a "free,
 signature-mandatory auto-updater", and that §10 risk 9's `bundle > windows >
-signCommand` and the roadmap row at PLAN.md:220 — both written against it — were
+signCommand` and the roadmap row at PLAN.md:224 — both written against it — were
 struck through there on 2026-08-06. **The app is not Tauri** — it is
 eframe/egui with no webview (`bins/pl-gui/Cargo.toml`). This
 document supersedes the updater half of that plan. The paragraphs are left in
