@@ -34095,6 +34095,397 @@ ATGAAACGCTAA
         );
     }
 
+    /// `App::ui`'s order, far enough down it to reach the two surfaces
+    /// [`paint_out`] cannot: the feature editor and the New-document dialog are
+    /// `egui::Context` windows painted AFTER the panels, not `Ui` children of
+    /// them.
+    ///
+    /// The order is the load-bearing part and it is `App::ui`'s, not a
+    /// convenient one. `side_panel` — and therefore `sequence_keys` — runs
+    /// BEFORE either window paints, so on any frame where one of those windows
+    /// holds the keyboard, `sequence_keys` is reading a focus id set by a widget
+    /// that has not been drawn yet this frame. That is exactly the situation the
+    /// guard has to survive, and a harness that painted the windows first would
+    /// not reproduce it.
+    fn paint_full(app: &mut App, ctx: &egui::Context, input: egui::RawInput) -> egui::FullOutput {
+        ctx.run_ui(input, |ui| {
+            app.find_bar(ui);
+            app.side_panel(ui);
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.allocate_space(ui.available_size());
+            });
+            let c = ui.ctx().clone();
+            app.feature_editor(&c);
+            app.new_dialog(&c);
+        })
+    }
+
+    /// Tab through [`paint_full`] until a TEXT BOX holds the keyboard, and hand
+    /// back its id.
+    ///
+    /// A count and not a constant, for `tab_to_seq_grid`'s reason. One settling
+    /// frame after it lands, for `tab_to_seq_grid`'s other reason — a caller
+    /// that pressed its keys on the landing frame would be testing the one frame
+    /// in the session before egui's focus state has settled, which is not a
+    /// state a user is ever in.
+    fn tab_to_a_text_box(app: &mut App, ctx: &egui::Context, whose: &str) -> egui::Id {
+        for _ in 1..=80 {
+            let _ = paint_full(app, ctx, seq_key(egui::Key::Tab, egui::Modifiers::NONE));
+            if ctx.text_edit_focused() {
+                let _ = paint_full(app, ctx, window());
+                assert!(
+                    ctx.text_edit_focused(),
+                    "the {whose} text box dropped the keyboard on the frame after Tab landed"
+                );
+                return ctx.memory(|m| m.focused()).expect("a text box has an id");
+            }
+        }
+        panic!("80 Tab presses never reached a text box with the {whose} showing");
+    }
+
+    /// The six keystrokes that destroy something if they land in the wrong
+    /// place: two that move the caret, two that delete a base, a Ctrl+A that
+    /// arms the whole molecule for replacement, and the base that would replace
+    /// it.
+    fn destructive_events() -> Vec<egui::RawInput> {
+        vec![
+            seq_key(egui::Key::ArrowRight, egui::Modifiers::NONE),
+            seq_key(egui::Key::ArrowDown, egui::Modifiers::NONE),
+            seq_key(egui::Key::Delete, egui::Modifiers::NONE),
+            seq_key(egui::Key::Backspace, egui::Modifiers::NONE),
+            seq_key(egui::Key::A, egui::Modifiers::COMMAND),
+            seq_text("G"),
+        ]
+    }
+
+    /// [`destructive_events`], one per frame, with the molecule measured either
+    /// side.
+    ///
+    /// **THE PREMISE IS RE-ASSERTED BEFORE EVERY FRAME**, and that is what makes
+    /// these tests about the guard rather than about something else. "The
+    /// molecule did not change" is a true sentence about a frame where nothing
+    /// held the keyboard at all, and it proves nothing there — the sequence view
+    /// is SUPPOSED to be live when nothing is focused; that is how it is edited
+    /// with a mouse. Only a frame where a text box holds the keyboard is a frame
+    /// this guard is answerable for.
+    fn no_keystroke_reached_the_molecule(app: &mut App, ctx: &egui::Context, whose: &str) {
+        let before = app.edit.effective_len(app.document().unwrap().molecule());
+        let settled = app.document().unwrap().molecule().len();
+        let caret = app.edit.caret;
+        for input in destructive_events() {
+            assert!(
+                ctx.text_edit_focused(),
+                "the {whose} had already let go of the keyboard, so the rest of \
+                 this is not about the guard"
+            );
+            let _ = paint_full(app, ctx, input);
+        }
+        molecule_untouched(app, whose, before, settled, caret);
+    }
+
+    /// **`effective_len` AND `molecule().len()`, and the first one is the one
+    /// that matters.** A typed base opens a RUN, which is deliberately not in
+    /// the op log until it settles — so a check that read only
+    /// `molecule().len()` would be one keystroke behind and could call a stolen
+    /// base "nothing happened".
+    /// `an_arrow_key_with_the_sequence_grid_focused_moves_the_caret` makes the
+    /// same distinction from the other side, and needs an explicit `commit` to
+    /// see an edit that this function has to be able to see without one.
+    fn molecule_untouched(
+        app: &App,
+        whose: &str,
+        before: u64,
+        settled: u64,
+        caret: seqedit::Caret,
+    ) {
+        assert_eq!(
+            app.edit.effective_len(app.document().unwrap().molecule()),
+            before,
+            "a keystroke aimed at the {whose} changed the length of the molecule"
+        );
+        assert_eq!(
+            app.document().unwrap().molecule().len(),
+            settled,
+            "a keystroke aimed at the {whose} reached the op log"
+        );
+        assert_eq!(
+            app.edit.caret, caret,
+            "a keystroke aimed at the {whose} moved the caret"
+        );
+        assert!(
+            app.edit.sel.is_none(),
+            "Ctrl+A aimed at the {whose} selected the molecule"
+        );
+    }
+
+    // The four tests below are ONE claim about four surfaces: the narrowing in
+    // `sequence_keys` yields to a text box exactly as the old line did. They are
+    // four functions and not four blocks of one function so that a mutation can
+    // be attributed — a combined test stops at the first surface and says
+    // nothing about the other three, which is how "the editor is held by
+    // something else entirely" would have gone unnoticed.
+    //
+    // Each begins with a POSITIVE half, and the order is not cosmetic: "the
+    // molecule did not change" is satisfied just as well by a guard that
+    // swallowed the keystroke on its way to the box. The positive half asserts
+    // the typed base is in the box's OWN string, so a surface that would prove
+    // nothing fails here instead of passing quietly.
+    //
+    // MEASURED against three mutations, and they do not all say the same thing:
+    //
+    //   guard deleted        Find box  FAILS (8,118 bp -> 1)
+    //                        filter    FAILS (8,117 bp -> 1)
+    //                        editor    passes  -- held by `feature_edit.is_some()`
+    //                        New       passes  -- held by `asking()`
+    //   text_edit_focused    all four  pass    -- they are all text boxes
+    //   wide guard (v0.9.1)  all four  pass    -- strictly wider than what ships
+    //
+    // The two that pass everything are the point rather than a gap: this
+    // narrowing is strictly NARROWER than the old line, so no stand-down test
+    // can distinguish it from the old line. What separates it from
+    // `text_edit_focused` is
+    // `a_base_typed_with_a_tab_strip_button_focused_does_not_reach_the_document`,
+    // which is not a text box; what separates it from nothing at all is these.
+
+    /// PROVEN TO FAIL with `sequence_keys`' focus guard deleted: the positive
+    /// half's `A` is appended to the plasmid as well as reaching the box, taking
+    /// the fixture to 8,118 bp, and then Ctrl+A arms all of it and the `G`
+    /// replaces it — `effective_len` 1.
+    ///
+    /// Deliberately overlapping
+    /// `a_base_typed_into_the_find_box_does_not_reach_the_document`, and
+    /// strictly stronger than it in two ways that matter: it reads
+    /// `effective_len` rather than `molecule().len()`, so a base sitting in an
+    /// open typing run is visible, and it presses Delete, which that test does
+    /// not. The weaker one is kept because it is the one that carries the
+    /// argument about WHY the Find box and not the Features filter.
+    #[test]
+    fn a_keystroke_aimed_at_the_find_box_never_reaches_the_molecule() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        app.find.open = true;
+        app.find_focus = true;
+        let _ = paint_settled(&mut app, &ctx, window());
+        let id = tab_to_a_text_box(&mut app, &ctx, "Find bar");
+        assert_ne!(id, seq_grid_id(), "the Find bar's box IS the grid");
+        let _ = paint_full(&mut app, &ctx, seq_text("A"));
+        assert!(
+            app.find.query.contains('A'),
+            "the base never reached the Find box, so this proves nothing"
+        );
+        no_keystroke_reached_the_molecule(&mut app, &ctx, "Find box");
+    }
+
+    /// PROVEN TO FAIL with the focus guard deleted: 8,117 bp to `effective_len`
+    /// 1 on the single frame below.
+    ///
+    /// **THE FILTER AND THE SEQUENCE GRID ARE NEVER DRAWN TOGETHER**, so the
+    /// exposure is exactly one frame wide and this test is built around that
+    /// frame. `sequence_keys` runs inside `sequence_tab`; the filter belongs to
+    /// `features_tab`. The frame where the two meet is the frame AFTER the tab
+    /// changes — egui clears the focus of a widget that stops registering, in
+    /// `Focus::end_pass`, so on the first Sequence frame the filter's id is
+    /// still the focused id while `sequence_keys` runs. All six keystrokes go in
+    /// ONE frame for that reason.
+    ///
+    /// **AND THE FRAME AFTER IT IS NOT THIS GUARD'S, WHICH IS WORTH PINNING
+    /// RATHER THAN LEAVING TO BE REDISCOVERED.** Once egui has dropped the
+    /// filter's focus, nothing is focused, and a sequence view with nothing
+    /// focused is LIVE — that is how it is edited with a mouse, and it is the
+    /// behaviour at `189be8a` too. Measured on both: the same six keystrokes
+    /// spread over six frames take the fixture from 8,117 bases to 1, at main
+    /// and on this branch alike, because Ctrl+A arms the molecule and the `G`
+    /// replaces it. The last assertion here is on the MECHANISM — that the focus
+    /// really has gone by then — so it records why the guard stops being
+    /// answerable rather than blessing what happens next.
+    #[test]
+    fn a_keystroke_aimed_at_the_feature_filter_never_reaches_the_molecule() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        app.tab = Tab::Features;
+        let _ = paint_full(&mut app, &ctx, window());
+        let id = tab_to_a_text_box(&mut app, &ctx, "Features tab");
+        let _ = paint_full(&mut app, &ctx, seq_text("A"));
+        assert_eq!(
+            app.filter, "A",
+            "the base never reached the feature filter, so this proves nothing"
+        );
+        // The tab changes underneath it, exactly as a click on the strip does:
+        // egui has no focus-on-click for ordinary widgets, so the filter is
+        // still holding the keyboard when the Sequence tab paints.
+        app.tab = Tab::Sequence;
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            Some(id),
+            "the filter had already let go, so the overlapping frame is not being \
+             tested"
+        );
+        let before = app.edit.effective_len(app.document().unwrap().molecule());
+        let settled = app.document().unwrap().molecule().len();
+        let caret = app.edit.caret;
+        let burst = egui::RawInput {
+            events: destructive_events()
+                .into_iter()
+                .flat_map(|i| i.events)
+                .collect(),
+            ..window()
+        };
+        let _ = paint_full(&mut app, &ctx, burst);
+        molecule_untouched(&app, "feature filter", before, settled, caret);
+        assert_eq!(
+            ctx.memory(|m| m.focused()),
+            None,
+            "the filter still holds the keyboard a frame after it stopped being \
+             drawn, so this test's own account of why the next frame is not the \
+             guard's is wrong"
+        );
+    }
+
+    /// **THIS ONE PASSES AGAINST EVERY MUTATION OF THE GUARD, AND SAYING SO IS
+    /// THE TEST.** `sequence_keys` returns on `self.feature_edit.is_some()`
+    /// three lines below the focus guard, and has since before this branch — so
+    /// what is pinned here is that the narrowing did not disturb a belt which
+    /// was already fastened, not that the guard holds this surface. A reader who
+    /// took this for evidence about the guard would be reading it wrong.
+    ///
+    /// It is still worth running: the editor is a `Context` window painted AFTER
+    /// `side_panel`, so `sequence_keys` sees it only through `App` state, and a
+    /// future change that moved the panel or the stand-down would land here.
+    #[test]
+    fn a_keystroke_aimed_at_the_feature_editor_never_reaches_the_molecule() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        let _ = paint_settled(&mut app, &ctx, window());
+        app.open_feature_editor(None);
+        assert!(app.feature_edit.is_some(), "the editor did not open");
+        let _ = paint_full(&mut app, &ctx, window());
+        let id = tab_to_a_text_box(&mut app, &ctx, "feature editor");
+        assert_ne!(id, seq_grid_id(), "the editor's box IS the grid");
+        let _ = paint_full(&mut app, &ctx, seq_text("A"));
+        let panel = app.feature_edit.as_ref().expect("still open");
+        assert!(
+            panel.name.contains('A') || panel.kind.contains('A'),
+            "the base never reached the editor's Name or Type box, so this proves \
+             nothing"
+        );
+        no_keystroke_reached_the_molecule(&mut app, &ctx, "feature editor");
+    }
+
+    /// Passes against every mutation of the guard, for the reason the feature
+    /// editor's test gives: `asking()` counts `newdoc.open` and `sequence_keys`
+    /// returns on it, which predates this branch. The comment on `asking()`
+    /// names this dialog's text boxes as the sharper consequence of getting that
+    /// stand-down wrong, and this is that comment run rather than read.
+    #[test]
+    fn a_keystroke_aimed_at_the_new_document_dialog_never_reaches_the_molecule() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        let _ = paint_settled(&mut app, &ctx, window());
+        app.newdoc.show();
+        let _ = paint_full(&mut app, &ctx, window());
+        let id = tab_to_a_text_box(&mut app, &ctx, "New dialog");
+        assert_ne!(id, seq_grid_id(), "the dialog's box IS the grid");
+        let _ = paint_full(&mut app, &ctx, seq_text("A"));
+        assert!(
+            app.newdoc.name.contains('A') || app.newdoc.text.contains('A'),
+            "the base never reached the New dialog, so this proves nothing"
+        );
+        no_keystroke_reached_the_molecule(&mut app, &ctx, "New dialog");
+    }
+
+    /// The two guards in one frame, because this change is the first thing that
+    /// makes them BOTH live at once.
+    ///
+    /// Before it, a focused sequence grid meant `global_shortcuts` fired and
+    /// `sequence_keys` did not. Now both do, and the question that raises — does
+    /// a chord reach two handlers? — is answered by the two key sets being
+    /// disjoint: `global_shortcuts` takes `O N Z Y S F`, F1, F3 and Escape;
+    /// `sequence_keys` takes Ctrl+A, Ctrl+Shift+R, Ctrl+Shift+P, Backspace,
+    /// Delete, the four arrows, PageUp/PageDown, Home and End. Nothing is in
+    /// both. Rather than restate that list in an assertion that would rot, this
+    /// presses the five accelerators a user reaches for most and checks each
+    /// fires ALONE.
+    ///
+    /// **PROVEN TO FAIL, in two halves and against two different mutations.**
+    ///
+    /// The undo half fails at `189be8a`, and it is the half that could not have
+    /// been written there: `8,117 -> 8,118` needs a base typed into a focused
+    /// grid from the keyboard, which is the thing that did not work. It reads
+    /// `8,117 -> 8,117 -> 8,117` instead.
+    ///
+    /// The accelerator half fails against `global_shortcuts` put back to
+    /// "anything is focused" — the shape it had before `a79a276`, which is
+    /// argued against at its own call site: every one of the five comes back
+    /// false, because the grid is focused.
+    ///
+    /// `app.side_panel(ui)` inside each frame is load-bearing rather than
+    /// scenery. `Focus::end_pass` clears the focus of a widget that did not
+    /// register this pass, so a frame that asked `global_shortcuts` a question
+    /// without also drawing the grid would be asking it with NOTHING focused —
+    /// which is not the state under test, and is a state where the answer is
+    /// trivially yes. Written the other way first, this printed
+    /// `focus_is_grid=false` and proved nothing.
+    #[test]
+    fn the_accelerators_and_the_undo_still_work_with_the_sequence_grid_focused() {
+        let ctx = test_ctx();
+        let mut app = seq_app();
+        let _ = paint_settled(&mut app, &ctx, window());
+        tab_to_seq_grid(&mut app, &ctx);
+
+        // Each accelerator alone, with the grid holding the keyboard throughout.
+        for (key, want) in [
+            (egui::Key::Z, "undo"),
+            (egui::Key::S, "save"),
+            (egui::Key::F, "find"),
+            (egui::Key::N, "new_doc"),
+            (egui::Key::O, "open"),
+        ] {
+            let mut got = Shortcuts::default();
+            let _ = ctx.run_ui(seq_key(key, egui::Modifiers::COMMAND), |ui| {
+                got = app.global_shortcuts(ui.ctx());
+                app.side_panel(ui);
+            });
+            assert_eq!(
+                ctx.memory(|m| m.focused()),
+                Some(seq_grid_id()),
+                "the grid lost the keyboard, so this frame is not the state under test"
+            );
+            let fired: Vec<&str> = [
+                ("undo", got.undo),
+                ("redo", got.redo),
+                ("save", got.save),
+                ("find", got.find),
+                ("new_doc", got.new_doc),
+                ("open", got.open),
+            ]
+            .into_iter()
+            .filter_map(|(n, b)| b.then_some(n))
+            .collect();
+            assert_eq!(
+                fired,
+                vec![want],
+                "with the sequence grid focused, Ctrl+{key:?} fired {fired:?}"
+            );
+        }
+
+        // And the flow this change creates end to end: type a base from the
+        // keyboard, settle the run, undo it.
+        let before = app.document().unwrap().molecule().len();
+        paint(&mut app, &ctx, seq_text("A"));
+        app.settle();
+        assert_eq!(
+            app.document().unwrap().molecule().len(),
+            before + 1,
+            "the typed base never reached the molecule"
+        );
+        app.do_undo();
+        assert_eq!(
+            app.document().unwrap().molecule().len(),
+            before,
+            "a base typed from the keyboard could not be undone"
+        );
+    }
+
     // -- and now the fix -----------------------------------------------------
 
     /// PROVEN TO FAIL at 189be8a: `sequence_keys` returns on
@@ -34416,12 +34807,18 @@ ATGAAACGCTAA
     /// application can falsify. On its own it would be exactly the check that
     /// cannot fail.
     ///
-    /// What gives it standing is the join:
+    /// What gives it standing is the join, and it takes TWO other tests because
+    /// this one divides two numbers and each of them has to be tied to a real
+    /// frame separately.
     /// `a_focused_sequence_grid_is_drawn_differently_from_an_unfocused_one`
-    /// reads the colour out of a real painted frame in each theme and asserts it
-    /// IS `seq_focus_ink`, so between them the ratio below is a ratio about the
-    /// pixels a user sees. Neither test is worth having without the other, and
-    /// each names the other for that reason.
+    /// reads the ink out of a painted frame in each theme and asserts it IS
+    /// `seq_focus_ink`; `the_focus_rings_background_is_the_panel_it_is_measured_against`
+    /// reads the fill the ring sits on and asserts it IS `theme::panel_fill`.
+    /// Only with both is the ratio below a ratio about the pixels a user sees —
+    /// and the background half was missing until it was added, with a mutation
+    /// that leaves the numbers here unchanged and this test green while the ring
+    /// is really on `#4A555C`. None of the three is worth having alone, and each
+    /// names the others for that reason.
     ///
     /// **3:1, THE SC 1.4.11 THRESHOLD FOR A GRAPHICAL OBJECT**, which is what a
     /// ring is — it carries no text, so the 4.5:1 for body text does not apply
@@ -34457,6 +34854,78 @@ ATGAAACGCTAA
             assert!(
                 theme::contrast(wrong, bg) < 3.0,
                 "the negative control passes in {mode}, so this test cannot say no"
+            );
+        }
+    }
+
+    /// The colour the ring is drawn ON, read out of a real frame in both
+    /// themes.
+    ///
+    /// **THE THIRD LEG, AND THE ONE THAT WAS MISSING.**
+    /// `the_sequence_focus_ring_clears_three_to_one_in_both_themes` divides two
+    /// numbers, and `a_focused_sequence_grid_is_drawn_differently_from_an_unfocused_one`
+    /// proves the first of them is the colour the application paints. Neither
+    /// touches the SECOND — the background. A ratio measured against a colour
+    /// that is not behind the ring is worth exactly as much as one measured
+    /// against ink nothing draws, and it would stay green while being wrong, so
+    /// the two tests that name each other needed a third to close the loop.
+    ///
+    /// **PROVEN TO FAIL against the change that would silently invalidate the
+    /// claim**: one `painter.rect_filled(rect, 0.0, pal(ui).faint)` under the
+    /// ring — a perfectly ordinary thing to add to a grid. Both halves were run:
+    /// this test failed with `#4A555C != #1E2229`, and the contrast test printed
+    /// its two unchanged numbers, `7.08:1` and `5.35:1`, and said ok.
+    ///
+    /// The real ratio under that mutation is **3.40:1**, and naming it rather
+    /// than reaching for a scarier number is the point. What this closes is not
+    /// "the ring went invisible" — it is "the CHANGELOG says 7.08:1 and the
+    /// screen says 3.40:1". A fill one step lighter puts it under the bar as
+    /// well, and by then nothing else in this file would have noticed either.
+    ///
+    /// The predicate is CONTAINMENT and not intersection: what is wanted is the
+    /// surface the ring sits ON, so a shape that merely crosses the perimeter —
+    /// the six ruler ticks and the bottom row of bases both do, measured — is
+    /// not an answer to the question. The innermost containing fill is the one a
+    /// user sees, because egui paints in order.
+    #[test]
+    fn the_focus_rings_background_is_the_panel_it_is_measured_against() {
+        for dark in [true, false] {
+            let mode = if dark { "dark" } else { "light" };
+            let ctx = if dark { test_ctx() } else { test_ctx_light() };
+            let mut app = seq_app();
+            let _ = paint_settled(&mut app, &ctx, window());
+            tab_to_seq_grid(&mut app, &ctx);
+            let out = paint_settled(&mut app, &ctx, window());
+            let rings = seq_focus_rings(&out);
+            assert_eq!(rings.len(), 1, "expected one ring in {mode}");
+            let ring = rings[0].0;
+
+            // Every opaque fill that covers the whole ring, in paint order; the
+            // last one is the one nearest the user.
+            let under: Vec<(egui::Rect, egui::Color32)> = flat_shapes(&out.shapes)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Rect(r) if r.fill.a() == 255 && r.rect.contains_rect(ring) => {
+                        Some((r.rect, r.fill))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let (rect, fill) = *under
+                .last()
+                .expect("something must be painted behind the focus ring");
+            eprintln!(
+                "RING BACKGROUND {mode}: {fill:?} from {rect:?} ({} candidates)",
+                under.len()
+            );
+            assert_eq!(
+                fill,
+                theme::panel_fill(dark),
+                "the {mode} focus ring is drawn on {fill:?}, and \
+                 `the_sequence_focus_ring_clears_three_to_one_in_both_themes` \
+                 measures it against {:?} — that test is measuring a background \
+                 the application does not paint there",
+                theme::panel_fill(dark)
             );
         }
     }

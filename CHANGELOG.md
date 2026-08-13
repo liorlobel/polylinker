@@ -76,9 +76,47 @@ which.
   can enter the sequence and not leave it would be worse off than one who never
   got in.
 
+- **Ctrl+Z reaches a base typed from the keyboard**, and Ctrl+S, Ctrl+F, Ctrl+N
+  and Ctrl+O all still fire while the sequence holds it. This is the first change
+  that leaves both keyboard paths live in the same frame, so the question of
+  whether a chord now reaches two handlers is answered rather than assumed: the
+  two key sets are disjoint, and each accelerator is checked to fire alone.
+
+### Verification
+
+Nothing in this section changes what the application does. It is here because
+the claims above are the kind that stay green while being wrong.
+
+- **Every text box this application can put over an open molecule** now has a
+  keystroke aimed at it and the molecule measured afterwards: the Find bar, the
+  Features filter, the feature editor and the New-document dialog. Two of the
+  four turn out not to be held by this guard at all — the editor and the dialog
+  have had stand-downs of their own since long before this branch — and the
+  tests say so, because a test that is read as evidence for the wrong mechanism
+  is worse than no test.
+
+  The measurement that matters is `effective_len` and not `molecule().len()`: a
+  typed base sits in an open run before it reaches the op log, so the obvious
+  assertion is one keystroke behind and can call a stolen base "nothing
+  happened".
+
+- **The focus ring's 7.08:1 and 5.35:1 are now tied to the frame at both ends.**
+  One test already proved the ring's INK is what the application paints; nothing
+  proved the same of the BACKGROUND, so the ratio was half anchored. Adding a
+  single ordinary-looking fill under the ring leaves the contrast figures
+  unchanged and passing while the ring is really on `#4A555C` at 3.40:1 — that
+  gap is now closed by reading the fill out of a painted frame in both themes.
+
 Not here: the go-to-base box finding 9 also asked for. That is a separate
 feature. It is now cheaper rather than dearer to build, because the surface such
 a box would hand control back to can hold the keyboard and can say that it does.
+
+Also not here, and pre-existing: **the view does not follow the caret.** Only a
+reflow or a map reveal sets a scroll offset, so a keyboard user can now drive the
+caret off the bottom of the view and lose sight of it. It behaves exactly as it
+did in 0.9.1 — what changed is that the caret can be driven from the keyboard at
+all, which is what makes the gap reachable. It is the natural companion to the
+go-to-base box and belongs with it.
 
 ## [0.9.1] - 2026-08-13
 
