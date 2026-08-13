@@ -560,7 +560,7 @@ prints the plan and stops.
 
 ### File associations
 
-`docs/PLAN.md:212` — *ask, don't take*. It costs nothing to honour, because
+`docs/PLAN.md:222` — *ask, don't take*. It costs nothing to honour, because
 since Windows 8 an installer cannot legitimately set a default anyway: the
 default lives under `Explorer\FileExts\<ext>\UserChoice` behind a per-user hash
 only the shell can compute.
@@ -578,7 +578,7 @@ Claiming the default for a file type you invented is not what PLAN.md forbids.
 Reversible with `-Unassociate`, by the uninstaller, or by deleting one visible
 HKCU subtree.
 
-The app side already worked: `App::open_argv` (`bins/pl-gui/src/main.rs:2405`)
+The app side already worked: `App::open_argv` (`bins/pl-gui/src/main.rs:2894`)
 takes every argument as a path and says so in its own doc comment.
 
 ### Upgrade
@@ -857,7 +857,7 @@ if any network or scheduling facility appears anywhere in `tools/installer/`.
 
 Note that `docs/PLAN.md` §5.1 still describes a Tauri stack with a "free,
 signature-mandatory auto-updater", and that §10 risk 9's `bundle > windows >
-signCommand` and the roadmap row at PLAN.md:220 — both written against it — were
+signCommand` and the roadmap row at PLAN.md:224 — both written against it — were
 struck through there on 2026-08-06. **The app is not Tauri** — it is
 eframe/egui with no webview (`bins/pl-gui/Cargo.toml`). This
 document supersedes the updater half of that plan. The paragraphs are left in

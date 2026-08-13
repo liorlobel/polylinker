@@ -31,9 +31,10 @@ Nothing yet.
 
 Two gestures that promised something and delivered nothing now deliver it. Tab
 reaching the sequence grid used to switch the keyboard off; it now hands the
-keyboard over and draws a focus ring saying so. A cut site on the ring — or its
-coordinate in the Enzymes table — used to show a pointing hand over inert text;
-it now selects that base.
+keyboard over and draws a focus ring saying so. A cut site on the ring showed a
+pointing hand over text that answered nothing, and the same cut's coordinate in
+the Enzymes table was inert without even the false promise of a cursor; both now
+select that base.
 
 Both are behaviour changes to gestures a user already makes, which is what the
 minor number is for. Neither changes a file format, an exported figure, a CLI
@@ -172,13 +173,21 @@ verb or an answer any of them gives.
 Nothing in this section changes what the application does. It is here because
 the claims above are the kind that stay green while being wrong.
 
-- **Every text box this application can put over an open molecule** now has a
-  keystroke aimed at it and the molecule measured afterwards: the Find bar, the
-  Features filter, the feature editor and the New-document dialog. Two of the
-  four turn out not to be held by this guard at all — the editor and the dialog
-  have had stand-downs of their own since long before this branch — and the
-  tests say so, because a test that is read as evidence for the wrong mechanism
-  is worse than no test.
+- **Four text boxes that can sit over an open molecule** now each have a
+  keystroke aimed at them and the molecule measured afterwards: the Find bar,
+  the Features filter, the feature editor and the New-document dialog. Two of
+  the four turn out not to be held by this guard at all — the editor and the
+  dialog have had stand-downs of their own since long before this branch — and
+  the tests say so, because a test that is read as evidence for the wrong
+  mechanism is worse than no test.
+
+  **This sentence began "Every text box this application can put over an open
+  molecule", and that was not true.** At least two more exist and neither is in
+  the list or the tests: the Spacer box in the Design-primers window
+  (`design.rs:513`) and the Cut-and-religate window's own box (`clone.rs:718`),
+  both `egui::Context` windows that paint over whichever tab is showing. Four
+  boxes covered is the fact; "every" was the assertion, and the difference is
+  the whole reason this section exists.
 
   The measurement that matters is `effective_len` and not `molecule().len()`: a
   typed base sits in an open run before it reaches the op log, so the obvious
@@ -192,9 +201,12 @@ the claims above are the kind that stay green while being wrong.
   unchanged and passing while the ring is really on `#4A555C` at 3.40:1 — that
   gap is now closed by reading the fill out of a painted frame in both themes.
 
-Not here: the go-to-base box finding 9 also asked for. That is a separate
-feature. It is now cheaper rather than dearer to build, because the surface such
-a box would hand control back to can hold the keyboard and can say that it does.
+Not here: the go-to-base box. Finding **19** is what asks for one — the
+genome-scale finding — and it notes in passing that the box "also solves the
+keyboard-only case in finding 9"; this said finding 9 asked for it, which reads
+the borrowed benefit as the request. It is a separate feature either way, and it
+is now cheaper rather than dearer to build, because the surface such a box would
+hand control back to can hold the keyboard and can say that it does.
 
 - **A cut-site test measured the label a whole text width from where the widget
   was.** `egui::Label` takes its horizontal alignment from the enclosing layout,
@@ -218,6 +230,57 @@ set the tab and no scroll offset, so a double-clicked Sanger mismatch at base
 4,001 switched to a Sequence tab still sitting on row 1. It asks for
 `Reveal::Base` now, which is what makes the new cut-site click land somewhere
 you can see — and it fixes the Reads tab's jump on the way past.
+
+### Audited before tagging
+
+The release commit was read by six independent passes before the tag was cut,
+each finding handed to a reader whose instruction was to refute it. Two dead
+checks and five false counts survived that, and all seven are fixed above or
+below. They are listed because a release that quietly repaired its own release
+notes has learned nothing.
+
+- **A version bump killed a test, silently, with the suite green.**
+  `check_does_not_call_an_older_release_an_update` built its older release as
+  `Version::new(current.major(), current.minor(), 0)` behind an
+  `if older == current` guard **whose two arms were the same expression**. At
+  any `x.y.0` release that value IS the current version — so from the moment
+  `Cargo.toml` read `0.10.0`, the test named for the older case exercised only
+  the equal one, and nothing anywhere went red. It had been true of every `.0`
+  release before this one.
+
+  `older` is now derived by decrementing the lowest non-zero component, and then
+  **asserted to be older**, which is the part that stops this recurring. The
+  helper returns the LARGEST version below the current one, so at 0.10.0 the
+  fixture is `0.9.4294967295` — a string that sorts ABOVE `"0.10.0"`, making the
+  same test a second trap for a comparison that ever became textual. Proven by
+  three mutations: restoring the old derivation, making `update_available`
+  lexical, and making it always true.
+
+- **The MSI oracle claimed a comparison it never made.** `check-msi.ps1` said
+  "`pl --version` must agree with the MSI's declared version" and then asserted
+  only that the output held some three-number pattern; the package's declared
+  version was never read. Both halves were already in scope — `$plVersion` and
+  the `DisplayVersion` Windows Installer writes into Add/Remove Programs — and
+  they are now compared. This is not hypothetical: both MSI steps read `dist/`,
+  which the gate does not rebuild, so a stale payload inside a freshly-numbered
+  package passed every assertion in the file.
+
+- **Four counts and one attribution were wrong**, each now re-derived from the
+  file it describes rather than from memory: the Stage 4 hold count in
+  `features/README.md` said six and is one (`PLF:3019`, factor Xa — the other 27
+  ship); the same file said the SV40 early poly(A) signal is `proposed` when
+  `PLF:4011` was refused at 1 of 3 placements and `SV40` appears nowhere in
+  `features.tsv`; it called the snapshot three ingest passes when
+  `provenance.tsv` holds five distinct `retrieved` dates and `features/NOTICE`
+  had already been corrected to say so; `tools/release-notes.md` — which the tag
+  renders onto the release page — said nine embedded font faces where `NOTICE`
+  and `check-archive.ps1` both say ten, and `NOTICE`'s copy is the one a test
+  sums; and `tools/ci.ps1` said a machine without WiX still runs "the other 71
+  steps" against its own stated rule of the file's step total minus one, which
+  is 72.
+
+  None of them was load-bearing. All of them were the same failure: a number in
+  prose, drifting away from the number in the tree, with nothing joining them.
 
 ## [0.9.1] - 2026-08-13
 

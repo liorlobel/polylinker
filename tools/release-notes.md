@@ -157,7 +157,7 @@ exist, and names the test that holds each one.
 ## Licences
 
 Polylinker is MIT OR Apache-2.0, at your option — both texts are in the archive,
-`LICENSE.txt` and `LICENSE-MIT.txt`. It embeds nine font faces under four other
+`LICENSE.txt` and `LICENSE-MIT.txt`. It embeds ten font faces under four other
 licences, four of which require their text to accompany every copy — so
 `licences/`, `NOTICE.txt` and `features/NOTICE.txt` are inside every archive too,
 and all of it is covered by its `SHA256SUMS.txt`. The feature database is CC BY

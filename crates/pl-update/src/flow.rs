@@ -824,23 +824,71 @@ mod tests {
         assert!(!server.asked_for(&signature_url(&v)));
     }
 
-    /// An older release is reported as older rather than as an update.
+    /// The largest version strictly below `v`: decrement the lowest component
+    /// that is not zero, and saturate the ones below it.
+    ///
+    /// The largest rather than any, because the tightest boundary is the one
+    /// worth testing — and because at an `x.y.0` release it produces a version
+    /// whose STRING sorts ABOVE the current one. At 0.10.0 this returns
+    /// 0.9.4294967295, and `"0.9.4294967295" > "0.10.0"` lexically, so a
+    /// comparison that ever became textual fails here as well as in
+    /// `version::numeric_ordering_is_not_lexical`.
+    ///
+    /// Panics at 0.0.0, where nothing older exists. A released crate cannot be
+    /// at 0.0.0, and a panic naming that is better than a fixture that quietly
+    /// equals `current` — which is exactly the failure this helper replaced.
+    fn older_than(v: Version) -> Version {
+        if v.patch() > 0 {
+            Version::new(v.major(), v.minor(), v.patch() - 1)
+        } else if v.minor() > 0 {
+            Version::new(v.major(), v.minor() - 1, u32::MAX)
+        } else if v.major() > 0 {
+            Version::new(v.major() - 1, u32::MAX, u32::MAX)
+        } else {
+            panic!("no version is older than 0.0.0")
+        }
+    }
+
+    /// An older release is reported as older rather than as an update, and so
+    /// is the identical one.
+    ///
+    /// **THE OLDER VERSION IS DERIVED AND THEN ASSERTED TO BE OLDER**, and the
+    /// assertion is the point. This built `older` as
+    /// `Version::new(current.major(), current.minor(), 0)` behind an
+    /// `if older == current` guard whose two arms were the same expression, so
+    /// at every `x.y.0` release `older` WAS `current` and the test named for
+    /// the older case exercised only the equal one. v0.10.0 is such a release:
+    /// the test went dead by a version bump, silently, with the whole suite
+    /// green — a check that cannot fail for the thing it names, arrived at
+    /// without anyone touching it.
+    ///
+    /// `assert!(older < current)` is what stops that recurring. Any future
+    /// derivation that fails to produce an older version now fails loudly here
+    /// instead of quietly weakening the case below it.
+    ///
+    /// Both versions are exercised because `check`'s boundary is `>`, not `>=`:
+    /// the equal case was all this test had left, and dropping it to fix the
+    /// older case would trade one hole for another.
     #[test]
     fn check_does_not_call_an_older_release_an_update() {
         let current = Version::current().unwrap();
-        let older = Version::new(current.major(), current.minor(), 0);
-        let older = if older == current {
-            Version::new(current.major(), current.minor(), 0)
-        } else {
-            older
-        };
-        let server = serving(&older);
-        let got = check(&server).unwrap();
-        assert_eq!(got.offered, older);
+        let older = older_than(current);
         assert!(
-            !got.update_available() || older > current,
-            "an older or equal release must not be offered as an update"
+            older < current,
+            "the fixture must be strictly older than {current}, and {older} is not"
         );
+
+        for offered in [older, current] {
+            let server = serving(&offered);
+            let got = check(&server).unwrap();
+            assert_eq!(got.offered, offered);
+            assert_eq!(got.current, current);
+            assert!(
+                !got.update_available(),
+                "{offered} is not newer than {current} and must not be offered \
+                 as an update"
+            );
+        }
     }
 
     /// Anything that is not a release manifest is refused, and refused in a way

@@ -3252,10 +3252,12 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     # elevation and because it is the scope readers get by default. The
     # per-machine pass is added only when the session happens to be elevated.
     # The step is skipped entirely without wix, since a workstation with no .NET
-    # SDK cannot build an MSI to test and the other 71 steps are still worth
-    # running there. (It said 62 until 2026-08-10, which was the count before
-    # the gate grew; the number is this file's step total minus this one step,
-    # so it moves every time a step is added.)
+    # SDK cannot build an MSI to test and the other 72 steps are still worth
+    # running there. (It said 62 until 2026-08-10 and 71 until 2026-08-13, each
+    # of which was the count before the gate grew past it; the number is this
+    # file's step total minus this one step, so it moves every time a step is
+    # added, and `docs/RELEASING.md` says seventy-two for the same reason.
+    # Step total today: 73.)
     $dist = "$repo/dist"
     $out = Join-Path ([IO.Path]::GetTempPath()) ("pl-msi-" + [IO.Path]::GetRandomFileName())
     try {

@@ -233,12 +233,25 @@ try {
         if (-not (Test-Path -LiteralPath $t)) { continue }
         if ((Get-Item $t).Length -lt 100000) { Bad "$exe is only $((Get-Item $t).Length) bytes; that is not the real binary" }
     }
-    # `pl --version` must agree with the MSI's declared version.
+    # `pl --version` must agree with the MSI's declared version. The comparison
+    # itself is in the Add/Remove Programs block below, which is where the other
+    # half of it -- DisplayVersion, the ProductVersion Windows Installer recorded
+    # -- comes into scope; this block only has to carry the number down to it.
+    #
+    # THAT COMMENT SAT ABOVE A CHECK THAT NEVER MADE THE COMPARISON, from f9d8b59
+    # until 2026-08-13. It ran the installed binary and asserted the output held
+    # SOME three-number pattern; the MSI's declared version was never read at
+    # all. An installer declaring 0.10.0 around a pl.exe reporting 0.9.1 passed
+    # every assertion in this file -- which is not hypothetical, because both MSI
+    # steps read $repo/dist, a directory the gate does not rebuild. See line 7:
+    # A CHECK THAT CANNOT FAIL PROVES NOTHING.
     $plExe = Join-Path $prefix 'pl.exe'
+    $plVersion = $null
     if (Test-Path $plExe) {
         $ver = (& $plExe --version 2>&1 | Out-String).Trim()
         Note "pl --version -> $ver"
-        if ($ver -notmatch '[0-9]+\.[0-9]+\.[0-9]+') { Bad "the installed pl.exe did not report a version: $ver" }
+        if ($ver -match '[0-9]+\.[0-9]+\.[0-9]+') { $plVersion = $Matches[0] }
+        else { Bad "the installed pl.exe did not report a version: $ver" }
     }
 
     # ------------------------------------------------------------- Add/Remove
@@ -298,6 +311,16 @@ try {
             Bad "ARP says InstallLocation is '$($arp.InstallLocation)' but the package's own App Paths entry points into '$prefix'"
         }
         if (-not $arp.DisplayVersion) { Bad 'the ARP entry has no DisplayVersion' }
+        # The comparison promised at the `pl --version` block above. Two
+        # mechanisms again: DisplayVersion is the ProductVersion Windows
+        # Installer read out of the package, $plVersion is what the binary
+        # inside the package says about itself. They can only disagree if the
+        # payload and the wrapper came from different builds -- a stale dist/
+        # against a bumped Cargo.toml is exactly how that happens, and it is
+        # the shape of mistake a release makes at most once a version.
+        elseif ($plVersion -and ($arp.DisplayVersion -ne $plVersion)) {
+            Bad "the MSI declares version '$($arp.DisplayVersion)' but the pl.exe it installed reports '$plVersion'; the package and its payload are from different builds"
+        }
         if ($arp.Publisher -ne 'The Polylinker contributors') {
             Bad "ARP Publisher is '$($arp.Publisher)'; the binaries' version resource says 'The Polylinker contributors' and the two must agree"
         }
