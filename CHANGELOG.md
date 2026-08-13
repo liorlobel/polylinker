@@ -25,6 +25,20 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.10.0] - 2026-08-13
+
+Two gestures that promised something and delivered nothing now deliver it. Tab
+reaching the sequence grid used to switch the keyboard off; it now hands the
+keyboard over and draws a focus ring saying so. A cut site on the ring — or its
+coordinate in the Enzymes table — used to show a pointing hand over inert text;
+it now selects that base.
+
+Both are behaviour changes to gestures a user already makes, which is what the
+minor number is for. Neither changes a file format, an exported figure, a CLI
+verb or an answer any of them gives.
+
 ### Fixed
 
 - **The sequence grid stopped accepting keys the moment Tab reached it, and now
@@ -2414,7 +2428,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.0
 [0.9.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.9.1
 [0.9.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.9.0
 [0.8.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.8.1
