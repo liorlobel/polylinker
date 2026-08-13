@@ -3513,11 +3513,149 @@ impl App {
         }
     }
 
+    /// What a FASTA write of this molecule cannot carry, one clause per class.
+    ///
+    /// Split out of [`App::export`] for the reason [`App::plan_dna`] was split
+    /// out of `save_dna`: `export` raises `rfd::FileDialog` inline, so every
+    /// decision taken inside it was unreachable from the suite — including this
+    /// one, which is the whole of the program's notion of whether a save
+    /// counts. `a_faithful_save_clears_the_dirty_state_and_a_lossy_one_does_not`
+    /// carried this property's name for six releases while asserting only
+    /// `Document`'s own saved-cursor bookkeeping, because there was no way in:
+    /// the picker opens a native window and no test may block on one. There is
+    /// a way in now, and the test that carries the name drives this.
+    ///
+    /// The list is BOTH the sentence shown to the user and the fidelity
+    /// predicate — `export` sets `faithful` from `is_empty()` on it — so the
+    /// two cannot say different things. That coupling is exactly why every
+    /// field `pl_fileio::fasta::write` cannot carry has to appear here: it
+    /// emits `mol.name`, `mol.description` and `mol.seq` and nothing else
+    /// (crates/pl-fileio/src/fasta.rs:103-116), so features, primers, notes,
+    /// the topology and the methylation flags all end at this boundary.
+    ///
+    /// Counting only features and the topology, as this did, turned an
+    /// under-report into a CLEARED DIRTY DOT. The reachable case is narrow and
+    /// real: a **linear** molecule with **zero features** but with primers and
+    /// notes — and notes are essentially always present, because
+    /// `snapgene.rs:401` assigns block 6 straight into `Molecule::notes`. Save
+    /// that as `.fa` and the old list was empty, so `note` was empty and
+    /// `wrote()` printed only "wrote x.fa"; `faithful` was true, so
+    /// `mark_saved()` ran, the dot cleared and `d.path` was retargeted at the
+    /// `.fa`; `close_request`'s `bench.any_unsaved()` guard then stood down and
+    /// `on_exit` deleted the recovery draft that was the only copy holding the
+    /// edited bases and the primers together. The bases were in the `.fa`; the
+    /// primers were only in the untouched original.
+    ///
+    /// The methylation flags are listed only when one is set, because all four
+    /// are false on every molecule that did not come from a `.dna` — see
+    /// [`App::methylation_row`] — and "this drops the methylation flags" on a
+    /// molecule that never recorded any would be a loss the user did not have.
+    fn fasta_losses(mol: &pl_core::Molecule) -> Vec<String> {
+        let mut lost: Vec<String> = Vec::new();
+        if !mol.features.is_empty() {
+            lost.push(format!("{} feature(s)", mol.features.len()));
+        }
+        if !mol.primers.is_empty() {
+            let sites: usize = mol.primers.iter().map(|p| p.sites.len()).sum();
+            lost.push(format!(
+                "{} primer(s) and the {sites} binding site(s) they name",
+                mol.primers.len()
+            ));
+        }
+        if !mol.notes.is_empty() {
+            lost.push(format!("{} note(s)", mol.notes.len()));
+        }
+        // Kept in this position deliberately: on a molecule with features and a
+        // circular topology and nothing else the two clauses join to
+        // `9 feature(s) and the topology (it will reopen as linear)`, which is
+        // quoted verbatim in [`App::wrote`]'s doc and measured by
+        // `the_toolbar_stays_inside_the_window_however_long_the_status_is`.
+        if mol.topology.is_circular() {
+            lost.push("the topology (it will reopen as linear)".into());
+        }
+        let meth = [
+            (mol.methylation.dam, "Dam"),
+            (mol.methylation.dcm, "Dcm"),
+            (mol.methylation.ecoki, "EcoKI"),
+            (mol.methylation.cpg, "CpG"),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>();
+        if !meth.is_empty() {
+            lost.push(format!("the methylation flags ({})", meth.join(", ")));
+        }
+        lost
+    }
+
+    /// The GenBank text, what the format could not hold, and the one nuance
+    /// that is not a loss.
+    ///
+    /// Three values because two of them are different KINDS of thing and the
+    /// caller must not conflate them:
+    ///
+    /// - the `Vec<String>` is `write_reporting`'s own report: a feature whose
+    ///   every segment has no GenBank location and is therefore absent from the
+    ///   file (genbank.rs:1073-1084), a primer binding site past the end
+    ///   (:1148-1153), a control character flattened out of DEFINITION or a
+    ///   qualifier (:908-916, :1108-1116), an ORIGIN character rewritten as `n`
+    ///   (:1210-1227). Every one of those is work that is on screen and not in
+    ///   the file, so it makes the write UNFAITHFUL.
+    /// - the `Option<String>` is the unoriented-strand note. GenBank has no way
+    ///   to say "unoriented", so those features are written as forward, which
+    ///   for about half of them is a directional claim the source never made.
+    ///   That is an expressibility nuance rather than lost work — the feature
+    ///   IS in the file — so it is said and does not touch the dirty state.
+    ///
+    /// # Why `write_reporting` and not `write`
+    ///
+    /// `genbank::write` is literally `write_reporting(..).0` and its own doc
+    /// says so: "This drops the report. Prefer `write_reporting` anywhere the
+    /// caller can tell the user what the format could not carry — an annotation
+    /// GenBank has no form for leaves no trace in the file it is missing from."
+    /// `export` is precisely that caller: it builds a sentence on the next line
+    /// and puts it in the status bar. It called `write` anyway, so all four
+    /// classes above were computed, formatted into strings and dropped on the
+    /// floor, and the consequence was not only silence. `faithful` was
+    /// initialised `true` and assigned only inside the FASTA arm, so the
+    /// GenBank arm was STRUCTURALLY unable to produce an unfaithful save:
+    /// `mark_saved()` and `d.path = Some(path)` ran unconditionally, and a file
+    /// with one fewer feature in it than the document on screen became the file
+    /// the app believed the document was. `export(false)` is bound to Ctrl+S,
+    /// to Save ▸ GenBank…, and to the unsaved-changes guard's own Save button.
+    ///
+    /// docs/AUDIT-2026-07-28.md:499 named this call site and recorded it as
+    /// **deferred, not done** — "the GUI's GenBank export and its crash-recovery
+    /// snapshot … still call plain `genbank::write` and still discard the
+    /// report". This closes an accurately-logged open item; it is not a fix
+    /// that had failed. The crash-recovery snapshot inside [`App::autosave`]
+    /// still calls plain `write` and is a separate, still-open site: a draft
+    /// nobody chose to write has no status line to report into.
+    ///
+    /// One class stays invisible and it is worth knowing about: a feature key
+    /// longer than fifteen characters is truncated BEFORE the comparison that
+    /// decides whether to report it (genbank.rs:936-952, `key != cut`), so a
+    /// `type=` that only lost its tail is rewritten silently. That is in
+    /// pl-fileio, not here.
+    fn plan_genbank(
+        mol: &pl_core::Molecule,
+        title: &str,
+        date: (u32, usize, i32),
+    ) -> (String, Vec<String>, Option<String>) {
+        let (text, unwritable) = pl_fileio::genbank::write_reporting(mol, title, date);
+        let lossy = mol.features_without_expressible_orientation();
+        let strand = (!lossy.is_empty()).then(|| {
+            format!(
+                "{} feature(s) written as forward; GenBank cannot express their strand",
+                lossy.len()
+            )
+        });
+        (text, unwritable, strand)
+    }
+
     fn export(&mut self, as_fasta: bool) {
         self.settle();
-        // Assigned by the FASTA arm below; GenBank is always faithful enough to
-        // count as a save.
-        let mut faithful = true;
         let Some(d) = self.bench.get() else { return };
         let stem = pl_fileio::genbank::locus_name(&d.title);
         let (ext, filter) = if as_fasta {
@@ -3532,61 +3670,81 @@ impl App {
         else {
             return;
         };
-        let text = if as_fasta {
-            pl_fileio::fasta::write(d.molecule(), &d.title, 70)
-        } else {
-            pl_fileio::genbank::write(d.molecule(), &d.title, today())
-        };
-        let note = if as_fasta {
+        // THE BYTES, THE SENTENCE AND THE VERDICT, out of one expression.
+        //
+        // `faithful` used to be a `let mut faithful = true;` above the picker,
+        // assigned only inside `if as_fasta`, under the comment "GenBank is
+        // always faithful enough to count as a save". That comment was the
+        // defect stated as a rule: it made the GenBank arm structurally unable
+        // to report a lossy write, however much the writer had just dropped.
+        // Both arms decide it here, so neither can be the quiet one.
+        let (text, note, faithful) = if as_fasta {
             // FASTA is bases and a header, and that is all. The GenBank path
             // carefully warns that unoriented features become forward while
             // this one set `lossy = Vec::new()` and said nothing at all — so
             // the format that discards *every* feature, every note and the
             // topology was the quieter of the two.
             let m = d.molecule();
-            let mut lost: Vec<String> = Vec::new();
-            if !m.features.is_empty() {
-                lost.push(format!("{} feature(s)", m.features.len()));
-            }
-            if m.topology.is_circular() {
-                lost.push("the topology (it will reopen as linear)".into());
-            }
-            // The same list decides whether this write CLEARS the dirty state,
-            // below. Reused rather than recomputed: `export` already knows, per
-            // format, exactly what that format cannot carry, and a second
-            // notion of fidelity is how two answers to one question appear.
-            faithful = lost.is_empty();
-            if lost.is_empty() {
+            // The same list decides the sentence AND whether this write clears
+            // the dirty state. Computed once, in `fasta_losses`, because
+            // `export` already knows per format exactly what that format cannot
+            // carry, and a second notion of fidelity is how two answers to one
+            // question appear.
+            let lost = Self::fasta_losses(m);
+            let note = if lost.is_empty() {
                 String::new()
             } else {
-                format!(
-                    "FASTA keeps only the bases; this drops {}",
-                    lost.join(" and ")
-                )
-            }
+                // "a and b" for two, "a, b and c" for more. The two-clause form
+                // is byte-identical to what this always emitted, deliberately:
+                // it is quoted in [`App::wrote`]'s doc and measured whole by
+                // `the_toolbar_stays_inside_the_window_however_long_the_status_is`.
+                let list = match lost.len() {
+                    0 => String::new(),
+                    1 | 2 => lost.join(" and "),
+                    _ => {
+                        let (last, rest) = lost.split_last().expect("at least three clauses");
+                        format!("{} and {last}", rest.join(", "))
+                    }
+                };
+                format!("FASTA keeps only the bases; this drops {list}")
+            };
+            let text = pl_fileio::fasta::write(m, &d.title, 70);
+            (text, note, lost.is_empty())
         } else {
-            let lossy = d.molecule().features_without_expressible_orientation();
-            if lossy.is_empty() {
-                String::new()
-            } else {
-                // GenBank has no way to say "unoriented", so those features are
-                // written as forward. For about half of them that is a
-                // directional claim the source never made.
-                format!(
-                    "{} feature(s) written as forward; GenBank cannot express their strand",
-                    lossy.len()
-                )
+            let (text, unwritable, strand) = Self::plan_genbank(d.molecule(), &d.title, today());
+            let mut said: Vec<String> = Vec::new();
+            // FIRST, because `wrote()` puts the note leftmost and the status bar
+            // elides from the right: this is the clause that has to survive
+            // clipping. The strand nuance after it is the one a reader can
+            // afford to lose.
+            if !unwritable.is_empty() {
+                said.push(format!(
+                    "{} thing(s) have no GenBank form and are NOT in this file: {}",
+                    unwritable.len(),
+                    unwritable.join("; ")
+                ));
             }
+            said.extend(strand);
+            // Only the report makes a write unfaithful. See `plan_genbank` for
+            // why the strand note does not: those features ARE in the file.
+            let faithful = unwritable.is_empty();
+            (text, said.join("  ·  "), faithful)
         };
         // `atomic::write`, not `fs::write`: a GenBank export that fails partway
         // must not have already truncated the file it was overwriting. See that
         // module's doc for the pattern and what it costs.
         match atomic::write(&path, text) {
             Ok(()) => {
-                // GenBank's own note ("N features written as forward") is a
-                // strand-EXPRESSIBILITY nuance, not lost work, so GenBank
-                // always clears the dirty state. FASTA clears it only when its
-                // loss list is empty — no features and linear — because a FASTA
+                // Cleared by a write that carried the whole document, and BOTH
+                // formats can now fail that test. GenBank's strand note ("N
+                // features written as forward") is an expressibility nuance and
+                // not lost work — the feature is in the file — so it does not
+                // count against the write; a feature `write_reporting` could
+                // not place, a primer site past the end, a flattened control
+                // character or an ORIGIN base rewritten as `n` is work that is
+                // on screen and not in the file, and does. FASTA clears it only
+                // when `fasta_losses` is empty — no features, no primers, no
+                // notes, linear, and no methylation flags — because a FASTA
                 // that drops nine features has not saved the user's work, and
                 // marking it clean would make the dot and the guard lie in the
                 // one case they exist for.
@@ -5815,9 +5973,19 @@ impl App {
                             self.export(false);
                             ui.close();
                         }
+                        // The hover names the same five classes
+                        // `App::fasta_losses` enumerates, in the same order.
+                        // The hover is read BEFORE the write and the status
+                        // line only after it, so a hover naming two of the five
+                        // was the shorter claim and the one the user acted on.
+                        // `fasta::write` emits the name, the description and
+                        // the bases, and nothing else at all.
                         if ui
                             .button("FASTA…")
-                            .on_hover_text("bases only: no features, no topology")
+                            .on_hover_text(
+                                "bases only: no features, no primers, no notes, no topology, \
+                                 no methylation",
+                            )
                             .clicked()
                         {
                             self.export(true);
@@ -6563,6 +6731,32 @@ impl App {
             // that no longer had any bases in it.
             (Some(kind), _) => {
                 self.status = format!("{} — Ctrl+Z to undo", kind.describe());
+                // AND THE HELD LINE GOES BACK, because nothing here replaced
+                // it. `held` was read in exactly one of the three arms, so on
+                // the ORDINARY path — the run commits and `commit` reports no
+                // feature loss — it was dropped at the end of the match and the
+                // notice under the sequence was destroyed. The one it destroyed
+                // is the one `SeqEdit` goes out of its way to keep: `reject()`
+                // records `reject_at` and `clear_notice` refuses to clear for
+                // `REJECT_STICKY = 5.0` seconds, "long enough to read a
+                // sentence". Every accepted-keystroke path inside `seqedit`
+                // honours that window; this wrapper bypassed all of them, and
+                // `App::ui` settles the run `Run::IDLE_SECONDS = 1.0` after the
+                // last accepted keystroke, so the real lifetime of a refusal
+                // was about one second and any pointer press cut it shorter
+                // still. Type `ATGGCC5TAA`, pause, and the only report that a
+                // keystroke was dropped is gone while the caret sits exactly
+                // where the user expects and nothing in the grid marks the gap.
+                //
+                // `is_none()` and not an unconditional restore: `commit`
+                // writes into `edit.notice` on success too, through
+                // `feature_loss`, and a feature destroyed by this very run
+                // outranks a refusal from before it. Expiry is not
+                // second-guessed here either — `clear_notice` owns that rule
+                // and applies it on the next keystroke.
+                if self.edit.notice.is_none() {
+                    self.edit.notice = held;
+                }
             }
             // Refused. THIS is the "genuine commit failure" the comment above
             // has always claimed to be selecting for, and could not.
@@ -12764,6 +12958,85 @@ impl App {
         }
     }
 
+    /// The File tab's `methylation` value: a verdict when the file can carry
+    /// one, and an admission when it cannot.
+    ///
+    /// # Two different absences that rendered as the same nothing
+    ///
+    /// `Molecule::methylation` has exactly one non-test writer in the whole
+    /// workspace — `crates/pl-fileio/src/snapgene.rs:382`, the `.dna` flag byte.
+    /// The GenBank and FASTA readers never touch it, and `Methylation` is four
+    /// plain `bool`s with a derived `Default`, so every molecule that did not
+    /// come out of a `.dna` carries `{dam: false, dcm: false, ecoki: false,
+    /// cpg: false}` and there is no third state to distinguish "the file says
+    /// no" from "the file has no field for this".
+    ///
+    /// This row was drawn only `if !meth.is_empty()`, which made those two
+    /// answers identical on screen: absent. The `strands` row a few rows
+    /// earlier in [`App::file_tab`] does the honest thing for the neighbouring
+    /// `Option` field — `None => row("strands", "not recorded")` — and the
+    /// pattern was simply not applied here.
+    ///
+    /// What the silence costs downstream: `pl_enzymes::methylation::site_effect`
+    /// skips every rule whose methylase is not `active_in(meth)`
+    /// (crates/pl-enzymes/src/methylation.rs:395), so on an all-false molecule
+    /// it returns `None` for every site and `DigestState::verdict` is `None` for
+    /// every enzyme. Open pKoV as `pKoV.dna` and the Enzymes tab strikes BclI
+    /// through, shows a chip, keeps it out of the gel's lane seeding and writes
+    /// the caveat into the exported picture. Open the identical 8,117 bp as
+    /// `pKoV.gb` — an Addgene download, or anything another tool exported — and
+    /// BclI is a clean unique cutter with no strike, no chip, and, before this,
+    /// no methylation row anywhere in the File tab to say the question had not
+    /// been asked. `docs/PLAN.md:733` ranks methylation-blocked sites tier 1:
+    /// "never display a digest without stating what is filtered out."
+    ///
+    /// `cpg` is in the array and was not. It is a flag no format carries — see
+    /// its own doc in pl-core — so it is always false today, and listing it
+    /// costs nothing; leaving it out would make the word `none` false the first
+    /// time anything sets it, which is exactly the class of defect this row is
+    /// being fixed for.
+    ///
+    /// # What this does NOT do
+    ///
+    /// It does not give a GenBank plasmid a true verdict, and nothing here can.
+    /// `OpKind::SetMethylation` exists in pl-core and has no constructor
+    /// anywhere in `bins/` — its only occurrence outside `oplog.rs` is a match
+    /// arm in `doc.rs` — so a molecule from a format that cannot record the
+    /// flags has no route to setting them either. **Wiring `SetMethylation` to
+    /// a control is the only way a GenBank plasmid can ever reach the first arm
+    /// below**, and that is a feature rather than part of this fix.
+    ///
+    /// One thing that is NOT true and should not be written here or anywhere
+    /// else: the CLI does not contradict this. `pl digest` applies no
+    /// methylation for any format, `.dna` included, so it is uniformly blind
+    /// rather than inconsistent with the GUI.
+    fn methylation_row(mol: &pl_core::Molecule, format: pl_fileio::Format) -> String {
+        let set = [
+            (mol.methylation.dam, "Dam"),
+            (mol.methylation.dcm, "Dcm"),
+            (mol.methylation.ecoki, "EcoKI"),
+            (mol.methylation.cpg, "CpG"),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>();
+        if !set.is_empty() {
+            return set.join(", ");
+        }
+        if format == pl_fileio::Format::SnapGene {
+            // The flag byte was read and it says no. That is a fact about the
+            // preparation, and the Enzymes tab is entitled to act on it.
+            "none".into()
+        } else {
+            // A fact about the FILE, not about the DNA. The parenthesis is not
+            // padding: the digest, the gel and the map all behave exactly as
+            // though the answer were `none`, and a reader who is not told that
+            // has no way to know the assumption was made on their behalf.
+            "not recorded in this file (treated as unmethylated)".into()
+        }
+    }
+
     fn file_tab(&mut self, ui: &mut Ui) {
         let d = self.bench.get().expect("checked by caller");
         let m = d.molecule();
@@ -12807,18 +13080,11 @@ impl App {
                     let sites: usize = m.primers.iter().map(|p| p.sites.len()).sum();
                     row("primers", format!("{} ({sites} sites)", m.primers.len()));
                 }
-                let meth = [
-                    (m.methylation.dam, "Dam"),
-                    (m.methylation.dcm, "Dcm"),
-                    (m.methylation.ecoki, "EcoKI"),
-                ]
-                .iter()
-                .filter(|(on, _)| *on)
-                .map(|(_, n)| *n)
-                .collect::<Vec<_>>();
-                if !meth.is_empty() {
-                    row("methylation", meth.join(", "));
-                }
+                // ALWAYS, like the `strands` row above and unlike this one
+                // before: it was drawn only when a flag was set, so a format
+                // that cannot record any and a `.dna` that records none looked
+                // identical — both drew nothing. See [`App::methylation_row`].
+                row("methylation", Self::methylation_row(m, d.format));
             });
 
         if let Some(c) = &d.container {
@@ -22496,9 +22762,29 @@ mod tests {
     /// keyed on the old predicate would have fired immediately after the user
     /// did exactly what it asked — the fastest possible way to teach someone the
     /// dialog is noise.
+    ///
+    /// RENAMED, because the old name was
+    /// `a_faithful_save_clears_the_dirty_state_and_a_lossy_one_does_not` and
+    /// **there is no save of either kind in this body**. It builds a
+    /// `Document`, applies two operations and calls `mark_saved()` / `unsaved()`
+    /// / `undo()` directly; `App::export` — the only place fidelity is decided
+    /// and the only place `mark_saved()` is conditional on it — is never
+    /// entered, and no molecule here is written to FASTA at all. The half of
+    /// the old name after the conjunction was asserted nowhere, so deleting
+    /// `export`'s `if faithful {` guard left this green. What the body really
+    /// pins is `doc.rs`'s cursor-versus-saved-cursor bookkeeping, which is a
+    /// different property with a different owner, and the name now says so. The
+    /// property the old name claimed is asserted in
+    /// `a_faithful_save_clears_the_dirty_state_and_a_lossy_one_does_not` below.
+    ///
+    /// The fixture's own label was wrong too. It read "GenBank, on a molecule
+    /// with features: faithful" above a **FASTA** with **zero** features — the
+    /// first `SetFeature` does not land until after `mark_saved` — so neither
+    /// noun in it was true of the object it labelled.
     #[test]
-    fn a_faithful_save_clears_the_dirty_state_and_a_lossy_one_does_not() {
-        // GenBank, on a molecule with features: faithful.
+    fn a_document_is_clean_at_its_saved_cursor_and_dirty_away_from_it() {
+        // A FASTA with no features, which is all this needs: the subject is the
+        // log cursor, not the molecule.
         let mut d = Document::from_bytes(
             b">x\nAAAACCCCGGGGTTTTAAGGCCTT\n",
             "x.fa".into(),
@@ -22524,6 +22810,272 @@ mod tests {
         assert!(
             !d.unsaved(),
             "undoing back to the saved point is clean again"
+        );
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f, three times over. The test that carried this
+    /// name performed no save of either kind — it is above, under the name it
+    /// actually measures — and the decision it names lived inside `App::export`
+    /// between an `rfd::FileDialog` and an `atomic::write`, where the suite
+    /// could not reach it. At that commit `App::fasta_losses` counted only
+    /// features and the topology, so a linear molecule carrying primers and
+    /// notes came back with an EMPTY list and cleared the dirty dot; and
+    /// `App::plan_genbank` did not exist, because `export` called
+    /// `genbank::write`, which is `write_reporting(..).0` with the report
+    /// discarded, and `faithful` was initialised `true` and assigned only
+    /// inside the FASTA arm.
+    ///
+    /// MUTATIONS THAT RE-BREAK IT, one per production change:
+    ///
+    /// - delete the `if !mol.primers.is_empty()` block from `App::fasta_losses`
+    ///   (or the `if !mol.notes.is_empty()` one below it);
+    /// - in `App::plan_genbank`, replace `let (text, unwritable) =
+    ///   pl_fileio::genbank::write_reporting(mol, title, date);` with
+    ///   `let (text, unwritable) = (pl_fileio::genbank::write(mol, title,
+    ///   date), Vec::new());`;
+    /// - in `App::export`, put `let mut faithful = true;` back above the picker
+    ///   and drop `faithful` from the tuple the two arms return.
+    #[test]
+    fn a_faithful_save_clears_the_dirty_state_and_a_lossy_one_does_not() {
+        // -- FASTA, the faithful arm ----------------------------------------
+        let plain = pl_core::Molecule {
+            seq: b"AAAACCCCGGGGTTTTAAGGCCTT".to_vec(),
+            ..Default::default()
+        };
+        assert!(
+            App::fasta_losses(&plain).is_empty(),
+            "a linear molecule with no annotation of any kind loses nothing to \
+             FASTA, and this arm is what lets an ordinary save clear the dot"
+        );
+
+        // -- FASTA, the lossy arm that used to clear the dot anyway ----------
+        //
+        // LINEAR and with NO FEATURES, deliberately: that conjunction is
+        // exactly what the old two-clause list called faithful. It is not
+        // exotic — `snapgene.rs:401` assigns block 6 into `Molecule::notes`, so
+        // a `.dna` essentially always has notes, and primers often too.
+        let mut rich = plain.clone();
+        rich.notes
+            .push(pl_core::Note::new("Description", "a plasmid"));
+        rich.primers.push(pl_core::Primer {
+            name: "M13F".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: String::new(),
+            sites: vec![pl_core::BindingSite {
+                start: 2,
+                end: 18,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+        });
+        let lost = App::fasta_losses(&rich);
+        assert!(
+            lost.iter().any(|s| s.contains("primer")),
+            "the primers do not survive this write and are not named: {lost:?}"
+        );
+        assert!(
+            lost.iter().any(|s| s.contains("note")),
+            "the notes do not survive this write and are not named: {lost:?}"
+        );
+        assert!(
+            !lost.is_empty(),
+            "`faithful` is `lost.is_empty()`, so an empty list here is a cleared \
+             dirty dot, a stood-down close guard and a deleted recovery draft"
+        );
+
+        // The methylation flags are the fifth class, and are named only when
+        // one is set: all four are false on every molecule that did not come
+        // from a `.dna`, and reporting a loss the user never had is its own
+        // kind of wrong answer.
+        let mut dam = plain.clone();
+        dam.methylation.dam = true;
+        assert!(
+            App::fasta_losses(&dam).iter().any(|s| s.contains("Dam")),
+            "a Dam+ preparation is a fact about the DNA and FASTA cannot hold it"
+        );
+
+        // The two-clause sentence, byte for byte. It is quoted in
+        // `App::wrote`'s doc and measured whole by
+        // `the_toolbar_stays_inside_the_window_however_long_the_status_is`, so
+        // the joiner and the order are pinned here rather than left to drift.
+        let mut nine = plain.clone();
+        nine.topology = pl_core::Topology::Circular;
+        for i in 0..9 {
+            let mut f = pl_core::Feature::new(format!("f{i}"), "misc_feature");
+            f.segments = vec![pl_core::Segment::new(2, 6)];
+            nine.features.push(f);
+        }
+        assert_eq!(
+            App::fasta_losses(&nine).join(" and "),
+            "9 feature(s) and the topology (it will reopen as linear)"
+        );
+
+        // -- GenBank, the lossy arm that could not exist ---------------------
+        //
+        // `misc_feature 2600..3000` on a 24 bp molecule: `location_parts` hits
+        // `span > 0 && end > span` and returns `None`, so the writer skips the
+        // feature. A collaborator's `.gb` can carry exactly this, because
+        // `parse_location` has no length to compare against.
+        let mut past_end = plain.clone();
+        let mut f = pl_core::Feature::new("tet leader", "misc_feature");
+        f.segments = vec![pl_core::Segment::new(2600, 3000)];
+        past_end.features.push(f);
+        let (text, unwritable, strand) = App::plan_genbank(&past_end, "past-end", (1, 0, 2026));
+        assert!(
+            unwritable.iter().any(|s| s.contains("tet leader")),
+            "the feature is not in the file and nothing says so: {unwritable:?}"
+        );
+        assert!(
+            !text.contains("tet leader"),
+            "the premise: it really is absent from what would be written"
+        );
+        assert_eq!(strand, None, "nothing here is unoriented");
+
+        // -- GenBank, the faithful arm, and the nuance that is NOT a loss ----
+        let (_, none, _) = App::plan_genbank(&plain, "plain", (1, 0, 2026));
+        assert!(
+            none.is_empty(),
+            "an ordinary molecule loses nothing to GenBank, and a save that \
+             refused to clear the dot for every document would be its own bug: {none:?}"
+        );
+        let mut unor = plain.clone();
+        let mut u = pl_core::Feature::new("sacB probe", "misc_feature");
+        u.segments = vec![pl_core::Segment::new(2, 6)];
+        u.strand = Strand::Unoriented;
+        unor.features.push(u);
+        let (text, unwritable, strand) = App::plan_genbank(&unor, "unoriented", (1, 0, 2026));
+        assert!(
+            unwritable.is_empty(),
+            "a strand GenBank cannot express is not lost work: {unwritable:?}"
+        );
+        assert!(strand.is_some(), "but it is still said out loud");
+        assert!(
+            text.contains("sacB probe"),
+            "and the feature itself IS in the file, which is why it does not \
+             make the write unfaithful"
+        );
+
+        // -- and that `export` asks these two, and takes the dot from them ---
+        //
+        // The functions above are only the app's answer if the app asks them.
+        // `export` cannot be entered from a test — it raises `rfd::FileDialog`
+        // inline, and a native window is not something a test may block on — so
+        // its wiring is read out of this file's own source, the way
+        // `every_picker_driven_save_in_this_file_goes_through_atomic_write`
+        // reads the picker/atomic-write pairing.
+        const RAW: &str = include_str!("main.rs");
+        // CRLF first, for the reason that test states at length: a Windows
+        // checkout with `core.autocrlf` on hands this file CRLF.
+        let src = RAW.replace("\r\n", "\n");
+        let body = src
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("main.rs still has a `mod tests`")
+            .0;
+        // Lines of code, not of prose: this file quotes its own call sites in
+        // doc comments, and matching those would count the claim as the thing.
+        let code = || body.lines().filter(|l| !l.trim_start().starts_with("//"));
+        for needle in [
+            "let (text, note, faithful) = if as_fasta {",
+            "let lost = Self::fasta_losses(m);",
+            "let (text, unwritable, strand) = Self::plan_genbank(",
+            "let faithful = unwritable.is_empty();",
+        ] {
+            assert!(
+                code().any(|l| l.contains(needle)),
+                "`App::export` no longer contains {needle:?}, so the two arms \
+                 asserted above are no longer the decision a save makes"
+            );
+        }
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f: the File tab drew its `methylation` row only
+    /// `if !meth.is_empty()`, so a molecule from a format that cannot record
+    /// the flags — every GenBank and every FASTA, since the one non-test writer
+    /// of `Molecule::methylation` in the workspace is the `.dna` flag byte at
+    /// `snapgene.rs:382` — rendered exactly like a `.dna` that genuinely says
+    /// none: as nothing at all. The `strands` row above it in the same grid
+    /// already did the honest thing with the same shape of absence.
+    ///
+    /// MUTATIONS THAT RE-BREAK IT, one per half:
+    ///
+    /// - put the old guard back around the row, by replacing
+    ///   `row("methylation", Self::methylation_row(m, d.format));` in
+    ///   `App::file_tab` with `if m.methylation.dam || m.methylation.dcm ||
+    ///   m.methylation.ecoki { row("methylation", Self::methylation_row(m,
+    ///   d.format)); }`;
+    /// - in `App::methylation_row`, replace the final `else` arm's string with
+    ///   `"none".into()`.
+    ///
+    /// This is `file_tab`'s first test of any kind.
+    #[test]
+    fn the_file_tab_says_when_methylation_was_never_recorded() {
+        // Every text drawn in one pass, by content: the grid's own geometry is
+        // not this test's business.
+        let drawn = |out: &egui::FullOutput| -> Vec<String> {
+            flat_shapes(&out.shapes)
+                .iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let ctx = test_ctx();
+        // The sentence the row owes a format that has no field for the answer.
+        const ADMISSION: &str = "not recorded in this file (treated as unmethylated)";
+
+        // A GenBank plasmid, which is the dominant sharing format and the one
+        // an Addgene download arrives in.
+        let gb = concat!(
+            "LOCUS       x                        24 bp    DNA     circular SYN 01-JAN-2026\n",
+            "ORIGIN\n        1 aaaaccccggggttttaaggcctt\n//\n"
+        );
+        let mut app = App::blank();
+        let d = Document::from_bytes(gb.as_bytes(), "x.gb".into(), None).expect("a GenBank");
+        assert_eq!(d.format, pl_fileio::Format::GenBank, "the premise");
+        assert!(
+            !d.molecule().methylation.dam,
+            "the premise: no reader on this path ever sets a flag"
+        );
+        app.adopt(d);
+        // Two passes, because a `Grid` sizes its columns from what the previous
+        // pass measured and the first is therefore the odd one out.
+        let _ = ctx.run_ui(window(), |ui| app.file_tab(ui));
+        let out = ctx.run_ui(window(), |ui| app.file_tab(ui));
+        let texts = drawn(&out);
+        assert!(
+            texts.iter().any(|t| t.as_str() == "methylation"),
+            "the row is not drawn at all, so the reader is told nothing while \
+             the gel goes on drawing bands for a digest that may not happen: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.as_str() == ADMISSION),
+            "a GenBank file cannot say `none`; only this program can, and it \
+             would be saying it on the file's behalf: {texts:?}"
+        );
+
+        // THE CONTROL, so the fix cannot be "always admit ignorance": a `.dna`
+        // carries a flag byte, and a flag byte that says no is a fact about the
+        // preparation that the digest is entitled to act on.
+        let mol = pl_core::Molecule {
+            seq: b"AAAACCCCGGGGTTTTAAGGCCTT".to_vec(),
+            ..Default::default()
+        };
+        let (bytes, _) = pl_fileio::snapgene::from_molecule_reporting(&mol);
+        let mut app = App::blank();
+        let d = Document::from_bytes(&bytes, "x.dna".into(), None).expect("a readable .dna");
+        assert_eq!(d.format, pl_fileio::Format::SnapGene, "the premise");
+        app.adopt(d);
+        let _ = ctx.run_ui(window(), |ui| app.file_tab(ui));
+        let out = ctx.run_ui(window(), |ui| app.file_tab(ui));
+        let texts = drawn(&out);
+        assert!(
+            texts.iter().any(|t| t.as_str() == "none"),
+            "a `.dna` that records no methylation says so: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.as_str() == ADMISSION),
+            "and must not be smeared with the admission the other formats owe: {texts:?}"
         );
     }
 
@@ -23313,6 +23865,85 @@ mod tests {
         assert_eq!(app.do_cut(500.0), None);
         assert_eq!(app.document().unwrap().molecule().len(), 20);
         assert!(app.edit.notice.as_deref().unwrap().contains("Nothing"));
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f: `App::settle` lifted the notice out with
+    /// `let held = self.edit.notice.take()` and read `held` in only one of the
+    /// three match arms — `(None, None)`. On the ORDINARY path, where the run
+    /// commits and `commit` reports no feature loss, the arm taken is
+    /// `(Some(kind), _)`, `held` was never read, and it dropped at the end of
+    /// the match with nothing after it to put the line back.
+    ///
+    /// What that destroyed: `SeqEdit::reject` records `reject_at` and
+    /// `clear_notice` refuses to clear the line for `REJECT_STICKY = 5.0`
+    /// seconds — "long enough to read a sentence" — and every accepted-keystroke
+    /// path inside `seqedit` honours that. `App::ui` settles a run
+    /// `Run::IDLE_SECONDS = 1.0` after the last accepted keystroke, and any
+    /// pointer press settles it at once, so the documented five seconds were
+    /// about one in practice and could be a tenth of one. The existing
+    /// `a_refusal_survives_the_keystrokes_that_follow_it`
+    /// (`seqedit/tests.rs`) drives `SeqEdit::commit` directly, one layer below
+    /// the wrapper the running application uses everywhere: the property was
+    /// tested at the layer where it was true and untested at the layer where it
+    /// was false. This is that layer.
+    ///
+    /// MUTATION THAT RE-BREAKS IT: delete the `if self.edit.notice.is_none() {
+    /// self.edit.notice = held; }` from the `(Some(kind), _)` arm of
+    /// `App::settle`.
+    #[test]
+    fn a_refusal_under_the_sequence_survives_the_run_that_settles_after_it() {
+        let mut app = App::blank();
+        app.bench
+            .set(circle_with("AAAACCCCGGGGTTTTAAGG", "f", 1, 4));
+        app.edit.caret = 8;
+        {
+            let d = app.bench.get_mut().expect("a document is open");
+            // A stretch copied off a figure legend, carrying one character that
+            // is not a nucleotide code. `type_text` returns early when every
+            // character in the event was refused, without touching the run.
+            app.edit.type_text(d, "ACGT", 100.0);
+            app.edit.type_text(d, "5", 100.05);
+        }
+        assert!(
+            app.edit.run().is_some(),
+            "the premise: a refusal does not close the open run"
+        );
+        let said = app.edit.notice.clone().unwrap_or_default();
+        assert!(said.contains('5'), "the premise: it was said — {said:?}");
+
+        app.settle();
+
+        assert!(
+            app.edit.run().is_none(),
+            "the premise: settling committed the run, which is the path that lost it"
+        );
+        assert!(
+            app.status.contains("Ctrl+Z"),
+            "the status still names the run: {:?}",
+            app.status
+        );
+        let after = app.edit.notice.clone().unwrap_or_default();
+        assert!(
+            after.contains('5'),
+            "the only report that a keystroke was dropped is gone, one second \
+             after it was made: the molecule differs from what the user typed, \
+             the caret is where they expect it and nothing marks the gap — {after:?}"
+        );
+
+        // THE CONTROL, so this cannot pass by pinning a notice on screen for
+        // ever: `clear_notice` owns the expiry rule, `settle` does not
+        // second-guess it, and a later burst of clean typing clears the line.
+        // 106.0 is past `SeqEdit::REJECT_STICKY` (5.0 s, private to that
+        // module) measured from the refusal at 100.05.
+        {
+            let d = app.bench.get_mut().expect("a document is open");
+            app.edit.type_text(d, "ACGT", 106.0);
+        }
+        app.settle();
+        assert_eq!(
+            app.edit.notice, None,
+            "a run with nothing refused in it says nothing"
+        );
     }
 
     // -----------------------------------------------------------------------

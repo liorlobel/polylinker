@@ -26,10 +26,40 @@ fn feat(name: &str, kind: &str, start: u64, end: u64) -> Feature {
     f
 }
 
-/// Cheap well-formedness: every tag opened is closed, in order, and no tag
-/// contains an odd number of quotes. Not a validator — enough to fail loudly on
-/// the mistakes a string-building emitter actually makes.
+/// Cheap well-formedness: every character is one XML 1.0 allows, every tag
+/// opened is closed, in order, and no tag contains an odd number of quotes. Not
+/// a validator — enough to fail loudly on the mistakes a string-building emitter
+/// actually makes.
+///
+/// The character check is the half that was missing until 2026-08-13, and its
+/// absence is why `a_hostile_colour_cannot_inject_an_attribute` — the test
+/// written for exactly that surface, closing with exactly this call — stayed
+/// green while `safe_color` was letting a U+000B through into
+/// `fill="rgb(79,127,208\x0b)"`. The scanner below reads *structure*: brackets,
+/// quotes, tag names. It has no opinion about the bytes inside them, so it
+/// called that document well formed and every conformant parser refuses it
+/// outright — the whole figure, not one wrong colour. `docs/AUDIT-2026-07.md`
+/// had named the byte class in July; the fix went into the escapers, and nothing
+/// in the tree could see the sanitiser that had missed it.
+///
+/// So this now checks the whole `Char` production and not merely the two
+/// codepoints of the bug that prompted it. That is the difference between
+/// closing a hole and closing the class: the next sanitiser to admit a byte XML
+/// forbids fails here, in hostile-input tests that already exist and already
+/// build documents out of file-supplied strings, rather than in a figure a
+/// reader cannot open.
 fn well_formed(svg: &str) -> Result<(), String> {
+    // The characters before the structure. An illegal one is fatal to the whole
+    // document wherever it sits — in a tag, in an attribute value, in text — so
+    // it is looked for across the whole string rather than only where the
+    // scanner below happens to look.
+    if let Some((at, c)) = svg.char_indices().find(|(_, c)| !is_xml_char(*c)) {
+        return Err(format!(
+            "U+{:04X} at byte {at} is outside the XML 1.0 Char production, so no \
+             conformant parser will open this document",
+            c as u32
+        ));
+    }
     let mut stack: Vec<String> = Vec::new();
     let mut i = 0;
     let b = svg.as_bytes();
@@ -58,6 +88,35 @@ fn well_formed(svg: &str) -> Result<(), String> {
     } else {
         Err(format!("unclosed: {stack:?}"))
     }
+}
+
+/// The XML 1.0 `Char` production, which is the whole specification of what may
+/// appear in a document at all:
+///
+/// ```text
+/// Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+/// ```
+///
+/// Written out rather than approximated as "not a control character", because
+/// the approximation is wrong in both directions and both mistakes have been
+/// made here: the TypeScript `esc` used to delete U+007F, which XML allows, and
+/// `safe_color` used to admit U+000B and U+000C, which it does not. Tab, LF and
+/// CR are in the production and no other C0 control is, in any form: `&#1;` is
+/// exactly as illegal as a raw U+0001, which is why `esc` *drops* control
+/// characters instead of escaping them. U+007F (DEL) **is** in it, inside
+/// `[#x20-#xD7FF]`, and both escapers keep it deliberately, so a checker that
+/// refused DEL would be reporting them broken for obeying the specification.
+/// U+FFFE and U+FFFF are out, by the upper bound of `[#xE000-#xFFFD]`. The
+/// surrogate range needs no arm here: a Rust `char` cannot hold one, so the gap
+/// between `#xD7FF` and `#xE000` is unreachable rather than unchecked.
+fn is_xml_char(c: char) -> bool {
+    let u = c as u32;
+    c == '\t'
+        || c == '\n'
+        || c == '\r'
+        || (0x20..=0xd7ff).contains(&u)
+        || (0xe000..=0xfffd).contains(&u)
+        || (0x10000..=0x10ffff).contains(&u)
 }
 
 #[test]
@@ -104,6 +163,114 @@ fn a_hostile_colour_cannot_inject_an_attribute() {
     // The fallback for a CDS is the CDS colour, not the generic grey.
     assert!(svg.contains(colour_for("CDS")), "did not fall back");
     well_formed(&svg).expect("malformed svg");
+}
+
+/// PROVEN TO FAIL at f0e4a6f: `safe_color`'s functional-notation arm listed
+/// `\x0b` and `\x0c` among the bytes it would admit between the parentheses of
+/// `rgb(`/`rgba(`/`hsl(`/`hsla(`, so `rgb(79,127,208\x0b)` came back unchanged
+/// and `svg_at` interpolated it into `fill="…"` untouched — `esc` is applied to
+/// `<title>` and `<text>` content and to nothing else. Neither byte is in the
+/// XML 1.0 `Char` production, so what `pl export --svg` wrote was a document no
+/// conformant reader will open: the entire figure lost, not one feature
+/// miscoloured, from a value that arrived in a downloaded file.
+///
+/// The `str::trim` at the top of `safe_color` is no defence and never was. Both
+/// bytes are `White_Space`, so it strips a leading or trailing one and cannot
+/// reach an interior one — every byte below is interior, which is the only
+/// position that matters.
+///
+/// One case per parenthesised form that admits the class, because the arm tries
+/// four prefixes and a fix reaching only `rgb(` would still ship the bug in the
+/// other three. Each case is asserted twice: at the sanitiser, which is where
+/// the defect is and where a failure should point, and then on a whole rendered
+/// document through `well_formed`, which is what a reader actually opens. The
+/// second assertion is the one that would still catch a future sanitiser that
+/// refuses these two bytes and admits the next.
+///
+/// Mutation that re-breaks it: in `crates/pl-draw/src/lib.rs`, restore the two
+/// bytes to `safe_color`'s allowed list, `b"eE+-.,%/ \t\n\r"` back to
+/// `b"eE+-.,%/ \t\n\x0b\x0c\r"`.
+#[test]
+fn a_colour_carrying_a_byte_xml_forbids_is_refused() {
+    for bad in [
+        "rgb(79,127,208\u{b})",
+        "rgba(79,127,\u{c}208,.5)",
+        "hsl(120 50%\u{b} 40%)",
+        "hsla(1,2%,3%,\u{c}4)",
+    ] {
+        // The unit-level claim first, so a failure names the sanitiser rather
+        // than the renderer that trusted it.
+        assert_eq!(
+            safe_color(Some(bad), "#7f8a95"),
+            "#7f8a95",
+            "{bad:?} was passed through"
+        );
+
+        let mut m = plasmid(1000, true);
+        let mut f = feat("evil", "CDS", 10, 500);
+        f.segments[0].color = Some(bad.into());
+        m.features.push(f);
+        let (svg, _) = circular_svg(&m, Options::default());
+        well_formed(&svg).unwrap_or_else(|e| panic!("{bad:?}: {e}"));
+        assert!(
+            !svg.contains('\u{b}') && !svg.contains('\u{c}'),
+            "{bad:?}: the byte reached the file"
+        );
+        // Refused, not merely escaped: the feature is drawn in the CDS colour.
+        assert!(
+            svg.contains(colour_for("CDS")),
+            "{bad:?}: the CDS fallback colour is not in the figure"
+        );
+    }
+}
+
+/// PROVEN TO FAIL at f0e4a6f: `well_formed` was a bracket-and-quote-parity
+/// scanner — it said so of itself, "Not a validator" — and every document below
+/// is perfectly balanced, so it answered `Ok` for files no XML parser will open.
+///
+/// This function is the oracle nearly every hostile-input test in this file
+/// closes with, and an oracle that cannot fail is worth nothing, so it gets a
+/// test of its own rather than being trusted. That is not a hypothetical here:
+/// `a_hostile_colour_cannot_inject_an_attribute` and the `safe_color` hole it
+/// was meant to catch both arrived in `442496c`, and it ended in this very call
+/// and stayed green until 2026-08-13.
+///
+/// The legal half is asserted too. `esc` keeps tab, LF, CR and U+007F on purpose
+/// and argues the case at length; a checker that rejected any of the four would
+/// turn the hostile-input tests red for the wrong reason, and be believed — the
+/// repair would then go into the escaper that was already right.
+///
+/// Mutation that re-breaks it — in this file rather than in the crate, because
+/// what is under test is the harness: delete the `svg.char_indices().find(…)`
+/// guard at the top of `well_formed`.
+#[test]
+fn the_well_formedness_check_can_see_a_byte_xml_forbids() {
+    // The exact shape `svg_at` emits, with one illegal byte in an attribute
+    // value — the position `safe_color` is responsible for.
+    let attr = "<svg><path d=\"M0,0\" fill=\"rgb(1,\u{b}2,3)\"/></svg>";
+    assert!(
+        well_formed(attr).is_err(),
+        "a raw U+000B in an attribute value was called well formed"
+    );
+
+    // Both ends of the production, not just the C0 controls of the bug that
+    // prompted the check: U+FFFE and U+FFFF are excluded by `[#xE000-#xFFFD]`
+    // and are perfectly possible in a feature name out of a binary payload.
+    for bad in [
+        '\u{0}', '\u{1}', '\u{b}', '\u{c}', '\u{1f}', '\u{fffe}', '\u{ffff}',
+    ] {
+        let doc = format!("<svg><title>a{bad}b</title></svg>");
+        assert!(
+            well_formed(&doc).is_err(),
+            "U+{:04X} in text was called well formed",
+            bad as u32
+        );
+    }
+
+    // …and everything XML allows must still pass, including DEL and the two
+    // codepoints either side of the surrogate gap.
+    let legal = "<svg><title>a\tb\nc\rd\u{7f}e\u{d7ff}f\u{e000}g\u{fffd}h\u{10ffff}</title></svg>";
+    well_formed(legal).expect("a legal document was refused");
 }
 
 #[test]

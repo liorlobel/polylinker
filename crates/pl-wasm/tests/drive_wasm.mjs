@@ -7,7 +7,18 @@
  * target. Disagreement means the wasm boundary is lying somewhere.
  *
  * Usage:
- *   node drive_wasm.mjs <path-to-pl_wasm.wasm> <path-to-pl(.exe)> <corpus-dir>
+ *   node drive_wasm.mjs <path-to-pl_wasm.wasm> <path-to-pl(.exe)> [corpus-dir]
+ *
+ * The corpus directory is optional, and the two modes are NOT the same check.
+ * Given one, every `.dna` under it goes through both builds and the run refuses
+ * to pass on a comparison that turned out to be empty. Given none, only the
+ * hand-made inputs below run and the script says so on stdout — which is what
+ * the workflow's `wasm` job and the gate step `wasm module self-checks` ask
+ * for, and a legitimate thing to ask for: those legs have no corpus to give.
+ *
+ * Exit status: 0 the builds agreed, 1 they disagreed (or a hand-made check
+ * failed), 2 the harness was mis-invoked — wrong arguments, or a corpus
+ * directory that held no `.dna` files at all.
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, extname, basename } from "node:path";
@@ -193,6 +204,38 @@ if (!corpus) {
     }
   })(corpus, 0);
   files.sort();
+
+  /* A FLOOR ON WHAT WAS COMPARED, not on whether a path exists.
+     `if (disagree) failures++` and `if (differ) failures++` below are the only
+     two ways this block can go red, and neither can fire over an empty list.
+     So a corpus holding no `.dna` printed `files compared : 0`,
+     `identical: 0/0`, `ALL WASM CHECKS PASSED`, and exited 0 — under the gate
+     step named "wasm module vs native binary" (tools/ci.ps1:399), reporting as
+     coverage having compared no molecules at all.
+     The gate believed it had already closed this hole. Its precondition is
+     tools/ci.ps1:187 — `$script:haveCorpus = (-not
+     [string]::IsNullOrWhiteSpace($Corpus)) -and (Test-Path $Corpus)` — which
+     tests THAT A DIRECTORY EXISTS, not that anything in it was compared. Point
+     `-Corpus` at a GenBank-only folder, at a corpus that has since moved, or at
+     a OneDrive tree whose `.dna` files are still placeholders, and the only
+     check that exists for the browser build asserts nothing while printing
+     green. The fix belongs here, in the script, because the script is the only
+     thing that knows how many files it actually opened.
+     Exit 2 rather than `failures++`: 1 means the two builds disagreed, which is
+     a finding about the code; 2 means this harness was pointed somewhere
+     useless, which is a finding about the invocation. `xcheck_deflate.py` and
+     `xcheck_icon.py` draw that line with the same two numbers.
+     The guard sits INSIDE the `else` of `if (!corpus)` deliberately. Two shipped
+     invocations pass no corpus on purpose and must stay green —
+     .github/workflows/ci.yml's "Drive the real module" and tools/ci.ps1's "wasm
+     module self-checks", both two-argument calls that run the hand-made inputs
+     above and nothing else. It is only the mode that was ASKED for a corpus and
+     found nothing in it that has to be loud. Both halves are pinned by
+     `reference/python/tests/xcheck_oracles.py`, which drives this very block. */
+  if (!files.length) {
+    console.error(`corpus held no .dna files: ${corpus}`);
+    process.exit(2);
+  }
 
   let agree = 0, disagree = 0, totalFeat = 0, totalBp = 0;
   for (const f of files) {

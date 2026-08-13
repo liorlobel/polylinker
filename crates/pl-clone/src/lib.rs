@@ -46,8 +46,60 @@ pub struct Dseq {
     pub circular: bool,
 }
 
+/// Reverse-complement a strand, decoding the result lossily.
+///
+/// Lossily rather than checked because `pl_core::reverse_complement` passes a
+/// byte it does not recognise through *reversed* (`iupac.rs`'s `complement`
+/// ends `other => other`), and the two bytes of a non-ASCII character reversed
+/// are not valid UTF-8. Making this fallible for every caller would be the
+/// wrong shape: the crate's answer to a strand that is not DNA is to refuse the
+/// operation at the door — [`try_cut`] and [`pcr`] both check `is_ascii()`
+/// before they read a strand — not to thread a `Result` through the
+/// arithmetic.
 pub(crate) fn rc(s: &str) -> String {
-    String::from_utf8_lossy(&reverse_complement(s.as_bytes())).into_owned()
+    rc_bytes(s.as_bytes())
+}
+
+/// As [`rc`], but over a byte range that is not necessarily a whole `str`.
+///
+/// Every index into a strand in this crate is a byte count that came out of
+/// the duplex arithmetic — `ovhg`, `watson.len()`, `crick.len()` — and not one
+/// of them knows anything about character boundaries. `&self.crick[..tail]` is
+/// a `str` slice, so it panics the moment `tail` lands inside a multi-byte
+/// character, and once `rc()` has widened one stray two-byte character into
+/// two three-byte replacement characters that is not a corner: `crick` runs
+/// exactly four bytes longer than `watson`, the tail term is 4, and byte 4 of
+/// `crick` is in the middle of a `U+FFFD` for a stray character at byte `w-2`,
+/// `w-4` or `w-5` of the sequence.
+///
+/// So the bytes are handed to `reverse_complement` and decoded *afterwards*. A
+/// split character comes back as a replacement character instead of as a
+/// panic. That is garbage in, garbage out — but a `Dseq` built from a file
+/// with one stray byte in it must not be able to abort the process, and it
+/// could: `bins/pl-gui/src/clone.rs` calls `plan` synchronously in the panel
+/// body on the UI thread, there is no worker and no `catch_unwind` anywhere in
+/// the GUI, so `pcr` on such a template took the whole editor down with
+/// "byte index 4 is not a char boundary" instead of showing the refusal that
+/// was written for exactly this case.
+pub(crate) fn rc_bytes(b: &[u8]) -> String {
+    String::from_utf8_lossy(&reverse_complement(b)).into_owned()
+}
+
+/// The bases of `s` between two byte offsets, clamped to the strand and
+/// decoded lossily.
+///
+/// The same argument as [`rc_bytes`], for the end-shape methods that report
+/// protruding bases as they are rather than complemented. The clamping is not
+/// new — every call site below already carried its own `.min(len)` or
+/// `saturating_sub`, because a hand-built `Dseq` whose `|ovhg|` exceeds its
+/// strand length must return the bases that exist rather than underflow a
+/// `usize` — it is gathered here so the bound and the lossy decode are stated
+/// once instead of four times.
+fn take_bytes(s: &str, from: usize, to: usize) -> String {
+    let b = s.as_bytes();
+    let to = to.min(b.len());
+    let from = from.min(to);
+    String::from_utf8_lossy(&b[from..to]).into_owned()
 }
 
 impl Dseq {
@@ -106,16 +158,22 @@ impl Dseq {
             // clamped so a malformed hand-built `Dseq` whose `|ovhg|` exceeds the
             // strand length returns the bases that exist rather than panicking on
             // a `usize` underflow — `left_overhang` already bounds the same way,
-            // and every internal producer keeps `|ovhg| <= strand`.
+            // and every internal producer keeps `|ovhg| <= strand`. Being in
+            // range is not the same as being on a character boundary, which is
+            // the second half of the bound and why this goes through
+            // [`take_bytes`] rather than slicing the strand as a `str`.
             std::cmp::Ordering::Less => End::Overhang {
                 five_prime: true,
-                bases: self.watson[..((-self.ovhg) as usize).min(self.watson.len())].to_string(),
+                bases: take_bytes(&self.watson, 0, (-self.ovhg) as usize),
             },
             // crick protrudes on the left, which is crick's 3' side
             std::cmp::Ordering::Greater => End::Overhang {
                 five_prime: false,
-                bases: self.crick[self.crick.len().saturating_sub(self.ovhg as usize)..]
-                    .to_string(),
+                bases: take_bytes(
+                    &self.crick,
+                    self.crick.len().saturating_sub(self.ovhg as usize),
+                    self.crick.len(),
+                ),
             },
         }
     }
@@ -134,16 +192,17 @@ impl Dseq {
         match d.cmp(&0) {
             std::cmp::Ordering::Equal => End::Blunt,
             // watson runs past crick on the right: a 3' overhang on top. Indices
-            // clamped like `left_end`, so a malformed `Dseq` returns the bases
-            // that exist rather than panicking; a no-op for any well-formed one.
+            // clamped like `left_end` and taken as bytes for the same two
+            // reasons, so a malformed `Dseq` returns the bases that exist rather
+            // than panicking; a no-op for any well-formed one.
             std::cmp::Ordering::Greater => End::Overhang {
                 five_prime: false,
-                bases: self.watson[((w - d).max(0) as usize).min(self.watson.len())..].to_string(),
+                bases: take_bytes(&self.watson, (w - d).max(0) as usize, self.watson.len()),
             },
             // crick runs past: a 5' overhang on the bottom strand
             std::cmp::Ordering::Less => End::Overhang {
                 five_prime: true,
-                bases: self.crick[..((-d) as usize).min(self.crick.len())].to_string(),
+                bases: take_bytes(&self.crick, 0, (-d) as usize),
             },
         }
     }
@@ -151,6 +210,38 @@ impl Dseq {
     /// The molecule as a single string, taking watson where it exists and
     /// filling from crick where it does not. Loses the end shapes, so it is for
     /// display and checksums rather than for cloning decisions.
+    ///
+    /// # Why the crick terms are taken as bytes
+    ///
+    /// Because this method must not panic, and as a `str` slice it did. Both
+    /// crick terms are indexed by a byte count that came out of the duplex
+    /// arithmetic (`ovhg` for the head, `c - ovhg - w` for the tail), and a
+    /// byte count is not a character boundary. For any `Dseq::new(seq, _)`
+    /// whose `seq` holds one non-ASCII character — a non-breaking space or a
+    /// micro sign pasted from a supplier's PDF, which `pl-fileio` preserves,
+    /// since `genbank.rs` filters ORIGIN for whitespace and digits only and
+    /// `Document::from_bytes` sanitises nothing — `crick` comes back four
+    /// bytes longer than `watson` (see [`CutError::NotDna`] for the mechanism)
+    /// and the tail term is 4. Whether byte 4 of `crick` is then a character
+    /// boundary depends on where the stray character sits: for byte `w-2`,
+    /// `w-4` or `w-5` of the sequence it is not, and `crick[..4]` split a
+    /// `U+FFFD`.
+    ///
+    /// `Dseq::new("ACGTACGTACGTACGT\u{a0}", false)` is the minimal case: watson
+    /// 18 bytes, crick 22, tail 4, and the panic reads "end byte index 4 is not
+    /// a char boundary; it is inside '\u{FFFD}' (bytes 3..6 of string)". Put
+    /// the same character in the middle of the sequence instead and nothing
+    /// panics — the tail is then plain ASCII, and four phantom bases are
+    /// appended silently — which is exactly why this went unnoticed, and why
+    /// the regression test pins the offsets that trip it.
+    ///
+    /// The guards in [`try_cut`] and [`pcr`] stay, and are still the right
+    /// place to *answer* the user: they refuse with a named strand and the
+    /// offending character, where this method can only produce replacement
+    /// characters. What changes here is that no public method of [`Dseq`] can
+    /// bring the process down on a value that came out of a file, whatever the
+    /// caller forgot to check first — including [`assembly::assemble`], which
+    /// flattens every fragment through this method and has no such guard.
     pub fn to_string_full(&self) -> String {
         let w = self.watson.len() as i64;
         let c = self.crick.len() as i64;
@@ -160,8 +251,8 @@ impl Dseq {
         if self.ovhg > 0 {
             // Clamped like `left_end`: a malformed `Dseq` with `ovhg` past the
             // crick length must not underflow this index.
-            let head = &self.crick[self.crick.len().saturating_sub(self.ovhg as usize)..];
-            out.push_str(&rc(head));
+            let keep = self.crick.len().saturating_sub(self.ovhg as usize);
+            out.push_str(&rc_bytes(&self.crick.as_bytes()[keep..]));
         }
         out.push_str(&self.watson);
 
@@ -171,7 +262,7 @@ impl Dseq {
         // GATC was not recoverable from any strand.
         let tail = (c - self.ovhg - w).min(c);
         if tail > 0 {
-            out.push_str(&rc(&self.crick[..tail as usize]));
+            out.push_str(&rc_bytes(&self.crick.as_bytes()[..tail as usize]));
         }
         out
     }
@@ -485,6 +576,16 @@ pub fn try_cut(seq: &Dseq, enzyme: &Enzyme) -> Result<Vec<Dseq>, CutError> {
         // (`AvrII+BamHI`, `AgeI+SalI`, `AflII+HindIII`). The clone panel listed
         // them as real and passed them to `ligate`.
         //
+        // That 128 is a historical number from a sweep that no longer exists,
+        // and it is kept as the record of what was seen rather than as a claim
+        // anyone can re-run. The in-tree sweep,
+        // `no_double_digest_produces_a_fragment_with_no_base_pairs`, reports 11
+        // against the eight names it used to carry and 216 against the whole
+        // table it carries now, when this filter is reverted to the per-strand
+        // test; its doc gives the exact recipe. The three pairs named above are
+        // all from those eight names, which is the narrowness that finding
+        // fixed.
+        //
         // Single digests were unaffected, which is why every test passed: the
         // two intervals are the same until something has already cut.
         let (d_lo, d_hi) = (w_lo.max(c_lo), w_hi.min(c_hi));
@@ -603,13 +704,25 @@ pub enum PcrError {
     Inverted,
     /// A primer or the template contains something that is not DNA.
     ///
-    /// Checked before any searching: `rc()` decodes through
-    /// `from_utf8_lossy`, so a non-ASCII byte -- a non-breaking space pasted
-    /// from a vendor's order sheet is the realistic case -- became a multi-byte
-    /// replacement character and then panicked on a char boundary, aborting a
-    /// whole batch rather than rejecting one primer.
+    /// Checked before anything reads any of them, which for the template is
+    /// newer than it looks: `rc()` decodes through `from_utf8_lossy`, so a
+    /// non-ASCII byte -- a non-breaking space pasted from a vendor's order
+    /// sheet is the realistic case -- became a multi-byte replacement
+    /// character and then panicked on a char boundary, aborting a whole batch
+    /// rather than rejecting one input. The primers were guarded first; the
+    /// template's guard was written but placed *below* the
+    /// `template.to_string_full()` call that panicked, so for the templates
+    /// that actually trip it this variant could not be reached. Both strands
+    /// of the template are now tested directly, above that call.
     NotDna {
+        /// Which input: "forward primer", "reverse primer" or "template". The
+        /// template's two strands share one label, because "the crick strand
+        /// of your template" is not a thing the user typed and cannot be a
+        /// thing they go and fix.
         what: &'static str,
+        /// The offending character as it appears in the input -- the
+        /// non-breaking space itself, not the `U+FFFD` the flattened duplex
+        /// would have shown, which appears nowhere in the user's file.
         found: char,
     },
     /// A primer anneals in more than one place.
@@ -699,12 +812,37 @@ pub const MIN_ANNEAL: usize = 12;
 /// simulation and will not tell you a reaction fails for having three
 /// mismatches near the 3' end; `docs/PLAN.md` §7.4 keeps that separate.
 pub fn pcr(forward: &str, reverse: &str, template: &Dseq) -> Result<Dseq, PcrError> {
-    // ASCII up front. `rc()` goes through `from_utf8_lossy`, so a non-ASCII
-    // byte anywhere -- a non-breaking space pasted from a vendor's order sheet
-    // is the realistic case -- became a multi-byte replacement character and
-    // then panicked on a char boundary deep inside the search, aborting a whole
-    // batch run rather than rejecting one primer.
-    for (what, s) in [("forward primer", forward), ("reverse primer", reverse)] {
+    // ASCII up front, ALL FOUR INPUTS, before anything reads them. `rc()` goes
+    // through `from_utf8_lossy`, so a non-ASCII byte anywhere -- a non-breaking
+    // space pasted from a vendor's order sheet is the realistic case -- became a
+    // multi-byte replacement character and then panicked on a char boundary,
+    // aborting a whole batch run rather than rejecting one input.
+    //
+    // THE TEMPLATE'S CHECK USED TO SIT THREE LINES DOWNSTREAM OF THE CALL IT
+    // WAS WRITTEN TO PROTECT. It read `let tmpl = template.to_string_full()`
+    // and then tested `tmpl.is_ascii()`, so for the templates that actually
+    // trip the boundary -- a stray character at byte `w-2`, `w-4` or `w-5`,
+    // where `to_string_full`'s tail term slices into a replacement character --
+    // the process died on the line above the guard. `AUDIT-2026-07` raised this
+    // class and the primers were hardened; the template check was added and
+    // placed after the thing it was meant to guard, which is the "raised but
+    // not actually fixed" category. `to_string_full` no longer panics either
+    // (see its doc), but a lossy string is not an answer: this refusal is,
+    // and it names the character the user has to go and find.
+    //
+    // The strands are checked rather than `to_string_full()`, exactly as
+    // `try_cut` does and for the reason its comment gives: that method is
+    // where the phantom bases are appended, so by the time it returns, the
+    // damage is already in the string being inspected -- and the character it
+    // would report is a `U+FFFD` that appears nowhere in the user's file,
+    // rather than the non-breaking space that does. Both strands, because
+    // `Dseq::from_parts` can carry a stray byte on crick alone.
+    for (what, s) in [
+        ("forward primer", forward),
+        ("reverse primer", reverse),
+        ("template", template.watson.as_str()),
+        ("template", template.crick.as_str()),
+    ] {
         if !s.is_ascii() {
             return Err(PcrError::NotDna {
                 what,
@@ -713,13 +851,12 @@ pub fn pcr(forward: &str, reverse: &str, template: &Dseq) -> Result<Dseq, PcrErr
         }
     }
 
+    // ASCII in, ASCII out: `complement` maps every ASCII byte to an ASCII byte
+    // (`iupac.rs`, `other => other`), so with both strands checked above there
+    // is nothing left here for a second `is_ascii()` test to catch. There was
+    // one, and after the reordering it would have been a check that cannot
+    // fail.
     let tmpl = template.to_string_full().to_ascii_uppercase();
-    if !tmpl.is_ascii() {
-        return Err(PcrError::NotDna {
-            what: "template",
-            found: tmpl.chars().find(|c| !c.is_ascii()).unwrap_or('?'),
-        });
-    }
     let n = tmpl.len();
     if n == 0 {
         return Err(PcrError::ForwardNotFound);
@@ -1793,6 +1930,247 @@ mod tests {
         }
     }
 
+    /// A 60-base template with one non-breaking space inserted at a chosen byte
+    /// offset. The offset is the whole point of the fixture; see the tests
+    /// below.
+    ///
+    /// `dna` is uppercase ACGT, so the insertion index and the byte offset of
+    /// the stray character are the same number, and `watson.len()` is
+    /// `60 + 2` for every case.
+    fn stray(at: usize) -> String {
+        let body = dna(0x51de_0913, 60);
+        format!("{}\u{a0}{}", &body[..at], &body[at..])
+    }
+
+    /// The three offsets at which the old `to_string_full` died, and the reason
+    /// they are not "somewhere near the end".
+    ///
+    /// `Dseq::new` builds crick with `reverse_complement`, which passes an
+    /// unknown byte through *reversed*; `C2 A0` comes back as `A0 C2`, which is
+    /// not UTF-8, so `from_utf8_lossy` yields two three-byte replacement
+    /// characters and `crick` measures `w + 4`. The tail term `c - ovhg - w` is
+    /// therefore 4 for every one of these, and the question is only whether
+    /// byte 4 of `crick` is a character boundary. With the stray character at
+    /// watson byte `p`, the reversal puts the replacement pair at crick byte
+    /// `s = w - 2 - p`, occupying `[s, s+3)` and `[s+3, s+6)`. Byte 4 is inside
+    /// one of those for `s` in {0, 2, 3} and is a boundary for `s = 1` -- that
+    /// is, `p` in {w-2, w-4, w-5} splits and `p = w-3` does not.
+    const SPLITS_A_CHARACTER: [usize; 3] = [60, 58, 57]; // w-2, w-4, w-5 for w = 62
+    /// The offset one base further in, which does *not* split a character. It is
+    /// here so the two tests below can state the trap rather than describe it.
+    const LANDS_ON_A_BOUNDARY: usize = 59; // w-3
+
+    /// `to_string_full` does not panic on a strand that is not DNA.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: the method ended
+    /// `out.push_str(&rc(&self.crick[..tail as usize]))`, a `str` slice indexed
+    /// by a byte count from the duplex arithmetic, so it panicked with "end byte
+    /// index 4 is not a char boundary; it is inside '\u{FFFD}' (bytes 3..6 of
+    /// string)" whenever `tail` landed inside a replacement character.
+    ///
+    /// Mutation that re-breaks it: in `to_string_full`, put the tail term back
+    /// to `out.push_str(&rc(&self.crick[..tail as usize]));` (and, for the head
+    /// term, `let head = &self.crick[self.crick.len().saturating_sub(self.ovhg
+    /// as usize)..]; out.push_str(&rc(head));`).
+    ///
+    /// THE OFFSET IS THE TEST. A non-ASCII character in the MIDDLE of the
+    /// sequence passes against the *unfixed* code -- the tail is then four
+    /// bytes of ordinary ASCII, four phantom bases are appended, and nothing
+    /// crashes -- so a fixture like `"ACGT\u{a0}ACGT..."` would be a check that
+    /// cannot fail. It has to sit at `w-2`, `w-4` or `w-5`, and
+    /// [`LANDS_ON_A_BOUNDARY`] is the neighbour that proves the window is
+    /// narrow. This is the trap the next person will fall into; it cost the
+    /// original guard its whole effect, because the check that was written for
+    /// this case was placed below the call that died.
+    #[test]
+    fn to_string_full_does_not_panic_on_a_strand_that_is_not_dna() {
+        for at in SPLITS_A_CHARACTER {
+            let seq = stray(at);
+            let d = Dseq::new(&seq, false);
+            assert_eq!(d.watson.len(), 62, "the fixture's own arithmetic");
+            assert_eq!(d.crick.len(), 66, "two bytes in, six bytes of U+FFFD out");
+            // Garbage in, garbage out -- but the bases the user typed are still
+            // at the front of it, and the process is still alive.
+            let full = d.to_string_full();
+            assert!(full.starts_with(&seq), "at {at}: {full:?}");
+        }
+
+        // The neighbour that does not split a character: at `w-3` the boundary
+        // falls exactly on byte 4. It never panicked, and it is here so that a
+        // maintainer who "reproduces" the defect one base over and sees nothing
+        // knows why -- and so that the quiet half of the same defect is on the
+        // record, since four bases that were never in the file are appended
+        // here whether or not anything crashes.
+        let seq = stray(LANDS_ON_A_BOUNDARY);
+        let quiet = Dseq::new(&seq, false).to_string_full();
+        assert!(quiet.starts_with(&seq), "{quiet:?}");
+        assert_eq!(
+            quiet.chars().count(),
+            seq.chars().count() + 4,
+            "the tail term appends four characters here: {quiet:?}"
+        );
+
+        // Every other offset, including the ones that never split anything.
+        for at in 0..=60 {
+            let _ = Dseq::new(&stray(at), false).to_string_full();
+        }
+    }
+
+    /// The end-shape methods do not panic on a strand that is not DNA either.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: `left_end` read
+    /// `self.watson[..((-self.ovhg) as usize).min(self.watson.len())]` and
+    /// `right_end` read `self.crick[..((-d) as usize).min(self.crick.len())]`.
+    /// Both indices were clamped -- that much was already deliberate, for a
+    /// hand-built `Dseq` whose `|ovhg|` exceeds its strand -- and being in range
+    /// is not the same as being on a character boundary. Observed: "end byte
+    /// index 1 is not a char boundary; it is inside '\u{a0}' (bytes 0..2 of
+    /// string)", from both methods.
+    ///
+    /// Mutation that re-breaks it: in `take_bytes`, replace the body's last line
+    /// with `s[from..to].to_string()`, which is what the four call sites used to
+    /// do inline.
+    ///
+    /// `Dseq`'s fields are public and `fragment()` builds one field by field, so
+    /// "watson is clean and crick is not" is a state a caller can hold; it is
+    /// not reachable through `Dseq::new`, which builds both from one string.
+    #[test]
+    fn the_end_shapes_do_not_panic_on_a_strand_that_is_not_dna() {
+        // watson protrudes by one byte into a two-byte character.
+        assert_eq!(
+            Dseq::from_parts("\u{a0}ACGTACGT", "ACGTACGT", -1, false).left_end(),
+            End::Overhang {
+                five_prime: true,
+                bases: "\u{fffd}".into()
+            }
+        );
+        // ...and the mirror: crick runs one byte past watson on the right.
+        assert_eq!(
+            Dseq::from_parts("ACGTACGT", "\u{a0}ACGTACG", 0, false).right_end(),
+            End::Overhang {
+                five_prime: true,
+                bases: "\u{fffd}".into()
+            }
+        );
+        // The other two arms, which count in from the far end of a strand and
+        // so split the character from the other side.
+        assert_eq!(
+            Dseq::from_parts("ACGTACGT", "ACGTACG\u{a0}", 1, false).left_end(),
+            End::Overhang {
+                five_prime: false,
+                bases: "\u{fffd}".into()
+            }
+        );
+        assert_eq!(
+            Dseq::from_parts("ACGTACG\u{a0}", "ACGTACGT", 0, false).right_end(),
+            End::Overhang {
+                five_prime: false,
+                bases: "\u{fffd}".into()
+            }
+        );
+    }
+
+    /// A template that is not DNA is refused by name, rather than crashing the
+    /// process on the line above the guard.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: `pcr`'s template check ran THREE LINES TOO
+    /// LATE. Line 716 was `let tmpl = template.to_string_full()` and the
+    /// `NotDna { what: "template" }` guard was at 717-722, so for the offsets
+    /// where `to_string_full` split a character the process died before the
+    /// check could run: `pcr` aborted with "end byte index 4 is not a char
+    /// boundary" at exactly [`SPLITS_A_CHARACTER`]. `rg -n '"template"'`
+    /// returned one hit repo-wide -- the construction site -- so nothing
+    /// asserted that this variant was ever produced, and the crate's own
+    /// `a_non_ascii_primer_is_rejected_rather_than_panicking` uses an ASCII
+    /// template in all six of its cases.
+    ///
+    /// The GUI calls `plan` synchronously in the clone panel's body on the UI
+    /// thread, with no worker and no `catch_unwind` anywhere in `bins/pl-gui`,
+    /// so a GenBank file carrying one non-breaking space near its end -- which
+    /// `pl-fileio` preserves -- took the whole editor down at "choose PCR,
+    /// paste two primers".
+    ///
+    /// Mutation that re-breaks it: delete the line
+    /// `("template", template.watson.as_str()),` from `pcr`'s guard array.
+    /// Observed at byte offset 0: `found: '\u{FFFD}'` where this asserts
+    /// `'\u{a0}'` — only the crick strand is left to catch it, and crick is
+    /// where `rc()` has already replaced the character with something the user
+    /// never typed, which is the whole argument for checking the strands.
+    ///
+    /// Mutation that re-breaks the crick half: delete
+    /// `("template", template.crick.as_str()),` instead. Observed: the
+    /// crick-only case returns `Ok(Dseq { watson: "CGTGAG…", … })` — a
+    /// confident 60 bp product from a template that is not DNA.
+    ///
+    /// Mutation that reproduces the original *panic* rather than a wrong
+    /// answer: put `pcr` back to the two-entry primer array with the
+    /// `if !tmpl.is_ascii()` block below `let tmpl = …`, and undo
+    /// `to_string_full`'s byte terms as described on
+    /// `to_string_full_does_not_panic_on_a_strand_that_is_not_dna`. That is the
+    /// shipped 0.10.0 shape exactly, and this test then aborts the process at
+    /// byte offset 57 with "end byte index 4 is not a char boundary; it is
+    /// inside '\u{FFFD}' (bytes 3..6 of string)" instead of failing an
+    /// assertion. Offsets 0 to 56 pass against it, because there the first
+    /// non-ASCII character of the flattened duplex really is the one from
+    /// watson — the late check answers correctly for every input that does not
+    /// kill the process on the line above it.
+    #[test]
+    fn a_non_ascii_template_is_rejected_rather_than_panicking() {
+        let body = dna(0x51de_0913, 60);
+        let fwd = body[..20].to_string();
+        let rev = rc(&body[40..]);
+
+        // The control first, so the refusals below are about the stray byte and
+        // not about a primer pair that never worked: the same primers on the
+        // same template without the character amplify the whole 60 bases.
+        let clean =
+            pcr(&fwd, &rev, &Dseq::new(&body, false)).expect("one site each: this pair amplifies");
+        assert_eq!(clean.watson.len(), 60);
+
+        // Every insertion offset, refused identically. The character reported is
+        // the one in the user's file, not the `U+FFFD` the flattened duplex
+        // would have shown -- that is what checking the strands rather than
+        // `to_string_full()` buys.
+        for at in 0..=60 {
+            assert_eq!(
+                pcr(&fwd, &rev, &Dseq::new(&stray(at), false)),
+                Err(PcrError::NotDna {
+                    what: "template",
+                    found: '\u{a0}'
+                }),
+                "at byte offset {at}"
+            );
+        }
+        // ...and the three that used to abort the process are among them.
+        for at in SPLITS_A_CHARACTER {
+            assert!(matches!(
+                pcr(&fwd, &rev, &Dseq::new(&stray(at), false)),
+                Err(PcrError::NotDna { .. })
+            ));
+        }
+
+        // Crick alone. `Dseq`'s fields are public, so a caller can hold a
+        // molecule whose bottom strand carries the stray byte and whose top
+        // strand does not; flattening it would hide the character in a term
+        // `to_string_full` never reaches.
+        let crick_only = Dseq::from_parts(&body, &format!("{}\u{a0}ACG", rc(&body)), 0, false);
+        assert_eq!(
+            pcr(&fwd, &rev, &crick_only),
+            Err(PcrError::NotDna {
+                what: "template",
+                found: '\u{a0}'
+            })
+        );
+
+        // The message names the input and the character, because "not DNA" on
+        // its own sends the user looking through 60 bases that are all fine.
+        let msg = pcr(&fwd, &rev, &Dseq::new(&stray(60), false))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("template"), "{msg}");
+        assert!(msg.contains("not a DNA base"), "{msg}");
+    }
+
     #[test]
     fn an_inverted_repeat_second_site_is_not_specific() {
         // The primer appears once on the top strand and once on the bottom, so
@@ -1929,6 +2307,144 @@ mod tests {
         );
     }
 
+    /// The enzymes the duplex sweep below runs over: the whole shipped table.
+    ///
+    /// A function rather than a literal in the test body so that
+    /// [`the_duplex_sweep_runs_over_the_whole_shipped_table`] and the sweep
+    /// itself cannot drift apart -- a coverage claim checked against a
+    /// different list from the one that runs is not a coverage claim.
+    fn sweep_enzymes() -> Vec<pl_enzymes::Enzyme> {
+        pl_enzymes::ENZYMES.to_vec()
+    }
+
+    /// How many base pairs a fragment actually has: the overlap between the
+    /// two strands.
+    ///
+    /// Watson occupies `[0, w)` and crick `[-ovhg, -ovhg + c)` -- the
+    /// convention `Dseq::len`, `fragment()` and `to_string_full()` all use, and
+    /// the one `xcheck_clone.py` asserts field-for-field against pydna. So the
+    /// shared interval runs from `max(0, -ovhg)` to `min(w, c - ovhg)`.
+    ///
+    /// ONE FUNCTION BECAUSE THE EXPRESSION WAS WRITTEN OUT TWICE AND BOTH
+    /// COPIES HAD THE SIGN WRONG. They read `w.min(c + ov) - 0.max(ov)`, which
+    /// places crick at `[ovhg, ovhg + c)` -- the mirror image, and the one
+    /// place in this crate that disagreed with `len()`. It happened to give the
+    /// same verdict on the one fragment the sweep was written against
+    /// (`{watson: "CCG", crick: "GAT", ovhg: -4}`, which really has no base
+    /// pairs, and which both formulas score at -1), so nothing caught it while
+    /// the sweep ran over eight enzymes that all leave the same overhang.
+    /// Widening the sweep to the whole table produced 1404 false accusations
+    /// against unchanged, correct production code -- `{watson: "TCGAGGCATG",
+    /// crick: "CC", ovhg: -4}` from XhoI+SphI is a perfectly good fragment
+    /// whose two strands pair over two bases, and the old expression scored it
+    /// at -2. It could miss a real one, too: at `w = 10, c = 2, ovhg = +9` the
+    /// strands do not meet and the old expression returns 1.
+    fn paired_bases(f: &Dseq) -> i64 {
+        let (w, c, ov) = (f.watson.len() as i64, f.crick.len() as i64, f.ovhg);
+        w.min(c - ov) - 0.max(-ov)
+    }
+
+    /// The sweep's measuring instrument counts the overlap the duplex has.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: the expression was `w.min(c + ov) -
+    /// 0.max(ov)`, written out inline at both of its call sites, and it read
+    /// the sign of `ovhg` backwards.
+    ///
+    /// Mutation that re-breaks it: in `paired_bases`, put the body back to
+    /// `w.min(c + ov) - 0.max(ov)`. The first case below then reports 1 where
+    /// the fragment has 5 base pairs, and
+    /// `no_double_digest_produces_a_fragment_with_no_base_pairs` goes red with
+    /// 1404 fragments it wrongly calls empty.
+    ///
+    /// The fixtures are shipped fragments, not hand-invented ones: the first is
+    /// the second half of the pydna reference digest asserted in
+    /// `cutting_matches_the_pydna_reference_shape`, and the third came out of
+    /// the whole-table sweep itself.
+    #[test]
+    fn the_sweeps_pairing_measure_counts_the_overlap_a_duplex_has() {
+        // BamHI's right-hand fragment: nine bases of watson over five of crick,
+        // four of which protrude as the GATC overhang, so five pairs.
+        assert_eq!(
+            paired_bases(&Dseq::from_parts("GATCCTTTT", "AAAAG", -4, false)),
+            5
+        );
+        // Blunt: every base is paired.
+        assert_eq!(paired_bases(&Dseq::new("GGATCC", false)), 6);
+        // A 3' overhang, the sign the old expression got wrong in the other
+        // direction: one base pair, and it is a real fragment.
+        assert_eq!(paired_bases(&Dseq::from_parts("C", "GGGCC", 4, false)), 1);
+        // ...and the fragment the whole sweep exists to forbid.
+        assert_eq!(paired_bases(&Dseq::from_parts("CCG", "GAT", -4, false)), -1);
+    }
+
+    /// The sweep really does run over every shipped enzyme.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f, where the sweep's doc claimed "every
+    /// unambiguous shipped enzyme" and its body built the list from eight
+    /// hand-written names -- 8 of 58, every one of them `ovhg == -4`. This test
+    /// did not exist, and could not have passed if it had.
+    ///
+    /// Mutation that re-breaks it: in `sweep_enzymes`, replace the body with
+    /// `pl_enzymes::ENZYMES[..8].to_vec()`. The count assertion fails at 8
+    /// against 58, and so do the blunt and non-4 geometry assertions, because
+    /// the first eight entries by name carry only `-4` and `+4`.
+    ///
+    /// The geometry assertions are the point rather than the count: they are
+    /// what the old eight-name list failed, and they are stated as "at least
+    /// one of each kind" so that adding an enzyme to the table cannot turn
+    /// this red for no reason.
+    #[test]
+    fn the_duplex_sweep_runs_over_the_whole_shipped_table() {
+        let es = sweep_enzymes();
+        assert_eq!(
+            es.len(),
+            pl_enzymes::ENZYMES.len(),
+            "the sweep is over the whole table or the sentence above it is false"
+        );
+
+        let mut geoms: Vec<i8> = es.iter().map(|e| e.ovhg).collect();
+        geoms.sort_unstable();
+        geoms.dedup();
+        // Biopython's sign convention, as `Enzyme::ovhg` documents: negative is
+        // a 5' overhang, positive a 3' one, zero blunt.
+        assert!(
+            geoms.iter().any(|&o| o < 0),
+            "no 5'-overhang cutter in the sweep: {geoms:?}"
+        );
+        assert!(
+            geoms.iter().any(|&o| o > 0),
+            "no 3'-overhang cutter in the sweep -- the eight-name list had none \
+             of these, and they are the ones `fragment()`'s head term exists \
+             for: {geoms:?}"
+        );
+        assert!(
+            geoms.contains(&0),
+            "no blunt cutter in the sweep: {geoms:?}"
+        );
+        assert!(
+            geoms.iter().any(|&o| o.abs() != 4),
+            "every overhang in the sweep is four bases, so the spacing guard's \
+             `|ovhg|` term is only ever tested at one value: {geoms:?}"
+        );
+        assert!(
+            es.iter().any(|e| e.cuts_outside_its_site()),
+            "no Type IIS enzyme in the sweep -- the class whose two nicks are \
+             both outside the site, which is what `try_cut`'s duplex filter was \
+             written for"
+        );
+
+        // Why the word "unambiguous" came out of the sweep's doc rather than
+        // being honoured: it excluded nothing. If that ever stops being true,
+        // the sweep's MCS-shaped cores start carrying ambiguity codes and this
+        // is the line that says so.
+        assert!(
+            es.iter()
+                .all(|e| e.site.bytes().all(|b| b"ACGT".contains(&b))),
+            "an enzyme with a non-ACGT site is now shipped; the sweep builds its \
+             fixtures by pasting sites together, so it now builds ambiguous DNA"
+        );
+    }
+
     /// Every fragment a double digest produces is a real duplex.
     ///
     /// PROVEN TO FAIL against the first version of `try_cut`'s duplex filter,
@@ -1945,23 +2461,44 @@ mod tests {
     /// because this sweep enumerates enzyme pairs and never touches the named
     /// fragment's shape.
     ///
-    /// Swept over every unambiguous shipped enzyme rather than asserted on one
-    /// case, because the defect is a property of overlapping sites and the pair
-    /// that first showed it is not special: 128 malformed fragments turned up
-    /// across ordinary MCS-shaped cores.
+    /// Swept over the WHOLE SHIPPED TABLE rather than asserted on one case,
+    /// because the defect is a property of overlapping sites and the pair that
+    /// first showed it is not special.
+    ///
+    /// That sentence used to read "every unambiguous shipped enzyme" over a
+    /// hand-written list of eight names, all of which have `ovhg == -4`. It
+    /// swept one end geometry -- a 4-base 5' overhang -- out of the six the
+    /// table holds, so not one 3'-overhang cutter, not one blunt cutter, not
+    /// one 2- or 3-base overhang and not one Type IIS enzyme was ever run
+    /// through it, and a maintainer reading the sentence to decide whether a
+    /// change to `try_cut`'s boundary arithmetic was covered got a false yes.
+    /// The qualifier was empty as well: no entry in the table has a non-ACGT
+    /// site, so "unambiguous" excluded nothing. `sweep_enzymes` now supplies
+    /// the list and [`the_duplex_sweep_runs_over_the_whole_shipped_table`]
+    /// pins what it contains.
+    ///
+    /// Mutation that re-breaks this test: in `try_cut`, put the duplex filter
+    /// back to the per-strand test --
+    ///
+    /// ```text
+    /// let inside = |t: &i64| *t > w_lo && *t < w_hi
+    ///                        && t + ovhg > c_lo && t + ovhg < c_hi;
+    /// ```
+    ///
+    /// -- and the first named case alone takes it down, on `len()` 7 against
+    /// `to_string_full()` 6 for BamHI+BspEI.
+    ///
+    /// The cost of the narrow list, measured rather than asserted: with that
+    /// same mutation applied AND the `len()`/`to_string_full()` assertion in
+    /// the loop below neutralised -- it otherwise aborts before anything is
+    /// counted -- the `bad` assertion reports **11** malformed fragments for
+    /// the eight names and **216** for the whole table. Both numbers are from
+    /// running it here. The "128" in `try_cut`'s own comment is an older
+    /// measurement of a different sweep and is left as the historical record it
+    /// is; it is not reproducible from this test.
     #[test]
     fn no_double_digest_produces_a_fragment_with_no_base_pairs() {
-        let names = [
-            "BamHI", "BspEI", "AvrII", "AgeI", "SalI", "AflII", "HindIII", "EcoRI",
-        ];
-        let es: Vec<pl_enzymes::Enzyme> = names
-            .iter()
-            .filter_map(|n| pl_enzymes::by_name(n).cloned())
-            .collect();
-        assert!(
-            es.len() >= 6,
-            "the shipped table lost enzymes this test needs"
-        );
+        let es = sweep_enzymes();
 
         // BOTH ENZYMES IN ONE CALL. An earlier version of this test digested
         // sequentially -- `digest(seq, [a])` then `digest(frag, [b])` -- and
@@ -1998,12 +2535,10 @@ mod tests {
         }
         for (what, seq) in &cases {
             for f in digest(&Dseq::new(seq, false), &es) {
-                let (w, c, ov) = (f.watson.len() as i64, f.crick.len() as i64, f.ovhg);
-                let paired = (w.min(c + ov) - 0.max(ov)).max(0);
-                if paired <= 0 {
+                if paired_bases(&f) <= 0 {
                     bad.push(format!(
-                        "{what} on {seq}: {{watson:{:?}, crick:{:?}, ovhg:{ov}}}",
-                        f.watson, f.crick
+                        "{what} on {seq}: {{watson:{:?}, crick:{:?}, ovhg:{}}}",
+                        f.watson, f.crick, f.ovhg
                     ));
                 }
                 assert_eq!(
@@ -2059,10 +2594,13 @@ mod tests {
         let bases = f.watson.len() + f.crick.len();
         assert_eq!(bases, 6, "watson {:?} + crick {:?}", f.watson, f.crick);
 
-        // Not one base pair: `paired` is the sweep's own formula above.
-        let (w, c, ov) = (f.watson.len() as i64, f.crick.len() as i64, f.ovhg);
+        // Not one base pair, measured with `paired_bases` -- the sweep's own
+        // instrument, so the premise here and the rule up there are one
+        // statement. This used to be a second, inline copy of that expression,
+        // and both copies read the sign of `ovhg` backwards; they agreed on
+        // this fragment, which is why the error survived. See `paired_bases`.
         assert!(
-            (w.min(c + ov) - 0.max(ov)) <= 0,
+            paired_bases(&f) <= 0,
             "the premise: the two strands do not overlap at all"
         );
 

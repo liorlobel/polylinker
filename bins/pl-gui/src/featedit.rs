@@ -30,7 +30,12 @@
 //! - **`Segment::kind`**, the `.dna` `<Segment type=>`. One distinct value in
 //!   the whole local corpus, so it gets no control; it is carried verbatim.
 //! - **segment order**, which is load-bearing three times over: `Feature::extent`
-//!   recognises an origin-crossing join only in the shape the writer emits,
+//!   reads an origin crossing off the ENDS of the run — the first segment's
+//!   start and the last segment's end — so a reorder moves where the feature is
+//!   reported to begin (this read "recognises an origin-crossing join only in
+//!   the shape the writer emits", which was true until the 2026-08-13 audit
+//!   found that a rotation produces a shape the writer never emits, and that
+//!   the recogniser then dropped the wrapped segment in silence),
 //!   `map::bands` builds the intron connectors from `windows(2)` in file order,
 //!   and `genbank::format_location` emits the parts of a `join(...)` verbatim —
 //!   INSDC join order *is* the reading order. Nothing here sorts.

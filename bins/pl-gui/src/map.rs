@@ -948,6 +948,18 @@ fn outward_of(forward_lanes: usize) -> f32 {
 
 /// The 1-based coordinate of the `i`th tenth-of-the-molecule ruler tick.
 ///
+/// **`i` RUNS `0..10` AND NOT `0..=10`, IN BOTH PAINTERS, AND THE TRAILING `+ 1`
+/// BELOW IS WHY.** `tick_pos(span, 10)` is `span + 1`, and `10 % 2 == 0` puts
+/// that value in the NUMBERED half of either ruler rather than in the silent
+/// half. On a circle `span + 1` is the origin and is defensible, and
+/// `draw_circular` has never asked for it anyway. On a line it is a base the
+/// molecule does not have — and every FASTA and every linear GenBank opens
+/// linear — yet `draw_linear` asked for it and printed it from the first GUI
+/// commit (516e1aa) until 2026-08-13: an 8,117 bp Plasmidsaurus assembly was
+/// ruled `1 … 6,494   8,118`, and 8,118 was the only length-like number in that
+/// pane. `draw_linear`'s own loop carries the rest of that story, including why
+/// the answer was to stop asking rather than to clamp here.
+///
 /// Multiplied in `u128`, because `span` is a coordinate straight out of a file
 /// and nothing on the open path has validated it. An annotation-only `.dna`
 /// carrying `range="1-18446744073709551615"` — the same 185-byte hostile file
@@ -964,9 +976,16 @@ fn outward_of(forward_lanes: usize) -> f32 {
 /// placed on the same spoke, collapsing the whole ruler.
 fn tick_pos(span: u64, i: u64) -> u64 {
     // The product needs 68 bits at most (u64::MAX x 10), and the quotient is
-    // never larger than `span`, so the narrowing back is exact. The final
-    // increment saturates for the one input that reaches the top: i = 10 on a
-    // span of u64::MAX, in `draw_linear`'s inclusive loop.
+    // never larger than `span`, so the narrowing back is exact.
+    //
+    // The final increment SATURATES, and since 2026-08-13 no painter reaches the
+    // input that needs it: that was i = 10 on a span of u64::MAX, drawn only by
+    // `draw_linear`'s then-inclusive loop, and both loops now stop at 9. The
+    // saturation stays because this function is total over its argument type
+    // while its callers' bounds are not part of its signature — the next ruler
+    // written against it must not be able to wrap it by counting one higher —
+    // and because `a_ruler_tick_on_a_hostile_span_is_computed_rather_than_wrapped`
+    // pins exactly that input.
     (((span as u128 * i as u128) / 10) as u64).saturating_add(1)
 }
 
@@ -2655,7 +2674,45 @@ fn draw_linear(
         );
     }
 
-    for i in 0..=10 {
+    // The ruler: a hairline every tenth of the molecule, numbered on every other
+    // one. `0..10`, EXCLUSIVE, character for character the range `draw_circular`
+    // uses for the same job — these are one ruler drawn on two shapes, and a
+    // difference between the two loops is a defect with nothing to catch it.
+    //
+    // IT WAS `0..=10` FROM 516e1aa UNTIL 2026-08-13, AND THE EXTRA PASS PRINTED
+    // A COORDINATE THE MOLECULE DOES NOT HAVE. `tick_pos(span, 10)` is
+    // `span + 1`; 10 is even, so it took the numbered branch; and
+    // `x_of(span + 1)` is exactly `x1`, the right-hand end of the axis, well
+    // inside the pane where it read as the length. An 8,117 bp Plasmidsaurus
+    // assembly was ruled `… 6,494   8,118`, a 4,641,652 bp genome `4,641,653`.
+    // Every other number here names a REAL base at the LEFT edge of its tick,
+    // and the ticks sit where the fractions say: the i = 5 hairline lands at
+    // exactly `x0 + 0.5 * width`. So the last number was never a boundary
+    // convention the reader could learn, it was one pass too many — and a
+    // coordinate printed on a map in a cloning tool is quoted at face value.
+    //
+    // NOT CLAMPED TO `span`, which was the other candidate and would have kept a
+    // number at the end of the axis. Clamping has to be a special case in one of
+    // two loops whose whole safety is that they are the same loop — the exact
+    // shape of the thing being fixed — and this file has already answered the
+    // same question the same way in `show`, where the primer marks are filtered:
+    // "Filtered rather than clamped: a site is somewhere or it is not, and a
+    // clamped one would sit on base 1 claiming to be a binding site."
+    //
+    // WHAT THE PANE LOSES IS A NUMBER IT WAS NEVER THE AUTHORITY ON, and this is
+    // the cost stated rather than waved past: the last NUMBER now sits at 80% of
+    // the axis and the last hairline at 90%, so the linear map no longer states
+    // the molecule's length at all. It was never the surface that answered that
+    // question — the File tab prints `length` / `8,117 bp` for every open
+    // document (`file_tab` in main.rs), whatever the topology — and the exported
+    // figure has never answered it either: `pl_draw::linear`'s ruler steps in
+    // ROUND numbers, `while base <= len`, so its last label is the last round
+    // number that fits — 8,000 on this assembly at the default width, and never
+    // `len` unless `len` is round. The two rulers label different bases — on
+    // this assembly they share no number at all — and that was as true before
+    // this change as after; what they now agree on is the only rule that
+    // matters, that neither can name a base past the end of the molecule.
+    for i in 0..10 {
         let pos = tick_pos(span, i);
         let x = x_of(pos);
         p.line_segment(
@@ -3216,8 +3273,12 @@ mod tests {
         assert_eq!(tick_pos(span, 4), 7_378_697_629_483_820_647);
         assert_eq!(tick_pos(span, 6), 11_068_046_444_225_730_970);
         assert_eq!(tick_pos(span, 8), 14_757_395_258_967_641_293);
-        // `draw_linear`'s loop is inclusive, so the last tick is the one where
-        // the trailing +1 would carry past the end of the type.
+        // NOTHING DRAWS i = 10 ANY MORE — both painters' loops are `0..10` since
+        // `draw_linear` stopped labelling `span + 1` on 2026-08-13 — and the
+        // arithmetic is still pinned here, because `tick_pos` takes a bare `u64`
+        // and its callers' bounds are not part of its signature. This is the one
+        // input where the trailing +1 would carry past the end of the type, so
+        // it is the input a future ruler would trip over first.
         assert_eq!(tick_pos(span, 10), u64::MAX);
         // Distinct and increasing is the property that keeps it a ruler.
         for i in 1..=10 {
@@ -3232,9 +3293,96 @@ mod tests {
     fn ruler_ticks_on_an_ordinary_plasmid_are_where_they_have_always_been() {
         // The control. pUC19 at 2,686 bp: hardening the arithmetic must not
         // move a single tick on a file anyone actually opens.
-        let want = [1, 269, 538, 806, 1075, 1344, 1612, 1881, 2149, 2418, 2687];
+        //
+        // TEN ENTRIES, AND IT CARRIED ELEVEN UNTIL 2026-08-13. The eleventh was
+        // `2687` — `i = 10`, which `tick_pos` answers with `span + 1` because it
+        // adds 1 after the division. That assertion encoded a base a 2,686 bp
+        // molecule does not have. It was harmless on the circle, whose loop has
+        // always been `0..10` and never asked; `draw_linear`'s was `0..=10`, so
+        // on a linear molecule the number was drawn, at the end of the axis,
+        // where it read as the length. Both loops now stop at 9, so ten is the
+        // whole of what either ruler draws and ten is what this control covers.
+        //
+        // DO NOT PUT 2,687 BACK HERE. Nothing draws it, and an eleventh expected
+        // value in a test named for where the ticks ARE would pin a coordinate
+        // the picture must never show. The arithmetic at i = 10 is not lost: it
+        // is asserted one test up, in
+        // `a_ruler_tick_on_a_hostile_span_is_computed_rather_than_wrapped`,
+        // which is where a claim about overflow belongs.
+        let want = [1, 269, 538, 806, 1075, 1344, 1612, 1881, 2149, 2418];
         for (i, w) in want.iter().enumerate() {
             assert_eq!(tick_pos(2686, i as u64), *w, "tick {i}");
+        }
+    }
+
+    /// The linear ruler never names a base the molecule does not have.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: `draw_linear`'s tick loop was `for i in 0..=10`
+    /// where `draw_circular`'s is `for i in 0..10`, and `tick_pos(span, 10)` is
+    /// `span + 1` with 10 in the NUMBERED half of the ruler. On this fixture the
+    /// pane's rightmost number came out `8,118` on an 8,117 bp molecule, drawn at
+    /// `x_of(span + 1)` — exactly `x1`, the right-hand end of the axis, well
+    /// inside the pane, where it reads as the length of the thing.
+    ///
+    /// THE MUTATION THAT RE-BREAKS IT: in `draw_linear`, change the ruler's
+    /// `for i in 0..10` back to `for i in 0..=10`. `8,118` reappears among the
+    /// drawn strings and the past-the-end assertion below fails naming it.
+    ///
+    /// THE FIXTURE IS THE POINT OF THE DEFECT: bases and nothing else, which is
+    /// what a Plasmidsaurus assembly arrives as, and `Topology::default()` is
+    /// `Linear` — every FASTA opens linear, which is what made a coordinate the
+    /// circle can defend (there `span + 1` is the origin) into a coordinate that
+    /// does not exist. It carries no features and [`paint`] hands the painter an
+    /// empty digest, so the ruler's numbers are the only text on the pane at all;
+    /// EVERY drawn string is examined here rather than a chosen few — anything
+    /// that is not a bare number cannot be a tick — so the check cannot pass by
+    /// having looked at the wrong text.
+    ///
+    /// The five expected numbers are asserted as well as the bound, because "no
+    /// number past the end" is satisfied perfectly by a ruler that draws nothing:
+    /// that half is what fails if the loop is emptied rather than shortened by
+    /// one, and without it this would be a check that cannot fail.
+    #[test]
+    fn the_linear_ruler_never_labels_a_base_past_the_end_of_the_molecule() {
+        let span = 8_117u64;
+        let mol = Molecule {
+            seq: vec![b'A'; span as usize],
+            ..Default::default()
+        };
+        assert_eq!(
+            mol.topology,
+            Topology::Linear,
+            "the premise: a bare sequence opens linear"
+        );
+        assert_eq!(mol.annotation_span().max(1), span, "the premise: the span");
+
+        let (shapes, _) = paint(&mol, 900.0, 700.0);
+        // Every drawn string that is a bare number, separators removed. A text
+        // that is not a number cannot be a ruler tick and is skipped rather than
+        // asserted about — there is none on this fixture, and a future caption
+        // must not turn this into a failure about the wrong thing.
+        let mut numbers: Vec<u64> = Vec::new();
+        for s in &shapes {
+            if let Shape::Text(t) = s {
+                let bare: String = t.galley.text().chars().filter(|c| *c != ',').collect();
+                if let Ok(n) = bare.parse::<u64>() {
+                    numbers.push(n);
+                }
+            }
+        }
+        assert!(!numbers.is_empty(), "the pane drew no ruler number at all");
+        for n in &numbers {
+            assert!(
+                *n <= span,
+                "the ruler names base {n} on a {span} bp molecule; it drew {numbers:?}"
+            );
+        }
+        // The deciles this fix does not move: `tick_pos` at i = 0, 2, 4, 6, 8.
+        for want in [1u64, 1_624, 3_247, 4_871, 6_494] {
+            assert!(
+                numbers.contains(&want),
+                "the {want} tick is missing; the ruler drew {numbers:?}"
+            );
         }
     }
 
@@ -3405,7 +3553,15 @@ mod tests {
     // applies to the screenshot; the picture is still worth looking at for the
     // arrow SHAPE and for the three heads that should have vanished.
 
-    /// One frame of the circular map, and the shapes it painted.
+    /// One frame of the map, and the shapes it painted.
+    ///
+    /// `show` dispatches on `mol.topology`, so this paints the ring or the axis
+    /// according to the fixture handed in. Every caller in the arrowhead group
+    /// below hands in a circle — that is what the group is about — and
+    /// `the_linear_ruler_never_labels_a_base_past_the_end_of_the_molecule` is the
+    /// one that does not. Nothing here is circle-specific: the caption is a fixed
+    /// string `draw_linear` does not even take, and the empty digest means
+    /// neither painter draws a site label.
     fn paint(mol: &Molecule, w: f32, h: f32) -> (Vec<Shape>, Rect) {
         let ctx = crate::test_ctx();
         let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(w, h));

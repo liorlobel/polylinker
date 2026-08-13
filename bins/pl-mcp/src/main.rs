@@ -30,6 +30,22 @@
 //! to check the project's central trust claim, and
 //! `the_module_header_describes_the_database_that_ships` now reads it.
 //!
+//! The rule two paragraphs up — anything hedged in the terminal has to be
+//! hedged here too — is not self-executing, and it has now been broken four
+//! times. Three on 2026-07-28 (`AUDIT-2026-07-28` #67, #68 and #89: a truncated
+//! fragment list with no truncation marker, a genetic code silently
+//! substituted, an empty ORF result with no threshold to read it against) and
+//! once on 2026-08-13, when `annotate` was found to be dropping two of the
+//! three qualifiers `pl annotate` appends to a hit — including `crosses
+//! origin`, without which the reversed coordinate pair of an origin-spanning
+//! feature is not merely unhedged but unreadable. `annotate` now also heads its
+//! reply with the molecule's length and topology, as the CLI does, because a
+//! wrapped range means nothing without them. One qualifier is still terminal
+//! only and is named where it is skipped rather than left to be rediscovered:
+//! `Annotation::fusion_orf`. The moral each time is the same and it is a
+//! process one — a new field on a result type is a new hedge to route, and this
+//! file is downstream of every one of them.
+//!
 //! # No dependencies
 //!
 //! JSON-RPC 2.0 over stdio, with [`json`] doing the parsing. The correctness
@@ -470,6 +486,51 @@ fn first_record_only(report: &pl_fileio::LoadReport) -> Vec<String> {
     }
 }
 
+/// How long the molecule is and whether its ends join, in one clause —
+/// `"5386 bp circular"` — hedged for the two shapes where that plain sentence
+/// would be a lie.
+///
+/// **One function because there must be one sentence.** This three-way split
+/// grew inside `read_molecule` and stayed there while it had one caller. It
+/// acquired a second on 2026-08-13, when `annotate` began heading its reply
+/// with the same fact (AUDIT-2026-08-13 #5 — a wrapped coordinate range is not
+/// interpretable without the length and the topology to read it against). A
+/// copy would have meant one tool on this server describing a UGENE annotation
+/// track as "0 bp linear" while the other, three hundred lines away, called it
+/// an annotation track and refused to name a topology — two answers to one
+/// question, from one process, about one file.
+///
+/// The hedges are the function, not decoration on it:
+///
+/// * `Molecule::len` counts the bases actually present, and a GenBank record
+///   may declare `5386 bp` on its LOCUS line and carry an empty `ORIGIN`. The
+///   plain form called such a plasmid "0 bp" — a claim about the molecule made
+///   out of a fact about the file, and exactly what the GC field on the same
+///   `read_molecule` line refuses to do. `pl info` hedges this case, so this
+///   has to as well.
+/// * A standalone annotation track — features, no bases, no declared length,
+///   and in the UGENE export this matches no topology word on the LOCUS line
+///   either — was reported as "0 bp linear", asserting both a length its own
+///   features contradict and a topology the file never gave. The span here is
+///   inferred from the features and says so. [`pl_core::Topology`] has no
+///   unknown state, which is precisely why this branch must not print one.
+fn extent_of(m: &pl_core::Molecule) -> String {
+    if m.sequence_absent() {
+        format!(
+            "{} bp DECLARED, but this file carries no bases, {}",
+            m.span(),
+            m.topology.as_str()
+        )
+    } else if m.is_annotation_track() {
+        format!(
+            "an annotation track: coordinates and no bases, spanning {} bp by its features",
+            m.annotation_span()
+        )
+    } else {
+        format!("{} bp {}", m.len(), m.topology.as_str())
+    }
+}
+
 fn call(params: &Value) -> Result<Value, String> {
     let name = params
         .get("name")
@@ -488,29 +549,12 @@ fn run(name: &str, a: &Value) -> Result<Value, String> {
             let (m, report) = load(&text_arg(a, "path")?)?;
             let c = pl_core::Composition::of(&m.seq);
             let mut lines = first_record_only(&report);
-            // `m.seq.len()` counts the bases actually present, and printing it
-            // as the molecule's length described a GenBank record declaring
-            // `5386 bp` with an empty `ORIGIN` as "0 bp" — exactly the class of
-            // claim the GC field two lines below refuses to make. `pl info`
-            // hedges this case, so this has to as well.
-            let extent = if m.sequence_absent() {
-                format!(
-                    "{} bp DECLARED, but this file carries no bases, {}",
-                    m.span(),
-                    m.topology.as_str()
-                )
-            } else if m.is_annotation_track() {
-                // No bases, no declared length, and — in the UGENE export that
-                // this matches — no topology word on the LOCUS line either, so
-                // "0 bp linear" asserted a topology the file never gave. The
-                // span here is inferred from the features and says so.
-                format!(
-                    "an annotation track: coordinates and no bases, spanning {} bp by its features",
-                    m.annotation_span()
-                )
-            } else {
-                format!("{} bp {}", m.len(), m.topology.as_str())
-            };
+            // Hedged, and hedged in [`extent_of`] rather than here, because
+            // `annotate` prints the same clause and the two must not be able to
+            // disagree about the same file. The reasons for each hedge — a
+            // declared length with no bases, and a bases-less annotation track
+            // with no topology to name — are written out there.
+            let extent = extent_of(&m);
             lines.push(format!(
                 "{extent}, GC {}, {} feature(s), {} primer(s)",
                 // `None` when the molecule holds no unambiguous bases —
@@ -767,7 +811,32 @@ fn run(name: &str, a: &Value) -> Result<Value, String> {
             } else {
                 all.reviewed()
             };
-            let note = first_record_only(&report);
+            let mut note = first_record_only(&report);
+            // The molecule the coordinates below are coordinates *in*, said
+            // once, at the head, before any of them.
+            //
+            // `pl annotate` heads its hit list with `{path}  {n} bp
+            // circular|linear` (bins/pl/src/main.rs) and this tool's only
+            // preamble was `first_record_only`, which is empty for the ordinary
+            // single-record file. So the reply for an origin-spanning feature
+            // was the bare pair `681..80` with no length and no topology, and
+            // an assistant handed that cannot reconstruct the wrap even by
+            // arithmetic: on a linear molecule `681..80` is a malformed range,
+            // on an 800 bp circle it is a 200-base arc, and nothing in the
+            // reply distinguished the two.
+            //
+            // The convention sentence rides along on the circular branch only.
+            // On a linear molecule `start > end` is not a wrap but an error,
+            // and printing the rule there would teach a reader to read a bug as
+            // a feature.
+            let mut head = extent_of(&m);
+            if m.topology.is_circular() {
+                head.push_str(
+                    ". A range below whose start is greater than its end runs \
+                     across base 1",
+                );
+            }
+            note.push(head);
             if db.records.is_empty() {
                 // The caveat has to survive the process boundary. An
                 // assistant repeats what it is handed, so "nothing found"
@@ -792,8 +861,56 @@ fn run(name: &str, a: &Value) -> Result<Value, String> {
             let found = ann.annotate(&m);
             let mut lines: Vec<String> = note;
             lines.extend(found.iter().map(|f| {
+                // Every qualifier the terminal prints, or the qualifier is lost
+                // exactly where it matters most.
+                //
+                // `pl annotate` appends "  fragment", "  via protein" and
+                // "  crosses origin" to its hit lines; only the first of the
+                // three survived into this reply, and `wraps_origin` was read
+                // nowhere in this crate at all. The cost is not cosmetic,
+                // because `wraps_origin` is the only thing that makes the
+                // coordinates legible: `Annotation` guarantees `start > end`
+                // exactly when it is set. `annotate.rs`'s own fixture measures
+                // the shape — an 800 bp circle carrying a 200 bp record across
+                // base 1 reports `681..80` — and an assistant handed that
+                // either relays "681 to 80" or silently normalises it to
+                // "80..681", the only reading that parses as an interval, and
+                // that arc holds none of the 200 bases the feature occupies.
+                // Someone then orders sequencing primers against it.
+                // `via_protein` is milder and still a real claim: a hit found
+                // only by translation says the nucleotides were rewritten,
+                // which is what a user needs to know before designing a probe
+                // or an allele-specific primer against the coordinates.
+                //
+                // Second sweep of this file for this one class, and the fourth
+                // instance of it: AUDIT-2026-07-28 #67 (the digest fragment
+                // cap), #68 and #89 (the ORF table and the ORF threshold) were
+                // all "a hedge the CLI prints that does not survive the process
+                // boundary", and the `annotate` suffix flags were simply
+                // missed. One flag is still missed on purpose and named here
+                // rather than left to be rediscovered:
+                // `Annotation::fusion_orf`, the ORF a peptide part was admitted
+                // on, which `pl annotate` prints on a continuation line. It is
+                // outside AUDIT-2026-08-13 #5's stated fix and has no test on
+                // this surface yet; do not read its absence below as evidence
+                // that nothing needs it.
+                //
+                // Accumulated rather than formatted inline so the order is
+                // fixed in one place and matches the CLI's, and so a fourth
+                // qualifier is one statement rather than another `{}` counted
+                // off against a widening argument list.
+                let mut hedges = String::new();
+                if f.is_fragment {
+                    hedges.push_str(", fragment");
+                }
+                if f.via_protein {
+                    hedges.push_str(", via protein");
+                }
+                if f.wraps_origin {
+                    hedges.push_str(", crosses origin");
+                }
                 format!(
-                    "{}..{} {} {} — {:.1}% identity, {:.0}% coverage{}",
+                    "{}..{} {} {} — {:.1}% identity, {:.0}% coverage{hedges}",
                     f.start,
                     f.end,
                     if f.strand == pl_core::Strand::Reverse {
@@ -804,7 +921,6 @@ fn run(name: &str, a: &Value) -> Result<Value, String> {
                     db.records[f.record].name,
                     f.identity * 100.0,
                     f.coverage * 100.0,
-                    if f.is_fragment { ", fragment" } else { "" }
                 )
             }));
             if found.is_empty() {
@@ -1243,6 +1359,243 @@ mod tests {
         assert!(text.contains("curated record(s) searched"), "{text}");
     }
 
+    /// `PLF:0001` — AmpR, 861 bases — as the shipped database actually holds
+    /// it, plus the name the reply will print for it.
+    ///
+    /// Read out of [`pl_features::Db::builtin`] rather than pasted in, because
+    /// the tool searches `Db::builtin().reviewed()` and a pasted copy would
+    /// silently stop being the thing under test the first time the row is
+    /// re-derived. Panics loudly if the row is gone or unsigned: that is a fact
+    /// about the shipped database worth failing over, not a reason to skip.
+    ///
+    /// AmpR because it is the audit's own failure scenario and the commonest
+    /// real one — the numbering origin of an assembled plasmid is wherever the
+    /// assembler cut the circle, so a full-length marker straddling base 1 is
+    /// routine rather than exotic.
+    fn shipped_ampr() -> (String, String) {
+        let (all, _) = pl_features::Db::builtin();
+        let db = all.reviewed();
+        let r = db
+            .records
+            .iter()
+            .find(|r| r.id == "PLF:0001")
+            .expect("PLF:0001 is signed off and clears the taint gate");
+        let raw = r.reference_nt.clone();
+        let nt = String::from_utf8(raw).expect("bases are ASCII");
+        assert_eq!(nt.len(), 861, "PLF:0001 changed length: {}", nt.len());
+        (r.name.clone(), nt)
+    }
+
+    /// Deterministic filler DNA, so the fixtures below carry the same bases on
+    /// every machine and every run.
+    ///
+    /// xorshift64, five lines, no dependency — `crates/` takes none and this
+    /// binary matches them. A `SystemTime`-seeded generator here would make a
+    /// failure unreproducible, and `fixture`'s own doc comment records what a
+    /// test that fails at random costs: it teaches whoever reads the suite to
+    /// re-run until green.
+    fn filler(n: usize, seed: u64) -> String {
+        let mut x = seed | 1;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                b"ACGT"[(x >> 33) as usize % 4] as char
+            })
+            .collect()
+    }
+
+    /// A one-record circular GenBank file carrying exactly `seq`.
+    fn circular_gb(name: &str, seq: &str) -> String {
+        fixture(
+            &format!("{name}.gb"),
+            &format!(
+                "LOCUS       {name}    {} bp    DNA     circular SYN 01-JAN-2026\n\
+                 ORIGIN\n        1 {seq}\n//\n",
+                seq.len()
+            ),
+        )
+    }
+
+    /// The reply line for the hit on `name`, or a panic showing the whole
+    /// reply — which is the only useful failure message when the hit is the
+    /// thing that went missing.
+    fn hit_line<'a>(text: &'a str, name: &str) -> &'a str {
+        text.lines()
+            .find(|l| l.contains("% identity") && l.contains(name))
+            .unwrap_or_else(|| panic!("no hit on {name} in {text:?}"))
+    }
+
+    /// The `start..end` a hit line opens with.
+    fn range_of(line: &str) -> (u64, u64) {
+        let head = line.split(' ').next().expect("a first field");
+        let (a, b) = head
+            .split_once("..")
+            .unwrap_or_else(|| panic!("no range at the head of {line:?}"));
+        (
+            a.parse().unwrap_or_else(|_| panic!("start of {line:?}")),
+            b.parse().unwrap_or_else(|_| panic!("end of {line:?}")),
+        )
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f: the `annotate` tool's hit format string
+    /// filled its one trailing slot from `is_fragment` alone and read
+    /// `wraps_origin` nowhere, and the reply's only preamble was
+    /// `first_record_only`, which is empty for a single-record file. So a
+    /// full-length AmpR straddling base 1 of a 1,461 bp circle crossed the
+    /// process boundary as the bare pair `1062..400` — start greater than end,
+    /// with no note, no molecule length and no topology. An assistant either
+    /// relays "1062 to 400" or normalises it to "400 to 1062", the only reading
+    /// that parses as an interval, and that arc holds none of the 861 bases the
+    /// feature occupies. At f0e4a6f two of the three assertions below fail —
+    /// `1461 bp circular` and `, crosses origin`. The `start > end` one is the
+    /// premise and not the claim: it holds at f0e4a6f too, because the
+    /// annotator was always right and only the rendering was not, and it is
+    /// here so that a fixture which quietly stopped wrapping cannot leave this
+    /// test passing on an empty condition.
+    ///
+    /// TO RE-BREAK IT: in the `"annotate"` arm of [`run`], delete the
+    /// `if f.wraps_origin { hedges.push_str(", crosses origin"); }` statement.
+    /// (Deleting the `note.push(head);` a few lines above it re-breaks the
+    /// header half on its own.)
+    ///
+    /// # Why a real record and not a synthetic one
+    ///
+    /// `crates/pl-features/src/annotate.rs`'s own
+    /// `a_feature_spanning_the_origin_of_a_circle_is_found_whole` proves the
+    /// same shape against a hand-built database, and proves it at the level of
+    /// the `Annotation` struct — where the flag was never in doubt. What was in
+    /// doubt is whether the flag survives being turned into text and handed to
+    /// another process, and that question can only be asked of the database the
+    /// server actually searches.
+    #[test]
+    fn a_hit_across_the_origin_says_so_across_the_process_boundary() {
+        let (name, amp) = shipped_ampr();
+        // The last 461 bases of AmpR at the start of the file and the first 400
+        // at the end, so the gene runs across base 1 exactly as it does on a
+        // plasmid the assembler happened to linearise inside the marker.
+        let mid = filler(600, 0x5157_2026_0813);
+        let seq = format!("{}{mid}{}", &amp[400..], &amp[..400]);
+        assert_eq!(seq.len(), 1461);
+        let path = circular_gb("wrapped", &seq);
+        let text = call_tool("annotate", vec![("path", s(path))]);
+        assert!(
+            text.contains("1461 bp circular"),
+            "no length or topology to read the range against: {text}"
+        );
+        let line = hit_line(&text, &name);
+        let (start, end) = range_of(line);
+        assert!(
+            start > end,
+            "the fixture did not produce a wrapped hit, so this test proves \
+             nothing: {line}"
+        );
+        assert!(
+            line.contains(", crosses origin"),
+            "a reversed range crossed the boundary with nothing to explain it: \
+             {line}"
+        );
+    }
+
+    /// The control for
+    /// [`a_hit_across_the_origin_says_so_across_the_process_boundary`], and the
+    /// half that makes the pair falsifiable in both directions: the same
+    /// marker, the same filler and the same 1,461 bp circumference, with the
+    /// marker moved clear of base 1.
+    ///
+    /// PROVEN TO FAIL against the obvious wrong fix — appending
+    /// ", crosses origin" unconditionally, or keying it on anything other than
+    /// `Annotation::wraps_origin` — which the wrapped test alone cannot
+    /// distinguish from the right one. A wrap note on a feature that does not
+    /// wrap sends a reader looking for bases that are not there, which is the
+    /// same class of harm in the other direction.
+    ///
+    /// TO RE-BREAK IT: in the `"annotate"` arm of [`run`], change
+    /// `if f.wraps_origin` to `if true` (or drop the `if` and push the string
+    /// unconditionally).
+    #[test]
+    fn a_hit_that_does_not_cross_the_origin_is_not_said_to() {
+        let (name, amp) = shipped_ampr();
+        let f = filler(600, 0x5157_2026_0813);
+        let seq = format!("{}{amp}{}", &f[..300], &f[300..]);
+        assert_eq!(seq.len(), 1461);
+        let path = circular_gb("interior", &seq);
+        let text = call_tool("annotate", vec![("path", s(path))]);
+        assert!(text.contains("1461 bp circular"), "{text}");
+        let line = hit_line(&text, &name);
+        let (start, end) = range_of(line);
+        assert!(start < end, "the control wrapped after all: {line}");
+        assert!(
+            !line.contains("crosses origin"),
+            "a wrap note on a feature that does not wrap: {line}"
+        );
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f: `Annotation::via_protein` was read nowhere in
+    /// this crate, so a marker found *only* by six-frame translation — i.e. one
+    /// whose nucleotides have been rewritten past the 96% identity gate, which
+    /// is what "codon-optimised" means — was reported in exactly the same words
+    /// as a nucleotide-identical one. The `100.0% identity` on that line is a
+    /// protein identity, and without the qualifier a reader designing a probe,
+    /// a diagnostic digest or an allele-specific primer against those
+    /// coordinates has been told the bases match when only the residues do.
+    /// `pl annotate` appends "  via protein"; this reply did not.
+    ///
+    /// TO RE-BREAK IT: in the `"annotate"` arm of [`run`], delete the
+    /// `if f.via_protein { hedges.push_str(", via protein"); }` statement.
+    #[test]
+    fn a_marker_found_only_by_its_protein_says_which_alphabet_matched() {
+        let (name, amp) = shipped_ampr();
+        // Recode AmpR by choosing the LAST synonymous codon available for each
+        // residue, the same construction
+        // `crates/pl-features/src/annotate.rs`'s
+        // `a_codon_optimised_gene_is_found_by_its_protein` uses: the protein is
+        // untouched and the nucleotides look nothing like the reference, so the
+        // DNA route cannot reach it and the translated route must.
+        let code = pl_core::translate::TABLE11;
+        // 861 bases is 287 codons and the last of them is the stop, which
+        // `Code::translate` emits as `*` rather than truncating at.
+        let full = code.translate(amp.as_bytes());
+        let protein: Vec<u8> = match full.strip_suffix(b"*") {
+            Some(p) => p.to_vec(),
+            None => full.clone(),
+        };
+        assert_eq!(protein.len(), 286, "PLF:0001 is a 286-residue protein");
+        let mut cds = String::new();
+        for aa in protein.iter().copied() {
+            let mut chosen = None;
+            for b1 in b"TCAG" {
+                for b2 in b"TCAG" {
+                    for b3 in b"TCAG" {
+                        let c = [*b1, *b2, *b3];
+                        if code.codon(&c) == aa {
+                            chosen = Some(c);
+                        }
+                    }
+                }
+            }
+            let c = chosen.expect("every residue of a real protein has a codon");
+            cds.push_str(std::str::from_utf8(&c).expect("a codon is ASCII"));
+        }
+        assert_eq!(code.translate(cds.as_bytes()), protein);
+        let f = filler(800, 0x5654_2026_0813);
+        let path = fixture(
+            "recoded.fa",
+            &format!(">recoded\n{}{cds}{}\n", &f[..400], &f[400..]),
+        );
+        let text = call_tool("annotate", vec![("path", s(path))]);
+        let line = hit_line(&text, &name);
+        assert!(
+            line.contains(", via protein"),
+            "a translated-only hit reads as a nucleotide identification: {line}"
+        );
+        // And the control on the same line: a recoded gene is still whole, so
+        // the qualifier that IS printed today must not have quietly become the
+        // one being asserted.
+        assert!(!line.contains(", fragment"), "{line}");
+    }
+
     #[test]
     fn the_methods_tool_returns_text_with_limits_in_it() {
         let r = req(r#"{"jsonrpc":"2.0","id":6,"method":"tools/call",
@@ -1263,10 +1616,38 @@ mod tests {
         assert!(text.contains("no fidelity percentage"), "{text}");
     }
 
+    /// A temperature with no model behind it is not a result somebody can put
+    /// in a paper — and, until 2026-08-13, only the model half of that sentence
+    /// was checked.
+    ///
+    /// PROVEN TO FAIL at f0e4a6f: not as shipped, but against three mutations
+    /// that f0e4a6f's version of this test passes, which is the same defect.
+    /// Its assertions were `starts_with("Method:")` and
+    /// `contains("GTAAAACGACGGCCAGT")`, and **both branches of the handler open
+    /// by echoing the oligo** — `"{o}  {:.1} C  ({} nt)"` on success and
+    /// `"{o}  cannot be computed: {e:?}"` on failure. So the second assertion
+    /// was satisfied by the input coming back, not by an answer, and nothing
+    /// anywhere looked at `Tm::tm`. Green under all three of: dropping the
+    /// number from the format string; swapping the match arms so every oligo
+    /// takes the error path; and substituting `t.gc_percent`, `t.dh` or `t.ds`,
+    /// all `f64`, all of which fill `{:.1}` without a compile error and one of
+    /// which — `gc_percent` for the M13 forward primer — prints a thoroughly
+    /// plausible 52.9 "C" that a bench scientist would set a thermocycler from.
+    /// The number is pinned on the CLI (`bins/pl/tests/cli.rs`) and inside
+    /// `pl-thermo`, but neither of those touches the `format!` literal that is
+    /// unique to this surface, and this is the one shipped surface whose output
+    /// a user never reads directly: they read an assistant's paraphrase of it.
+    ///
+    /// The expected lines are built **from the model**, not written down as
+    /// 57.8 and 38.9, so the assertion cannot drift away from the
+    /// implementation the way a transcribed constant does — if `pl-thermo`'s
+    /// parameters legitimately change, this test follows them, and if the MCP
+    /// handler stops printing what the model says, it does not.
+    ///
+    /// TO RE-BREAK IT: in the `"melting_temperature"` arm of [`run`], change
+    /// `t.tm` to `t.gc_percent` in the success `format!`.
     #[test]
     fn a_tm_request_reports_the_method_alongside_the_number() {
-        // A temperature with no model behind it is not a result somebody can
-        // put in a paper.
         let r = req(
             r#"{"jsonrpc":"2.0","id":7,"method":"tools/call",
                 "params":{"name":"melting_temperature","arguments":{"oligos":"GTAAAACGACGGCCAGT, ACGT"}}}"#,
@@ -1283,8 +1664,27 @@ mod tests {
             .unwrap()
             .as_str()
             .unwrap();
-        assert!(text.starts_with("Method:"), "{text}");
-        assert!(text.contains("GTAAAACGACGGCCAGT"), "{text}");
+        let method = pl_thermo::Method::default();
+        // Named, so the reply cannot claim one model and compute another.
+        let head = format!("Method: {}", method.describe());
+        assert_eq!(text.lines().next(), Some(head.as_str()), "{text}");
+        // M13 forward, and a 4-mer that is above `pl_thermo`'s two-base floor
+        // and so must take the success branch as well — the error branch is the
+        // one the old assertions could not tell apart from a result.
+        let m13 = b"GTAAAACGACGGCCAGT";
+        let long = pl_thermo::tm(m13, &method).expect("M13 forward has a Tm");
+        let short = pl_thermo::tm(b"ACGT", &method).expect("a computable 4-mer");
+        let first = format!("GTAAAACGACGGCCAGT  {:.1} C  (17 nt)", long.tm);
+        let second = format!("ACGT  {:.1} C  (4 nt)", short.tm);
+        assert!(text.contains(first.as_str()), "want {first:?} in {text:?}");
+        assert!(
+            text.contains(second.as_str()),
+            "want {second:?} in {text:?}"
+        );
+        assert!(
+            !text.contains("cannot be computed"),
+            "both oligos are computable and one was refused: {text}"
+        );
     }
 
     /// A 1,300 bp record with a PvuII site every hundred bases: 13 cuts, and

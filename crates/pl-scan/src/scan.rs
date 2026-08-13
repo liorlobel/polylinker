@@ -21,7 +21,11 @@
 //!   library.
 //! - **Gone from disk** → drop, and report the count — *unless the walk was
 //!   incomplete*, in which case nothing is dropped at all. A share that blinks
-//!   must never read as a mass deletion.
+//!   must never read as a mass deletion. "Incomplete" here is a wider notion
+//!   than `walk`'s own: a link this walk declined to follow is a sub-tree
+//!   nobody looked at, so it suppresses the deletion pass and the completeness
+//!   stamp even though `walk` rightly does not call it an error. See
+//!   `unfollowed_links` below for why the two notions have to differ.
 //!
 //! `engine` is in the key because every derived column is a function of the
 //! *parser*, not just the file. Ship a GenBank fix and, without it, every file
@@ -32,7 +36,7 @@ use std::path::Path;
 use pl_index::codec::Library;
 use pl_index::{nibble, Row};
 
-use crate::walk::walk;
+use crate::walk::{walk, WalkOptions, WalkReport};
 use crate::{content_id, rows_for_file, ScanOptions, ScanReport, MAX_BYTES};
 
 /// Build or refresh the library for `root`.
@@ -48,6 +52,50 @@ pub fn scan(root: &Path, now_ns: u128, opts: &ScanOptions) -> (Library, ScanRepo
     };
     for (path, err) in &walk_report.errors {
         report.unreadable.push((path.clone(), err.clone()));
+    }
+
+    // A link we declined to follow is a sub-tree nobody looked at, and from here
+    // down that has to read exactly like a share that blinked.
+    //
+    // `walk` counts these in `links_skipped` and deliberately leaves its own
+    // `incomplete` unset (walk.rs:219-226), which is right *for the walk*:
+    // refusing to follow a link is the documented default, not a failure, and it
+    // is the only thing keeping a link back to an ancestor from making the walk
+    // unbounded. It was wrong for what happens next here. The deletion pass
+    // below was gated on `incomplete.is_none()` alone, so `pl index
+    // --follow-links C:/lab` followed by any flagless run over the same folder
+    // -- `pl find`, `pl library`, or merely opening the GUI's Library tab, which
+    // cannot pass the flag at all because it scans with `..Default::default()`
+    // (bins/pl-gui/src/library.rs:114-124) -- counted every row behind the
+    // junction as removed, dropped it, and wrote `complete: true` over the good
+    // index. Measured on a filesystem with nothing wrong with it: `2 removed`
+    // and `#!complete 1`, after which `pl library` had no partial scan to warn
+    // about and `pl find` answered "not in my library" for plasmids still on
+    // disk.
+    //
+    // `docs/AUDIT-2026-07-29.md` deferred this as D2 because choosing between
+    // "persist the walk options in the index and reuse them" and "refuse
+    // deletions when a link was skipped" is a product decision about what an
+    // index *is*. That reason is honest and still stands -- the codec stores no
+    // walk options and this change adds none, so `--follow-links` is still not
+    // persisted and the flag still has to be repeated per invocation. What could
+    // not wait for that decision is the *claim*: an index that stamps
+    // `complete: true` over rows it deleted without looking is the single
+    // outcome the whole `incomplete` mechanism exists to prevent, and a stale
+    // row -- the worst this costs -- is recoverable by one rescan, while a
+    // deleted one is not recoverable at all.
+    //
+    // Scoped to the deletion pass and the completeness stamp, which is all
+    // `ScanReport::incomplete` reaches: nothing is pushed into `unreadable`, and
+    // `walk`'s own report is untouched, so a skipped link is still not an error.
+    // The cost is that a library holding an unfollowed link stops recording
+    // deletions until someone indexes it with the flag, exactly as an unreadable
+    // sub-directory already does. On the corpus this design was measured against
+    // it does not fire: OneDrive's 68,811 reparse points do not carry the
+    // name-surrogate bit `is_symlink` tests, which is why the walker tests that
+    // bit and not the reparse point (walk.rs:203-218).
+    if report.incomplete.is_none() {
+        report.incomplete = unfollowed_links(root, &opts.walk, &walk_report);
     }
 
     // The previous rows *are* the ledger: each carries the size, mtime and
@@ -198,7 +246,9 @@ pub fn scan(root: &Path, now_ns: u128, opts: &ScanOptions) -> (Library, ScanRepo
         rows.extend(file_rows);
     }
 
-    // Deletions, but only if we actually looked everywhere.
+    // Deletions, but only if we actually looked everywhere -- and "everywhere"
+    // includes the sub-trees behind links this walk declined to follow, which
+    // `unfollowed_links` promoted into `incomplete` above.
     if report.incomplete.is_none() {
         let seen: Vec<&str> = found.iter().map(|f| f.rel.as_str()).collect();
         report.removed = prev_rows
@@ -249,6 +299,47 @@ pub fn scan(root: &Path, now_ns: u128, opts: &ScanOptions) -> (Library, ScanRepo
         packed_bases,
     };
     (lib, report)
+}
+
+/// Why a walk that skipped a link did not look everywhere, if it did not.
+///
+/// `Some(why)` means the deletion pass must not run and the index must not
+/// claim to be complete. `None` means nothing was skipped that could be hiding
+/// a file, so a row that is missing from this walk really is a row whose file
+/// is gone.
+///
+/// Two conditions, and the second one is the one that is easy to get wrong.
+/// `WalkReport::links_skipped` counts two different things depending on the
+/// flag that was passed:
+///
+/// - With `follow_links` **off** it counts links the walk refused to enter
+///   (walk.rs:219-226). Behind one of those there may be a folder of
+///   constructs, and nothing in this run looked at it. That is the case this
+///   function exists for.
+/// - With `follow_links` **on** it counts *cycle* skips (walk.rs:266-278): a
+///   link whose target is already on the descent path, whose files are reached
+///   under their real path in the very same walk. Those are complete -- walk.rs
+///   says so where it skips them -- and calling them partial would stop a
+///   `--follow-links` library from ever recording a deletion because of a
+///   `loop -> .` that costs it nothing.
+///
+/// The count is all there is to go on. `WalkReport` records *how many* links
+/// were skipped and not *which paths* they were, so the suppression is over the
+/// whole index rather than over the sub-trees behind them; and `ScanReport` has
+/// no `links_skipped` field, so the number cannot be handed on to a caller that
+/// might want to name the junction in its warning. Both are worth having, and
+/// neither is needed to stop an index asserting completeness over rows it
+/// deleted without looking, which is the only thing being fixed here.
+fn unfollowed_links(root: &Path, opts: &WalkOptions, walk_report: &WalkReport) -> Option<String> {
+    if opts.follow_links || walk_report.links_skipped == 0 {
+        return None;
+    }
+    Some(format!(
+        "{}: {} link(s) or junction(s) were not followed, because --follow-links \
+         is off; whatever is behind them was not looked at",
+        root.display(),
+        walk_report.links_skipped
+    ))
 }
 
 /// Copy a path's rows out of the previous library, re-homing their bases.
@@ -457,6 +548,193 @@ mod tests {
         assert_eq!(lib.rows[0].state, pl_index::State::Ok);
         assert_eq!(lib.rows[0].content.len(), 40, "SHA-1, in hex");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f: `scan` took its `incomplete` from `walk`'s
+    /// report alone, and `walk` counts a link it declined to follow without
+    /// setting `incomplete` — so `links_skipped > 0` with `incomplete == None`
+    /// reached the deletion pass as a walk that had looked everywhere.
+    ///
+    /// Mutation that re-breaks it: in `unfollowed_links`, replace the body with
+    /// `None`. (Equivalently, delete the `report.incomplete =
+    /// unfollowed_links(...)` assignment in `scan`.)
+    ///
+    /// Mutation that re-breaks the second half: delete `opts.follow_links ||`
+    /// from the guard in `unfollowed_links`, which makes a `--follow-links`
+    /// walk that skipped one cycle report itself partial and stop recording
+    /// deletions for a `loop -> .` that cost it nothing.
+    ///
+    /// No filesystem and no link: `walk`'s two counters are the whole input to
+    /// the decision, so the pair the audit found untested in both directions —
+    /// `links_skipped > 0` with `incomplete == None` — can be stated directly.
+    /// That also means this check runs on every machine, including one where
+    /// the end-to-end test below has to skip because it cannot make a junction.
+    #[test]
+    fn a_skipped_link_is_a_partial_walk_but_a_cycle_skip_is_not() {
+        let root = Path::new("C:/lab");
+        let plain = WalkOptions::default();
+        assert!(
+            !plain.follow_links,
+            "the default is what the GUI scans with"
+        );
+        let following = WalkOptions {
+            follow_links: true,
+            ..Default::default()
+        };
+
+        let nothing_skipped = WalkReport::default();
+        assert!(
+            unfollowed_links(root, &plain, &nothing_skipped).is_none(),
+            "a walk that skipped nothing must still be allowed to record \
+             deletions, or no library ever converges"
+        );
+
+        let one_skipped = WalkReport {
+            links_skipped: 1,
+            ..Default::default()
+        };
+        let why = unfollowed_links(root, &plain, &one_skipped)
+            .expect("a link that was not followed is a sub-tree nobody looked at");
+        assert!(
+            why.contains("lab") && why.contains("follow-links"),
+            "the operator needs the folder and the flag that would fix it: {why:?}"
+        );
+
+        assert!(
+            unfollowed_links(root, &following, &one_skipped).is_none(),
+            "under --follow-links this counter is cycle skips, whose files were \
+             reached under their real path in the same walk"
+        );
+    }
+
+    /// Make `link` a link to the directory `target`; `false` if the platform
+    /// refused.
+    ///
+    /// A junction on Windows rather than a symbolic link, for the reason
+    /// `walk.rs`'s copy of this helper gives: `mklink /D` needs elevation or
+    /// Developer Mode, `mklink /J` needs neither, and Rust reports both as
+    /// `is_symlink()` because both carry the name-surrogate bit.
+    ///
+    /// This copy returns a bool where that one asserts, so a machine that may
+    /// not create a link does not turn into a failure of the thing being
+    /// tested. The skip hides nothing: `walk.rs`'s
+    /// `a_link_is_not_followed_by_default_and_the_skip_is_counted` still
+    /// asserts on exactly this operation in this crate, so a machine where this
+    /// returns `false` is already red there — and the decision itself is pinned
+    /// by `a_skipped_link_is_a_partial_walk_but_a_cycle_skip_is_not` above,
+    /// which needs no filesystem at all.
+    #[cfg(windows)]
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        let out = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.display().to_string(),
+                &target.display().to_string(),
+            ])
+            .output();
+        match out {
+            Ok(o) => o.status.success(),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    /// PROVEN TO FAIL at f0e4a6f: with `links_skipped` invisible to `scan`, the
+    /// flagless rescan below counted the linked row as removed, dropped it from
+    /// the rebuilt library and wrote `complete: true` — the whole of finding #8,
+    /// end to end, and the GUI reaches it by opening the Library tab.
+    ///
+    /// Mutation that re-breaks it: in `unfollowed_links`, replace the body with
+    /// `None`.
+    ///
+    /// The two scans are the two commands: `pl index --follow-links <root>`,
+    /// then anything at all over the same folder without the flag — the flag is
+    /// per-invocation, nothing in the index records it, and `bins/pl-gui` has no
+    /// way to pass it.
+    #[test]
+    fn a_rescan_without_follow_links_carries_the_linked_rows_forward_instead_of_deleting_them() {
+        let root = tmp("followlinks-rescan");
+        let target = tmp("followlinks-rescan-target");
+        write(&root, "plain.gb", &gb("plain", "GAATTCAAAA", true));
+        write(&target, "linked.gb", &gb("linked", "GGGGAATTCC", true));
+        if !link_dir(&target, &crate::abs(&root, "archive")) {
+            eprintln!(
+                "skipped: this machine would not create a directory link. the decision \
+                 itself is covered by a_skipped_link_is_a_partial_walk_but_a_cycle_skip_is_not"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&target);
+            return;
+        }
+
+        // `pl index --follow-links`: the linked sub-tree is indexed under the
+        // path the user gave.
+        let following = ScanOptions {
+            walk: WalkOptions {
+                follow_links: true,
+                ..Default::default()
+            },
+            previous: None,
+        };
+        let (lib, first) = scan(&root, 1, &following);
+        let mut indexed: Vec<&str> = lib.rows.iter().map(|r| r.path.as_str()).collect();
+        indexed.sort_unstable();
+        assert_eq!(
+            indexed,
+            vec!["archive/linked.gb", "plain.gb"],
+            "the link was created but not walked, so this test would prove nothing"
+        );
+        assert!(lib.complete, "nothing was skipped with the flag on");
+        assert_eq!(first.removed, 0);
+
+        // Anything at all over the same folder without the flag.
+        let flagless = ScanOptions {
+            walk: WalkOptions::default(),
+            previous: Some(lib.clone()),
+        };
+        let (after, report) = scan(&root, 2, &flagless);
+        assert!(
+            report.incomplete.is_some(),
+            "a walk that refused to enter the junction did not look everywhere"
+        );
+        assert_eq!(
+            report.removed, 0,
+            "a link we chose not to follow is not 400 plasmids being deleted"
+        );
+        assert!(
+            !after.complete,
+            "and the index must not claim on disk to cover what it did not walk"
+        );
+        let mut kept: Vec<&str> = after.rows.iter().map(|r| r.path.as_str()).collect();
+        kept.sort_unstable();
+        assert_eq!(
+            kept,
+            vec!["archive/linked.gb", "plain.gb"],
+            "the row behind the link survives"
+        );
+
+        // And it survived with its bases, so the library still answers about it.
+        let motif = pl_index::scan::Motif::new("GAATTC").unwrap();
+        let linked = after
+            .rows
+            .iter()
+            .find(|r| r.path == "archive/linked.gb")
+            .unwrap();
+        assert_eq!(
+            pl_index::scan::find_in_row(&motif, &after.packed, linked).len(),
+            1,
+            "a carried-forward row kept its sequence"
+        );
+
+        // The junction goes first, so nothing can reach through it.
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[test]
