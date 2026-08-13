@@ -1725,9 +1725,11 @@ def self_test() -> list:
     nothing", and this project has already shipped one gate — the translation
     check — whose stated strength was greater than its real one.
 
-    The nucleotide strings below are synthetic test fixtures, not references to
-    any organism, which is why they may appear literally here and nowhere in a
-    row.
+    The nucleotide and peptide strings below are synthetic test fixtures, not
+    references to any organism, which is why they may appear literally here and
+    nowhere in a row. Peptides are named as well as nucleotides because the
+    id-stability audit now compares `reference_aa` too, and the fixtures that
+    exercise it have to be as synthetic as the rest.
     """
     out, fails = [], []
 
@@ -1981,8 +1983,14 @@ def self_test() -> list:
     # a check with a new way past it is a check that has to be driven at the
     # hole. Every case below is run against the same two-row baseline, so the
     # difference between them is only the thing being tested.
-    was = {"PLF:0000": {"name": "kept", "nt": "ATGTAA"},
-           "PLF:0001": {"name": "gone", "nt": "ATGTAG"}}
+    # The baseline dicts carry "aa" because `read_previous` captures it: the
+    # audit compares both sequence columns, so a fixture with only "nt" would be
+    # a shape the reader never produces and would test the function against an
+    # input it cannot receive. "M" is the peptide `signed_row()` builds, so
+    # these two rows differ from the rows below in nothing except what each case
+    # is about.
+    was = {"PLF:0000": {"name": "kept", "nt": "ATGTAA", "aa": "M"},
+           "PLF:0001": {"name": "gone", "nt": "ATGTAG", "aa": "M"}}
     kept = signed_row(id="PLF:0000", name="kept", reference_nt="ATGTAA")
     f, _, g = audit_ids(was, [kept], {})
     want("an unexplained disappearance is still fatal",
@@ -2002,6 +2010,75 @@ def self_test() -> list:
     )
     want("a withdrawal does not excuse a row that is present and repointed",
          len(f) == 1 and "changed sequence" in f[0])
+
+    # THE PEPTIDE HALF OF THE SAME AUDIT, WHICH DID NOT EXIST AND COULD NOT HAVE
+    # FAILED. Every fixture above is a nucleotide row -- ATGTAA, ATGTAG, ATGTTT
+    # -- and so was every other check on this function, which is exactly why a
+    # green self-test never noticed that the peptide column was on neither side
+    # of the comparison. Nineteen of the 113 shipped rows carry an empty
+    # `reference_nt` and their whole content in `reference_aa`; for those rows
+    # the audit compared "" with "" and passed, so two of them could exchange
+    # sequences and be reported as a pair of renames "(sequence unchanged)".
+    #
+    # PROVEN TO FAIL at d8c218b: the old `if new.reference_nt != old["nt"]:`
+    # returned no fatal and no warning at all for the repointed case below, and
+    # the build wrote the table with exit 0. The one-line mutation that puts it
+    # back: in `audit_ids`, delete the single line of the `moved` comprehension
+    # that begins `("reference_aa",` -- it is the only line in that comprehension
+    # naming the peptide column, and with it gone the column is compared nowhere,
+    # so this case goes red while every case above stays green. Delete that LINE,
+    # not every occurrence of the text: the fix is quoted in prose here too.
+    # The peptide strings are synthetic, like the nucleotide ones.
+    was_pep = {"PLF:0002": {"name": "tag", "nt": "", "aa": "MKQ"}}
+    f, w, _ = audit_ids(
+        was_pep,
+        [signed_row(id="PLF:0002", name="tag", reference_nt="", reference_aa="MKW")],
+        {},
+    )
+    want("a peptide-only row repointed at a DIFFERENT peptide is fatal",
+         len(f) == 1 and "changed sequence" in f[0])
+    want("and the message names reference_aa as the column that moved",
+         bool(f) and "reference_aa" in f[0] and "reference_nt" not in f[0])
+    want("a peptide repointing is not downgraded to a rename warning", not w)
+    # The control, and it is the one that catches the OTHER half of the fix: if
+    # `read_previous` stops capturing column 6 the published peptide arrives here
+    # as "" and this unchanged row is reported as a repointing, which is a check
+    # that fires on everything -- as worthless as one that fires on nothing.
+    f, w, _ = audit_ids(
+        was_pep,
+        [signed_row(id="PLF:0002", name="tag", reference_nt="", reference_aa="MKQ")],
+        {},
+    )
+    want("an unchanged peptide-only row is not reported at all", not f and not w)
+
+    # AND THE READER, because a comparison is only ever as good as what was
+    # captured for it. `read_previous` is the only producer of the dicts above,
+    # and it captured the name and the nucleotide cell and nothing else -- no
+    # peptide column, so the comparison downstream had nothing to compare on 19
+    # of 113 rows however carefully it was written.
+    #
+    # PROVEN TO FAIL at d8c218b: `read_previous` returned no "aa" key at all.
+    # The one-line mutation that puts it back: in the body of `read_previous`,
+    # delete the `"aa": f[6]` entry from the dict it stores per id (the sole
+    # assignment into `prev`, and the ONLY place in this file where that entry
+    # is written -- do not run the edit as a whole-file text replacement, since
+    # the fix is quoted in prose elsewhere here). `.get("aa")` then returns None
+    # and this case goes red on its own, without a traceback.
+    with tempfile.TemporaryDirectory() as td:
+        published = Path(td) / "features.tsv"
+        published.write_text(
+            "#!version 0.0\n"
+            + "\t".join(FEATURE_COLUMNS) + "\n"
+            + "\t".join([
+                "PLF:0002", "tag", "", "cds", "CDS", "", "MKQ", "curated",
+                "-", "d", "proposed", "", TODAY, "0", "",
+            ]) + "\n",
+            encoding="utf8",
+        )
+        got = read_previous(published)
+        want("read_previous captures the peptide column, not only the nucleotide one",
+             got is not None and got["PLF:0002"].get("aa") == "MKQ"
+             and got["PLF:0002"]["nt"] == "" and got["PLF:0002"]["name"] == "tag")
 
     if fails:
         for f in fails:
@@ -2344,7 +2421,27 @@ def apply_signoff(rows: list, signed: dict) -> tuple[dict, list]:
 
 
 def read_previous(path: Path) -> dict | None:
-    """Read the features.tsv this build is about to overwrite, if any."""
+    """Read the features.tsv this build is about to overwrite, if any.
+
+    Returns `{id: {"name", "nt", "aa"}}` — the three published cells `audit_ids`
+    needs in order to say whether an id still means what it meant.
+
+    BOTH SEQUENCE COLUMNS, AND FOR A LONG TIME IT CAPTURED ONE. This read only
+    `f[5]` (`reference_nt`), which is fine for as long as every row has one.
+    Nineteen of the 113 shipped rows do not: FLAG, His6, the (GGGGS)n linkers —
+    every peptide-only record — ship an EMPTY `reference_nt` and carry their
+    whole content in `reference_aa`. What the audit downstream then compared for
+    those rows was "" against "", so it agreed with any content whatsoever; two
+    peptide rows could exchange sequences and be reported as a pair of renames,
+    "(sequence unchanged)", in precisely the case where the sequence is the thing
+    that moved. Capturing the column is half the fix and `audit_ids` is the other
+    half; neither is worth anything alone.
+
+    The indices are positions in FEATURE_COLUMNS — 1 `name`, 5 `reference_nt`,
+    6 `reference_aa` — in the order `write_outputs` writes them. The length guard
+    below is what makes `f[6]` safe to index: a line with fewer cells than the
+    column list is dropped before anything reads it.
+    """
     if not path.exists():
         return None
     prev = {}
@@ -2354,7 +2451,7 @@ def read_previous(path: Path) -> dict | None:
         f = line.split("\t")
         if len(f) < len(FEATURE_COLUMNS) or f[0] == "id":
             continue
-        prev[f[0]] = {"name": f[1], "nt": f[5]}
+        prev[f[0]] = {"name": f[1], "nt": f[5], "aa": f[6]}
     return prev
 
 
@@ -2398,6 +2495,18 @@ def audit_ids(prev: dict | None, rows: list, withdrawn: dict | None = None) -> t
     for the same reason a changed sequence is — the id has stopped meaning what
     it meant, it has just stopped meaning anything at all.
 
+    "SEQUENCE" MEANS BOTH SEQUENCE COLUMNS, AND IT USED TO MEAN ONE. The test
+    below compares `reference_nt` and `reference_aa` together and the message
+    names whichever of them moved. It compared only `reference_nt` until this
+    was found, and 19 of the 113 shipped rows are peptide-only — empty
+    `reference_nt`, the whole record in `reference_aa` — so on those rows the
+    comparison was "" against "" and could not fail whatever the content did.
+    That is not a weaker check on 19 rows; it is no check at all on them, while
+    the run still printed "previously published id(s) still mean the same
+    sequence" over a count that included every one. For a peptide-only row
+    published before a curator signs it, this function is the ONLY guard that
+    a published id has not been repointed, and it was agreeing with everything.
+
     WITH ONE EXCEPTION, AND IT IS AN EXCEPTION WITH A NAME ON IT. A curator may
     withdraw a published row; the row then legitimately leaves the table. What
     separates that from the failure above is not that the row is gone — those
@@ -2438,10 +2547,23 @@ def audit_ids(prev: dict | None, rows: list, withdrawn: dict | None = None) -> t
             else:
                 fatal.append(f"{rid} ({old['name']}) was published and is now absent")
             continue
-        if new.reference_nt != old["nt"]:
+        # One list, not two `if`s, so that a row whose nucleotide AND peptide
+        # both moved is reported once naming both columns rather than twice or
+        # — worse — once naming whichever was tested first.
+        moved = [
+            column
+            for column, published, rebuilt in (
+                ("reference_nt", old["nt"], new.reference_nt),
+                ("reference_aa", old["aa"], new.reference_aa),
+            )
+            if published != rebuilt
+        ]
+        if moved:
             fatal.append(
-                f"{rid} changed sequence: {old['name']!r} ({len(old['nt'])} nt) -> "
-                f"{new.name!r} ({len(new.reference_nt)} nt). An id is a permanent name."
+                f"{rid} changed sequence in {' and '.join(moved)}: {old['name']!r} "
+                f"({len(old['nt'])} nt, {len(old['aa'])} aa) -> {new.name!r} "
+                f"({len(new.reference_nt)} nt, {len(new.reference_aa)} aa). "
+                f"An id is a permanent name."
             )
         elif new.name != old["name"]:
             warn.append(f"{rid} renamed {old['name']!r} -> {new.name!r} (sequence unchanged)")
@@ -2615,11 +2737,20 @@ def main() -> int:
         print(f"  warn  {w}")
     for f in fatal:
         print(f"  FATAL {f}")
+    # SAY WHAT WAS COMPARED, NOT WHAT WOULD BE REASSURING. This line used to
+    # read "N previously published id(s) still mean the same sequence" while the
+    # comparison behind it read `reference_nt` alone -- so on a table of 113 rows
+    # it made a claim about 113 having checked 94, and the 19 it silently skipped
+    # were the peptide-only ones, whose entire content is the column it did not
+    # look at. Both columns are compared now, and the sentence names them so that
+    # if either is ever dropped again the log stops being able to say this.
     if not warn and not fatal and not gone:
-        print(f"  {len(prev or {})} previously published id(s) still mean the same sequence")
+        print(f"  {len(prev or {})} previously published id(s) still mean the same "
+              f"sequence, comparing reference_nt and reference_aa on every one")
     elif not warn and not fatal:
         print(f"  {len(prev or {}) - len(gone)} previously published id(s) still mean the "
-              f"same sequence; {len(gone)} withdrawn above")
+              f"same sequence, comparing reference_nt and reference_aa on every one; "
+              f"{len(gone)} withdrawn above")
     if fatal and not args.allow_id_drift:
         print("\nRefusing to write. A published id now means a different sequence, and")
         print("nothing downstream would be told. Fix the allocation, or pass")

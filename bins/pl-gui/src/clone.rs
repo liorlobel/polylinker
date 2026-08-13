@@ -1623,15 +1623,32 @@ fn build(
         // here would drift the layout by an overhang per junction.
         //
         // It is NOT the basis for the mirror below — see [`place`], which takes
-        // the crick length and `ovhg` for that — and it is one strand's length
-        // where a flipped fragment contributes the other's. Those two agree for
-        // every fragment whose ends leave overhangs of equal length, which is
-        // every fragment of a single-enzyme digest and every fragment of a
-        // digest by enzymes that share an overhang width. Where they disagree
-        // the whole tail of the product's features shifts, and `place`'s bounds
-        // check is what stops that becoming a coordinate off the molecule; no
-        // digest is known that both produces such a fragment and seals it
-        // flipped, so it is guarded rather than corrected here.
+        // the crick length and `ovhg` for that — and it MUST stay watson for
+        // `place`'s interval test, because a feature's offset arrives in the
+        // parent's coordinates and those are watson's.
+        //
+        // **THE CURSOR IS A SEPARATE QUESTION, AND IT IS WHERE THIS WAS WRONG.**
+        // A flipped fragment contributes its CRICK length to the product. The
+        // two agree whenever a fragment's ends leave overhangs of equal width —
+        // every fragment of a single-enzyme digest, and every fragment of a
+        // digest by enzymes sharing a width — and otherwise differ by exactly
+        // the difference in those widths, so every feature laid down after the
+        // flipped fragment shifts by that much.
+        //
+        // This advanced by watson in both cases, behind a comment claiming that
+        // "no digest is known that both produces such a fragment and seals it
+        // flipped, so it is guarded rather than corrected here". That sentence
+        // shipped in v0.10.1 and was false when it was written. Ten common
+        // enzymes swept pairwise over a four-fragment circle: 256 of 848
+        // flipped placements are of a fragment whose ends differ in width, and
+        // 43 of 840 carried features landed on bases that are not their own —
+        // shifted by two for NdeI against a four-base cutter, by four for blunt
+        // SmaI. `place`'s bounds check does NOT catch it, because the shifted
+        // coordinate is still inside the product: the feature is placed,
+        // silently, on the wrong bases, in a construct somebody orders primers
+        // against. A double digest is the most ordinary thing this panel does.
+        //
+        // See `a_flipped_fragment_does_not_shift_the_features_behind_it`.
         let flen = frags[*idx].watson.len() as u64;
         if let Some((fs, _)) = described[*idx].from {
             let slot = Slot {
@@ -1667,7 +1684,11 @@ fn build(
                 carried += 1;
             }
         }
-        at += flen;
+        at += if *flipped {
+            frags[*idx].crick.len() as u64
+        } else {
+            flen
+        };
     }
 
     // COUNTED ONCE, over the union of the parents this construct is made of.
@@ -1771,11 +1792,47 @@ struct Slot {
 /// origin. Rather than emit a position the product does not have, or invent the
 /// two-segment wrapped feature this module refuses to carry in the other
 /// direction, such a feature does not travel and is counted as dropped.
+///
+/// # The mirror reverses the LIST, not only each span
+///
+/// Mapping `a < b` to `m - b < m - a` puts each individual span on the bases it
+/// names and STILL leaves a multi-exon feature wrong, because the mirror also
+/// swaps which exon comes first: the parent's leading exon is the product's
+/// trailing one. Collected in the parent's order the list therefore comes back
+/// DESCENDING, and nothing downstream repairs it. `genbank::write` emits the
+/// parts in stored order (`format_location`), `aa.rs` reverses them to READ a
+/// Reverse feature rather than to sort them, and `pl convert --to genbank
+/// --stdout` returns either spelling byte for byte — measured, both ways round.
+///
+/// That order is not free-floating. `Feature::segments` is stored in JOIN order
+/// and a Reverse feature is read back to front — `crates/pl-fileio/src/genbank.rs`
+/// states the convention where it reverses the parts of a
+/// `join(complement(a),complement(b))`, and `aa.rs` applies it, checked there
+/// against pKoV SacB's stored `/translation`. So a descending list is written as
+/// `complement(join(hi,lo))`, and everything that splices that — this program's
+/// own amino-acid track, and Biopython 1.87, measured — reads rc(lo) then
+/// rc(hi): **THE EXONS COME OUT SWAPPED.** A two-exon CDS (a real intron, or an
+/// origin-crossing feature, which GenBank stores as a two-part join) travelling
+/// on an inverted fragment therefore exported a spliced product that is not the
+/// gene, at coordinates sitting comfortably inside the construct with nothing on
+/// screen saying so: on the fixture in
+/// `an_inverted_multi_exon_feature_keeps_its_exons_in_splice_order`, `CCATCTTG`
+/// where the parent splices `CTTGCCAT`. The defect is symmetric — a Reverse
+/// parent feature flipped to Forward was stored wrong the same way.
+///
+/// The reversal is conditioned on `flipped` and must stay so. An unflipped
+/// fragment's mapping is order-preserving (`a`, `b` both increase with
+/// `s.start`), so reversing there would break the ordinary case the same way.
+///
+/// NOT A REGRESSION, though `place` is new code: the inline `.map(...).collect()`
+/// it replaced, at `f0e4a6f:1512-1526`, collected in the parent's order too. The
+/// behaviour was carried forward, not introduced.
 fn place(f: &Feature, slot: &Slot) -> Option<Vec<Segment>> {
     if f.segments.is_empty() {
         return None;
     }
-    f.segments
+    let mut out = f
+        .segments
         .iter()
         .map(|s| {
             // A coordinate the parent does not have is not a coordinate.
@@ -1797,7 +1854,8 @@ fn place(f: &Feature, slot: &Slot) -> Option<Vec<Segment>> {
             }
             let (lo, hi) = if slot.flipped {
                 let m = slot.crick - 1 - slot.ovhg;
-                // `b` maps low and `a` maps high: the mirror reverses the order.
+                // `b` maps low and `a` maps high: the mirror reverses the order
+                // WITHIN a span, and — see below — between them as well.
                 (m - b as i64, m - a as i64)
             } else {
                 (a as i64, b as i64)
@@ -1808,7 +1866,13 @@ fn place(f: &Feature, slot: &Slot) -> Option<Vec<Segment>> {
             }
             Some(Segment::new(lo as u64, hi as u64))
         })
-        .collect()
+        .collect::<Option<Vec<Segment>>>()?;
+    // Back into join order. Each span is already on the right bases; this is
+    // the exon ORDER, which the mirror inverted along with everything else.
+    if slot.flipped {
+        out.reverse();
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -1837,11 +1901,20 @@ mod tests {
     /// THE ORACLE FOR EVERY FEATURE ASSERTION BELOW, and it is deliberately not
     /// an assertion about coordinates. The whole failure mode of a feature remap
     /// is a span that sits comfortably inside the construct and names the wrong
-    /// bases; a number compared against a number cannot see that, and the two
-    /// defects this file's tests exist to hold down — an inverted fragment
-    /// mirrored on the wrong strand length, and a fragment interval read as
-    /// though a circle had no origin — both produce coordinates that look
+    /// bases; a number compared against a number cannot see that, and every
+    /// placement defect this file's tests exist to hold down — an inverted
+    /// fragment mirrored on the wrong strand length, a fragment interval read as
+    /// though a circle had no origin, and a product cursor advanced by watson
+    /// past a fragment that contributes crick — produces coordinates that look
     /// entirely reasonable.
+    ///
+    /// NECESSARY AND NOT SUFFICIENT, which the list above once implied it was.
+    /// A multi-exon feature can have every one of its spans on exactly the right
+    /// bases and still be the wrong gene, because the EXONS can be in the wrong
+    /// order; reading each span says nothing about that. That one is caught by
+    /// splicing the spans rather than reading them —
+    /// `an_inverted_multi_exon_feature_keeps_its_exons_in_splice_order` composes
+    /// this with `rc` to do it.
     fn bases(m: &Molecule, a: u64, b: u64) -> String {
         let seq = String::from_utf8_lossy(&m.seq).to_string();
         seq[(a - 1) as usize..b as usize].to_ascii_uppercase()
@@ -1857,6 +1930,147 @@ mod tests {
 
     fn rc(s: &str) -> String {
         String::from_utf8(pl_core::reverse_complement(s.as_bytes())).expect("ASCII in, ASCII out")
+    }
+
+    /// A flipped fragment must not move the features laid down behind it.
+    ///
+    /// PROVEN TO FAIL at d8c218b (v0.10.1), where this reported `misplaced=43`
+    /// of 840 carried features: `build` advanced its product cursor by the
+    /// fragment's WATSON length in every case, while a flipped fragment
+    /// contributes its CRICK length. The two differ by the difference in the
+    /// two ends' overhang widths, so on a digest by enzymes of unequal width
+    /// every feature laid down after a flipped fragment shifted by that much --
+    /// NdeI's two against a four-base cutter, blunt SmaI's zero against four.
+    ///
+    /// TO RE-BREAK IT: in `build`, replace the whole `at +=` expression with
+    /// `at += flen;`.
+    ///
+    /// **A TWO-FRAGMENT FIXTURE CANNOT SEE THIS, AND THE FIRST ATTEMPT USED
+    /// ONE.** Two fragments of a double digest carry one end of each enzyme, so
+    /// neither can be sealed either way round and nothing ever flips: that run
+    /// reported `flip=0` and passed against the broken code. Four fragments --
+    /// two sites of each enzyme -- is the smallest fixture that both flips and
+    /// mismatches. The `flip` and `mismatch` counters are ASSERTED, not merely
+    /// printed, so an edit that stops reaching the case fails here instead of
+    /// going quietly green.
+    #[test]
+    fn a_flipped_fragment_does_not_shift_the_features_behind_it() {
+        let names = [
+            "EcoRI", "BamHI", "NdeI", "SmaI", "PstI", "SacI", "KpnI", "XhoI", "HindIII", "SalI",
+        ];
+        let mut checked = 0usize;
+        let mut flip = 0usize;
+        let mut mismatch = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for a in 0..names.len() {
+            for b in 0..names.len() {
+                if a == b {
+                    continue;
+                }
+                let (ea, eb) = (names[a], names[b]);
+                let sa = match pl_enzymes::ENZYMES.iter().find(|e| e.name == ea) {
+                    Some(e) => e.site.to_string(),
+                    None => continue,
+                };
+                let sb = match pl_enzymes::ENZYMES.iter().find(|e| e.name == eb) {
+                    Some(e) => e.site.to_string(),
+                    None => continue,
+                };
+                if !sa.bytes().all(|c| b"ACGT".contains(&c))
+                    || !sb.bytes().all(|c| b"ACGT".contains(&c))
+                {
+                    continue;
+                }
+                // Two sites of each enzyme, so a fragment can carry the same
+                // enzyme at both ends and therefore be sealed either way round.
+                let seq = format!(
+                    "{}CCCCTTTAAAGGG{}CCCAAATTTCCC{}GGGTTTAAACCC{}TTTGGGAAA",
+                    sa, sb, sa, sb
+                );
+                let mut m = mol(&seq, true);
+                m.name = "p".into();
+                let mut f1 = Feature::new("alpha", "CDS");
+                f1.strand = Strand::Forward;
+                f1.segments
+                    .push(Segment::new((sa.len() + 3) as u64, (sa.len() + 12) as u64));
+                m.features.push(f1);
+                let mut f2 = Feature::new("beta", "CDS");
+                f2.strand = Strand::Forward;
+                let off = sa.len() + 16 + sb.len();
+                f2.segments
+                    .push(Segment::new((off + 3) as u64, (off + 12) as u64));
+                m.features.push(f2);
+
+                let p = plan(
+                    &m,
+                    None,
+                    Method::Restriction,
+                    &ticked(&[ea, eb]),
+                    &Primers::default(),
+                    true,
+                    25,
+                );
+                if p.note.is_some() {
+                    continue;
+                }
+                let parent = String::from_utf8_lossy(&m.seq)
+                    .to_string()
+                    .to_ascii_uppercase();
+                for pr in &p.prods {
+                    for (i, fl) in pr.order.iter() {
+                        if *fl {
+                            flip += 1;
+                            if p.frags[*i].left.len() != p.frags[*i].right.len() {
+                                mismatch += 1;
+                            }
+                        }
+                    }
+                    let prod = String::from_utf8_lossy(&pr.mol.seq)
+                        .to_string()
+                        .to_ascii_uppercase();
+                    for f in &pr.mol.features {
+                        let s = &f.segments[0];
+                        if s.start < 1 || s.end as usize > prod.len() || s.start > s.end {
+                            continue;
+                        }
+                        let got = prod[(s.start - 1) as usize..s.end as usize].to_string();
+                        let ws = m
+                            .features
+                            .iter()
+                            .find(|g| g.name == f.name)
+                            .expect("the parent feature")
+                            .segments[0]
+                            .clone();
+                        let want_f = parent[(ws.start - 1) as usize..ws.end as usize].to_string();
+                        let want_r = String::from_utf8_lossy(&pl_core::reverse_complement(
+                            want_f.as_bytes(),
+                        ))
+                        .to_string();
+                        checked += 1;
+                        if got != want_f && got != want_r {
+                            bad.push(format!(
+                                "{ea}+{eb} {} at {}..{} reads {got}, parent says {want_f}",
+                                f.name, s.start, s.end
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "checked={checked} flip={flip} mismatch={mismatch} misplaced={}",
+            bad.len()
+        );
+        assert!(
+            checked > 500 && flip > 100 && mismatch > 100,
+            "the sweep stopped reaching the case it exists for: checked={checked} flip={flip} mismatch={mismatch}"
+        );
+        assert!(
+            bad.is_empty(),
+            "{} carried feature(s) point at bases that are not their own; first: {}",
+            bad.len(),
+            bad.first().map(String::as_str).unwrap_or("")
+        );
     }
 
     #[test]
@@ -2053,6 +2267,149 @@ mod tests {
         // And it reads on the other strand now, because its bases do.
         assert_eq!(named(&inverted.mol, "gfp").strand, Strand::Reverse);
         assert_eq!(named(&inverted.mol, "bla").strand, Strand::Forward);
+    }
+
+    /// A two-exon feature on an inverted fragment must SPLICE to the parent's
+    /// gene, which takes reversing the exon LIST and not only each exon's span.
+    ///
+    /// PROVEN TO FAIL at d8c218b: `place` mirrored each segment and collected
+    /// them in the PARENT's order, so a flipped fragment's multi-exon feature
+    /// came back DESCENDING — on this fixture `[33..36, 27..30]`. Nothing
+    /// downstream repairs that: `genbank::write` emits the parts in stored
+    /// order, so `Save ▸ GenBank` wrote `complement(join(33..36,27..30))`, and
+    /// by the convention `crates/pl-fileio/src/genbank.rs:611` states and
+    /// `bins/pl-gui/src/aa.rs` applies — a Reverse feature is read back to front
+    /// — that splices to `CCATCTTG` where this gene is `CTTGCCAT`. THE EXONS
+    /// COME OUT SWAPPED: a spliced product, and therefore a translated protein,
+    /// that is not the gene that was carried. Nothing on screen shows it — both
+    /// spans sit comfortably inside the construct and each names bases that are
+    /// really its own, and the map draws the same two arcs whichever order the
+    /// list is in — so the first place it can surface is the amino-acid track,
+    /// or somebody else's reader after the file has left. Biopython 1.87 splices
+    /// that file to `CCATCTTG` too, measured, so it is not a private
+    /// disagreement this program could settle for itself.
+    ///
+    /// EVERY feature this module's tests built was single-segment before this
+    /// one — 15 `push(Segment::new(..))` calls, no two of them on the same
+    /// feature — so the whole shipped suite was blind to it, and stayed green
+    /// through the round-1 repair of the neighbouring arithmetic. It is not a
+    /// regression from that repair either: `place` is new code, but the inline
+    /// `.map(...).collect()` it replaced at `f0e4a6f:1512-1526` collected in the
+    /// parent's order too. Carried forward, not introduced.
+    ///
+    /// TO RE-BREAK IT: in `place`, delete the line `out.reverse();` at
+    /// clone.rs:1873 — the body of the `if slot.flipped` immediately before
+    /// `Some(out)`. That leaves `let mut out` with nothing mutating it, so
+    /// rustc emits an `unused_mut` WARNING; this crate does not deny warnings,
+    /// so the build still succeeds and this test is what fails.
+    ///
+    /// WHY THIS FIXTURE. Sequence, enzyme and fragment geometry are exactly
+    /// `an_inverted_fragment_carries_its_features_to_the_bases_they_name`'s —
+    /// two EcoRI sites, one of them straddling the origin so that NEITHER
+    /// fragment wraps, both fragments carrying an `AATT` end at each end so that
+    /// each seals in either orientation — so that this test can fail for the
+    /// exon order and for nothing else. The exons are `CTTG` and `CCAT`:
+    /// different from each other, and neither equal to its own reverse
+    /// complement, so a swap cannot slip through on a symmetry.
+    ///
+    /// `backbone` IS A CONTROL AND NOT DECORATION. It rides the fragment laid in
+    /// forwards, where the mapping preserves order, and it is asserted in FILE
+    /// order rather than reversed. A "fix" that reversed unconditionally would
+    /// satisfy every assertion about `split gene` and fail on this one.
+    ///
+    /// The two round-2 clone fixes MEET HERE, which is the other reason for a
+    /// multi-segment feature on a flipped fragment: `slot.at` is the product
+    /// cursor — the thing finding #1 corrected to advance by crick — and every
+    /// coordinate below is `slot.at` plus the mirror. This fixture is a
+    /// single-enzyme digest, where `watson.len() == crick.len()` and the cursor's
+    /// two branches agree, so the exon order is the only thing under test;
+    /// `a_flipped_fragment_does_not_shift_the_features_behind_it` is where the
+    /// branches are made to differ.
+    #[test]
+    fn an_inverted_multi_exon_feature_keeps_its_exons_in_splice_order() {
+        let seq = "AATTCGGCATTACGTACGAATTCTTGCACCATGGAG";
+        let mut m = mol(seq, true);
+        m.name = "pExon".into();
+        // On the SECOND fragment, which is the one that can be laid in either
+        // way round: `ligate` pins fragment 0 first and unflipped for every
+        // circular product (crates/pl-clone/src/ligate.rs).
+        let mut gene = Feature::new("split gene", "CDS");
+        gene.strand = Strand::Forward;
+        gene.segments.push(Segment::new(23, 26)); // CTTG
+        gene.segments.push(Segment::new(29, 32)); // CCAT
+        m.features.push(gene);
+        // On the first fragment, laid in forwards.
+        let mut ctrl = Feature::new("backbone", "CDS");
+        ctrl.strand = Strand::Forward;
+        ctrl.segments.push(Segment::new(8, 10)); // CAT
+        ctrl.segments.push(Segment::new(13, 15)); // CGT
+        m.features.push(ctrl);
+
+        let p = plan(
+            &m,
+            None,
+            Method::Restriction,
+            &ticked(&["EcoRI"]),
+            &Primers::default(),
+            false,
+            25,
+        );
+        assert!(p.note.is_none(), "{:?}", p.note);
+        assert_eq!(p.frags.len(), 2, "two sites in a circle give two fragments");
+
+        let inverted = p
+            .prods
+            .iter()
+            .find(|pr| pr.order.iter().any(|(_, flipped)| *flipped))
+            .expect("no product laid a fragment in end-for-end");
+        assert!(inverted.circular);
+        assert_eq!(inverted.carried, 2, "a feature did not travel");
+
+        let gene = named(&inverted.mol, "split gene");
+        assert_eq!(gene.segments.len(), 2, "an exon was lost");
+        assert_eq!(
+            gene.strand,
+            Strand::Reverse,
+            "the fixture stopped exercising the inverted fragment"
+        );
+        // THE ORACLE IS THE SPLICED BASES, not the coordinates. The whole shape
+        // of this defect is two spans that each name the right bases in the
+        // wrong sequence, and a number compared against a number cannot see
+        // that. Read the way `genbank.rs` and `aa.rs` read a Reverse feature:
+        // the parts back to front, each reverse-complemented.
+        let spliced: String = gene
+            .segments
+            .iter()
+            .rev()
+            .map(|s| rc(&bases(&inverted.mol, s.start, s.end)))
+            .collect();
+        assert_eq!(
+            spliced,
+            format!("{}{}", bases(&m, 23, 26), bases(&m, 29, 32)),
+            "the inverted fragment's exons splice in the wrong order"
+        );
+        // And again as coordinates, because that is the form the file carries
+        // and the form every other reader trusts: join order is ascending here,
+        // and a descending list is written as `complement(join(hi,lo))`.
+        let exons: Vec<(u64, u64)> = gene.segments.iter().map(|s| (s.start, s.end)).collect();
+        assert!(
+            exons[0].0 < exons[1].0,
+            "the exon list came back descending: {exons:?}"
+        );
+
+        let back = named(&inverted.mol, "backbone");
+        assert_eq!(back.segments.len(), 2, "an exon was lost");
+        assert_eq!(back.strand, Strand::Forward);
+        let plain: String = back
+            .segments
+            .iter()
+            .map(|s| bases(&inverted.mol, s.start, s.end))
+            .collect();
+        assert_eq!(
+            plain,
+            format!("{}{}", bases(&m, 8, 10), bases(&m, 13, 15)),
+            "the fragment laid in forwards must keep its exons in file order"
+        );
     }
 
     /// A feature reaching into a junction's overhang travels while there is a

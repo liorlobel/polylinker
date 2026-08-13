@@ -11,8 +11,17 @@
 //! crashes on a particular molecule it will crash again on reopening it, and
 //! recovery that requires the crashing app is worth very little. So the format
 //! is a short plain-text header followed by an ordinary GenBank record: anyone
-//! can open it in a text editor, delete the first six lines, and have their
-//! sequence back.
+//! can open it in a text editor, delete everything down to and including the
+//! `--` line, and have their sequence back.
+//!
+//! Down to the `--`, and NOT "the first six lines", which is what this said
+//! while the header had grown optional keys. `exit:` is written only for a
+//! deliberate quit and `unsaved:` only when that count exists, so the header
+//! runs to six, seven or eight lines and the six-line instruction eats the
+//! LOCUS line of every file that carries either one. A rescue instruction that
+//! is right on some files and destroys the first record of others is worse than
+//! no instruction at all, because the reader following it has no reason to
+//! doubt it.
 //!
 //! # Presence means an unclean exit
 //!
@@ -48,7 +57,43 @@ pub struct Snapshot {
     pub saved_at: u64,
     /// Edits in the log when this was written. Shown so a user choosing
     /// between two recovery files can tell which is further along.
+    ///
+    /// EVERY edit in the document, saved or not — `OpLog::path().len()`. It is
+    /// a good number to *show* and the wrong number to *decide* on; see
+    /// [`Snapshot::unsaved`], which exists because it was decided on.
     pub ops: usize,
+    /// How many of those edits are in no file — `Document::unsaved_ops()` at
+    /// the moment this was written — or `None` when that count does not exist.
+    ///
+    /// THE RECOVER BANNER USED TO TAKE ITS ONE DECISION-SUPPORT LINE ON `ops`,
+    /// and `ops` is not the quantity that sentence is about. A document opened,
+    /// edited, SAVED, and then lost to a crash has `ops > 0` with nothing left
+    /// over, so `draft_age`'s "this draft holds nothing the file does not"
+    /// escape hatch never fired for it and the line fell through to comparing
+    /// the two timestamps — which is a comparison the draft always wins: the
+    /// autosave heartbeat restamps every draft once per thirty seconds whether
+    /// or not the molecule moved, and nothing clears a draft when its document
+    /// is saved, so `saved_at` walks steadily past the file's mtime. Every
+    /// crash draft of a saved file was therefore advertised as "written after
+    /// the file on disk was last saved", inviting the user to replace a rich
+    /// `.dna` with a GenBank rendering of the same molecule that has lost the
+    /// container, the typed primers and the methylation flags to say it.
+    ///
+    /// `None` means "no answer", never zero, and it has two sources. A file
+    /// written by a build older than this key carries no `unsaved:` line at
+    /// all; and a document whose saved cursor is not an ancestor of the current
+    /// one — save, then seek onto another branch — has no distance to report,
+    /// which is exactly what `Document::unsaved_ops` returns `None` for. Both
+    /// fall back to `ops` in `draft_age`, which is what the banner did before
+    /// this key existed, so an old draft reads exactly as it always did.
+    ///
+    /// Additive in both directions, for [`Snapshot::abandoned`]'s reason and by
+    /// the same mechanism: [`decode`] ignores keys it does not know, so an old
+    /// build reading a new file loses only this number, and a new build reading
+    /// an old file sees the `None` that is the truth about it. The MAGIC line
+    /// does not move for a key that cannot make either build misread a
+    /// molecule.
+    pub unsaved: Option<usize>,
     /// The user was asked about these edits and chose to abandon them.
     ///
     /// The module doc above argues there must be no crash flag, because "a flag
@@ -93,6 +138,14 @@ pub fn encode(s: &Snapshot) -> String {
     out.push_str(&format!("title: {}\n", escape(&s.title)));
     out.push_str(&format!("saved: {}\n", s.saved_at));
     out.push_str(&format!("ops: {}\n", s.ops));
+    // Written only when there is an answer. An absent key is "unknown", which
+    // is what a document sitting on a branch its last save is not an ancestor
+    // of genuinely is; writing a 0 there would be inventing the most dangerous
+    // possible value, since 0 is what tells the banner the draft holds nothing
+    // the file does not.
+    if let Some(n) = s.unsaved {
+        out.push_str(&format!("unsaved: {n}\n"));
+    }
     if s.abandoned {
         out.push_str("exit: unsaved\n");
     }
@@ -114,6 +167,7 @@ pub fn decode(text: &str) -> Result<Snapshot, String> {
         return Err(format!("not a recovery file: expected {MAGIC:?} on line 1"));
     }
     let (mut original, mut title, mut saved, mut ops) = (None, String::new(), 0u64, 0usize);
+    let mut unsaved: Option<usize> = None;
     let mut abandoned = false;
     let mut body_at = None;
     let mut consumed = MAGIC.len() + 1;
@@ -138,10 +192,15 @@ pub fn decode(text: &str) -> Result<Snapshot, String> {
             "title" => title = v,
             "saved" => saved = v.parse().unwrap_or(0),
             "ops" => ops = v.parse().unwrap_or(0),
+            // `.ok()`, not `.unwrap_or(0)`: a value that will not parse is
+            // unknown, and the 0 the other two keys fall back to is the one
+            // number this field must never be invented as — it is what tells
+            // the banner the draft holds nothing the file does not.
+            "unsaved" => unsaved = v.parse().ok(),
             // Unknown keys are ignored here, which is what makes this key
             // compatible in both directions: an old file read by a new build
             // reads as a crash, and a new file read by an old build loses only
-            // the label.
+            // the label. `unsaved` above rides on the same rule.
             "exit" => abandoned = v == "unsaved",
             _ => {}
         }
@@ -154,6 +213,7 @@ pub fn decode(text: &str) -> Result<Snapshot, String> {
         title,
         saved_at: saved,
         ops,
+        unsaved,
         abandoned,
         genbank: text.get(at..).unwrap_or("").to_string(),
     })
@@ -274,12 +334,19 @@ pub fn recovery_path(dir: &Path, slot: usize) -> PathBuf {
 /// otherwise deep enough to trip `clippy::type_complexity`.
 pub type Found = (PathBuf, Result<Snapshot, String>);
 
-/// How many slots [`claim`] will look at before giving up.
+/// How many slots [`claim`] and [`claim_next`] look at.
 ///
-/// [`claim`] probes names instead of listing the directory, so nothing else
-/// bounds the search: a directory that somehow held every slot name would turn
-/// startup into an open-ended run of `stat` calls. Sixty-four is far past the
-/// realistic case, which is one — a single crashed session that held this PID.
+/// Both probe names instead of listing the directory, so nothing else bounds
+/// the search: a directory that somehow held every slot name would turn startup
+/// into an open-ended run of `stat` calls. Sixty-four is far past the realistic
+/// case, which is one — a single crashed session that held this PID.
+///
+/// [`claim`] now pays all sixty-four on EVERY launch rather than stopping at
+/// the first free name, and that is deliberate: stopping early is what hid a
+/// crashed session's draft from the Recover banner whenever it sat at any slot
+/// but the lowest free one. Sixty-four `try_exists` calls against a directory
+/// that holds at most a handful of small files is a few hundred microseconds
+/// once per run, against a draft the user is never told about — see [`claim`].
 const MAX_SLOTS: usize = 64;
 
 /// This run's recovery file, plus anything already sitting at a name this
@@ -301,24 +368,41 @@ const MAX_SLOTS: usize = 64;
 /// concurrent windows still cannot collide, because they hold distinct PIDs and
 /// so never look at the same names.
 ///
+/// **EVERY SLOT IS LOOKED AT, AND THE FREE ONE IS ANSWERED LAST.** This used to
+/// `return` at the first free name, so the second value listed only a
+/// *contiguous prefix* of the occupied slots and a draft with any lower slot
+/// free was never seen by anything: [`stale`] skips it because the name carries
+/// this process's prefix, and `claim` stopped before reaching it. Slot
+/// holes are the ordinary case, not a contrivance — `App::close_tab` frees the
+/// slot of a tab closed cleanly and nothing ever compacts them, so a user who
+/// crashed with two windows open was offered one draft and silently not the
+/// other. Nothing was destroyed by that (`claim_next` refuses any slot whose
+/// file exists, and `clear` is only ever handed a path this run was issued),
+/// but a crash draft nobody is told about is a crash draft nobody restores.
+///
 /// `None` for the path means every slot is taken and there is nowhere left to
 /// write; the caller must say autosave is off rather than overwrite one of the
 /// files it has just promised to list.
 pub fn claim(dir: &Path) -> (Option<PathBuf>, Vec<Found>) {
     let mut found = Vec::new();
+    let mut free: Option<usize> = None;
     for slot in 0..MAX_SLOTS {
         let p = recovery_path(dir, slot);
         // `try_exists` rather than `exists`: a name we cannot stat is one we
         // must not assume is free, because writing there would overwrite it.
         if matches!(p.try_exists(), Ok(false)) {
-            return (Some(p), found);
-        }
-        match std::fs::read_to_string(&p) {
-            Ok(t) => found.push((p, decode(&t))),
-            Err(e) => found.push((p, Err(e.to_string()))),
+            // REMEMBERED, NOT RETURNED — the whole of the fix. `get_or_insert`
+            // keeps the LOWEST free slot, which is what a `return` here used to
+            // hand back, while the walk carries on to the slots above it.
+            free.get_or_insert(slot);
+        } else {
+            match std::fs::read_to_string(&p) {
+                Ok(t) => found.push((p, decode(&t))),
+                Err(e) => found.push((p, Err(e.to_string()))),
+            }
         }
     }
-    (None, found)
+    (free.map(|slot| recovery_path(dir, slot)), found)
 }
 
 /// A free recovery slot for this process, avoiding the ones already handed out.
@@ -559,6 +643,10 @@ mod tests {
             title: "pUC19".into(),
             saved_at: 1_785_000_000,
             ops: 7,
+            // Seven edits, two of which the file has never seen: the ordinary
+            // shape of a crash draft of a document that HAS been saved, and the
+            // one the banner used to get wrong.
+            unsaved: Some(2),
             abandoned: false,
             genbank: "LOCUS       x  10 bp DNA circular SYN\nORIGIN\n        1 acgtacgtac\n//\n"
                 .into(),
@@ -612,6 +700,54 @@ mod tests {
         s.original = None;
         let back = decode(&encode(&s)).unwrap();
         assert_eq!(back.original, None);
+    }
+
+    /// The number the Recover banner takes its one decision on has to survive
+    /// the file, and an old file has to say it does not know rather than zero.
+    ///
+    /// PROVEN TO FAIL at d8c218b: there was no `unsaved` key at all, and the
+    /// banner decided on `ops` — every edit in the document, saved or not — so
+    /// a crash draft of a document that had been saved was advertised as
+    /// "written after the file on disk was last saved" with nothing in it the
+    /// file did not already have. To re-break it, change the `"unsaved" =>
+    /// unsaved = v.parse().ok(),` arm in `decode` to `"unsaved" => {}`.
+    #[test]
+    fn the_unsaved_count_survives_the_file_and_an_older_file_admits_it_cannot_say() {
+        assert_eq!(decode(&encode(&snap())).unwrap().unsaved, Some(2));
+
+        // ZERO IS A VALUE, not an absence, and it is the one the banner acts
+        // on: it is what says the draft holds nothing the file does not.
+        let mut filed = snap();
+        filed.unsaved = Some(0);
+        let text = encode(&filed);
+        assert!(text.contains("\nunsaved: 0\n"), "{text}");
+        assert_eq!(decode(&text).unwrap().unsaved, Some(0));
+
+        // No answer writes no key, and comes back as no answer.
+        let mut unknown = snap();
+        unknown.unsaved = None;
+        let text = encode(&unknown);
+        assert!(!text.contains("\nunsaved: "), "{text}");
+        assert_eq!(decode(&text).unwrap().unsaved, None);
+
+        // A file written by a build older than this key: the same bytes minus
+        // the one line. It must read as unknown — NOT as zero, which would
+        // claim the user's file already holds work that only the draft has —
+        // and everything else about it must come back untouched.
+        let old = encode(&snap()).replacen("unsaved: 2\n", "", 1);
+        let back = decode(&old).unwrap();
+        assert_eq!(
+            back.unsaved, None,
+            "an old draft read as though its edits were already saved"
+        );
+        assert_eq!(back.ops, 7, "and the rest of the header is untouched");
+        assert_eq!(back.genbank, snap().genbank);
+
+        // A value that will not parse is unknown too, for the same reason
+        // `saved_at` is: unknown rather than invented.
+        let bad = encode(&snap()).replacen("unsaved: 2", "unsaved: \u{fffd}", 1);
+        assert_eq!(decode(&bad).unwrap().unsaved, None);
+        assert_eq!(decode(&bad).unwrap().genbank, snap().genbank);
     }
 
     #[test]
@@ -749,38 +885,89 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// PID reuse, at EVERY slot rather than only the lowest.
+    ///
+    /// PROVEN TO FAIL at d8c218b: `claim` returned at the first free name, so
+    /// its second value listed only a contiguous prefix of the occupied slots.
+    /// The `occupied = 0` case passed there and every other case did not —
+    /// `left: 0, right: 1` on the "handed back to be listed" assertion — because
+    /// slot 0 was free and the walk stopped on it. That is not a contrived
+    /// arrangement: `App::close_tab` frees the slot of a tab closed cleanly and
+    /// nothing compacts them, so a crash with two windows open leaves exactly
+    /// this shape and the user is offered one draft and silently not the other.
+    ///
+    /// To re-break it, change `free.get_or_insert(slot);` in `claim` back to
+    /// `return (Some(p), found);`.
     #[test]
     fn a_draft_left_at_our_own_pid_is_listed_and_not_written_over() {
-        // PID reuse. A crashed session left `{pid}-0.recover`; the OS hands the
+        // Swept across the slot because the slot is what the defect was keyed
+        // on, including the last one: `MAX_SLOTS - 1` is reachable by a user who
+        // has had sixty-four documents open at once, and a bound is exactly
+        // where an off-by-one lives. A helper rather than a loop body so that
+        // every assertion below reads at the indent it was written at.
+        for occupied in [0usize, 1, 2, 5, MAX_SLOTS - 1] {
+            a_crashed_draft_at_this_slot_is_listed_and_kept(occupied);
+        }
+    }
+
+    /// One slot's worth of `a_draft_left_at_our_own_pid_is_listed_and_not_written_over`.
+    fn a_crashed_draft_at_this_slot_is_listed_and_kept(occupied: usize) {
+        // PID reuse. A crashed session left `{pid}-K.recover`; the OS hands the
         // same number to this run. `stale` skips the file because the name
         // begins with our prefix, so the banner never lists it, and
-        // `recovery_path(dir, 0)` resolves to it, so `clear` on the next clean
+        // `recovery_path(dir, K)` resolves to it, so `clear` on the next clean
         // quit deletes it and the first autosave renames over it. Total, silent
         // loss of exactly the artefact this module exists to protect.
-        let dir = std::env::temp_dir().join(format!("pl-claim-{}", std::process::id()));
+        // `pl-claim-0-…` and not `pl-claim0-…`: the latter is the directory
+        // `an_empty_recovery_directory_still_gives_this_run_slot_zero` owns, the
+        // suite runs its tests in parallel threads of ONE process, and both
+        // names are built from that one `process::id()`. Sharing it made the two
+        // tests take turns deleting the directory the other was renaming into,
+        // which fails as "the system cannot find the path specified" in whichever
+        // one loses — a flake that says nothing about recovery at all.
+        let tag = format!("pl-claim-{occupied}-{}", std::process::id());
+        let dir = std::env::temp_dir().join(tag);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let crashed = recovery_path(&dir, 0);
+        let crashed = recovery_path(&dir, occupied);
         let mut draft = snap();
         draft.title = "40 unsaved edits".into();
         draft.ops = 40;
         write(&crashed, &draft).unwrap();
 
         let (path, mine) = claim(&dir);
-        let path = path.expect("slot 1 is free");
-        assert_ne!(
-            path, crashed,
-            "this run must not write where the crashed one already did"
+        let path = path.expect("a free slot remains");
+        // The lowest slot the crashed draft is not sitting in: slot 0 for every
+        // case but the first, and slot 1 for that one. `usize::from` of the
+        // comparison rather than an `if`, which clippy reads as a bool-to-int
+        // conversion written the long way. Stronger than the `assert_ne!`
+        // against `crashed` this replaces, and it subsumes it: `first_free` is
+        // by construction not `occupied`, so naming the slot exactly says both
+        // that this run took a free one and that it was not the crashed one's.
+        let first_free = usize::from(occupied == 0);
+        assert_eq!(
+            path,
+            recovery_path(&dir, first_free),
+            "slot {occupied}: this run must write at the LOWEST free slot, and never where the \
+             crashed one already did"
         );
-        assert_eq!(mine.len(), 1, "and the draft is handed back to be listed");
+        assert_eq!(
+            mine.len(),
+            1,
+            "slot {occupied}: the draft was not handed back to be listed, so the Recover banner \
+             never mentions it"
+        );
         assert_eq!(mine[0].0, crashed);
         assert_eq!(mine[0].1.as_ref().unwrap().title, "40 unsaved edits");
 
         // The whole point: quitting cleanly, having opened nothing, no longer
         // deletes it.
         clear(&path);
-        assert!(crashed.exists(), "the crashed draft survives a clean quit");
+        assert!(
+            crashed.exists(),
+            "slot {occupied}: the crashed draft did not survive a clean quit"
+        );
         assert_eq!(
             decode(&std::fs::read_to_string(&crashed).unwrap())
                 .unwrap()
@@ -788,11 +975,24 @@ mod tests {
             40
         );
 
-        // A second collision takes the next slot again, and both are listed.
+        // A second collision takes the next free slot again, and BOTH are
+        // listed — the two-window crash, which is the case a walk that stopped
+        // at the first free name could not see.
         write(&path, &draft).unwrap();
         let (third, mine) = claim(&dir);
-        assert_eq!(third.unwrap(), recovery_path(&dir, 2));
-        assert_eq!(mine.len(), 2);
+        let next_free = (0..MAX_SLOTS)
+            .find(|s| *s != occupied && *s != first_free)
+            .expect("a third slot");
+        assert_eq!(
+            third.unwrap(),
+            recovery_path(&dir, next_free),
+            "slot {occupied}"
+        );
+        assert_eq!(
+            mine.len(),
+            2,
+            "slot {occupied}: two crashed drafts, and the banner would show fewer"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
