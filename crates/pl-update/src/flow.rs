@@ -828,11 +828,23 @@ mod tests {
     /// that is not zero, and saturate the ones below it.
     ///
     /// The largest rather than any, because the tightest boundary is the one
-    /// worth testing — and because at an `x.y.0` release it produces a version
-    /// whose STRING sorts ABOVE the current one. At 0.10.0 this returns
-    /// 0.9.4294967295, and `"0.9.4294967295" > "0.10.0"` lexically, so a
-    /// comparison that ever became textual fails here as well as in
-    /// `version::numeric_ordering_is_not_lexical`.
+    /// worth testing.
+    ///
+    /// **AT AN `x.y.0` RELEASE IT ALSO CATCHES A TEXTUAL COMPARISON, AND AT
+    /// EVERY OTHER RELEASE IT DOES NOT.** At 0.10.0 the minor arm ran and
+    /// returned 0.9.4294967295, whose STRING sorts above `"0.10.0"`, so a
+    /// comparison that had become lexical failed here too. At 0.10.1 the patch
+    /// arm runs and returns 0.10.0, and `"0.10.0" < "0.10.1"` textually as well
+    /// as numerically, so that second value lapses — silently, and without this
+    /// helper changing at all.
+    ///
+    /// That is recorded rather than fixed because the property is not this
+    /// helper's to keep: `version::numeric_ordering_is_not_lexical` pins
+    /// `0.10.0 > 0.9.9` and `0.1.10 > 0.1.2` with hard-coded literals that no
+    /// version bump can degenerate, and THAT is the check the lexical trap
+    /// rests on. Do not read a green run here as evidence about ordering; the
+    /// job of this helper is to produce a strictly older version, and the
+    /// `assert!(older < current)` at the call site is what holds it to that.
     ///
     /// Panics at 0.0.0, where nothing older exists. A released crate cannot be
     /// at 0.0.0, and a panic naming that is better than a fixture that quietly
