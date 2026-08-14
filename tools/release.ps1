@@ -49,9 +49,58 @@
 
 .PARAMETER PlatformLabel
     Overrides the platform half of the archive name -- `windows-x64`,
-    `linux-x64`, `macos-universal`. Defaults to this machine's OS and
-    architecture. The one case that needs it is a universal macOS binary, which
-    is not the architecture of the machine that built it.
+    `windows-arm64`, `linux-x64`, `macos-universal`. Defaults to this machine's
+    OS and architecture, and the architecture half has recognised Arm64 as well
+    as X64 since before ARM64 was a shipping platform.
+
+    The one case that NEEDS it is a universal macOS binary, which is not the
+    architecture of the machine that built it. That case is also the reason the
+    default is not trusted on its own. `OSArchitecture` describes the MACHINE
+    and this label describes the ARTIFACT, and those coincide only for as long
+    as the toolchain on the machine targets the machine. An ARM64 Windows
+    runner with an x64 rustc -- or an x64 pwsh under emulation, where
+    `OSArchitecture` STILL reports Arm64, because it is documented to report
+    the operating system's architecture and not the process's -- would derive
+    `windows-arm64` over a directory full of x86-64 code.
+
+    That is worse than having no ARM64 build. `crates/pl-update`'s
+    PLATFORM_ARTIFACT cascade returns None for a platform it has no arm for, so
+    `pl update` DECLINES rather than offering the wrong file; it fails closed. A
+    mislabelled archive turns that clean refusal into a confident, wrong
+    download, and the person who finds out is a reader whose machine will not
+    run what the updater just fetched for them.
+
+    So the label is derived AND CHECKED -- see 'THE LABEL IS CHECKED AGAINST THE
+    BINARIES' below. A caller may pass it explicitly (the release workflow does,
+    for macOS) or let it be derived; either way the run fails loudly if the
+    label and the machine code disagree, so neither route can quietly produce a
+    mislabelled archive.
+
+.PARAMETER OmitPythonModule
+    Ship WITHOUT the Python extension module, and record in the manifest that
+    this copy is short of it and why. The reason is the argument. It is written
+    into SHA256SUMS.txt as an `omitted:` line, which `tools/check-archive.ps1`
+    parses, holds to a rule, and prints.
+
+    THIS IS NOT A CONVENIENCE, and it does not relax the requirement. Without
+    the switch the behaviour is exactly what it has always been: no extension
+    module, no release. With it, the only combination `tools/check-archive.ps1`
+    will accept is `polylinker.pyd` on `windows-arm64`, whose declared reason
+    must name that platform -- every other file, and that file on every other
+    platform, still fails the archive check outright.
+
+    It exists because `crates/pl-py` links against CPython through pyo3, and
+    whether GitHub's `windows-11-arm` image carries an ARM64 CPython for it to
+    link against was NOT ESTABLISHED when ARM64 support was added. It could not
+    be: the ARM64 MSVC linker is not installed on the machine this was written
+    on, so no ARM64 binary of any kind has ever been produced here, and the
+    first honest answer will come from the first run of that leg.
+
+    So both answers are handled. If the runner can build it, nothing passes this
+    switch and the ARM64 archive has the same shape as the x64 one. If it
+    cannot, the archive ships one file short and SAYS SO, in the one file inside
+    it that a downloader already reads. The outcome that must not happen is the
+    third: an archive that is short of it and silent about it.
 
 .PARAMETER ArchiveFormat
     `zip` or `tar.gz`. Defaults to zip on Windows and tar.gz elsewhere, which is
@@ -66,6 +115,7 @@ param(
     [string]$Out = 'dist',
     [string]$BinDir = '',
     [string]$PlatformLabel = '',
+    [string]$OmitPythonModule = '',
     [ValidateSet('', 'zip', 'tar.gz')]
     [string]$ArchiveFormat = '',
     [switch]$SkipBuild,
@@ -162,6 +212,13 @@ if ($SkipBuild -and -not $BinDir) {
 if (-not $BinDir) { $BinDir = 'target/release' }
 
 if (-not $PlatformLabel) {
+    # `Arm64` was already here before ARM64 was a platform this project ships,
+    # and it was dead code the whole time: nothing built on an ARM64 machine and
+    # nothing consumed the label it would have produced. It is live from
+    # 2026-08-14, on GitHub's `windows-11-arm` runners, and being live is
+    # exactly what makes the check further down necessary -- this switch reads
+    # the OS's architecture, which is not the same question as which
+    # architecture the compiler just emitted. See .PARAMETER PlatformLabel.
     $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
         'X64'   { 'x64' }
         'Arm64' { 'arm64' }
@@ -313,15 +370,185 @@ $pyMap = if ($onWindows) { @{ Built = 'polylinker.dll';     Shipped = 'polylinke
          elseif ($onMac)  { @{ Built = 'libpolylinker.dylib'; Shipped = 'polylinker.so' } }
          else             { @{ Built = 'libpolylinker.so';    Shipped = 'polylinker.so' } }
 $pyBuilt = Join-Path $BinDir $pyMap.Built
+
+# THE ONE WAY TO SHIP WITHOUT IT, AND EVERY GUARD ON THAT WAY.
+#
+# See .PARAMETER OmitPythonModule for why the switch exists at all. What matters
+# here is that it cannot be used to make a failing build pass quietly. Three
+# things are refused before anything is written:
+#
+#   * any platform but windows-arm64, because the other three demonstrably build
+#     the module and an escape hatch that any of them could take is not a
+#     declared exception, it is the requirement removed;
+#   * a reason that does not name the platform it applies to, because
+#     `tools/check-archive.ps1` holds the manifest line to that same rule and a
+#     reason nobody can check is decoration;
+#   * a reason that is not one line of printable ASCII, because it goes into
+#     SHA256SUMS.txt and the archive check requires that file to be pure ASCII
+#     with no CR -- so a stray character here would fail the archive later, in a
+#     step whose message would be about encodings and not about this argument.
+$pyOmitted = ''
+if ($OmitPythonModule) {
+    if ($PlatformLabel -ne 'windows-arm64') {
+        throw ("-OmitPythonModule is accepted for windows-arm64 and nothing else; this build is " +
+               "'$PlatformLabel'. Every other platform builds the extension module, and " +
+               "tools/check-archive.ps1 fails an archive that has no polylinker.pyd or polylinker.so.")
+    }
+    if ($OmitPythonModule -notmatch [regex]::Escape($PlatformLabel)) {
+        throw ("the reason given to -OmitPythonModule must name the platform it applies to, and " +
+               "'$OmitPythonModule' does not contain '$PlatformLabel'. tools/check-archive.ps1 " +
+               "rejects the manifest line for the same reason: a declaration that does not say which " +
+               "platform is short of the file is one nobody downstream can check.")
+    }
+    if ($OmitPythonModule -match '[^\x20-\x7E]') {
+        throw ("the reason given to -OmitPythonModule must be one line of printable ASCII. It is " +
+               "written into SHA256SUMS.txt, which tools/check-archive.ps1 requires to be pure ASCII " +
+               "with no CR and no BOM so that sha256sum can verify it.")
+    }
+}
+
 if (Test-Path $pyBuilt) {
+    if ($OmitPythonModule) {
+        throw ("-OmitPythonModule was given, but $($pyMap.Built) IS in $BinDir. The switch writes a " +
+               "line into the manifest saying this copy has no Python extension module; shipping one " +
+               "anyway would make that line false, and a manifest that misdescribes its own archive is " +
+               "worse than either honest outcome. Drop the switch.")
+    }
     Copy-Item $pyBuilt (Join-Path $Out $pyMap.Shipped) -Force
     $artifacts += $pyMap.Shipped
+} elseif ($OmitPythonModule) {
+    # Recorded, not swallowed. This string becomes the manifest's `omitted:`
+    # line, which travels inside the archive and which the archive check reads
+    # back, holds to the waiver rule, and prints in yellow whether it passes or
+    # not. Nothing about this path is quiet.
+    $pyOmitted = "$($pyMap.Shipped) -- $OmitPythonModule"
+    Say "  NO PYTHON EXTENSION MODULE: this build has no $($pyMap.Shipped)." Yellow
+    Say "  declared reason: $OmitPythonModule" Yellow
 } else {
     $missing += $pyMap.Built
 }
 
 if ($missing) {
     throw "the build produced nothing at $BinDir for: $($missing -join ', '). A release missing a binary is not a smaller release, it is a broken one."
+}
+
+# ---------------------------------------------------------------------------
+# THE LABEL IS CHECKED AGAINST THE BINARIES.
+#
+# `$PlatformLabel` reaches four places somebody acts on: the archive's file
+# name, the directory it unpacks into, the `platform:` line of its manifest,
+# and -- since `crates/pl-update` matches on that same string -- which file
+# `pl update` offers a reader. Until now it was DERIVED FROM THE MACHINE and
+# compared with nothing.
+#
+# That was survivable while every runner built for itself and there was one
+# architecture per operating system. It stops being survivable with a platform
+# whose entire distinguishing feature is a different instruction set under the
+# same OS name. `OSArchitecture` answers "what is this operating system?", not
+# "what did the compiler just emit?" and not "what is this process?" -- so an
+# x64 rustc on an ARM64 runner, or a toolchain reached through emulation,
+# derives `windows-arm64` over x86-64 code. Nothing downstream would catch it:
+# the zip would be well formed, the manifest would verify against it,
+# `tools/check-archive.ps1` would pass it, and the first reader to discover the
+# mistake would be somebody whose CPU cannot run what they were just handed.
+#
+# So the label is not believed. The machine-type field is read out of every file
+# this script is about to ship and must agree with the architecture the label
+# claims. It costs four reads of a few bytes, and it can fail four ways that are
+# all real: a cross-build, an emulated toolchain, a `-PlatformLabel` typed wrong
+# on a command line, and a `-BinDir` pointing at another platform's output.
+#
+# WHAT IT DOES NOT COVER, SAID HERE RATHER THAN LEFT TO BE INFERRED. A label
+# whose architecture half is not an architecture has nothing to compare against.
+# That is `macos-universal` -- the case `-PlatformLabel` was added for, whose
+# artifacts are Mach-O fat binaries holding two slices at once, so no single
+# answer would be the right one. This block says so out loud and asserts
+# nothing there. The evidence for that leg is the `lipo -info` printed over all
+# four artifacts in `.github/workflows/release.yml`, which is a different check
+# on a different runner and is not this one.
+function Get-ImageArchitecture([string]$Path) {
+    <#
+        '<container>:<architecture>' for a file on disk, read from its own
+        header, or a '<container>:<complaint>' string that names what stopped
+        this from answering. Never $null and never a guess: every return value
+        below is something the caller can print.
+
+        PE (COFF) and ELF only. Both are two reads and a lookup, and both put
+        the machine type in a documented fixed place: `IMAGE_FILE_HEADER.Machine`
+        two bytes after the PE\0\0 signature that `e_lfanew` points at, and
+        `e_machine` at offset 0x12 of an ELF header. A Mach-O is recognised and
+        named as such rather than parsed -- see the note above.
+    #>
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $head = New-Object byte[] 64
+        if ($fs.Read($head, 0, 64) -lt 64) { return 'unknown:shorter-than-64-bytes' }
+
+        # ELF: 0x7F 'E' 'L' 'F'. EI_DATA at offset 5 is 1 for little-endian,
+        # which every target this project has ever built for is; a big-endian
+        # ELF is reported rather than byte-swapped, because producing one would
+        # mean something much stranger than a wrong label.
+        if ($head[0] -eq 0x7F -and $head[1] -eq 0x45 -and $head[2] -eq 0x4C -and $head[3] -eq 0x46) {
+            if ($head[5] -ne 1) { return 'elf:big-endian' }
+            $m = ([int]$head[18]) -bor (([int]$head[19]) -shl 8)
+            if ($m -eq 0x3E) { return 'elf:x64' }
+            if ($m -eq 0xB7) { return 'elf:arm64' }
+            if ($m -eq 0x03) { return 'elf:x86' }
+            return ('elf:e_machine-0x{0:x4}' -f $m)
+        }
+
+        # Mach-O, thin (0xFEEDFACF little-endian) or fat (0xCAFEBABE big-endian
+        # on disk). Named, not decoded.
+        if ($head[0] -eq 0xCF -and $head[1] -eq 0xFA -and $head[2] -eq 0xED -and $head[3] -eq 0xFE) { return 'macho:thin' }
+        if ($head[0] -eq 0xCA -and $head[1] -eq 0xFE -and $head[2] -eq 0xBA -and $head[3] -eq 0xBE) { return 'macho:fat' }
+
+        # PE: 'MZ', then e_lfanew at 0x3C, then 'PE\0\0' and the machine word.
+        if ($head[0] -eq 0x4D -and $head[1] -eq 0x5A) {
+            $e = [System.BitConverter]::ToInt32($head, 60)
+            if ($e -lt 64 -or ($e + 6) -gt $fs.Length) { return "pe:e_lfanew-$e-is-outside-the-file" }
+            $fs.Position = $e
+            $sig = New-Object byte[] 6
+            if ($fs.Read($sig, 0, 6) -lt 6) { return 'pe:truncated-at-the-signature' }
+            if (-not ($sig[0] -eq 0x50 -and $sig[1] -eq 0x45 -and $sig[2] -eq 0 -and $sig[3] -eq 0)) {
+                return 'pe:no-PE-signature-where-e_lfanew-points'
+            }
+            $m = ([int]$sig[4]) -bor (([int]$sig[5]) -shl 8)
+            if ($m -eq 0x8664) { return 'pe:x64' }
+            if ($m -eq 0xAA64) { return 'pe:arm64' }
+            if ($m -eq 0x014C) { return 'pe:x86' }
+            if ($m -eq 0x01C4) { return 'pe:arm' }
+            return ('pe:machine-0x{0:x4}' -f $m)
+        }
+        return 'unknown:no-recognised-container-magic'
+    } finally { $fs.Dispose() }
+}
+
+$labelOs   = ($PlatformLabel -split '-')[0]
+$labelArch = ($PlatformLabel -split '-')[-1]
+$wantKind  = if ($labelOs -eq 'windows') { 'pe' } elseif ($labelOs -eq 'linux') { 'elf' } else { '' }
+if ($wantKind -and (@('x64', 'arm64', 'x86') -contains $labelArch)) {
+    $want = "${wantKind}:$labelArch"
+    $seen = @()
+    foreach ($a in $artifacts) {
+        $got = Get-ImageArchitecture (Join-Path $Out $a)
+        $seen += "$a is $got"
+        if ($got -ne $want) {
+            throw ("$a is $got, and '$PlatformLabel' says every file in this release is $want. " +
+                   "The label names the ARTIFACT and it was derived from, or handed in for, the " +
+                   "MACHINE; one of those two is wrong here. Either the toolchain targeted a " +
+                   "different architecture than the runner reports, or -PlatformLabel/-BinDir point " +
+                   "somewhere they should not. What must not happen is shipping this: pl update " +
+                   "selects a download by this exact string, so a mislabelled archive is a download " +
+                   "that cannot run on the machine that asked for it. All artifacts: " +
+                   ($seen -join '; '))
+        }
+    }
+    Say "  architecture: $($artifacts.Count) artifact(s), every one $want, which is what '$PlatformLabel' claims"
+} else {
+    Say ("  architecture: NOT CHECKED for '$PlatformLabel'. This block reads PE and ELF machine " +
+         "types and compares them with one architecture; '$labelArch' on '$labelOs' gives it nothing " +
+         "to compare against. macos-universal is that case by design -- see the note above -- and its " +
+         "evidence is the lipo -info step in .github/workflows/release.yml, not this one.") Yellow
 }
 
 # The notices have to travel with the binaries, and until 2026-07-30 they did
@@ -656,6 +883,18 @@ $manifest += "version: $version"
 # and they are not interchangeable: the same line that tells a user their
 # download is intact should tell them which download it was.
 $manifest += "platform: $PlatformLabel"
+# WHAT THIS COPY IS SHORT OF, IF ANYTHING, AND WHY -- immediately under the
+# platform line, because it is only ever true OF a platform and a reader
+# scanning the header should not have to reach the checksums to find it.
+#
+# Absent unless -OmitPythonModule was given, so the header of every archive cut
+# before ARM64 existed is unchanged. `tools/check-archive.ps1` parses this line,
+# refuses it on any platform but the one it is waived for, refuses it if the
+# file it names is in the archive anyway, refuses it if its reason does not name
+# the platform, and prints it whether the archive passes or fails.
+# `tools/installer/Install-Polylinker.ps1` and `tools/check-msi.ps1` both ignore
+# header lines they do not recognise, so neither is affected by a new one.
+if ($pyOmitted) { $manifest += "omitted: $pyOmitted" }
 $manifest += "built: $stamp"
 $manifest += "commit: $commit$(if ($dirty) { ' (WORKING TREE DIRTY - not reproducible)' })"
 $manifest += "rustc: $rustc"

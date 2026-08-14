@@ -8,9 +8,9 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 170,710 lines of Rust, 97,790 of it dependency-free (141 `.rs`
-> files under `crates/` and `bins/`), with 2,016 `#[test]` functions and a
-> 75-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
+> crates and 171,242 lines of Rust, 98,322 of it dependency-free (141 `.rs`
+> files under `crates/` and `bins/`), with 2,019 `#[test]` functions and a
+> 76-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-10, and recounted on every test run since:
 > tests are lines matching `^\s*#\[test\]`, the attribute at the start of a
@@ -51,6 +51,32 @@ sends a sequence anywhere.
 > added and nobody has read; those are `proposed`, they are not searched, and
 > `--include-proposed` is how to see them. See
 > [Where this actually is](#where-this-actually-is).
+>
+> **The newest thing on this page is also the least proven, and it is a
+> download rather than a feature: `windows-arm64`.** There is now a fourth pair
+> of Windows files — a zip and an MSI — for Windows on ARM64, and they are
+> produced and exercised by a `windows-11-arm` GitHub runner and by nothing
+> else, because no other machine here can make one. The
+> `aarch64-pc-windows-msvc` target is installed and compiles this workspace's
+> library crates; every *executable* then dies at
+> `linker 'link.exe' not found`, because the ARM64 MSVC toolset is not on the
+> only workstation this project has — measured rather than assumed: that
+> machine's MSVC install offers `x64` and `x86` target linkers under
+> `Hostx64\` and no `arm64` one. So **no person has ever run a Polylinker
+> binary on Windows ARM64** — not the editor's window, not `pl`, not the
+> installer — and every timing, every corpus figure and every "verified
+> natively" claim below is an x86-64 claim, because there was nowhere else to
+> measure one. **The gate this paragraph counts the steps of does not run on
+> that platform at all**: it has three legs and none of them is ARM64. What
+> ARM64 gets on every commit is `fmt`, `clippy` and the Rust test suite,
+> natively, which is real and is less; the archive and the installer are
+> checked only when a release is cut; and two things the x86-64 download is
+> held to are not established for this one — that the Python extension module
+> is in it, and that it needs no C runtime the user is not allowed to install.
+> Both are stated in full in the ARM64 row of the table below and in
+> [`docs/RELEASING.md`](docs/RELEASING.md#windows-on-arm64), because a fourth
+> download that quietly means less than the other three is exactly the shape of
+> claim this project keeps finding in its own prose.
 
 ---
 
@@ -100,7 +126,8 @@ Each ships before the app, stands alone, and survives the app.
 | [`bins/pl-mcp`](bins/pl-mcp) | **MCP server**, read-only, no dependencies — so an assistant can ask about a plasmid without being able to overwrite one. |
 | [`crates/pl-py`](crates/pl-py) | **Python bindings** (PyO3, abi3), so a script already using Biopython can call the parts that are hard to get right without being rewritten. |
 | [`docs/AUDIT-2026-07-28.md`](docs/AUDIT-2026-07-28.md) | A 123-agent audit of the whole workspace: 90 confirmed findings, 19 refuted, 90 of 90 fixed. Kept in the repo because the findings that mattered most were **checks that could not fail**, and that is worth being public about. |
-| Windows installer | **`polylinker-<version>-windows-x64.msi`**, built by [`tools/build-msi.ps1`](tools/build-msi.ps1) from [`tools/installer/Polylinker.wxs`](tools/installer/Polylinker.wxs). Installs for you alone by default — no administrator, no elevation prompt — with "for everyone" offered for machines where you are one. The installer itself contacts nothing, and it registers no service, no scheduled task and no auto-updater: nothing it puts on the machine ever runs on its own. ([`tools/ci.ps1`](tools/ci.ps1) fails the build if any network or scheduling facility appears anywhere under `tools/installer/`.) It **adds** Polylinker to the "Open with" list for eight sequence formats and takes none of them away from SnapGene or anything else you already use. The MSI carries no file list of its own: it is generated from the same `SHA256SUMS.txt` the archive is verified against, because a second list is how a licence text stops shipping. The readable [`Install-Polylinker.ps1`](tools/installer/Install-Polylinker.ps1) still ships inside the zip for anyone who would rather run something they can read. See [`docs/RELEASING.md`](docs/RELEASING.md). |
+| Windows installer | **`polylinker-<version>-windows-x64.msi`**, and since 2026-08-14 **`polylinker-<version>-windows-arm64.msi`** beside it — one package per architecture, because a PE is single-architecture and Windows has no `lipo`. Both come out of [`tools/build-msi.ps1`](tools/build-msi.ps1) and the one [`tools/installer/Polylinker.wxs`](tools/installer/Polylinker.wxs); the row below is about how much less is known about the ARM64 one. Installs for you alone by default — no administrator, no elevation prompt — with "for everyone" offered for machines where you are one. The installer itself contacts nothing, and it registers no service, no scheduled task and no auto-updater: nothing it puts on the machine ever runs on its own. ([`tools/ci.ps1`](tools/ci.ps1) fails the build if any network or scheduling facility appears anywhere under `tools/installer/`.) It **adds** Polylinker to the "Open with" list for eight sequence formats and takes none of them away from SnapGene or anything else you already use. The MSI carries no file list of its own: it is generated from the same `SHA256SUMS.txt` the archive is verified against, because a second list is how a licence text stops shipping. The readable [`Install-Polylinker.ps1`](tools/installer/Install-Polylinker.ps1) still ships inside the zip for anyone who would rather run something they can read. See [`docs/RELEASING.md`](docs/RELEASING.md). |
+| Windows on ARM64 | **`polylinker-<version>-windows-arm64.zip` and `polylinker-<version>-windows-arm64.msi`** — the same two downloads x86-64 gets, from the same [`tools/release.ps1`](tools/release.ps1) and [`tools/build-msi.ps1`](tools/build-msi.ps1), with the same licence texts and the same `SHA256SUMS.txt` inside. Everything else in this row is what is **not** established about them, because this is the one platform in the table that has never been in a human being's hands. **The build happens on GitHub's free `windows-11-arm` runners and can happen nowhere else here.** `aarch64-pc-windows-msvc` is installed on the maintainer's machine and genuinely compiles the library crates; every binary crate stops at `linker 'link.exe' not found`, because a rustup target is a standard library and not a toolchain and the ARM64 MSVC linker was never installed. Cross-compiling was refused as the shipping path anyway: an artifact no machine of that architecture has executed is a guess with a checksum on it. **What runs on ARM64, on every commit:** `cargo fmt`, `cargo clippy`, the whole Rust test suite and the integration suites of `pl-fileio`, `pl-features`, `pl-draw`, `pl-design`, `pl-update` and `pl` — that leg is in `ci.yml`'s `test` job. **What does not:** [`tools/ci.ps1`](tools/ci.ps1), the gate this page counts the steps of, which runs on three legs and none of them is this one. So on ARM64 nothing checks the PE icon and version resources, nothing runs the differential oracles, and **the archive and the installer are assembled, verified, installed and uninstalled only when a release is cut** — that is `release.yml`, a tag or a `workflow_dispatch` run, and it is the position x86-64 was in for the six releases this page's audit entry is about. **Two consequences a user can actually hit.** First, the Python extension module may simply not be there: `crates/pl-py` links against CPython, Windows resolves those symbols at link time, and whether the ARM64 runner carries an ARM64 CPython was never established — so an ARM64 archive is permitted to ship without `polylinker.pyd`, but only by declaring the omission in its own `SHA256SUMS.txt`, which [`tools/check-archive.ps1`](tools/check-archive.ps1) then holds it to and prints either way. Second, **the ARM64 binaries do not have the static C runtime the x86-64 ones have**: `.cargo/config.toml` scopes `-C target-feature=+crt-static` to `x86_64-pc-windows-msvc` and declares nothing for `aarch64-pc-windows-msvc`, so they import `VCRUNTIME140.dll`, which is not part of Windows and whose redistributable needs administrator rights — the exact dependency that file exists to remove, on a machine whose owner may not be allowed to install it. The gate step that asserts its absence is a gate step, and this leg does not run the gate. **The `.msi` ships rather than zip-only on purpose**: half a platform reads to a user as a platform where the software does not really work, and it is also the file [`crates/pl-update/src/flow.rs`](crates/pl-update/src/flow.rs) hands over on Windows. `pl update` used to refuse outright on ARM64, and correctly — that table returns `None` for anything the release workflow does not build, so it declined rather than handing an ARM64 user an x86-64 installer; adding the entry and publishing the file are therefore one change, since an entry whose file does not exist turns a clean refusal into a 404. ARM64 Windows *emulates* x86-64, so these machines were never locked out and the `windows-x64` download has always run on them, more slowly; nobody has measured either build on one. See [`docs/RELEASING.md`](docs/RELEASING.md#windows-on-arm64), which is a table of exactly what this leg checks and what it leaves unchecked. |
 | Signing | **Code signing: not done, and not planned.** There is no code-signing certificate and no Apple Developer ID, and obtaining them is not on the roadmap — see [`docs/RELEASING.md`](docs/RELEASING.md), which states the decision and what it costs you at the download. That is the signature an *operating system* checks, so Windows and macOS go on saying they do not recognise the publisher, and a machine under someone else's policy may refuse the binaries outright. **Manifest signing: done, 2026-08-05.** `SHA256SUMS.txt` ships with an Ed25519 signature (`SHA256SUMS.txt.sig`) whose public key is compiled into the two programs that can use it, `pl` and `polylinker` (`pl-mcp`, the Python module and the wasm build do not carry it, because none of them can update anything), so a download can be traced to whoever holds the release key rather than merely to whoever served the page. Every release page prints the OpenSSL command to check it by hand, or `pl update` does it for you — it refuses everything that key did not sign. The private half is a GitHub Actions secret and is on no machine here. |
 | Features database | **113 records as of release 2026.08.12, 89 reviewed and 24 proposed.** Machine-assembled from public sources, then signed off row by row; the 89 were signed on 2026-07-28, of the 21 added on 2026-08-10 one has been withdrawn by the curator and the remaining 20 have not been read by anyone, three more were appended on 2026-08-11, and a fourth on 2026-08-12 — none of those four has been read either. A row moves past `proposed` only when `features/SIGNOFF.tsv` names it with a sha256 of its content that still matches, so an approval lapses by itself when the row changes and the shipped set shrinks without anyone deciding to shrink it. That mechanism, not the current count, is what enforces "the tool may propose and never assert" — and the 24 are what it looks like when it works: they are in the repository, they are not in what `pl annotate` searches, and `--include-proposed` is the only way to see them. **It is not comprehensive, and the gaps are not small: the 89 rows the tool searches contain no promoter, no terminator and no origin of replication** — 89 against SnapGene's 1,367 — because those classes have no automatable source that gives a defensible boundary. Ten regulatory elements — six promoters, three terminators and a poly(A) signal — are now proposed and awaiting a curator; three of the promoters (T3, araBAD and human EF-1alpha) were added on 2026-08-11 after re-measurement contradicted the reasons they had been held for, and the mouse PGK promoter was added on 2026-08-12 **on the curator's instruction**, not because any rule changed — the stage had refused to promote it itself, and issuing it is a decision the program is not allowed to take. Each was appended so that no published id moved — [`features/PROPOSED.md`](features/PROPOSED.md) is that curator's worklist, and since 2026-08-11 every row in it carries the primary source that settles it and a recommendation — sign, withdraw, or a decision only a curator can make — with the decisions first and the arithmetic afterwards. The CMV enhancer was **withdrawn** on 2026-08-11 rather than signed: the promoter half of the block it belongs to was refused on the evidence, and shipping the enhancer alone tells a reader by omission that a CMV region has no promoter. Its id, `PLF:4006`, is retired rather than freed — the row's declaration stays in the build with the reason attached, so nothing else can ever be issued under that number. Five more were built and then refused, because two independent depositors have to draw the edges where we drew them before a row may call its boundary a consensus, and lac, tac, trc, the CMV promoter and the SV40 poly(A) signal are each corroborated by exactly one; origins are still untouched ([`features/README.md`](features/README.md) enumerates the rest). The desktop app and `pl methods annotate` both say so on screen, computed from the table rather than written down, because a user who watches `AmpR` light up and sees no `ori` will otherwise conclude their plasmid has none. `pl licences` prints the live count and the attribution. |
 
@@ -167,6 +194,20 @@ the only external requirement.
   A `--profile minimal` rustup install also omits clippy and rustfmt:
   `rustup component add clippy rustfmt`.
 
+- **Windows on ARM64** — `rustup target add aarch64-pc-windows-msvc` is not
+  enough, and the way it is not enough is worth knowing before you spend an
+  afternoon on it. The target installs, `cargo check` passes, and every
+  *library* crate in this workspace builds; then the first binary crate fails
+  with the same `linker 'link.exe' not found` as above, because a rustup target
+  is a standard library and not a toolchain. The ARM64 linker is a separate
+  Visual Studio component,
+  `Microsoft.VisualStudio.Component.VC.Tools.ARM64`, and without it an MSVC
+  install has only `x64` and `x86` under `VC\Tools\MSVC\<ver>\bin\Hostx64\`.
+  Nobody here has it installed, which is why ARM64 binaries come out of CI and
+  out of nowhere else — see the ARM64 row in the table above, and
+  [`docs/RELEASING.md`](docs/RELEASING.md#windows-on-arm64) for what that costs
+  in evidence.
+
 Verify a build end to end, including against real files:
 
 ```powershell
@@ -176,7 +217,10 @@ Verify a build end to end, including against real files:
 That script checks for the linker first and prints the fix rather than letting
 cargo fail obscurely.
 
-Built and verified natively on Windows (MSVC 14.44, Rust 1.97.1) and on Linux.
+Built and verified natively on **x86-64** Windows (MSVC 14.44, Rust 1.97.1) and
+on **x86-64** Linux. The architecture is named because there is now a fourth
+platform, `windows-arm64`, where the same sentence cannot be written: it is
+built and tested by a runner and by no hands at all.
 
 ### What has been proven so far
 
@@ -221,8 +265,13 @@ Built and verified natively on Windows (MSVC 14.44, Rust 1.97.1) and on Linux.
   bugs live".
 - On the 4.64 Mb *E. coli* genome (a 17.7 MB `.dna`): **70 ms** to parse and
   report and **590 ms** for a 50-enzyme digest on Linux; **103 ms** and
-  **1,195 ms** natively on Windows. 30 MB peak RSS.
-- The whole suite passes on **Windows (MSVC) and Linux**, from the same source.
+  **1,195 ms** natively on Windows. 30 MB peak RSS. **All four numbers are
+  x86-64**, and every other timing on this page is too; no Polylinker build has
+  ever been timed on ARM64, on Windows or anywhere else.
+- The whole suite passes on **x86-64 Windows (MSVC) and x86-64 Linux**, from the
+  same source, and this is a claim about machines somebody sat at. What
+  `windows-arm64` has instead is a CI leg, which is a weaker thing and is
+  described as one in the table above.
 - The wasm build and the native binary **agree on 41/41 files**, and the GenBank
   they write is **byte-identical** on all 41. The browser page holds no parser of
   its own; there used to be a second implementation in JavaScript, and two

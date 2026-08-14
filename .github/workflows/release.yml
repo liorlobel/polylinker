@@ -1,12 +1,28 @@
 name: Release
 
-# Cut a release for Windows, macOS and Linux from one tag.
+# Cut a release for Windows, macOS and Linux from one tag. FOUR downloads, not
+# three, because Windows ships x64 and arm64 separately -- see the matrix.
 #
 # WHAT THIS FILE DOES NOT CONTAIN, and deliberately: any knowledge of what goes
 # into an archive. Every job below runs `tools/release.ps1`, which `tools/ci.ps1`
 # exercises on all three legs of `ci.yml`'s `gate` job and on a developer
 # machine, and then checks the result with `tools/check-archive.ps1`. There is no
 # `tar -cf` here and no file list in YAML.
+#
+# THE FOURTH LEG IS NOT COVERED BY THAT SENTENCE, and the gap is stated here
+# rather than left to be discovered. `ci.yml`'s `gate` job runs on
+# windows-latest, ubuntu-latest and macos-latest -- three legs, all x64 or Apple
+# Silicon, none of them Windows on ARM. So on `windows-arm64` the packaging
+# path (`release.ps1` -> `check-archive.ps1` -> `build-msi.ps1` ->
+# `check-msi.ps1`) is NOT rehearsed by the gate on any push. What rehearses it
+# instead is the Windows leg of `ci.yml`'s `test` job, which since the ARM64
+# port runs on `windows-11-arm` and drives those same four scripts on every
+# pull request -- deliberately, because "a release workflow is not where to
+# test a hypothesis" applies with more force to a platform nobody can build on
+# locally than to one everybody can. What that leg does NOT run is the rest of
+# the gate: the PE resource assertions, the differential oracles, the 8.3 alias
+# case, the wasm steps. `ci.yml`'s header sets out exactly which. Do not write
+# "ARM64 is covered by the gate" anywhere; it is not.
 #
 # That is not tidiness. Four of the licences this project ships under require
 # their text to accompany every copy, and the packaging step has dropped them
@@ -18,7 +34,9 @@ name: Release
 # conflating the two would be a lie in either direction.
 #
 # NOT signed: the executables. There is no code-signing certificate for any of
-# the three platforms -- no Authenticode certificate, no Apple Developer ID --
+# the three operating systems, and adding a second Windows architecture does
+# not add a fourth story here -- no Authenticode certificate, no Apple
+# Developer ID --
 # and as of 2026-08-06 none is planned, so SmartScreen and Gatekeeper will say
 # what they say and go on saying it. docs/RELEASING.md has the reasoning and the
 # release notes tell the user what it costs on each platform. Nothing in this
@@ -99,8 +117,8 @@ jobs:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
-      # Three independent artifacts. One platform failing should not hide
-      # whether the other two built.
+      # Four independent artifacts. One platform failing should not hide
+      # whether the other three built.
       fail-fast: false
       matrix:
         include:
@@ -118,6 +136,54 @@ jobs:
           - os: macos-latest
             label: macos-universal
 
+          # ----------------------------------------------------------- ARM64
+          #
+          # A SEPARATE DOWNLOAD, and the macOS entry above is precisely why it
+          # has to be. That entry pays a second full LTO build to spare the user
+          # a choice, and it can, because Mach-O holds two slices in one file
+          # and `lipo` puts them there. PE holds one. There is no fat-binary
+          # format on Windows, no `lipo`, and no supported way to make
+          # `pl.exe` mean two architectures -- so the cost the macOS reasoning
+          # buys off cannot be bought off here at any price. A Windows reader
+          # picks x64 or arm64. What this file owes them in exchange is that
+          # both choices exist, that both carry an MSI rather than the ARM
+          # reader being handed a zip and told to cope, and that the names make
+          # the choice obvious: `polylinker-<v>-windows-arm64.{zip,msi}`.
+          #
+          # The one thing it is cheaper than macOS at: no second build. This is
+          # one native build on one runner, not a cross-compile joined to
+          # anything.
+          #
+          # NATIVE, AND THAT IS A DECISION RATHER THAN A DEFAULT. rustc will
+          # cross-compile `aarch64-pc-windows-msvc` library crates from an x64
+          # Windows machine, but every BINARY in this workspace fails there with
+          # "linker `link.exe` not found" unless the ARM64 MSVC linker is
+          # installed -- measured on the maintainer's machine, which does not
+          # have it. So a cross-compiled ARM64 release would be an artifact that
+          # had never been linked on, let alone run on, the architecture it
+          # claims. Worse, the three things this job does AFTER packaging --
+          # `check-archive.ps1` over the produced zip, an `msiexec` install in
+          # both scopes, and the uninstall assertions -- all execute the
+          # artifact's own environment and cannot be done from an x64 host at
+          # all. `windows-11-arm` is a GitHub-hosted image and is free for
+          # public repositories, which this one is.
+          #
+          # A LABEL THAT DOES NOT RESOLVE CANNOT PUBLISH, whatever GitHub does
+          # with it. This is asserted from this file rather than from a belief
+          # about the scheduler: the exact presentation of an unknown `runs-on`
+          # -- immediate error, or a job that queues until it times out -- is
+          # NOT verified here and must be read off the first run. What is
+          # verified is that neither presentation can produce a release. A job
+          # that does not run produces no artifact; `if-no-files-found: error`
+          # on the two upload steps refuses an empty one; `needs: build` holds
+          # the publish job behind it; and the publish job checks every one of
+          # the four archives and both MSIs BY NAME, so a missing
+          # `windows-arm64` file is a thrown error and not a shorter release
+          # page. `fail-fast: false` means the other three still build and can
+          # still be diagnosed, which is the whole reason it is set.
+          - os: windows-11-arm
+            label: windows-arm64
+
     steps:
       - uses: actions/checkout@v4
 
@@ -125,7 +191,7 @@ jobs:
       # built so the answer arrives in one minute rather than twenty.
       #
       # `release.ps1` reads the version out of Cargo.toml and nowhere else, so
-      # a tag of v0.2.0 on a tree that still says 0.1.0 would publish three
+      # a tag of v0.2.0 on a tree that still says 0.1.0 would publish four
       # archives called polylinker-0.1.0-* under a release called v0.2.0, and
       # every one of them would carry the wrong number in its own manifest.
       - name: The tag names the version in Cargo.toml
@@ -285,15 +351,36 @@ jobs:
 
       # -------------------------------------------------------------- Windows
       #
-      # THE MSI. Built inside this job rather than in a matrix leg of its own,
-      # because it needs the dist/ this job has just produced and verified, and
-      # because tools/ci.ps1 asserts the build matrix is exactly three runners
-      # with three labels.
+      # THE MSI, ON BOTH WINDOWS LEGS. Built inside this job rather than in a
+      # matrix leg of its own, because it needs the dist/ this job has just
+      # produced and verified, and because tools/ci.ps1 asserts the shape of
+      # this matrix (it asserted three runners and three labels; the ARM64 leg
+      # requires that assertion to be widened to four -- if it has not been,
+      # this file is right and the gate step is what needs the edit, because a
+      # published `windows-arm64` download with no matching matrix entry is not
+      # a state this workflow can reach).
+      #
+      # `runner.os` is `Windows` on both windows-latest and windows-11-arm, so
+      # every step below runs twice across the matrix, once per architecture,
+      # and neither is a special case in YAML. The architecture is not named
+      # here at all -- see the note on the build step.
       #
       # WiX is a RELEASE-time dependency only. Nothing about `cargo build`,
       # `cargo test` or the rest of tools/ci.ps1 needs it, and a contributor
       # without a .NET SDK still runs a complete gate: the MSI steps skip
       # themselves when `wix` is absent rather than failing.
+      #
+      # UNVERIFIED ON ARM64, AND DELIBERATELY NOT GATED. The `windows-11-arm`
+      # image does not preinstall a WiX toolset -- the image manifest lists WiX
+      # among the tools it does not carry -- so this step is the only thing that
+      # puts one there. WiX has supported ARM64 natively since v4 and ships as
+      # an architecture-independent .NET tool, which is why this is expected to
+      # work; but "expected" is the honest word until a run says otherwise, and
+      # it has not run yet. It is therefore left UNCONDITIONAL on both Windows
+      # legs on purpose: if `dotnet tool install` cannot serve an arm64 host,
+      # the correct outcome is a red install step naming WiX, not an `if` that
+      # quietly turns the ARM64 MSI into something nobody builds. A skip here
+      # would be the failure this repository has shipped nine fixes for.
       #
       # The version is pinned. An installer that changes shape because a
       # toolchain published a new minor is not reproducible, and the MSI is the
@@ -315,7 +402,91 @@ jobs:
         # dist/ against the manifest and exclude only SHA256SUMS.txt, *.zip and
         # *.zip.sha256, so an .msi left in dist/ would be swept into the
         # manifest and then into the zip, roughly doubling the download.
+        #
+        # NO ARCHITECTURE ARGUMENT, AND THAT IS THE POINT. The invocation is
+        # byte-identical on both Windows legs. `build-msi.ps1` already takes its
+        # entire file list from `dist/SHA256SUMS.txt` rather than from a second
+        # list -- that is what the comment above about the manifest is defending
+        # -- and `tools/release.ps1:658` writes `platform: <label>` into that
+        # same manifest, derived from the machine's real OSArchitecture. So the
+        # architecture is already in the one file the MSI builder reads, and
+        # putting `-arch` in this YAML would be a second copy of it in a
+        # language the local gate cannot run: exactly the mistake the header of
+        # this file exists to refuse. `build-msi.ps1` must read it from there
+        # (it hard-coded `'-arch', 'x64'` and the x64 MSI name before the ARM64
+        # port), and the step below is what catches it if it has not.
         run: ./tools/build-msi.ps1 -Dist dist -Out msi
+
+      # THE INSTALLER SAYS WHICH ARCHITECTURE IT IS, AND IS ASKED.
+      #
+      # Two Windows legs now write into the same artifact store, so a
+      # `build-msi.ps1` that still hard-codes the x64 name would have both of
+      # them produce `polylinker-<v>-windows-x64.msi`. The publish job downloads
+      # with `merge-multiple: true`, which flattens by filename -- so one of the
+      # two would overwrite the other and the release page would carry one MSI
+      # under a name that is right for at most one architecture, with nothing
+      # anywhere reporting it. That is a silent wrong file, which is worse than
+      # a missing one.
+      #
+      # THE NAME IS NOT ENOUGH, so the package is asked what it thinks it is. An
+      # MSI's Template summary property carries the platform WiX was given by
+      # `-arch`, and an ARM64 Windows will happily install an x64 package
+      # through emulation -- so `check-msi.ps1` below would pass, the payload
+      # inside really would be the ARM64 binaries, and the only wrong thing
+      # would be the installer's own declaration of itself. Nothing else in this
+      # workflow can see that. Reading it here is one COM call and it is the
+      # only place the `-arch` flag's actual effect is observed rather than
+      # assumed.
+      #
+      # HOW IT FAILS: build the ARM64 leg with `build-msi.ps1` unchanged and
+      # this step reports `polylinker-0.10.3-windows-x64.msi` where
+      # `windows-arm64` was expected, or a Template of `x64;1033` where `Arm64`
+      # was expected. Both were the state of the tree when the ARM64 port began.
+      # It also refuses to pass on an unreadable Template rather than treating
+      # "read nothing" as "read something matching".
+      - name: The MSI is named and stamped for this architecture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $label = '${{ matrix.label }}'
+          $version = ''
+          foreach ($line in (Get-Content 'dist/SHA256SUMS.txt')) {
+              if ($line -match '^version:\s*(\S+)') { $version = $Matches[1]; break }
+          }
+          if (-not $version) { throw 'dist/SHA256SUMS.txt carries no version: line, so this step could check neither name' }
+
+          $msi = @(Get-ChildItem msi -Filter *.msi)
+          if ($msi.Count -ne 1) { throw "expected exactly one .msi, found $($msi.Count)" }
+          $want = "polylinker-$version-$label.msi"
+          if ($msi[0].Name -ne $want) {
+              throw ("the MSI is called $($msi[0].Name) and this leg builds $label, so it should be $want. " +
+                     'tools/build-msi.ps1 derives the name from the platform: line of dist/SHA256SUMS.txt; ' +
+                     'if it still hard-codes windows-x64 then both Windows legs produce the same filename and ' +
+                     'the publish job merges one over the other.')
+          }
+
+          # Parameterised COM properties are not reachable through PowerShell's
+          # normal property syntax, hence InvokeMember. Property 7 is PID_TEMPLATE.
+          $inst = New-Object -ComObject WindowsInstaller.Installer
+          $si = $inst.GetType().InvokeMember('SummaryInformation', 'GetProperty', $null, $inst, @($msi[0].FullName, 0))
+          $template = $si.GetType().InvokeMember('Property', 'GetProperty', $null, $si, @(7))
+          if ([string]::IsNullOrWhiteSpace($template)) {
+              throw 'the MSI has an empty Template summary property, so this step read nothing and proved nothing about its architecture'
+          }
+          # `x64;1033`, `Arm64;1033`. The platform is everything before the
+          # first semicolon; the rest is the language list.
+          $platform = ($template -split ';')[0].Trim()
+          $wantPlatform = switch ($label) {
+              'windows-x64'   { 'x64' }
+              'windows-arm64' { 'Arm64' }
+              default         { throw "no MSI platform is defined for the label $label" }
+          }
+          if ($platform -ne $wantPlatform) {
+              throw ("the MSI declares itself for '$platform' and this leg builds $label, which needs '$wantPlatform'. " +
+                     "tools/build-msi.ps1 passes WiX its -arch; an ARM64 Windows installs an x64 package under emulation, " +
+                     'so nothing else in this workflow would have noticed.')
+          }
+          Write-Host "$($msi[0].Name) declares Template '$template'"
 
       - name: Install the MSI, check it, uninstall it
         if: runner.os == 'Windows'
@@ -361,10 +532,19 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
-          name: polylinker-windows-msi
+          # THE LABEL IS IN THE ARTIFACT NAME, and it has to be now that two
+          # legs reach this step. This read `polylinker-windows-msi`, which was
+          # unambiguous while exactly one runner was Windows; with two, both
+          # legs would claim the same artifact name and upload-artifact@v4
+          # refuses a second upload under a name that already exists -- so the
+          # ARM64 leg (or whichever finished second) would fail here, having
+          # built and verified a perfectly good installer. The archives above
+          # were already labelled this way; this is the same rule applied to the
+          # file that was the exception.
+          name: polylinker-${{ matrix.label }}-msi
           # Its own artifact, so its own root. Both patterns are under msi/, so
           # the files arrive at the top level of the artifact exactly as the
-          # three archives do, and the publish job's download flattens them into
+          # four archives do, and the publish job's download flattens them into
           # the same artifacts/ directory.
           path: |
             msi/*.msi
@@ -375,9 +555,11 @@ jobs:
   publish:
     name: publish the release
     needs: build
-    # A tag, and only a tag, publishes. `workflow_dispatch` runs the three
+    # A tag, and only a tag, publishes. `workflow_dispatch` runs the four
     # builds and leaves the artifacts on the run, which is what you want when
     # the question is "would this release build?" rather than "release it".
+    # It is also the cheapest way to answer "does the windows-11-arm leg work
+    # at all?" without pushing a tag that cannot be un-pushed.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -399,10 +581,10 @@ jobs:
       # So this fails the job rather than skipping the signing step. It is the
       # first step because the ones below assemble notes and then call
       # `gh release create`, and a release page that exists without a signature
-      # is harder to withdraw than a red job. It CANNOT run before the three
+      # is harder to withdraw than a red job. It CANNOT run before the four
       # builds -- `needs: build` is what this job is waiting on -- so the
       # feedback still costs a full build. Moving it earlier means putting the
-      # secret in front of three runners on three operating systems to save
+      # secret in front of four runners on three operating systems to save
       # twenty minutes, which is the wrong trade for a step that only ever
       # fails when somebody has just rotated or removed the secret.
       #
@@ -427,7 +609,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # THREE ARCHIVES OR NOTHING.
+      # FOUR ARCHIVES OR NOTHING.
       #
       # `fail-fast: false` above means one platform can fail while the others
       # succeed, which is right for diagnosis and wrong for publishing: a
@@ -435,7 +617,20 @@ jobs:
       # because that job went red, is worse than no release page. `needs:` alone
       # does not cover it -- it covers the job failing, not the job producing
       # nothing.
-      - name: Three platforms, checked again after transit
+      #
+      # THE ARM64 ENTRY IS LOAD-BEARING FOR THE UPDATER, and more so than the
+      # other three. `crates/pl-update/src/flow.rs:104-121` maps the running
+      # platform to (label, extension) through a `#[cfg]` cascade with an
+      # explicit `None` fallback, so before the ARM64 port `pl update` on an
+      # ARM64 Windows matched nothing and DECLINED -- it failed closed, and told
+      # the user to update by hand rather than offering them an x64 MSI. The
+      # port adds an arm to that cascade. From the moment it lands, a release
+      # published without `polylinker-<v>-windows-arm64.zip` turns that clean
+      # decline into a 404 on the user's machine: `pl update` would name a file
+      # the release page does not have. There is no way to notice that from
+      # here except by refusing to publish, which is what the loop below does.
+      # The new cfg arm and the new artifact are one change, not two.
+      - name: Four platforms, checked again after transit
         id: check
         shell: pwsh
         run: |
@@ -445,12 +640,13 @@ jobs:
           }
           $expected = @(
               "polylinker-$version-windows-x64.zip"
+              "polylinker-$version-windows-arm64.zip"
               "polylinker-$version-linux-x64.tar.gz"
               "polylinker-$version-macos-universal.tar.gz"
           )
           foreach ($name in $expected) {
               $p = Join-Path 'artifacts' $name
-              if (-not (Test-Path -LiteralPath $p)) { throw "$name was not produced. All three platforms publish together or none do." }
+              if (-not (Test-Path -LiteralPath $p)) { throw "$name was not produced. All four platforms publish together or none do." }
               # The sidecar, re-checked. Between release.ps1 computing it and
               # here lie an upload and a download.
               $side = "$p.sha256"
@@ -464,36 +660,72 @@ jobs:
               # THE EXIT CODE IS CHECKED HERE, not left to the shell wrapper.
               # `check-archive.ps1` reports by exiting non-zero, and `exit` in a
               # called script returns to its caller rather than ending the job --
-              # so with three archives in a loop, only the LAST one's result
-              # survived in $LASTEXITCODE. A failure on Windows followed by two
-              # clean Unix archives would have published all three.
+              # so with more than one archive in a loop, only the LAST one's
+              # result survived in $LASTEXITCODE. A failure on Windows followed
+              # by two clean Unix archives would have published all three, and
+              # with the ARM64 leg there is now a second Windows archive ahead
+              # of them for the same bug to hide.
               ./tools/check-archive.ps1 -Archive $p
               if ($LASTEXITCODE -ne 0) { throw "$name failed its archive check" }
           }
 
-          # The MSI, checked the same way minus the archive check -- it is an
-          # installer, not an archive, and check-archive.ps1 would reject it for
-          # having no manifest. It was already installed, asserted and
-          # uninstalled on the Windows runner; what is verified here is that the
-          # bytes survived the artifact store, which is the one thing that
+          # BOTH MSIs, checked the same way minus the archive check -- they are
+          # installers, not archives, and check-archive.ps1 would reject them
+          # for having no manifest. Each was already installed, asserted and
+          # uninstalled on its own Windows runner; what is verified here is that
+          # the bytes survived the artifact store, which is the one thing that
           # happened since.
           #
-          # It is in this step rather than merely globbed onto the release
-          # because a missing MSI must fail the publish. The three archives
+          # They are in this step rather than merely globbed onto the release
+          # because a missing MSI must fail the publish. The four archives
           # publish together or not at all, and the installer most Windows
-          # readers will take is not a lesser member of that set.
-          $msiName = "polylinker-$version-windows-x64.msi"
-          $msiPath = Join-Path 'artifacts' $msiName
-          if (-not (Test-Path -LiteralPath $msiPath)) { throw "$msiName was not produced by the Windows job" }
-          $msiSide = "$msiPath.sha256"
-          if (-not (Test-Path -LiteralPath $msiSide)) { throw "$msiName has no .sha256 sidecar" }
-          $recorded = ((Get-Content $msiSide -Raw) -split '  ')[0].Trim()
-          $actual = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $recorded) { throw "$msiName does not match its sidecar after transit through the artifact store" }
+          # readers will take is not a lesser member of that set -- which is now
+          # true twice, since an ARM64 reader offered only a zip while the x64
+          # reader gets an installer has been handed the worse half of a
+          # decision nobody wrote down.
+          #
+          # BY NAME AND IN A LOOP, for the same reason the archives are: two
+          # Windows legs write into one flattened artifacts/ directory, so
+          # "there is an .msi here" is no longer a question worth asking. The
+          # two names must both be present and must differ.
+          $msiNames = @(
+              "polylinker-$version-windows-x64.msi"
+              "polylinker-$version-windows-arm64.msi"
+          )
+          foreach ($msiName in $msiNames) {
+              $msiPath = Join-Path 'artifacts' $msiName
+              if (-not (Test-Path -LiteralPath $msiPath)) { throw "$msiName was not produced by its Windows job" }
+              $msiSide = "$msiPath.sha256"
+              if (-not (Test-Path -LiteralPath $msiSide)) { throw "$msiName has no .sha256 sidecar" }
+              $recorded = ((Get-Content $msiSide -Raw) -split '  ')[0].Trim()
+              $actual = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLower()
+              if ($actual -ne $recorded) { throw "$msiName does not match its sidecar after transit through the artifact store" }
+          }
+
+          # THE TWO INSTALLERS ARE NOT THE SAME BYTES. `merge-multiple: true`
+          # flattens every artifact into one directory by filename, so a
+          # build-msi.ps1 that produced identically named files on both legs
+          # would have silently left one of them here twice -- and the loop
+          # above would have passed, because both names would exist and both
+          # would match a sidecar. That is precisely a check that cannot fail.
+          # An x64 and an ARM64 installer of the same version differ in their
+          # payload, so equal digests mean one leg's output was overwritten by
+          # the other's and the release would ship the wrong installer to half
+          # its Windows readers. The Windows job's own name-and-Template step
+          # is the primary defence; this is the one that still holds if that
+          # step is ever weakened.
+          $digests = $msiNames | ForEach-Object {
+              (Get-FileHash -LiteralPath (Join-Path 'artifacts' $_) -Algorithm SHA256).Hash.ToLower()
+          }
+          if ($digests[0] -eq $digests[1]) {
+              throw ("$($msiNames[0]) and $($msiNames[1]) are byte-identical. Two architectures cannot produce " +
+                     'the same installer, so one Windows leg overwrote the other in the artifact store and this ' +
+                     'release would hand half its Windows readers the wrong package.')
+          }
 
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
 
-      # One manifest over the three downloads, so a user can verify the file
+      # One manifest over the four downloads, so a user can verify the file
       # they took without opening it first. The per-archive SHA256SUMS.txt
       # inside each one covers the notices; this covers the archives.
       - name: The cross-platform manifest
@@ -793,7 +1025,7 @@ jobs:
         run: |
           set -euo pipefail
           # SHA256SUMS.txt.sig is named explicitly and not swept up by a glob,
-          # for the same reason the three archives are checked by name above: a
+          # for the same reason the four archives are checked by name above: a
           # glob that matches nothing publishes a release without it, and a
           # release page whose manifest is unsigned is one that the updater
           # contract cannot be met against. `gh release create` fails on a

@@ -1,7 +1,13 @@
 <#
 .SYNOPSIS
-    Build polylinker-<version>-windows-x64.msi from a dist/ that tools/release.ps1
+    Build polylinker-<version>-<platform>.msi from a dist/ that tools/release.ps1
     has already produced.
+
+    The platform is not a parameter and not this machine's. It is read out of
+    dist/SHA256SUMS.txt, which is the same file the payload comes from -- so the
+    installer is targeted at the architecture of the binaries it contains, by
+    construction, and cannot be aimed somewhere else by an argument. See 'the
+    architecture' below.
 
 .DESCRIPTION
     THE POINT OF THIS SCRIPT IS THAT THE MSI HAS NO FILE LIST OF ITS OWN.
@@ -120,13 +126,72 @@ if ($outFull.Equals($distFull, [StringComparison]::OrdinalIgnoreCase)) {
 
 # ---------------------------------------------------------------- the manifest
 # Format: a header, a '--' line, then '<sha256>  <relative path>' per file.
+#
+# THE HEADER IS READ NOW TOO, for the `platform:` line. It used to be skipped
+# wholesale, which was fine while there was one Windows architecture and the
+# only thing this script needed from dist/ was the file list.
 $members = @()
+$platform = ''
 $past = $false
 foreach ($line in Get-Content -LiteralPath $manifestPath) {
-    if (-not $past) { if ($line.Trim() -eq '--') { $past = $true }; continue }
+    if (-not $past) {
+        if ($line.Trim() -eq '--') { $past = $true }
+        elseif ($line -match '^platform:\s*(\S+)\s*$') { $platform = $Matches[1] }
+        continue
+    }
     if ($line -match '^[0-9a-f]{64}\s\s(.+)$') { $members += $Matches[1].Trim() }
 }
 if (-not $members) { throw "no file lines parsed out of $manifestPath" }
+if (-not $platform) {
+    throw ("$manifestPath has no 'platform:' line, so there is nothing here that says which " +
+           "architecture these binaries are. tools/release.ps1 has written that line since the first " +
+           "three-platform release; a dist/ without it did not come from it.")
+}
+
+# --------------------------------------------------------------- the architecture
+#
+# WHY THIS IS NOT `x64` ANY MORE, AND WHY IT IS NOT A PARAMETER EITHER.
+#
+# `-arch x64` was hard-coded here from the day the MSI was authored, which was
+# correct for exactly as long as `windows-x64` was the only Windows artifact.
+# `-arch` is not cosmetic: WiX writes it into the package's Template summary
+# property, and that value is what decides how `ProgramFiles6432Folder`
+# resolves and whether Windows Installer will accept the package on the machine
+# at all. An ARM64 payload in a package that says x64 is the failure mode this
+# whole block exists to make impossible -- it would install into the wrong
+# Program Files where it installed at all, and both outcomes look like a
+# working build right up until somebody double-clicks it.
+#
+# It comes from the manifest rather than from a parameter or from this machine.
+# A parameter is a second place to state a fact that dist/ already states, and
+# this project's whole MSI design is "one file list, read twice, never copied";
+# the architecture is part of that same fact. `RuntimeInformation` is worse
+# still: the machine that BUILDS the MSI need not be the machine the payload
+# targets -- `wix` is a .NET tool that runs anywhere -- so asking the host would
+# be asking something that does not know.
+#
+# The manifest's label is trustworthy because `tools/release.ps1` no longer
+# merely asserts it: since ARM64 was added it reads the COFF machine field out
+# of every binary it ships and refuses to write a `platform:` line the bytes
+# disagree with. So the chain is bytes -> label -> manifest -> this table ->
+# `-arch`, and every link but the last is checked upstream. The last link is
+# checked after the build, below.
+#
+# An unknown label is a THROW and not a default. Defaulting to x64 here is
+# precisely the bug this replaces, one indirection further back.
+$WixArchOfPlatform = @{ 'windows-x64' = 'x64'; 'windows-arm64' = 'arm64' }
+if (-not $WixArchOfPlatform.ContainsKey($platform)) {
+    throw ("this dist/ says 'platform: $platform', and an MSI is a Windows Installer package -- the " +
+           "only platforms it can be built for are $(($WixArchOfPlatform.Keys | Sort-Object) -join ' and '). " +
+           "If a new Windows architecture is being added, it needs an entry here, an arm in " +
+           "crates/pl-update's PLATFORM_ARTIFACT cascade, and a published file to go with it; an arm " +
+           "without a file turns pl update's clean decline into a 404.")
+}
+$wixArch = $WixArchOfPlatform[$platform]
+# Said here and not only at the wix invocation, so that `-GenerateOnly` -- the
+# mode a machine with no .NET SDK runs, which is the machine this project is
+# developed on -- still reports which architecture this dist/ resolved to.
+Say "  platform: $platform (from the manifest header) -> wix -arch $wixArch"
 
 $payload = $members | Where-Object { $ExcludeFromMsi -notcontains $_ } | Sort-Object
 $skipped = $members | Where-Object { $ExcludeFromMsi -contains $_ }
@@ -295,11 +360,11 @@ thing and is checked against $IsWindows rather than believed.)
 '@
 }
 
-$msiName = "polylinker-$Version-windows-x64.msi"
+$msiName = "polylinker-$Version-$platform.msi"
 $msiPath = Join-Path $outFull $msiName
 $args = @(
     'build',
-    '-arch', 'x64',
+    '-arch', $wixArch,
     '-d', "Version=$Version",
     '-bindpath', "payload=$distFull",
     '-bindpath', "msi=$outFull",
@@ -309,10 +374,80 @@ $args = @(
     "$repo/tools/installer/Polylinker.wxs",
     $payloadWxs
 )
-Say "  wix build -> $msiName" Cyan
+Say "  wix build -> $msiName (-arch $wixArch, from 'platform: $platform')" Cyan
 & $wix @args
 if ($LASTEXITCODE -ne 0) { throw "wix build failed with exit code $LASTEXITCODE" }
 if (-not (Test-Path $msiPath)) { throw "wix reported success but $msiPath is not there" }
+
+# ------------------------------------------------- did -arch actually land?
+#
+# THE ARGUMENT WAS PASSED IS NOT THE SAME CLAIM AS THE PACKAGE IS TARGETED.
+# Everything above proves this script computed `arm64` and put it in an array.
+# It proves nothing about the .msi on disk, and the gap between those two is
+# where the interesting failure lives: a flag WiX quietly ignores, a flag whose
+# spelling changed between toolset versions, an `-arch` overridden by something
+# in the .wxs. Every one of those produces a package that builds cleanly,
+# installs on the developer's x64 machine, passes the install/uninstall oracle
+# there, and is wrong. A check that stopped at "we passed the flag" would be a
+# check that cannot fail.
+#
+# So the produced file is read back. An MSI records its target in the Template
+# summary property, as `<platform>;<language codes>` -- `x64;1033`,
+# `Arm64;1033` -- and that property is precisely what `-arch` sets. It is the
+# one field that answers the question, so it is the one field this reads.
+#
+# READ BY SCANNING THE BYTES, not through the WindowsInstaller COM automation.
+# Two reasons, and the second is the one that decided it. Firstly this script is
+# already written to run where `wix` runs rather than only where `msiexec` does
+# -- `-GenerateOnly` exists so a machine with no .NET SDK still gets the file
+# set checked -- and COM would tie a step to Windows that need not be. Secondly
+# the summary information stream is stored in the compound file uncompressed,
+# with its strings as codepage bytes, so the value appears literally: no parser,
+# no interop, nothing between the assertion and the file. The .cab of binaries
+# alongside it is compressed noise, and the chance of a four-to-seven character
+# platform token followed by `;` and digits appearing in it by accident is
+# small enough to prefer over an automation dependency -- and if it ever did,
+# the two-candidate case below refuses rather than picking one.
+#
+# THREE WAYS THIS FAILS, all of them wanted:
+#   * no candidate at all -- the reader found nothing, so it proved nothing, and
+#     an unverified package is not accepted;
+#   * more than one distinct candidate -- ambiguous evidence is not evidence;
+#   * a candidate naming an architecture other than the one asked for.
+# The comparison is case-insensitive because the spelling is WiX's to choose
+# (`Arm64` today) and this is checking WHICH ARCHITECTURE, not which capital.
+$msiBytes = [System.IO.File]::ReadAllBytes($msiPath)
+# Latin-1 maps every byte to the character of the same value, so the search is
+# over the bytes and not over a decoding that could drop or merge any of them.
+# UTF-16LE as well, purely so that a future toolset writing the summary stream
+# as wide characters is found rather than reported as absent; ASCII bytes cannot
+# decode to the pattern under UTF-16 and wide bytes cannot under Latin-1, so the
+# union cannot double-count one real value.
+$rx = '(?<![A-Za-z0-9])(Intel64|Arm64|Intel|x64|Arm);([0-9]+)(?![0-9])'
+$candidates = @()
+foreach ($enc in @([System.Text.Encoding]::GetEncoding(28591), [System.Text.Encoding]::Unicode)) {
+    foreach ($m in [regex]::Matches($enc.GetString($msiBytes), $rx)) { $candidates += $m.Value }
+}
+$candidates = @($candidates | Sort-Object -Unique)
+if ($candidates.Count -eq 0) {
+    throw ("$msiName was built, but no Template summary value could be found anywhere in it, so " +
+           "nothing here established that -arch $wixArch reached WiX. An MSI always carries one. " +
+           "Refusing the package rather than reporting a check that looked and saw nothing.")
+}
+if ($candidates.Count -gt 1) {
+    throw ("$msiName contains $($candidates.Count) candidate Template summary values -- " +
+           "$($candidates -join ', ') -- and this check will not choose between them. One of them is " +
+           "the package's real target and the rest are coincidence in the compressed payload; either " +
+           "way the evidence is ambiguous and the package is not accepted on it.")
+}
+$templatePlatform = ($candidates[0] -split ';')[0]
+if (-not $templatePlatform.Equals($wixArch, [StringComparison]::OrdinalIgnoreCase)) {
+    throw ("$msiName was built with -arch $wixArch but its Template summary property says " +
+           "'$($candidates[0])', so the package targets $templatePlatform. The payload in $distFull is " +
+           "$platform. A package whose target disagrees with its payload installs into the wrong " +
+           "Program Files where Windows Installer accepts it at all, and it does both silently.")
+}
+Say "  Template summary: $($candidates[0]) -- -arch $wixArch reached WiX" Green
 
 if (-not $KeepIntermediate) {
     Remove-Item -LiteralPath $payloadWxs, $rtfPath -Force -ErrorAction SilentlyContinue

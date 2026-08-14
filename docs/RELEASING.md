@@ -5,10 +5,17 @@
 `tools/release.ps1` builds the binaries, records the commit and toolchain, and
 writes `SHA256SUMS.txt`. It has a `-WindowsCert` path, which nothing here uses,
 and on every platform it prints in so many words that it signed nothing. It runs
-on all three platforms and produces one archive per platform;
-`.github/workflows/release.yml` runs it on three GitHub runners and attaches the
-three results to a release. [Cutting a release](#cutting-a-release) is the
-procedure.
+on every platform this project ships for and produces one archive per platform
+*label*; `.github/workflows/release.yml` runs it on four GitHub runners — three
+operating systems, with Windows appearing twice because a PE is
+single-architecture and there is no `lipo` to join x86-64 and ARM64 into one
+file — and attaches the four results to a release.
+[Cutting a release](#cutting-a-release) is the procedure.
+
+The fourth label, `windows-arm64`, is the newest and the one least is known
+about; [Windows on ARM64](#windows-on-arm64) is what it does and does not
+establish, and that section is worth reading before quoting any sentence in this
+file at an ARM64 user.
 
 **The builds are unsigned, and that is a settled decision rather than a gap.**
 Code signing is not planned work here: not deferred, not blocked on money, and
@@ -113,18 +120,25 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 pwsh -NoProfile -File tools/ci.ps1
 
-# 3. Commit, push, and let CI go green. NINE checks off six job definitions --
-#    `the gate (tools/ci.ps1)` three times, `test` twice, and one each of
-#    `reconcile`, `msrv`, `wasm` and `oracles`. The ones that matter here are
-#    the three gate legs -- which run the whole of step 2 on windows-latest,
-#    ubuntu-latest and macos-latest, with the oracles, node, the wasm target
-#    and (on Windows) WiX installed, and fail if any step skips without a
-#    declared reason or if the corpus skips are not exactly
+# 3. Commit, push, and let CI go green. TEN checks off six job definitions --
+#    `the gate (tools/ci.ps1)` three times, `test` THREE times since the ARM64
+#    port added a windows-11-arm leg to it, and one each of `reconcile`, `msrv`,
+#    `wasm` and `oracles`. It was nine until 2026-08-14. The ones that matter
+#    here are the three gate legs -- which run the whole of step 2 on
+#    windows-latest, ubuntu-latest and macos-latest, with the oracles, node, the
+#    wasm target and (on Windows) WiX installed, and fail if any step skips
+#    without a declared reason or if the corpus skips are not exactly
 #    .github/ci-expected-skips.txt -- and `reconcile`, which compares the three
 #    legs and fails if any step ran on none of them.
 #
+#    THE GATE IS STILL THREE LEGS AND NONE OF THEM IS ARM64. windows-11-arm is a
+#    leg of `test`, not of `gate`, for reasons ci.yml's header sets out, so
+#    "the gate passed" means "passed on x86-64 Windows, x86-64 Linux and Apple
+#    Silicon" and says nothing whatever about aarch64. What ARM64 does get is
+#    the subject of the Windows on ARM64 section below, and it is less.
+#
 #    Cutting the release on a branch and opening a pull request is how those
-#    nine are read before anything is tagged; `on: pull_request` runs the same
+#    ten are read before anything is tagged; `on: pull_request` runs the same
 #    workflow. Nothing below is reachable from a branch, so nothing is
 #    published by getting this wrong.
 
@@ -147,8 +161,9 @@ because the only evidence either way was a terminal on one machine and nobody
 had a reason to look at it between releases.
 
 `ci.yml` now has a `gate` job. It runs this exact file — since 2026-08-10 on
-`windows-latest`, `ubuntu-latest` and `macos-latest` — with everything the
-gate's preconditions ask for installed first: the eleven Python oracles, Node
+`windows-latest`, `ubuntu-latest` and `macos-latest`, and still exactly those
+three after the ARM64 port, which put its leg in `test` instead — with
+everything the gate's preconditions ask for installed first: the eleven Python oracles, Node
 24, the `wasm32-unknown-unknown` target, `packages/circular-map/node_modules`,
 and, on Windows, the WiX Toolset and a `dist/` assembled by
 `tools/release.ps1` so that the two MSI steps have something to read. It passes
@@ -172,26 +187,36 @@ the number that decides whether this tree is releasable is no longer one that
 only one machine can produce.
 
 `.github/workflows/release.yml` triggers on `v*`. It also has a
-`workflow_dispatch` trigger, which runs the three builds and leaves the archives
+`workflow_dispatch` trigger, which runs the four builds and leaves the archives
 on the run as workflow artifacts **without** creating a release — that is how
-you answer "would this release build?" without spending a tag.
+you answer "would this release build?" without spending a tag. On ARM64 it is
+also the only way to answer "would this build at all?", because there is no
+machine here that can try.
 
 ### What the workflow does
 
-Three jobs in a matrix, `fail-fast: false` so one platform failing does not hide
-the other two, and a fourth job that publishes only if all three produced
+Four jobs in a matrix, `fail-fast: false` so one platform failing does not hide
+the other three, and a fifth job that publishes only if all four produced
 something.
 
 | Runner | Label | Archive |
 |---|---|---|
 | `windows-latest` | `windows-x64` | `polylinker-<version>-windows-x64.zip` |
+| `windows-11-arm` | `windows-arm64` | `polylinker-<version>-windows-arm64.zip` |
 | `ubuntu-latest` | `linux-x64` | `polylinker-<version>-linux-x64.tar.gz` |
 | `macos-latest` | `macos-universal` | `polylinker-<version>-macos-universal.tar.gz` |
+
+The two Windows rows each additionally produce an `.msi` — the archive column is
+the archive, not the whole output — and neither Windows job passes
+`-PlatformLabel`: `tools/release.ps1` derives `windows-x64` and `windows-arm64`
+itself from `RuntimeInformation.OSArchitecture`, which it has done since before
+either runner existed in this matrix, so the two `Package` steps are one line
+shared between them rather than two lines that could disagree.
 
 Every job:
 
 1. **Checks the tag against `Cargo.toml`** before building anything. A `v0.2.0`
-   tag on a tree that still says `0.1.0` would publish three archives named
+   tag on a tree that still says `0.1.0` would publish four archives named
    `0.1.0` under a release called `v0.2.0`, each carrying the wrong number in
    its own manifest. This fails in a minute rather than in twenty.
 2. Builds and packages by running **`tools/release.ps1`** — the same script the
@@ -199,11 +224,11 @@ Every job:
 3. Runs **`tools/check-archive.ps1`** over the archive.
 4. Uploads the archive and its `.sha256`.
 
-The publish job re-downloads all three, re-checks each sidecar and re-runs
+The publish job re-downloads all four, re-checks each sidecar and re-runs
 `check-archive.ps1` on the bytes that will actually be attached (an upload and a
 download sit in between), writes one cross-platform `SHA256SUMS.txt` over the
-three archives and the MSI, **signs it**, renders `tools/release-notes.md`, and
-calls `gh release create --verify-tag`. `gh` is preinstalled on the runner, so
+four archives and the two MSIs, **signs it**, renders `tools/release-notes.md`,
+and calls `gh release create --verify-tag`. `gh` is preinstalled on the runner, so
 no third-party action is in the trust path.
 
 ### The manifest is signed
@@ -302,6 +327,170 @@ than built on a second, Intel runner.
 
 `polylinker.so` is joined the same way, and is importable on both architectures.
 
+### Windows on ARM64
+
+**This is the platform this project knows least about, and the honest version of
+that sentence is longer than the feature.** Read this section before repeating
+anything else in this file, in the README or in the release notes at somebody
+running Windows on ARM.
+
+**It is built natively, on GitHub's `windows-11-arm` runners, and cross-building
+was rejected rather than merely not chosen.** Those runners are free for public
+repositories, as this one is, so the argument that killed a second macOS runner
+— *`macos-*-intel` and the `-large` images are billed even for public
+repositories* — does not apply here and the native option is the cheap one as
+well as the right one. It is the right one for a reason that has nothing to do
+with money: a cross-built binary that no machine of that architecture has ever
+executed is a guess with a checksum on it. `lipo` is defensible on macOS because
+the arm64 slice is built and *tested* on the runner and the x86-64 slice rides
+along inside the same file; nothing equivalent is available on Windows, where a
+PE holds one architecture and the second artifact is a second artifact.
+
+**Nobody here can produce an ARM64 binary at all, which is why CI is not a
+convenience.** `rustup target add aarch64-pc-windows-msvc` succeeds on the
+maintainer's machine and the target genuinely compiles this workspace's library
+crates. Every *binary* crate then fails with `linker 'link.exe' not found`: a
+rustup target is a standard library, not a toolchain, and the ARM64 linker is a
+separate Visual Studio component
+(`Microsoft.VisualStudio.Component.VC.Tools.ARM64`). Measured on that machine,
+its MSVC install offers `x64` and `x86` under
+`VC\Tools\MSVC\<ver>\bin\Hostx64\` and no `arm64`. So there is no local
+rehearsal of an ARM64 release and no local reproduction of an ARM64 bug report.
+"Would this compile?" is answered on every pull request by the `test` leg, which
+does a full `cargo build --workspace --release`. "Would this *package*?" is not:
+`workflow_dispatch` on `release.yml` is the only thing anywhere that runs
+`release.ps1`, `check-archive.ps1`, `build-msi.ps1` and `check-msi.ps1` on this
+architecture without spending a tag, and it is worth spending before one.
+
+**Both the zip and the MSI ship, and shipping only the zip was considered and
+refused.** The MSI is the file [the release notes tell a Windows reader to take
+first](#why-an-msi-and-what-it-did-and-did-not-solve), and an architecture that
+gets half of what the other one gets reads to a user as an architecture where
+the software does not really work. It is also the file
+`crates/pl-update/src/flow.rs` hands over on Windows, so a zip-only ARM64
+release would have to either keep declining to update or hand an installer-less
+archive to a code path whose whole design is "return the path of a file for a
+person to run".
+
+**It is two downloads where macOS is one, and the argument against two downloads
+was made in this file.** [macOS: one universal
+binary](#macos-one-universal-binary) says two artifacts "doubles the choice the
+user has to get right". That is still true and Windows pays it, because there is
+no `lipo` for PE and building a second MSI is not optional once the first one
+exists. Two things soften it, and neither is an excuse. Windows on ARM64
+*emulates* x86-64, so an ARM64 machine that takes the x64 download runs it —
+more slowly, and nobody here has measured how much more slowly, on either build.
+And the mistake is asymmetric: `windows-x64` on an ARM64 machine works, while
+`windows-arm64` on an x86-64 machine does not start at all.
+
+**`pl update` and the artifact list are one change, not two.**
+`crates/pl-update/src/flow.rs` maps a platform to `(label, extension)` through a
+`#[cfg]` cascade with an explicit `None` fallback, and ARM64 landed in that
+fallback: `pl update` **declined** rather than offering an ARM64 user an x86-64
+`.msi`. That was correct, it failed closed, and it is the behaviour that a new
+`#[cfg]` arm removes. The arm and the published file therefore have to arrive in
+the same release — an arm naming a file no release carries converts a clean
+refusal into a 404, which is a worse answer than "no update is available for
+this platform" and is much harder to read from the user's end.
+
+**The ARM64 download does not have the static C runtime, and that is an open
+hole rather than a detail.** `.cargo/config.toml` sets
+`-C target-feature=+crt-static` under `[target.x86_64-pc-windows-msvc]`, scoped
+to one triple on purpose — the note in that file explains why `[build]
+rustflags` was wrong. It declares **nothing** for `aarch64-pc-windows-msvc`. So
+the ARM64 binaries link the *dynamic* C runtime and import `VCRUNTIME140.dll`,
+which is not part of Windows and arrives with the Visual C++ redistributable,
+whose installer needs administrator rights — the exact dependency that config
+file exists to remove, on behalf of the user `docs/PLAN.md:120` describes as
+someone who cannot install software requiring them. On x86-64 that property is
+asserted on every push by `tools/ci.ps1`'s step *no C runtime redistributable is
+needed*, a byte scan over the PE import directory of everything in the release
+directory. That step is in the gate, the ARM64 leg does not run the gate, and so
+nothing reports this. **Until a `[target.aarch64-pc-windows-msvc]` block with
+the same flag is added, an ARM64 user on a locked-down machine may get
+`VCRUNTIME140.dll was not found` from a program whose pitch is that it is one
+file you can run.** One thing does guard the *fix*: `ci.yml`'s step *RUSTFLAGS
+is not silently discarding .cargo/config.toml* turns the ARM64 `test` leg red
+the moment such a block appears while that job still sets `RUSTFLAGS`, because
+cargo replaces target rustflags with the environment variable rather than
+merging them. That is a guard on the repair, not on the defect.
+
+**What `windows-arm64` is actually checked by.** This is the paragraph that
+decides whether every other sentence about ARM64 in this repository is honest,
+so it is a table of the two workflows rather than an adjective:
+
+| | `windows-x64` | `windows-arm64` |
+|---|---|---|
+| Where it lives in `ci.yml` | the `gate` job | the `test` job |
+| On every push and pull request | `cargo fmt`, `cargo clippy`, and the whole of `tools/ci.ps1` — 75 steps, with a ledger and the skip discipline `-ExpectedSkips` enforces | `cargo fmt`, `cargo clippy --locked`, `cargo test --workspace --lib --bins --locked`, `cargo build --workspace --release --locked`, and the integration suites of `pl-fileio`, `pl-features`, `pl-draw`, `pl-design`, `pl-update` and `pl` |
+| `tools/ci.ps1` | yes | **never, on any trigger** |
+| A ledger, and `reconcile` comparing it to the other legs | yes | **no ledger exists for this platform** |
+| The C-runtime import scan, the PE icon and version resources, the 8.3 alias case | on every push | **nowhere** |
+| The differential oracles — Biopython, pydna, SciPy, resvg, Pillow, fontTools, the SEGUID reference | in the gate on every push | **nowhere** (`oracles` is `ubuntu-latest` and always was, so this is one platform's claim rather than a per-architecture one) |
+| `tools/release.ps1` → `tools/check-archive.ps1` | on every push, in the gate | **only in `release.yml`** — a tag, or a `workflow_dispatch` run |
+| `tools/build-msi.ps1` → `tools/check-msi.ps1`, per-user and per-machine | on every push, in the gate | **only in `release.yml`**, same two triggers |
+| Has been run by a human being | yes, daily | **never** |
+
+Two rows deserve to be read twice. The packaging rows mean the ARM64 zip and MSI
+are assembled, verified, installed and uninstalled **at release time and not
+before**, which is the position x86-64 was in for six releases and which this
+file spent a section describing as the thing that went wrong. `workflow_dispatch`
+on `release.yml` is the way to rehearse it without spending a tag, and on this
+platform it is the only way there is. And the last row is the one no amount of
+CI moves: nobody has launched `polylinker.exe` on Windows ARM64, run `pl` there,
+or double-clicked the `.msi`. That is not an ARM64 peculiarity — *no* CI job on
+*any* platform opens the editor's window — but on the other three platforms the
+maintainer's own machine stands behind that gap, and on this one nothing does.
+
+**The ARM64 archive is allowed to ship without the Python extension module, and
+if it does, it says so.** `crates/pl-py` links against CPython through pyo3, and
+Windows resolves an extension module's symbols at link time, so an ARM64
+`polylinker.pyd` needs an ARM64 CPython on the runner to link against — abi3
+does not remove that requirement the way it does on Unix, which is why the macOS
+cross-slice needs no interpreter and this does. Whether GitHub's
+`windows-11-arm` image carries one was not established, and could not be from
+here. So `tools/release.ps1` has an `-OmitPythonModule` switch that is refused
+on every label but `windows-arm64`, refused unless its reason names that label,
+and refused outright if a `.pyd` was in fact built; it writes an `omitted:` line
+into `SHA256SUMS.txt`, and `tools/check-archive.ps1` accepts a missing
+`polylinker.pyd` **only** on `windows-arm64` and **only** against that declared
+line, printing the waiver whether the archive passes or fails. The user-visible
+consequence is the one to state plainly: **an ARM64 download may contain
+`pl`, `polylinker` and `pl-mcp` but no Python module**, and the manifest inside
+it is where that is written down.
+
+**One file is shared between the two Windows archives.**
+`tools/check-archive.ps1` picks its required-file set by matching the archive
+*name* against `windows`, which both labels do, so the ARM64 zip is held to the
+full Windows list — the executables, the licence texts,
+`Install-Polylinker.ps1`, `Install.cmd`, `polylinker.ico` and
+`README-WINDOWS.txt`. That last one is a single file shipped inside both, so
+nothing in it may name one architecture's download: a line telling an ARM64
+reader to `Get-FileHash` `polylinker-<version>-windows-x64.zip` is telling them
+to check a file they do not have.
+
+**The architecture is never typed into the workflow.** `./tools/build-msi.ps1
+-Dist dist -Out msi` is byte-identical on both Windows legs; the script reads
+the `platform:` line out of `dist/SHA256SUMS.txt` — the same manifest it already
+takes its whole file list from — and derives both the WiX `-arch` value and the
+output file name from it. An `-arch` argument in YAML would have been a second
+copy of a fact in a language the local gate cannot run, which is the mistake
+`release.yml`'s header exists to refuse. Three checks stand behind that, and
+each of them can fail. `build-msi.ps1` reads the finished package's `Template`
+summary property back and refuses to leave a package whose `-arch` did not
+reach WiX — and refuses just as loudly when it can find no Template value at
+all, or more than one candidate, because "read nothing" and "read something
+matching" are different results. `release.yml` then asks the same question a
+second time from outside the script, through `WindowsInstaller.Installer`,
+requiring `x64` or `Arm64` to match the leg's `matrix.label`; that second
+reading is worth its lines because an ARM64 Windows will install an x64 package
+under emulation, so `check-msi.ps1` on its own would pass a correctly-built
+payload inside a mislabelled wrapper. And `tools/ci.ps1`'s step *the updater's
+platform table and the release workflow agree, in both directions* compares
+`PLATFORM_ARTIFACT`'s cascade against the build matrix, so an arm without a
+matrix entry, or a matrix entry without an arm, is a red gate rather than a 404
+on somebody's machine.
+
 ### Linux: which machines this actually runs on
 
 `ubuntu-latest` is Ubuntu 24.04, whose glibc is **2.39**. glibc is backward but
@@ -368,12 +557,16 @@ these rows, and that was the whole of the truth: nothing ran the file.
 | `release.ps1` runs; its manifest is set-equal to `dist/` | `tools/ci.ps1` |
 | ≥ 21 files hashed on Windows and ≥ 18 elsewhere, ≥ 8 font licence texts under `licences/`, `NOTICE.txt` / `LICENSE.txt` / `LICENSE-MIT.txt` / `features/NOTICE.txt` by name | `tools/ci.ps1` |
 | The zip is a deterministic function of `dist/` | `tools/ci.ps1` |
-| The **archive** verifies against its own `SHA256SUMS.txt`, licence set included | `tools/check-archive.ps1`, in the gate and on all three release runners |
+| The **archive** verifies against its own `SHA256SUMS.txt`, licence set included | `tools/check-archive.ps1`, in the gate and on all four release runners |
 | The tar writer produces something GNU tar or bsdtar will read | `tools/ci.ps1` (forces `-ArchiveFormat tar.gz` on Windows) |
-| `release.yml` parses, covers three OSes, publishes only on a tag | `tools/ci.ps1` (PyYAML) |
+| `release.yml` parses, carries exactly the four expected runners and the four expected platform labels, publishes only on a tag | `tools/ci.ps1` (PyYAML) |
 | `release.yml` packs no archive of its own, and every `tools/` path it names exists | `tools/ci.ps1` |
 | The release notes still carry the quarantine remedy, SmartScreen, the glibc floor, and the checksum caveat — and still contain no "Run anyway" | `tools/ci.ps1` |
 | The measured glibc floor matches `README-LINUX.txt` | `release.yml`, Linux job |
+| The updater's platform table and the release matrix name the same four artifacts, in both directions | `tools/ci.ps1` |
+| The `.msi` is named for its leg's label, and its `Template` summary property says the same architecture | `release.yml`, both Windows jobs |
+| A missing `polylinker.pyd` is accepted only on `windows-arm64`, only against a declared `omitted:` line, and is printed either way | `tools/check-archive.ps1` |
+| **Not one `tools/ci.ps1` row above runs on `windows-arm64`** — that leg is in `test`, not `gate`; what it does run, and when the packaging rows reach it, is [Windows on ARM64](#windows-on-arm64) | nothing |
 
 The tar writer is forced on Windows for a specific reason: it is Unix-only code,
 and the Windows leg would otherwise never exercise it. That leg is the one that
@@ -385,9 +578,13 @@ no-op and the step checks what a user will download.
 
 ## The Windows install path
 
-`tools/release.ps1` produces `dist/polylinker-<version>-windows-x64.zip`. That
-zip is the download. Inside it, beside the binaries and the licence texts, are
-three files:
+`tools/release.ps1` produces `dist/polylinker-<version>-windows-x64.zip`, and on
+the ARM64 runner the same script produces
+`dist/polylinker-<version>-windows-arm64.zip` from the same code path — the
+label is derived from the machine, not passed in. One of those two zips is the
+download; everything in this section is true of both, and where it names a file
+by its x86-64 name that is the older of the two and not the only one. Inside
+either zip, beside the binaries and the licence texts, are three files:
 
 | File | What it is |
 |---|---|
@@ -402,9 +599,12 @@ reversed.** It is rewritten rather than deleted, because three of its four
 arguments were answered by the design and one was not, and a reader deciding
 whether to trust the installer deserves to know which is which.
 
-An MSI now ships: `polylinker-<version>-windows-x64.msi`, built by
+An MSI now ships: `polylinker-<version>-windows-x64.msi`, and since 2026-08-14
+`polylinker-<version>-windows-arm64.msi` beside it, both built by
 `tools/build-msi.ps1` from `tools/installer/Polylinker.wxs`. The zip and the
-readable PowerShell installer still ship alongside it.
+readable PowerShell installer still ship alongside each of them. Everything
+below about *why* an MSI is true of both; how much is known about the ARM64 one
+in particular is [Windows on ARM64](#windows-on-arm64), and it is less.
 
 **Answered structurally — the second file list.** The strongest objection was
 that every compiled installer carries a second list of files, a WiX
@@ -422,13 +622,18 @@ a second copy of it.
 `dotnet tool` and there is no .NET SDK on the author's machine. It is therefore
 a *CI-time* dependency only: *one* MSI step in `tools/ci.ps1` — *the MSI
 installs, does what it says, uninstalls, and leaves nothing* — is preconditioned
-on `wix`, so a contributor without an SDK still runs the other seventy-two.
-(The other two MSI steps do not need it. *The MSI is generated from the manifest
-and not from a second file list* calls `build-msi.ps1 -GenerateOnly`, which
-returns before the `wix` lookup, and is preconditioned on `dist/SHA256SUMS.txt`
-alone; *the MSI takes no file type away from a program the reader already uses*
-reads `Polylinker.wxs` and has no precondition at all, so it runs on all three
-platforms.) `cargo build` and `cargo test` acquired no dependency at all.
+on `wix`, so a contributor without an SDK still runs every other step. (That
+last clause used to carry the count of those other steps. It is relative now on
+purpose: the count is a property of `tools/ci.ps1`, the README states it and a
+test recomputes it from the file on every run, and a second hand-written copy
+down here was one more number waiting to go stale — which is the exact failure
+the README's paragraph about its own counts exists to describe. The other two
+MSI steps do not need `wix`. *The MSI is generated from the manifest and not
+from a second file list* calls `build-msi.ps1 -GenerateOnly`, which returns
+before the `wix` lookup, and is preconditioned on `dist/SHA256SUMS.txt` alone;
+*the MSI takes no file type away from a program the reader already uses* reads
+`Polylinker.wxs` and has no precondition at all, so it runs on every leg of the
+gate.) `cargo build` and `cargo test` acquired no dependency at all.
 
 That leniency used to mean the install test ran nowhere. `wix` was absent on the
 one machine running the gate, and no machine ran the gate, so *the MSI installs,

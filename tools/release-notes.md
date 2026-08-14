@@ -20,6 +20,8 @@ fresh installation asks for nothing until you tell it to.
 |---|---|---|
 | **Windows 10/11, x64** | **`polylinker-{{VERSION}}-windows-x64.msi`** | **the installer — start here.** Installs for you alone by default, so no admin rights and no elevation prompt |
 | Windows 10/11, x64 | `polylinker-{{VERSION}}-windows-x64.zip` | portable: unzip and run, nothing installed. Also contains a readable PowerShell installer |
+| **Windows 11, ARM64** | **`polylinker-{{VERSION}}-windows-arm64.msi`** | **native ARM64 — new, and less proven than the rest of this table.** Read *Which Windows file?* below before taking it |
+| Windows 11, ARM64 | `polylinker-{{VERSION}}-windows-arm64.zip` | the portable form of the same build |
 | macOS 11+, Apple Silicon **and** Intel | `polylinker-{{VERSION}}-macos-universal.tar.gz` | one universal binary for both |
 | Linux, x64, glibc 2.39 or newer | `polylinker-{{VERSION}}-linux-x64.tar.gz` | see the note below before downloading |
 
@@ -30,9 +32,27 @@ checksum table at the bottom of this page before extracting it. The `.msi`
 installs that same set, minus the two installer files it replaces, and is in
 that checksum table too.
 
-### On Windows, which one?
+### Which Windows file?
 
-Take the **`.msi`** unless you have a reason not to. It puts Polylinker in the
+**First, x64 or ARM64.** If you do not know, you have x64 — press
+Windows+Pause and read *System type*, or run `echo $env:PROCESSOR_ARCHITECTURE`
+in PowerShell: `AMD64` means x64, `ARM64` means ARM64. Nearly every Windows PC
+is x64; ARM64 is Snapdragon-based machines such as the Surface Pro 11 and the
+Copilot+ laptops.
+
+**An ARM64 machine will run the x64 files perfectly well**, under Windows'
+built-in emulation, and until this release that is what ARM64 users were
+doing. The native build should be faster and will not warm your battery
+emulating, but it is the newest thing here: it is compiled and its test suite
+is run on real Windows-on-ARM hardware for every commit, and the zip and MSI
+are built, installed, checked and uninstalled there — but the cross-checks
+against Biopython, pydna, SciPy and the rest are run only on x64, and at the
+time this release was cut **no person had run a Polylinker build on an ARM64
+machine at all**. If you want the better-trodden path today, take the x64
+files; they work. If you take the ARM64 ones and something is wrong, that is
+worth an issue, because you will be among the first to look.
+
+**Then, installer or zip.** Take the **`.msi`** unless you have a reason not to. It puts Polylinker in the
 Start Menu and in Settings → Apps, offers to put `pl` on your PATH, and adds
 Polylinker to the "Open with" list for GenBank, FASTA, SnapGene `.dna` and
 `.ab1` trace files. It **adds** itself to those lists: if SnapGene owns `.dna`

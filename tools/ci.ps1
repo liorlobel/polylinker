@@ -3,10 +3,17 @@
     Run the whole CI gate, in the same order CI runs it.
 
 .DESCRIPTION
-    This is THE gate. `.github/workflows/ci.yml` runs this file on
-    windows-latest, ubuntu-latest and macos-latest; running it here runs the
-    same list, so "CI is green" is something you can know before you push
-    rather than after.
+    This is THE gate. `.github/workflows/ci.yml` runs this file as its `gate`
+    job, on every runner in that job's matrix; running it here runs the same
+    list, so "CI is green" is something you can know before you push rather
+    than after.
+
+    THAT SENTENCE USED TO NAME THE RUNNERS -- "windows-latest, ubuntu-latest
+    and macos-latest" -- and naming them here was a copy of a list that lives
+    in ci.yml. A copy is a thing that drifts: the day a fourth runner is added
+    there, this file would have gone on describing three, in the one document
+    whose entire subject is prose asserting what the tree does not do. The
+    matrix is one file away and it is named above.
 
     That was not true until 2026-08-09. This script's own header used to say
     "the repository has no remote yet, so GitHub Actions has never executed",
@@ -50,9 +57,12 @@
 .PARAMETER Ledger
     Where to write a tab-separated record of every step and what became of it:
     name, `ran` or `skipped`, and the reason. `.github/workflows/ci.yml`
-    collects one of these from each of the three runners and
+    collects one of these from each runner in the `gate` matrix and
     `tools/reconcile-ledgers.ps1` compares them, which is the only place a step
-    that skipped on ALL THREE platforms can be seen.
+    that skipped on EVERY platform can be seen. (That script takes a fixed
+    number of ledgers, one per platform, and refuses a short set -- a leg that
+    did not report at all is the case it is there to catch -- so adding a
+    runner to the matrix is also an edit there.)
 
 .EXAMPLE
     .\tools\ci.ps1
@@ -3573,11 +3583,11 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     # elevation and because it is the scope readers get by default. The
     # per-machine pass is added only when the session happens to be elevated.
     # The step is skipped entirely without wix, since a workstation with no .NET
-    # SDK cannot build an MSI to test and the other 74 steps are still worth
-    # running there. (It said 62 until 2026-08-10, 71 until 2026-08-13 and 72
+    # SDK cannot build an MSI to test and the other 75 steps are still worth
+    # running there. (It said 62 until 2026-08-10, 71 until 2026-08-13, 72 and then 74
     # until 2026-08-14, each of which was the count before the gate grew past it;
     # the number is this file's step total minus this one step, so it moves every
-    # time a step is added. Step total today: 75.)
+    # time a step is added. Step total today: 76.)
     #
     # FIVE PLACES OUTSIDE THIS FILE STILL SAY SEVENTY-TWO OR SEVENTY-THREE, and
     # they are stale as of 2026-08-14, when 'the browser prototype: template and
@@ -3632,7 +3642,7 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     }
 }
 
-Step 'the release workflow parses and covers three platforms' {
+Step 'the release workflow parses and covers four platforms' {
     # A here-string piped to `python -`, not a shell heredoc: `<<'PY'` is bash
     # and PowerShell has no such operator. Single-quoted, so nothing in the
     # Python below is interpolated on its way there.
@@ -3666,12 +3676,27 @@ if not build:
     problems.append("there is no build job")
 else:
     include = build.get("strategy", {}).get("matrix", {}).get("include") or []
+    # THE TWO LISTS ARE PINNED HERE AND NOT DERIVED FROM ANYTHING, which is the
+    # opposite of what the step below this one does and is deliberate. That step
+    # asks whether the updater's table and this matrix AGREE; if this list were
+    # derived from either of them, adding a platform to both would satisfy both
+    # checks and nobody would have had to look at what it costs. A platform is
+    # an artifact users download for years, a runner is a machine somebody has
+    # to pay for or GitHub has to keep free, and the MSI is built inside the
+    # windows legs of this job rather than in a leg of its own. So a new one is
+    # a line in this file, in a reviewed diff, and that is the whole point of
+    # writing them out.
+    #
+    # windows-11-arm is GitHub's native ARM64 Windows image, free for public
+    # repositories. It is here because ARM64 is BUILT AND TESTED THERE rather
+    # than cross-compiled: nothing about an aarch64 artifact is claimed by a
+    # machine that cannot run one.
     runners = sorted(e.get("os") for e in include)
-    want = ["macos-latest", "ubuntu-latest", "windows-latest"]
+    want = ["macos-latest", "ubuntu-latest", "windows-11-arm", "windows-latest"]
     if runners != want:
         problems.append(f"the matrix runs on {runners}, not {want}")
     labels = sorted(e.get("label") for e in include)
-    if labels != ["linux-x64", "macos-universal", "windows-x64"]:
+    if labels != ["linux-x64", "macos-universal", "windows-arm64", "windows-x64"]:
         problems.append(f"the platform labels are {labels}")
     if build.get("strategy", {}).get("fail-fast") is not False:
         problems.append("fail-fast is not disabled; one platform failing would hide the other two")
@@ -3695,6 +3720,574 @@ print(f"  parses; {len(include)} platforms, publish gated on a tag")
 '@
     $prog | python - "$repo/.github/workflows/release.yml"
 } { (HavePy 'yaml') -and (Test-Path "$repo/.github/workflows/release.yml") }
+
+# THE UPDATER'S PLATFORM TABLE AND THE RELEASE MATRIX, WHICH NOTHING CONNECTED.
+#
+# `crates/pl-update/src/flow.rs` holds `PLATFORM_ARTIFACT`: a `#[cfg]` cascade
+# naming, for each platform, the release file `pl update` downloads in order to
+# update itself. `.github/workflows/release.yml` holds the build matrix that
+# PRODUCES those files. Two lists of the same platforms, written in two
+# languages, and until this step nothing compared them -- which is the shape
+# this file has already shipped nine fixes for: a list of things, and a second
+# list that has to agree with it because somebody remembered.
+#
+# THE TWO WAYS THEY DRIFT, both silent until a user hits one:
+#
+#   * an arm the matrix does not build. `artifact_file_name` in flow.rs builds
+#     `polylinker-<version>-<label>.<extension>` and `pl update` asks the
+#     release page for exactly that; there is no such asset, so the download
+#     404s -- on a release that is otherwise perfectly good, from a binary that
+#     has already told the user an update is waiting.
+#   * a label the table does not carry. That platform installs and can never
+#     update itself: `artifact_file_name` returns `None`, `pl update` declines,
+#     and nothing anywhere reports that a platform was left out of the table.
+#
+# THERE IS A THIRD LIST, AND THIS STEP IS THE ONLY THING THAT CAN READ IT
+# AGAINST THE WORKFLOW. `published_artifact_names` in that crate's test module
+# is the crate's copy of every file a release attaches, and the crate's own
+# tests hold the cascade against it -- but it is a COPY. Its own doc comment
+# says so twice, and so does the cascade's: "two copies agreeing is not evidence
+# about the release page", "`tools/ci.ps1` is the only place that reads both".
+# Those sentences are claims about THIS FILE, made in a file that cannot check
+# them. Either this step holds that list against the workflow or that prose is
+# describing something nobody wrote.
+#
+# WHY THIS IS WORTH A STEP NOW AND WAS NOT BEFORE. Until windows-arm64 the
+# cascade was three `Some` arms and one `None` fallback, and the fallback is
+# what made the first failure impossible rather than merely unlikely: a platform
+# the workflow did not build had no arm, so it named no file, so it could not
+# 404. It declined, which is the honest answer and the safe one. A FOURTH ARM
+# SPENDS THAT SAFETY. From the moment a cfg arm exists for a platform, the
+# binary built there WILL construct a URL, so the arm and the published artifact
+# have to arrive in the same commit -- and this is the thing that says so when
+# they do not.
+#
+# No interpreter, so this runs on every leg of the gate rather than only where
+# PyYAML is installed, unlike the step above that reads the same workflow
+# through `yaml.safe_load`. Both constructs are PARSED and not grepped for: a
+# `Select-String` for 'windows-x64' finds that string in both files today and
+# would go on finding it for as long as one platform still agreed, which is a
+# check that passes while the thing it is named after is broken.
+#
+# WHAT IT DOES NOT PROVE. These are holes, not hedges, and the first is the one
+# a reader is most likely to assume away:
+#
+#   * that the artifact exists on a release page. Both subjects are files in
+#     this repository. A tag whose Windows leg died still has its matrix entry
+#     here, and this step will call the pair consistent.
+#   * that the `not(any(...))` list in the fallback matches the positive arms.
+#     Get that wrong and the affected platform declares PLATFORM_ARTIFACT twice
+#     or not at all -- a compile error, but one that appears only when somebody
+#     compiles for that platform. That one is held by
+#     `the_platform_cascade_and_its_fallback_stay_mutually_exclusive` in the
+#     crate itself, which reads the same text; nothing here duplicates it.
+#   * that any sentence about platforms anywhere is true. This compares two
+#     machine-readable constructs to each other. The doc comment above the
+#     cascade, README.md, docs/RELEASING.md and tools/release-notes.md are prose
+#     and are read by nothing in this step.
+#   * that the extension is the RIGHT one for the platform. It checks that the
+#     workflow names the file the updater will ask for. Whether a Windows reader
+#     should be handed an `.msi` rather than the `.zip` is a decision, recorded
+#     in flow.rs's own doc comment and held by
+#     `crates/pl-update/tests/handoff.rs`.
+
+# `PLATFORM_ARTIFACT`, read out of the Rust rather than matched inside it.
+#
+# The shape is one `#[cfg(...)]` attribute -- which may span four lines, as the
+# macOS arm does -- immediately above one
+# `const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some(("label", "ext"));` or
+# `= None;`. Anything else in that position THROWS rather than being skipped: a
+# parser that quietly reads three arms out of a four-arm table reports the
+# fourth as missing from the workflow, which sends the reader to the wrong file
+# with a message that sounds authoritative.
+#
+# Only a `//` that OPENS a line is treated as a comment. `//` also occurs inside
+# this file's string literals -- `RELEASE_BASE_URL` is an https URL -- and a
+# parser that strips from there is reading its own invention.
+#
+# IT STOPS AT `#[cfg(test)]`, and that is not tidiness. The crate's test module
+# carries raw-string PROBES that spell out complete, well-formed arms -- they
+# are what its own cascade reader is proved against -- so a scan of the whole
+# file reads eight arms instead of four, three of them naming windows-x64.
+# Measured, not reasoned: without this the first run over the real file threw
+# "flow.rs:1101 declares PLATFORM_ARTIFACT with no #[cfg] attribute above it",
+# pointing at a fixture inside a test. The crate's own reader draws the line in
+# the same place, at the same marker, for the same reason.
+function Get-UpdaterPlatformArtifacts {
+    param([string]$Path)
+    $lines = @(Get-Content -LiteralPath $Path)
+    $leaf = Split-Path -Leaf $Path
+    $found = [System.Collections.Generic.List[object]]::new()
+    $cfg = ''
+    $cfgEnd = -2      # not -1: -1 would be "ends on the line above line 0"
+    $inCfg = $false
+    $open = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -match '^\s*#\[cfg\(test\)\]') { break }
+        if ($line -match '^\s*//') { continue }
+        if (-not $inCfg -and $line -match '^\s*#\[\s*cfg\b') {
+            $inCfg = $true
+            $cfg = ''
+            $open = 0
+        }
+        if ($inCfg) {
+            $cfg += ' ' + $line.Trim()
+            $open += ([regex]::Matches($line, '\(')).Count - ([regex]::Matches($line, '\)')).Count
+            if ($open -le 0) { $inCfg = $false; $cfgEnd = $i }
+            continue
+        }
+        if ($line -notmatch '\bconst\s+PLATFORM_ARTIFACT\s*:') { continue }
+        if ($cfgEnd -ne $i - 1) {
+            throw ("${leaf}:$($i + 1) declares PLATFORM_ARTIFACT with no #[cfg] attribute on the line above it. " +
+                   'Every arm of that cascade is chosen by its own cfg; one without is either dead code or ' +
+                   'ambiguous, and this step will not guess which.')
+        }
+        if ($line -notmatch '=\s*(.+?);\s*$') {
+            throw ("${leaf}:$($i + 1) declares PLATFORM_ARTIFACT and this step cannot read the value off the " +
+                   'line. It expects the whole initialiser on one line, which is where rustfmt leaves it.')
+        }
+        $value = $Matches[1].Trim()
+        if ($value -eq 'None') {
+            $found.Add([pscustomobject]@{
+                Fallback = $true; Label = $null; Extension = $null; Cfg = $cfg.Trim(); Line = $i + 1 })
+        } elseif ($value -match '^Some\(\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)\)$') {
+            $found.Add([pscustomobject]@{
+                Fallback = $false; Label = $Matches[1]; Extension = $Matches[2]; Cfg = $cfg.Trim(); Line = $i + 1 })
+        } else {
+            throw ("${leaf}:$($i + 1) sets PLATFORM_ARTIFACT to `"$value`", which is neither None nor " +
+                   'Some(("<label>", "<extension>")). The label in that tuple is half of the file name every ' +
+                   'copy of pl asks a release page for, so it has to stay something a reader -- and this step -- ' +
+                   'can see at a glance.')
+        }
+    }
+    $found.ToArray()   # plainly, for the reason Get-TestNames gives
+}
+
+# The build matrix's `include:` list, as (os, label) pairs.
+#
+# Indentation-scoped rather than a regex over the whole file, because `label`
+# appears in this workflow outside the matrix as well -- `name: ${{ matrix.label
+# }}` and the artifact names -- and a pattern loose enough to find the entries
+# would find those too and report platforms that do not exist.
+#
+# A LINE IN THE BLOCK THAT THIS CANNOT READ IS A FAILURE, not something to step
+# over. YAML has other spellings for the same list (a bare `-` with the keys
+# beneath it, or a flow mapping `- {os: x, label: y}`), and a parser that
+# silently ignored one would report the platform as missing from the updater's
+# table. Throwing names the line and asks for either the shape below or a
+# parser that understands the new one.
+function Get-ReleaseMatrixEntries {
+    param([string]$Path)
+    $leaf = Split-Path -Leaf $Path
+    # Comments first, by the rule the step below this one uses: a '#' that opens
+    # a line or follows whitespace. Five lines of the include block are comment,
+    # and one of them names a platform.
+    $lines = @(Get-Content -LiteralPath $Path | ForEach-Object { $_ -replace '(^|\s)#.*$', '' })
+
+    if (@($lines | Where-Object { $_ -match '^\s*matrix:\s*$' }).Count -gt 1) {
+        throw ("$leaf declares more than one build matrix. This step reads the first, which would then be the " +
+               'wrong one; teach it which job it is meant to be reading before adding a second.')
+    }
+    $matrixAt = -1
+    $matrixIndent = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^(\s*)matrix:\s*$') { $matrixAt = $i; $matrixIndent = $Matches[1].Length; break }
+    }
+    if ($matrixAt -lt 0) { throw "$leaf declares no build matrix at all, so there is nothing here to compare the updater's table against" }
+
+    $includeAt = -1
+    $includeIndent = 0
+    for ($i = $matrixAt + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*$') { continue }
+        $ind = $lines[$i].Length - $lines[$i].TrimStart().Length
+        if ($ind -le $matrixIndent) { break }
+        if ($lines[$i] -match '^\s*include:\s*$') { $includeAt = $i; $includeIndent = $ind; break }
+    }
+    if ($includeAt -lt 0) { throw "${leaf}:$($matrixAt + 1) is a build matrix with no include: list, so this step can read no platform labels out of it" }
+
+    $entries = [System.Collections.Generic.List[object]]::new()
+    $current = $null
+    for ($i = $includeAt + 1; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -match '^\s*$') { continue }
+        $ind = $line.Length - $line.TrimStart().Length
+        if ($ind -le $includeIndent) { break }
+        if ($line -match '^\s*-\s+([A-Za-z_][\w.-]*)\s*:\s*(.+?)\s*$') {
+            $current = [pscustomobject]@{ Os = $null; Label = $null; Line = $i + 1 }
+            $entries.Add($current)
+        } elseif ($line -match '^\s*([A-Za-z_][\w.-]*)\s*:\s*(.+?)\s*$') {
+            if ($null -eq $current) {
+                throw "${leaf}:$($i + 1) sets a key inside the include list before any list item has started: $($line.Trim())"
+            }
+        } else {
+            throw ("${leaf}:$($i + 1) is inside the build matrix's include list and this step cannot read it: " +
+                   "$($line.Trim()). Every entry here has to be a `"- os: <runner>`" line followed by " +
+                   '"label: <platform>", or this parser has to learn the new spelling -- silently skipping the ' +
+                   "line would report that platform as one the updater's table has invented.")
+        }
+        $key = $Matches[1]
+        $val = $Matches[2].Trim()
+        if ($val -match '^"(.*)"$') { $val = $Matches[1] } elseif ($val -match "^'(.*)'$") { $val = $Matches[1] }
+        if ($val -match '\$\{\{') {
+            throw ("${leaf}:$($i + 1) gives $key as a workflow expression. This step compares literal platform " +
+                   'names and cannot evaluate one, and calling an unevaluated expression a platform name would ' +
+                   'be worse than saying so.')
+        }
+        # Only these two keys are this step's business; a matrix is free to
+        # carry others and several workflows do.
+        if ($key -eq 'os') { $current.Os = $val }
+        elseif ($key -eq 'label') { $current.Label = $val }
+    }
+    foreach ($e in $entries) {
+        if (-not $e.Os -or -not $e.Label) {
+            throw ("${leaf}:$($e.Line) is a build matrix entry without both an os: and a label:. The label is the " +
+                   'platform half of every artifact name that entry produces; an entry missing one builds ' +
+                   'something this step cannot name.')
+        }
+    }
+    $entries.ToArray()
+}
+
+# `published_artifact_names`, the crate's copy of what a release attaches.
+#
+# It lives in the test module, which is why the reader above stops before it and
+# this one starts by finding it. Its doc comment calls itself "half of a check"
+# and names this file as the other half; if it is renamed or its shape changes,
+# this THROWS rather than returning an empty list, because an empty list would
+# agree with any workflow at all.
+function Get-PublishedArtifactFixture {
+    param([string]$Path)
+    $lines = @(Get-Content -LiteralPath $Path)
+    $leaf = Split-Path -Leaf $Path
+    $at = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^(\s*)fn\s+published_artifact_names\b') { $at = $i; $indent = $Matches[1].Length; break }
+    }
+    if ($at -lt 0) {
+        throw ("$leaf declares no fn published_artifact_names. That function is the crate's copy of every file a " +
+               'release attaches, its own doc comment says holding it against .github/workflows/release.yml ' +
+               'belongs to this gate, and this step is that sentence. If it has been renamed, rename it here; if ' +
+               'it is gone, the sentence has to go with it.')
+    }
+    $names = @()
+    $closed = $false
+    for ($i = $at + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s{0,}\}' -and ($lines[$i].Length - $lines[$i].TrimStart().Length) -eq $indent) { $closed = $true; break }
+        foreach ($m in [regex]::Matches($lines[$i], 'polylinker-\{\w+\}-([\w.-]+?)\.(zip|tar\.gz|msi)(?![\w.])')) {
+            $names += ($m.Groups[1].Value + '.' + $m.Groups[2].Value)
+        }
+    }
+    if (-not $closed) { throw "${leaf}:$($at + 1) opens fn published_artifact_names and this step never found its closing brace" }
+    $names
+}
+
+# Every release artifact `.github/workflows/release.yml` names IN FULL.
+#
+# `polylinker-$version-windows-x64.msi` counts; `artifacts/polylinker-*.msi`
+# does not, and that asymmetry is the point. The globs at the end of that
+# workflow attach whatever happens to be on disk, so a platform whose build
+# quietly produced nothing is published as a release missing a file. What makes
+# "every platform publishes together or none do" true is the publish job's
+# by-name check, and only a name can be compared with a name.
+function Get-WorkflowArtifactNames {
+    param([string]$Text)
+    @([regex]::Matches($Text, 'polylinker-\$\{?\w+\}?-([\w.-]+?)\.(zip|tar\.gz|msi)(?![\w.])') |
+      ForEach-Object { $_.Groups[1].Value + '.' + $_.Groups[2].Value } | Sort-Object -Unique)
+}
+
+# The comparison itself, in a function so that the planted cases in the step
+# below drive THIS code and not a second copy of the rules written to agree with
+# it. Returns one string per problem; an empty array is agreement.
+function Compare-PlatformCoverage {
+    param($Arms, $Entries, [string[]]$Fixture, [string[]]$WorkflowNames)
+    $problems = @()
+    $armLabels = @($Arms | ForEach-Object { $_.Label })
+    $entryLabels = @($Entries | ForEach-Object { $_.Label })
+
+    foreach ($dup in @($armLabels | Group-Object | Where-Object { $_.Count -gt 1 })) {
+        $problems += ("the updater's table has $($dup.Count) arms naming the platform '$($dup.Name)'. Two cfgs " +
+                      'mapping to one artifact name is an arm that was copied and whose label was not changed, ' +
+                      'and the platform it was copied FOR now has no entry of its own.')
+    }
+    foreach ($dup in @($entryLabels | Group-Object | Where-Object { $_.Count -gt 1 })) {
+        $problems += ("the release matrix has $($dup.Count) entries labelled '$($dup.Name)'. Both produce the same " +
+                      'artifact file name, so one of the two builds is thrown away by whichever upload runs last.')
+    }
+
+    foreach ($a in $Arms) {
+        if ($entryLabels -notcontains $a.Label) {
+            $problems += ("crates/pl-update/src/flow.rs:$($a.Line) makes '$($a.Label)' an updatable platform and " +
+                          ".github/workflows/release.yml builds no such label. Every copy of pl on that platform " +
+                          "will ask a release page for polylinker-<version>-$($a.Label).$($a.Extension) and be " +
+                          'answered 404 -- which is worse than the refusal the None fallback used to give, because ' +
+                          'by then the binary has already told the user an update is available.')
+        }
+    }
+    foreach ($e in $Entries) {
+        if ($armLabels -notcontains $e.Label) {
+            $problems += (".github/workflows/release.yml:$($e.Line) builds '$($e.Label)' and the cascade in " +
+                          'crates/pl-update/src/flow.rs has no arm for it, so everyone running that build is on a ' +
+                          'copy that can never update itself. `pl update` there refuses with PlatformUnsupported ' +
+                          'and no line anywhere says the platform was left out of the table.')
+        }
+    }
+
+    # THE FILE NAME, not merely the label. A matrix entry says the platform is
+    # BUILT; the publish job's by-name checks are what say the file is
+    # PUBLISHED, and those two came apart once already -- `fail-fast: false`
+    # means one leg can die while the others succeed, which is why that job
+    # lists its artifacts by name rather than globbing them.
+    foreach ($a in $Arms) {
+        $mine = "$($a.Label).$($a.Extension)"
+        if ($WorkflowNames -notcontains $mine) {
+            $problems += ("nothing in .github/workflows/release.yml names polylinker-<version>-$mine, which is the " +
+                          'exact file artifact_file_name() constructs on that platform. The publish job checks its ' +
+                          'artifacts BY NAME before the release is created -- that is what makes "all platforms ' +
+                          'publish together or none do" true -- and a name that is not on that list is a file the ' +
+                          'release can be published without.')
+        }
+    }
+
+    # AND THE CRATE'S COPY OF THE PUBLISHED LIST, BOTH WAYS. This is the half
+    # `published_artifact_names` says it cannot do: it is a fixture, the crate's
+    # tests hold the cascade against it, and two copies agreeing is not evidence
+    # about a release page. Both directions, because each is a different defect.
+    # A fixture entry the workflow does not publish means the crate's suite is
+    # passing against a release that does not exist -- the ARM64 tests would go
+    # green on windows-arm64.msi while nothing built one. A published file the
+    # fixture does not name means the suite has never seen an artifact users
+    # can download.
+    foreach ($f in $Fixture) {
+        if ($WorkflowNames -notcontains $f) {
+            $problems += ("published_artifact_names() in crates/pl-update/src/flow.rs claims a release attaches " +
+                          "polylinker-<version>-$f, and .github/workflows/release.yml names no such file. The " +
+                          "crate's tests build their whole manifest fixture out of that list, so they are green " +
+                          'against a release page that does not have it.')
+        }
+    }
+    foreach ($n in $WorkflowNames) {
+        if ($Fixture -notcontains $n) {
+            $problems += (".github/workflows/release.yml publishes polylinker-<version>-$n and " +
+                          'published_artifact_names() in crates/pl-update/src/flow.rs does not name it, so no test ' +
+                          'in that crate has ever seen a manifest containing a file users can download.')
+        }
+    }
+
+    # The three spellings of one platform, which must agree: the cfg the arm is
+    # compiled in under, the label the artifact is named with, and the runner
+    # the matrix builds it on.
+    $runnerOs = @{ windows = 'windows'; ubuntu = 'linux'; macos = 'macos' }
+    foreach ($a in $Arms) {
+        $os = @([regex]::Matches($a.Cfg, 'target_os\s*=\s*"([^"]+)"') |
+                ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        if ($os.Count -ne 1) {
+            $problems += ("crates/pl-update/src/flow.rs:$($a.Line) is selected by a cfg naming $($os.Count) " +
+                          "operating system(s) ($($os -join ', ')), so nothing here can say which platform " +
+                          "'$($a.Label)' is the artifact for.")
+            continue
+        }
+        $want = ($a.Label -split '-')[0]
+        if ($os[0] -ne $want) {
+            $problems += ("crates/pl-update/src/flow.rs:$($a.Line) is compiled in under target_os = " +
+                          "`"$($os[0])`" and names its artifact '$($a.Label)', whose platform word is '$want'. " +
+                          'One of the two was copied from the arm above it and not finished.')
+        }
+    }
+    foreach ($e in $Entries) {
+        $prefix = ($e.Os -split '-')[0].ToLowerInvariant()
+        if (-not $runnerOs.ContainsKey($prefix)) {
+            $problems += (".github/workflows/release.yml:$($e.Line) builds '$($e.Label)' on the runner " +
+                          "'$($e.Os)', which this step does not recognise as Windows, Linux or macOS. Teach it " +
+                          'the new runner family rather than leaving that label compared against nothing.')
+            continue
+        }
+        $want = ($e.Label -split '-')[0]
+        if ($runnerOs[$prefix] -ne $want) {
+            $problems += (".github/workflows/release.yml:$($e.Line) builds the artifact labelled '$($e.Label)' on " +
+                          "'$($e.Os)', which is $($runnerOs[$prefix]). That label is the platform half of the file " +
+                          "name pl update asks for, so a $want user would be handed a $($runnerOs[$prefix]) build.")
+        }
+    }
+    return $problems
+}
+
+Step 'the updater''s platform table and the release workflow agree, in both directions' {
+    $flowPath = Join-Path $repo 'crates/pl-update/src/flow.rs'
+    $wfPath = Join-Path $repo '.github/workflows/release.yml'
+    foreach ($p in $flowPath, $wfPath) {
+        if (-not (Test-Path -LiteralPath $p)) { throw "$p is missing, and it is one of the two files this step exists to compare" }
+    }
+
+    $table = @(Get-UpdaterPlatformArtifacts $flowPath)
+    $arms = @($table | Where-Object { -not $_.Fallback })
+    $fallbacks = @($table | Where-Object { $_.Fallback })
+    $fixture = @(Get-PublishedArtifactFixture $flowPath)
+    $entries = @(Get-ReleaseMatrixEntries $wfPath)
+    $wfNames = @(Get-WorkflowArtifactNames ((Get-Content -LiteralPath $wfPath) -join "`n"))
+
+    # FLOORS, because a parser that has stopped matching enumerates nothing and
+    # then agrees with everything: two empty sets are equal, and three of the
+    # four comparisons below are set comparisons. Three platforms and four files
+    # are what this project shipped before windows-arm64, so lowering any of
+    # these is a deliberate line in a diff.
+    if ($arms.Count -lt 3) {
+        throw ("only $($arms.Count) platform arm(s) parsed out of crates/pl-update/src/flow.rs; the cascade has " +
+               'at least three, so this parser is broken and the comparison below would prove nothing')
+    }
+    if ($entries.Count -lt 3) {
+        throw ("only $($entries.Count) matrix entr(ies) parsed out of .github/workflows/release.yml; the release " +
+               'builds at least three platforms, so this parser is broken and the comparison below would prove nothing')
+    }
+    if ($fixture.Count -lt 4) {
+        throw ("only $($fixture.Count) file name(s) read out of published_artifact_names(); it has named at least " +
+               'four since the MSI shipped, so this parser is broken and would agree with any workflow at all')
+    }
+    if ($wfNames.Count -lt 4) {
+        throw ("only $($wfNames.Count) artifact name(s) written out in full in .github/workflows/release.yml. Its " +
+               'publish job names every file it will not publish a release without, and if that has become a loop ' +
+               'over a list or a glob then the comparison below is over an empty set and this step proves nothing. ' +
+               'Teach this step the new shape rather than letting it pass.')
+    }
+    # AND THE FALLBACK MUST SURVIVE. It is what makes `pl update` decline on a
+    # platform with no build instead of guessing at the closest artifact, and
+    # without it that platform has no PLATFORM_ARTIFACT at all -- which is a
+    # compile error nobody sees until somebody builds there.
+    if ($fallbacks.Count -ne 1) {
+        throw ("the cascade in crates/pl-update/src/flow.rs has $($fallbacks.Count) None arm(s) and needs exactly " +
+               'one. That arm is the whole of the refusal: it is why a platform the release workflow does not ' +
+               'build is told there is no update for it rather than being handed the nearest file.')
+    }
+
+    $problems = @(Compare-PlatformCoverage -Arms $arms -Entries $entries -Fixture $fixture -WorkflowNames $wfNames)
+
+    # THE CONTROL, on planted files outside this repository, because a
+    # comparator that has stopped comparing reports the same clean as a tree
+    # that agrees -- and the real files are green only when they agree, which is
+    # exactly the state in which a broken checker is indistinguishable from a
+    # working one. Six cases: each rule that can fire, fired once, plus a
+    # consistent set that must produce NOTHING. That last one is not padding: a
+    # checker that objects to everything is deleted as noise rather than fixed,
+    # and this file has watched that happen.
+    $probeDir = Join-Path $tmp "pl-platform-probe-$PID"
+    if (Test-Path -LiteralPath $probeDir) { Remove-Item -LiteralPath $probeDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
+    try {
+        # Four shapes the readers have to get right, all of which a draft of
+        # them got wrong: a four-line cfg, a doc comment naming a real label,
+        # the `#[cfg(test)]` boundary, and -- past that boundary -- a raw-string
+        # probe that IS a well-formed arm. The real flow.rs carries five of
+        # those probes, and reading them cost the first run of this step.
+        $flowProbe = Join-Path $probeDir 'flow.rs'
+        Set-Content -LiteralPath $flowProbe -Value @(
+            '/// Prose naming linux-riscv64, which is not an arm and must not be read as one.',
+            '#[cfg(all(target_os = "linux", target_arch = "x86_64"))]',
+            'const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some(("linux-x64", "tar.gz"));',
+            '#[cfg(all(',
+            '    target_os = "linux",',
+            '    any(target_arch = "riscv64", target_arch = "loongarch64")',
+            '))]',
+            'const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some(("linux-riscv64", "tar.gz"));',
+            '#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"))))]',
+            'const PLATFORM_ARTIFACT: Option<(&str, &str)> = None;',
+            '#[cfg(test)]',
+            'mod tests {',
+            '    fn published_artifact_names(version: &Version) -> Vec<String> {',
+            '        vec![',
+            '            format!("polylinker-{version}-linux-x64.tar.gz"),',
+            '            format!("polylinker-{version}-linux-riscv64.tar.gz"),',
+            '        ]',
+            '    }',
+            '',
+            '    const PROBE: &str = "const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some((0, 0));";',
+            '}'
+        )
+        $wfProbe = Join-Path $probeDir 'release.yml'
+        Set-Content -LiteralPath $wfProbe -Value @(
+            'jobs:',
+            '  build:',
+            '    strategy:',
+            '      matrix:',
+            '        include:',
+            '          - os: ubuntu-latest',
+            '            label: linux-x64',
+            '          - os: ubuntu-latest',
+            '            label: linux-riscv64',
+            '    steps:',
+            '      - run: echo this is not a matrix entry'
+        )
+        $probeTable = @(Get-UpdaterPlatformArtifacts $flowProbe)
+        $probeArms = @($probeTable | Where-Object { -not $_.Fallback })
+        $probeFixture = @(Get-PublishedArtifactFixture $flowProbe)
+        $probeEntries = @(Get-ReleaseMatrixEntries $wfProbe)
+        if ($probeArms.Count -ne 2) {
+            throw ("the table reader found $($probeArms.Count) of the 2 planted arms. One carries a cfg spanning " +
+                   'four lines and there is a third, well-formed one past the #[cfg(test)] marker that it must ' +
+                   'not have counted.')
+        }
+        if (@($probeTable | Where-Object { $_.Fallback }).Count -ne 1) {
+            throw 'the table reader did not see the planted None fallback, so its absence would not be noticed either'
+        }
+        if (($probeFixture -join ',') -ne 'linux-x64.tar.gz,linux-riscv64.tar.gz') {
+            throw "the fixture reader read published_artifact_names() as [$($probeFixture -join ', ')]"
+        }
+        if ($probeEntries.Count -ne 2 -or $probeEntries[1].Label -ne 'linux-riscv64') {
+            throw ("the matrix reader found $($probeEntries.Count) planted entries, the second labelled " +
+                   "'$($probeEntries[1].Label)'")
+        }
+        $both = @('linux-x64.tar.gz', 'linux-riscv64.tar.gz')
+
+        $agree = @(Compare-PlatformCoverage -Arms $probeArms -Entries $probeEntries -Fixture $probeFixture -WorkflowNames $both)
+        if ($agree.Count -ne 0) {
+            throw ("a consistent planted set produced $($agree.Count) problem(s), so this comparator objects to " +
+                   "everything and its silence on the real files means nothing:`n        " + ($agree -join "`n        "))
+        }
+        $tableOnly = @(Compare-PlatformCoverage -Arms $probeArms -Entries @($probeEntries[0]) -Fixture $probeFixture -WorkflowNames $both)
+        if ($tableOnly.Count -ne 1 -or $tableOnly[0] -notmatch 'linux-riscv64' -or $tableOnly[0] -notmatch '404') {
+            throw ("an arm the matrix does not build was not reported as the 404 it is. Got " +
+                   "$($tableOnly.Count) problem(s):`n        " + ($tableOnly -join "`n        "))
+        }
+        $matrixOnly = @(Compare-PlatformCoverage -Arms @($probeArms[0]) -Entries $probeEntries -Fixture $probeFixture -WorkflowNames $both)
+        if ($matrixOnly.Count -ne 1 -or $matrixOnly[0] -notmatch 'linux-riscv64' -or $matrixOnly[0] -notmatch 'never update itself') {
+            throw ("a matrix label with no table arm was not reported as a platform that cannot update itself. Got " +
+                   "$($matrixOnly.Count) problem(s):`n        " + ($matrixOnly -join "`n        "))
+        }
+        $unnamed = @(Compare-PlatformCoverage -Arms $probeArms -Entries $probeEntries -Fixture $probeFixture `
+                        -WorkflowNames @('linux-x64.tar.gz'))
+        if ($unnamed.Count -ne 2 -or @($unnamed | Where-Object { $_ -match 'artifact_file_name' }).Count -ne 1 -or
+            @($unnamed | Where-Object { $_ -match 'published_artifact_names' }).Count -ne 1) {
+            throw ("a file the workflow never names in full was not reported from both the cascade and the " +
+                   "fixture. Got $($unnamed.Count) problem(s):`n        " + ($unnamed -join "`n        "))
+        }
+        $stray = @(Compare-PlatformCoverage -Arms $probeArms -Entries $probeEntries -Fixture $probeFixture `
+                      -WorkflowNames ($both + 'linux-mips.tar.gz'))
+        if ($stray.Count -ne 1 -or $stray[0] -notmatch 'linux-mips') {
+            throw ("a file the workflow publishes and the crate's fixture has never heard of was not reported. Got " +
+                   "$($stray.Count) problem(s):`n        " + ($stray -join "`n        "))
+        }
+        $wrongRunner = @(Compare-PlatformCoverage -Arms @($probeArms[0]) `
+                            -Entries @([pscustomobject]@{ Os = 'windows-latest'; Label = 'linux-x64'; Line = 7 }) `
+                            -Fixture @('linux-x64.tar.gz') -WorkflowNames @('linux-x64.tar.gz'))
+        if ($wrongRunner.Count -ne 1 -or $wrongRunner[0] -notmatch 'which is windows') {
+            throw ("a linux artifact built on a Windows runner was not reported. Got " +
+                   "$($wrongRunner.Count) problem(s):`n        " + ($wrongRunner -join "`n        "))
+        }
+    } finally {
+        Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($problems) { throw ($problems -join "`n        ") }
+    # THE WHOLE FORMAT STRING IS PARENTHESISED, for the reason written out at
+    # length above 'the cross-platform scripts touch no environment variable
+    # unguarded': `-f` binds tighter than `+`, so without these brackets only
+    # the last literal is formatted and the line prints "{0} platform(s): {1}".
+    # Which is exactly what the first run of this step printed.
+    Write-Host (("        {0} platform(s): {1}. Each built by the matrix, and all {2} file(s) the crate says a " +
+                 "release attaches are named in full by the workflow. Comparator verified on six planted cases") -f
+                $arms.Count, (($arms | ForEach-Object { "$($_.Label) -> .$($_.Extension)" }) -join ', '),
+                $fixture.Count) -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+}
 
 # What the workflow must NOT contain, and every file it must be able to find.
 #

@@ -73,7 +73,8 @@ pub const MANIFEST_FILE_NAME: &str = "SHA256SUMS.txt";
 pub const SIGNATURE_FILE_NAME: &str = "SHA256SUMS.txt.sig";
 
 /// The most manifest bytes [`check`] or [`fetch_and_verify`] will accept. A
-/// release manifest is four lines and a few hundred bytes.
+/// release manifest is one line per published file — six once `windows-arm64`
+/// publishes a zip and an MSI, four before it — and a few hundred bytes.
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
 /// The most signature bytes that will be accepted. Exactly 64 are expected; the
@@ -90,7 +91,7 @@ const ARTIFACT_PREFIX: &str = "polylinker-";
 /// the extension.
 ///
 /// `None` for anything the workflow does not build, which is every platform but
-/// these three — Linux on ARM, 32-bit Windows, the BSDs, `wasm32`. That is a
+/// these four — Linux on ARM, 32-bit Windows, the BSDs, `wasm32`. That is a
 /// refusal rather than a guess: offering a user an x86-64 archive because it is
 /// the closest thing available is how an update breaks an installation.
 ///
@@ -101,8 +102,73 @@ const ARTIFACT_PREFIX: &str = "polylinker-";
 /// Linux there is no installer to hand over, so it is the archive, and
 /// [`Handoff`] says which of the two it is holding rather than calling both
 /// "the installer".
+///
+/// # Why Windows on ARM64 is its own entry rather than a pointer at the x64 one
+///
+/// Sending `aarch64` to `windows-x64` would have "worked", in the sense that
+/// nothing visibly breaks: Windows on ARM runs x86-64 binaries under emulation,
+/// so the x64 MSI installs, and the emulated Polylinker starts and opens files.
+/// That is precisely what makes it the wrong answer. The user gets an emulated
+/// build, it works well enough that nothing ever prompts them to look, and —
+/// because this table is consulted again at every release — they get the
+/// emulated build again, and again, for as long as they keep updating. A native
+/// build could ship for a year and they would never hear of it. Of all the
+/// places to make that substitution, an updater is the worst one: it is the
+/// place that makes it repeatedly, silently, and on the user's behalf.
+///
+/// # An entry here is a promise that a file exists; the old `None` was not
+///
+/// Before this arm existed, `aarch64-pc-windows-msvc` fell through to the
+/// fallback below, [`artifact_file_name`] returned `None`, and `pl update`
+/// declined with [`UpdateError::PlatformUnsupported`] before touching the
+/// network. That was not a bug, and it is worth being exact about what
+/// replacing it costs. `None` is a refusal that happens before anything is
+/// fetched. An entry is a claim that a file with this exact name is attached to
+/// every release from here on, and the failure mode of getting that claim wrong
+/// is not a decline — it is a 404 in the middle of an update the user asked
+/// for. So the arm and the published artifact land together or neither lands.
+///
+/// **This crate cannot check that half by itself, and must not be read as
+/// though it does.** Nothing here reads `.github/workflows/release.yml`; the
+/// tests below hold this table against `published_artifact_names`, which is a
+/// second copy of the file list written beside them. Two copies agreeing is not
+/// evidence about the release page. Reading the workflow and comparing it with
+/// this table is `tools/ci.ps1`'s job — it already pins that workflow's build
+/// matrix — and it is the only place the comparison can actually be made.
+///
+/// # What the compiler proves here, and what it does not
+///
+/// The arms and the fallback have to partition the space of targets, and rustc
+/// enforces exactly that — for the target being compiled, and for no other. Two
+/// arms matching is E0428, "the name `PLATFORM_ARTIFACT` is defined multiple
+/// times"; none matching is E0425 at every use site below. Both are hard
+/// errors, so any target that builds at all has exactly one entry, and that
+/// part needs no test.
+///
+/// **Per-target is the trap.** A `#[cfg]`-disabled item is parsed but never
+/// name-resolved or type-checked, so an arm for a target nobody builds is, to
+/// an ordinary `cargo test` on an x86-64 machine, some lines of text that
+/// happen to be syntactically valid. Add an arm and forget to exclude it from
+/// the `not(any(...))` below and the workspace still builds everywhere except
+/// the one platform the arm was written for — where it stops compiling, on CI,
+/// after review, in a job whose failure looks like a toolchain problem.
+/// `the_platform_cascade_and_its_fallback_stay_mutually_exclusive` reads this
+/// file as text and compares the two lists, so that drift goes red on every
+/// leg instead of only on the leg that builds the arm.
+///
+/// **Nothing on a developer machine establishes that the `windows-arm64` arm is
+/// correct.** The ARM64 MSVC linker is not installed on the maintainer's
+/// machine: `aarch64-pc-windows-msvc` compiles library crates there, and every
+/// binary target fails with "linker `link.exe` not found", so no ARM64 build of
+/// Polylinker can be produced or run locally at all. The thing that compiles
+/// this arm, type-checks the tuple in it, and runs this crate's suite against
+/// it is the `windows-11-arm` leg in `.github/workflows/ci.yml`. Until that leg
+/// has run on a commit, the only claim anything has checked about the ARM64
+/// entry is the textual one named above.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some(("windows-x64", "msi"));
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some(("windows-arm64", "msi"));
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some(("linux-x64", "tar.gz"));
 #[cfg(all(
@@ -112,6 +178,7 @@ const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some(("linux-x64", "tar.gz"));
 const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some(("macos-universal", "tar.gz"));
 #[cfg(not(any(
     all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64"),
     all(
         target_os = "macos",
@@ -478,9 +545,19 @@ fn hash_and_place(
 ///
 /// It fails closed when `current_exe` cannot answer. That is deliberate and it
 /// is a real trade: on a platform where the executable's path is unavailable
-/// this refuses to update at all. All three platforms this project releases for
-/// answer it, and the alternative — skipping the check when it cannot be made —
-/// is a guard that disappears exactly where it cannot be observed.
+/// this refuses to update at all. The alternative — skipping the check when it
+/// cannot be made — is a guard that disappears exactly where it cannot be
+/// observed.
+///
+/// Three of the four platforms this project releases for are known to answer
+/// it, because `the_destination_may_not_be_the_directory_this_binary_runs_from`
+/// calls it on each of them on every push. **The fourth is `windows-arm64`, and
+/// the honest statement is that the same test is what will establish it**: this
+/// crate is where an unanswerable `current_exe` would turn every ARM64 update
+/// into [`UpdateError::UnknownInstallLocation`], and no x86-64 machine can ask
+/// an ARM64 Windows anything. Until the `windows-11-arm` leg has run this
+/// crate's suite, "it answers on ARM64" is an expectation about a Win32 API,
+/// not a measurement.
 fn refuse_install_directory(into: &Path) -> Result<(), UpdateError> {
     let unknown = |detail: String| UpdateError::UnknownInstallLocation { detail };
     let exe = std::env::current_exe().map_err(|e| unknown(e.to_string()))?;
@@ -650,17 +727,59 @@ mod tests {
         format!("this pretends to be Polylinker {version}\n").into_bytes()
     }
 
-    /// A manifest listing all four release files, with a real digest for this
+    /// Every file `.github/workflows/release.yml` attaches to a release, named
+    /// the way the manifest names it, in the order that workflow's `sort -k2`
+    /// leaves them in.
+    ///
+    /// This is the list [`PLATFORM_ARTIFACT`] points *into*, and the two
+    /// drifting apart is a failure this file can see. A table entry with no file
+    /// here is a `pl update` that stopped declining and started 404-ing; a file
+    /// here that no table entry names is a platform that can download Polylinker
+    /// and can never update itself.
+    ///
+    /// **It is a copy, so it is half of a check and not the whole of one.**
+    /// Nothing in this crate reads the workflow. A name misspelled identically
+    /// here and there agrees with itself perfectly and is still not on the
+    /// release page. `tools/ci.ps1` is the only place that reads both, and
+    /// holding this list against the workflow belongs to it.
+    ///
+    /// Six entries since `windows-arm64`, four before it: the two Windows
+    /// platforms each publish a zip and an MSI, and macOS and Linux publish one
+    /// archive each.
+    fn published_artifact_names(version: &Version) -> Vec<String> {
+        vec![
+            format!("polylinker-{version}-linux-x64.tar.gz"),
+            format!("polylinker-{version}-macos-universal.tar.gz"),
+            format!("polylinker-{version}-windows-arm64.msi"),
+            format!("polylinker-{version}-windows-arm64.zip"),
+            format!("polylinker-{version}-windows-x64.msi"),
+            format!("polylinker-{version}-windows-x64.zip"),
+        ]
+    }
+
+    /// A manifest listing every release file, with a real digest for this
     /// platform's, signed by `SEED`'s key.
     fn release(version: &Version) -> (String, [u8; 64]) {
         let mut text = String::new();
         let mine = artifact_file_name(version).map(|(n, _)| n);
-        for name in [
-            format!("polylinker-{version}-linux-x64.tar.gz"),
-            format!("polylinker-{version}-macos-universal.tar.gz"),
-            format!("polylinker-{version}-windows-x64.msi"),
-            format!("polylinker-{version}-windows-x64.zip"),
-        ] {
+        let names = published_artifact_names(version);
+
+        // The fixture and the table, tied together where the mismatch is
+        // legible. Without this, a table entry naming a file this list does not
+        // have surfaces three tests later as `NotInManifest`, which reads as a
+        // problem with the manifest rather than with the entry that named a file
+        // nobody publishes. On the ARM64 leg that is the difference between
+        // "windows-arm64 is missing from the fixture" and half an hour spent in
+        // the wrong module.
+        if let Some(name) = mine.as_ref() {
+            assert!(
+                names.contains(name),
+                "this target's PLATFORM_ARTIFACT entry names {name}, which is not \
+                 one of the files the release workflow publishes: {names:?}"
+            );
+        }
+
+        for name in names {
             let digest = if Some(&name) == mine.as_ref() {
                 pl_core::sha256::sha256_hex(&artifact_bytes(version))
             } else {
@@ -692,6 +811,414 @@ mod tests {
     fn newer() -> Version {
         let c = Version::current().unwrap();
         Version::new(c.major(), c.minor(), c.patch() + 1)
+    }
+
+    // -------------------------------------------------------- the platform table
+
+    /// The file this target would ask for is a file the release workflow
+    /// publishes, and the list it is checked against has not rotted into
+    /// something nothing can fail.
+    #[test]
+    fn the_table_names_a_file_the_release_workflow_publishes() {
+        let v = Version::parse("1.2.3").unwrap();
+        let published = published_artifact_names(&v);
+
+        let mut sorted = published.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted, published,
+            "the published list must be sorted and free of duplicates, the way \
+             release.yml's `sort -k2` leaves SHA256SUMS.txt"
+        );
+        for name in &published {
+            assert_eq!(
+                version_named_by(format!("aa  {name}\n").as_bytes()).unwrap(),
+                v,
+                "{name} does not read back as the version it was built for, so \
+                 `check` could not read a version out of a manifest naming it"
+            );
+        }
+
+        match artifact_file_name(&v) {
+            Some((name, kind)) => {
+                assert!(
+                    published.contains(&name),
+                    "this target asks for {name}, which the release workflow does \
+                     not publish: {published:?}. A table entry with no file behind \
+                     it turns `pl update` from a clean decline into a 404, which \
+                     is strictly worse than declining."
+                );
+                assert_eq!(
+                    kind == Kind::Installer,
+                    name.ends_with(".msi"),
+                    "{name} would be handed over as {kind:?}; the extension and the \
+                     kind must agree or the user is told to run a file they have to \
+                     unpack, or to unpack one they have to run"
+                );
+            }
+            None => {
+                // A target with no build at all. Refusing IS the correct
+                // behaviour, and the two refusals have to be the same refusal.
+                assert!(
+                    artifact_url(&v).is_none(),
+                    "artifact_file_name declines for this target and artifact_url \
+                     does not, so a URL would be built for a file nothing named"
+                );
+            }
+        }
+    }
+
+    /// One `#[cfg(...)] const PLATFORM_ARTIFACT ... = <value>;`, as source text,
+    /// with every space and newline removed so that rustfmt's line breaking
+    /// cannot make two identical predicates compare unequal.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Arm {
+        cfg: String,
+        value: String,
+    }
+
+    /// The marker that ends the shipped part of this file. Spelled with an
+    /// escape rather than a real newline so that this constant is not itself the
+    /// thing it is looking for.
+    const TESTS_MARKER: &str = "#[cfg(test)]\nmod tests {";
+
+    /// Everything before the test module, which is where the cascade lives.
+    fn before_the_tests(src: &str) -> &str {
+        match src.find(TESTS_MARKER) {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    /// The length of the balanced run at the start of `text`, which begins just
+    /// inside an opening `(`. `None` if that parenthesis never closes.
+    fn balanced(text: &str) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, c) in text.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' if depth == 0 => return Some(i),
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// `text` split at the commas that are not inside parentheses.
+    fn top_level_commas(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        for (i, c) in text.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    out.push(text[start..i].to_string());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        if !text[start..].is_empty() {
+            out.push(text[start..].to_string());
+        }
+        out
+    }
+
+    /// Every `PLATFORM_ARTIFACT` declaration in `src`, in source order.
+    ///
+    /// Comment lines are dropped whole before the whitespace is stripped:
+    /// welding a `///` line's prose onto the code below it would let a doc
+    /// comment invent an arm, or hide one. That this crate has no block comments
+    /// is the same fact `tests/handoff.rs`'s scanner rests on.
+    fn arms_in(src: &str) -> Vec<Arm> {
+        const OPEN: &str = "#[cfg(";
+        const DECL: &str = "constPLATFORM_ARTIFACT:Option<(&str,&str)>=";
+
+        let dense: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .flat_map(str::chars)
+            .filter(|c| !c.is_whitespace())
+            .collect();
+
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while let Some(i) = dense[at..].find(OPEN) {
+            let start = at + i + OPEN.len();
+            at = start;
+            let Some(len) = balanced(&dense[start..]) else {
+                continue;
+            };
+            let Some(rest) = dense[start + len..].strip_prefix(")]") else {
+                continue;
+            };
+            let Some(rest) = rest.strip_prefix(DECL) else {
+                continue;
+            };
+            let Some(end) = rest.find(';') else { continue };
+            out.push(Arm {
+                cfg: dense[start..start + len].to_string(),
+                value: rest[..end].to_string(),
+            });
+        }
+        out
+    }
+
+    /// Every arm of the cascade is excluded from the fallback, and every arm
+    /// names a file the release workflow publishes.
+    ///
+    /// **THIS READS THE SOURCE, AND THAT IS THE ONLY WAY IT CAN SEE AN ARM FOR A
+    /// TARGET THIS BUILD IS NOT FOR.** rustc guarantees that exactly one
+    /// `PLATFORM_ARTIFACT` is defined — but only for the target being compiled.
+    /// An arm added without being excluded from the `not(any(...))` fallback is
+    /// two definitions, E0428, on that target *alone*; every other target builds,
+    /// every test passes, and the failure surfaces on the one CI leg that
+    /// compiles the arm, looking like a toolchain fault rather than a two-line
+    /// edit. `windows-arm64` is the arm that costs the most to find that way: no
+    /// developer machine here has the ARM64 MSVC linker, so nothing local can
+    /// compile it at all.
+    ///
+    /// What this does NOT establish, and what no test in this crate can: that
+    /// the release page actually carries the files named here.
+    /// [`published_artifact_names`] is a copy of that list, not a reading of it.
+    /// `tools/ci.ps1` is the only place `.github/workflows/release.yml` is read.
+    #[test]
+    fn the_platform_cascade_and_its_fallback_stay_mutually_exclusive() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/flow.rs");
+        let src = std::fs::read_to_string(&path)
+            .expect("this crate's own src/flow.rs")
+            .replace("\r\n", "\n");
+        let shipped = before_the_tests(&src);
+        assert!(
+            shipped.len() < src.len(),
+            "the test-module marker was not found in {}, so this read the probe \
+             strings below as though they were the real cascade",
+            path.display()
+        );
+
+        let arms = arms_in(shipped);
+        assert_eq!(
+            arms.len(),
+            5,
+            "expected four platform entries and one fallback in {}, read {arms:#?}",
+            path.display()
+        );
+
+        let (fallback, platforms) = arms.split_last().unwrap();
+        assert_eq!(
+            fallback.value, "None",
+            "the last arm must be the refusal, so that a platform with no release \
+             build declines rather than being handed the nearest thing"
+        );
+
+        let cfg = fallback.cfg.as_str();
+        let inner = cfg
+            .strip_prefix("not(any(")
+            .and_then(|s| s.strip_suffix("))"))
+            .unwrap_or_else(|| panic!("the fallback's cfg is not not(any(..)): {cfg}"));
+        let mut listed = top_level_commas(inner);
+        let mut declared: Vec<String> = platforms.iter().map(|a| a.cfg.clone()).collect();
+        listed.sort();
+        declared.sort();
+
+        let mut distinct = declared.clone();
+        distinct.dedup();
+        assert_eq!(
+            distinct, declared,
+            "two platform entries carry the same cfg predicate, which is E0428 on \
+             every target that matches it"
+        );
+        assert_eq!(
+            listed, declared,
+            "the fallback's not(any(..)) list and the entries above it have drifted \
+             apart. A predicate in one and not the other is a target that defines \
+             PLATFORM_ARTIFACT twice (E0428) or not at all (E0425), and that is a \
+             compile error ONLY on that target -- red on the CI leg that builds it \
+             and invisible everywhere else, including in this process."
+        );
+
+        let v = Version::parse("1.2.3").unwrap();
+        let published = published_artifact_names(&v);
+        let mut named = Vec::new();
+        for arm in platforms {
+            let value = arm.value.as_str();
+            let pair = value
+                .strip_prefix("Some((")
+                .and_then(|s| s.strip_suffix("))"))
+                .unwrap_or_else(|| panic!("an entry is not Some((label, extension)): {value}"));
+            let (label, extension) = pair
+                .split_once(',')
+                .unwrap_or_else(|| panic!("{pair} is not a label and an extension"));
+            let name = format!(
+                "polylinker-{v}-{}.{}",
+                label.trim_matches('"'),
+                extension.trim_matches('"')
+            );
+            assert!(
+                published.contains(&name),
+                "the entry for {} names {name}, which is not one of the files the \
+                 release workflow publishes: {published:?}",
+                arm.cfg
+            );
+            named.push(name);
+        }
+
+        let mut distinct = named.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            named.len(),
+            "two platforms are pointed at one artifact, which is exactly how a \
+             user on one of them ends up updating forever into a build for the \
+             other: {named:?}"
+        );
+        assert!(
+            named.iter().any(|n| n.ends_with("-windows-arm64.msi")),
+            "the windows-arm64 entry is the one no machine here can compile, so \
+             its removal would go unnoticed until the ARM64 CI leg ran -- if it \
+             is genuinely being withdrawn, withdraw the published artifact and \
+             this assertion together, and put ARM64 back on the fallback"
+        );
+    }
+
+    /// The name [`arms_in`] matches on, kept out of the fixtures below.
+    const DECL_NAME: &str = "PLATFORM_ARTIFACT";
+
+    /// A fixture with its `ARTIFACT` placeholder turned into the real name.
+    ///
+    /// **THE FIXTURES BELOW ARE NOT A SECOND COPY OF THE CASCADE AND MUST NOT
+    /// READ AS ONE.** Two things scan this file as text looking for exactly that
+    /// declaration, and they do not agree about where the file ends. [`arms_in`]
+    /// stops at the test module, so it cannot see these. `tools/ci.ps1`'s
+    /// `Get-UpdaterPlatformArtifacts` — the step that holds this table against
+    /// `.github/workflows/release.yml`, and the only place those two are ever
+    /// compared — reads every line of the file.
+    ///
+    /// So a fixture spelling the name out verbatim does not merely sit there: it
+    /// arrives at the gate as extra platform arms and extra fallbacks, and the
+    /// gate then reports a cascade this file does not contain, or throws on a
+    /// declaration that has no `#[cfg]` above it because the line above it is a
+    /// `r#"`. Measured, not guessed: with the fixtures written out longhand that
+    /// step found 5 arms and 3 fallbacks in a file that has 4 and 1, and threw
+    /// four times.
+    ///
+    /// Substituting the name in at run time keeps each fixture exact for the
+    /// reader under test and invisible to the reader that is not. It is a
+    /// narrower fix than it should be — the durable one is for a scanner of a
+    /// Rust file to truncate at `#[cfg(test)]`, the way [`before_the_tests`] and
+    /// `tests/handoff.rs` both do — and that belongs in `tools/ci.ps1`.
+    fn spelled_out(fixture: &str) -> String {
+        fixture.replace("ARTIFACT", DECL_NAME)
+    }
+
+    /// The reader above finds what it is looking for, and objects to the edit it
+    /// exists to object to.
+    ///
+    /// Without this,
+    /// [`the_platform_cascade_and_its_fallback_stay_mutually_exclusive`] is a
+    /// pattern that might match nothing useful. An [`arms_in`] that returned no
+    /// arms would fail its own length assertion, but one that mis-nested the
+    /// parentheses would return five garbled strings and compare them against
+    /// each other perfectly happily.
+    #[test]
+    fn the_cascade_reader_finds_what_it_is_looking_for() {
+        const ONE_PLATFORM: &str = r#"#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const ARTIFACT: Option<(&str, &str)> = Some(("windows-x64", "msi"));
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64")
+)))]
+const ARTIFACT: Option<(&str, &str)> = None;
+"#;
+        // The wrapped shape rustfmt leaves the macOS arm in.
+        const WRAPPED: &str = r#"#[cfg(all(
+    target_os = "macos",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const ARTIFACT: Option<(&str, &str)> = Some(("macos-universal", "tar.gz"));
+"#;
+        // THE EDIT THIS ALL EXISTS FOR: an arm added, and not excluded from the
+        // fallback. It builds on x86-64 and defines the constant twice on ARM64.
+        const DRIFTED: &str = r#"#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const ARTIFACT: Option<(&str, &str)> = Some(("windows-x64", "msi"));
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+const ARTIFACT: Option<(&str, &str)> = Some(("windows-arm64", "msi"));
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64")
+)))]
+const ARTIFACT: Option<(&str, &str)> = None;
+"#;
+
+        let one = spelled_out(ONE_PLATFORM);
+        let arms = arms_in(&one);
+        assert_eq!(arms.len(), 2, "{arms:#?}");
+        assert_eq!(
+            arms[0].cfg,
+            r#"all(target_os="windows",target_arch="x86_64")"#
+        );
+        assert_eq!(arms[0].value, r#"Some(("windows-x64","msi"))"#);
+        assert_eq!(
+            arms[1].cfg,
+            r#"not(any(all(target_os="windows",target_arch="x86_64")))"#
+        );
+        assert_eq!(arms[1].value, "None");
+
+        let wrapped = spelled_out(WRAPPED);
+        assert_eq!(
+            arms_in(&wrapped)[0].cfg,
+            r#"all(target_os="macos",any(target_arch="x86_64",target_arch="aarch64"))"#,
+            "rustfmt breaks this arm across four lines and the reader must not care"
+        );
+
+        // A doc comment that spells out an entry is prose, not an entry -- and
+        // this file's own doc comments name the table over and over. The probe
+        // is a well-formed arm, so it WOULD be read as a third one if the
+        // comment filter stopped working.
+        let commented = spelled_out(&format!(
+            "/// #[cfg(all())] const ARTIFACT: Option<(&str, &str)> = None;\n{ONE_PLATFORM}"
+        ));
+        assert_eq!(
+            arms_in(&commented),
+            arms_in(&one),
+            "a comment naming a table entry must not be read as one"
+        );
+
+        let drifted = spelled_out(DRIFTED);
+        let arms = arms_in(&drifted);
+        assert_eq!(arms.len(), 3, "{arms:#?}");
+        let (fallback, platforms) = arms.split_last().unwrap();
+        let inner = fallback.cfg.strip_prefix("not(any(").unwrap();
+        let inner = inner.strip_suffix("))").unwrap();
+        let listed = top_level_commas(inner);
+        let declared: Vec<String> = platforms.iter().map(|a| a.cfg.clone()).collect();
+        assert_ne!(
+            listed, declared,
+            "the reader must see that the ARM64 arm is missing from the fallback"
+        );
+
+        // And the two splitters, since everything above rests on them.
+        assert_eq!(
+            top_level_commas("all(a,b),all(c,any(d,e))"),
+            vec!["all(a,b)".to_string(), "all(c,any(d,e))".to_string()],
+            "a comma inside a nested predicate must not split it"
+        );
+        assert_eq!(
+            top_level_commas("a,b,"),
+            vec!["a".to_string(), "b".to_string()],
+            "a trailing comma must not produce an empty predicate"
+        );
+        assert_eq!(balanced("a,b)tail"), Some(3));
+        assert_eq!(balanced("all(x))"), Some(6));
+        assert_eq!(balanced("never closes"), None);
+
+        // And the truncation everything above rests on really truncates.
+        let with_tests = format!("fn a() {{}}\n{TESTS_MARKER}\n    fn b() {{}}\n}}\n");
+        assert!(before_the_tests(&with_tests).contains("fn a"));
+        assert!(!before_the_tests(&with_tests).contains("fn b"));
     }
 
     // ------------------------------------------------------------------ URLs
@@ -1429,10 +1956,15 @@ mod tests {
             version_named_by(b"aa  polylinker-0.1.10-linux-x64.tar.gz\n").unwrap(),
             Version::parse("0.1.10").unwrap()
         );
-        // The same version named several times is one answer, not a conflict.
+        // The same version named several times is one answer, not a conflict --
+        // including the two Windows platforms, whose file names differ only in
+        // the label and would be a conflict if the version field were read from
+        // the wrong dash.
         assert_eq!(
             version_named_by(
-                b"a  polylinker-1.0.0-linux-x64.tar.gz\nb  polylinker-1.0.0-windows-x64.msi\n"
+                b"a  polylinker-1.0.0-linux-x64.tar.gz\n\
+                  b  polylinker-1.0.0-windows-x64.msi\n\
+                  c  polylinker-1.0.0-windows-arm64.msi\n"
             )
             .unwrap(),
             Version::parse("1.0.0").unwrap()
