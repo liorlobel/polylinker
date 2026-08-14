@@ -25,6 +25,21 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.11.0] - 2026-08-15
+
+**Polylinker runs natively on Windows on ARM64.** That is the whole of this
+release: a fourth platform, no behaviour change on the other three, and the
+version's minor number moves because there is a new thing you can download
+rather than because anything you already had works differently.
+
+One number in it is now measured rather than assumed. Until this release the
+`test / windows-11-arm` check had never run; on the commit this release was cut
+from it passed, which is the first evidence that this workspace compiles for
+`aarch64-pc-windows-msvc` and that its suite passes on the architecture. Before
+that, every ARM64 statement anywhere in this repository was a plan.
+
 ### Added
 
 - **A fourth platform, `windows-arm64`, shipping both a zip and an MSI:**
@@ -2958,7 +2973,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.10.3...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.0
 [0.10.3]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.3
 [0.10.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.2
 [0.10.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.1
