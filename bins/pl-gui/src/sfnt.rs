@@ -42,10 +42,48 @@
 //! subtable format is not worth decoding in full (class-based contexts, pair
 //! positioning) this OVER-reports rather than under-reports, and where a format
 //! is not understood at all it returns `Err`. Both directions fail loud.
+//!
+//! WHICH FEATURES COUNT AS TURNED ON, which is a second question and was
+//! answered incompletely for one release. [`SHAPER_DEFAULTS`] is the tag list
+//! harfrust enables globally, and until this was reviewed it was the WHOLE
+//! answer: the guard walked the FeatureList, intersected it with those fourteen
+//! tags, and never opened the ScriptList at all — `scriptListOffset` was named
+//! in a comment below and consumed nowhere. But a LangSys also carries a
+//! `requiredFeatureIndex`, and harfrust applies that feature UNCONDITIONALLY,
+//! whatever tag it wears: `harfrust-0.7.0/src/hb/ot_map.rs:314-329` collects it
+//! through `get_required_language_feature` and :489-511 feeds its lookups to
+//! `add_lookups(.., GLOBAL_BIT_MASK, ..)` before any tag is looked at. So a face
+//! could park a ligature behind a feature tagged `ss20`, name it as the required
+//! feature of its default LangSys, leave it out of every FeatureIndex array —
+//! and be shaped with that ligature on while this module reported a clean bill
+//! of health, byte-for-byte the verdict it gives the healthy shipped face. That
+//! was demonstrated on doctored IBM Plex Mono bytes before it was closed here by
+//! `required_feature_indices`; the permanent fixture is
+//! `a_lookup_reached_only_through_the_required_feature_index_is_not_missed`.
+//!
+//! WHAT THIS MODULE DOES NOT DECIDE, said here because it has been assumed
+//! rather than stated. It answers the question about whatever bytes it is handed
+//! and says nothing about which faces are allowed to answer what. That policy
+//! lives in `main.rs`'s tests, and it is emphatically not "no face may ligate":
+//! the MONOSPACE face must come back empty, because the sequence grid rests on
+//! `x = x0 + col * advance` and a substitution or a kern breaks it, while IBM
+//! Plex Sans (`liga`, `f + i -> fi`, and GPOS `kern` over ASCII) and Inter
+//! SemiBold (`calt`, plus the `ccmp` and `locl` this walk finds reachable where
+//! both Plex faces' are not) are LIVE, are asserted to be live, and are shipped
+//! anyway — no proportional or heading text in this application carries a
+//! position-to-index mapping, and every proportional width is taken from a real
+//! egui layout, which shapes. A non-empty answer out of this module is therefore
+//! not by itself a defect. A non-empty answer about the monospace face is.
 
 use std::collections::BTreeSet;
 
-/// The features harfrust enables when the user-feature list is empty.
+/// The feature TAGS harfrust enables globally when the user-feature list is
+/// empty.
+///
+/// NOT the whole set the shaper turns on, and reading it as such is the defect
+/// `required_feature_indices` exists to close: a LangSys `requiredFeatureIndex`
+/// is applied whatever tag it carries, so it cannot be recognised from any tag
+/// list at all. This constant is one of the two halves.
 ///
 /// Read at source in the pinned harfrust 0.7.0, `src/hb/ot_shape.rs`, in
 /// `hb_ot_shape_planner_t::collect_features`. `COMMON_FEATURES` (lines 84-92)
@@ -220,23 +258,128 @@ fn features(font: &[u8], which: &[u8; 4]) -> Result<Option<Vec<FeatureRecord>>, 
     Ok(Some(out))
 }
 
-/// The features in `which` that the shaper will actually apply: the
-/// intersection of what the face advertises with [`SHAPER_DEFAULTS`].
+/// The `requiredFeatureIndex` a LangSys writes when it has no required feature.
+///
+/// 0xFFFF and not 0: index 0 is a perfectly ordinary feature, which is why this
+/// has to be a sentinel comparison and not a truth test. Phosphor Bold's `latn`
+/// default LangSys really does carry `requiredFeatureIndex = 0`, pointing at its
+/// one and only feature, `liga`.
+const NO_REQUIRED_FEATURE: u16 = 0xFFFF;
+
+/// Every FeatureList index some LangSys marks REQUIRED, over every script and
+/// language system in `which`'s ScriptList.
+///
+/// WHY THIS EXISTS, AND WHAT IT COST NOT TO HAVE IT. The rest of this module
+/// decides what the shaper turns on by intersecting the FeatureList's tags with
+/// [`SHAPER_DEFAULTS`]. A required feature is not in that intersection and need
+/// not be in any FeatureIndex array either — it is reached only through this
+/// field — and harfrust applies it regardless of the tag it wears
+/// (`harfrust-0.7.0/src/hb/ot_map.rs`, `get_required_language_feature` at
+/// :314-329, `add_lookups(.., GLOBAL_BIT_MASK, ..)` at :489-511, before any tag
+/// filtering; `Cargo.lock` pins 0.7.0). So a face whose ligature sat behind, say,
+/// `ss20` — a tag no defaults list will ever contain — and which named `ss20` as
+/// its default LangSys's required feature was shaped WITH that ligature and
+/// reported by this module as carrying nothing at all, giving the byte-identical
+/// verdict to the healthy face it exists to clear. That was not a thought
+/// experiment: it was demonstrated on a doctored IBM Plex Mono with one
+/// LigatureSubst `g + a -> A` reachable only this way.
+///
+/// EVERY LangSys, not the one harfrust would select. This module deliberately
+/// does not model script and language selection — that would be a second guess
+/// about the shaper, in the direction that can only lose coverage. Collecting
+/// the union over every script and every language system OVER-reports, which is
+/// the same direction every approximation in this file leans, and which is the
+/// only direction that cannot make the monospace verdict a lie.
+///
+/// Measured against the faces in this tree before it was written, with fontTools
+/// as the oracle: this walk reproduces fontTools' script/LangSys enumeration,
+/// `ReqFeatureIndex` and `FeatureIndex` count exactly on all 35 LangSys records
+/// of the six GSUB/GPOS tables of IBM Plex Mono, IBM Plex Sans and Inter
+/// SemiBold. All 35 read `0xFFFF`, so closing this hole moves no shipped verdict;
+/// the one real required feature reachable from this tree is Phosphor Bold's
+/// `latn/dflt` -> `liga`, which was already reported because `liga` is in
+/// [`SHAPER_DEFAULTS`] and is listed in the FeatureIndex array as well.
+fn required_feature_indices(t: &[u8], which: &[u8; 4]) -> Result<BTreeSet<u16>, String> {
+    let name = tag(which);
+    // Header byte 4. Every other reader in this file starts at byte 6
+    // (featureListOffset) or byte 8 (lookupListOffset); this is the one that was
+    // missing.
+    let list = be16(t, 4)? as usize;
+    if list == 0 {
+        return Err(format!(
+            "{name} has no ScriptList, so which of its features the shaper turns \
+             on cannot be decided from this table"
+        ));
+    }
+    let scripts = be16(t, list)? as usize;
+    let mut out = BTreeSet::new();
+    for s in 0..scripts {
+        // ScriptRecord: scriptTag (4) then an Offset16 from the START of the
+        // ScriptList, which is why `list` and not `list + 2` is the base.
+        let rec = list + 2 + s * 6;
+        if t.get(rec..rec + 6).is_none() {
+            return Err(format!(
+                "{name} ScriptList ends inside record {s} of {scripts}"
+            ));
+        }
+        let script = list + be16(t, rec + 4)? as usize;
+        // A Script table is defaultLangSysOffset, langSysCount, then one
+        // (langSysTag, Offset16) record each. Both offsets are from the start of
+        // the Script table. A zero default offset means "this script has no
+        // default LangSys", not "it is at offset zero" — the same distinction
+        // `features()` makes about a zero Feature offset.
+        let mut langs = Vec::new();
+        let default = be16(t, script)? as usize;
+        if default != 0 {
+            langs.push(script + default);
+        }
+        let n = be16(t, script + 2)? as usize;
+        for l in 0..n {
+            langs.push(script + be16(t, script + 4 + l * 6 + 4)? as usize);
+        }
+        for ls in langs {
+            // LangSys: lookupOrderOffset (reserved, always 0), then
+            // requiredFeatureIndex, then the featureIndexCount and array that
+            // `features()` already covers by walking the FeatureList itself.
+            let req = be16(t, ls + 2)?;
+            if req != NO_REQUIRED_FEATURE {
+                out.insert(req);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The features in `which` that the shaper will actually apply: what the face
+/// advertises, intersected with [`SHAPER_DEFAULTS`], PLUS whatever any LangSys
+/// names as its required feature whether or not its tag is in that list.
 ///
 /// Sorted and deduplicated, because a FeatureList registers one record per
 /// script and language system and Plex Mono's 136 records cover 23 distinct
 /// tags — a caller comparing against a list wants the tags, not the records.
 ///
+/// The second half of that first sentence is not decoration. Without it this
+/// function's own name was a claim it could not keep: harfrust turns the
+/// required feature on and would not have appeared here, so a caller filtering
+/// this against [`NEVER_IN_A_MONOSPACE_TEXT_FACE`] — which is exactly what the
+/// monospace guard does — was filtering a set the shaper's own required feature
+/// had been quietly left out of. See `required_feature_indices`.
+///
 /// This is the ADVERTISED set, and on its own it is not a verdict: IBM Plex
 /// Mono legitimately advertises `ccmp`, `locl` and `mark`. See
 /// [`ascii_reachable_default_on`] for the question that has an answer.
 pub fn default_on_features(font: &[u8], which: &[u8; 4]) -> Result<Vec<[u8; 4]>, String> {
-    let mut on: Vec<[u8; 4]> = features(font, which)?
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(t, _)| t)
-        .filter(|t| SHAPER_DEFAULTS.contains(t))
-        .collect();
+    let Some(feats) = features(font, which)? else {
+        return Ok(Vec::new());
+    };
+    let t = table(font, which)?.expect("features() already proved this table is here");
+    let required = required_feature_indices(t, which)?;
+    let mut on: Vec<[u8; 4]> = Vec::new();
+    for (i, (ft, _)) in feats.into_iter().enumerate() {
+        if SHAPER_DEFAULTS.contains(&ft) || required.contains(&(i as u16)) {
+            on.push(ft);
+        }
+    }
     on.sort_unstable();
     on.dedup();
     Ok(on)
@@ -249,6 +392,12 @@ pub fn default_on_features(font: &[u8], which: &[u8; 4]) -> Result<Vec<[u8; 4]>,
 /// alphabet the sequence grid paints, so `x = x0 + col * advance` holds. A
 /// non-empty answer names the tags to go and look at.
 ///
+/// "The features the shaper turns on" is [`default_on_features`]' set and has
+/// two halves, the tag intersection and the LangSys required feature — the
+/// second of which this walked past entirely for one release, so a lookup
+/// reachable only through `requiredFeatureIndex` was shaped and not reported.
+/// See `required_feature_indices`.
+///
 /// Errors rather than guessing whenever the container, the cmap, a lookup type
 /// or a subtable format is not one it understands, so silence is only ever
 /// reported about a file it actually read.
@@ -257,12 +406,14 @@ pub fn ascii_reachable_default_on(font: &[u8], which: &[u8; 4]) -> Result<Vec<[u
         return Ok(Vec::new());
     };
     let t = table(font, which)?.expect("features() already proved this table is here");
+    let required = required_feature_indices(t, which)?;
     let ascii = paintable_glyphs(font)?;
     let name = tag(which);
 
     let mut hit = Vec::new();
-    for (ft, lookups) in feats {
-        if !SHAPER_DEFAULTS.contains(&ft) || hit.contains(&ft) {
+    for (i, (ft, lookups)) in feats.into_iter().enumerate() {
+        let turned_on = SHAPER_DEFAULTS.contains(&ft) || required.contains(&(i as u16));
+        if !turned_on || hit.contains(&ft) {
             continue;
         }
         for li in lookups {
@@ -602,10 +753,52 @@ fn subtable_reaches_ascii(
             Ok(every_position_ascii(t, at + 6, back, at, ascii)?
                 && every_position_ascii(t, ahead_at + 2, ahead, at, ascii)?)
         }
-        // Pair and cursive positioning. Both move x. Read as their leading
-        // coverage only — over-reporting — because neither appears behind a
+        // Pair positioning (2) and cursive attachment (3). Both move x, and both
+        // are read as their LEADING coverage only, which over-reports: a PairPos
+        // rule needs a second covered glyph and a cursive attachment needs a
+        // covered neighbour, and neither second position is decoded here.
+        //
+        // WHAT THIS COMMENT USED TO SAY, AND WHY IT WAS FALSE ON THE DAY IT WAS
+        // WRITTEN. It justified the shortcut with "neither appears behind a
         // default-on feature in any face this repository ships, so decoding
-        // ValueRecord widths would be untested code guarding nothing.
+        // ValueRecord widths would be untested code guarding nothing." Pair
+        // positioning appears behind `kern` — which IS in `SHAPER_DEFAULTS` — in
+        // three of them. Measured with fontTools: `IBMPlexSans-Regular.ttf`
+        // feature `kern` runs lookups 0, 1, 2, all LookupType 2; that face is
+        // `include_bytes!`d into this binary and arrived in the SAME COMMIT as
+        // the sentence claiming it did not exist. `Inter-SemiBold.ttf` feature
+        // `kern` runs lookups 0, 1, 2, of LookupType 2 and of LookupType 9
+        // (ExtensionPos) wrapping a LookupType 2; also `include_bytes!`d. And
+        // the `Ubuntu-Light.ttf` that `epaint_default_fonts` puts at the tail of
+        // BOTH text chains has 8 `kern` lookups, every one LookupType 2.
+        //
+        // Far from guarding nothing, this arm is the SOLE producer of the `kern`
+        // verdict. Delete the match arm below and the `_ =>` catch-all turns
+        // Plex Sans's first `kern` lookup into
+        // `GPOS lookup type 2 is not one this reads`, which reaches
+        // `the_proportional_face_ligates_and_that_is_recorded_not_denied` in
+        // `main.rs` as a panic about an unreadable subtable rather than as
+        // anything about kerning — a loud failure with a misleading message, and
+        // an hour of somebody's time. `a_gpos_pair_and_cursive_position_on_ascii
+        // _is_read_rather_than_refused` below now says so in this file directly.
+        //
+        // SO WHY IS THE APPROXIMATION STILL RIGHT? Two reasons, neither of them
+        // "it never runs". (a) For every face here that has one, the leading
+        // coverage already holds printable ASCII and the answer is therefore
+        // "reachable"; decoding the exact pairs and their ValueRecord widths
+        // could only confirm that, never overturn it, so it would change no
+        // verdict. (b) The face this guard exists to CLEAR is the monospace one,
+        // and a monospace candidate advertising `kern` at all is rejected on the
+        // `NEVER_IN_A_MONOSPACE_TEXT_FACE` check before the reachability walk is
+        // reached at all, so a pair width can never be the deciding fact there.
+        //
+        // Cursive attachment is the half of the old claim that was true, and it
+        // is kept here said about the type it is actually true of: LookupType 3
+        // appears in no GPOS table reachable from this tree — checked with
+        // fontTools over Plex Mono, Plex Sans, Inter SemiBold, Phosphor Bold,
+        // Hack, Ubuntu-Light, Noto Emoji and emoji-icon-font. It is read the
+        // same way regardless, and the fixture below exercises it, so the arm is
+        // not one nobody has ever seen run.
         (false, 2 | 3) => covers_ascii(t, at, 2, ascii),
         // Mark-to-base, mark-to-ligature and mark-to-mark positioning: two
         // coverage tables, and BOTH have to be fillable. The mark side is what
@@ -622,4 +815,520 @@ fn subtable_reaches_ascii(
 /// A feature tag as the four characters it is, for an assertion message.
 pub fn show(tags: &[[u8; 4]]) -> String {
     tags.iter().map(tag).collect::<Vec<_>>().join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// the fixtures that hold this module's own two blind spots open
+// ---------------------------------------------------------------------------
+//
+// The guard's tests live in `main.rs`, beside the vendored faces they read, and
+// that is the right place for every question about a real file. These two are
+// here instead because neither can be asked of a real file: no face in this tree
+// carries a required feature that is not also listed, and the one GPOS PairPos
+// this module is exercised on reaches it only through a `.expect()` in a test
+// whose failure message would be about something else entirely. Both need
+// hand-built bytes, and bytes built to break THIS module belong next to it.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The glyph ids the fixtures assign. Named, because in the ligature fixture
+    // exactly one of them is the difference between a face that breaks the
+    // sequence grid and one that cannot: `row_text` substitutes `?` for every
+    // byte that is not `is_ascii_graphic`, so a rule needing GID_ACUTE can never
+    // be spelled from a sequence row while one needing GID_C is spelled by the
+    // word `ac`.
+    const GID_A_LOWER: u16 = 1;
+    const GID_C: u16 = 2;
+    const GID_A_UPPER: u16 = 3;
+    const GID_ACUTE: u16 = 4;
+
+    /// Which route the fixture's single feature is reachable by, from the
+    /// default LangSys of its single script.
+    ///
+    /// `Listed` and `Neither` are indistinguishable to this module by design —
+    /// it reads the FeatureList directly and never consults a LangSys's
+    /// `featureIndices`, which over-reports and is safe. `RequiredOnly` is the
+    /// one that is not indistinguishable, and is the whole reason this enum and
+    /// these fixtures exist.
+    #[derive(Clone, Copy)]
+    enum Reached {
+        /// In the default LangSys's `featureIndices`, the ordinary route.
+        Listed,
+        /// Named by `requiredFeatureIndex` and in no `featureIndices` array at
+        /// all — the route the shaper honours unconditionally and this module
+        /// could not see until 2026-08-14.
+        RequiredOnly,
+        /// Neither. The negative control for `RequiredOnly`: identical bytes but
+        /// for the two at offset 24.
+        Neither,
+    }
+
+    /// A complete GSUB or GPOS table wrapping one hand-built lookup subtable,
+    /// with a REAL ScriptList rather than a zero count.
+    ///
+    /// Every offset is a constant written out beside the byte it lives at, so it
+    /// can be checked against the OpenType spec by eye, and so the LangSys is a
+    /// real one — `main.rs`'s two synthetic faces both point `scriptListOffset`
+    /// at a `scriptCount` of zero, which is exactly why neither of them could
+    /// have caught the required-feature hole.
+    ///
+    /// The two bytes at 28 are `featureIndices[0]`. They are written in both
+    /// arms and counted only in the `Listed` one, so the FeatureList begins at a
+    /// constant offset whichever route is being built and the two fixtures
+    /// differ in as few bytes as possible.
+    fn layout_table(
+        feature: &[u8; 4],
+        reached: Reached,
+        lookup_type: u16,
+        subtable: &[u8],
+    ) -> Vec<u8> {
+        let (required, listed): (u16, u16) = match reached {
+            Reached::Listed => (NO_REQUIRED_FEATURE, 1),
+            Reached::RequiredOnly => (0, 0),
+            Reached::Neither => (NO_REQUIRED_FEATURE, 0),
+        };
+        let mut g: Vec<u8> = Vec::new();
+        g.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); //   @0  version 1.0
+        g.extend_from_slice(&10u16.to_be_bytes()); //        @4  scriptListOffset
+        g.extend_from_slice(&30u16.to_be_bytes()); //        @6  featureListOffset
+        g.extend_from_slice(&44u16.to_be_bytes()); //        @8  lookupListOffset
+        g.extend_from_slice(&1u16.to_be_bytes()); //         @10 scriptCount
+        g.extend_from_slice(b"DFLT"); //                     @12 scriptTag
+        g.extend_from_slice(&8u16.to_be_bytes()); //         @16 -> 10 + 8 = 18
+        g.extend_from_slice(&4u16.to_be_bytes()); //         @18 defaultLangSys -> 22
+        g.extend_from_slice(&0u16.to_be_bytes()); //         @20 langSysCount
+        g.extend_from_slice(&0u16.to_be_bytes()); //         @22 lookupOrderOffset
+        g.extend_from_slice(&required.to_be_bytes()); //     @24 requiredFeatureIndex
+        g.extend_from_slice(&listed.to_be_bytes()); //       @26 featureIndexCount
+        g.extend_from_slice(&0u16.to_be_bytes()); //         @28 featureIndices[0]
+        g.extend_from_slice(&1u16.to_be_bytes()); //         @30 featureCount
+        g.extend_from_slice(feature); //                     @32 featureTag
+        g.extend_from_slice(&8u16.to_be_bytes()); //         @36 -> 30 + 8 = 38
+        g.extend_from_slice(&0u16.to_be_bytes()); //         @38 featureParams
+        g.extend_from_slice(&1u16.to_be_bytes()); //         @40 lookupIndexCount
+        g.extend_from_slice(&0u16.to_be_bytes()); //         @42 lookupListIndices[0]
+        g.extend_from_slice(&1u16.to_be_bytes()); //         @44 lookupCount
+        g.extend_from_slice(&4u16.to_be_bytes()); //         @46 -> 44 + 4 = 48
+        g.extend_from_slice(&lookup_type.to_be_bytes()); //  @48 lookupType
+        g.extend_from_slice(&0u16.to_be_bytes()); //         @50 lookupFlag
+        g.extend_from_slice(&1u16.to_be_bytes()); //         @52 subTableCount
+        g.extend_from_slice(&8u16.to_be_bytes()); //         @54 -> 48 + 8 = 56
+        g.extend_from_slice(subtable); //                    @56 the subtable
+        g
+    }
+
+    /// LigatureSubst (GSUB LookupType 4), format 1: `a` + `component` -> `A`.
+    fn ligature_subst(component: u16) -> Vec<u8> {
+        let mut s: Vec<u8> = Vec::new();
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @0  substFormat
+        s.extend_from_slice(&8u16.to_be_bytes()); //        @2  coverageOffset -> 8
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @4  ligatureSetCount
+        s.extend_from_slice(&14u16.to_be_bytes()); //       @6  -> 14
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @8  coverageFormat
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @10 glyphCount
+        s.extend_from_slice(&GID_A_LOWER.to_be_bytes()); // @12 the first glyph
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @14 ligatureCount
+        s.extend_from_slice(&4u16.to_be_bytes()); //        @16 -> 14 + 4 = 18
+        s.extend_from_slice(&GID_A_UPPER.to_be_bytes()); // @18 ligatureGlyph
+        s.extend_from_slice(&2u16.to_be_bytes()); //        @20 componentCount
+        s.extend_from_slice(&component.to_be_bytes()); //   @22 the one variable
+        s
+    }
+
+    /// PairPos (GPOS LookupType 2), format 1: `first` followed by `a` closes up
+    /// by 40 units.
+    ///
+    /// The ValueRecord is real even though this module never reads one, because
+    /// a fixture that omitted it would be a fixture built to the reader rather
+    /// than to the format — and the point of the shortcut this exercises is
+    /// precisely that the widths are skipped.
+    fn pair_pos(first: u16) -> Vec<u8> {
+        let mut s: Vec<u8> = Vec::new();
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @0  posFormat
+        s.extend_from_slice(&12u16.to_be_bytes()); //       @2  coverageOffset -> 12
+        s.extend_from_slice(&0x0004u16.to_be_bytes()); //   @4  valueFormat1 = X_ADVANCE
+        s.extend_from_slice(&0u16.to_be_bytes()); //        @6  valueFormat2 = none
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @8  pairSetCount
+        s.extend_from_slice(&18u16.to_be_bytes()); //       @10 pairSetOffsets[0] -> 18
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @12 coverageFormat
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @14 glyphCount
+        s.extend_from_slice(&first.to_be_bytes()); //       @16 the leading glyph
+        s.extend_from_slice(&1u16.to_be_bytes()); //        @18 pairValueCount
+        s.extend_from_slice(&GID_A_LOWER.to_be_bytes()); // @20 secondGlyph
+        s.extend_from_slice(&(-40i16).to_be_bytes()); //    @22 xAdvance
+        s
+    }
+
+    /// CursivePos (GPOS LookupType 3), format 1, covering `first` with null
+    /// anchors — this module reads the coverage and nothing past it.
+    fn cursive_pos(first: u16) -> Vec<u8> {
+        let mut s: Vec<u8> = Vec::new();
+        s.extend_from_slice(&1u16.to_be_bytes()); //  @0  posFormat
+        s.extend_from_slice(&10u16.to_be_bytes()); // @2  coverageOffset -> 10
+        s.extend_from_slice(&1u16.to_be_bytes()); //  @4  entryExitCount
+        s.extend_from_slice(&0u16.to_be_bytes()); //  @6  entryAnchorOffset = none
+        s.extend_from_slice(&0u16.to_be_bytes()); //  @8  exitAnchorOffset = none
+        s.extend_from_slice(&1u16.to_be_bytes()); //  @10 coverageFormat
+        s.extend_from_slice(&1u16.to_be_bytes()); //  @12 glyphCount
+        s.extend_from_slice(&first.to_be_bytes()); // @14 the covered glyph
+        s
+    }
+
+    /// A cmap the walk can read: format 12, four single-codepoint groups sorted
+    /// by codepoint as the format requires. `A` -> 3, `a` -> 1, `c` -> 2 and
+    /// U+0301 COMBINING ACUTE -> 4.
+    ///
+    /// Only the first three are inside [`PAINTABLE`], which is what makes glyph
+    /// 4 unreachable from any sequence row and lets one glyph id be the entire
+    /// difference between the two arms of each fixture pair.
+    fn unicode_cmap() -> Vec<u8> {
+        let mut sub: Vec<u8> = Vec::new();
+        sub.extend_from_slice(&12u16.to_be_bytes()); // format
+        sub.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        sub.extend_from_slice(&(16u32 + 4 * 12).to_be_bytes()); // length
+        sub.extend_from_slice(&0u32.to_be_bytes()); // language
+        sub.extend_from_slice(&4u32.to_be_bytes()); // numGroups
+        for (cp, gid) in [
+            (0x41u32, GID_A_UPPER),
+            (0x61, GID_A_LOWER),
+            (0x63, GID_C),
+            (0x0301, GID_ACUTE),
+        ] {
+            sub.extend_from_slice(&cp.to_be_bytes()); // startCharCode
+            sub.extend_from_slice(&cp.to_be_bytes()); // endCharCode
+            sub.extend_from_slice(&(gid as u32).to_be_bytes()); // startGlyphID
+        }
+        let mut cmap: Vec<u8> = Vec::new();
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        cmap.extend_from_slice(&3u16.to_be_bytes()); // platformID: Windows
+        cmap.extend_from_slice(&10u16.to_be_bytes()); // encodingID: full repertoire
+        cmap.extend_from_slice(&12u32.to_be_bytes()); // subtableOffset
+        cmap.extend_from_slice(&sub);
+        cmap
+    }
+
+    /// Wrap hand-built tables in an sfnt table directory.
+    ///
+    /// The four tables [`REQUIRED`] names are present and empty: the container
+    /// check asks that they EXIST, which is what stops a renamed JPEG passing,
+    /// and reads none of them.
+    fn assemble_face(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut sorted = tables.to_vec();
+        sorted.sort_by_key(|(t, _)| **t);
+
+        let mut out = vec![0x00, 0x01, 0x00, 0x00];
+        out.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0u8; 6]); // searchRange, entrySelector, rangeShift
+        let mut at = 12 + 16 * sorted.len();
+        let mut body = Vec::new();
+        for (t, data) in &sorted {
+            out.extend_from_slice(*t);
+            out.extend_from_slice(&0u32.to_be_bytes()); // checkSum, unchecked
+            out.extend_from_slice(&(at as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            at += data.len();
+            body.extend_from_slice(data);
+        }
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A whole face carrying one layout table with one feature and one lookup.
+    fn face(
+        which: &[u8; 4],
+        feature: &[u8; 4],
+        reached: Reached,
+        lookup_type: u16,
+        subtable: &[u8],
+    ) -> Vec<u8> {
+        let layout = layout_table(feature, reached, lookup_type, subtable);
+        let cmap = unicode_cmap();
+        assemble_face(&[
+            (which, &layout),
+            (b"cmap", &cmap),
+            (b"head", &[]),
+            (b"hmtx", &[]),
+            (b"maxp", &[]),
+        ])
+    }
+
+    /// A rule the shaper reaches through `requiredFeatureIndex` alone is not
+    /// missed, and the tag it wears does not matter.
+    ///
+    /// PROVEN TO FAIL at c0b60b2: there, `default_on_features` and
+    /// `ascii_reachable_default_on` decided what the shaper turns on by
+    /// intersecting the FeatureList's tags with [`SHAPER_DEFAULTS`] and nothing
+    /// else. `scriptListOffset` was named in a comment and read by no code in
+    /// this file. So the `required` fixture below — whose only feature is tagged
+    /// `ss20`, which no defaults list will ever contain — came back EMPTY from
+    /// both, which is byte-for-byte the verdict the healthy IBM Plex Mono gets.
+    /// A face could hide a `g + a -> A` this way and be shaped with it while
+    /// every assertion in `main.rs` stayed green; that was demonstrated on
+    /// doctored Plex Mono bytes before it was fixed, and this fixture is the
+    /// permanent version of that demonstration.
+    ///
+    /// THE ONE-LINE MUTATION THAT RE-BREAKS IT, so a reader can check this
+    /// rather than believe it: change `if req != NO_REQUIRED_FEATURE {` at
+    /// `sfnt.rs:345`, in `required_feature_indices`, to
+    /// `if req == NO_REQUIRED_FEATURE {`. That collects the 0xFFFF sentinel
+    /// instead of the real indices, so the function returns a set that can never
+    /// match a feature index, and the first assertion below goes red with
+    /// `left: "" / right: "ss20"`. Run, not asserted: `rustc 1.97.1`,
+    /// `--edition 2021 --test`, this module compiled standalone with `#[path]`
+    /// beside a harness replaying every verdict `main.rs` pins — pristine 4
+    /// passed / 0 failed, mutant 3 passed / 1 failed, and the one failure is
+    /// this test. It is deliberately a mutation with no fallout anywhere else:
+    /// every LangSys in every vendored face reads 0xFFFF, and no face has 65,536
+    /// features, so nothing but this test changes its answer.
+    ///
+    /// WHY IT MATTERS THAT HARFRUST IGNORES THE TAG. `harfrust-0.7.0`'s
+    /// `hb/ot_map.rs` collects the required feature at :314-329 through
+    /// `get_required_language_feature` and hands its lookups to
+    /// `add_lookups(.., GLOBAL_BIT_MASK, ..)` at :489-511, before any tag
+    /// filtering happens; its own comment records that an unknown tag is still
+    /// applied, just at stage 0. `Cargo.lock` pins 0.7.0. So there is no tag a
+    /// face could use here that a defaults list would catch — the field itself
+    /// had to be read.
+    ///
+    /// WHY IT IS NOT LIVE TODAY, recorded so nobody re-derives it: all 35
+    /// LangSys records across the six GSUB/GPOS tables of Plex Mono, Plex Sans
+    /// and Inter SemiBold carry `requiredFeatureIndex = 0xFFFF`, verified with
+    /// fontTools against a byte-level replay of the walk this module now does.
+    /// The one required feature reachable from this tree at all is Phosphor
+    /// Bold's `latn`/default -> `liga`, which was already reported because
+    /// `liga` is in [`SHAPER_DEFAULTS`] and is in the `featureIndices` array
+    /// too. The fix moves no shipped verdict; it removes a way for the guard to
+    /// be silent about a face that ligates.
+    #[test]
+    fn a_lookup_reached_only_through_the_required_feature_index_is_not_missed() {
+        // `a` + `c` -> `A`, reachable ONLY as the default LangSys's required
+        // feature. Every glyph in the rule is one `row_text` can emit, so this
+        // is the exact failure the sequence grid cannot survive.
+        let required = face(
+            b"GSUB",
+            b"ss20",
+            Reached::RequiredOnly,
+            4,
+            &ligature_subst(GID_C),
+        );
+        // The same bytes but for the two at offset 24: `requiredFeatureIndex`
+        // back to the 0xFFFF sentinel. Nothing now turns `ss20` on, so the walk
+        // must say nothing — which is what stops the assertions above from being
+        // satisfied by a reader that reports every tag it can find.
+        let unrequired = face(
+            b"GSUB",
+            b"ss20",
+            Reached::Neither,
+            4,
+            &ligature_subst(GID_C),
+        );
+        // Required, and its rule needs U+0301 COMBINING ACUTE. This is the shape
+        // of all thirteen of Plex Mono's real `ccmp` ligature rules. It proves
+        // the required feature's LOOKUPS are walked rather than its tag being
+        // waved through: a fix that simply added every required tag to the
+        // answer would report this one and would eventually reject a healthy
+        // face.
+        let required_on_marks = face(
+            b"GSUB",
+            b"ss20",
+            Reached::RequiredOnly,
+            4,
+            &ligature_subst(GID_ACUTE),
+        );
+
+        // NOT VACUOUS: all three fixtures really do carry a FeatureList this
+        // reader parses, so an empty answer below is a decision and not a
+        // parser that found nothing.
+        for (what, f) in [
+            ("required", &required),
+            ("unrequired", &unrequired),
+            ("required-on-marks", &required_on_marks),
+        ] {
+            let all = feature_tags(f, b"GSUB")
+                .unwrap_or_else(|e| panic!("the {what} fixture did not parse: {e}"))
+                .expect("the fixture has a GSUB table");
+            assert_eq!(
+                show(&all),
+                "ss20",
+                "the {what} fixture should advertise exactly one feature, `ss20`; if \
+                 the FeatureList is not being read the verdicts below are about a file \
+                 nobody looked at"
+            );
+        }
+
+        // THE FIX. `ss20` is in no defaults list and never will be, so the only
+        // thing that can put it here is the ScriptList walk.
+        assert_eq!(
+            show(&default_on_features(&required, b"GSUB").expect("it parses")),
+            "ss20",
+            "a feature named by the default LangSys's `requiredFeatureIndex` was not \
+             counted as default-on. harfrust applies it whatever tag it carries, so \
+             the monospace guard's `NEVER_IN_A_MONOSPACE_TEXT_FACE` filter would be \
+             run over a set the shaper's own required feature had been left out of."
+        );
+        assert_eq!(
+            show(&ascii_reachable_default_on(&required, b"GSUB").expect("it parses")),
+            "ss20",
+            "a LigatureSubst spelled `a` + `c` -> `A`, reachable only through the \
+             LangSys `requiredFeatureIndex`, was NOT reported. Both glyphs are \
+             printable ASCII and harfrust turns the required feature on \
+             unconditionally, so this collapses two columns of a sequence row into \
+             one advance and every click past it lands on the wrong base."
+        );
+
+        // THE NEGATIVE CONTROL, without which the two assertions above would be
+        // satisfied by a walk that reported `ss20` for any reason at all.
+        assert!(
+            default_on_features(&unrequired, b"GSUB")
+                .expect("it parses")
+                .is_empty(),
+            "`ss20` was reported as default-on for a face that neither lists it nor \
+             requires it. It is not in `SHAPER_DEFAULTS` and nothing else may put it \
+             in this answer."
+        );
+        assert!(
+            ascii_reachable_default_on(&unrequired, b"GSUB")
+                .expect("it parses")
+                .is_empty(),
+            "the reachability walk reported `ss20` for a face where no LangSys turns \
+             it on, so the positive result above says nothing about the required \
+             feature in particular"
+        );
+
+        // AND THE REQUIRED FEATURE'S LOOKUPS ARE WALKED, not waved through.
+        assert_eq!(
+            show(&default_on_features(&required_on_marks, b"GSUB").expect("it parses")),
+            "ss20",
+            "the mark-only fixture is still REQUIRED, so it is still default-on; it is \
+             the reachability walk below, not this, that has to tell the two apart"
+        );
+        assert!(
+            ascii_reachable_default_on(&required_on_marks, b"GSUB")
+                .expect("it parses")
+                .is_empty(),
+            "a required feature whose one rule needs a combining mark was reported as \
+             ASCII-reachable. `row_text` cannot emit one. This is over-reporting of \
+             the kind that would reject IBM Plex Mono, whose thirteen real `ccmp` \
+             ligature rules all have exactly this shape."
+        );
+    }
+
+    /// The GPOS pair- and cursive-positioning arm is read, not refused.
+    ///
+    /// PROVEN TO FAIL at c0b60b2 ONLY BY NOT EXISTING, and that is said plainly
+    /// rather than dressed up as a behavioural proof: the `(false, 2 | 3)` arm
+    /// is CORRECT at c0b60b2 and this test passes against it unchanged. What was
+    /// wrong there was the comment above it, which justified the shortcut with
+    /// "neither appears behind a default-on feature in any face this repository
+    /// ships" — false of pair positioning in three of them on the day it was
+    /// written — and so invited exactly one edit: deleting an arm described as
+    /// dead. The fix for that finding is prose, and prose cannot be pinned by an
+    /// assertion. This is the next best thing, and the thing the finding asked
+    /// for: the arm the comment called dead now has a check of its own that goes
+    /// red if it stops covering the case.
+    ///
+    /// IT IS SHOWN TO FAIL BY MUTATION INSTEAD. Delete the line
+    /// `(false, 2 | 3) => covers_ascii(t, at, 2, ascii),` at `sfnt.rs:802`, in
+    /// `subtable_reaches_ascii`. The `_ =>` catch-all then answers
+    /// `GPOS lookup type 2 is not one this reads`, both halves of this test go
+    /// red naming the arm, and — the thing worth noticing —
+    /// `the_proportional_face_ligates_and_that_is_recorded_not_denied` in
+    /// `main.rs` panics through its `.expect("it parses")` with a message about
+    /// an unreadable subtable rather than anything about kerning. Before this
+    /// fixture existed that misleading panic was the ONLY evidence the arm was
+    /// load-bearing. Run, not asserted, with the same standalone `rustc` harness
+    /// as the fixture above: pristine 4 passed / 0 failed; with the line deleted
+    /// 2 passed / 2 failed, this test naming the arm and the vendored-face
+    /// replay dying on an opaque `Err`. A narrower second mutation — `(false, 2
+    /// | 3)` to `(false, 2)`, dropping only the cursive half — reddens THIS TEST
+    /// AND NOTHING ELSE, because no face in the tree has a LookupType 3 at all.
+    ///
+    /// WHY THE SHORTCUT IS STILL RIGHT is argued where it belongs, on the arm
+    /// itself. What is asserted here is only that the arm runs, that it reads
+    /// the leading coverage rather than answering a constant, and that the two
+    /// facts the rewritten argument rests on — `kern` is a shaper default, and
+    /// `kern` is banned outright from a monospace text face — are true of the
+    /// constants this module actually exports.
+    #[test]
+    fn a_gpos_pair_and_cursive_position_on_ascii_is_read_rather_than_refused() {
+        let kerning = face(b"GPOS", b"kern", Reached::Listed, 2, &pair_pos(GID_A_LOWER));
+        let cursive = face(
+            b"GPOS",
+            b"curs",
+            Reached::Listed,
+            3,
+            &cursive_pos(GID_A_LOWER),
+        );
+        // The same two with their leading coverage on the combining acute, which
+        // no sequence row can spell.
+        let kerning_on_marks = face(b"GPOS", b"kern", Reached::Listed, 2, &pair_pos(GID_ACUTE));
+        let cursive_on_marks = face(
+            b"GPOS",
+            b"curs",
+            Reached::Listed,
+            3,
+            &cursive_pos(GID_ACUTE),
+        );
+
+        for (what, f, want) in [
+            ("PairPos (LookupType 2)", &kerning, "kern"),
+            ("CursivePos (LookupType 3)", &cursive, "curs"),
+        ] {
+            let live = ascii_reachable_default_on(f, b"GPOS").unwrap_or_else(|e| {
+                panic!(
+                    "the `(false, 2 | 3)` arm of `subtable_reaches_ascii` refused to \
+                     read a {what} subtable: {e}. That arm is the sole producer of the \
+                     `kern` verdict this module gives IBM Plex Sans, Inter SemiBold and \
+                     Ubuntu-Light; without it the guard cannot answer the question at \
+                     all about any face that kerns, and says so as an error about an \
+                     unreadable subtable rather than as anything about kerning."
+                )
+            });
+            assert_eq!(
+                show(&live),
+                want,
+                "a {what} lookup whose leading coverage holds a printable ASCII glyph \
+                 was not reported as reachable. Pair and cursive positioning both move \
+                 x, and the sequence grid rests on x = x0 + col * advance."
+            );
+        }
+
+        // NOT A CONSTANT: the same arm, the same lookup types, coverage that no
+        // sequence row can reach. Without this the assertions above would be
+        // satisfied by `Ok(true)` written in place of the coverage read.
+        for (what, f) in [
+            ("PairPos", &kerning_on_marks),
+            ("CursivePos", &cursive_on_marks),
+        ] {
+            assert!(
+                ascii_reachable_default_on(f, b"GPOS")
+                    .unwrap_or_else(|e| panic!("the mark-only {what} fixture did not parse: {e}"))
+                    .is_empty(),
+                "a {what} lookup covering only U+0301 COMBINING ACUTE was reported as \
+                 ASCII-reachable, so the arm is answering a constant rather than \
+                 reading its leading coverage"
+            );
+        }
+
+        // The two premises the arm's rewritten justification leans on, asserted
+        // rather than assumed — both are one edit away from silently ceasing to
+        // be true.
+        assert!(
+            SHAPER_DEFAULTS.contains(b"kern"),
+            "`kern` has left `SHAPER_DEFAULTS`. The argument on the `(false, 2 | 3)` \
+             arm turns on pair positioning being reached through a default-on feature; \
+             if it is not, that argument has to be rewritten rather than left standing."
+        );
+        assert!(
+            NEVER_IN_A_MONOSPACE_TEXT_FACE.contains(b"kern"),
+            "`kern` has left `NEVER_IN_A_MONOSPACE_TEXT_FACE`. Half the reason the \
+             leading-coverage shortcut is safe is that a monospace candidate \
+             advertising `kern` at all is rejected before the reachability walk is \
+             reached, so a ValueRecord width can never be the deciding fact for the \
+             face this guard exists to clear."
+        );
+    }
 }

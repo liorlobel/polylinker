@@ -245,7 +245,8 @@ EXPORT OPTIONS:
                                  (default single). Needs --journal, since the
                                  widths come from the preset, and cannot be
                                  combined with --mm, which sets the width itself
-    --check-contrast             measure every colour against WCAG 2.2 AA
+    --check-contrast             measure every colour against WCAG 2.2 AA, on
+                                 the white ground the figure itself carries
     --no-ruler                   omit the base-position ruler
     -o, --outdir <dir>           where to write (default: beside the input)
     --stdout                     write to stdout instead of files
@@ -1952,9 +1953,12 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
             let (b, d, f) = pl_draw::map_pdf(&mol, opts.clone());
             (b, d, Some(f))
         } else if as_png {
-            // White, matching the background `--check-contrast` audits against
-            // a few lines down. A transparent figure would make that audit a
-            // claim about a background the file does not have.
+            // White -- `pl_draw::PAPER` as bytes, which is the same ground the
+            // other three writers paint and the same one `--check-contrast`
+            // audits against a few lines down. A transparent figure would make
+            // that audit a claim about a background the file does not have.
+            // Bytes rather than the constant because `map_png_at` takes an RGB
+            // triple: a raster has no hex strings in it.
             //
             // REFUSED RATHER THAN ATTEMPTED when the canvas is past
             // `pl_draw::MAX_PIXELS`. Every band above is on one flag and the
@@ -1991,13 +1995,35 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
         // renderer can simply fix -- but an unreadable label is a defect in the
         // figure whoever authored the colour, and saying so is the only way it
         // gets noticed before print.
+        //
+        // `pl_draw::PAPER`, NOT A LITERAL `"#ffffff"`. The number this line
+        // computes is only worth as much as the agreement between the colour it
+        // audits against and the colour the writer above actually painted, and
+        // two spellings of one fact is how that agreement breaks. It had already
+        // broken once: until 2026-08-14 `pdf::pdf_at` painted nothing at all
+        // while this line certified its ink against white, so `--pdf
+        // --check-contrast` printed a pass about a background the file did not
+        // have. All four writers now take the ground from that constant, and so
+        // does this.
+        //
+        // And the passing line NAMES it. A bare `contrast ok (WCAG 2.2 AA)` is
+        // byte-identical for a figure painted white, a figure painted nothing
+        // and a figure painted something else -- so it certified the transparent
+        // PDF in exactly the words it certified the SVG, and no reader of either
+        // could tell which they had. `#ffffff` reached stdout only on a FAILING
+        // line, which is the one case where the reader can already see the
+        // colour.
         if a.has("check-contrast") {
             let (scene, _) = pl_draw::scene(&mol, opts.clone());
             let scale =
                 width_mm.map_or(1.0, |mm| pl_draw::page::Fit::to_width_mm(&scene, mm).scale);
-            let findings = pl_draw::contrast::audit(&scene, "#ffffff", scale);
+            let findings = pl_draw::contrast::audit(&scene, pl_draw::PAPER, scale);
             if findings.is_empty() {
-                eprintln!("pl: {}: contrast ok (WCAG 2.2 AA)", path.display());
+                eprintln!(
+                    "pl: {}: contrast ok on {} (WCAG 2.2 AA)",
+                    path.display(),
+                    pl_draw::PAPER
+                );
             }
             for f in findings.iter().take(12) {
                 eprintln!(
