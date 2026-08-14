@@ -11,7 +11,8 @@
 
     What it checks:
 
-      * exactly one top-level directory, named for the version and platform
+      * exactly one top-level directory, named for the version and platform,
+        and the manifest's own `platform:` line agrees with that name
       * SHA256SUMS.txt is inside, and EVERY file it lists is in the archive with
         the recorded hash -- computed from the archive's own bytes, not from
         whatever happens to be on disk beside it
@@ -24,6 +25,14 @@
         function of the contents
       * on a tar, that the three programs and the extension module carry mode
         0755 and that no build machine's uid, gid or username is recorded
+
+    ONE FILE MAY BE MISSING, ON ONE PLATFORM, AND ONLY IF THE MANIFEST SAYS SO.
+    See `$WaivableOmissions` below. Nothing here is skipped quietly: the waiver
+    has to be declared in the manifest header, it is refused on every platform
+    but the one it names, it is refused if the file turns up in the archive
+    anyway, and it is printed on the way out whether the archive passes or
+    fails. A reader of the output can always tell which of the two shapes the
+    archive has.
 
     It reads both containers itself rather than shelling out to `tar` or
     `Expand-Archive`, because it has to run identically on three runners and on
@@ -62,6 +71,42 @@ param(
 $ErrorActionPreference = 'Stop'
 $fail = @()
 function Bad($msg) { $script:fail += $msg }
+
+# WHAT AN ARCHIVE IS ALLOWED TO BE SHORT OF, AND WHERE.
+#
+# The table is deliberately one row long, and the row is deliberately keyed on
+# the platform rather than on the file. An entry here is not "this file is
+# optional"; it is "this exact file, on this exact platform, may be absent IF
+# the manifest declares the absence and gives a reason that names the platform".
+# Every other file on every platform is required as it always was, and the same
+# file on windows-x64 is still a hard failure.
+#
+# `polylinker.pyd` on `windows-arm64` is the row, and the reason it exists is a
+# question nobody could answer when ARM64 support was written: `crates/pl-py`
+# links against CPython through pyo3, so the extension module needs an ARM64
+# CPython on the build machine to link against, and whether GitHub's
+# `windows-11-arm` image has one WAS NOT ESTABLISHED. It could not be -- the
+# ARM64 MSVC linker is not installed on the machine this was written on, so no
+# ARM64 binary of any kind had ever been produced there. Both answers therefore
+# had to be handled: if the runner can build it, no waiver is declared and this
+# table is never consulted; if it cannot, the archive is one file short and says
+# so in the manifest a downloader already reads.
+#
+# THE THIRD OUTCOME IS THE ONE THIS SHAPE EXISTS TO PREVENT. Making the
+# requirement conditional on the platform alone -- `if not arm64, skip` -- would
+# have produced a check that passes over an ARM64 archive without looking at
+# anything, which is the defect this project has now shipped fixes for nine
+# times. A waiver that has to be written down, that is refused when it is
+# written down wrongly, and that is printed either way, can still fail. A silent
+# `if` cannot.
+$WaivableOmissions = @{ 'polylinker.pyd' = @('windows-arm64') }
+
+# Filled from the manifest header if it declares any. Initialised here rather
+# than inside the manifest block below, because the tar section reads it and an
+# archive with no manifest at all must not turn a reported failure into a
+# property lookup on $null.
+$omitted = @{}
+$rootPlatform = ''
 
 if (-not (Test-Path -LiteralPath $Archive)) { throw "no such archive: $Archive" }
 $Archive = (Resolve-Path -LiteralPath $Archive).Path
@@ -171,9 +216,20 @@ if ($roots.Count -ne 1) { Bad "the archive has $($roots.Count) top-level entries
 $root = $roots[0]
 $expectedRoot = [System.IO.Path]::GetFileName($Archive) -replace '\.tar\.gz$|\.zip$', ''
 if ($root -ne $expectedRoot) { Bad "the archive is named for '$expectedRoot' but unpacks into '$root'" }
-if ($root -notmatch '^polylinker-\d+\.\d+\.\d+-(windows|linux|macos)-\S+$') {
+# CAPTURED, not merely matched. The platform label is what decides which files
+# are required, which read-me is banned, and whether an omission is waivable at
+# all, and it is read from the directory the archive actually unpacks into --
+# the string the recipient sees. It is compared with the manifest's own
+# `platform:` line below, so a mislabelled archive is caught by the two halves
+# disagreeing rather than by both being wrong in the same direction.
+if ($root -match '^polylinker-\d+\.\d+\.\d+-((windows|linux|macos)-\S+)$') {
+    $rootPlatform = $Matches[1]
+} else {
     Bad "'$root' is not a <name>-<version>-<platform> directory"
 }
+# For messages. Never empty, so a complaint about a malformed root still names
+# something the reader can find on disk.
+$platformName = if ($rootPlatform) { $rootPlatform } else { [System.IO.Path]::GetFileName($Archive) }
 
 $rel = @{}
 foreach ($f in $files) {
@@ -202,6 +258,41 @@ if (-not $rel.ContainsKey('SHA256SUMS.txt')) {
     if ($sep -lt 4) { Bad 'the manifest has no header' }
     foreach ($k in 'version:', 'platform:', 'commit:', 'rustc:') {
         if (-not ($lines[0..$sep] | Where-Object { $_.StartsWith($k) })) { Bad "the manifest header has no '$k' line" }
+    }
+
+    $header = @($lines[0..$sep])
+
+    # THE TWO PLACES THE PLATFORM IS WRITTEN MUST AGREE.
+    #
+    # `tools/release.ps1` puts one label into the archive's name and the same
+    # label into this header, from one variable, so they cannot differ by
+    # accident today. They can differ by EDIT -- a file renamed by hand, a
+    # manifest patched, an archive repacked -- and the two readers that act on
+    # the platform read different ones: this script takes it from the directory
+    # name, and anything parsing the manifest takes it from here. Two sources
+    # for one fact, unchecked, is the shape every drift in this repository has
+    # had.
+    $manifestPlatform = ''
+    foreach ($l in $header) { if ($l -match '^platform:\s*(\S+)\s*$') { $manifestPlatform = $Matches[1] } }
+    if ($manifestPlatform -and $rootPlatform -and $manifestPlatform -ne $rootPlatform) {
+        Bad ("the archive unpacks into a directory named for '$rootPlatform' but its manifest says " +
+             "'platform: $manifestPlatform'. One of the two is a lie to whoever downloaded this, and " +
+             "pl update selects a download by exactly this string.")
+    }
+
+    # THE DECLARED OMISSIONS. `omitted: <file> -- <reason>`, one per line.
+    #
+    # A malformed line is a failure, not an ignored line. The alternative is a
+    # waiver that silently does not parse: the file would then be reported
+    # missing with no explanation, which is at least loud -- but a typo in the
+    # other direction, a line this reader half-understood, would be worse. So
+    # anything starting `omitted:` either parses or fails here.
+    foreach ($l in $header) {
+        if ($l -match '^omitted:\s*(\S+)\s+--\s+(\S.*?)\s*$') {
+            $omitted[$Matches[1]] = $Matches[2]
+        } elseif ($l -match '^omitted:') {
+            Bad "the manifest has an 'omitted:' line this checker cannot read: '$l'. The form is 'omitted: <file> -- <reason>'."
+        }
     }
 
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -265,8 +356,56 @@ if (-not $rel.ContainsKey('SHA256SUMS.txt')) {
         # block that this is deliberate and not an oversight.
         if ($isWinArchive) { 'Install-Polylinker.ps1', 'Install.cmd', 'polylinker.ico' }
     )
+    # THE REQUIREMENT IS UNCHANGED. A file that is required and absent is a
+    # failure unless the manifest declared its absence, and the declaration is
+    # then judged on its own terms in the block below -- so a bogus declaration
+    # does not buy the archive anything, it just moves where it fails.
     foreach ($r in $required) {
-        if ($listed -notcontains $r) { Bad "$r is required in a $(if ($isWinArchive) { 'Windows' } elseif ($isMacArchive) { 'macOS' } else { 'Linux' }) archive and is not in the manifest" }
+        if ($listed -contains $r) { continue }
+        if ($omitted.ContainsKey($r)) { continue }
+        Bad "$r is required in a $platformName archive and is not in the manifest"
+    }
+
+    # EVERY DECLARED OMISSION, HELD TO $WaivableOmissions.
+    #
+    # Five ways this can fail, which is the point of writing it out rather than
+    # skipping a requirement behind an `if`: a file nothing may ever omit, the
+    # right file on the wrong platform, a declaration contradicted by the
+    # archive's own contents, a declaration of something this platform never
+    # required in the first place, and a reason that does not name the platform
+    # it is excusing. The last one is not pedantry -- a reason that does not say
+    # which platform is short of the file is a sentence a reader cannot act on,
+    # and `tools/release.ps1` refuses to write one for the same reason.
+    $waived = @()
+    foreach ($name in @($omitted.Keys)) {
+        $reason = $omitted[$name]
+        if (-not $WaivableOmissions.ContainsKey($name)) {
+            Bad ("the manifest declares '$name' omitted. No release may omit that file on any " +
+                 "platform; only $(($WaivableOmissions.Keys | Sort-Object) -join ', ') has a waiver at all.")
+            continue
+        }
+        $where = $WaivableOmissions[$name]
+        if ($where -notcontains $rootPlatform) {
+            Bad ("the manifest declares '$name' omitted, and that is waivable only on " +
+                 "$($where -join ', ') -- not on '$platformName'.")
+            continue
+        }
+        if ($listed -contains $name) {
+            Bad ("the manifest declares '$name' omitted and also lists it. One of the two is wrong, " +
+                 "and an archive that misdescribes its own contents cannot be checked against itself.")
+            continue
+        }
+        if ($required -notcontains $name) {
+            Bad ("the manifest declares '$name' omitted, but a $platformName archive never required " +
+                 "it, so the declaration excuses nothing and describes nothing.")
+            continue
+        }
+        if ($reason -notmatch [regex]::Escape($rootPlatform)) {
+            Bad ("the manifest's reason for omitting '$name' does not name the platform it applies " +
+                 "to: '$reason' does not contain '$rootPlatform'.")
+            continue
+        }
+        $waived += [pscustomobject]@{ Name = $name; Reason = $reason }
     }
     # And the read-mes for the other platforms must NOT be here.
     foreach ($w in 'README-WINDOWS.txt', 'README-MACOS.txt', 'README-LINUX.txt') {
@@ -278,7 +417,16 @@ if (-not $rel.ContainsKey('SHA256SUMS.txt')) {
     # The floor, derived when the caller did not set one. See the comment on the
     # parameter: this is the weak half, kept only because an empty archive
     # agrees perfectly with an empty manifest.
-    $floor = if ($MinimumFiles -gt 0) { $MinimumFiles } else { $required.Count }
+    #
+    # MINUS THE WAIVED FILES, and only the ones that got past every test above.
+    # Without the subtraction a legitimately waived archive fails the floor as
+    # well, which would report a count when the cause is a declared omission --
+    # and the temptation then is to lower the number by hand, which is exactly
+    # how a floor stops being one. `$waived` cannot be inflated to buy slack: a
+    # declaration that is not in $WaivableOmissions, is on the wrong platform,
+    # is contradicted by the archive, or has a reason that does not name the
+    # platform never reaches it.
+    $floor = if ($MinimumFiles -gt 0) { $MinimumFiles } else { $required.Count - $waived.Count }
     if ($listed.Count -lt $floor) {
         Bad "the manifest lists $($listed.Count) file(s); at least $floor are expected"
     }
@@ -323,7 +471,14 @@ if ($isTar) {
     # The programs. Named by stem, because the tar may have been produced on
     # Windows by the gate, where they carry .exe.
     $progs = @($rel.Keys | Where-Object { $_ -match '^(pl|pl-mcp|polylinker)(\.exe)?$|^polylinker\.(so|pyd)$' })
-    if ($progs.Count -lt 4) { Bad "found $($progs.Count) program(s) in the archive; expected 4" }
+    # FOUR, MINUS ANY EXTENSION MODULE THE MANIFEST DECLARED ABSENT. The three
+    # executables are never waivable, so this number can only ever be 4 or 3,
+    # and it is 3 only for an archive that said in its own header why. This is
+    # reachable on Windows: `tools/ci.ps1` runs `release.ps1 -ArchiveFormat
+    # tar.gz` on the gate machine on purpose, so a Windows tar is checked here
+    # even though no Windows release ships one.
+    $wantProgs = 4 - @($omitted.Keys | Where-Object { $_ -eq 'polylinker.pyd' -or $_ -eq 'polylinker.so' }).Count
+    if ($progs.Count -lt $wantProgs) { Bad "found $($progs.Count) program(s) in the archive; expected $wantProgs" }
     foreach ($p in $progs) {
         if ($rel[$p].Mode -ne '755') {
             Bad "$p has mode 0$($rel[$p].Mode); it would extract without the executable bit and the user would have to chmod it"
@@ -334,11 +489,33 @@ if ($isTar) {
     }
 }
 
+# WHAT WAS DECLARED ABSENT, PRINTED BEFORE THE VERDICT AND REGARDLESS OF IT.
+#
+# Above the FAIL/ok split on purpose. An archive that is short of a file is a
+# fact about the download whether or not the rest of it checked out, and it is
+# printed even when the run fails so that a reader debugging a red gate is not
+# looking at a smaller archive with no explanation for why.
+foreach ($w in $omitted.Keys) {
+    Write-Host ("NOTE  {0} is NOT IN {1}. Declared reason: {2}" -f
+        $w, [System.IO.Path]::GetFileName($Archive), $omitted[$w]) -ForegroundColor Yellow
+}
+
 if ($fail) {
     Write-Host "FAIL  $([System.IO.Path]::GetFileName($Archive))" -ForegroundColor Red
     $fail | ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
     exit 1
 }
-Write-Host ("ok    {0}: {1} file(s), {2} licence text(s), manifest verified against the archive's own bytes" -f
-    [System.IO.Path]::GetFileName($Archive), $rel.Count, @($rel.Keys | Where-Object { $_ -like 'licences/*' }).Count) -ForegroundColor Green
+# The extension module is named in the success line, not merely absent from the
+# failures. "It did not complain" and "it looked and found it" read the same in
+# a log, and this is the one member of the required set that a platform is now
+# allowed to be without -- so the line says which of the two happened rather
+# than leaving a reader to infer it from a file count.
+$pyState = if ($omitted.ContainsKey('polylinker.pyd') -or $omitted.ContainsKey('polylinker.so')) {
+    'the Python extension module ABSENT BY DECLARATION'
+} else {
+    'the Python extension module present'
+}
+Write-Host ("ok    {0} [{1}]: {2} file(s), {3} licence text(s), {4}, manifest verified against the archive's own bytes" -f
+    [System.IO.Path]::GetFileName($Archive), $platformName, $rel.Count,
+    @($rel.Keys | Where-Object { $_ -like 'licences/*' }).Count, $pyState) -ForegroundColor Green
 exit 0

@@ -25,7 +25,78 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **A fourth platform, `windows-arm64`, shipping both a zip and an MSI:**
+  `polylinker-<version>-windows-arm64.zip` and
+  `polylinker-<version>-windows-arm64.msi`, built and tested natively on
+  GitHub's `windows-11-arm` runners, which are free for public repositories as
+  this one is. Both files and not the zip alone — the `.msi` is the file a
+  Windows reader is told to take first, and an architecture that gets half of
+  what the other one gets reads to a user as an architecture where the software
+  does not really work.
+  It is also the file `pl update` hands over on Windows, so a zip-only ARM64
+  release would have had to keep declining to update.
+
+  **What this entry is careful not to say.** It does not say that Windows ARM64
+  is supported, verified or tested beyond one thing: a CI leg. **No person has
+  ever run a Polylinker binary on Windows ARM64** — not the editor's window, not
+  `pl`, not the installer — and nobody here can. `aarch64-pc-windows-msvc` is
+  installed on the maintainer's machine and genuinely compiles this workspace's
+  library crates; every *binary* crate then stops at
+  `linker 'link.exe' not found`, because a rustup target is a standard library
+  and not a toolchain, and the ARM64 linker is a separate Visual Studio
+  component. Measured on that machine rather than assumed: its MSVC install
+  offers `x64` and `x86` target linkers under `VC\Tools\MSVC\<ver>\bin\Hostx64\`
+  and no `arm64` one. That is also why cross-compiling was refused as the
+  shipping path — a cross-built artifact no machine of that architecture has
+  executed is a guess with a checksum on it — and why there is no local
+  rehearsal of an ARM64 release and no local reproduction of an ARM64 bug
+  report.
+
+  Consequently every timing, every corpus figure and every "built and verified
+  natively" sentence in [`README.md`](README.md) is an x86-64 measurement.
+  Those sentences now name the architecture, which they did not before this
+  release, because the moment a fourth platform appeared they stopped being
+  about all of them.
+
+  **What the ARM64 leg checks and what it leaves unchecked is a table in
+  [`docs/RELEASING.md`](docs/RELEASING.md)**, under *Windows on ARM64*, and not
+  a sentence here. It is a real difference from what `windows-x64` gets on every
+  commit, and a changelog bullet is exactly the place such a difference gets
+  rounded off to "it works now". The short form: the ARM64 leg lives in
+  `ci.yml`'s `test` job and runs `fmt`, `clippy` and the whole Rust test suite
+  natively on every commit; it does **not** run `tools/ci.ps1`, so the gate this
+  project counts the steps of has three legs and none of them is this
+  architecture, and the archive and installer are built, verified, installed and
+  uninstalled only when a release is cut.
+
+  **Two differences a user can hit, stated here rather than left in the
+  table.** The ARM64 archive is permitted to ship **without the Python
+  extension module** — `crates/pl-py` links against CPython, Windows resolves
+  those symbols at link time, and whether the ARM64 runner carries an ARM64
+  CPython was never established from a machine that cannot link ARM64 at all.
+  The permission is not a silent `if`: `tools/release.ps1` takes the omission
+  only for `windows-arm64`, only with a reason naming that label, and only if no
+  `.pyd` was in fact built; it writes an `omitted:` line into `SHA256SUMS.txt`,
+  and `tools/check-archive.ps1` holds the archive to that line and prints the
+  waiver whether the archive passes or fails. And the ARM64 binaries **do not
+  carry the static C runtime the x86-64 ones carry**: `.cargo/config.toml`
+  scopes `-C target-feature=+crt-static` to `x86_64-pc-windows-msvc` and
+  declares nothing for `aarch64-pc-windows-msvc`, so they import
+  `VCRUNTIME140.dll` — not part of Windows, redistributable needs administrator
+  rights, and the exact dependency that config file exists to remove for the
+  user `docs/PLAN.md:120` describes. The step that asserts its absence lives in
+  the gate, and this leg does not run the gate.
+
+  One behaviour change follows from the artifact existing. `pl update` on ARM64
+  used to **decline**, and correctly:
+  [`crates/pl-update/src/flow.rs`](crates/pl-update/src/flow.rs) maps a platform
+  to an artifact through a `#[cfg]` cascade with an explicit `None` fallback, so
+  a platform the release workflow does not build gets a refusal rather than an
+  x86-64 `.msi`. It failed closed. Adding the ARM64 arm and publishing the ARM64
+  file are therefore one change and not two: an arm naming a file no release
+  carries converts that clean refusal into a 404.
 
 ## [0.10.3] - 2026-08-14
 

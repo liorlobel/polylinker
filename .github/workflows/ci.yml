@@ -13,8 +13,11 @@ name: CI
 # HOW THE TWO GATE FILES DIVIDE THE WORK, since 2026-08-09 and revised
 # 2026-08-10.
 #
-# `tools/ci.ps1` is 73 steps and `docs/RELEASING.md` names it as the thing to
-# run before tagging. Until 2026-08-09 NO WORKFLOW INVOKED IT. It appeared in
+# `tools/ci.ps1` is 75 steps and `docs/RELEASING.md` names it as the thing to
+# run before tagging. (It said 73 here and below until the ARM64 port; 75 is
+# what `Step '` at column 0 counts to in the file today, and the two places this
+# workflow repeats the number are exactly why a repeated number goes stale.)
+# Until 2026-08-09 NO WORKFLOW INVOKED IT. It appeared in
 # this file six times and every one of them was on a comment line. It had been
 # failing on a clean tree since v0.1.2 and six releases were tagged with it red,
 # because the only machine running it was the author's and the only evidence
@@ -33,14 +36,16 @@ name: CI
 #   * `reconcile` compares the three legs. It is the only place a step that
 #     skipped on all three can be seen, and the only place a step deleted from
 #     one leg at file level can be seen.
-#   * `test` runs on ubuntu-latest and macos-latest, and is NOT redundant with
-#     the gate now that the gate runs there too: every cargo invocation in it
-#     passes `--locked`, and no cargo invocation in the gate does, so a
-#     rewritten lockfile is a red build here and nowhere else. It also runs
-#     `pl-draw/tests/memory.rs` and `pl-features/tests/schema_pin.rs`, which no
-#     step in the gate runs. Its windows-latest leg WAS deleted in 2026-08-09,
-#     which cost `--locked` on Windows; lock drift is a property of the tree and
-#     not of the operating system, so two platforms is enough for it.
+#   * `test` runs on ubuntu-latest, macos-latest and windows-11-arm, and is NOT
+#     redundant with the gate now that the gate runs there too: every cargo
+#     invocation in it passes `--locked`, and no cargo invocation in the gate
+#     does, so a rewritten lockfile is a red build here and nowhere else. It
+#     also runs `pl-draw/tests/memory.rs` and `pl-features/tests/schema_pin.rs`,
+#     which no step in the gate runs. Its windows-latest leg WAS deleted in
+#     2026-08-09, which cost `--locked` on Windows; lock drift is a property of
+#     the tree and not of the operating system, so two platforms was enough for
+#     THAT. Its windows-11-arm leg is here for an entirely different reason and
+#     is the subject of the section below.
 #   * `msrv`, `wasm` and `oracles` stay. Each holds something the gate does not:
 #     the toolchain floor, the wasm module driven against a Linux `pl`, and four
 #     checks with no twin in the gate at all — the taint gate's FETCHING half,
@@ -51,6 +56,98 @@ name: CI
 #     of `oracles` is a second run of the differential checks under a different
 #     Python and a different rendering stack, which for a rasteriser is coverage
 #     and not repetition.
+#
+# ---------------------------------------------------------------------------
+# WHERE ARM64 IS, WHY IT IS THERE, AND EXACTLY WHAT IT DOES NOT COVER.
+#
+# Windows on ARM became a shipped platform with v0.10.4. It is built and tested
+# NATIVELY, on GitHub's `windows-11-arm` image, which is free for public
+# repositories and this one is public. Nothing cross-compiles: rustc will build
+# `aarch64-pc-windows-msvc` LIBRARY crates from an x64 Windows machine, but
+# every binary in this workspace fails there with "linker `link.exe` not found"
+# unless the ARM64 MSVC linker is installed, so no contributor can produce or
+# run an ARM64 binary locally and CI is the only place this architecture is ever
+# executed. That makes the honesty of the next two lists load-bearing rather
+# than pedantic: there is no developer machine anywhere backing them up.
+#
+# IT IS IN `test`, NOT IN `gate`, and that is a decision with three reasons.
+#
+#   1. `test` is what proves the code RUNS on the architecture. The whole point
+#      of a native leg is `cargo test --workspace --lib --bins`, plus the seven
+#      integration suites below, executing as aarch64 machine code. The gate
+#      contains a great deal that is not that.
+#   2. A fourth `gate` leg would BREAK `reconcile` and could not be fixed from
+#      this file. `tools/reconcile-ledgers.ps1` requires exactly three ledgers
+#      (it exits on any other count) and its rule X1a requires the set of
+#      platforms they declare to be exactly the three it knows -- and rejects a
+#      duplicate in terms, "a duplicate is two runs of one platform standing in
+#      for three". Two Windows legs are that duplicate unless `tools/ci.ps1`'s
+#      platform stamp learns to distinguish architectures. Both files would have
+#      to change together, and until they did, every push would be red for a
+#      reason that is not about the tree.
+#   3. A `gate` leg on ARM64 could PASS WITHOUT BUILDING THE MSI, which is the
+#      failure this repository has shipped nine fixes for, arriving through the
+#      front door. The `windows-11-arm` image does not carry a WiX toolset, and
+#      the gate's two MSI steps are written to skip themselves when `wix` is
+#      absent rather than fail -- correctly, for a contributor without a .NET
+#      SDK. `-ExpectedSkips` would accept that skip: its reason is declared by
+#      the step's own precondition (L1), it is not a platform reason so there is
+#      nothing for L2 to disagree with, and it is not a corpus skip so L3's set
+#      equality never sees it. The reconciler's X2 would accept it too, because
+#      the step still ran on the x64 leg. So the ARM64 leg would print GATE
+#      PASSED having never built or installed the installer this platform is
+#      shipping, and no rule anywhere would say so. The packaging steps added to
+#      `test` instead are plain unconditional `run:` lines with no skip
+#      vocabulary in them at all: no WiX is a red step, full stop.
+#
+# WHAT THE ARM64 LEG ACTUALLY RUNS, as a list, because prose about coverage is
+# how coverage claims go stale:
+#
+#     cargo fmt --all --check
+#     cargo clippy --workspace --all-targets --locked
+#     cargo test --workspace --lib --bins --locked
+#     cargo build --workspace --release --locked
+#     pl-fileio --tests, pl-features --test corpus, --test schema_pin,
+#     pl-draw --test agreement zstream pngfile glyphs render memory,
+#     pl-design --tests, pl-update (whole crate), pl --test cli
+#     tools/release.ps1 -> tools/check-archive.ps1
+#     tools/build-msi.ps1 -> tools/check-msi.ps1, per-user AND per-machine
+#
+# WHAT IT DOES NOT RUN. Every one of these runs on windows-latest and on NO
+# ARM64 machine anywhere, and a sentence in the README that does not account for
+# them is a false sentence:
+#
+#   * `tools/ci.ps1` as a list -- 75 steps, its ledger, and the whole skip
+#     discipline. There is no ARM64 ledger, so `reconcile` says nothing about
+#     this platform.
+#   * 'no C runtime redistributable is needed', the `dumpbin /dependents` step.
+#     THIS IS THE MOST IMPORTANT ABSENCE AND IT IS AN OPEN HOLE, not a shrug:
+#     `.cargo/config.toml` scopes `-C target-feature=+crt-static` to
+#     `[target.x86_64-pc-windows-msvc]` and declares nothing for
+#     `aarch64-pc-windows-msvc`, so ARM64 binaries link the DYNAMIC C runtime
+#     and import VCRUNTIME140.dll -- the exact dependency that config file
+#     exists to remove, on behalf of the persona in docs/PLAN.md:120 who cannot
+#     install a redistributable. Until that block is added, the ARM64 download
+#     does not carry the property the x64 download is checked for, and nothing
+#     in CI reports it.
+#   * the PE assertions: the icon and version resource in the built binaries.
+#   * the 8.3 short-name alias case.
+#   * the differential oracles -- SEGUID, zlib, Pillow, fontTools, resvg, the
+#     SciPy gel spline, the PDF/SVG comparison, the chromatogram checks. Those
+#     live in `gate` and in `oracles`, and `oracles` is ubuntu-latest only, so
+#     they are not "missing on ARM64" so much as "on one platform, which is not
+#     this one".
+#   * the wasm32 build, the wasm self-checks and the pl-index purity build.
+#   * the TypeScript typecheck and the renderer-agreement fixture regeneration.
+#   * the release-workflow YAML checks.
+#   * `msrv`, `wasm` and `oracles` as jobs. All three are ubuntu-latest by
+#     design and always have been; none of them is a per-architecture claim.
+#
+# So the true sentence about ARM64, in the shape a user should read it: the code
+# is compiled and its test suite is run on real Windows-on-ARM hardware, and the
+# zip and MSI are built, installed, checked and uninstalled there. The oracles
+# and the artefact-property checks that the x64 build gets are not run on it.
+# ---------------------------------------------------------------------------
 #
 # WHAT THE MATRIX MUST NOT COST, stated up front because it is the whole risk:
 # the Windows leg is what has stood between a mistake and a published release,
@@ -145,10 +242,20 @@ jobs:
   # strong one that runs in one. `fail-fast: false`, so a Linux failure does not
   # cancel Windows and hide what it would have said.
   #
-  # 73 steps. Five skip everywhere for want of a corpus
+  # 75 steps. Five skip everywhere for want of a corpus
   # (`.github/ci-expected-skips.txt`); seven more skip off Windows and say why.
   # The `reconcile` job below is what checks the three legs against each other,
   # and it is the only place a step that skipped on ALL THREE can be seen.
+  #
+  # STILL THREE LEGS AFTER THE ARM64 PORT, AND THAT IS DELIBERATE. windows-11-arm
+  # is not here; it is a leg of `test` below. The three reasons are set out in
+  # this file's header under "WHERE ARM64 IS" -- the short form is that
+  # `tools/reconcile-ledgers.ps1` accepts exactly three ledgers and rejects two
+  # legs claiming one platform, and that the gate's MSI steps are allowed to
+  # skip when WiX is absent, which on the ARM image would mean a green gate that
+  # never built the installer that platform ships. `windows-latest` here is
+  # therefore still an x64 claim and only an x64 claim. Nothing in this job says
+  # anything about aarch64.
   gate:
     name: the gate (tools/ci.ps1) / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -430,10 +537,30 @@ jobs:
   test:
     name: test / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Safe here, and this is the job that carries the deny across `cargo build`
-    # and `cargo test` rather than only across clippy. Neither runner in this
-    # matrix is Windows -- windows-latest was removed in favour of `gate` -- so
-    # there is no `[target.x86_64-pc-windows-msvc]` block for it to replace.
+    # This is the job that carries the deny across `cargo build` and `cargo
+    # test` rather than only across clippy.
+    #
+    # THE SENTENCE HERE USED TO BE "Neither runner in this matrix is Windows",
+    # AND IT IS NO LONGER TRUE. `windows-11-arm` joined this matrix with the
+    # ARM64 port, so the trap documented in this file's `env:` block -- cargo
+    # REPLACES `[target.<triple>] rustflags` from .cargo/config.toml with a
+    # `RUSTFLAGS` environment variable rather than merging them -- is live in
+    # this job again for the first time since 2026-08-09.
+    #
+    # It costs nothing TODAY, and the reason is narrow and worth writing down
+    # rather than trusting: .cargo/config.toml declares rustflags for exactly
+    # one triple, `x86_64-pc-windows-msvc`, and that triple is not in this
+    # matrix. `aarch64-pc-windows-msvc` has no block, so there is nothing on the
+    # ARM64 leg for this variable to discard.
+    #
+    # That is a statement about the current contents of another file, which is
+    # the weakest kind of safety there is -- so it is CHECKED rather than
+    # asserted, by 'RUSTFLAGS is not silently discarding .cargo/config.toml'
+    # below. The day somebody adds the `[target.aarch64-pc-windows-msvc]`
+    # crt-static block that the ARM64 download needs, this job goes red and says
+    # what to do about it, instead of quietly building an ARM64 binary that
+    # imports VCRUNTIME140.dll while the step that would have caught it lives in
+    # a gate this leg does not run.
     env:
       RUSTFLAGS: -D warnings
     strategy:
@@ -447,7 +574,21 @@ jobs:
         # `pl-features/tests/schema_pin.rs`, none of which any step in the gate
         # carries. See the division set out in this file's header, including
         # what dropping the Windows leg cost.
-        os: [ubuntu-latest, macos-latest]
+        #
+        # windows-11-arm IS PRESENT, and it is not a reversal of that decision.
+        # windows-latest is absent because the gate covers it; the gate covers
+        # NOTHING on aarch64, so for that architecture this job is not the
+        # smaller of two lists, it is the only list. It is also the only place
+        # in this repository where ARM64 code is executed at all -- see "WHERE
+        # ARM64 IS" in the header for the three-reason justification and for the
+        # explicit list of what this leg does NOT cover.
+        #
+        # Free for public repositories, which this one is. If the label ever
+        # stops resolving, the job cannot report success: `needs`-less as it is,
+        # a job that never runs is not a green check on the pull request. The
+        # precise presentation -- immediate error or a job that queues until it
+        # times out -- is not verified here and the first run will show it.
+        os: [ubuntu-latest, macos-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v4
 
@@ -456,6 +597,84 @@ jobs:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      # THE ONE WAY THIS JOB'S `env:` CAN GO WRONG, CHECKED ON THE LEG WHERE IT
+      # CAN GO WRONG.
+      #
+      # `RUSTFLAGS: -D warnings` at job level replaces, rather than merges with,
+      # any `[target.<triple>] rustflags` in .cargo/config.toml -- measured, and
+      # recorded in this file's `env:` block, where setting it workflow-wide
+      # silently removed `-C target-feature=+crt-static` from the Windows `gate`
+      # job and put a VC++ redistributable dependency back into binaries built
+      # there. Nothing about the program behaves differently when that happens;
+      # the failure appears only on a locked-down machine nobody here owns.
+      #
+      # WHY THIS EXISTS AS A STEP RATHER THAN A COMMENT: the ARM64 download
+      # NEEDS a `[target.aarch64-pc-windows-msvc]` block with the same
+      # crt-static flag -- .cargo/config.toml does not have one yet, so ARM64
+      # binaries currently link the dynamic CRT -- and the moment somebody adds
+      # it, this job's `env:` would throw it away again. The gate step that
+      # catches exactly this, 'no C runtime redistributable is needed', runs
+      # `dumpbin /dependents` and does NOT run on this leg. So the fix and the
+      # regression would land in the same commit, on a platform nobody can build
+      # locally, with no check between them.
+      #
+      # HOW IT FAILS, both directions:
+      #   * add rustflags for the host triple to .cargo/config.toml while this
+      #     job sets RUSTFLAGS -> red, naming the discarded flags.
+      #   * edit .cargo/config.toml so the parser below matches nothing -> red,
+      #     because a sweep that found no `[target.` block at all has checked
+      #     nothing and must not report clean. There is one such block in the
+      #     file today (x86_64-pc-windows-msvc) and this leg is not that triple,
+      #     which is exactly why the vacuity guard is needed: without it the step
+      #     would pass on a file it had failed to read.
+      - name: RUSTFLAGS is not silently discarding .cargo/config.toml
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cfg = '.cargo/config.toml'
+          if (-not (Test-Path -LiteralPath $cfg)) { throw "there is no $cfg, so this step read nothing" }
+
+          # A deliberately small parser: `[target.<triple>]` headers and the
+          # `rustflags = [...]` line under each. It does not need to understand
+          # TOML, it needs to notice a triple gaining flags.
+          $blocks = @{}
+          $current = $null
+          foreach ($line in (Get-Content -LiteralPath $cfg)) {
+              if ($line -match '^\s*\[target\.([^\]]+)\]') { $current = $Matches[1]; continue }
+              elseif ($line -match '^\s*\[')               { $current = $null; continue }
+              if ($current -and $line -match '^\s*rustflags\s*=\s*(.+)$') { $blocks[$current] = $Matches[1].Trim() }
+          }
+          if ($blocks.Count -eq 0) {
+              throw ("no [target.<triple>] rustflags were found in $cfg. That file has carried a " +
+                     'crt-static block for x86_64-pc-windows-msvc since 2026-08-05, so finding none ' +
+                     'means this parser has stopped matching and the check below would pass on anything.')
+          }
+
+          # Read rather than hard-coded: a triple typed into this file would be
+          # a second copy of a fact rustc already knows, and it is the fact the
+          # comparison turns on.
+          $hostLine = @(rustc -vV | Select-String -Pattern '^host:\s*(\S+)')
+          if ($hostLine.Count -ne 1) {
+              throw "rustc -vV printed $($hostLine.Count) host: lines; this step cannot say which triple it is checking"
+          }
+          $host_triple = $hostLine[0].Matches[0].Groups[1].Value
+          Write-Host "host triple: $host_triple"
+          Write-Host "$cfg declares rustflags for: $($blocks.Keys -join ', ')"
+
+          if ($blocks.ContainsKey($host_triple)) {
+              if ($env:RUSTFLAGS) {
+                  throw ("$cfg declares rustflags for $host_triple -- $($blocks[$host_triple]) -- and this job " +
+                         "sets RUSTFLAGS='$env:RUSTFLAGS'. Cargo REPLACES the config's target rustflags with the " +
+                         'environment variable rather than merging them, so those flags are being discarded here ' +
+                         'and this leg is not building what release.yml builds. Move the deny off this job (clippy ' +
+                         "is given -D warnings on its own command line and denies rustc's lints too), or fold the " +
+                         'config flags into the value.')
+              }
+              Write-Host "RUSTFLAGS is unset, so $cfg's flags for $host_triple apply"
+          } else {
+              Write-Host "$cfg declares nothing for $host_triple, so RUSTFLAGS discards nothing on this leg"
+          }
 
       # eframe needs system libraries on Linux; macOS ships its own. The `if`
       # stays rather than becoming unconditional: this matrix has had three
@@ -641,6 +860,157 @@ jobs:
       # tests write only under `std::env::temp_dir()`.
       - name: The pl binary, from the outside
         run: cargo test -p pl --test cli --locked
+
+      # ----------------------------------------------------------------- ARM64
+      #
+      # THE PACKAGING PATH, REHEARSED ON THE ONE PLATFORM NOBODY CAN REHEARSE IT
+      # ON LOCALLY.
+      #
+      # Everything above is `cargo`. The four steps below are the release path:
+      # `release.ps1` -> `check-archive.ps1` -> `build-msi.ps1` ->
+      # `check-msi.ps1`, which is what `release.yml` runs against a pushed tag,
+      # and what `tools/ci.ps1` rehearses on windows-latest as part of the gate.
+      #
+      # ON ARM64 THE GATE REHEARSES NOTHING, because `gate` is a three-runner
+      # matrix and none of them is Windows-on-ARM -- see "WHERE ARM64 IS" in
+      # this file's header for why adding a fourth leg there is not the answer.
+      # Without these steps, the first time an ARM64 zip is packed, checked,
+      # turned into an MSI, installed and uninstalled would be inside a release
+      # run, after a tag had been pushed and could not be un-pushed.
+      # `release.yml`'s own header states the rule this violates: "A release
+      # workflow is not where to test a hypothesis." That rule binds harder
+      # here than anywhere else in the repository, because the maintainer's
+      # machine cannot link an ARM64 binary at all -- rustc cross-compiles the
+      # library crates and every binary dies with "linker `link.exe` not found"
+      # -- so there is no local run to fall back on and no way to reproduce a
+      # failure after the fact.
+      #
+      # WINDOWS-GUARDED, NOT ARM-GUARDED, and on purpose. `runner.os` is
+      # `Windows` on windows-11-arm and would be on a windows-latest leg too, so
+      # if x64 ever returns to this matrix it gets the same rehearsal rather
+      # than an `if` somebody has to remember to widen.
+      #
+      # NOTHING HERE MAY SKIP. The gate's MSI steps are allowed to skip when
+      # `wix` is absent, which is right for a contributor without a .NET SDK and
+      # would be wrong here: these are plain `run:` lines with no precondition
+      # and no skip vocabulary, so a WiX that will not install on aarch64 is a
+      # red step naming WiX. That is the whole reason ARM64 is in this job
+      # rather than in the gate.
+
+      # Same version and same extension as release.yml and the gate install.
+      # An installer that changes shape between the rehearsal and the release
+      # makes the rehearsal worthless.
+      #
+      # UNVERIFIED ON THIS IMAGE. The `windows-11-arm` image manifest lists WiX
+      # among the tools it does NOT carry, so this line is the only thing that
+      # puts one there. WiX has supported ARM64 natively since v4 and ships as
+      # an architecture-independent .NET tool, which is why it is expected to
+      # work -- but it has not run here yet, and if it cannot, this step is
+      # where that is discovered, on a pull request, rather than on a tag.
+      - name: Install the WiX Toolset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'installing wix failed' }
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'adding the WiX UI extension failed' }
+          wix --version
+
+      # `./tools/release.ps1 -Out dist` with no -PlatformLabel and no
+      # -ArchiveFormat: byte-identical to what release.yml runs on a Windows
+      # runner, so nothing here is a CI-only path. The label is derived by the
+      # script from `RuntimeInformation::OSArchitecture` (release.ps1:164-172),
+      # which already knows `Arm64`, and the assertion below is what proves it
+      # derived the one this platform ships under rather than defaulting to x64
+      # somewhere. `/dist/` is gitignored, so the working tree stays clean.
+      #
+      # HOW IT FAILS: an ARM64 runner that produced `...-windows-x64.zip`, or a
+      # zip whose internal SHA256SUMS.txt does not describe its own contents, or
+      # one missing a licence text. That last is not hypothetical: seven licence
+      # files went missing from the archive on 2026-07-30, which is why
+      # check-archive.ps1 exists and why it is run here on the bytes rather than
+      # on the dist/ directory they came from.
+      - name: Package this platform, and check the archive from the outside
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./tools/release.ps1 -Out dist -Quiet
+          if (-not (Test-Path dist/SHA256SUMS.txt)) {
+              throw 'release.ps1 produced no dist/SHA256SUMS.txt'
+          }
+
+          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          $wantLabel = switch ("$arch") {
+              'X64'   { 'windows-x64' }
+              'Arm64' { 'windows-arm64' }
+              default { throw "this runner reports OSArchitecture '$arch' and no archive name is defined for it" }
+          }
+          $stated = ''
+          foreach ($line in (Get-Content 'dist/SHA256SUMS.txt')) {
+              if ($line -match '^platform:\s*(\S+)') { $stated = $Matches[1]; break }
+          }
+          if (-not $stated) { throw 'dist/SHA256SUMS.txt carries no platform: line, so this step could not tell what was packaged' }
+          if ($stated -ne $wantLabel) {
+              throw ("this runner is $arch and the manifest says it packaged '$stated'; it should say '$wantLabel'. " +
+                     'release.yml names the artifact from the same label, so a wrong one here is a wrong download name there.')
+          }
+
+          $archive = @(Get-ChildItem dist -File | Where-Object { $_.Name -match '\.(zip|tar\.gz)$' })
+          if ($archive.Count -ne 1) { throw "expected exactly one archive in dist/, found $($archive.Count)" }
+          if ($archive[0].Extension -ne '.zip') {
+              throw ("release.ps1's default format on Windows produced $($archive[0].Name); release.yml passes no " +
+                     '-ArchiveFormat, so the default IS what ships and a zip is what the release notes tell a ' +
+                     'Windows reader to download.')
+          }
+          ./tools/check-archive.ps1 -Archive $archive[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw 'the archive failed its check' }
+
+      # The installer, built and then actually installed, asserted against the
+      # disk and the registry, uninstalled, and asserted again -- both scopes,
+      # per-user first because that is the one readers get by default.
+      #
+      # This is the only place an ARM64 MSI is exercised at all before a tag.
+      # `build-msi.ps1` takes its file list AND its platform from
+      # dist/SHA256SUMS.txt rather than from any argument, so there is no
+      # architecture named on this line either; if it still hard-codes x64 it
+      # produces `polylinker-<v>-windows-x64.msi` here and the name check fails.
+      # `-Out msi`, never `dist/`: an .msi left in dist/ would be swept into the
+      # manifest and then into the zip. `msi` and not a temp directory, so this
+      # is the same invocation release.yml makes rather than a near-miss of it.
+      # `/dist/` is gitignored and `msi/` is not, so this leaves one untracked
+      # directory behind on the runner -- which costs nothing here, because no
+      # step in this job asserts a clean working tree and the runner is
+      # destroyed afterwards. If `msi/` is ever added to .gitignore that is an
+      # improvement and changes nothing about this step.
+      - name: Build the MSI, install it, check it, uninstall it
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./tools/build-msi.ps1 -Dist dist -Out msi
+          if ($LASTEXITCODE -ne 0) { throw 'building the MSI failed' }
+
+          $version = ''
+          $label = ''
+          foreach ($line in (Get-Content 'dist/SHA256SUMS.txt')) {
+              if ($line -match '^version:\s*(\S+)')  { $version = $Matches[1] }
+              if ($line -match '^platform:\s*(\S+)') { $label   = $Matches[1] }
+          }
+          if (-not $version -or -not $label) { throw 'dist/SHA256SUMS.txt is missing its version: or platform: line' }
+
+          $msi = @(Get-ChildItem msi -Filter *.msi)
+          if ($msi.Count -ne 1) { throw "expected exactly one .msi, found $($msi.Count)" }
+          $want = "polylinker-$version-$label.msi"
+          if ($msi[0].Name -ne $want) {
+              throw ("the MSI is called $($msi[0].Name) and this platform packages as $label, so it should be $want. " +
+                     'release.yml publishes both Windows installers into one flattened directory, so two legs ' +
+                     'producing one name would silently overwrite each other there.')
+          }
+
+          ./tools/check-msi.ps1 -Msi $msi[0].FullName -Dist dist -PerUser
+          if ($LASTEXITCODE -ne 0) { throw 'the MSI failed its check in the per-user scope, which is the default one' }
+          ./tools/check-msi.ps1 -Msi $msi[0].FullName -Dist dist
+          if ($LASTEXITCODE -ne 0) { throw 'the MSI failed its check in the per-machine scope' }
 
   # The oldest toolchain this workspace claims to build on, actually building it.
   #

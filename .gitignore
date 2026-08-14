@@ -9,6 +9,9 @@ venv/
 # Node
 node_modules/
 dist/
+# `tools/build-msi.ps1 -GenerateOnly` and the ARM64 test leg both leave one
+# here; it is a build product of dist/, never a source.
+msi/
 *.tsbuildinfo
 
 # Rust
