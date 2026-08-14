@@ -3589,17 +3589,32 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     # the number is this file's step total minus this one step, so it moves every
     # time a step is added. Step total today: 76.)
     #
-    # FIVE PLACES OUTSIDE THIS FILE STILL SAY SEVENTY-TWO OR SEVENTY-THREE, and
-    # they are stale as of 2026-08-14, when 'the browser prototype: template and
-    # builder agree, and the page is built and driven where it can be' and 'the
-    # archived licence evidence still matches the manifest it was fetched under'
-    # were added. They are named here rather than left for a reader to trip over:
-    # `docs/RELEASING.md:425` ("seventy-two"), `tools/build-msi.ps1:289`
-    # ("seventy-two"), `tools/verify.ps1:12` ("at 73 steps"), `README.md:13` and
-    # `CONTRIBUTING.md:103`, plus `.github/workflows/ci.yml:16` and :148. Nothing
-    # in the gate reads any of them, so none of them can go red; they are prose
-    # about this file and they have to be edited by hand when it grows. The two
-    # quotations of a past reconciler run -- `tools/ci.ps1:148` and
+    # THIS INDEX OF STALE COPIES WAS ITSELF STALE, and that is the more useful
+    # lesson than any of the numbers in it. As written on 2026-08-14 it named
+    # five places and got three of them wrong: `README.md:13` had already been
+    # corrected to "76-step gate" and said neither seventy-two nor
+    # seventy-three; `docs/RELEASING.md:425` said "75 steps" rather than
+    # "seventy-two"; `tools/verify.ps1:12` said "at 73 steps" but also carried
+    # its own re-derivation rule two lines down, which is what actually fixed
+    # it. An index of stale prose is prose, decays at the same rate as what it
+    # indexes, and is worth exactly as much as the last hand that edited it.
+    #
+    # All of them were swept to 76 on 2026-08-15, from the one measurement
+    # `(Select-String "^Step '" tools/ci.ps1).Count`: `docs/RELEASING.md`,
+    # `tools/build-msi.ps1`, `tools/verify.ps1`, `CONTRIBUTING.md`, and
+    # `.github/workflows/ci.yml` in three places. NAMED WITHOUT LINE NUMBERS ON
+    # PURPOSE. The version of this list that carried them was written minutes
+    # earlier and was already wrong by one on two entries, because editing the
+    # first citation moved the two below it. A line number in prose about
+    # another file is a fourth thing to keep in sync and the first to rot;
+    # `grep` finds these in a second and cannot go stale. Nothing in the gate
+    # reads any of them, so none of them can go red -- `README.md` alone is
+    # held to the tree, by `the_readme_headline_counts_are_the_counts_in_the_tree`
+    # in `bins/pl/src/main.rs`, which is why README was the one that was right.
+    # The rest are prose about this file and have to be edited by hand when it
+    # grows. If that keeps costing a release, the answer is to give them the
+    # same test README has, not a longer list here. The two quotations of a past
+    # reconciler run -- `tools/ci.ps1:158` and
     # `tools/reconcile-ledgers.ps1:195`, both "73 steps each" -- are records of
     # run 31359657821 and stay true of that run.
     $dist = "$repo/dist"
@@ -3808,7 +3823,15 @@ print(f"  parses; {len(include)} platforms, publish gated on a tag")
 # IT STOPS AT `#[cfg(test)]`, and that is not tidiness. The crate's test module
 # carries raw-string PROBES that spell out complete, well-formed arms -- they
 # are what its own cascade reader is proved against -- so a scan of the whole
-# file reads eight arms instead of four, three of them naming windows-x64.
+# file reads more arms than the cascade has. It reads four today rather than
+# eight, because the crate ALSO writes those fixtures as `const ARTIFACT:` and
+# substitutes the real name in at run time; the two guards are independent and
+# both are kept. Counted rather than recalled: `const PLATFORM_ARTIFACT`
+# appears six times in the file. Five are declarations above the `#[cfg(test)]`
+# at line 585 -- the four arms and the one fallback, which is the whole
+# cascade. The sixth is prose, in a doc comment inside the test module, and it
+# is why this break is still needed after the fixtures were renamed: a reader
+# that ran to the end of the file would count it.
 # Measured, not reasoned: without this the first run over the real file threw
 # "flow.rs:1101 declares PLATFORM_ARTIFACT with no #[cfg] attribute above it",
 # pointing at a fixture inside a test. The crate's own reader draws the line in

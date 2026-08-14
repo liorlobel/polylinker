@@ -619,15 +619,18 @@ jobs:
       # nothing.
       #
       # THE ARM64 ENTRY IS LOAD-BEARING FOR THE UPDATER, and more so than the
-      # other three. `crates/pl-update/src/flow.rs:104-121` maps the running
+      # other three. The `#[cfg]` cascade in `crates/pl-update/src/flow.rs` maps the running
       # platform to (label, extension) through a `#[cfg]` cascade with an
       # explicit `None` fallback, so before the ARM64 port `pl update` on an
       # ARM64 Windows matched nothing and DECLINED -- it failed closed, and told
       # the user to update by hand rather than offering them an x64 MSI. The
-      # port adds an arm to that cascade. From the moment it lands, a release
-      # published without `polylinker-<v>-windows-arm64.zip` turns that clean
-      # decline into a 404 on the user's machine: `pl update` would name a file
-      # the release page does not have. There is no way to notice that from
+      # port adds an arm to that cascade, and that arm names the MSI: on Windows
+      # the updater hands over the installer, never the zip, for both
+      # architectures. From the moment it lands, a release published without
+      # `polylinker-<v>-windows-arm64.msi` turns that clean decline into a 404
+      # on the user's machine: `pl update` would name a file the release page
+      # does not have. The zip is checked below beside it because the download
+      # table promises both, not because the updater asks for it. There is no way to notice that from
       # here except by refusing to publish, which is what the loop below does.
       # The new cfg arm and the new artifact are one change, not two.
       - name: Four platforms, checked again after transit

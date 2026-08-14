@@ -2,7 +2,8 @@
 //!
 //! `docs/RELEASING.md` says the update path is that a user checks when they want
 //! to, and that `pl --version` tells them which build they have. A version
-//! number alone does not: every build between two releases says `0.1.0`, and
+//! number alone does not: every build between two releases carries the same
+//! `CARGO_PKG_VERSION` as the release it follows, and
 //! "which build is this?" is the first question after any bug report.
 //!
 //! It also stamps the Windows VERSIONINFO block -- see `bins/winres.rs`. No
