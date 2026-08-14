@@ -92,10 +92,21 @@ the code — raised 41 findings, of which 14 survived adversarial refutation. Al
   tampered with. A verifier that cries tamper on a clean checkout trains its
   reader to ignore it.
 
-- **An exported SVG or PDF map has no background, but `--check-contrast`
-  certified it against `#ffffff`** — the exact failure the EPS and PNG back ends
-  of the same command were written to avoid. The certificate now states the
-  background it assumed.
+- **An exported SVG map had no background, but `--check-contrast` certified it
+  against `#ffffff`** — the exact failure the EPS and PNG back ends of the same
+  command were written to avoid. The SVG back end paints its ground now, so the
+  certificate is about a colour the file actually has.
+
+  **THE PDF HALF DID NOT SHIP, AND THIS ENTRY CLAIMED IT DID.** As first
+  written, this sentence said "an exported SVG or PDF map" and "the certificate
+  now states the background it assumed"; the second clause was true of neither
+  back end and the first was true only of SVG. `pdf::pdf_at` still opens its
+  content stream straight onto the backbone, so `pl export --pdf
+  --check-contrast` remains a claim about a background the file does not have —
+  which `crates/pl-draw/src/lib.rs:280-289` says in as many words, under the
+  heading "What still does not paint it". The code was honest and the release
+  note was not. Corrected 2026-08-14, after the round-3 audit read the two
+  against each other.
 
 - **`packages/circular-map`**: a restriction site outside `1..length` was drawn
   at a wrapped base with its impossible coordinate printed on the figure and
