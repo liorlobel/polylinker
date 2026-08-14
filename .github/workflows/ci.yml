@@ -13,8 +13,9 @@ name: CI
 # HOW THE TWO GATE FILES DIVIDE THE WORK, since 2026-08-09 and revised
 # 2026-08-10.
 #
-# `tools/ci.ps1` is 75 steps and `docs/RELEASING.md` names it as the thing to
-# run before tagging. (It said 73 here and below until the ARM64 port; 75 is
+# `tools/ci.ps1` is 76 steps and `docs/RELEASING.md` names it as the thing to
+# run before tagging. (It said 73 here and below until the ARM64 port, then 75,
+# which was already one short on the commit that wrote it; 76 is
 # what `Step '` at column 0 counts to in the file today, and the two places this
 # workflow repeats the number are exactly why a repeated number goes stale.)
 # Until 2026-08-09 NO WORKFLOW INVOKED IT. It appeared in
@@ -60,7 +61,7 @@ name: CI
 # ---------------------------------------------------------------------------
 # WHERE ARM64 IS, WHY IT IS THERE, AND EXACTLY WHAT IT DOES NOT COVER.
 #
-# Windows on ARM became a shipped platform with v0.10.4. It is built and tested
+# Windows on ARM became a shipped platform with v0.11.0. It is built and tested
 # NATIVELY, on GitHub's `windows-11-arm` image, which is free for public
 # repositories and this one is public. Nothing cross-compiles: rustc will build
 # `aarch64-pc-windows-msvc` LIBRARY crates from an x64 Windows machine, but
@@ -117,7 +118,7 @@ name: CI
 # ARM64 machine anywhere, and a sentence in the README that does not account for
 # them is a false sentence:
 #
-#   * `tools/ci.ps1` as a list -- 75 steps, its ledger, and the whole skip
+#   * `tools/ci.ps1` as a list -- 76 steps, its ledger, and the whole skip
 #     discipline. There is no ARM64 ledger, so `reconcile` says nothing about
 #     this platform.
 #   * 'no C runtime redistributable is needed', the `dumpbin /dependents` step.
@@ -242,7 +243,7 @@ jobs:
   # strong one that runs in one. `fail-fast: false`, so a Linux failure does not
   # cancel Windows and hide what it would have said.
   #
-  # 75 steps. Five skip everywhere for want of a corpus
+  # 76 steps. Five skip everywhere for want of a corpus
   # (`.github/ci-expected-skips.txt`); seven more skip off Windows and say why.
   # The `reconcile` job below is what checks the three legs against each other,
   # and it is the only place a step that skipped on ALL THREE can be seen.
@@ -978,11 +979,10 @@ jobs:
       # `-Out msi`, never `dist/`: an .msi left in dist/ would be swept into the
       # manifest and then into the zip. `msi` and not a temp directory, so this
       # is the same invocation release.yml makes rather than a near-miss of it.
-      # `/dist/` is gitignored and `msi/` is not, so this leaves one untracked
-      # directory behind on the runner -- which costs nothing here, because no
-      # step in this job asserts a clean working tree and the runner is
-      # destroyed afterwards. If `msi/` is ever added to .gitignore that is an
-      # improvement and changes nothing about this step.
+      # `/dist/` and `msi/` are both gitignored -- `msi/` was added in the same
+      # change as this step -- so this leaves nothing untracked behind. It would
+      # cost nothing either way, because no step in this job asserts a clean
+      # working tree and the runner is destroyed afterwards.
       - name: Build the MSI, install it, check it, uninstall it
         if: runner.os == 'Windows'
         shell: pwsh

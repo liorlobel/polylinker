@@ -25,6 +25,21 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.11.0] - 2026-08-15
+
+**Polylinker runs natively on Windows on ARM64.** That is the whole of this
+release: a fourth platform, no behaviour change on the other three, and the
+version's minor number moves because there is a new thing you can download
+rather than because anything you already had works differently.
+
+One number in it is now measured rather than assumed. Until this release the
+`test / windows-11-arm` check had never run; on the commit this release was cut
+from it passed, which is the first evidence that this workspace compiles for
+`aarch64-pc-windows-msvc` and that its suite passes on the architecture. Before
+that, every ARM64 statement anywhere in this repository was a plan.
+
 ### Added
 
 - **A fourth platform, `windows-arm64`, shipping both a zip and an MSI:**
@@ -68,19 +83,32 @@ which.
   `ci.yml`'s `test` job and runs `fmt`, `clippy` and the whole Rust test suite
   natively on every commit; it does **not** run `tools/ci.ps1`, so the gate this
   project counts the steps of has three legs and none of them is this
-  architecture, and the archive and installer are built, verified, installed and
-  uninstalled only when a release is cut.
+  architecture. The archive and the installer are **not** in what it leaves
+  unchecked: the same `test` job packs the ARM64 zip and checks it from the
+  outside, then builds the MSI and installs, asserts and uninstalls it per-user
+  and per-machine, on every push and every pull request. Those steps are guarded
+  by `runner.os == 'Windows'` rather than by architecture, so the ARM64 leg gets
+  them. This bullet, the ARM64 row in `README.md` and the table in
+  `docs/RELEASING.md` all said packaging happened only at release time until
+  2026-08-15; that was the x86-64 position for six releases and was never true
+  of ARM64, because the packaging steps and the table landed in the same commit
+  and disagreed from birth.
 
-  **Two differences a user can hit, stated here rather than left in the
-  table.** The ARM64 archive is permitted to ship **without the Python
+  **One difference a user can hit, and one that was settled by measuring it.**
+  The settled one: the ARM64 archive is permitted to ship **without the Python
   extension module** — `crates/pl-py` links against CPython, Windows resolves
   those symbols at link time, and whether the ARM64 runner carries an ARM64
-  CPython was never established from a machine that cannot link ARM64 at all.
+  CPython could not be established from a machine that cannot link ARM64 at all.
   The permission is not a silent `if`: `tools/release.ps1` takes the omission
   only for `windows-arm64`, only with a reason naming that label, and only if no
   `.pyd` was in fact built; it writes an `omitted:` line into `SHA256SUMS.txt`,
   and `tools/check-archive.ps1` holds the archive to that line and prints the
-  waiver whether the archive passes or fails. And the ARM64 binaries **do not
+  waiver whether the archive passes or fails. It has not been needed: the run
+  this release was cut from logged `polylinker-0.11.0-windows-arm64.zip
+  [windows-arm64]: 22 file(s), 8 licence text(s), the Python extension module
+  present`, the same file count as the `windows-x64` zip. The permission stays,
+  because the reason it exists is that nobody here can link ARM64 locally, and
+  that has not changed. The difference that remains: the ARM64 binaries **do not
   carry the static C runtime the x86-64 ones carry**: `.cargo/config.toml`
   scopes `-C target-feature=+crt-static` to `x86_64-pc-windows-msvc` and
   declares nothing for `aarch64-pc-windows-msvc`, so they import
@@ -97,6 +125,48 @@ which.
   x86-64 `.msi`. It failed closed. Adding the ARM64 arm and publishing the ARM64
   file are therefore one change and not two: an arm naming a file no release
   carries converts that clean refusal into a 404.
+
+- **Errata, from an audit of this release's own prose before the tag.** Thirty
+  statements were checked against the tree and found false; none of them was
+  code, and the release page carried the correct version of the largest one
+  while three other surfaces carried the wrong one.
+
+  *What ARM64 CI covers.* `README.md`, this file and the table in
+  `docs/RELEASING.md` — the table whose stated job is deciding whether every
+  other ARM64 sentence in the repository is honest — all said the ARM64 archive
+  and installer were packaged and checked only when a release was cut. They are
+  packaged and checked on every push and every pull request, and were from the
+  moment the leg landed: the steps are guarded by `runner.os == 'Windows'` and
+  `windows-11-arm` is in that job's matrix. The steps and the table shipped in
+  the same commit and contradicted each other on arrival.
+
+  *Whether the ARM64 archive has the Python extension module.* Three surfaces
+  said this was never established. It was established by the run this release
+  was cut from, which logged the module present and 22 files, matching
+  `windows-x64` exactly. The waiver that lets an ARM64 archive omit it stays,
+  because the reason for it — nobody here can link ARM64 locally — is unchanged.
+
+  *The gate's step count.* `CONTRIBUTING.md`, `docs/RELEASING.md`,
+  `tools/verify.ps1`, `tools/build-msi.ps1` and three comments in
+  `.github/workflows/ci.yml` said 72, 73 or 75. The count is 76. `tools/ci.ps1`
+  carried an index of exactly this staleness and the index was itself stale in
+  three of its five entries. `README.md` was the only surface that was right,
+  and it is the only one a test holds to the tree — which is the whole finding,
+  and is now written where the next person to add a step will read it.
+
+  *Smaller ones.* `ci.yml` credited the ARM64 port to a `v0.10.4` that does not
+  exist; `README.md` said no gate step invoked `prototype/check_page.js` when
+  one does, though only where jsdom is present, which is no runner;
+  `release.yml` said a missing ARM64 **zip** would 404 the updater when the
+  updater names the **msi** on both Windows architectures; `flow.rs` described a
+  durable fix as still owed after it had been made; `ci.yml` said `msi/` was not
+  gitignored in a commit that gitignored it; and `bins/pl/build.rs` said builds
+  between releases report `0.1.0`.
+
+  Every one of these ran in the safe direction — claiming less coverage than
+  exists, or naming a smaller number than the truth — which is the opposite of
+  this project's usual failure and is not a defence. A table that is wrong about
+  being under-tested is still a table nobody can rely on.
 
 ## [0.10.3] - 2026-08-14
 
@@ -2958,7 +3028,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.10.3...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.0
 [0.10.3]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.3
 [0.10.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.2
 [0.10.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.1

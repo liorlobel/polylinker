@@ -45,12 +45,31 @@ built-in emulation, and until this release that is what ARM64 users were
 doing. The native build should be faster and will not warm your battery
 emulating, but it is the newest thing here: it is compiled and its test suite
 is run on real Windows-on-ARM hardware for every commit, and the zip and MSI
-are built, installed, checked and uninstalled there — but the cross-checks
-against Biopython, pydna, SciPy and the rest are run only on x64, and at the
-time this release was cut **no person had run a Polylinker build on an ARM64
-machine at all**. If you want the better-trodden path today, take the x64
-files; they work. If you take the ARM64 ones and something is wrong, that is
-worth an issue, because you will be among the first to look.
+are built, installed, checked and uninstalled there — but `tools/ci.ps1`, the
+gate this project counts the steps of, has three legs and none of them is this
+architecture, so the cross-checks against Biopython, pydna, SciPy and the rest
+are run only on x64. And at the time this release was cut **no person had run a
+Polylinker build on an ARM64 machine at all**.
+
+**One difference is concrete enough to stop the program starting, so it belongs
+here rather than in a table.** The x64 binaries link the C runtime statically
+and need nothing installed alongside them. The ARM64 binaries do not:
+`.cargo/config.toml` sets `-C target-feature=+crt-static` for
+`x86_64-pc-windows-msvc` and declares nothing for `aarch64-pc-windows-msvc`, so
+they import `VCRUNTIME140.dll`. That DLL is not part of Windows — it arrives
+with the Visual C++ 2015-2022 redistributable, whose installer wants
+administrator rights. Most machines that have run any desktop application
+already have it and you will never notice this paragraph. A freshly imaged or
+locked-down one may not, and there the failure is `VCRUNTIME140.dll was not
+found` before Polylinker gets to run at all. The x64 download carries no such
+dependency and runs on these machines under emulation, so it is the better
+answer on a PC you do not administer. This is a missing linker flag rather than
+a decision, the gate step that would have caught it is a gate step, and it is
+written here because it is not fixed yet.
+
+If you want the better-trodden path today, take the x64 files; they work. If you
+take the ARM64 ones and something is wrong, that is worth an issue, because you
+will be among the first to look.
 
 **Then, installer or zip.** Take the **`.msi`** unless you have a reason not to. It puts Polylinker in the
 Start Menu and in Settings → Apps, offers to put `pl` on your PATH, and adds

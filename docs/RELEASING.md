@@ -101,14 +101,14 @@ One tag. Everything else follows from it.
 #    -- substitute both; they are written concretely because a placeholder is
 #    the thing people paste by accident, and they are one release behind the
 #    moment a release lands:
-sed -i 's/version = "0.10.2"/version = "0.10.3"/g' Cargo.toml
+sed -i 's/version = "0.10.3"/version = "0.11.0"/g' Cargo.toml
 #    Then check it took, because a typo in the left-hand side is a silent no-op.
 #    BOTH greps, and they used to be one: the old line ran only the NEW-version
 #    count and left "and 0.7.0 must print 0" as a comment, which is the half that
 #    catches a sed that matched nothing. `grep -c` exits 1 when it prints 0, so
 #    run them as two commands rather than chaining them with &&:
-grep -c 'version = "0.10.3"' Cargo.toml   # must print 17
-grep -c 'version = "0.10.2"' Cargo.toml   # must print 0
+grep -c 'version = "0.11.0"' Cargo.toml   # must print 17
+grep -c 'version = "0.10.3"' Cargo.toml   # must print 0
 cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
 #    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
 #    are the two files a tag does not update and nothing checks.
@@ -144,8 +144,8 @@ pwsh -NoProfile -File tools/ci.ps1
 
 # 4. Tag, on main, after the release commit has landed there. This is the only
 #    step that publishes anything.
-git tag -a v0.10.3 -m "Polylinker 0.10.3"
-git push origin v0.10.3
+git tag -a v0.11.0 -m "Polylinker 0.11.0"
+git push origin v0.11.0
 ```
 
 ### Step 2 is no longer the only thing standing between a tag and a red gate
@@ -422,22 +422,29 @@ so it is a table of the two workflows rather than an adjective:
 | | `windows-x64` | `windows-arm64` |
 |---|---|---|
 | Where it lives in `ci.yml` | the `gate` job | the `test` job |
-| On every push and pull request | `cargo fmt`, `cargo clippy`, and the whole of `tools/ci.ps1` — 75 steps, with a ledger and the skip discipline `-ExpectedSkips` enforces | `cargo fmt`, `cargo clippy --locked`, `cargo test --workspace --lib --bins --locked`, `cargo build --workspace --release --locked`, and the integration suites of `pl-fileio`, `pl-features`, `pl-draw`, `pl-design`, `pl-update` and `pl` |
+| On every push and pull request | `cargo fmt`, `cargo clippy`, and the whole of `tools/ci.ps1` — 76 steps, with a ledger and the skip discipline `-ExpectedSkips` enforces | `cargo fmt`, `cargo clippy --locked`, `cargo test --workspace --lib --bins --locked`, `cargo build --workspace --release --locked`, and the integration suites of `pl-fileio`, `pl-features`, `pl-draw`, `pl-design`, `pl-update` and `pl` |
 | `tools/ci.ps1` | yes | **never, on any trigger** |
 | A ledger, and `reconcile` comparing it to the other legs | yes | **no ledger exists for this platform** |
 | The C-runtime import scan, the PE icon and version resources, the 8.3 alias case | on every push | **nowhere** |
 | The differential oracles — Biopython, pydna, SciPy, resvg, Pillow, fontTools, the SEGUID reference | in the gate on every push | **nowhere** (`oracles` is `ubuntu-latest` and always was, so this is one platform's claim rather than a per-architecture one) |
-| `tools/release.ps1` → `tools/check-archive.ps1` | on every push, in the gate | **only in `release.yml`** — a tag, or a `workflow_dispatch` run |
-| `tools/build-msi.ps1` → `tools/check-msi.ps1`, per-user and per-machine | on every push, in the gate | **only in `release.yml`**, same two triggers |
+| `tools/release.ps1` → `tools/check-archive.ps1` | on every push, in the gate | on every push, in the `test` job |
+| `tools/build-msi.ps1` → `tools/check-msi.ps1`, per-user and per-machine | on every push, in the gate | on every push, in the `test` job |
 | Has been run by a human being | yes, daily | **never** |
 
-Two rows deserve to be read twice. The packaging rows mean the ARM64 zip and MSI
-are assembled, verified, installed and uninstalled **at release time and not
-before**, which is the position x86-64 was in for six releases and which this
-file spent a section describing as the thing that went wrong. `workflow_dispatch`
-on `release.yml` is the way to rehearse it without spending a tag, and on this
-platform it is the only way there is. And the last row is the one no amount of
-CI moves: nobody has launched `polylinker.exe` on Windows ARM64, run `pl` there,
+**The two packaging rows read `only in release.yml` until 2026-08-15, and that
+was wrong on the day it was written.** The steps that pack the ARM64 zip, check
+it from the outside, build the MSI and install, assert and uninstall it are
+`ci.yml`'s *Package this platform, and check the archive from the outside* and
+*Build the MSI, install it, check it, uninstall it*; both are guarded by
+`runner.os == 'Windows'` and by nothing else, and `windows-11-arm` is in the
+`test` job's matrix, so both run on every push and every pull request. They and
+this table landed in the same commit and disagreed from birth — the steps were
+added late and the table was not re-read. The error ran the safe direction, in
+that the platform was better checked than the documentation claimed, but a table
+whose stated purpose is deciding whether the other ARM64 sentences are honest
+does not get to be wrong in either direction. `workflow_dispatch` on
+`release.yml` remains the way to rehearse a full release without spending a tag.
+The last row is the one no amount of CI moves: nobody has launched `polylinker.exe` on Windows ARM64, run `pl` there,
 or double-clicked the `.msi`. That is not an ARM64 peculiarity — *no* CI job on
 *any* platform opens the editor's window — but on the other three platforms the
 maintainer's own machine stands behind that gap, and on this one nothing does.

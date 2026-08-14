@@ -1097,7 +1097,9 @@ mod tests {
     /// stops at the test module, so it cannot see these. `tools/ci.ps1`'s
     /// `Get-UpdaterPlatformArtifacts` — the step that holds this table against
     /// `.github/workflows/release.yml`, and the only place those two are ever
-    /// compared — reads every line of the file.
+    /// compared — used to read every line of the file. It no longer does: it
+    /// breaks at `#[cfg(test)]` too, so both readers now stop in the same place
+    /// for the same reason.
     ///
     /// So a fixture spelling the name out verbatim does not merely sit there: it
     /// arrives at the gate as extra platform arms and extra fallbacks, and the
@@ -1108,10 +1110,13 @@ mod tests {
     /// four times.
     ///
     /// Substituting the name in at run time keeps each fixture exact for the
-    /// reader under test and invisible to the reader that is not. It is a
-    /// narrower fix than it should be — the durable one is for a scanner of a
-    /// Rust file to truncate at `#[cfg(test)]`, the way [`before_the_tests`] and
-    /// `tests/handoff.rs` both do — and that belongs in `tools/ci.ps1`.
+    /// reader under test and invisible to the reader that is not. It was a
+    /// narrower fix than it should have been; the durable one — a scanner of a
+    /// Rust file truncating at `#[cfg(test)]`, the way [`before_the_tests`] and
+    /// `tests/handoff.rs` both do — now exists in `tools/ci.ps1` as well. Both
+    /// are kept. Either alone would hold today, and the substitution costs
+    /// nothing, so removing it to prove the other one works is a trade of a
+    /// real safeguard for a fact already established by test.
     fn spelled_out(fixture: &str) -> String {
         fixture.replace("ARTIFACT", DECL_NAME)
     }
