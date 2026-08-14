@@ -25,7 +25,100 @@ which.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.10.3] - 2026-08-14
+
+**The browser prototype told users that no enzyme cut their plasmid, when every
+one did.** That is the whole reason this release exists, and it is the only
+user-facing false scientific statement three audit rounds have found. Twelve
+findings from `docs/AUDIT-2026-08-14-r3.md` are fixed here.
+
 ### Fixed
+
+- **`prototype/dna-reader.html` reported a scan it never ran as a result.** The
+  page skips its restriction digest above 400,000 bases to keep the main thread
+  responsive; the Enzymes tab then computed "enzymes that do not cut" as every
+  enzyme absent from an empty result and rendered **"58 of the 58 enzymes in the
+  set do not cut this molecule at all"**, naming all 58. Measured against the
+  shipped binary on a 500,000 bp circle: `pl digest` reports **zero**
+  non-cutters, 47 enzymes cutting a hundred times or more, AarI cutting 56.
+  Exactly inverted, and presented as a measurement.
+
+  The map hint one function away already said "enzyme scan skipped". The tab
+  contradicted it in the same page load.
+
+  **"Not scanned" is now a value that cannot be read as an answer.** `null`
+  rather than `[]`, chosen deliberately: `null.filter` throws, `[].filter`
+  quietly yields zero, and it was the quiet zero that turned a skip into a
+  claim. All five consumers were carrying the same conflation. Two further
+  instances fell out of the fix — `coreDigest` also returned `[]` when the wasm
+  call declines, and a file that declares 3,000 bp with no bases at all was
+  being digested, coming back empty, and reported as a molecule 58 enzymes had
+  been tried against.
+
+  **The reason it survived four audits is that `prototype/` appeared zero times
+  in `tools/ci.ps1`.** There is a gate step now, and it carries floors with
+  their reasons attached: the template must be at least 900 lines, and
+  `check_page.js` must make at least fifteen assertions, "because a harness with
+  most of them deleted still ends by printing ALL CHECKS PASSED".
+
+- **A feature colour from an untrusted file went verbatim into a live CSS
+  `style` attribute**, so a crafted `.dna` could make a page that promises
+  "nothing is uploaded, no network" fetch a remote URL. It now passes through an
+  accept-list transcribed arm-for-arm from `pl-draw`'s `safe_color`, verified
+  against the Rust by running both over 26 vectors: 26/26 identical verdicts.
+
+- **A file with no bases reported "GC 0.0%"** where the core deliberately
+  returns null, and the page's footer claimed a fifty-enzyme set while the same
+  page computed and displayed 58.
+
+- **An exported PDF map had no background while `--check-contrast` certified it
+  against `#ffffff`.** `pdf::pdf_at` now paints its ground, the audit measures
+  against the crate constant rather than a hard-coded string, and the passing
+  line names the colour it used. **v0.10.2's release note claimed this was
+  already done**; only the SVG half had shipped, and `pl-draw`'s own doc said so
+  under a heading reading "What still does not paint it" while the changelog
+  said otherwise. Rather than narrow the claim, the claim was made true.
+
+- **`sfnt.rs`'s ligature guard could not see a lookup the shaper applies through
+  LangSys `requiredFeatureIndex`** — a required feature is not in the feature
+  list the guard walked, so a face carrying its substitution there would pass
+  unnoticed. The property held for the vendored faces and still does; what
+  changed is that the guard would now notice if it stopped.
+
+- **The ring's arrowhead direction and a feature arc's circular coordinate are
+  asserted for the first time.** Every ring feature could previously be rotated
+  a thousand bases, or have its arrowhead moved to the wrong end, with the
+  suite green — the same defect class that produced a real wrong coordinate in
+  each of the two previous rounds.
+
+- **A gate step reported ok after running zero tests** when its glob stopped
+  matching, and the gate attributed the `<File>` ban to a portable step when
+  only the Windows-and-`dist`-gated one asserts it.
+
+- **The README and `docs/PLAN.md` named the wrong renderer** for the browser
+  prototype's map — sending anyone fixing a prototype map bug to code the page
+  never loads. Correcting it required stating what the sentence was hiding:
+  **four things in this repository draw a plasmid map**, and of the six pairs
+  between them, two are checked and four are not. The prototype's own renderer
+  is checked against nothing. Both sentences were false on the day they were
+  written, twelve days after the code they described had changed.
+
+### Verification
+
+Every fix carries a test or an executed proof. **The five Rust mutations were
+run centrally and all five went red**, each targeted by line number because two
+of the mutation strings also occur inside the doc comment that quotes them — a
+trap one agent hit on its own first run and documented. The four prototype fixes
+were proven in jsdom, each mutation reddening only its own assertions.
+
+One honest note, because this project's first house rule cuts both ways: the
+restore step of the mutation harness failed on `sfnt.rs` and left a deliberately
+inverted guard in the working tree. It was caught by inspection rather than by
+the harness. The restore now retries, verifies the bytes by SHA-256, and prints
+the line it restored.
+
 
 - **An exported PDF map had no background, but `--check-contrast` certified it
   against `#ffffff`.** `pdf::pdf_at` opened its content stream `q`, `1 J 1 j` and
@@ -2794,7 +2887,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.10.3...HEAD
+[0.10.3]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.3
 [0.10.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.2
 [0.10.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.1
 [0.10.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.0
