@@ -3,6 +3,12 @@
 //! `tests/agreement.rs` checks that the two renderers compute the same numbers.
 //! These check the things only this one does: emitting a document that parses,
 //! reporting what it could not draw, and refusing hostile input from a file.
+//!
+//! And, since 2026-08-14, where the figures put a feature. That belongs here
+//! and not in the fixture because `tests/agreement.rs` imports scalar helpers
+//! only — it never builds a `Molecule` and never calls `scene`, so it cannot
+//! see a band drawn at the wrong angle. See the "reading a ring band back off
+//! the scene" block below, and [`span_x`] for the track's older equivalent.
 
 use super::*;
 use pl_core::{Feature, Segment, Topology};
@@ -859,6 +865,78 @@ fn a_feature_long_enough_for_a_full_arrowhead_keeps_one() {
     let base = first_arc_to(&segs);
     assert!((base - (a1 - 8.0 / mid)).abs() < 1e-12, "{base}");
     assert!(base > a0 && base < a1);
+}
+
+/// The `Arrow::Start` arm of [`arc_segs`], which nothing but the ring asks for.
+///
+/// **This passes at c0b60b2 and is meant to: the arm is correct and always
+/// was.** What did not exist was any execution of it. `Arrow::Start` was never
+/// once passed to `arc_segs` by a test in this crate — the two calls above both
+/// pass `Arrow::End`, and the only `Arrow::Start` anywhere in `pl-draw`'s tests
+/// was `linear.rs:1025`, which is `box_segs`, a different function drawing a
+/// different shape. Half of `arc_segs` — the half every reverse-strand feature
+/// on every plasmid map goes through — was reached by no assertion at all. See
+/// F4 in `docs/AUDIT-2026-08-14-r3.md`.
+///
+/// The arm has to be the mirror of `Arrow::End`, because a reverse gene reads
+/// towards its own low coordinate: the outline is walked from the arc's FAR
+/// end, the arrowhead's base sits `head` past `a0` rather than `head` short of
+/// `a1`, and the point itself is at `a0` on the band's mid radius. All three
+/// are asserted, so a fix to one of them cannot be had by breaking another.
+///
+/// The point is compared to `polar(cx, cy, mid, a0)` for bit equality rather
+/// than within a tolerance, because `arc_segs` reaches it through that same
+/// function with those same arguments: anything but an identical `f64` pair
+/// means it went somewhere else, and a tolerance would only decide how far
+/// somewhere else is allowed to be.
+///
+/// Mutation that re-breaks it: in `crates/pl-draw/src/lib.rs`, in the
+/// `Arrow::Start` arm of `arc_segs`, change `segs.push(arc(ro, a1, base));`
+/// (line 2191 at c0b60b2) to `segs.push(arc(ro, a0, base));`.
+#[test]
+fn the_reverse_arm_of_arc_segs_walks_from_the_far_end_and_points_at_the_near_one() {
+    let (cx, cy, ri, ro, a0, a1) = (100.0, 100.0, 80.0, 98.0, 0.0, 1.0);
+    let segs = arc_segs(cx, cy, ri, ro, a0, a1, Arrow::Start);
+    let mid = (ri + ro) / 2.0;
+
+    // The outer arc leaves a1 and runs BACKWARDS to the arrowhead's base.
+    // `Arrow::End`'s first arc leaves a0 instead, so this one number is what
+    // separates the two arms of the match.
+    let (r, from, to) = segs
+        .iter()
+        .find_map(|s| match *s {
+            Seg::Arc { r, from, to, .. } => Some((r, from, to)),
+            _ => None,
+        })
+        .expect("an arc");
+    assert!((r - ro).abs() < 1e-12, "the outer arc is at r={r}");
+    assert!(
+        (from - a1).abs() < 1e-12,
+        "the outline starts at {from}, not a1"
+    );
+    assert!(
+        (to - (a0 + 8.0 / mid)).abs() < 1e-12,
+        "the arrowhead's base is at {to}"
+    );
+    assert!(to > a0 && to < a1, "the head is not inside the arc: {to}");
+
+    // And the point is at a0, on the mid radius, exactly once.
+    let on_band: Vec<(f64, f64)> = segs
+        .iter()
+        .filter_map(|s| match *s {
+            Seg::Move(x, y) | Seg::Line(x, y) if ((x - cx).hypot(cy - y) - mid).abs() < 1e-9 => {
+                Some((x, y))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        on_band.len(),
+        1,
+        "{} vertices on the band's mid radius",
+        on_band.len()
+    );
+    assert_eq!(on_band[0], polar(cx, cy, mid, a0), "the point is not at a0");
 }
 
 // ---------------------------------------------------------------------------
@@ -1995,6 +2073,140 @@ fn span_x(segs: &[Seg]) -> (f64, f64) {
     )
 }
 
+// ---------------------------------------------------------------------------
+// reading a ring band back off the scene
+//
+// [`span_x`] above is what the track's geometry is asserted through, and until
+// 2026-08-14 the ring had no equivalent: every test that drew features on a
+// circular molecule asserted names, counts, `Report` fields or well-formedness
+// and never where an arc landed. Rotating every band by a thousand bases, or
+// reflecting the whole figure across the vertical axis, passed all 208 tests in
+// this crate and all 18 integration tests besides. F4 and F5 in
+// `docs/AUDIT-2026-08-14-r3.md` are that hole; these three functions are the
+// instrument the tests below close it with.
+//
+// They read the SCENE and nothing else. Nothing here calls `angle`, `frac`,
+// `angle_past` or `ring::radius`, so a renderer cannot satisfy them by making
+// the same mistake twice — the only thing taken from the production side is
+// where the circle's centre is, and that is read off the path's own arcs.
+// ---------------------------------------------------------------------------
+
+/// Every drawn vertex of one ring path, as `(radius, angle)` about the ring's
+/// own centre.
+///
+/// The inverse of [`polar`], which is `(cx + r·sin a, cy − r·cos a)`: `r` is
+/// the hypotenuse and `a` is `atan2(x − cx, cy − y)`, normalised into
+/// `0.0..TAU` because `atan2` answers in `−π..π` and this crate's convention is
+/// clockwise from twelve o'clock.
+///
+/// The centre comes off the path's own `Seg::Arc`s rather than out of
+/// `Options`, because the figure's radius is a function of how many labels
+/// landed in a side column and rebuilding it here would be a second
+/// implementation of the thing under test.
+fn ring_vertices(segs: &[Seg]) -> Vec<(f64, f64)> {
+    let (cx, cy) = segs
+        .iter()
+        .find_map(|s| match *s {
+            Seg::Arc { cx, cy, .. } => Some((cx, cy)),
+            _ => None,
+        })
+        .expect("a feature band on the ring is drawn with arcs");
+    segs.iter()
+        .filter_map(|s| match *s {
+            Seg::Move(x, y) | Seg::Line(x, y) => Some((
+                (x - cx).hypot(cy - y),
+                (x - cx).atan2(cy - y).rem_euclid(TAU),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The two angles one ring band runs BETWEEN, in radians clockwise from twelve
+/// o'clock, as `(start, end)` with `end` always the larger.
+///
+/// `end` may exceed a full turn, which is what a band closing on the origin
+/// means and exactly what `angle_past(len, len)` returns for it.
+///
+/// The band is found as the complement of the WIDEST gap between consecutive
+/// vertex angles rather than as plain `min..max`, because `atan2`'s branch cut
+/// falls somewhere on every circle: a band ending on the last base of the
+/// molecule has one end at 359.99 degrees and the other at 0.0, and `min..max`
+/// would report it as the 359.99 degrees it does *not* cover. Taking the
+/// complement of the gap gets that case and the ordinary one with the same
+/// arithmetic, which is why a feature on the last base can be a fixture at all.
+///
+/// **It cannot read a band longer than half a turn**, where the shaft is itself
+/// the widest gap and the answer would be the outside of the arc. It says so
+/// rather than returning that quietly, because a silently inverted reading is
+/// how a test stops meaning anything.
+fn arc_span(segs: &[Seg]) -> (f64, f64) {
+    let mut a: Vec<f64> = ring_vertices(segs).iter().map(|v| v.1).collect();
+    assert!(a.len() >= 2, "a band drawn with {} vertices", a.len());
+    a.sort_by(|p, q| p.partial_cmp(q).expect("no NaN in a drawn angle"));
+    // Seeded with the gap that wraps past twelve o'clock, so index 0 is a
+    // candidate start on the same terms as every other index.
+    let (mut at, mut gap) = (0usize, a[0] + TAU - a[a.len() - 1]);
+    for (i, pair) in a.windows(2).enumerate() {
+        if pair[1] - pair[0] > gap {
+            (at, gap) = (i + 1, pair[1] - pair[0]);
+        }
+    }
+    let sweep = TAU - gap;
+    assert!(
+        sweep < TAU * 0.5,
+        "a band of {sweep} radians cannot be told from its own complement"
+    );
+    (a[at], a[at] + sweep)
+}
+
+/// The 1-based bases a ring band runs between, inverted out of where it was
+/// drawn.
+///
+/// `angle(a, len)` puts base `a` at `(a − 1)/len` of a turn and
+/// `angle_past(b, len)` closes the band at `b/len` of one, so this is those two
+/// read backwards — and read backwards out of coordinates, not recomputed from
+/// them.
+///
+/// Fractional, and deliberately not rounded to a base: the whole point of the
+/// assertions downstream is the SIZE of the error, and rounding would hide a
+/// half-base one behind an exact-looking integer.
+fn arc_bases(segs: &[Seg], len: u64) -> (f64, f64) {
+    let (start, end) = arc_span(segs);
+    (start / TAU * len as f64 + 1.0, end / TAU * len as f64)
+}
+
+/// The angle of the arrowhead's point on a ring band, or `None` if it has none.
+///
+/// The point is the one vertex at the band's MID radius. The shaft's corners
+/// sit at `ri` and `ro` and the two barbs overshoot to `ri − barb` and
+/// `ro + barb`, so `(ri + ro)/2` belongs to the point alone — and, because the
+/// barbs are equal and opposite, that midpoint is the mean of the extreme radii
+/// whether the band carries a head or not. So neither `ri` nor `ro` has to be
+/// known here, which is what keeps this independent of `ring::radius`.
+///
+/// `None` is the honest answer for `Strand::Unoriented`, whose band is a plain
+/// wedge, and for every part of a joined feature except the one `arrow_on`
+/// names. A point is a directional claim, and a file that declines to make one
+/// must not have it made on its behalf.
+fn arrow_tip_angle(segs: &[Seg]) -> Option<f64> {
+    let vs = ring_vertices(segs);
+    let lo = vs.iter().map(|v| v.0).fold(f64::INFINITY, f64::min);
+    let hi = vs.iter().map(|v| v.0).fold(f64::NEG_INFINITY, f64::max);
+    let mid = (lo + hi) * 0.5;
+    // 1e-6, not 1e-9. What it has to absorb is the sin/cos/hypot round trip,
+    // about 1e-12 on the 270 unit radius these figures use; what it has to stay
+    // clear of is the next vertex in, which is half the ring's width away --
+    // nine units at the default. There is no width of doubt between the two.
+    let mut on_band = vs.iter().filter(|v| (v.0 - mid).abs() < 1e-6);
+    let tip = on_band.next()?;
+    assert!(
+        on_band.next().is_none(),
+        "two vertices on the band's mid radius: a second arrowhead"
+    );
+    Some(tip.1)
+}
+
 #[test]
 fn a_linear_molecule_now_gets_a_linear_figure() {
     // The whole complaint, as an assertion. Every FASTA, every assembly, every
@@ -2545,6 +2757,189 @@ fn the_arrowhead_is_at_the_end_the_feature_reads_towards() {
     }
 }
 
+/// The ring twin of [`the_arrowhead_is_at_the_end_the_feature_reads_towards`],
+/// which draws a LINEAR molecule and so tests `box_segs` and never `arc_segs`.
+///
+/// **This passes at c0b60b2 and is meant to: the ring draws this correctly and
+/// always has.** The finding is that nothing noticed. Until this existed, the
+/// test above was the only one in `pl-draw` asserting which end of a feature
+/// carries the point, its fixture is `plasmid(6000, false)`, and `plasmid`'s
+/// second parameter is `circular` — so the ring's own copy of the rule, the
+/// `match d.strand` in `circular_scene`'s feature loop, was read back by
+/// nothing. Inverting it wholesale left all 208 tests in this crate green while
+/// moving a reverse gene's point 90 degrees to the wrong end of its arc. F4 in
+/// `docs/AUDIT-2026-08-14-r3.md` measured exactly that.
+///
+/// Which end carries the point is not decoration. It is the only thing in a
+/// plasmid map that says which way a gene is transcribed, and a reader who
+/// clones off a figure with it reversed builds the construct backwards.
+///
+/// **Relative, on purpose.** The assertion is where the point sits within the
+/// band's own two ends, never at an absolute angle or an absolute base, so this
+/// test answers for direction alone and
+/// [`a_feature_on_the_ring_is_drawn_between_the_bases_it_names`] answers for
+/// position. Rotating the whole ring leaves this green, which is what keeps the
+/// two findings' checks from collapsing into one check that fails for two
+/// reasons and pins neither. The second assertion in each oriented arm — that
+/// the point is nowhere near the band's other end — is what stops a degenerate
+/// band, whose two ends coincide, satisfying the first arm vacuously.
+///
+/// The fixture is 3,600 bp so a base is a tenth of a degree, and every feature
+/// is 600 bp: a 60 degree band, far above `min_feature_degrees`, so each is
+/// drawn as an arrowed arc rather than degrading to the tick branch.
+///
+/// Mutation that re-breaks it: in `crates/pl-draw/src/lib.rs`, in the feature
+/// loop of `circular_scene`, change `Strand::Reverse => Arrow::Start,`
+/// (line 1346 at c0b60b2) to `Strand::Reverse => Arrow::End,`.
+#[test]
+fn on_the_ring_too_the_arrowhead_is_at_the_end_the_feature_reads_towards() {
+    let mut m = plasmid(3_600, true);
+    m.features
+        .push(feat_on("fwd", "CDS", 201, 800, Strand::Forward));
+    m.features
+        .push(feat_on("rev", "CDS", 1_001, 1_600, Strand::Reverse));
+    m.features
+        .push(feat_on("flat", "CDS", 2_001, 2_600, Strand::Unoriented));
+    let (sc, report) = circular_scene(&m, Options::default());
+    assert!(report.malformed.is_empty() && report.partly_drawn.is_empty());
+
+    for (name, want) in [("fwd", Some(true)), ("rev", Some(false)), ("flat", None)] {
+        let bands = titled(&sc, name);
+        assert_eq!(bands.len(), 1, "{name}: {} bands drawn", bands.len());
+        let (start, end) = arc_span(bands[0]);
+        // The premise every assertion below rests on: the band has two ENDS,
+        // told apart by more than float noise. 600 of 3,600 bases is 60
+        // degrees, so this is a long way from binding.
+        assert!(
+            end - start > 0.5,
+            "{name}: a band of {} radians has no two ends to speak of",
+            end - start
+        );
+        match (want, arrow_tip_angle(bands[0])) {
+            (None, tip) => assert!(
+                tip.is_none(),
+                "{name}: an unoriented feature was given an arrowhead at {tip:?}"
+            ),
+            (Some(_), None) => panic!("{name}: an oriented feature has no arrowhead"),
+            (Some(forward), Some(tip)) => {
+                // Clockwise from twelve o'clock, so a forward feature's own
+                // reading direction is towards the LARGER angle.
+                let (point, tail) = if forward { (end, start) } else { (start, end) };
+                assert!(
+                    (tip - point).abs() < 1e-9,
+                    "{name}: the point is at {tip} and the band runs {start}..{end}"
+                );
+                assert!(
+                    (tip - tail).abs() > 0.5,
+                    "{name}: the point is at the band's other end, {tip} of {start}..{end}"
+                );
+            }
+        }
+    }
+}
+
+/// Where a ring band lands, in the molecule's own coordinates.
+///
+/// **This passes at c0b60b2 and is meant to.** Nothing in this crate tied a
+/// base number to an angle on the ring: the audit rotated every band by 10, 50,
+/// 200 and 1,000 bases, shortened each by one, swapped its two endpoints and
+/// finally reflected the entire figure across the vertical axis, and all 208
+/// tests here plus all 18 integration tests stayed green through every one of
+/// them. A figure with every feature mirrored passed the whole `pl-draw` test
+/// surface. That is not a loose bound; it is no bound. F5 in
+/// `docs/AUDIT-2026-08-14-r3.md`.
+///
+/// The track has had this since it was written —
+/// [`a_feature_at_the_start_at_the_end_and_across_the_whole_molecule_is_drawn_where_it_is`]
+/// — and this is its ring twin, with the three cases a coordinate map gets
+/// wrong when it is off by one wrap: a feature on the FIRST base, one ending on
+/// the LAST, and one crossing the origin, whose two parts have to come back at
+/// their own coordinates and not at the whole feature's.
+///
+/// **Read backwards out of the drawing, not compared against `angle`.**
+/// [`arc_bases`] inverts `atan2` over the vertices the back ends will actually
+/// write, so this would still fail if `angle` and `frac` were themselves wrong
+/// — which asserting `drawn == angle(start, len)` would not, both sides moving
+/// together.
+///
+/// **The second half is what makes the first unfakeable.** Absolute positions
+/// alone can be satisfied by a renderer told the answer; two identical features
+/// exactly 1,000 bases apart having to land exactly 1,000 bases apart cannot
+/// be, and the pair together pin the mapping rather than one point on it.
+///
+/// Mutation that re-breaks it: in `crates/pl-draw/src/lib.rs`, in the one line
+/// of `circular_scene` that turns bases into an arc —
+/// `segs: arc_segs(cx, cy, ri, ro, angle(a, len), angle_past(b, len), arrow),`,
+/// line 1353 at c0b60b2 — rotate every band by a thousand bases by replacing
+/// `angle(a, len), angle_past(b, len)` with
+/// `angle(a.wrapping_add(1000), len), angle_past(b.wrapping_add(1000), len)`.
+///
+/// `wrapping_add` and not `+`, because `len` comes off a LOCUS line and two
+/// unrelated tests here hand this function a molecule near the top of the `u64`
+/// range on purpose: a plain `+ 1000` overflows and panics in those instead,
+/// and a mutation that fails a test for a second reason proves nothing about
+/// the first. A ONE-base rotation reddens this test too, and so does dropping
+/// `angle_past` for `angle`, negating both angles, or exchanging them; all four
+/// were run.
+#[test]
+fn a_feature_on_the_ring_is_drawn_between_the_bases_it_names() {
+    let len = 3_600u64;
+    let mut m = plasmid(len as usize, true);
+    m.features
+        .push(feat_on("first", "CDS", 1, 300, Strand::Forward));
+    m.features
+        .push(feat_on("plus1000", "CDS", 1_001, 1_300, Strand::Forward));
+    m.features
+        .push(feat_on("last", "CDS", 3_301, len, Strand::Forward));
+    m.features
+        .push(feat_on("wrap", "CDS", 3_500, 200, Strand::Forward));
+    let (sc, report) = circular_scene(&m, Options::default());
+    assert!(report.malformed.is_empty() && report.partly_drawn.is_empty());
+
+    // A quarter of a base. The round trip through `polar` and `atan2` is good
+    // to about 1e-12 bases at this radius and the smallest mutation this exists
+    // to catch moves a band by a whole one, so there is no width of error
+    // between exact and caught, and the number is stated in BASES because that
+    // is the unit a reader of the figure works in.
+    let tol = 0.25;
+    for (name, want) in [
+        ("first", vec![(1.0, 300.0)]),
+        ("plus1000", vec![(1_001.0, 1_300.0)]),
+        ("last", vec![(3_301.0, 3_600.0)]),
+        // `ranges` splits this one at the origin, and the parts are the
+        // feature's real coordinates rather than 3,500..3,700 or 1..200 twice.
+        ("wrap", vec![(3_500.0, 3_600.0), (1.0, 200.0)]),
+    ] {
+        let bands = titled(&sc, name);
+        assert_eq!(
+            bands.len(),
+            want.len(),
+            "{name}: {} bands drawn for {} parts",
+            bands.len(),
+            want.len()
+        );
+        for (i, &(a, b)) in want.iter().enumerate() {
+            let (from, to) = arc_bases(bands[i], len);
+            assert!(
+                (from - a).abs() < tol,
+                "{name} part {i} begins at base {from}, not {a}"
+            );
+            assert!(
+                (to - b).abs() < tol,
+                "{name} part {i} ends at base {to}, not {b}"
+            );
+        }
+    }
+
+    let (first_from, _) = arc_bases(titled(&sc, "first")[0], len);
+    let (later_from, _) = arc_bases(titled(&sc, "plus1000")[0], len);
+    assert!(
+        (later_from - first_from - 1_000.0).abs() < tol,
+        "two features 1,000 bases apart were drawn {} bases apart",
+        later_from - first_from
+    );
+}
+
 #[test]
 fn the_rulers_own_numbers_never_overprint_each_other() {
     // The ring divides by a flat twelve and can: twelve numbers around `2πr` are
@@ -2883,14 +3278,32 @@ fn segments_out_of_order_are_drawn_where_they_are_and_read_the_way_the_file_says
     assert_eq!(tips(parts[0]), 0, "a second arrowhead on a joined feature");
 
     // The ring makes the same choice from the same field, so the two figures
-    // cannot disagree about which end a joined feature reads towards.
+    // cannot disagree about which PART of a joined feature carries the point --
+    // and that is now asserted here rather than merely stated. Until
+    // 2026-08-14 this block ended at the part count below, and the sentence
+    // above it claimed a compensating control that did not exist: the ring's
+    // arrowhead could go on the wrong part, or on the wrong end of the right
+    // one, with nothing in the crate the wiser. The false claim had already
+    // cost something, having talked round 2's finding 7 into calling the
+    // shipped desktop figures guarded. Which END the point is on is
+    // `on_the_ring_too_the_arrowhead_is_at_the_end_the_feature_reads_towards`;
+    // which PART it is on is here, because only this fixture has two.
     let mut round = plasmid(2000, true);
     round.features = m.features.clone();
     let (ring_scene, _) = circular_scene(&round, Options::default());
+    let ring_parts = titled(&ring_scene, "descending");
     assert_eq!(
-        titled(&ring_scene, "descending").len(),
+        ring_parts.len(),
         2,
         "the ring drew a different number of parts for the same feature"
+    );
+    assert!(
+        arrow_tip_angle(ring_parts[1]).is_some(),
+        "the ring left the last-listed segment without an arrowhead"
+    );
+    assert!(
+        arrow_tip_angle(ring_parts[0]).is_none(),
+        "a second arrowhead on a joined feature, on the ring this time"
     );
 }
 

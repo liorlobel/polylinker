@@ -332,6 +332,56 @@ function CargoTest {
     $global:LASTEXITCODE = 0
 }
 
+# THE SAME RULE FOR `node --test`, WHICH THIS FILE DOCUMENTED FOR CARGO AND THEN
+# DID NOT GENERALISE.
+#
+# `CargoTest` above exists because `cargo test <filter>` exits 0 having run
+# nothing. `node --test test/*.test.ts` does exactly the same thing for exactly
+# the same reason, and the gate's node step was written without it. PowerShell
+# does not expand a wildcard for a native command, so the pattern reaches node
+# intact and NODE expands it -- and node's runner exits 0 when the pattern
+# matches no file. Measured here on node v24.19.0 against
+# `packages/circular-map`, which is the only caller:
+#
+#     test/*.test.ts    -> tests 46 / pass 46 / fail 0    EXIT=0
+#     test/*.spec.ts    -> tests  0 / pass  0 / fail 0    EXIT=0
+#
+# A step asserting nothing but the exit code cannot tell those two apart, so one
+# renamed file takes its tests dark behind an unchanged green line -- and nothing
+# else in the tree would notice, because `packages/circular-map/tsconfig.json`
+# includes only `src/**/*.ts` so the typecheck step never looks in `test/`, and
+# `package.json`'s "test" script is byte-identical to the gate's command and so
+# is vacuous in the same way.
+#
+# The count is read out of the runner's own summary rather than counted off the
+# filesystem, for the reason `CargoTest` reads libtest's: a file that exists and
+# is not collected is precisely the case a directory listing calls healthy.
+#
+# NO SUMMARY IS ALSO A FAILURE. If a future node stops printing `pass N` this
+# throws rather than falling back on "well, it exited 0" -- the fail-closed
+# direction, and the one that keeps this from becoming another check that cannot
+# fail. Both of node's reporters are read: the TAP one it uses when stdout is not
+# a terminal prints `# pass 46`, the spec one it uses when it is prints an info
+# glyph and then `pass 46`, and CI has been seen to give either.
+function Assert-NodeTestSummary {
+    param([string[]]$Lines, [string]$What)
+    $pass = -1
+    $fail = -1
+    foreach ($line in $Lines) {
+        # `[^0-9]*` before the word is what keeps a TEST NAME containing "pass"
+        # from being read as the summary: under TAP such a line reads
+        # `ok 12 - ...`, and the digits of the ordinal cannot be crossed; under
+        # the spec reporter it carries a `(0.41ms)` suffix, and the anchor
+        # forbids anything after the number.
+        if ($line -match '^[^0-9]*\bpass\s+(\d+)\s*$') { $pass = [int]$Matches[1] }
+        elseif ($line -match '^[^0-9]*\bfail\s+(\d+)\s*$') { $fail = [int]$Matches[1] }
+    }
+    if ($pass -lt 0 -or $fail -lt 0) { throw ($What + ' printed no test-runner summary at all, so nothing here read a count out of it and this step proved nothing.') }
+    if ($pass -eq 0) { throw ($What + ' ran 0 tests and still exited 0, so this step proved nothing. A glob that matches no file is the usual cause -- node --test exits 0 for an empty match, exactly as cargo test does for a name filter that matches nothing. Check that no test file has been renamed.') }
+    if ($fail -ne 0) { throw ($What + " reported $fail failing test(s) and still exited 0.") }
+    return $pass
+}
+
 Write-Host "`nPolylinker CI gate" -ForegroundColor Cyan
 Write-Host ("rustc {0}" -f (rustc --version))
 
@@ -1439,10 +1489,42 @@ Write-Host "`ncircular-map (TypeScript)" -ForegroundColor Cyan
 Step 'typecheck' {
     Push-Location packages/circular-map; npx --no-install tsc -p tsconfig.json --noEmit; Pop-Location
 } { (Have node) -and (Test-Path 'packages/circular-map/node_modules') }
+# THE 46 PROPERTY TESTS, WITH A FLOOR UNDER THEM.
+#
+# This step used to be the three lines below with nothing but the exit code
+# asserted, which made it the node-shaped twin of the defect `CargoTest` was
+# written for: rename `render.test.ts` to `render.tests.ts` and 23 of the 46 go
+# dark; rename all three and the runner reports `tests 0 / pass 0 / fail 0` and
+# exits 0, and this log prints the same word it printed yesterday. What a dark
+# `test/` would cost is the hostile-input and label-geometry property tests --
+# not the cross-implementation diff, which 'renderers agree (fixture is
+# current)' below covers byte for byte and separately.
+#
+# The pattern is QUOTED now. It made no difference to what node received --
+# PowerShell passes a wildcard through to a native command untouched either way
+# -- and it says out loud that the glob is node's to expand, which is the whole
+# reason a zero match is possible here at all.
 Step 'circular-map tests' {
     Push-Location packages/circular-map
-    node --test --experimental-strip-types test/*.test.ts
-    Pop-Location
+    try {
+        $out = & node --test --experimental-strip-types 'test/*.test.ts' 2>&1
+        $code = $LASTEXITCODE
+    } finally { Pop-Location }
+    if ($code -ne 0) { $out | ForEach-Object { Write-Output $_ }; $global:LASTEXITCODE = $code; return }
+    $ran = Assert-NodeTestSummary $out 'node --test packages/circular-map/test/*.test.ts'
+
+    # THE FLOOR IS SHOWN TO FIRE, on planted input rather than asserted -- the
+    # rule every oracle in this file is held to, because a floor over a healthy
+    # corpus is indistinguishable from no floor at all. Delete the zero-test
+    # throw in `Assert-NodeTestSummary` and this probe catches nothing, and this
+    # step goes red rather than quietly returning to reporting ok over 0 tests.
+    $fired = $false
+    try { Assert-NodeTestSummary @('# tests 0', '# suites 0', '# pass 0', '# fail 0') 'a planted zero-test transcript' | Out-Null }
+    catch { $fired = $true }
+    if (-not $fired) { throw 'the zero-test floor did not fire on a planted "pass 0" summary, so this step could still report ok having run nothing -- which is the defect the floor was added to remove' }
+
+    Write-Host ("        {0} test(s) ran" -f $ran) -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
 } { Have node }
 
 # Do the two renderers still agree?
@@ -1487,6 +1569,182 @@ Step 'renderers agree (rust replays it)' {
     # an integration test.
     cargo test -p pl-draw --test agreement
 } { Have node }
+
+Write-Host "`nbrowser prototype (the single-file page)" -ForegroundColor Cyan
+
+# WHY THIS SECTION EXISTS AT ALL, WHICH IS THE POINT OF IT.
+#
+# Until 2026-08-14 the string `prototype` did not appear ONCE in this file's
+# 4,019 lines, and neither did `dna-reader`, `build-web` or `check_page`.
+# `prototype/dna-reader.template.html` is 1,257 lines, `README.md` calls the page
+# it builds "Usable today", `tools/build-web.ps1` builds it and
+# `prototype/check_page.js` drives it -- and no gate on any platform ran any of
+# the three. The first audit that ever opened that file raised five findings and
+# all five survived refutation, one of them a page telling a user that 58 of the
+# 58 enzymes in its set do not cut a molecule that all 58 cut. Yield tracks first
+# contact with a surface; this section is the first contact.
+#
+# THE PLACEHOLDER CONTRACT BETWEEN THE TEMPLATE AND ITS BUILDER, as a function
+# so it can be run over planted input as well as over the real pair.
+#
+# The template is not the artefact. It carries `{{...}}` placeholders that
+# `tools/build-web.ps1` substitutes -- the base64 wasm module, the demo GenBank
+# record, a build stamp -- and the page a reader opens is the result. Rename one
+# on either side and NOTHING TODAY SAYS SO: build-web.ps1 throws for
+# `{{WASM_BASE64}}` alone (its line 58) and its other two substitutions are
+# `String.Replace` calls, which are silent no-ops when the needle is absent. A
+# template that spelled the stamp differently would ship the literal text
+# `{{BUILD_STAMP}}` to a reader inside a comment about provenance; a builder
+# substituting one the template no longer has would ship a page carrying no
+# provenance at all -- which is how a four-commit-stale build sat on the author's
+# disk, missing a fifteen-line null check, while `check_page.js` printed ALL
+# CHECKS PASSED against it.
+function Compare-WebPlaceholders {
+    param([string[]]$InTemplate, [string[]]$InBuilder)
+    $found = @()
+    foreach ($p in $InTemplate) { if ($InBuilder -notcontains $p) { $found += "the template uses $p and tools/build-web.ps1 substitutes nothing for it, so the built page would hand that placeholder to a reader as literal text" } }
+    foreach ($p in $InBuilder) { if ($InTemplate -notcontains $p) { $found += "tools/build-web.ps1 substitutes $p and the template no longer contains it, so that substitution is a silent no-op and whatever it carried is now missing from the page" } }
+    return $found
+}
+
+# NO PRECONDITION, DELIBERATELY, and the step is written so that it is honest
+# about which of its three halves ran. The first half needs nothing but this
+# interpreter and runs on all three legs; the second needs a builder that is not
+# portable today; the third needs a library no runner has. A step that skipped
+# whenever the third was missing would be a step that never ran anywhere, which
+# is the state this section was written to leave.
+Step 'the browser prototype: template and builder agree, and the page is built and driven where it can be' {
+    $tplPath = "$repo/prototype/dna-reader.template.html"
+    $pagePath = "$repo/prototype/dna-reader.html"
+    $harnessPath = "$repo/prototype/check_page.js"
+    $builderPath = "$repo/tools/build-web.ps1"
+    foreach ($p in $tplPath, $builderPath, $harnessPath, "$repo/prototype/demo-construct.gb") {
+        if (-not (Test-Path -LiteralPath $p)) { throw "$p is missing, so the browser prototype can be neither built nor checked" }
+    }
+
+    # FLOORS ON THE INPUTS FIRST, because every corpus-taking oracle in this file
+    # refuses an empty input set rather than reporting ok over one. A truncated
+    # template and a harness somebody gutted are exactly the two inputs the
+    # comparisons below would call healthy.
+    $tplRaw = Get-Content -LiteralPath $tplPath -Raw
+    $tplLines = @(Get-Content -LiteralPath $tplPath).Count
+    if ($tplLines -lt 900) { throw "prototype/dna-reader.template.html is $tplLines line(s); it was 1,257 when this floor was written and a file this short is not that page" }
+    $harness = Get-Content -LiteralPath $harnessPath -Raw
+    $assertions = ([regex]::Matches($harness, '(?m)^\s*T\(')).Count
+    if ($assertions -lt 15) { throw "prototype/check_page.js makes $assertions assertion(s); it made 24 when this floor was written, and a harness with most of them deleted still ends by printing ALL CHECKS PASSED" }
+
+    # The builder's placeholders come from its AST, not from a grep over its
+    # text. A comment naming `{{BUILD_STAMP}}` is not a substitution, and a
+    # checker that cannot tell code from prose gets silenced rather than
+    # satisfied -- which the release-workflow checker further down this file
+    # already had to learn once.
+    $toks = $null
+    $errs = $null
+    $bast = [System.Management.Automation.Language.Parser]::ParseFile($builderPath, [ref]$toks, [ref]$errs)
+    if ($errs) { throw "tools/build-web.ps1 does not parse: $($errs[0])" }
+    $inBuilder = @($bast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                $n.Value -match '^\{\{[A-Z0-9_]+\}\}$' }, $true) |
+        ForEach-Object { $_.Value } | Sort-Object -Unique)
+    $inTemplate = @([regex]::Matches($tplRaw, '\{\{[A-Z0-9_]+\}\}') |
+        ForEach-Object { $_.Value } | Sort-Object -Unique)
+    if ($inBuilder.Count -lt 3) { throw "only $($inBuilder.Count) placeholder(s) parsed out of tools/build-web.ps1; it substitutes three, so the parser is broken and this comparison would agree with anything" }
+    if ($inTemplate.Count -lt 3) { throw "only $($inTemplate.Count) placeholder(s) found in the template; it carries three, so this comparison would agree with anything" }
+    $problems = @(Compare-WebPlaceholders $inTemplate $inBuilder)
+
+    # PLANTED INPUT. Two sets agree whenever they agree, including when both are
+    # wrong in the same way and including when the comparison has stopped
+    # comparing, so it is run once over a pair known to differ IN BOTH
+    # DIRECTIONS. Delete either loop in `Compare-WebPlaceholders` and this counts
+    # one where it must count two, and the step goes red.
+    $planted = @(Compare-WebPlaceholders @('{{WASM_BASE64}}', '{{BUILD_STAMP_RENAMED}}') @('{{WASM_BASE64}}', '{{BUILD_STAMP}}'))
+    if ($planted.Count -ne 2) { throw "the placeholder comparison reported $($planted.Count) of 2 planted disagreements, so it does not notice a renamed placeholder in both directions and proves nothing" }
+    if ($problems) { throw ($problems -join "`n        ") }
+    Write-Host ("        {0} placeholder(s), template and builder agree; comparison verified against a renamed one" -f $inTemplate.Count) -ForegroundColor DarkGray
+
+    # THE BUILD, WHERE IT CAN RUN -- AND WHY THAT IS NOT EVERYWHERE.
+    #
+    # `tools/build-web.ps1` is Windows-only, and NOT because its subject is. Its
+    # line 28 is `Join-Path $env:USERPROFILE '.cargo\bin'`, and off Windows that
+    # variable is ABSENT rather than empty, which makes `Join-Path` a terminating
+    # error -- the exact failure this file's own header records as having killed
+    # both non-Windows legs of the first release. Its four paths are joined with
+    # backslashes besides (lines 31 to 33 and 64), which name nothing on Linux.
+    # So the limit is a scripting defect in the builder, not the artefact's:
+    # a single HTML file with a wasm module inlined into it is as portable as
+    # anything in this tree.
+    #
+    # It is guarded HERE rather than declared `WindowsOnly` on purpose.
+    # `WindowsOnly` is this file's one spelling for "the subject is a Win32
+    # artefact -- a PE resource directory, an 8.3 name, the registry, msiexec",
+    # seven steps say it and the header counts them; an eighth saying it for a
+    # fixable `Join-Path` would make the word mean two things and quietly retire
+    # the header sentence that gives it meaning. When build-web.ps1 is made
+    # portable, delete the `if ($onWindows)` and this builds on all three legs
+    # with nothing else changed.
+    $built = $false
+    $wasmPath = "$repo/target/wasm32-unknown-unknown/wasm/pl_wasm.wasm"
+    if (-not $onWindows) {
+        Write-Host '        not built here: tools/build-web.ps1 is not portable (see the comment above this line)' -ForegroundColor DarkGray
+    } elseif (-not (Test-Path -LiteralPath $wasmPath)) {
+        Write-Host '        not built here: the wasm module is absent, so the wasm32 step above did not run' -ForegroundColor DarkGray
+    } else {
+        $buildLog = & $builderPath -SkipBuild *>&1
+        if (-not (Test-Path -LiteralPath $pagePath)) { throw ('tools/build-web.ps1 wrote no prototype/dna-reader.html: ' + ($buildLog -join ' | ')) }
+        $page = Get-Content -LiteralPath $pagePath -Raw
+        # Rebuilding rather than reading whatever is on disk IS the check.
+        # `prototype/dna-reader.html` is gitignored, so there is no committed
+        # artefact to diff against and nothing in the tree says how old the local
+        # one is. The copy found by audit on this machine was four commits behind
+        # its template, and the harness passed against it. Built here, every run,
+        # the page the harness drives is the page this template describes.
+        foreach ($p in $inTemplate) { if ($page.Contains($p)) { throw "the built page still contains $p, so build-web.ps1 did not substitute it" } }
+        if ($page.Length -le $tplRaw.Length) { throw "the built page is $($page.Length) bytes against a $($tplRaw.Length)-byte template, so the wasm module was not inlined into it" }
+        $built = $true
+        Write-Host ("        built prototype/dna-reader.html, {0:N0} bytes, no placeholder left in it" -f $page.Length) -ForegroundColor DarkGray
+    }
+
+    # THE BEHAVIOURAL HALF, AND ONLY OVER A PAGE THIS RUN BUILT.
+    #
+    # Driving whatever `dna-reader.html` happens to be lying on the disk is the
+    # defect and not the check, for the reason given above, so `$built` gates it
+    # rather than `Test-Path`.
+    #
+    # `prototype/check_page.js` needs jsdom, and JSDOM IS ON NO RUNNER: both
+    # `prototype/package.json` and `node_modules/` are gitignored, so a fresh
+    # checkout has neither and `require("jsdom")` throws. That is reported here
+    # rather than assumed, and what would close it is one line in
+    # `.github/workflows/ci.yml` -- `npm install --no-save jsdom` in `prototype/`
+    # on all three legs, or a committed package.json and lockfile there plus
+    # `npm ci`, the way `packages/circular-map` is already provisioned. Until
+    # that lands, what runs on a runner is the contract above, which is not
+    # nothing: it has floors on both inputs and a planted control.
+    $haveJsdom = $false
+    if (Have node) {
+        Push-Location prototype
+        try { node -e 'require.resolve("jsdom")' *>&1 | Out-Null; $haveJsdom = ($LASTEXITCODE -eq 0) } finally { Pop-Location }
+    }
+    if ($built -and $haveJsdom) {
+        Push-Location prototype
+        try {
+            $chk = & node check_page.js 2>&1
+            $chkCode = $LASTEXITCODE
+        } finally { Pop-Location }
+        $passes = @($chk | Where-Object { "$_" -match '^\s+PASS\s' }).Count
+        if ($chkCode -ne 0) { $chk | ForEach-Object { Write-Output $_ }; throw "prototype/check_page.js failed against the page this step has just built ($passes assertion(s) passed before it stopped)" }
+        # A FLOOR ON WHAT IT REACHED, not on what it printed. `check_page.js`
+        # ends with ALL CHECKS PASSED whenever nothing failed, INCLUDING when it
+        # was handed no corpus and skipped its own comparisons -- the shape this
+        # whole file exists to refuse. Driven with no corpus, as here, 20 of its
+        # 24 assertions are reached and pass; a run that reaches fewer than
+        # fifteen has stopped reaching them for some other reason.
+        if ($passes -lt 15) { throw "prototype/check_page.js exited 0 having passed only $passes assertion(s); it carries $assertions, and a harness that stopped reaching them exits 0 in exactly the same way" }
+        Write-Host ("        page driven in jsdom: {0} assertion(s) passed" -f $passes) -ForegroundColor DarkGray
+    } elseif ($built) {
+        Write-Host '        not driven here: jsdom does not resolve from prototype/ (npm install --no-save jsdom there)' -ForegroundColor DarkGray
+    }
+    $global:LASTEXITCODE = 0
+}
 
 Write-Host "`npath arithmetic (the helper three scripts each carry a copy of)" -ForegroundColor Cyan
 
@@ -3080,30 +3338,37 @@ Step 'the MSI is generated from the manifest and not from a second file list' {
     # release.ps1 drifted twice in one week, on 2026-08-03 and 2026-08-04, and a
     # licence text stopped shipping each time.
     #
-    # So tools/installer/Polylinker.wxs contains no files, and this step proves
-    # it: it regenerates the payload fragment and asserts the component set is
-    # exactly the manifest minus the three deliberate exclusions.
-    # FIRST, THE ASSERTION THIS STEP'S NAME ACTUALLY PROMISES.
+    # So tools/installer/Polylinker.wxs contains no files. This step proves the
+    # second half of that -- it regenerates the payload fragment and asserts the
+    # component set is exactly the manifest minus the three deliberate
+    # exclusions -- and, since 2026-08-14, another step proves the first.
     #
-    # The comparison below was, in its first version, the whole step -- and it
-    # could not fail. It compared the manifest against a fragment that
-    # build-msi.ps1 had generated FROM the manifest four lines earlier, using the
-    # same parser. Two lists derived from one source agree by construction. It
-    # would have passed just as happily against a Polylinker.wxs stuffed with
-    # hand-written <File> elements, which is the exact thing the step exists to
-    # forbid. So the authoring file is checked first, and directly.
-    $wxsRaw = Get-Content -LiteralPath "$repo/tools/installer/Polylinker.wxs" -Raw
-    $wxsCode = [regex]::Replace($wxsRaw, '(?s)<!--.*?-->', '')
-    if ($wxsCode -match '<File\b') {
-        throw 'Polylinker.wxs contains a <File> element. The MSI payload must come from dist/SHA256SUMS.txt through build-msi.ps1, so that a licence text cannot stop shipping without the manifest saying so.'
-    }
-    if ($wxsCode -match '<ComponentGroup\b(?!Ref)') {
-        throw 'Polylinker.wxs defines a <ComponentGroup>. It may only reference the generated one with <ComponentGroupRef Id="PayloadComponents" />.'
-    }
-    if ($wxsCode -notmatch '<ComponentGroupRef\s+Id="PayloadComponents"') {
-        throw 'Polylinker.wxs does not reference the generated PayloadComponents group, so the MSI would ship no payload at all'
-    }
-
+    # HALF THE ASSERTION THIS STEP'S NAME PROMISES IS NO LONGER IN THIS STEP.
+    # IT MOVED, ON 2026-08-14, AND THIS IS WHERE IT WENT.
+    #
+    # The comparison below cannot, on its own, fail the way the name promises. It
+    # compares the manifest against a fragment that build-msi.ps1 generated FROM
+    # the manifest four lines earlier, using the same parser, and two lists
+    # derived from one source agree by construction. It would pass just as
+    # happily against a Polylinker.wxs stuffed with hand-written <File> elements,
+    # which is the exact thing the name forbids. So the authoring file is checked
+    # directly -- and that check, four lines of `Get-Content` plus regex, used to
+    # sit right here, immediately below this comment.
+    #
+    # Sitting here put it behind THIS STEP'S PRECONDITION, which is Windows AND a
+    # built `dist/`. Reading a committed .wxs for a <File> element needs neither:
+    # no WiX, no msiexec, no dist/, no Windows. Worse, the precondition's own
+    # comment told a reviewer the opposite in the one sentence a reviewer relies
+    # on -- that the platform-neutral half of the authoring "is asserted by the
+    # step below, which reads the committed .wxs, has no precondition at all, and
+    # therefore runs on all three" -- while the step below had never contained
+    # the string `<File` at all. That sentence was wrong on the day it was
+    # written, and on Linux and macOS the claim was made and nothing checked it.
+    #
+    # The ban now lives in `Test-WxsPayloadAuthoring`, called by 'the MSI takes
+    # no file type away from a program the reader already uses', which reads the
+    # same file, strips the same comments, has no precondition at all and so runs
+    # on three legs instead of one. This step's name is made true by that step.
     $dist = "$repo/dist"
     $out = Join-Path ([IO.Path]::GetTempPath()) ("pl-msi-gen-" + [IO.Path]::GetRandomFileName())
     try {
@@ -3179,10 +3444,44 @@ Step 'the MSI is generated from the manifest and not from a second file list' {
     # never be built there. A green from that tells a reader nothing.
     #
     # The half of the MSI's authoring that IS platform-neutral -- no <File>, no
-    # <Extension>, the pinned UpgradeCode -- is asserted by the step below,
-    # which reads the committed .wxs, has no precondition at all, and therefore
-    # runs on all three.
+    # <ComponentGroup>, no <Extension>, the pinned UpgradeCode -- is asserted by
+    # the step below, which reads the committed .wxs, has no precondition at all,
+    # and therefore runs on all three.
+    #
+    # THAT SENTENCE WAS FALSE UNTIL 2026-08-14 and is kept here, corrected,
+    # rather than quietly rewritten. The `<File>` ban was not in the step below;
+    # it was in the body of THIS step, behind this precondition, so the two legs
+    # that cannot run this step were told the ban covered them and it did not.
+    # `git log -S` puts the claim and the split in the same commit, so it was
+    # wrong when authored rather than having drifted. The ban has been moved into
+    # `Test-WxsPayloadAuthoring`, which the step below calls, and the sentence is
+    # now true of every element it names.
     WindowsOnly { Test-Path "$repo/dist/SHA256SUMS.txt" }
+}
+
+# THE PAYLOAD AUTHORING RULE, AS A FUNCTION SO IT CAN BE RUN OVER PLANTED INPUT.
+#
+# `tools/installer/Polylinker.wxs` must contain no files. The MSI's component set
+# is GENERATED from dist/SHA256SUMS.txt by tools/build-msi.ps1, because
+# docs/RELEASING.md refused a compiled installer on the grounds that every one of
+# them carries a second list of files that drifts from the real payload -- and
+# that is not hypothetical here: the notices list in release.ps1 drifted twice in
+# one week, on 2026-08-03 and 2026-08-04, and a licence text stopped shipping
+# each time.
+#
+# It is a function because a ban is a check that cannot fail while the file it
+# reads is clean, and this file has been clean since the day it was written --
+# which is exactly how it went four audits without anybody noticing WHICH STEP
+# held the ban. The caller runs it twice: once over the real .wxs, once over a
+# copy with a <File> planted in it that must be refused, and refused for that
+# reason.
+function Test-WxsPayloadAuthoring {
+    param([string]$Wxs)
+    $found = @()
+    if ($Wxs -match '<File\b') { $found += 'Polylinker.wxs contains a <File> element. The MSI payload must come from dist/SHA256SUMS.txt through build-msi.ps1, so that a licence text cannot stop shipping without the manifest saying so.' }
+    if ($Wxs -match '<ComponentGroup\b(?!Ref)') { $found += 'Polylinker.wxs defines a <ComponentGroup>. It may only reference the generated one with <ComponentGroupRef Id="PayloadComponents" />.' }
+    if ($Wxs -notmatch '<ComponentGroupRef\s+Id="PayloadComponents"') { $found += 'Polylinker.wxs does not reference the generated PayloadComponents group, so the MSI would ship no payload at all' }
+    return $found
 }
 
 Step 'the MSI takes no file type away from a program the reader already uses' {
@@ -3210,6 +3509,18 @@ Step 'the MSI takes no file type away from a program the reader already uses' {
     # learn once.
     $wxs = [regex]::Replace($raw, '(?s)<!--.*?-->', '')
     $problems = @()
+
+    # THE PAYLOAD AUTHORING BAN, WHICH RUNS HERE BECAUSE HERE IT RUNS ON ALL
+    # THREE. It lived until 2026-08-14 in 'the MSI is generated from the manifest
+    # and not from a second file list', whose precondition is
+    # `WindowsOnly { Test-Path dist/SHA256SUMS.txt }`, while that step's own
+    # comment told the reader this step asserted it. This step had never
+    # contained the string `<File`. Nothing else in `tools/` or `.github/` bans
+    # one either -- 'the installer contacts nothing' is portable and scans the
+    # same directory, but only for network and scheduling tokens. So the ban is
+    # here now, where the file it reads is committed and the step it sits in has
+    # no precondition at all.
+    $problems += @(Test-WxsPayloadAuthoring $wxs)
 
     if ($wxs -match '<Extension\b') {
         $problems += 'Polylinker.wxs uses <Extension>, which writes the extension default and takes the file type from whatever the reader already has'
@@ -3239,8 +3550,18 @@ Step 'the MSI takes no file type away from a program the reader already uses' {
     $owp = ([regex]::Matches($wxs, 'OpenWithProgids')).Count
     if ($owp -lt 8) { $problems += "only $owp OpenWithProgids entries; the installer associates eight extensions additively" }
 
+    # NEGATIVE CONTROL FOR THE BAN, on a doctored copy of the real file rather
+    # than on a hand-written string, so that the thing being refused is the thing
+    # a careless edit would actually produce. One <File> is planted immediately
+    # before the closing tag; the ban must report that and nothing else.
+    $doctored = $wxs -replace '(?s)(</Package>)', '<Component Id="C_Sneaky" Directory="APPLICATIONFOLDER"><File Id="SneakyFile" Name="polylinker.exe" Source="!(bindpath.payload)polylinker.exe" /></Component>$1'
+    if ($doctored -eq $wxs) { throw 'the probe planted nothing: Polylinker.wxs no longer ends in </Package>, so the payload authoring ban below is unproven' }
+    $planted = @(Test-WxsPayloadAuthoring $doctored)
+    if ($planted.Count -ne 1) { throw "the payload authoring ban found $($planted.Count) problem(s) in a copy of Polylinker.wxs carrying one planted <File> element, not 1, so it is not doing what its name says" }
+    if ($planted[0] -notmatch 'contains a <File> element') { throw "the payload authoring ban refused the doctored file for the wrong reason: $($planted[0])" }
+
     if ($problems) { throw ($problems -join "`n        ") }
-    Write-Host "        no <Extension>, no default-handler theft, $owp additive associations, UpgradeCode pinned" -ForegroundColor DarkGray
+    Write-Host "        no <File>, no <Extension>, no default-handler theft, $owp additive associations, UpgradeCode pinned" -ForegroundColor DarkGray
     $global:LASTEXITCODE = 0
 }
 
@@ -3252,12 +3573,25 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     # elevation and because it is the scope readers get by default. The
     # per-machine pass is added only when the session happens to be elevated.
     # The step is skipped entirely without wix, since a workstation with no .NET
-    # SDK cannot build an MSI to test and the other 72 steps are still worth
-    # running there. (It said 62 until 2026-08-10 and 71 until 2026-08-13, each
-    # of which was the count before the gate grew past it; the number is this
-    # file's step total minus this one step, so it moves every time a step is
-    # added, and `docs/RELEASING.md` says seventy-two for the same reason.
-    # Step total today: 73.)
+    # SDK cannot build an MSI to test and the other 74 steps are still worth
+    # running there. (It said 62 until 2026-08-10, 71 until 2026-08-13 and 72
+    # until 2026-08-14, each of which was the count before the gate grew past it;
+    # the number is this file's step total minus this one step, so it moves every
+    # time a step is added. Step total today: 75.)
+    #
+    # FIVE PLACES OUTSIDE THIS FILE STILL SAY SEVENTY-TWO OR SEVENTY-THREE, and
+    # they are stale as of 2026-08-14, when 'the browser prototype: template and
+    # builder agree, and the page is built and driven where it can be' and 'the
+    # archived licence evidence still matches the manifest it was fetched under'
+    # were added. They are named here rather than left for a reader to trip over:
+    # `docs/RELEASING.md:425` ("seventy-two"), `tools/build-msi.ps1:289`
+    # ("seventy-two"), `tools/verify.ps1:12` ("at 73 steps"), `README.md:13` and
+    # `CONTRIBUTING.md:103`, plus `.github/workflows/ci.yml:16` and :148. Nothing
+    # in the gate reads any of them, so none of them can go red; they are prose
+    # about this file and they have to be edited by hand when it grows. The two
+    # quotations of a past reconciler run -- `tools/ci.ps1:148` and
+    # `tools/reconcile-ledgers.ps1:195`, both "73 steps each" -- are records of
+    # run 31359657821 and stay true of that run.
     $dist = "$repo/dist"
     $out = Join-Path ([IO.Path]::GetTempPath()) ("pl-msi-" + [IO.Path]::GetRandomFileName())
     try {
@@ -3832,6 +4166,42 @@ Step 'the build''s writer reads SIGNOFF.tsv and never writes it' {
 # shows is that no stage reached the table without answering the question.
 Step 'every stage declares what it does about SnapGene arriving through INSDC' {
     python features/build/insdc_posture.py
+} { Have python }
+
+# The archived licence evidence, against the manifest it was fetched under.
+#
+# `features/build/archive_legal.py` was run BY NO GATE ON ANY PLATFORM. Audit
+# round 2 recorded that, round 3 re-derived it by intersecting `git ls-files`
+# against this file plus all three workflows, and it was still true at v0.10.2.
+# Its `--check` mode fetches nothing: it reads `legal/MANIFEST.json`, re-hashes
+# the seven archived files beside it, and compares. All eight are committed, so
+# this needs a Python interpreter and nothing else -- no network, no corpus, no
+# platform, about a tenth of a second.
+#
+# WHY IT IS WORTH A STEP. `features/SOURCING.md` section 2 Stage 0.3 gives the
+# reason those files exist: `www.uniprot.org/help/license` and the ENA policy
+# page are JavaScript shells with ZERO licence text, so a URL in a document is
+# evidence of nothing and a reader who follows it sees an empty page. What makes
+# `legal/` evidence rather than a folder of HTML is the recorded sha256 and the
+# retrieval date beside each file. A file that has drifted from its hash is a
+# licence claim with nothing behind it, and until now nothing anywhere said so.
+#
+# THE FLOOR IS NOT DECORATION. `--check` walks `manifest["files"]`, so an EMPTY
+# manifest prints "0 archived file(s), all matching their recorded sha256" and
+# exits 0 -- a check that cannot fail, over an archive that has been deleted.
+# The count is read back out of that line and floored at the seven committed
+# today. The floor lives in this caller rather than in the script because the
+# script is not this step's to edit, and a floor is cheaper here than a second
+# copy of the rule there.
+Step 'the archived licence evidence still matches the manifest it was fetched under' {
+    $out = & python features/build/archive_legal.py --check 2>&1
+    $code = $LASTEXITCODE
+    if ($code -ne 0) { $out | ForEach-Object { Write-Output $_ }; $global:LASTEXITCODE = $code; return }
+    $n = 0
+    foreach ($line in $out) { if ("$line" -match '^(\d+) archived file\(s\), all matching') { $n = [int]$Matches[1] } }
+    if ($n -lt 7) { throw "archive_legal.py --check reported $n archived file(s) and exited 0; legal/ holds seven, and an empty or truncated manifest is exactly the input that check reports ok over" }
+    Write-Host ("        {0} archived licence file(s), each matching the sha256 recorded when it was fetched" -f $n) -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
 } { Have python }
 
 # THE SKIP DISCIPLINE -- because on a runner it is the only thing standing

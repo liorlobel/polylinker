@@ -35,6 +35,22 @@
 //! real font and a real `text-anchor` — centred it properly. With
 //! `Anchor::End` the whole 6.7 pt difference lands in the label's position.
 //!
+//! # The ground
+//!
+//! The content stream opens by filling the whole page with [`crate::PAPER`],
+//! before a single stroke of artwork — see `pdf_ground` for the operators and
+//! [`crate::PAPER`] for why a figure carries its own background at all.
+//!
+//! **Until 2026-08-14 it did not, and that was the last back end whose
+//! accessibility certificate was about nothing.** The stream opened
+//! `q\n1 J 1 j\n0.2 0.22 0.24 RG` straight onto the backbone, so an exported PDF
+//! was transparent, while `pl export --pdf --check-contrast` measured its ink
+//! against `#ffffff` and printed a pass. [`crate::eps::to_eps`] had refused that
+//! trade since it was written and [`crate::svg_at`] was corrected in `12e25b7`,
+//! which shipped as v0.10.2; that release's note then announced the PDF half as
+//! fixed too, on a tree where this file had not been touched at all — which is
+//! the second failure this section exists to record.
+//!
 //! # What is not carried across
 //!
 //! SVG `<title>` tooltips. PDF has no equivalent short of annotations, which
@@ -257,6 +273,48 @@ fn pdf_string(bytes: &[u8]) -> String {
     out
 }
 
+/// The ground: the whole page filled with [`crate::PAPER`], as content-stream
+/// operators.
+///
+/// A function rather than four more lines inside [`pdf_at`], for the reasons
+/// `svg_ground` is one on the SVG side. The ground becomes a thing this file
+/// names instead of a literal buried in a 200-line emitter, and removing it is
+/// then a ONE-LINE change — which is what lets a reader re-break
+/// `file_tests::the_pdf_carries_the_ground_its_contrast_certificate_is_measured_against`
+/// on purpose and watch it fail, rather than taking the test's word for it.
+///
+/// **In scene units, not in points.** [`pdf_at`] emits the physical size as a
+/// `cm` matrix and writes every coordinate below it exactly as it always was, so
+/// the ground is written the same way and is scaled by the same matrix. Written
+/// at the page size instead it would be scaled twice: a 252 pt rectangle blown
+/// up by 1.26 on a 252 pt page, i.e. a white field a quarter larger than the
+/// paper it is meant to be — which crops silently rather than looking wrong.
+///
+/// **Bracketed by `q`/`Q`**, exactly as [`crate::eps::to_eps`] brackets its own
+/// ground with `gsave`/`grestore`. The fill colour is a graphics-state
+/// parameter, so an unbracketed `1 1 1 rg` would leave white as the non-stroking
+/// colour for whatever comes next. Nothing in the loop below is filled without
+/// setting `rg` first *today* — that was read before this was written — but the
+/// day an arm is added that is not, the failure is a feature painted white on
+/// white, which looks like a feature that was never drawn.
+///
+/// The components come from [`rgb`] applied to the constant rather than from a
+/// literal `1 1 1`, so a change to [`crate::PAPER`] moves the file and the
+/// certificate together. That is the whole point of there being a constant: a
+/// caller auditing against `#ffffff` beside a writer painting something else is
+/// two sources of truth for one fact.
+fn pdf_ground(scene: &Scene) -> String {
+    let (r, g, b) = rgb(crate::PAPER);
+    format!(
+        "q\n{} {} {} rg\n0 0 {} {} re\nf\nQ\n",
+        n(r),
+        n(g),
+        n(b),
+        n(scene.width),
+        n(scene.height)
+    )
+}
+
 /// Render a scene as a complete PDF document.
 ///
 /// One page, one font, no compression — the content stream stays readable, so
@@ -295,6 +353,10 @@ pub fn pdf_at(scene: &Scene, width_mm: Option<f64>) -> (Vec<u8>, Report) {
     // scene, differing at every corner. The SVG root now states round
     // explicitly, and this line is what it is matching.
     c.push_str("1 J 1 j\n");
+    // The ground, before any artwork, and INSIDE the `cm` above so it is scaled
+    // with everything else. See `pdf_ground`, and `crate::PAPER` for why a
+    // figure that leaves this machine carries its own background.
+    c.push_str(&pdf_ground(scene));
 
     for item in &scene.items {
         match item {
@@ -981,7 +1043,20 @@ mod file_tests {
         // PDF has no arc operator: an `A` surviving would mean the SVG form
         // leaked through.
         assert!(text.contains(" c\n"), "arcs must become Beziers");
-        assert!(!text.contains(" re\n"), "no rectangles are emitted");
+        // THE OLD ASSERTION HERE WAS `!text.contains(" re\n")`, "no rectangles
+        // are emitted", and it was wrong from 2026-08-14. It was a true
+        // observation about a file with no background turned into a rule, and
+        // the rule it stated is the defect: a PDF with no `re` in it is a
+        // TRANSPARENT figure, which is exactly what made `--check-contrast`'s
+        // certificate a claim about nothing. What survives of the old claim is
+        // its real content -- no `Scene` item is a rectangle, so the writer must
+        // emit exactly ONE, the ground, and a second would mean something leaked
+        // in from the SVG side.
+        assert_eq!(
+            text.matches(" re\n").count(),
+            1,
+            "the only rectangle in the file should be the ground"
+        );
         assert!(text.contains("/Helvetica"), "the base-14 font");
         assert!(text.contains("Tj"), "text is drawn");
     }
@@ -1082,6 +1157,170 @@ mod file_tests {
             String::from_utf8_lossy(&bytes).contains(LABEL),
             "the PDF stopped emitting the second space, so the two now disagree \
              the other way"
+        );
+    }
+
+    /// The content stream, lifted out of the assembled file.
+    ///
+    /// **Nothing is decompressed, because nothing is compressed.** The audit
+    /// that prescribed this test assumed a `FlateDecode` stream; [`pdf_at`]
+    /// writes `<< /Length n >>` with no `/Filter` at all, on purpose — its own
+    /// header says "no compression — the content stream stays readable, so
+    /// `strings map.pdf` shows the drawing commands". That is asserted here
+    /// rather than assumed: if a filter is ever added, this test must be told
+    /// to inflate rather than quietly search compressed bytes for operators it
+    /// will never find and fail with a misleading message.
+    fn content_stream(bytes: &[u8]) -> String {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(
+            !text.contains("/Filter"),
+            "the content stream grew a filter, so this test is now reading \
+             compressed bytes as if they were operators"
+        );
+        let s = text.find("stream\n").expect("a content stream") + 7;
+        let e = text.find("\nendstream").expect("the end of it");
+        text[s..e].to_string()
+    }
+
+    /// The first fill-rectangle in a content stream: its colour as `#rrggbb`,
+    /// and its four operands.
+    ///
+    /// Deliberately NOT `pdf_ground`'s return value — a test that asks the
+    /// writer what it wrote agrees with itself whatever it writes, which is the
+    /// trap the SVG sibling's `ground_of` records. The colour is read back as
+    /// PDF wrote it, in 0..1 components, and converted here; `None` when the
+    /// stream paints no rectangle at all, which is the state this whole test is
+    /// about.
+    fn ground_of(stream: &str) -> Option<(String, [f64; 4])> {
+        let at = stream.find(" re\n")?;
+        let rect_from = stream[..at].rfind('\n').map_or(0, |i| i + 1);
+        let rect: Vec<f64> = stream[rect_from..at]
+            .split_whitespace()
+            .map(|t| t.parse::<f64>().unwrap_or(f64::NAN))
+            .collect();
+        if rect.len() != 4 {
+            return None;
+        }
+        // The fill colour in force when the rectangle is painted is the `rg`
+        // immediately above it.
+        let before = &stream[..rect_from];
+        let rg = before.rfind(" rg\n")?;
+        let rg_from = before[..rg].rfind('\n').map_or(0, |i| i + 1);
+        let c: Vec<f64> = before[rg_from..rg]
+            .split_whitespace()
+            .map(|t| t.parse::<f64>().unwrap_or(f64::NAN))
+            .collect();
+        if c.len() != 3 {
+            return None;
+        }
+        let byte = |v: f64| (v * 255.0).round() as u8;
+        Some((
+            format!("#{:02x}{:02x}{:02x}", byte(c[0]), byte(c[1]), byte(c[2])),
+            [rect[0], rect[1], rect[2], rect[3]],
+        ))
+    }
+
+    /// PROVEN TO FAIL at c0b60b2: [`pdf_at`] opened its content stream
+    /// `q\n1 J 1 j\n` and went straight to the backbone, so an exported PDF map
+    /// carried no background of any kind and the file was TRANSPARENT — the
+    /// 9,989-byte stream of a real `pl export --pdf` on `demo-construct.gb` has
+    /// a ` re` operator count of exactly 0 — while `pl export --pdf
+    /// --check-contrast` measured its ink against a literal `#ffffff` and
+    /// printed a pass. `ground_of` returned `None`: there was nothing in the
+    /// file to audit against, and the certificate was a claim about a background
+    /// the reader's slide, journal or word processor would supply later. On a
+    /// dark slide [`crate::ink::LABEL_FILL`] is 1.05:1 against a requirement of
+    /// 4.5.
+    ///
+    /// This is the twin of
+    /// `crate::ground_tests::the_svg_carries_the_ground_its_contrast_certificate_is_measured_against`
+    /// and shares its fixture on purpose, so the two back ends are asserted to
+    /// paint the same ground on the same scene rather than each on one of its
+    /// own.
+    ///
+    /// **The mutation that re-breaks it: on line 359 of this file, replace
+    /// `c.push_str(&pdf_ground(scene));` with `let _ = pdf_ground(scene);`.**
+    /// Written as a substitution rather than a deletion so the mutant still
+    /// compiles without a dead-code warning to muddy the result. **By line
+    /// number, because the same call also appears three paragraphs up in this
+    /// doc comment**, and a mutation applied by string match would edit the prose
+    /// as well and prove nothing about the code. Measured: 208 passed, 2 failed —
+    /// this test and `every_arc_becomes_curves_and_the_page_is_the_scenes_size`,
+    /// whose rectangle count is the other half of the same claim.
+    ///
+    /// For the scene-units section specifically: **on line 313, change
+    /// `n(scene.width),` to `n(scene.width * 1.2614),`** — the exact scale
+    /// `Fit::to_width_mm` computes for the 200-unit fixture at 89 mm, which the
+    /// `cm` matrix then applies a second time. Measured: 209 passed, 1 failed.
+    #[test]
+    fn the_pdf_carries_the_ground_its_contrast_certificate_is_measured_against() {
+        let sc = crate::ground_tests::a_map();
+        let (bytes, _) = to_pdf(&sc);
+        let stream = content_stream(&bytes);
+
+        // The background is read back OUT OF THE FILE and the audit is then run
+        // against that colour rather than against a literal `"#ffffff"`. That is
+        // the whole assertion: the certificate is about the ground the file
+        // actually carries, and a transparent file has no ground to name.
+        let (ground, rect) = ground_of(&stream)
+            .expect("the PDF paints no ground, so a contrast certificate for it is about nothing");
+        assert_eq!(
+            ground,
+            crate::PAPER,
+            "the file's ground is not the colour this crate says it audits against"
+        );
+        assert!(
+            crate::contrast::audit(&sc, &ground, 1.0).is_empty(),
+            "the shipped ink does not meet WCAG AA on the ground the file paints: {:?}",
+            crate::contrast::audit(&sc, &ground, 1.0)
+        );
+
+        // It covers the whole MediaBox. A ground smaller than the page leaves a
+        // transparent margin, and a label in that margin is exactly the ink the
+        // audit was least able to speak for.
+        assert_eq!(
+            rect,
+            [0.0, 0.0, sc.width, sc.height],
+            "the ground does not cover the page"
+        );
+
+        // And it is painted BEFORE the artwork. PDF paints in stream order, so a
+        // ground emitted last is a figure with a white sheet over it — which
+        // passes every "is there a background" check and is a blank page.
+        let at = stream.find(" re\n").expect("a ground");
+        for op in [" m\n", "BT\n"] {
+            let ink = stream
+                .find(op)
+                .unwrap_or_else(|| panic!("the map emitted no {op:?}, so this proves nothing"));
+            assert!(
+                at < ink,
+                "the ground is painted over the {op:?} that follows"
+            );
+        }
+
+        // `pdf_ground` is what put it there, so the mutation named above is the
+        // one that removes it.
+        assert!(
+            stream.contains(&pdf_ground(&sc)),
+            "`pdf_ground` is not what wrote the ground"
+        );
+
+        // Scene units, not page units. `pdf_at` emits the physical size as a
+        // `cm` matrix and leaves every coordinate alone, so a ground written at
+        // the page size would be scaled twice. The 200 x 100 fixture at 89 mm
+        // makes the two unmistakable: 200 units against a 252.28 pt page.
+        let small = sample();
+        let (bytes, _) = pdf_at(&small, Some(89.0));
+        let stream = content_stream(&bytes);
+        assert!(
+            stream.contains(" cm\n"),
+            "this is meant to be the physical-size path: {stream:.80}"
+        );
+        let (_, rect) = ground_of(&stream).expect("a ground at a stated physical width");
+        assert_eq!(
+            rect,
+            [0.0, 0.0, small.width, small.height],
+            "the ground is in page units, so the `cm` matrix scales it a second time"
         );
     }
 

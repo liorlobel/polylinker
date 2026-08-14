@@ -25,7 +25,50 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **An exported PDF map had no background, but `--check-contrast` certified it
+  against `#ffffff`.** `pdf::pdf_at` opened its content stream `q`, `1 J 1 j` and
+  went straight to the backbone, so the file was transparent: a real
+  `pl export --pdf` content stream is 9,989 bytes with a ` re` operator count of
+  **0**. Composited onto a white page the certificate is true, which is why this
+  survived as long as it did; on the dark slide a talk uses, the label ink is
+  **1.05:1** against a requirement of 4.5 and the backbone **1.35:1** against 3.0.
+
+  The stream now opens with the ground — `1 1 1 rg 0 0 w h re f`, bracketed by
+  `q`/`Q` so white cannot leak into the graphics state, in SCENE units inside the
+  `cm` matrix so a `--mm` printed width scales it once and not twice — with the
+  colour taken from `pl_draw::PAPER` through the same `rgb` every other paint
+  operator uses. All four writers now paint the same ground: EPS always did, PNG
+  takes it as a parameter, SVG gained one in v0.10.2, PDF is the last and is
+  here.
+
+  **The certificate names the background it measured.** `pl export
+  --check-contrast` passes `pl_draw::PAPER` rather than its own literal
+  `"#ffffff"`, and a passing figure now prints `contrast ok on #ffffff (WCAG 2.2
+  AA)`. The bare `contrast ok (WCAG 2.2 AA)` it replaces was byte-identical for
+  the format that painted white, the format that painted nothing and the format
+  that already had a ground, so it certified the transparent PDF in exactly the
+  words it certified the SVG — and `#ffffff` reached the user only on a *failing*
+  line, which is the one case where the reader can already see the colour.
+
+  **v0.10.2's release note announced this fix on the day of a release that did
+  not contain it**, and claimed the certificate "now states the background it
+  assumed" when no format said any such thing — while `crates/pl-draw/src/lib.rs`,
+  in the same commit, said the opposite under a heading reading "What still does
+  not paint it". That entry has now been corrected twice: on 2026-08-14 to admit
+  the PDF half had not shipped, and again once it had, because the admission went
+  stale the moment the fix landed. Both corrections are left in the 0.10.2 entry
+  rather than tidied away. A release note that runs ahead of the code is the
+  failure this project's prose-versus-code rule exists to stop, and this is the
+  case that rule was written from.
+
+  Pinned by `pdf::file_tests::the_pdf_carries_the_ground_its_contrast_certificate_is_measured_against`,
+  the twin of the SVG test v0.10.2 added, sharing its fixture so the two back ends
+  are asserted to paint the same ground on the same scene. It reads the colour
+  back out of the assembled file rather than asking the writer what it wrote,
+  re-runs the audit against *that* string, and checks the rectangle covers the
+  MediaBox, precedes the first `m` and `BT`, and stays in scene units at 89 mm.
 
 ## [0.10.2] - 2026-08-14
 
@@ -97,16 +140,22 @@ the code — raised 41 findings, of which 14 survived adversarial refutation. Al
   command were written to avoid. The SVG back end paints its ground now, so the
   certificate is about a colour the file actually has.
 
-  **THE PDF HALF DID NOT SHIP, AND THIS ENTRY CLAIMED IT DID.** As first
-  written, this sentence said "an exported SVG or PDF map" and "the certificate
-  now states the background it assumed"; the second clause was true of neither
-  back end and the first was true only of SVG. `pdf::pdf_at` still opens its
-  content stream straight onto the backbone, so `pl export --pdf
-  --check-contrast` remains a claim about a background the file does not have —
-  which `crates/pl-draw/src/lib.rs:280-289` says in as many words, under the
-  heading "What still does not paint it". The code was honest and the release
-  note was not. Corrected 2026-08-14, after the round-3 audit read the two
-  against each other.
+  **THE PDF HALF DID NOT SHIP IN THIS RELEASE, AND THIS ENTRY CLAIMED IT DID.**
+  As first written, this sentence said "an exported SVG or PDF map" and "the
+  certificate now states the background it assumed"; the second clause was true
+  of neither back end and the first was true only of SVG. At v0.10.2
+  `pdf::pdf_at` still opened its content stream straight onto the backbone, so
+  `pl export --pdf --check-contrast` was a claim about a background the file did
+  not have — which `crates/pl-draw/src/lib.rs:280-289` said in as many words, in
+  the same commit, under a heading reading "What still does not paint it". The
+  code was honest and the release note was not. Corrected 2026-08-14, after the
+  round-3 audit read the two against each other.
+
+  This correction has itself been corrected. The PDF ground and the named
+  certificate landed later the same day and are recorded under [Unreleased];
+  the paragraph above is left standing, in the past tense it belongs in, because
+  what v0.10.2 shipped does not change retroactively and the sequence — claim,
+  admission, fix — is the whole point of keeping it.
 
 - **`packages/circular-map`**: a restriction site outside `1..length` was drawn
   at a wrapped base with its impossible coordinate printed on the figure and

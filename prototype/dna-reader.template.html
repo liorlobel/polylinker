@@ -301,9 +301,23 @@
     <p>Reads the block-framed SnapGene <code>.dna</code> container (sequence, topology and
     methylation flags, features, primers, notes, and the xz-compressed history tree — detected
     but not yet inflated), plus GenBank and FASTA. Format is sniffed from content, not from the
-    file extension. Restriction sites are computed live from a fifty-enzyme textbook set, with
-    circular wraparound handled; these agree with Biopython on 5,587 sites across 33 real
-    plasmids.</p>
+    file extension. Restriction sites are computed live from a textbook set of
+    <!-- Written from ENZYMES.length as soon as the core is up; see the assignment
+         in READY. This read "a fifty-enzyme textbook set" as a literal from
+         2026-07-26 until 2026-08-14. The core's table grew from 50 to 58 on
+         2026-07-27, and only the sentence the Enzymes tab interpolates followed —
+         so one page carried two sizes for one set, 620 lines apart, in nearly the
+         same words, and was wrong for eight releases. The count is now written in
+         exactly one place on this page and it is read from the core. The "…" is
+         what stands here if the core never initialises: not knowing is a fair
+         thing to show, guessing is not. -->
+    <b id="enzymeCount">…</b> enzymes — including the Type IIS ones Golden Gate needs —
+    with circular wraparound handled.</p>
+    <p>The last published agreement figure predates part of that set, so here is what it
+    covers: on 2026-07-26 this digest matched Biopython on 5,587 sites across 33 real
+    plasmids, measured over the 50-enzyme table that shipped that day. The eight Type IIS
+    enzymes were added the following day and the figure has not been re-measured over
+    them.</p>
     <p><b>Save GenBank</b> is the way out of <code>.dna</code>: plain text, read by ApE, UGENE,
     Benchling, Biopython and SnapGene itself, with feature colours written in the ApE
     convention. <b>Map as SVG</b> gives you a vector figure you can finish in Illustrator or
@@ -356,6 +370,13 @@ const READY = (async () => {
   }
   W.pl_enzymes_json();
   ENZYMES = coreJson().map(e => [e.name, e.site]);
+  // The footer's enzyme count is written from this array, not typed into the
+  // HTML. A number a test recomputes is not the same thing as a sentence a test
+  // reads (README.md), and the footer's spelled-out "fifty" was stale for eight
+  // releases while the Enzymes tab's interpolated one was right the whole time.
+  // No `if (el)` guard: if that element ever goes missing this must throw into
+  // READY's rejection and be seen, not silently leave a placeholder on screen.
+  document.getElementById("enzymeCount").textContent = String(ENZYMES.length);
 })();
 
 /* ---- the ABI ----------------------------------------------------------
@@ -540,9 +561,20 @@ function coreOpen(bytes) {
   return adapt(summary, coreSequence());
 }
 
-/** Digest the open molecule. Returns only enzymes that actually cut. */
+/**
+ * Digest the open molecule: the enzymes that actually cut, or `null` when the
+ * scan did not run.
+ *
+ * `null`, and deliberately not `[]`. An empty array here is a *measurement* —
+ * "every enzyme in the set was tried against this sequence and none of them
+ * cut" — and the Enzymes tab prints it as one, by name, all 58 of them. The
+ * core can decline: `pl_digest_json` returns non-zero when there is no molecule
+ * to digest. Returning `[]` in that branch handed the page a result it did not
+ * have, and nothing downstream could tell the two apart. The block immediately
+ * below is the larger version of the same mistake, and what it cost.
+ */
 function coreDigest() {
-  if (W.pl_digest_json() !== 0) return [];
+  if (W.pl_digest_json() !== 0) return null;
   return coreJson()
     .filter(d => d.positions.length > 0)
     .map(d => ({
@@ -550,6 +582,81 @@ function coreDigest() {
       fragments: d.fragments, blunt: d.blunt,
     }));
 }
+
+/* ---- when the digest did not run, and how the page has to say so -----------
+
+   The core scans a 4.6 Mb genome in well under a second, but this page runs it
+   on the main thread, so above a ceiling the scan is skipped to keep the window
+   responsive. Skipping is a legitimate UI decision. Reporting the skip as a
+   finding is not, and until 2026-08-14 that is exactly what happened.
+
+   `state.digest` was set to `[]` whenever the scan was skipped, and `[]` is
+   indistinguishable from "tried them all, nothing cut". `renderEnzymes` derives
+   its non-cutter list by subtracting the digest from `ENZYMES`, so on any
+   molecule over the cap the pane read
+
+       58 of the 58 enzymes in the set do not cut this molecule at all:
+       AarI, AatII, AflII, … XmaI
+
+   under a heading that says "Computed live", with the summary strip printing
+   "Unique cutters 0" beside it. On a 500 kb chromosome the truth is the exact
+   inverse: `pl digest` on the same file reports "0 unique cutter(s), 0
+   non-cutter(s), from 58 enzymes" — every one of the 58 cuts, most of them a
+   hundred times or more. A user planning a Golden Gate assembly could read
+   "AarI does not cut", design against it, and have dozens of internal sites.
+   Nothing in three audit rounds was worse than this, because it is the only
+   place the page stated a false scientific result rather than merely a stale
+   number.
+
+   The one disclosure that did exist lived in the *Map* panel's header, and the
+   `max-width:1000px` rule stacks the two panels, so on a narrow window the
+   disclosure was off-screen above the pane that contradicted it.
+
+   So: the skipped state is `null`, and nothing else. `null` was chosen over a
+   sentinel object precisely because `null.filter` throws — a consumer that
+   forgets the distinction fails loudly instead of quietly printing a zero.
+   All five consumers handle it. `renderSummary` prints an em dash, the two map
+   renderers draw no cut ticks, `renderEnzymes` replaces its entire body with
+   the reason, and `show` puts that same reason in the Map panel's header.
+   ------------------------------------------------------------------------- */
+
+/** The largest molecule this page will digest on the main thread. */
+const SCAN_CAP = 400000;
+
+/**
+ * Why the live restriction scan cannot run on `doc`, or `null` when it can.
+ *
+ * One predicate, so that "the scan did not run" and "here is why" cannot drift
+ * apart into two conditions that disagree — which is how the header and the
+ * pane came to contradict each other in the first place.
+ *
+ * The test is on `doc.sequence.length`, the bases the core would actually
+ * scan — not on `doc.length`, which falls back to the *annotation span* for a
+ * file that declares a length and carries no bases at all.
+ * `tests/library-fixture/track.gb` is such a file: 3,000 bp declared, zero
+ * bases, `pl info` says "3000 bp DECLARED, but this file carries no bases".
+ * Under the old `doc.length > 0` test it was digested anyway, came back empty,
+ * and was reported as a molecule 58 enzymes had been tried against.
+ */
+function scanSkipReason(doc) {
+  if (!doc.sequence.length) return "this file carries no bases to scan";
+  if (doc.sequence.length > SCAN_CAP) {
+    return `${fmt(doc.sequence.length)} bases is over this page's `
+         + `${fmt(SCAN_CAP)} bp live-scan cap`;
+  }
+  return null;
+}
+
+/**
+ * The enzymes cutting exactly once — or none at all when the scan did not run.
+ *
+ * Only the two map renderers and the panel header use this. Drawing no cut
+ * ticks is the honest rendering of "not measured": an absent tick asserts
+ * nothing, whereas an absent row under a heading that counts the rows does.
+ * The words are carried by `renderEnzymes` and by `show`'s map hint.
+ */
+const uniqueCutters = digest =>
+  digest === null ? [] : digest.filter(e => e.positions.length === 1);
 
 /* =====================================================================
    3. Feature colouring
@@ -562,7 +669,69 @@ const TYPE_COLOR = {
   LTR: "#8a6f4f", enhancer: "#4f7f6f", intron: "#8a8a5f", tRNA: "#5f8a7a",
   sig_peptide: "#8a6f8a", source: "#7d8a86",
 };
-const colorOf = f => f.color || TYPE_COLOR[f.type] || "#7d8a86";
+/**
+ * A colour safe to interpolate into an attribute, or the fallback.
+ *
+ * The colour on a feature is read out of the file, so it is not
+ * author-controlled: `.dna` files arrive from Addgene and from collaborators,
+ * and `genbank::decode_quoted` copies the characters of `/ApEinfo_fwdcolor=`
+ * verbatim. Until 2026-08-14 this page interpolated that string straight into a
+ * live CSS declaration —
+ *
+ *     <span class="swatch" style="background:${esc(colorOf(f))}">
+ *
+ * — and `esc` escapes `< > & "` only. It does not escape `;`, so the value was
+ * never confined to the `background` property. A GenBank record carrying
+ *
+ *     /ApEinfo_fwdcolor="#ff0000;background-image:url(http://example.invalid/x.png)"
+ *
+ * produced a span whose CSSOM held nine declarations, `backgroundImage` among
+ * them, on an element that is 9×9 px and rendered. There is no attribute
+ * breakout and no XSS — `"` *is* escaped — but a remote `url()` on a rendered
+ * element is fetched, and this page's own tagline and footer promise "Nothing
+ * is uploaded" and "There is no server, no account and no upload — open it from
+ * a USB stick on a locked-down PC". One crafted file falsified that. The same
+ * raw string also became the map's `stroke` and `fill`, so it travelled into
+ * the figure the user downloads with "Map as SVG" as well.
+ *
+ * The accept-list below is `crates/pl-draw/src/lib.rs::safe_color`'s, arm for
+ * arm — `#` plus 3/4/6/8 hex digits; `rgb(`/`rgba(`/`hsl(`/`hsla(` closed by
+ * `)` and holding only digits, `eE+-.,%/` and XML's four whitespace bytes; or a
+ * bare 1–32 character alphabetic keyword — with the same fallback-on-refusal
+ * behaviour. `packages/circular-map/src/geometry.ts::safeColor` is the third
+ * copy of it. Of the three renderers in this tree this page was the only one
+ * interpolating the value raw; `pl export evil.gb` has always written
+ * `fill="#8b7bb8"` and zero occurrences of the payload.
+ *
+ * An accept-list, not a blocklist, and not an extra escape in `esc`. Escaping
+ * `;` would keep the payload out of the style attribute but leave it in the
+ * SVG `stroke`, where an unparseable paint means the feature arc silently
+ * vanishes from the map — a wrong picture with nothing said about it. Refusing
+ * the value and falling back to the type colour fails in the safe direction:
+ * one feature in the wrong shade, and everything still drawn.
+ */
+function safeColor(v, fallback) {
+  const s = typeof v === "string" ? v.trim() : "";
+  if (!s) return fallback;
+
+  // #rgb, #rgba, #rrggbb, #rrggbbaa
+  const hexOk = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(s);
+
+  // rgb()/rgba()/hsl()/hsla() carrying only numbers, %, commas, slashes and
+  // whitespace. Real files use these and refusing them would grey out a map
+  // another tool coloured correctly. The whitespace admitted is space, tab, LF
+  // and CR — XML 1.0's four — which is why VT and FF are not in the class: an
+  // interior VT survives `trim()` and every other arm, and one in an exported
+  // SVG makes a conformant parser refuse the whole document.
+  const funcOk = /^(?:rgb|rgba|hsl|hsla)\([0-9eE+\-.,%\/ \t\n\r]*\)$/.test(s);
+
+  // A bare CSS colour keyword, plus the two SVG paint keywords.
+  const wordOk = /^[A-Za-z]{1,32}$/.test(s);
+
+  return hexOk || funcOk || wordOk ? s : fallback;
+}
+
+const colorOf = f => safeColor(f.color, TYPE_COLOR[f.type] || "#7d8a86");
 
 /* =====================================================================
    4. Map rendering
@@ -738,7 +907,9 @@ function renderCircular(svg, doc, state, W, H) {
   }
 
   // ---- unique cutters ----
-  const uniq = state.digest.filter(e => e.positions.length === 1);
+  // `uniqueCutters` and not `state.digest.filter`: the digest is `null`, not
+  // `[]`, whenever the scan did not run, and a bare `.filter` on it throws.
+  const uniq = uniqueCutters(state.digest);
   for (const e of uniq.slice(0, 26)) {
     const a = A(e.positions[0]);
     const [x1, y1] = pt(R - 14, a), [x2, y2] = pt(R - 30, a);
@@ -827,7 +998,8 @@ function renderLinear(svg, doc, state, W, H) {
     g.appendChild(grp);
   }
 
-  const uniq = state.digest.filter(e => e.positions.length === 1);
+  // Same reason as the ring's: see `uniqueCutters`.
+  const uniq = uniqueCutters(state.digest);
   uniq.slice(0, 24).forEach((e, i) => {
     const x = X(e.positions[0]);
     const yTop = 40 + (i % 3) * 13;
@@ -877,10 +1049,15 @@ function renderSummary(doc, state) {
       : `<span class="pill plain">${doc.doubleStranded ? "double-stranded" : "single-stranded"}</span>`}
     ${meth.length ? `<span class="pill plain">${meth.join(" · ")} methylated</span>` : ""}
     <div class="metric"><span class="k">Length</span><span class="v">${fmt(doc.length)} bp</span></div>
-    <div class="metric"><span class="k">GC</span><span class="v">${state.gc}%</span></div>
+    <div class="metric"${state.gc === null
+      ? ` title="there is nothing here to measure — this file holds no A, C, G or T base"` : ""}>
+      <span class="k">GC</span><span class="v">${state.gc === null ? "n/a" : state.gc + "%"}</span></div>
     <div class="metric"><span class="k">Features</span><span class="v">${doc.features.length}</span></div>
     <div class="metric"><span class="k">Primers</span><span class="v">${doc.primers.length}</span></div>
-    <div class="metric"><span class="k">Unique cutters</span><span class="v">${state.digest.filter(e => e.positions.length === 1).length}</span></div>
+    <div class="metric"${state.digestSkipped
+      ? ` title="not computed — ${esc(state.digestSkipped)}"` : ""}>
+      <span class="k">Unique cutters</span><span class="v">${state.digest === null
+        ? "—" : state.digest.filter(e => e.positions.length === 1).length}</span></div>
     <div class="metric"><span class="k">Versions</span><span class="v">${doc.exportVersion}/${doc.importVersion}</span></div>`;
 }
 
@@ -909,6 +1086,24 @@ function renderFeatures(doc) {
 
 function renderEnzymes(doc, state) {
   const host = document.getElementById("pane-enzymes");
+
+  // Not computed is not a result, so nothing below this branch may be rendered
+  // from a digest that was never taken. Every line of it is phrased as a
+  // measurement — the "Computed live" paragraph, the two counted section
+  // headings, and above all the non-cutter note, which subtracts the digest
+  // from `ENZYMES` and therefore names every enzyme in the set when the digest
+  // is empty. That sentence was the single false scientific statement in this
+  // page; see the block above `SCAN_CAP` for what it cost.
+  if (state.digest === null) {
+    host.innerHTML = `<div class="empty">
+      <b>Not computed.</b> No restriction scan was run on this molecule, because
+      ${esc(state.digestSkipped)}. Nothing is listed below because there is
+      nothing to list — this page is <b>not</b> reporting that none of the
+      ${ENZYMES.length} enzymes cut, it has not looked. <code>pl digest</code> in
+      the command-line tool has no such cap.</div>`;
+    return;
+  }
+
   const uniq = state.digest.filter(e => e.positions.length === 1);
   const rest = state.digest.filter(e => e.positions.length > 1);
   const none = ENZYMES.filter(e => !state.digest.some(d => d.name === e[0]));
@@ -1056,7 +1251,13 @@ function renderAnatomy(doc, state) {
    ===================================================================== */
 
 let CURRENT = null;
-const state = { hot: null, title: "", gc: "0.0", digest: [] };
+// `gc: null` and `digest: null` are the "not measured" values, not placeholder
+// zeroes — see `show`. `digestSkipped` is non-null exactly when `digest` is
+// null, and the pre-file value has to satisfy that invariant too.
+const state = {
+  hot: null, title: "", gc: null,
+  digest: null, digestSkipped: "no file is open yet",
+};
 
 function setHot(name) {
   if (state.hot === name) return;
@@ -1122,16 +1323,36 @@ function show(doc, title) {
   CURRENT = doc;
   state.title = title;
   state.hot = null;
-  state.gc = doc.gc === null || doc.gc === undefined ? "0.0" : doc.gc.toFixed(1);
-  // The core scans a 4.6 Mb genome in well under a second, but this is the
-  // main thread; keep the interactive ceiling where it was.
-  state.digest = doc.length > 0 && doc.length <= 400000 ? coreDigest() : [];
+  // `null`, and no longer the string "0.0". `Composition::gc_percent` returns
+  // `None` whenever the sequence holds no A, C, G or T at all — which covers an
+  // absent sequence, but equally an all-N contig, a masked region or an
+  // assembly gap — and this page printed "GC 0.0%" for both, in the same
+  // typeface as every other measured metric beside it. 0.0% is a claim: it says
+  // the bases were counted and none of them were G or C. The rest of this tree
+  // says the opposite. `bins/pl/src/main.rs` prints `GC n/a`, `pl-gui`'s
+  // main.rs and seqedit.rs print `n/a` — the latter's doc comment saying
+  // "never 0%, which is a measurement" — and `pl-mcp` prints `unknown` with a
+  // comment reading "0.0% would be a claim about a sequence there is nothing to
+  // say about". `pl info` on tests/library-fixture/track.gb and on an 80-base
+  // all-N FASTA prints `GC         n/a` for both. This page now agrees.
+  state.gc = doc.gc === null || doc.gc === undefined ? null : doc.gc.toFixed(1);
 
-  const uniq = state.digest.filter(e => e.positions.length === 1).length;
+  // The two digest fields are written here and nowhere else, so the invariant
+  // holds by construction: `state.digest === null` if and only if
+  // `state.digestSkipped` names a reason. `scanSkipReason` decides in advance
+  // whether the scan is possible; `coreDigest` can also decline, and its `null`
+  // is folded into the same pair rather than being allowed to look like a
+  // result. See the block above `SCAN_CAP` for why `[]` could not stay.
+  const skip = scanSkipReason(doc);
+  state.digest = skip === null ? coreDigest() : null;
+  state.digestSkipped = state.digest === null
+    ? skip || "the core declined to digest it"
+    : null;
+
   document.getElementById("mapHint").textContent =
     doc.sequenceAbsent ? "no bases in this file — annotations only"
-      : doc.length > 400000 ? "enzyme scan skipped — sequence too large for this prototype"
-      : `${doc.features.length} features · ${uniq} unique cutters`;
+      : state.digestSkipped ? `enzyme scan not run — ${state.digestSkipped}`
+      : `${doc.features.length} features · ${uniqueCutters(state.digest).length} unique cutters`;
 
   renderSummary(doc, state);
   renderMap(doc, state);

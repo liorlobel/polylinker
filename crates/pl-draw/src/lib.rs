@@ -277,16 +277,34 @@ pub mod ink {
 /// truth for one fact, which is exactly what `pl_gel::render::Options::background`
 /// exists to prevent on the gel picture.
 ///
-/// # What still does not paint it
+/// # Which back ends paint it, and when each one started
 ///
-/// **[`pdf::pdf_at`] does not.** A map exported as PDF is still transparent — its
-/// content stream opens `q\n1 J 1 j\n0.2 0.22 0.24 RG` straight onto the backbone
-/// — so `pl export --pdf --check-contrast` remains a claim about a background the
-/// file does not have. Closing it is one operator sequence (`1 1 1 rg 0 0 w h re
-/// f`) in front of the artwork in `pdf.rs`, and this constant is the colour it
-/// should use. Said here rather than left implicit, because a constant documented
-/// as "the ground this crate paints" while one back end paints nothing would be
-/// the same kind of overstatement it was introduced to remove.
+/// **All four, as of 2026-08-14.** [`eps::to_eps`] has painted a white ground
+/// since it was written; [`raster::draw`] takes one as a parameter and every
+/// caller in this workspace passes white; [`svg_at`] gained one in `12e25b7`,
+/// which shipped as v0.10.2; [`pdf::pdf_at`] gained one after v0.10.2 and was
+/// the last. Anchored to commits and releases rather than to calendar dates
+/// because `12e25b7` landed five minutes past midnight, and a reader who takes
+/// "2026-08-13" from the paragraphs above and "2026-08-14" from here would think
+/// the two were a day apart when they are a few hours.
+///
+/// This section used to be headed "What still does not paint it" and named the
+/// PDF: until then a map exported as PDF was transparent, its content
+/// stream opening `q\n1 J 1 j\n0.2 0.22 0.24 RG` straight onto the backbone, so
+/// `pl export --pdf --check-contrast` was a claim about a background the file did
+/// not have. The heading is kept in the history rather than deleted because of
+/// what happened in between: **v0.10.2's release note announced the PDF half as
+/// fixed while this very paragraph, in the same commit, said it was not.** The
+/// code was honest and the note was not. What closed it is the one operator
+/// sequence this paragraph already specified — `1 1 1 rg 0 0 w h re f`, in front
+/// of the artwork, taking its colour from this constant through `pdf::rgb` — and
+/// `pdf::file_tests::the_pdf_carries_the_ground_its_contrast_certificate_is_measured_against`
+/// now reads it back out of the assembled file.
+///
+/// Keep this list current when a fifth writer appears. A constant documented as
+/// "the ground this crate paints" while some back end paints nothing is the
+/// overstatement it was introduced to remove, and a list that has gone stale in
+/// the other direction is the same failure wearing better news.
 ///
 /// # Not a knob
 ///
@@ -1961,9 +1979,11 @@ pub fn linear_png_at(
 ///
 /// The first element in the document body is a `<rect>` covering the whole
 /// `viewBox` and filled with [`PAPER`] — see that constant for why a figure
-/// carries its own ground, and for the one back end that still does not. Until
-/// 2026-08-13 this function emitted no such element, so the file it wrote was
-/// transparent while `--check-contrast` certified its ink against white.
+/// carries its own ground, and for which back end started painting one when.
+/// Until 2026-08-13 this function emitted no such element, so the file it wrote
+/// was transparent while `--check-contrast` certified its ink against white.
+/// [`pdf::pdf_at`] was the last to follow, a few hours later in wall-clock time
+/// but one release later in the history: after v0.10.2 rather than in it.
 ///
 /// It is written in SCENE UNITS and not in millimetres. `width_mm` scales the
 /// root element and leaves every coordinate alone, as the paragraphs above
@@ -2249,19 +2269,34 @@ pub fn commas(v: u64) -> String {
 ///
 /// The first of them reads the finished document back and re-runs
 /// [`contrast::audit`] against the background it finds *in there*, rather than
-/// against a literal `"#ffffff"`. Passing the literal is exactly what the CLI
-/// does — `contrast::audit(&scene, "#ffffff", scale)` in `bins/pl/src/main.rs`
-/// — and exactly what made its certificate a claim about nothing, so a test
-/// that did the same would reproduce the defect inside its own proof.
+/// against a literal `"#ffffff"`. Passing a literal is what the CLI used to do
+/// — `contrast::audit(&scene, "#ffffff", scale)` in `bins/pl/src/main.rs`, which
+/// on 2026-08-14 became `audit(&scene, pl_draw::PAPER, scale)` — and it is
+/// exactly what made the certificate a claim about nothing while the file
+/// carried no ground, so a test that hard-coded the same string would reproduce
+/// the defect inside its own proof. That the caller now passes the constant is
+/// not a substitute for reading the file back: the constant says what the crate
+/// *intends* to paint, and only the document says what it painted.
+///
+/// `a_map` is `pub(crate)` because the PDF back end's twin of the first test
+/// lives beside *its* writer, in
+/// `pdf::file_tests::the_pdf_carries_the_ground_its_contrast_certificate_is_measured_against`,
+/// and two grounds asserted on two different fixtures would not be the same
+/// claim.
 #[cfg(test)]
-mod ground_tests {
+pub(crate) mod ground_tests {
     use super::*;
 
     /// A four-feature ring: the same molecule
     /// `contrast::tests::every_colour_the_renderer_emits_is_one_of_the_audited_constants`
     /// builds, so the ink under test here is the ink that test already pins to
     /// the audited constants.
-    fn a_map() -> Scene {
+    ///
+    /// Shared with the PDF back end's ground test rather than copied, so the two
+    /// writers are asserted against ONE scene: a fixture per back end could drift
+    /// until "both paint the ground" stopped meaning "both paint the same ground
+    /// on the same figure".
+    pub(crate) fn a_map() -> Scene {
         let mut m = Molecule {
             name: "pTEST".into(),
             seq: b"ACGT".iter().cycle().take(4000).copied().collect(),
