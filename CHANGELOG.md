@@ -27,6 +27,50 @@ which.
 
 Nothing yet.
 
+## [0.11.2] - 2026-08-15
+
+### Fixed
+
+- **A save that fails no longer replaces the document with "Could not read that
+  file".** Nine picker-driven writes — the project file, GenBank and FASTA,
+  protein FASTA, `.dna`, and the five figure exports — sent their failure to the
+  full-pane takeover. Every word of it was wrong: nothing was being read, the
+  file it named was the one being created, and it hid the document the user was
+  trying to save at the moment they most needed to see it was still there.
+
+  They now raise a banner of their own. Not the existing notice banner, which
+  carries the standing line *"Nothing was changed."* — the right answer for an
+  edit the op log declined and the wrong one after a save, where the question is
+  not whether the document was altered but whether the work is on disk. Sharing
+  one slot would also let the next refused edit erase the only sign the document
+  was still unwritten. The new banner says what a user needs instead: the file on
+  disk is unchanged, and these edits exist only in this window.
+
+  Both outcomes are wired. A write that lands retires the banner the last one
+  raised, because a warning that outlives its cause is the same defect wearing
+  the other sign, and `every_write_that_can_fail_records_both_outcomes` holds all
+  nine sites to that in both directions.
+
+- **A failing autosave is now visible for longer than one frame.** The failure
+  went to `status`, a line the next event overwrites — so the one condition a
+  user must not miss had the shortest life of anything on screen, and
+  `autosave_armed` went on reporting that a recovery copy is kept because it
+  reads configuration and never an outcome. A full disk, a revoked permission or
+  a cloud client holding the file left the window looking exactly like one where
+  autosave works.
+
+  The outcome is now kept on `App`. A standing "not autosaving" chip sits in the
+  toolbar until a write succeeds, with the reason on hover, and the unsaved-work
+  dialog no longer promises a crash-recovery copy the last pass could not write.
+
+  **What is not claimed.** A first draft distinguished a write that was
+  *attempted* from one that *landed* and cleared the warning only on the second.
+  Three attempts to construct a case where those differ all came back green under
+  both — including one that puts the failure on an already-autosaved document so
+  the retry is a pure heartbeat. The distinction was deleted rather than shipped
+  unprovable, and the test says so; if a case is ever found it is a real
+  difference and should return with the test that finds it.
+
 ## [0.11.1] - 2026-08-15
 
 **The ARM64 binaries no longer need a DLL the user may not be allowed to
@@ -3099,7 +3143,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.2
 [0.11.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.1
 [0.11.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.0
 [0.10.3]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.3
