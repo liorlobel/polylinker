@@ -109,8 +109,19 @@ env:
   # at workflow level it reached the Windows `gate` job and discarded
   # `-C target-feature=+crt-static` -- putting a VC++ redistributable dependency
   # back into binaries built there. This file has never set the variable, so no
-  # shipped binary was ever affected. See the note in ci.yml's `env:` block for
-  # the measurement.
+  # shipped binary ever lost the flag THAT way.
+  #
+  # Do not read that as "every shipped binary had a static CRT", which is what
+  # this sentence implied until 2026-08-15 and is false. v0.11.0's four
+  # `windows-arm64` binaries had none: .cargo/config.toml declared the flag for
+  # the x64 triple and named no aarch64 one, and a flag that was never declared
+  # cannot be discarded. Not setting RUSTFLAGS is necessary and is not
+  # sufficient. Both holes end in the same place -- what this job builds with is
+  # whatever that file says for the triple being built -- which is why the gate
+  # step 'every Windows platform the release builds has a static CRT declared'
+  # now reads this workflow's own matrix against it, and why the ARM64 leg of
+  # ci.yml scans the staged payload with tools/check-crt.ps1. See the note in
+  # ci.yml's `env:` block for the measurement.
 
 jobs:
   build:

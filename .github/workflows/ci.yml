@@ -13,7 +13,7 @@ name: CI
 # HOW THE TWO GATE FILES DIVIDE THE WORK, since 2026-08-09 and revised
 # 2026-08-10.
 #
-# `tools/ci.ps1` is 76 steps and `docs/RELEASING.md` names it as the thing to
+# `tools/ci.ps1` is 77 steps and `docs/RELEASING.md` names it as the thing to
 # run before tagging. (It said 73 here and below until the ARM64 port, then 75,
 # which was already one short on the commit that wrote it; 76 is
 # what `Step '` at column 0 counts to in the file today, and the two places this
@@ -118,7 +118,7 @@ name: CI
 # ARM64 machine anywhere, and a sentence in the README that does not account for
 # them is a false sentence:
 #
-#   * `tools/ci.ps1` as a list -- 76 steps, its ledger, and the whole skip
+#   * `tools/ci.ps1` as a list -- 77 steps, its ledger, and the whole skip
 #     discipline. There is no ARM64 ledger, so `reconcile` says nothing about
 #     this platform.
 #   * 'no C runtime redistributable is needed', the `dumpbin /dependents` step.
@@ -243,7 +243,7 @@ jobs:
   # strong one that runs in one. `fail-fast: false`, so a Linux failure does not
   # cancel Windows and hide what it would have said.
   #
-  # 76 steps. Five skip everywhere for want of a corpus
+  # 77 steps. Five skip everywhere for want of a corpus
   # (`.github/ci-expected-skips.txt`); seven more skip off Windows and say why.
   # The `reconcile` job below is what checks the three legs against each other,
   # and it is the only place a step that skipped on ALL THREE can be seen.
@@ -538,32 +538,37 @@ jobs:
   test:
     name: test / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # This is the job that carries the deny across `cargo build` and `cargo
-    # test` rather than only across clippy.
+    # THIS JOB SETS NO `RUSTFLAGS`, and that is the whole point of the change
+    # that removed it on 2026-08-15.
     #
-    # THE SENTENCE HERE USED TO BE "Neither runner in this matrix is Windows",
-    # AND IT IS NO LONGER TRUE. `windows-11-arm` joined this matrix with the
-    # ARM64 port, so the trap documented in this file's `env:` block -- cargo
-    # REPLACES `[target.<triple>] rustflags` from .cargo/config.toml with a
-    # `RUSTFLAGS` environment variable rather than merging them -- is live in
-    # this job again for the first time since 2026-08-09.
+    # It used to set `RUSTFLAGS: -D warnings`, to carry the deny across
+    # `cargo build` and `cargo test` rather than only across clippy. The comment
+    # here argued that was safe because .cargo/config.toml declared rustflags for
+    # exactly one triple, `x86_64-pc-windows-msvc`, which is not in this matrix
+    # -- so there was nothing on the ARM64 leg for the variable to discard. It
+    # then said, in as many words, that the day somebody added the
+    # `[target.aarch64-pc-windows-msvc]` crt-static block the ARM64 download
+    # needs, this job would go red and say what to do about it.
     #
-    # It costs nothing TODAY, and the reason is narrow and worth writing down
-    # rather than trusting: .cargo/config.toml declares rustflags for exactly
-    # one triple, `x86_64-pc-windows-msvc`, and that triple is not in this
-    # matrix. `aarch64-pc-windows-msvc` has no block, so there is nothing on the
-    # ARM64 leg for this variable to discard.
+    # That day was 2026-08-15 and it went exactly that way: the guard step below
+    # is what refuses the combination, and its message names two remedies. This
+    # is the first of them -- move the deny off the job. The second, folding the
+    # config's flags into the variable's value, was rejected because it makes
+    # `ci.yml` carry a second copy of a codegen flag whose single source of truth
+    # is `.cargo/config.toml`, and a copy that must be edited whenever that file
+    # changes is the shape of defect this repository keeps finding.
     #
-    # That is a statement about the current contents of another file, which is
-    # the weakest kind of safety there is -- so it is CHECKED rather than
-    # asserted, by 'RUSTFLAGS is not silently discarding .cargo/config.toml'
-    # below. The day somebody adds the `[target.aarch64-pc-windows-msvc]`
-    # crt-static block that the ARM64 download needs, this job goes red and says
-    # what to do about it, instead of quietly building an ARM64 binary that
-    # imports VCRUNTIME140.dll while the step that would have caught it lives in
-    # a gate this leg does not run.
-    env:
-      RUSTFLAGS: -D warnings
+    # IT IS NOT A LINT HOLE, and the reasoning is this file's own, already
+    # measured for the `gate` job in the `env:` block at the top: `-D warnings`
+    # on clippy's command line denies ordinary rustc lints too, not only clippy's
+    # own, and `--all-targets` reaches tests, benches and examples. A crate whose
+    # only fault is an unused variable exits 101 under that command with
+    # RUSTFLAGS unset. The Clippy step below therefore passes it explicitly, the
+    # same way `tools/ci.ps1` Step 'clippy' does, and this job now matches both
+    # the `gate` job and `release.yml` in setting no RUSTFLAGS at all.
+    #
+    # What this buys: the ARM64 leg builds with the flags `release.yml` builds
+    # with, which is the only way `windows-arm64` binaries get a static CRT.
     strategy:
       fail-fast: false
       matrix:
@@ -610,15 +615,22 @@ jobs:
       # there. Nothing about the program behaves differently when that happens;
       # the failure appears only on a locked-down machine nobody here owns.
       #
-      # WHY THIS EXISTS AS A STEP RATHER THAN A COMMENT: the ARM64 download
-      # NEEDS a `[target.aarch64-pc-windows-msvc]` block with the same
-      # crt-static flag -- .cargo/config.toml does not have one yet, so ARM64
-      # binaries currently link the dynamic CRT -- and the moment somebody adds
-      # it, this job's `env:` would throw it away again. The gate step that
-      # catches exactly this, 'no C runtime redistributable is needed', runs
-      # `dumpbin /dependents` and does NOT run on this leg. So the fix and the
-      # regression would land in the same commit, on a platform nobody can build
-      # locally, with no check between them.
+      # WHY THIS EXISTS AS A STEP RATHER THAN A COMMENT, and what it caught.
+      # The ARM64 download needs a `[target.aarch64-pc-windows-msvc]` block with
+      # the same crt-static flag. It did not have one until 2026-08-15, so every
+      # ARM64 binary in v0.11.0 links the dynamic CRT and imports
+      # VCRUNTIME140.dll -- measured on the published artifacts, with the x64
+      # build of the same release clean on all four as the control. When the
+      # block was added, this step is what refused the combination, because a
+      # job-level `RUSTFLAGS` would have discarded it again and produced exactly
+      # the same broken binaries with the fix apparently applied. The remedy it
+      # names is now in force: this job sets no RUSTFLAGS.
+      #
+      # It stays, and it is not now vacuous. It fails if anyone reintroduces the
+      # variable, which is the specific regression that would silently undo the
+      # fix, and it fails if its own parser stops matching. What it cannot do is
+      # prove the resulting binaries are clean -- that needs the bytes, and the
+      # step 'no ARM64 binary needs the VC++ redistributable' below reads them.
       #
       # HOW IT FAILS, both directions:
       #   * add rustflags for the host triple to .cargo/config.toml while this
@@ -700,8 +712,12 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # `-- -D warnings` on the command line, not `RUSTFLAGS` in the job's env.
+      # See the block at the top of this job: the variable would replace
+      # .cargo/config.toml's `[target.<triple>] rustflags` outright, which on the
+      # ARM64 leg means building without the static CRT the download needs.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Unit tests
         run: cargo test --workspace --lib --bins --locked
@@ -966,6 +982,35 @@ jobs:
           }
           ./tools/check-archive.ps1 -Archive $archive[0].FullName
           if ($LASTEXITCODE -ne 0) { throw 'the archive failed its check' }
+
+      # THE ONE CHECK THIS LEG EXISTS FOR, and the one whose absence shipped a
+      # broken download.
+      #
+      # v0.11.0's four ARM64 binaries all import VCRUNTIME140.dll, because
+      # .cargo/config.toml scoped `+crt-static` to `x86_64-pc-windows-msvc` and
+      # named no aarch64 triple. Nothing went red. The step that asserts the
+      # absence of that import, 'no C runtime redistributable is needed', is a
+      # step of tools/ci.ps1, and the gate runs on windows-latest, ubuntu-latest
+      # and macos-latest -- so the single architecture whose flags were missing
+      # was the single architecture no caller of that scan could reach. The flag
+      # is a one-line fix; the reason it was needed for four days is this gap.
+      #
+      # It scans `dist/`, the staged payload the archive above was built from,
+      # so it reads the bytes that would actually ship rather than a debug build
+      # or an intermediate. It is the same tools/check-crt.ps1 the gate calls,
+      # invoked rather than transcribed, and it carries its own vacuity guard: a
+      # run that finds fewer than four binaries throws instead of passing, which
+      # is what stops it from going quietly green if `dist/` is ever empty or
+      # renamed.
+      #
+      # WindowsOnly by `runner.os`, not by architecture: the x64 legs of this
+      # matrix do not exist, but if one is ever added the check is right for it
+      # too, and the four banned names cannot appear in a Linux or macOS build.
+      - name: No ARM64 binary needs the VC++ redistributable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./tools/check-crt.ps1 -Dir dist
 
       # The installer, built and then actually installed, asserted against the
       # disk and the registry, uninstalled, and asserted again -- both scopes,

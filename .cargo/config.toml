@@ -38,11 +38,35 @@
 # behaves differently, and the failure only appears on a machine nobody here
 # owns.
 #
-# WHY IT IS SCOPED TO ONE TRIPLE
+# WHY IT IS SCOPED TO WINDOWS TRIPLES, AND WHY THERE ARE NOW TWO
 #
 # `[build] rustflags` would also apply to `wasm32-unknown-unknown`, where
 # `crt-static` is meaningless, and to any future cross build. The problem being
 # solved is a Windows deployment problem, so the fix names Windows.
+#
+# It named only `x86_64-pc-windows-msvc` until 2026-08-15, and for four days
+# that was a hole rather than a decision. `windows-arm64` shipped as a fourth
+# platform in v0.11.0 and this file said nothing about `aarch64-pc-windows-msvc`,
+# so every ARM64 binary in that release links the dynamic CRT. Measured on the
+# published v0.11.0 artifacts rather than inferred from this file: all four
+# ARM64 PEs -- `polylinker.exe`, `pl.exe`, `pl-mcp.exe`, `polylinker.pyd` --
+# carry `VCRUNTIME140` and `api-ms-win-crt` in their import directories, and the
+# x86_64 build of that same release carries neither in any of the four. That
+# contrast is what makes it a measurement: a scan that reported hits everywhere
+# would be finding the strings, not the imports.
+#
+# Nothing caught it. The step that asserts absence, 'no C runtime redistributable
+# is needed', is a step of `tools/ci.ps1`, and the gate has three legs of which
+# none is ARM64 -- so the one architecture whose flags were missing was the one
+# architecture the check could not reach. The check now also runs on the ARM64
+# leg of `ci.yml`'s `test` job, via `tools/check-crt.ps1`, which is the same
+# scan both callers share rather than a second copy of it.
+#
+# A triple added to this file needs a `RUSTFLAGS`-free job to build in: cargo
+# REPLACES these flags with that environment variable rather than merging, so a
+# job that sets it silently discards everything below. See
+# `.github/workflows/ci.yml`, both the `env:` block at the top and the step
+# 'RUSTFLAGS is not silently discarding .cargo/config.toml'.
 #
 # WHAT THIS IS NOT
 #
@@ -53,4 +77,10 @@
 # beside the executable, which is permitted for app-local deployment but puts a
 # redistribution grant into a project that currently needs none. Prefer this.
 [target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# The measured cost above is x86_64's. ARM64's has not been measured, because no
+# machine here can link ARM64 -- the size delta is whatever the runner produces,
+# and the archive's own `SHA256SUMS.txt` records it per release.
+[target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

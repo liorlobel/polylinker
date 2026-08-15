@@ -45,27 +45,27 @@ built-in emulation, and until this release that is what ARM64 users were
 doing. The native build should be faster and will not warm your battery
 emulating, but it is the newest thing here: it is compiled and its test suite
 is run on real Windows-on-ARM hardware for every commit, and the zip and MSI
-are built, installed, checked and uninstalled there — but `tools/ci.ps1`, the
-gate this project counts the steps of, has three legs and none of them is this
-architecture, so the cross-checks against Biopython, pydna, SciPy and the rest
-are run only on x64. And at the time this release was cut **no person had run a
-Polylinker build on an ARM64 machine at all**.
+are built, installed, checked and uninstalled there, and since v0.11.1 the scan
+that proves no binary needs the VC++ redistributable runs there too — but
+`tools/ci.ps1`, the gate this project counts the steps of, has three legs and
+none of them is this architecture, so the cross-checks against Biopython, pydna,
+SciPy and the rest are run only on x64. And at the time this release was cut
+**no person had run a Polylinker build on an ARM64 machine at all**.
 
-**One difference is concrete enough to stop the program starting, so it belongs
-here rather than in a table.** The x64 binaries link the C runtime statically
-and need nothing installed alongside them. The ARM64 binaries do not:
-`.cargo/config.toml` sets `-C target-feature=+crt-static` for
-`x86_64-pc-windows-msvc` and declares nothing for `aarch64-pc-windows-msvc`, so
-they import `VCRUNTIME140.dll`. That DLL is not part of Windows — it arrives
-with the Visual C++ 2015-2022 redistributable, whose installer wants
-administrator rights. Most machines that have run any desktop application
-already have it and you will never notice this paragraph. A freshly imaged or
-locked-down one may not, and there the failure is `VCRUNTIME140.dll was not
-found` before Polylinker gets to run at all. The x64 download carries no such
-dependency and runs on these machines under emulation, so it is the better
-answer on a PC you do not administer. This is a missing linker flag rather than
-a decision, the gate step that would have caught it is a gate step, and it is
-written here because it is not fixed yet.
+**The one difference that could stop the program starting is fixed in this
+release, and it is worth saying what it was.** Every ARM64 binary in v0.11.0
+imported `VCRUNTIME140.dll` — a DLL that is not part of Windows, arriving with
+the Visual C++ 2015-2022 redistributable, whose installer wants administrator
+rights. On most machines you would never have noticed. On a freshly imaged or
+locked-down one, the failure is `VCRUNTIME140.dll was not found` before
+Polylinker runs at all, which is precisely the machine this program is for.
+`.cargo/config.toml` declared the static-CRT flag for the x64 triple and named
+no ARM64 one. It now names both, and these ARM64 binaries link the C runtime
+statically exactly as the x64 ones always have.
+
+**If you downloaded v0.11.0 for ARM64, replace it with this one.** Nothing about
+it is unsafe; it may simply refuse to start on a machine without the
+redistributable, and no message it prints will tell you why.
 
 If you want the better-trodden path today, take the x64 files; they work. If you
 take the ARM64 ones and something is wrong, that is worth an issue, because you

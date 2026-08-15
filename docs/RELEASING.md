@@ -101,14 +101,14 @@ One tag. Everything else follows from it.
 #    -- substitute both; they are written concretely because a placeholder is
 #    the thing people paste by accident, and they are one release behind the
 #    moment a release lands:
-sed -i 's/version = "0.10.3"/version = "0.11.0"/g' Cargo.toml
+sed -i 's/version = "0.11.0"/version = "0.11.1"/g' Cargo.toml
 #    Then check it took, because a typo in the left-hand side is a silent no-op.
 #    BOTH greps, and they used to be one: the old line ran only the NEW-version
 #    count and left "and 0.7.0 must print 0" as a comment, which is the half that
 #    catches a sed that matched nothing. `grep -c` exits 1 when it prints 0, so
 #    run them as two commands rather than chaining them with &&:
-grep -c 'version = "0.11.0"' Cargo.toml   # must print 17
-grep -c 'version = "0.10.3"' Cargo.toml   # must print 0
+grep -c 'version = "0.11.1"' Cargo.toml   # must print 17
+grep -c 'version = "0.11.0"' Cargo.toml   # must print 0
 cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
 #    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
 #    are the two files a tag does not update and nothing checks.
@@ -144,8 +144,8 @@ pwsh -NoProfile -File tools/ci.ps1
 
 # 4. Tag, on main, after the release commit has landed there. This is the only
 #    step that publishes anything.
-git tag -a v0.11.0 -m "Polylinker 0.11.0"
-git push origin v0.11.0
+git tag -a v0.11.1 -m "Polylinker 0.11.1"
+git push origin v0.11.1
 ```
 
 ### Step 2 is no longer the only thing standing between a tag and a red gate
@@ -422,10 +422,11 @@ so it is a table of the two workflows rather than an adjective:
 | | `windows-x64` | `windows-arm64` |
 |---|---|---|
 | Where it lives in `ci.yml` | the `gate` job | the `test` job |
-| On every push and pull request | `cargo fmt`, `cargo clippy`, and the whole of `tools/ci.ps1` — 76 steps, with a ledger and the skip discipline `-ExpectedSkips` enforces | `cargo fmt`, `cargo clippy --locked`, `cargo test --workspace --lib --bins --locked`, `cargo build --workspace --release --locked`, and the integration suites of `pl-fileio`, `pl-features`, `pl-draw`, `pl-design`, `pl-update` and `pl` |
+| On every push and pull request | `cargo fmt`, `cargo clippy`, and the whole of `tools/ci.ps1` — 77 steps, with a ledger and the skip discipline `-ExpectedSkips` enforces | `cargo fmt`, `cargo clippy --locked`, `cargo test --workspace --lib --bins --locked`, `cargo build --workspace --release --locked`, and the integration suites of `pl-fileio`, `pl-features`, `pl-draw`, `pl-design`, `pl-update` and `pl` |
 | `tools/ci.ps1` | yes | **never, on any trigger** |
 | A ledger, and `reconcile` comparing it to the other legs | yes | **no ledger exists for this platform** |
-| The C-runtime import scan, the PE icon and version resources, the 8.3 alias case | on every push | **nowhere** |
+| The PE icon and version resources, the 8.3 alias case | on every push | **nowhere** |
+| The C-runtime import scan (`tools/check-crt.ps1`) | on every push, in the gate | on every push, in the `test` job — since v0.11.1, and it found nothing before because it could not run here |
 | The differential oracles — Biopython, pydna, SciPy, resvg, Pillow, fontTools, the SEGUID reference | in the gate on every push | **nowhere** (`oracles` is `ubuntu-latest` and always was, so this is one platform's claim rather than a per-architecture one) |
 | `tools/release.ps1` → `tools/check-archive.ps1` | on every push, in the gate | on every push, in the `test` job |
 | `tools/build-msi.ps1` → `tools/check-msi.ps1`, per-user and per-machine | on every push, in the gate | on every push, in the `test` job |

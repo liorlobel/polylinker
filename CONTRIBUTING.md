@@ -100,7 +100,7 @@ pwsh -NoProfile -File tools/ci.ps1
 pwsh -NoProfile -File tools/ci.ps1 -Corpus "C:\path\to\your\plasmids"
 ```
 
-76 steps. **CI runs this same file**, in the `gate` job of
+77 steps. **CI runs this same file**, in the `gate` job of
 `.github/workflows/ci.yml`, on `windows-latest`, `ubuntu-latest` and
 `macos-latest` — so running it here is not a courtesy version of CI, it is CI,
 and "CI is green" becomes something you know rather than something you find out.

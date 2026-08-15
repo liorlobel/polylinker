@@ -27,6 +27,77 @@ which.
 
 Nothing yet.
 
+## [0.11.1] - 2026-08-15
+
+**The ARM64 binaries no longer need a DLL the user may not be allowed to
+install.** Everything in this release exists because of one missing line, and
+most of it is about why the line was missing for four days rather than about the
+line.
+
+### Fixed
+
+- **`windows-arm64` links the C runtime statically, as every other Windows
+  download always has.** `.cargo/config.toml` scoped
+  `-C target-feature=+crt-static` to `[target.x86_64-pc-windows-msvc]` and
+  declared nothing for `aarch64-pc-windows-msvc`, so all four ARM64 binaries in
+  v0.11.0 — `polylinker.exe`, `pl.exe`, `pl-mcp.exe` and `polylinker.pyd` —
+  import `VCRUNTIME140.dll` and `api-ms-win-crt-runtime-l1-1-0.dll`. Neither is
+  part of Windows. They arrive with the Visual C++ 2015-2022 redistributable,
+  whose installer needs administrator rights, and `docs/PLAN.md:120` describes
+  the primary user as somebody who has none. On such a machine v0.11.0 for ARM64
+  is a missing-DLL dialog rather than a program, and nothing it prints explains
+  why.
+
+  Measured on the published artifacts, not inferred from the config file: all
+  four ARM64 PEs carry those strings in their import directories and all four
+  x86-64 PEs of the same release carry none of them. The contrast is what makes
+  it a measurement rather than a grep — a scan that reported hits on both sides
+  would be finding the strings, not the imports.
+
+  **Anyone running the v0.11.0 ARM64 download should replace it.** Nothing about
+  it is unsafe; it may simply fail to start.
+
+### Why nothing caught it, which is the actual defect
+
+- **The check existed and could not reach the platform.** `tools/ci.ps1` has
+  asserted the absence of exactly these imports since 2026-08-05, under
+  'no C runtime redistributable is needed'. The gate runs on `windows-latest`,
+  `ubuntu-latest` and `macos-latest`. So the single architecture whose flags were
+  missing was the single architecture no caller of that scan could reach, and
+  adding a platform to the release quietly added one the gate does not cover.
+  The scan is now `tools/check-crt.ps1`, called by `tools/ci.ps1` **and** by the
+  ARM64 leg of `ci.yml`, which runs it against the staged `dist/` payload on
+  every push and pull request. One implementation with two callers, rather than
+  a transcription.
+
+- **A second check, because the first one only ever judges binaries that exist.**
+  The new gate step 'every Windows platform the release builds has a static CRT
+  declared' reads `release.yml`'s matrix and `.cargo/config.toml` and fails any
+  Windows platform whose target triple has no `+crt-static`. It compares two text
+  files, so it runs on every leg — including the three that cannot build an ARM64
+  binary — and it fails *before* a build rather than after a release. An
+  unrecognised `windows-*` label is an error rather than a skip, because a new
+  Windows platform arriving with nobody thinking about its C runtime is the
+  entire failure being prevented. It carries three planted controls, since a
+  comparator that has stopped comparing reports the same clean as a tree that
+  agrees.
+
+- **The guard that refused the naive fix was right, and this release takes its
+  advice.** `ci.yml`'s `test` job set `RUSTFLAGS: -D warnings`, and cargo
+  REPLACES `[target.<triple>] rustflags` with that variable rather than merging,
+  so adding the config block alone would have been discarded and produced
+  identical broken binaries with the fix apparently applied. The step
+  'RUSTFLAGS is not silently discarding .cargo/config.toml' predicted this in as
+  many words — it said that the day somebody added the ARM64 crt-static block,
+  the job would go red and say what to do. It did. The job now sets no
+  `RUSTFLAGS` and passes `-D warnings` on clippy's command line instead, which is
+  what the `gate` job and `release.yml` already did, and which this repository
+  had already measured to deny ordinary rustc lints too.
+
+### Changed
+
+- The gate is **77 steps**, up from 76.
+
 ## [0.11.0] - 2026-08-15
 
 **Polylinker runs natively on Windows on ARM64.** That is the whole of this
@@ -3028,7 +3099,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.1
 [0.11.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.0
 [0.10.3]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.3
 [0.10.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.10.2
