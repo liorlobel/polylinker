@@ -1339,6 +1339,33 @@ struct App {
     /// "Could not read that file" and removed the map — telling the user their
     /// file is unreadable when the document is fine and nothing was changed.
     notice: Option<String>,
+    /// A save or an export that did not reach the disk.
+    ///
+    /// THE THIRD SLOT, and it exists because the other two are both wrong for a
+    /// failed write. Nine picker-driven writes — the project file, GenBank and
+    /// FASTA, protein FASTA, `.dna`, and the five figure exports — sent their
+    /// `Err` to [`App::error`], which is the full-pane *"Could not read that
+    /// file"* takeover. Every word of that is wrong here: nothing was being
+    /// read, the file it names is the one the user was trying to create, and the
+    /// takeover hides the document they were trying to save at the moment they
+    /// most want to see it is still there.
+    ///
+    /// Not `notice` either, and that is the less obvious half. `notice` carries
+    /// the standing second line *"Nothing was changed."*, which is the right
+    /// answer for an edit the op log declined and the wrong one after a save:
+    /// the user's question is not "was my document altered" but "is my work on
+    /// disk", and the answer is no. They also end differently. A notice is
+    /// answered by reading it; a failed save is answered by saving. Sharing one
+    /// slot would let the next refused edit erase the only sign that the
+    /// document is still unwritten.
+    save_error: Option<String>,
+    /// The last autosave pass that did not reach the disk, if it has not since
+    /// been followed by one that did.
+    ///
+    /// Kept on `App` rather than left in `status`, which is a transient line the
+    /// next event overwrites. See the assignment in [`App::autosave`] for why
+    /// the distinction is load-bearing.
+    autosave_failure: Option<String>,
     /// Caret, selection and the open typing run for the Sequence tab.
     edit: seqedit::SeqEdit,
     tab: Tab,
@@ -2232,6 +2259,7 @@ impl App {
         // filename comparison in another module.
         match atomic::write(path, session::encode(&s)) {
             Ok(()) => {
+                self.write_ok();
                 self.status = format!(
                     "saved {name} — {} file(s){}",
                     s.open.len(),
@@ -2245,7 +2273,7 @@ impl App {
                     }
                 );
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => self.write_failed(e),
         }
     }
 
@@ -2427,6 +2455,21 @@ impl App {
     /// written something.
     fn autosave_armed(&self) -> bool {
         self.recovery_dir.is_some() && (!self.autosave_off || self.bench.any_armed())
+    }
+
+    /// Whether the recovery copy this window promises actually exists.
+    ///
+    /// [`App::autosave_armed`] answers a question about CONFIGURATION — is a
+    /// recovery directory set, and did startup find a free slot. This answers
+    /// the question a user is really asking, which is whether the last write
+    /// reached the disk. The two disagree exactly when it matters: a full disk,
+    /// a revoked permission, a cloud client holding the file open. Armed stays
+    /// true through all of them.
+    ///
+    /// `None` when there is nothing to report — either autosave is working or it
+    /// has not yet had cause to run.
+    fn autosave_failure(&self) -> Option<&str> {
+        self.autosave_failure.as_deref()
     }
 
     /// Every recovery slot this window is holding — the bench, AND the closed
@@ -2689,6 +2732,21 @@ impl App {
         if wrote || touched {
             self.last_touch = Some(now);
         }
+        // THE OUTCOME OUTLIVES THE FRAME, which the status line does not.
+        //
+        // `self.status` was the whole of this, and it is overwritten by the next
+        // thing that has anything to say — a digest finishing, a feature
+        // selected, a figure exported. So a failing autosave announced itself
+        // once and then the window looked exactly like one where autosave works,
+        // while `autosave_armed` went on reporting that a recovery copy is kept
+        // because it reads configuration and never an outcome. A user who
+        // believes they are covered and is not is the case this whole surface
+        // exists for.
+        if let Some(e) = &failed {
+            self.autosave_failure = Some(e.clone());
+        } else if wrote {
+            self.autosave_failure = None;
+        }
         if let Some(e) = failed {
             self.status = format!("autosave failed: {e}");
         } else if let Some(title) = off {
@@ -2711,6 +2769,8 @@ impl App {
             closed: Vec::new(),
             error: None,
             notice: None,
+            save_error: None,
+            autosave_failure: None,
             edit: seqedit::SeqEdit::new(),
             tab: Tab::Features,
             selected: None,
@@ -3445,6 +3505,30 @@ impl App {
         );
     }
 
+    /// A write the user asked for did not land.
+    ///
+    /// Unconditional, where [`App::load_failed`] branches on whether a document
+    /// is open. That asymmetry is the point: a failed *read* with nothing open
+    /// leaves the user with no document and nothing to look at, so the takeover
+    /// is the only surface there is. A failed *write* never means that — the
+    /// thing being written is still in memory, and the reason to keep the window
+    /// intact is that it is holding the only copy.
+    fn write_failed(&mut self, e: String) {
+        self.save_error = Some(e);
+    }
+
+    /// A write the user asked for landed.
+    ///
+    /// Called from every `Ok` arm that [`App::write_failed`] has an `Err` arm
+    /// in, so the banner cannot outlive the condition it reports. Without it a
+    /// user who fixed the problem — freed the disk, closed the file in Excel —
+    /// and saved successfully would still be looking at a banner saying their
+    /// work is not on disk, which is the same defect this pair exists to fix,
+    /// pointing the other way.
+    fn write_ok(&mut self) {
+        self.save_error = None;
+    }
+
     /// Take on a chromatogram. NEVER touches `self.document`.
     fn take_read(&mut self, path: PathBuf, data: &[u8]) {
         let trace = match pl_abif::parse(data) {
@@ -3768,6 +3852,7 @@ impl App {
         // module's doc for the pattern and what it costs.
         match atomic::write(&path, text) {
             Ok(()) => {
+                self.write_ok();
                 // Cleared by a write that carried the whole document, and BOTH
                 // formats can now fail that test. GenBank's strand note ("N
                 // features written as forward") is an expressibility nuance and
@@ -3812,7 +3897,7 @@ impl App {
             }
             // Already names the destination and says it survived; wrapping it in
             // a second `{path}: ` would print the path twice.
-            Err(e) => self.error = Some(e),
+            Err(e) => self.write_failed(e),
         }
     }
 
@@ -3926,7 +4011,7 @@ impl App {
         // was overwriting.
         match atomic::write(&path, text) {
             Ok(()) => self.wrote(&path, &note),
-            Err(e) => self.error = Some(e),
+            Err(e) => self.write_failed(e),
         }
     }
 
@@ -4049,6 +4134,7 @@ impl App {
         // else here.
         match atomic::write(&p.path, &p.bytes) {
             Ok(()) => {
+                self.write_ok();
                 if let Some(d) = self.bench.get_mut() {
                     d.mark_saved();
                     // Same rule as `export`: a write the document is marked
@@ -4078,7 +4164,7 @@ impl App {
                     self.resolve_guard(why, true);
                 }
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => self.write_failed(e),
         }
     }
 
@@ -4095,6 +4181,13 @@ impl App {
     /// The user's own genome files sit 160 characters deep in OneDrive, so
     /// "saving beside a source file" was the ordinary case, not an edge one.
     fn wrote(&mut self, path: &std::path::Path, note: &str) {
+        // A write that landed retires the banner the last one that did not put
+        // up. Here rather than in each caller because this is already the one
+        // place every successful export passes through; the three save paths
+        // that do not call it clear it themselves, and
+        // `every_write_that_can_fail_records_both_outcomes` holds all nine to
+        // that.
+        self.write_ok();
         self.status = if note.is_empty() {
             format!("wrote {}", path.display())
         } else {
@@ -4244,7 +4337,7 @@ impl App {
         // `atomic::write` for the same reason the document saves do.
         match atomic::write(&path, bytes) {
             Ok(()) => self.wrote(&path, &note.join("  —  ")),
-            Err(e) => self.error = Some(e),
+            Err(e) => self.write_failed(e),
         }
     }
 
@@ -4341,7 +4434,7 @@ impl App {
 
         match atomic::write(&path, svg) {
             Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
-            Err(e) => self.error = Some(e),
+            Err(e) => self.write_failed(e),
         }
     }
 
@@ -4488,7 +4581,7 @@ impl App {
         self.gel_cache = Some((key, built));
         match atomic::write(&path, bytes) {
             Ok(()) => self.wrote(&path, &note.join("  —  ")),
-            Err(e) => self.error = Some(e),
+            Err(e) => self.write_failed(e),
         }
     }
 
@@ -4533,7 +4626,7 @@ impl App {
         };
         match atomic::write(&path, bytes) {
             Ok(()) => self.wrote(&path, &note.join("  —  ")),
-            Err(e) => self.error = Some(e),
+            Err(e) => self.write_failed(e),
         }
     }
 
@@ -4624,7 +4717,7 @@ impl App {
         let (eps, _) = pl_draw::eps::to_eps(&sc, self.figure_scale(&sc));
         match atomic::write(&path, eps) {
             Ok(()) => self.wrote(&path, &Self::figure_note(&drawn).join("  —  ")),
-            Err(e) => self.error = Some(e),
+            Err(e) => self.write_failed(e),
         }
     }
 
@@ -4875,6 +4968,7 @@ impl App {
             "Save as GenBank…"
         };
         let armed = self.autosave_armed();
+        let autosave_failure = self.autosave_failure().map(str::to_string);
         let mut cancel = false;
         let mut discard = false;
         let mut save = false;
@@ -4885,7 +4979,21 @@ impl App {
             ui.label(RichText::new(stake));
             ui.label(RichText::new(why.consequence(one)));
             ui.add_space(6.0);
-            if armed {
+            if let Some(why) = &autosave_failure {
+                // ARMED AND FAILING, which is the case this dialog used to get
+                // wrong. `armed` is configuration, and on its own it promised a
+                // copy that the last pass did not manage to write — in the one
+                // dialog whose whole job is telling the user what they are about
+                // to lose. Named first because it outranks both other branches.
+                ui.label(
+                    RichText::new(format!(
+                        "Autosave is on but the last copy could not be written, so there may be \
+                         nothing to recover:\n{why}"
+                    ))
+                    .color(pal(ui).warn)
+                    .size(11.0),
+                );
+            } else if armed {
                 ui.label(
                     RichText::new(
                         "A crash-recovery copy is kept. Polylinker will offer it the next time \
@@ -6391,6 +6499,29 @@ impl App {
                             );
                         }
                     });
+                    // A STANDING CHIP, beside the spinner and before the title.
+                    //
+                    // The failure used to reach `self.status` alone, which the
+                    // next event overwrites — so the one condition a user must
+                    // not miss had the shortest life of anything on screen. This
+                    // stays up until an autosave works, because that is the only
+                    // thing that makes it untrue.
+                    //
+                    // Words AND a colour, not a colour alone: `warn` is one
+                    // channel and the sentence is the other, for the same reason
+                    // the chip beside it spells out "digesting".
+                    if let Some(why) = self.autosave_failure() {
+                        ui.label(
+                            RichText::new("not autosaving")
+                                .color(pal(ui).warn)
+                                .size(12.0),
+                        )
+                        .on_hover_text(format!(
+                            "The last recovery copy could not be written:\n{why}\n\nYour work is \
+                             still here, but nothing is writing it down. Save the document \
+                             somewhere you can write to."
+                        ));
+                    }
                     if let Some(d) = self.document() {
                         if d.digest.is_running() {
                             ui.add(egui::Spinner::new().size(13.0));
@@ -13387,7 +13518,9 @@ impl App {
         };
 
         let notice = self.notice.clone();
+        let save_error = self.save_error.clone();
         let mut dismiss = false;
+        let mut dismiss_save_error = false;
 
         // BUILT BEFORE THE PANEL, not inside it. The gel needs `&self.document`
         // and `&mut self.gel` at once, and the paint closure already holds a
@@ -13419,6 +13552,47 @@ impl App {
             // hiding it. The message itself was always good — `OpError` names
             // the feature, its index and the numbers — the presentation was the
             // bug, and it already shipped for the four ops that were wired.
+            // ABOVE THE NOTICE, AND IT IS A SEPARATE BANNER.
+            //
+            // Both can be up at once — a save fails, and the next edit is
+            // refused — and they answer different questions. Ordered first
+            // because "your work is not on disk" outranks "that edit did not
+            // happen", and because the notice is the one the user can act on by
+            // reading it while this one is only cleared by a save that works.
+            //
+            // `warn`, not `selection`: the notice's ground is the same colour
+            // the app uses to say something happened, and a failed save is not
+            // in that category. The second line is the whole reason this is not
+            // a `notice` — see the field's own doc.
+            if let Some(msg) = &save_error {
+                egui::Frame::NONE
+                    .fill(pal(ui).selection())
+                    .stroke(egui::Stroke::new(1.0, pal(ui).warn))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                            if ui.button("Dismiss").clicked() {
+                                dismiss_save_error = true;
+                            }
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(format!("Not saved — {msg}")).color(pal(ui).ink),
+                                );
+                                // The sentence a user actually needs, and the
+                                // one `notice` cannot give them: their work is
+                                // still here and still only here.
+                                ui.label(
+                                    RichText::new(
+                                        "The file on disk is unchanged. This document is still \
+                                         open, and these edits exist only in this window.",
+                                    )
+                                    .color(pal(ui).muted)
+                                    .size(11.0),
+                                );
+                            });
+                        });
+                    });
+            }
             if let Some(msg) = &notice {
                 egui::Frame::NONE
                     .fill(pal(ui).selection())
@@ -13564,6 +13738,9 @@ impl App {
         self.gel_cache = built;
         if dismiss {
             self.notice = None;
+        }
+        if dismiss_save_error {
+            self.save_error = None;
         }
         self.central_view = view_next;
         gel_next.apply(&mut self.gel);
@@ -23761,10 +23938,23 @@ mod tests {
             original,
             "a save that failed truncated the file it was overwriting"
         );
-        let e = app.error.clone().expect("the failure must be reported");
+        // `save_error`, not `error`, since 2026-08-15. The assertion moved
+        // deliberately rather than being deleted: this test is the only one that
+        // drives a real failing save, so it is also the only place the routing
+        // can be held. The message itself is unchanged.
+        let e = app
+            .save_error
+            .clone()
+            .expect("the failure must be reported");
         assert!(
             e.contains("not-a-casualty.dna") && e.contains("unchanged"),
             "the error must name the destination and say it survived: {e:?}"
+        );
+        assert!(
+            app.error.is_none(),
+            "a failed WRITE raised the full-pane \"Could not read that file\" takeover, which \
+             hides the document the user was trying to save: {:?}",
+            app.error
         );
         // And the document is still the only copy of the user's work.
         assert!(
@@ -23820,10 +24010,23 @@ mod tests {
             original,
             "a save that could not be staged replaced the project anyway"
         );
-        let e = app.error.clone().expect("the failure must be reported");
+        // `save_error`, not `error`, since 2026-08-15 — the same move as in
+        // `a_save_that_cannot_be_written_does_not_destroy_what_it_overwrites`.
+        // This test is why the suite is the check and a grep is not: the first
+        // sweep found one of the two assertions on `app.error` and this one went
+        // red on the next full run.
+        let e = app
+            .save_error
+            .clone()
+            .expect("the failure must be reported");
         assert!(
             e.contains("bench-not-a-casualty.plproj") && e.contains("unchanged"),
             "the error must name the destination and say it survived: {e:?}"
+        );
+        assert!(
+            app.error.is_none(),
+            "a failed project save raised the \"Could not read that file\" takeover: {:?}",
+            app.error
         );
 
         let _ = std::fs::remove_dir_all(atomic::temp_beside(&victim));
@@ -23873,6 +24076,55 @@ mod tests {
     /// a dozen times over to build fixtures and must go on doing so. No count
     /// is quoted for that: it is not a claim anything rests on, and an
     /// unpinned number in a comment is the defect this test was written for.
+    /// Every `atomic::write` in this file reports BOTH outcomes.
+    ///
+    /// The failure and the clear are two halves of one behaviour, and the half
+    /// that is easy to forget is the clear: a banner that outlives the condition
+    /// it reports is the same defect as one that never appears, wearing the
+    /// other sign. A tenth save site added later with only an `Err` arm would
+    /// leave the banner up forever after one bad disk.
+    ///
+    /// PROVEN TO FAIL by changing any one of the nine `Err` arms back to
+    /// `self.error = Some(e)`: 8 against 9.
+    #[test]
+    fn every_write_that_can_fail_records_both_outcomes() {
+        const RAW: &str = include_str!("main.rs");
+        let src = RAW.replace("\r\n", "\n");
+        let body = src
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("main.rs still has a `mod tests`")
+            .0;
+        let code = || body.lines().filter(|l| !l.trim_start().starts_with("//"));
+        let count = |needle: &str| code().filter(|l| l.contains(needle)).count();
+
+        let writes = count("match atomic::write(");
+        // A FLOOR, because two zeroes are equal. If `atomic::write` is ever
+        // renamed, this test would otherwise agree with a file that has no save
+        // path in it at all.
+        assert!(
+            writes >= 9,
+            "only {writes} `atomic::write` match(es) found; there were nine when this was \
+             written, so the scan has stopped matching and the equality below would hold \
+             over nothing"
+        );
+        let routed = count("Err(e) => self.write_failed(e),");
+        assert_eq!(
+            routed, writes,
+            "{writes} writes but {routed} route their failure to the save banner: a save \
+             that fails still takes the window over with \"Could not read that file\""
+        );
+        // The clear reaches six of the nine through `wrote`; the three save
+        // paths that do not call it clear it themselves. One call inside `wrote`
+        // plus those three is the whole set, and asserting the total means
+        // deleting either kind fails.
+        let cleared = count("self.write_ok();");
+        assert_eq!(
+            cleared, 4,
+            "the banner is retired from {cleared} place(s); it needs the one in `wrote` \
+             and one in each save path that does not call it"
+        );
+    }
+
     #[test]
     fn every_picker_driven_save_in_this_file_goes_through_atomic_write() {
         const RAW: &str = include_str!("main.rs");
@@ -23973,6 +24225,114 @@ mod tests {
     /// The deletion was in no file anywhere. The throttle is right; "another
     /// frame will come along" was the assumption, and the one case it fails is
     /// the idle app — which is the exact case a crash-recovery file exists for.
+    /// Block the recovery slot's staging file so `recover::write` cannot
+    /// succeed.
+    ///
+    /// The same technique `a_save_that_cannot_be_written_does_not_destroy_what_it_overwrites`
+    /// uses, pointed at the other writer: `recover::write` stages at
+    /// `path.with_extension("recover.tmp")`, which is a pure function of the
+    /// slot, so a directory can be put exactly in its way. It stands in for a
+    /// full volume or a revoked permission — the failures a user cannot see
+    /// coming and the ones this whole surface exists for.
+    fn block_recovery_slot(path: &std::path::Path) {
+        std::fs::create_dir_all(path.with_extension("recover.tmp")).expect("a blocking directory");
+    }
+
+    /// PROVEN TO FAIL by reverting only the `autosave_failure` assignment in
+    /// `App::autosave`: without it the field is never set, `expect` on the first
+    /// assertion panics, and the app is back to announcing the failure once into
+    /// a status line that the next event overwrites.
+    #[test]
+    fn a_failing_autosave_outlives_the_status_line_that_announced_it() {
+        let (mut app, path) = app_with_recovery("autosave-health");
+        block_recovery_slot(&path);
+        app.adopt(edited_doc("x.fa", "ACGTACGTACGTACGT"));
+
+        app.autosave(true);
+        let why = app
+            .autosave_failure()
+            .expect("a blocked slot must be recorded, not only announced")
+            .to_string();
+        assert!(
+            app.status.contains("autosave failed"),
+            "the status line is still the immediate report: {:?}",
+            app.status
+        );
+
+        // THE POINT OF THE TEST. Anything at all with something to say
+        // overwrites `status`, and before this field existed that was the whole
+        // of the signal — the window then looked exactly like one where autosave
+        // works.
+        app.status = "digest complete".into();
+        assert_eq!(
+            app.autosave_failure(),
+            Some(why.as_str()),
+            "the failure vanished with the status line that announced it"
+        );
+
+        // And `autosave_armed` is why a second signal was needed: it reads
+        // configuration, so it is still true while nothing is reaching the disk.
+        assert!(
+            app.autosave_armed(),
+            "the case this test is about is armed AND failing; if armed is false \
+             the two signals do not disagree and the test proves nothing"
+        );
+    }
+
+    /// PROVEN TO FAIL by reverting only the clear — deleting the
+    /// `self.autosave_failure = None` in `App::autosave`'s `else` arm — after
+    /// which the warning stays up forever and the last assertion fires.
+    ///
+    /// AN HONEST NOTE ON WHAT IS *NOT* PROVEN HERE. A first draft distinguished
+    /// "a write was attempted" from "a write landed" and cleared only on the
+    /// second. Three attempts to build a case where the two differ all came back
+    /// green under both, including this one, which puts the failure on an
+    /// already-autosaved document so the retry is a heartbeat. Rather than ship
+    /// a distinction no test can see, the flag was deleted and the clear keyed to
+    /// the existing `wrote`. If a case is ever found, it is a real difference and
+    /// the flag should come back WITH the test that finds it.
+    #[test]
+    fn an_autosave_that_lands_retires_the_failure_the_last_one_raised() {
+        let (mut app, path) = app_with_recovery("autosave-recovers");
+        app.adopt(edited_doc("x.fa", "ACGTACGTACGTACGT"));
+
+        // ONE GOOD PASS FIRST, so the tab is marked autosaved. Without it every
+        // later pass sees a changed document and sets `wrote`, and the flag this
+        // test exists to distinguish never differs from it — which is exactly
+        // what a first draft of this test did, and it passed under both.
+        app.autosave(true);
+        assert!(app.autosave_failure().is_none(), "the first pass must land");
+
+        // Now the disk fills while the user is idle. Nothing has changed, so
+        // this is the heartbeat, and it fails.
+        block_recovery_slot(&path);
+        app.autosave(true);
+        assert!(
+            app.autosave_failure().is_some(),
+            "the blocked slot must raise the failure this test then clears"
+        );
+
+        // The user frees the disk, or the cloud client lets go of the file —
+        // AND THEN DOES NOTHING ELSE. No edit, so the next pass is the
+        // heartbeat: `wrote` is false and only `landed` is true.
+        //
+        // That is the whole reason the two flags are not the same one, and this
+        // test is written to sit on the difference. With the clear keyed to
+        // `wrote` — a write that was ATTEMPTED — the warning stays up until the
+        // user happens to type something, which is precisely the moment they are
+        // least likely to, having just been told their work is not being saved.
+        std::fs::remove_dir_all(path.with_extension("recover.tmp")).expect("unblock the slot");
+        app.autosave(true);
+
+        assert_eq!(
+            app.autosave_failure(),
+            None,
+            "a working autosave left the warning up, which is the same defect \
+             pointing the other way: the app would go on saying it is not \
+             protecting work it is protecting"
+        );
+    }
+
     #[test]
     fn an_idle_app_with_unsaved_work_still_schedules_its_next_autosave() {
         let (mut app, _path) = app_with_recovery("wake");
