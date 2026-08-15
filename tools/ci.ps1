@@ -2658,21 +2658,11 @@ Step 'shipped Python extension imports' {
 # baseline by hand and agrees: after the change, the imports are stock Windows
 # DLLs plus python3.dll for the extension.
 Step 'no C runtime redistributable is needed' {
-    $banned = 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'MSVCP140.dll', 'api-ms-win-crt-runtime-l1-1-0.dll'
-    $checked = 0
-    foreach ($f in (Get-ChildItem -LiteralPath $script:release -File |
-                    Where-Object { $_.Extension -in '.exe', '.pyd', '.dll' })) {
-        $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
-        $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
-        foreach ($b in $banned) {
-            if ($ascii.IndexOf($b, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                throw "$($f.Name) references $b, which is not part of Windows and whose redistributable needs admin rights. Check .cargo/config.toml still sets +crt-static."
-            }
-        }
-        $checked++
-    }
-    if ($checked -lt 4) { throw "only $checked binary(ies) checked; expected at least 4" }
-    Write-Host "        $checked binaries, none needs the VC++ redistributable" -ForegroundColor DarkGray
+    # The scan itself moved to tools/check-crt.ps1 on 2026-08-15, unchanged, so
+    # that the ARM64 leg of ci.yml -- which does not run this file -- can call
+    # the same implementation. It could not before, and v0.11.0 shipped four
+    # ARM64 binaries importing VCRUNTIME140.dll because of it.
+    & "$PSScriptRoot/check-crt.ps1" -Dir $script:release
     $global:LASTEXITCODE = 0
 } {
     # VCRUNTIME140.dll is a Windows redistributable and the scan is over the
@@ -3583,11 +3573,11 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     # elevation and because it is the scope readers get by default. The
     # per-machine pass is added only when the session happens to be elevated.
     # The step is skipped entirely without wix, since a workstation with no .NET
-    # SDK cannot build an MSI to test and the other 75 steps are still worth
+    # SDK cannot build an MSI to test and the other 76 steps are still worth
     # running there. (It said 62 until 2026-08-10, 71 until 2026-08-13, 72 and then 74
     # until 2026-08-14, each of which was the count before the gate grew past it;
     # the number is this file's step total minus this one step, so it moves every
-    # time a step is added. Step total today: 76.)
+    # time a step is added. Step total today: 77.)
     #
     # THIS INDEX OF STALE COPIES WAS ITSELF STALE, and that is the more useful
     # lesson than any of the numbers in it. As written on 2026-08-14 it named
@@ -3599,7 +3589,9 @@ Step 'the MSI installs, does what it says, uninstalls, and leaves nothing' {
     # it. An index of stale prose is prose, decays at the same rate as what it
     # indexes, and is worth exactly as much as the last hand that edited it.
     #
-    # All of them were swept to 76 on 2026-08-15, from the one measurement
+    # All of them were swept to 76 on 2026-08-15 and to 77 the same day when
+    # 'every Windows platform the release builds has a static CRT declared' was
+    # added, from the one measurement
     # `(Select-String "^Step '" tools/ci.ps1).Count`: `docs/RELEASING.md`,
     # `tools/build-msi.ps1`, `tools/verify.ps1`, `CONTRIBUTING.md`, and
     # `.github/workflows/ci.yml` in three places. NAMED WITHOUT LINE NUMBERS ON
@@ -4134,6 +4126,127 @@ function Compare-PlatformCoverage {
     }
     return $problems
 }
+
+# Every Windows platform the release builds must have a static CRT declared for
+# its triple.
+#
+# THIS STEP EXISTS BECAUSE THE ONE-LINE FIX WAS NOT THE DEFECT. v0.11.0 added
+# `windows-arm64` to the release matrix and did not add
+# `[target.aarch64-pc-windows-msvc]` to `.cargo/config.toml`, so all four ARM64
+# binaries shipped importing VCRUNTIME140.dll -- a DLL that is not part of
+# Windows and whose redistributable needs the administrator rights
+# `docs/PLAN.md:120`'s user does not have. Adding the block fixes that release.
+# It does nothing at all about the next platform.
+#
+# The scan that reads the bytes, `tools/check-crt.ps1`, can only judge binaries
+# that exist on the machine running it, which is why it missed this for four
+# days: the gate has no ARM64 leg. This step needs no binaries. It compares two
+# text files and therefore runs on every leg, including the ones that could
+# never build the artifact in question, and it fails BEFORE a build rather than
+# after one.
+#
+# It fails closed on an unfamiliar label: a `windows-` platform this step has no
+# triple for is an error, not a skip, because the whole failure being prevented
+# is a new Windows platform arriving without anyone thinking about its CRT.
+function Get-CargoTargetRustflags {
+    param([Parameter(Mandatory)][string]$Path)
+    $blocks = @{}
+    $current = $null
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        if ($line -match '^\s*\[target\.[''"]?([^\]''"]+)[''"]?\]') { $current = $Matches[1]; continue }
+        elseif ($line -match '^\s*\[') { $current = $null; continue }
+        if ($current -and $line -match '^\s*rustflags\s*=\s*(.+)$') { $blocks[$current] = $Matches[1].Trim() }
+    }
+    return $blocks
+}
+
+function Compare-WindowsCrtCoverage {
+    param([Parameter(Mandatory)]$Entries, [Parameter(Mandatory)]$Blocks)
+    # Label to triple. Written out rather than derived, because there is nothing
+    # in `windows-arm64` to derive `aarch64-pc-windows-msvc` from -- and an
+    # unknown label throws below rather than being dropped.
+    $triples = @{ 'windows-x64' = 'x86_64-pc-windows-msvc'; 'windows-arm64' = 'aarch64-pc-windows-msvc' }
+    $problems = @()
+    foreach ($e in ($Entries | Where-Object { $_.Label -like 'windows-*' })) {
+        if (-not $triples.ContainsKey($e.Label)) {
+            $problems += ("release.yml builds a Windows platform labelled '$($e.Label)' and this step has no target " +
+                          'triple for it. Add the label to $triples here together with the ' +
+                          "[target.<triple>] block in .cargo/config.toml, and do not delete this message to make " +
+                          'it pass: a Windows download with no static CRT is the defect v0.11.0 shipped.')
+            continue
+        }
+        $t = $triples[$e.Label]
+        if (-not $Blocks.ContainsKey($t)) {
+            $problems += (".github/workflows/release.yml builds '$($e.Label)', whose target triple is $t, and " +
+                          ".cargo/config.toml declares no [target.$t] rustflags. That download would import " +
+                          'VCRUNTIME140.dll, which is not part of Windows and whose redistributable needs ' +
+                          'administrator rights. This is exactly what shipped in v0.11.0.')
+        } elseif ($Blocks[$t] -notmatch 'crt-static') {
+            $problems += (".cargo/config.toml has a [target.$t] block but its rustflags do not mention " +
+                          "crt-static: $($Blocks[$t]). The block existing is not the property being checked.")
+        }
+    }
+    return $problems
+}
+
+Step 'every Windows platform the release builds has a static CRT declared' {
+    $cfgPath = Join-Path $repo '.cargo/config.toml'
+    $wfPath = Join-Path $repo '.github/workflows/release.yml'
+    foreach ($p in $cfgPath, $wfPath) {
+        if (-not (Test-Path -LiteralPath $p)) { throw "$p is missing, and it is one of the two files this step compares" }
+    }
+
+    $blocks = Get-CargoTargetRustflags -Path $cfgPath
+    $entries = @(Get-ReleaseMatrixEntries $wfPath)
+    $win = @($entries | Where-Object { $_.Label -like 'windows-*' })
+
+    # FLOORS. A parser that has stopped matching enumerates nothing, and an
+    # empty set satisfies every "for each" below. Two Windows platforms and two
+    # target blocks are what this project ships as of v0.11.1, so lowering
+    # either number is a deliberate line in a diff.
+    if ($win.Count -lt 2) {
+        throw ("only $($win.Count) Windows platform(s) parsed out of .github/workflows/release.yml; the release " +
+               'builds windows-x64 and windows-arm64, so this parser is broken and the comparison below would ' +
+               'pass on a config file declaring nothing at all')
+    }
+    if ($blocks.Count -lt 2) {
+        throw ("only $($blocks.Count) [target.<triple>] rustflags block(s) parsed out of .cargo/config.toml; that " +
+               'file has carried one per Windows architecture since 2026-08-15, so this parser is broken')
+    }
+
+    $problems = @(Compare-WindowsCrtCoverage -Entries $win -Blocks $blocks)
+
+    # THE CONTROL, on planted files, because a comparator that has stopped
+    # comparing reports the same clean as a tree that agrees -- and the real
+    # files are green only when they agree, which is the exact state in which a
+    # broken checker looks identical to a correct one.
+    $plantedMissing = @(Compare-WindowsCrtCoverage `
+        -Entries @([pscustomobject]@{ Label = 'windows-arm64'; Os = 'windows-11-arm'; Line = 1 }) `
+        -Blocks @{ 'x86_64-pc-windows-msvc' = '["-C", "target-feature=+crt-static"]' })
+    if ($plantedMissing.Count -ne 1) {
+        throw ("the control failed: a release that builds windows-arm64 against a config declaring only the x64 " +
+               "triple produced $($plantedMissing.Count) problem(s) and must produce exactly 1. That is the " +
+               'v0.11.0 defect, and a checker that does not see it is not checking.')
+    }
+    $plantedFlagless = @(Compare-WindowsCrtCoverage `
+        -Entries @([pscustomobject]@{ Label = 'windows-x64'; Os = 'windows-latest'; Line = 1 }) `
+        -Blocks @{ 'x86_64-pc-windows-msvc' = '["-C", "opt-level=3"]' })
+    if ($plantedFlagless.Count -ne 1) {
+        throw ("the control failed: a [target.<triple>] block whose rustflags do not mention crt-static produced " +
+               "$($plantedFlagless.Count) problem(s) and must produce exactly 1")
+    }
+    $plantedUnknown = @(Compare-WindowsCrtCoverage `
+        -Entries @([pscustomobject]@{ Label = 'windows-riscv'; Os = 'windows-future'; Line = 1 }) `
+        -Blocks @{ 'x86_64-pc-windows-msvc' = '["-C", "target-feature=+crt-static"]' })
+    if ($plantedUnknown.Count -ne 1) {
+        throw ("the control failed: an unrecognised windows-* label must be an error and produced " +
+               "$($plantedUnknown.Count) problem(s)")
+    }
+
+    if ($problems.Count -gt 0) { throw ($problems -join [Environment]::NewLine) }
+    Write-Host "        $($win.Count) Windows platform(s), each with +crt-static for its triple" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
+} { (Test-Path (Join-Path $repo '.cargo/config.toml')) -and (Test-Path (Join-Path $repo '.github/workflows/release.yml')) }
 
 Step 'the updater''s platform table and the release workflow agree, in both directions' {
     $flowPath = Join-Path $repo 'crates/pl-update/src/flow.rs'

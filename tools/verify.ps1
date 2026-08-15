@@ -9,7 +9,7 @@
     against Python and Biopython.
 
     It is not the whole gate and must not be read as one. `tools/ci.ps1` is,
-    and at 76 steps it runs seventy-one more things this does not -- every
+    and at 77 steps it runs seventy-two more things this does not -- every
     other integration suite, all the oracles, the release script, the MSI, the
     benchmark, the TypeScript side. This script printing ALL CHECKS PASSED
     means those five things passed, no more. The header used to say "the same
