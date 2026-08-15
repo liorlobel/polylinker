@@ -27,6 +27,81 @@ which.
 
 Nothing yet.
 
+## [0.12.0] - 2026-08-15
+
+Four changes to the desktop app, all of them about letting a user see what the
+program already knows.
+
+### Added
+
+- **The map answers the mouse wheel and the keyboard.** It answered neither.
+  Scroll zooms about the cursor, drag pans, `0` resets, and the arrow keys step
+  feature to feature, with Home and End for the ends, Enter to select and Escape
+  to hand the focus back. On a 40 kb construct the labels were the only way to
+  read the picture, and a keyboard-only user could not reach it at all.
+
+  The map is now in the tab order, which reverses an earlier deliberate decision
+  and closes the gap that decision left. `Sense::CLICK` was chosen over
+  `Sense::click()` precisely because focus on a widget with no keys left the
+  sequence view refusing every keystroke with nothing on screen saying why — and
+  the comment recording that said the map would deserve a place in the tab order
+  the day it had keyboard behaviour worth reaching. It has one now.
+  `tabbing_does_not_land_on_the_map` asserted the opposite; it has been renamed
+  and inverted rather than edited in place, so the change reads in a diff as a
+  deletion and an addition instead of a flipped assertion nobody re-reads.
+
+  **Zoom and pan add no coordinate mapping.** Every coordinate in the drawing is
+  derived from the `Rect` it is handed, and hit-testing compares a screen-space
+  pointer against geometry from that same rect — so the transform is *a different
+  rect*, with the painter still clipped to the real pane. One mapping, which is
+  why the picture and the hit answers cannot disagree. Zoom anchors on the
+  cursor, its floor is fit-to-pane, its pan is bounded at half the drawing, and
+  the ratio comes from the zoom that was applied rather than the one requested —
+  each of those is a test, and each is a real defect if dropped.
+
+  Known limit: at high zoom, labels laid out against the enlarged rect clip at
+  the pane edge. Expected for zoom; a culling pass would finish it.
+
+- **An example plasmid, from the empty pane and from Help.** That pane was one
+  sentence and a drop target, which assumes the reader already owns a `.dna` —
+  and the user this program is for may have opened it precisely because they do
+  not yet have the tool that writes those files.
+
+  It is `prototype/demo-construct.gb`, the file the gel tests and the browser
+  prototype already use, compiled in with `include_str!` so it needs nothing
+  beside the executable. Its own DEFINITION line says what it is — *"Synthetic
+  demo construct. Not a real plasmid."* — and opening it repeats that in the
+  status line, where somebody will read it. A fabricated sequence offered as a
+  real vector is the one claim this project refuses everywhere else, and an
+  example is not an exemption.
+
+- **Provenance in the Features list.** The row that names a feature said nothing
+  about where the name came from; the `PLF:` id and the database version were two
+  clicks away in the editor. Rows now carry `PLF:1004 · db 2026.08.12`, and an
+  `unreviewed` chip when no curator has read the record. A claim the interface
+  hides is a claim the user has to take on trust, which is the opposite of this
+  project's pitch.
+
+  Read back out of the `note` qualifier rather than from a field, because the
+  note is what SURVIVES a save: a feature that went out to GenBank and came back
+  carries its provenance there and nowhere else. Two markers are required, not
+  one — a note a human typed beginning `PLF:` yields nothing without the literal
+  `polylinker feature db` beside it, so the failure direction is a missing chip
+  rather than a fabricated one.
+
+### Fixed
+
+- **The clone panel says what methylation does.** Four surfaces strike a blocked
+  enzyme through, chip the methylase and say so on hover. The clone panel was the
+  fifth and showed none of it — its enzyme grid gated purely on `cut_positions`
+  and drew a bare checkbox — so a user could plan a digest the enzyme will not
+  perform, in the one panel whose output is a construct.
+
+  The verdicts are keyed by enzyme NAME rather than by index: this panel iterates
+  `pl_enzymes::ENZYMES` while the digest is indexed by whatever the Enzymes tab
+  is showing, and an index would pair the wrong verdict with the wrong enzyme the
+  moment a filter is applied.
+
 ## [0.11.2] - 2026-08-15
 
 ### Fixed
@@ -3143,7 +3218,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.12.0
 [0.11.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.2
 [0.11.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.1
 [0.11.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.0
