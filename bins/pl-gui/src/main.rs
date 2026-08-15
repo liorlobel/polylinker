@@ -1058,6 +1058,77 @@ enum Reveal {
     Base(u64),
 }
 
+/// The example molecule, compiled in.
+///
+/// **THE SAME FILE THE TESTS AND THE BROWSER PROTOTYPE ALREADY USE**, not a
+/// second copy written for the menu. `prototype/demo-construct.gb` is generated
+/// deterministically by `tools/make-demo.py`, and its own DEFINITION line says
+/// what it is: *"Synthetic demo construct. Not a real plasmid."* That honesty is
+/// the reason it is the right file to hand a first-time user — a fabricated
+/// sequence presented as a real vector would be the exact claim this project
+/// refuses to make anywhere else.
+///
+/// `include_str!` rather than a path read at run time, because the pitch is one
+/// file you can run from a USB stick: an example that needs a second file beside
+/// the executable is an example most users never see.
+const EXAMPLE_GB: &str = include_str!("../../../prototype/demo-construct.gb");
+
+/// What the annotator recorded about where a feature's name came from.
+///
+/// Read back out of the `note` qualifier `pl_features::annotate::to_feature`
+/// writes, rather than kept in a parallel field. That is deliberate and it is
+/// the reason this is a parser and not a struct member: the note is what
+/// SURVIVES a save. A feature that went out to GenBank and came back carries its
+/// provenance in that string and nowhere else, so a panel that read a field
+/// would show provenance for the session that annotated and nothing afterwards —
+/// which is precisely the case where a reader most needs to know a name was
+/// guessed by a program.
+#[derive(Clone, PartialEq, Debug)]
+struct Provenance {
+    /// The database row, e.g. `PLF:1004`.
+    id: String,
+    /// The database version that produced the match, e.g. `2026.08.12`.
+    db: String,
+    /// The row has not been read by a curator.
+    proposed: bool,
+}
+
+/// Pull the provenance out of a feature's qualifiers, if a Polylinker
+/// annotation put one there.
+///
+/// Matched on the `PLF:` prefix and the literal `polylinker feature db`, both of
+/// which `to_feature` writes together. A note a HUMAN typed that happens to
+/// start with `PLF:` yields nothing without the second marker, which is the
+/// conservative direction: showing no provenance for a real annotation is a
+/// missing chip, and showing a fabricated one is a lie about where a name came
+/// from.
+fn provenance_of(f: &pl_core::Feature) -> Option<Provenance> {
+    const DB: &str = "polylinker feature db ";
+    for (k, v) in &f.qualifiers {
+        if k != "note" {
+            continue;
+        }
+        let Some(note) = v.as_deref() else { continue };
+        if !note.starts_with("PLF:") {
+            continue;
+        }
+        let Some(at) = note.find(DB) else { continue };
+        let id = note.split_whitespace().next()?.to_string();
+        // Up to the `;` that introduces the PROPOSED clause, or to the end.
+        let rest = &note[at + DB.len()..];
+        let db = rest.split(';').next().unwrap_or(rest).trim().to_string();
+        if id.len() <= 4 || db.is_empty() {
+            continue;
+        }
+        return Some(Provenance {
+            id,
+            db,
+            proposed: note.contains("PROPOSED"),
+        });
+    }
+    None
+}
+
 /// Does this feature survive the Features tab's filter box? `needle` must
 /// already be lowercased.
 ///
@@ -3505,6 +3576,29 @@ impl App {
         );
     }
 
+    /// Open the compiled-in example.
+    ///
+    /// Routed through `Document::from_bytes` exactly as a dropped file is, so it
+    /// gets the same load report, the same annotation pass and the same
+    /// unrepresentable-notes accounting. An example that took a private path
+    /// would be an example that cannot demonstrate the thing it exists to
+    /// demonstrate.
+    fn open_example(&mut self) {
+        match Document::from_bytes(EXAMPLE_GB.as_bytes(), "demo-construct.gb".to_string(), None) {
+            Ok(d) => {
+                let what = describe(d.molecule(), d.format);
+                self.take_over(d, what, None);
+                self.status =
+                    "example opened — a synthetic construct, not a real plasmid".to_string();
+            }
+            // Compiled in, so this cannot happen without a broken build; it is
+            // reported rather than unwrapped because a panic on a menu item is a
+            // worse answer than a banner, and `load_failed` is where every other
+            // unreadable payload goes.
+            Err(e) => self.load_failed(format!("the built-in example could not be read: {e}")),
+        }
+    }
+
     /// A write the user asked for did not land.
     ///
     /// Unconditional, where [`App::load_failed`] branches on whether a document
@@ -5934,6 +6028,9 @@ impl App {
     }
 
     fn top_bar(&mut self, ui: &mut Ui) {
+        // Taken out of the closure, because `self` is borrowed by it. The same
+        // shape every other deferred action in this function uses.
+        let mut example_from_menu = false;
         egui::Panel::top(egui::Id::new("toolbar")).show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -6391,6 +6488,22 @@ impl App {
                                 ui.close();
                             }
                         }
+                        // The second way to the example, and the only one left
+                        // once a document is open — the empty pane's button is
+                        // gone by then, and "show me what this does" is a
+                        // question a user asks again after their first file
+                        // rather than only before it.
+                        if ui
+                            .button("Open an example plasmid")
+                            .on_hover_text(
+                                "A synthetic 3,180 bp construct that ships inside Polylinker. \
+                                 Not a real plasmid.",
+                            )
+                            .clicked()
+                        {
+                            example_from_menu = true;
+                            ui.close();
+                        }
                         ui.separator();
                         ui.label(
                             RichText::new(help::version())
@@ -6612,6 +6725,9 @@ impl App {
             });
             ui.add_space(4.0);
         });
+        if example_from_menu {
+            self.open_example();
+        }
     }
 
     /// The history controls, and the operations on the molecule as a whole.
@@ -8285,6 +8401,42 @@ impl App {
                                         .monospace()
                                         .size(11.0),
                                 );
+                                // PROVENANCE, in the list rather than only in
+                                // the editor.
+                                //
+                                // This program's whole claim is that every
+                                // annotation can be audited, and until now the
+                                // row that names a feature said nothing about
+                                // where the name came from — the `PLF:` id and
+                                // the database version were two clicks away, in
+                                // the feature editor. A claim the interface
+                                // hides is a claim the user has to take on
+                                // trust, which is the opposite of the point.
+                                //
+                                // WORDS, NOT A COLOURED DOT, for the unreviewed
+                                // case, following the rule the rest of this
+                                // crate keeps: colour is never the only channel.
+                                if let Some(p) = provenance_of(f) {
+                                    if p.proposed {
+                                        ui.label(
+                                            RichText::new("unreviewed")
+                                                .color(pal(ui).warn)
+                                                .size(10.0),
+                                        )
+                                        .on_hover_text(
+                                            "This row was added by a program and no curator has                                              read it. It is not searched by default;                                              --include-proposed is how it got here.",
+                                        );
+                                    }
+                                    ui.label(
+                                        RichText::new(format!("{} · db {}", p.id, p.db))
+                                            .color(pal(ui).muted)
+                                            .monospace()
+                                            .size(10.0),
+                                    )
+                                    .on_hover_text(
+                                        "The database row this name came from, and the version of                                          the table that produced it. Written into the file's own                                          note, so it survives a save.",
+                                    );
+                                }
                                 // `start()`/`end()` are a min and a max over the
                                 // segments, so an origin-crossing feature in the
                                 // `join(2677..2686,1..7)` form every save through
@@ -13444,6 +13596,9 @@ impl App {
         let hot = self.hot_shown;
         let mut hovered_out = None;
         let mut clicked_out = None;
+        // A keyboard step on the map, which the Features list must follow. See
+        // `MapResponse::scroll_to` for why this is not just `clicked_out`.
+        let mut scroll_out: Option<usize> = None;
         let mut opened_out = None;
         let mut site_out: Option<map::SiteHit> = None;
         let mut cut_out: Option<u64> = None;
@@ -13636,7 +13791,17 @@ impl App {
                 return;
             }
             let Some(d) = self.bench.get() else {
-                ui.centered_and_justified(|ui| {
+                // A WAY IN FOR SOMEBODY WITH NO FILE.
+                //
+                // This pane was one sentence and a drop target, which assumes
+                // the reader already owns a `.dna` — and the user this program
+                // is for is a student on a locked-down PC who may have opened it
+                // precisely because they do not yet have the tool that writes
+                // those files. An application that does nothing at all until it
+                // is fed is one most people close.
+                let mut example = false;
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.34);
                     ui.label(
                         RichText::new(format!(
                             "Drop a .dna, GenBank or FASTA file here\n\n\
@@ -13645,7 +13810,19 @@ impl App {
                         .color(pal(ui).muted)
                         .size(14.0),
                     );
+                    ui.add_space(14.0);
+                    example = ui
+                        .button("Open an example plasmid")
+                        .on_hover_text(
+                            "A synthetic 3,180 bp construct that ships inside Polylinker. Not a \
+                             real plasmid — it is here to show the map, the digest and the \
+                             annotations working.",
+                        )
+                        .clicked();
                 });
+                if example {
+                    self.open_example();
+                }
                 return;
             };
 
@@ -13728,6 +13905,7 @@ impl App {
             );
             hovered_out = r.hovered;
             clicked_out = r.clicked;
+            scroll_out = r.scroll_to;
             opened_out = r.double_clicked;
             site_out = r.hovered_site;
             cut_out = r.clicked_site;
@@ -13741,6 +13919,19 @@ impl App {
         }
         if dismiss_save_error {
             self.save_error = None;
+        }
+        // THE ARROW KEYS MOVE BOTH VIEWS, and the reveal is how the second one
+        // hears about it. Set before `select_feature` runs below rather than
+        // after, because `Reveal` is consumed by whichever tab draws next and a
+        // request posted after that frame's read waits a whole frame.
+        //
+        // `or` rather than a plain assignment: a reveal already queued by
+        // something the user asked for more directly -- Ctrl+F, a click in the
+        // Enzymes tab -- outranks one this map inferred, and the existing
+        // arbitration for `reveal` is `take`-on-read, so an unconditional write
+        // here would drop it.
+        if let Some(i) = scroll_out {
+            self.reveal = self.reveal.or(Some(Reveal::Row(i)));
         }
         self.central_view = view_next;
         gel_next.apply(&mut self.gel);
@@ -14549,7 +14740,22 @@ impl App {
             .iter()
             .map(|(i, n, m, a)| (*i, n.clone(), m, *a))
             .collect();
-        let keep = clone::show(ctx, &mut panel, &mol, at, &refs, dark);
+        // The verdicts, keyed by enzyme NAME, from the same digest the Enzymes
+        // tab and the gel read — so the five surfaces cannot disagree about one
+        // enzyme. Empty while the digest is still running, which is correct: an
+        // absent verdict draws a plain checkbox rather than a false all-clear.
+        let methylation: std::collections::HashMap<&'static str, doc::Methylated> = self
+            .document()
+            .map(|d| {
+                d.digest
+                    .results()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, r)| d.digest.verdict(i).map(|v| (r.enzyme.name, v)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let keep = clone::show(ctx, &mut panel, &mol, at, &refs, dark, &methylation);
 
         if let Some(i) = panel.wanted.take() {
             if let Some(p) = panel.plan.as_ref().and_then(|pl| pl.prods.get(i)) {
@@ -16280,6 +16486,121 @@ fn poor_single_site_note(name: &str, sites: usize) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// A feature carrying the note `pl_features::annotate::to_feature` writes.
+    ///
+    /// Built by calling the real annotator rather than by typing the string out,
+    /// so a change to that format fails these tests instead of leaving them
+    /// asserting a shape nothing produces any more. That is the whole risk of
+    /// parsing another module's output, and a hand-written fixture would hide
+    /// exactly the regression this pair exists to catch.
+    #[cfg(test)]
+    fn annotated_feature(proposed: bool) -> pl_core::Feature {
+        let mut f = pl_core::Feature::new("AmpR", "CDS");
+        f.segments.push(pl_core::Segment::new(1, 100));
+        f.qualifiers.push((
+            "note".into(),
+            Some(format!(
+                "PLF:1004 nucleotide match: 99.4% identity, 100% coverage,                  polylinker feature db 2026.08.12{}",
+                if proposed {
+                    "; PROPOSED, not reviewed by a human"
+                } else {
+                    ""
+                }
+            )),
+        ));
+        f
+    }
+
+    /// PROVEN TO FAIL by pointing `EXAMPLE_GB` at an empty string: the parse
+    /// then fails, `open_example` routes to `load_failed`, and no document is
+    /// adopted — which is what a broken `include_str!` path would do silently
+    /// otherwise, since nothing else in the tree reads that file at run time.
+    #[test]
+    fn the_built_in_example_opens_and_says_what_it_is() {
+        let mut app = App::blank();
+        assert!(app.document().is_none(), "the fixture starts empty");
+        app.open_example();
+
+        let d = app
+            .document()
+            .expect("the compiled-in example must open; it is the only file a                      first-time user is offered");
+        assert!(
+            app.error.is_none() && app.notice.is_none(),
+            "the example must not arrive with a complaint: {:?} {:?}",
+            app.error,
+            app.notice
+        );
+
+        // It is a real, drawable molecule and not an empty shell — the whole
+        // point is to show the map working.
+        let mol = d.molecule();
+        assert!(
+            mol.annotation_span() > 1_000,
+            "the example is {} bp; too small to demonstrate anything",
+            mol.annotation_span()
+        );
+        assert!(
+            mol.topology.is_circular(),
+            "the example is a plasmid, and the ring is the picture worth showing first"
+        );
+        assert!(
+            !mol.features.is_empty(),
+            "an example with no features shows nothing the Features tab does"
+        );
+
+        // AND IT SAYS IT IS SYNTHETIC. A fabricated sequence offered as a real
+        // vector is the one claim this project refuses to make; the file's own
+        // DEFINITION line carries the disclaimer, and the status line repeats
+        // it where somebody will actually read it.
+        assert!(
+            EXAMPLE_GB.contains("Not a real plasmid"),
+            "the example file no longer says it is synthetic"
+        );
+        assert!(
+            app.status.contains("not a real plasmid"),
+            "opening it must say so on screen, not only in the file: {:?}",
+            app.status
+        );
+    }
+
+    /// PROVEN TO FAIL by returning `None` unconditionally, and by dropping the
+    /// `;` split — which leaves the db reading
+    /// `2026.08.12; PROPOSED, not reviewed by a human` in a chip sized for ten
+    /// characters.
+    #[test]
+    fn a_polylinker_annotation_carries_its_row_and_database_version() {
+        let p = provenance_of(&annotated_feature(false)).expect("an annotated feature has one");
+        assert_eq!(p.id, "PLF:1004");
+        assert_eq!(
+            p.db, "2026.08.12",
+            "the PROPOSED clause must not leak into the version"
+        );
+        assert!(!p.proposed);
+
+        let q = provenance_of(&annotated_feature(true)).expect("still parses when proposed");
+        assert_eq!(q.db, "2026.08.12");
+        assert!(q.proposed, "an unreviewed row must say so in the list");
+    }
+
+    /// PROVEN TO FAIL by matching on the `PLF:` prefix alone: a note a human
+    /// typed then produces a fabricated chip claiming a database row and a
+    /// version that no table ever emitted — which is a lie about where a name
+    /// came from, in the panel whose entire purpose is saying where names come
+    /// from.
+    #[test]
+    fn a_hand_written_note_does_not_fabricate_provenance() {
+        let mut f = pl_core::Feature::new("my insert", "misc_feature");
+        f.segments.push(pl_core::Segment::new(1, 10));
+        f.qualifiers
+            .push(("note".into(), Some("PLF:9999 I typed this myself".into())));
+        assert_eq!(provenance_of(&f), None);
+
+        // And a feature with no notes at all is simply quiet.
+        let mut bare = pl_core::Feature::new("bare", "CDS");
+        bare.segments.push(pl_core::Segment::new(1, 10));
+        assert_eq!(provenance_of(&bare), None);
+    }
+
     use super::*;
 
     /// The update check is off in a freshly installed copy.

@@ -358,6 +358,20 @@ pub fn show(
         Option<pl_core::oplog::OpId>,
     )],
     dark: bool,
+    // What methylation does to each enzyme in `pl_enzymes::ENZYMES`, by name.
+    //
+    // THE FIFTH SURFACE, and it was the only one silent about this. The Enzymes
+    // tab, the map's tooltip, the sequence view and the gel all strike a blocked
+    // enzyme through, chip it with the methylase and say so on hover; this panel
+    // drew a bare checkbox. It is also the panel whose output is a CONSTRUCT, so
+    // the cost of not saying it is a user planning a digest the enzyme will not
+    // perform and finding out at the bench.
+    //
+    // By name rather than by index into `results()`: this panel iterates
+    // `pl_enzymes::ENZYMES` and the digest is indexed by whatever the Enzymes
+    // tab is showing, so an index would silently pair the wrong verdict with the
+    // wrong enzyme the moment a filter is applied.
+    methylation: &std::collections::HashMap<&'static str, crate::doc::Methylated>,
 ) -> bool {
     let pal = crate::theme::Palette::of(dark);
     // The donor as it stands THIS frame. A tab that has been closed since the
@@ -463,7 +477,30 @@ pub fn show(
                         continue;
                     }
                     let mut on = p.enzymes.contains(e.name);
-                    if ui.checkbox(&mut on, e.name).changed() {
+                    // The same three channels the other four surfaces use:
+                    // strikethrough, a chip naming the methylase and the count,
+                    // and a sentence on hover. Colour is never the only one.
+                    let v = methylation.get(e.name);
+                    let dead = v.is_some_and(|m| m.all_blocked());
+                    let label = if dead {
+                        egui::RichText::new(e.name).strikethrough().color(pal.warn)
+                    } else {
+                        egui::RichText::new(e.name)
+                    };
+                    let mut resp = ui.checkbox(&mut on, label);
+                    if let Some(m) = v {
+                        resp = resp.on_hover_text(format!(
+                            "{}. This preparation blocks {}.{}",
+                            m.chip(),
+                            m.of_sites(m.blocked),
+                            if m.all_blocked() {
+                                " Selecting it will not cut this molecule."
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                    if resp.changed() {
                         if on {
                             p.enzymes.insert(e.name.to_string());
                         } else {
@@ -1877,6 +1914,72 @@ fn place(f: &Feature, slot: &Slot) -> Option<Vec<Segment>> {
 
 #[cfg(test)]
 mod tests {
+    /// The clone panel says the same thing about a blocked enzyme that the other
+    /// four surfaces say.
+    ///
+    /// **THE PANEL WHOSE OUTPUT IS A CONSTRUCT WAS THE ONE THAT SAID NOTHING.**
+    /// The Enzymes tab, the map tooltip, the sequence view and the gel all
+    /// strike a blocked enzyme through and name the methylase; `clone::show`
+    /// drew a bare checkbox gated only on `cut_positions`, so a user could plan
+    /// a digest the enzyme will not perform and find out at the bench.
+    ///
+    /// Asserted on `doc::Methylated`'s own accessors rather than on the widget,
+    /// because those are what the panel now renders and what the other four
+    /// surfaces already rendered — the point is that one type answers for all
+    /// five. A test that re-implemented the phrasing would let the five drift
+    /// while staying green.
+    ///
+    /// PROVEN TO FAIL by reverting `all_blocked()` to `blocked > 0`: an enzyme
+    /// with one dead site out of four is then struck through as though it does
+    /// not cut, which is the mirror defect `doc::Methylated` was introduced to
+    /// remove and which this panel would otherwise have reintroduced.
+    #[test]
+    fn a_blocked_enzyme_reads_the_same_here_as_in_the_enzymes_tab() {
+        use pl_enzymes::methylation::{Effect, Methylase, SiteEffect};
+
+        let site = |effect| SiteEffect {
+            methylase: Methylase::Dam,
+            effect,
+        };
+
+        // Every site dead: struck through, and the hover says so.
+        let all_dead = crate::doc::Methylated {
+            worst: site(Effect::Blocked),
+            total: 2,
+            blocked: 2,
+            affected: 2,
+        };
+        assert!(
+            all_dead.all_blocked(),
+            "two of two blocked is a dead enzyme"
+        );
+        assert_eq!(all_dead.live(), 0);
+        assert!(
+            all_dead.chip().contains("all 2 sites"),
+            "the chip must carry the count: {}",
+            all_dead.chip()
+        );
+
+        // One of four: methylation is worth saying, and the enzyme still cuts.
+        // This is the case the strikethrough must NOT claim.
+        let partial = crate::doc::Methylated {
+            worst: site(Effect::Blocked),
+            total: 4,
+            blocked: 1,
+            affected: 1,
+        };
+        assert!(
+            !partial.all_blocked(),
+            "an enzyme with three live sites still cuts and must not be drawn as dead"
+        );
+        assert_eq!(partial.live(), 3);
+        assert!(
+            partial.chip().contains("1 of 4 sites"),
+            "the chip must say how many of how many: {}",
+            partial.chip()
+        );
+    }
+
     use super::*;
 
     fn mol(seq: &str, circular: bool) -> Molecule {

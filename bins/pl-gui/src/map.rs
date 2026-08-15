@@ -396,6 +396,14 @@ pub struct MapResponse {
     /// answer `clicked` uses — no geometry, lane, arrowhead, leader or ruler code
     /// is touched.
     pub double_clicked: Option<usize>,
+    /// A feature the KEYBOARD moved to, which the side list should scroll into
+    /// view.
+    ///
+    /// Distinct from [`MapResponse::clicked`] even though the arrow keys set
+    /// both: a click needs no scroll, because the thing clicked is already under
+    /// the user's eye. A keyboard step does — the whole point is that the user
+    /// is not pointing at anything.
+    pub scroll_to: Option<usize>,
     /// Where the centre caption was drawn and what it says in full, when the
     /// ring was too narrow to hold the whole name.
     ///
@@ -525,6 +533,161 @@ fn cut_under(
 // what is picked, what is hovered, what is selected, and what a filter lit. The
 // two painters below already carry the same  for the same reason — a
 // struct here would only move the list one line up.
+/// How much of the pane the drawing is scaled and shifted by.
+///
+/// **THE WHOLE OF ZOOM AND PAN, AND IT TOUCHES NO GEOMETRY CODE.** Every
+/// coordinate in `draw_circular` and `draw_linear` is derived from the `Rect`
+/// they are handed, and hit-testing compares a screen-space pointer against
+/// geometry from that same rect. So scaling and offsetting the rect they receive
+/// zooms and pans the picture, and the hit answers follow without a second
+/// mapping that could disagree with the first — which is the failure this
+/// project has found four times in this file under other names.
+///
+/// The painter stays clipped to the REAL pane, so an enlarged drawing is cropped
+/// to the panel rather than painted over the side bar.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct View {
+    /// Multiplier on the pane's size. 1.0 is fit-to-pane.
+    zoom: f32,
+    /// Screen-space offset of the drawing's centre from the pane's centre.
+    pan: egui::Vec2,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        View {
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+        }
+    }
+}
+
+impl View {
+    /// Never below 1.0, so the map cannot be shrunk inside its own pane — a
+    /// drawing smaller than the space it was given reads as broken rather than
+    /// as zoomed out, and "fit" is the sensible floor. The ceiling is arbitrary
+    /// and generous; it exists so a trackpad cannot run the radius into the
+    /// float range where arcs stop being drawable.
+    const MIN: f32 = 1.0;
+    const MAX: f32 = 12.0;
+
+    /// The rect the drawing should be laid out in, given the pane it must fit.
+    fn rect_in(&self, pane: Rect) -> Rect {
+        Rect::from_center_size(pane.center() + self.pan, pane.size() * self.zoom)
+    }
+
+    /// Zoom about a fixed screen point, so the base under the cursor stays under
+    /// the cursor.
+    ///
+    /// The naive version scales about the pane's centre, which slides whatever
+    /// the user was looking at off the side exactly when they are trying to look
+    /// closer at it. Solving for the centre that keeps `at` fixed:
+    /// `at - c' = (at - c) * z'/z`.
+    fn zoomed_about(self, pane: Rect, at: Pos2, factor: f32) -> Self {
+        let next = (self.zoom * factor).clamp(Self::MIN, Self::MAX);
+        // The clamp may have refused the change; recompute the ratio from what
+        // was actually applied rather than from what was asked for, or the pan
+        // drifts on every scroll event once the zoom is pinned at a limit.
+        let applied = next / self.zoom;
+        let c = pane.center() + self.pan;
+        let c_next = at + (c - at) * applied;
+        View {
+            zoom: next,
+            pan: c_next - pane.center(),
+        }
+    }
+
+    /// Drag the drawing, and never so far that the pane is empty.
+    ///
+    /// The bound is half the drawing's size in each axis: at that offset the
+    /// centre of the drawing sits on the pane's edge and half of it is still
+    /// visible. Without it a flick of the wrist leaves a blank panel with no way
+    /// back except a key the user has not been told about.
+    fn panned(self, pane: Rect, by: egui::Vec2) -> Self {
+        let size = pane.size() * self.zoom;
+        let limit = size * 0.5;
+        View {
+            zoom: self.zoom,
+            pan: egui::vec2(
+                (self.pan.x + by.x).clamp(-limit.x, limit.x),
+                (self.pan.y + by.y).clamp(-limit.y, limit.y),
+            ),
+        }
+    }
+}
+
+/// Which feature the arrow keys move to, or `None` if no navigation key was
+/// pressed this frame.
+///
+/// **ORDERED BY POSITION, NOT BY INDEX.** `mol.features` is in file order, which
+/// for a `.dna` or a GenBank record is whatever the last program to write it
+/// chose. Stepping through that with an arrow key jumps around the ring at
+/// random, which is not what "next" means to somebody looking at a picture of a
+/// circle. Sorting by start puts the order on screen and the order under the
+/// key in agreement, and the tie-break on index keeps it total so two features
+/// starting at the same base cannot swap places between frames.
+///
+/// Wraps in both directions, because the molecule this is drawn on usually does.
+/// On a linear one it still wraps — the alternative is an arrow key that
+/// silently does nothing at the ends, and a user cannot tell that from a key
+/// that is not bound.
+fn map_keys(ui: &Ui, mol: &Molecule, selected: Option<usize>) -> Option<usize> {
+    let (fwd, back, home, end) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowDown),
+            i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowUp),
+            i.key_pressed(egui::Key::Home),
+            i.key_pressed(egui::Key::End),
+        )
+    });
+    map_step(mol, selected, fwd, back, home, end)
+}
+
+/// The decision [`map_keys`] makes, without the `Ui` it reads the keys from.
+///
+/// Split out so it can be tested at all. Driving the real thing needs an egui
+/// context, a laid-out frame and a synthesised key event per case, which is four
+/// times the code and tests egui's focus machinery rather than this file's
+/// ordering rule — and the ordering rule is the part that was worth getting
+/// right.
+fn map_step(
+    mol: &Molecule,
+    selected: Option<usize>,
+    fwd: bool,
+    back: bool,
+    home: bool,
+    end: bool,
+) -> Option<usize> {
+    if !(fwd || back || home || end) {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..mol.features.len()).collect();
+    order.sort_by_key(|&i| (mol.features[i].start(), i));
+
+    if home {
+        return order.first().copied();
+    }
+    if end {
+        return order.last().copied();
+    }
+    // No selection yet: the first key press picks an end rather than doing
+    // nothing, so the very first arrow is never a dead press.
+    let Some(cur) = selected.and_then(|s| order.iter().position(|&i| i == s)) else {
+        return if fwd {
+            order.first().copied()
+        } else {
+            order.last().copied()
+        };
+    };
+    let n = order.len();
+    let next = if fwd {
+        (cur + 1) % n
+    } else {
+        (cur + n - 1) % n
+    };
+    order.get(next).copied()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
@@ -620,22 +783,81 @@ pub fn show(
     // Not a click bug: egui has no focus-on-click for ordinary widgets, only
     // `TextEdit` and `DragValue` call `request_focus` when clicked, so clicking
     // the ring never took the keyboard. Tab was the only way in, which is what
-    // `tabbing_does_not_land_on_the_map` presses.
+    // `tabbing_lands_on_the_map_now_that_it_answers_the_keyboard` presses — and
+    // that test asserted the opposite until this change, under its old name.
     //
-    // A map you could drive from the keyboard would deserve a place in the tab
-    // order. That would be a real improvement and it is not this change; until
-    // then it does not take focus it cannot use.
-    let response = ui.allocate_rect(rect, Sense::CLICK);
+    // THE PARAGRAPH ABOVE ENDED "that would be a real improvement and it is not
+    // this change". This is that change, so the sense flips with it.
+    //
+    // `Sense::click()` is `CLICK | FOCUSABLE`, which is exactly what was refused
+    // before: the map is now in the tab order because it now has keys worth
+    // reaching. Arrow keys step feature to feature around the molecule, Home and
+    // End go to the first and last, Enter and Space select, Escape hands the
+    // focus back. `map_keys` below is the whole of it.
+    //
+    // The two conditions the old comment set are both met, and neither is
+    // incidental. First, the map has keyboard behaviour, so the focus it takes
+    // is spent rather than stranded. Second, `sequence_keys` standing down while
+    // this widget holds focus is now CORRECT rather than a side effect — the
+    // arrows belong to the map while the map has the keyboard, and giving them
+    // to the sequence grid instead is what would be wrong.
+    //
+    // A focus ring is drawn below, for the same reason the sequence grid draws
+    // one: a widget that silently swallows the arrow keys with nothing on screen
+    // to say so is worse than one that never took them.
+    // `click_and_drag`, so the drawing can be dragged. egui still distinguishes
+    // the two — `clicked()` is false for a press that moved — so selection by
+    // click is untouched by pan.
+    let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let mut out = MapResponse {
         hovered: None,
         clicked: None,
+        scroll_to: None,
         double_clicked: None,
         caption_full: None,
         hovered_site: None,
         clicked_site: None,
         pane: rect,
     };
+
+    // THE VIEW, read before anything is drawn and written back after.
+    //
+    // In egui's own memory rather than on `App`: it is a property of this
+    // widget's presentation and not of the document, it must survive frames
+    // without every caller having to thread it through, and a document that is
+    // closed and reopened should be back at fit rather than wherever its last
+    // reader left the wheel.
+    let view_id = ui.id().with("map-view");
+    let mut view: View = ui.data(|d| d.get_temp(view_id)).unwrap_or_default();
+
+    // The wheel zooms about the cursor; a drag pans. Both only when the pointer
+    // is actually over the map, or a scroll meant for the side list would move
+    // the picture instead.
+    if response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            if let Some(at) = response.hover_pos() {
+                // Exponential in the scroll delta, so a trackpad's many small
+                // events and a mouse wheel's few large ones travel the same
+                // distance per unit of physical gesture.
+                view = view.zoomed_about(rect, at, (scroll * 0.004).exp());
+            }
+        }
+    }
+    if response.dragged() {
+        view = view.panned(rect, response.drag_delta());
+    }
+    // `0` resets, and it is the only way back from a lost view. Bound while the
+    // map has focus so it cannot eat a keystroke meant for anything else.
+    if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Num0)) {
+        view = View::default();
+    }
+    ui.data_mut(|d| d.insert_temp(view_id, view));
+
+    // What the drawing is laid out in. The painter above is clipped to `rect`,
+    // so this is cropped to the pane rather than painted over its neighbours.
+    let draw_rect = view.rect_in(rect);
 
     let span = mol.annotation_span().max(1);
     let bands = bands(mol);
@@ -664,13 +886,13 @@ pub fn show(
         .collect();
     if mol.topology == Topology::Circular {
         draw_circular(
-            &painter, rect, span, &bands, caption, digest, mol, &pal, selected, hot, sel, caret,
-            set, lit, &primers, pointer, &mut out,
+            &painter, draw_rect, span, &bands, caption, digest, mol, &pal, selected, hot, sel,
+            caret, set, lit, &primers, pointer, &mut out,
         );
     } else {
         draw_linear(
-            &painter, rect, span, &bands, digest, mol, &pal, selected, hot, sel, caret, &primers,
-            pointer, &mut out,
+            &painter, draw_rect, span, &bands, digest, mol, &pal, selected, hot, sel, caret,
+            &primers, pointer, &mut out,
         );
     }
 
@@ -690,6 +912,34 @@ pub fn show(
     }
     if response.double_clicked() {
         out.double_clicked = out.hovered;
+    }
+    // THE KEYBOARD, and it reports through the same channel a click does.
+    //
+    // `out.clicked` rather than a channel of its own: every caller already
+    // routes that through `App::select_feature`, which is the single setter
+    // v0.9.0 exists to establish, so a second channel would be a second way to
+    // select a feature and the fourth place that rule has had to be re-learnt.
+    // A keyboard step IS a selection; it differs from a click only in how the
+    // index was chosen.
+    if response.has_focus() {
+        if let Some(next) = map_keys(ui, mol, selected) {
+            out.clicked = Some(next);
+            // Bring it into view in the side list too. The map and the Features
+            // tab are two views of one selection and the arrow keys must not
+            // move only the one under the cursor.
+            out.scroll_to = Some(next);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            response.surrender_focus();
+        }
+        // Painted last so it sits over the ring, and inset by a pixel so it
+        // reads as a frame around the map rather than a border on the panel.
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            2.0,
+            ui.visuals().selection.stroke,
+            egui::StrokeKind::Inside,
+        );
     }
     if let Some((at, full)) = &out.caption_full {
         ui.interact(*at, ui.id().with("caption"), Sense::hover())
@@ -3778,15 +4028,260 @@ mod tests {
         }
     }
 
-    /// PROVEN TO FAIL at f7ad1c6: the ring was allocated with `Sense::click()`,
-    /// which is `CLICK | FOCUSABLE`, so Tab landed on a widget with no keyboard
-    /// behaviour — and `sequence_keys` stands down for anything focused, so the
-    /// sequence view then refused every printable key with nothing saying why.
-    ///
-    /// Asserted on egui's own focus state rather than on the constant, so it
-    /// fails if the sense is widened again by any route.
+    fn pane() -> Rect {
+        Rect::from_min_size(Pos2::new(100.0, 50.0), egui::vec2(800.0, 600.0))
+    }
+
+    /// PROVEN TO FAIL by scaling about the pane's centre instead — the naive
+    /// version — after which the point under the cursor moves by 133 px on one
+    /// notch, which is the whole complaint about zoom that does not anchor.
     #[test]
-    fn tabbing_does_not_land_on_the_map() {
+    fn zooming_keeps_the_point_under_the_cursor_under_the_cursor() {
+        let pane = pane();
+        // Deliberately NOT the centre: anchoring is trivially satisfied there.
+        let at = Pos2::new(300.0, 200.0);
+        let v = View::default();
+
+        // Where that screen point sits in the drawing, before and after.
+        let before = v.rect_in(pane);
+        let u = (at - before.center()) / v.zoom;
+
+        let z = v.zoomed_about(pane, at, 2.0);
+        let after = z.rect_in(pane);
+        let u2 = (at - after.center()) / z.zoom;
+
+        assert!(
+            (u - u2).length() < 1e-3,
+            "the drawing moved under the cursor: {u:?} then {u2:?}"
+        );
+        assert!(
+            (z.zoom - 2.0).abs() < 1e-6,
+            "zoom did not apply: {}",
+            z.zoom
+        );
+    }
+
+    /// PROVEN TO FAIL by computing the pan ratio from the REQUESTED factor
+    /// rather than from the one the clamp allowed: at the ceiling every further
+    /// scroll then shifts the pan while the zoom stays put, so a user leaning on
+    /// the wheel at maximum zoom watches the plasmid slide out of the pane.
+    #[test]
+    fn scrolling_past_the_zoom_limit_does_not_drift_the_pan() {
+        let pane = pane();
+        let at = Pos2::new(250.0, 500.0);
+        let mut v = View::default();
+        for _ in 0..40 {
+            v = v.zoomed_about(pane, at, 2.0);
+        }
+        assert!((v.zoom - View::MAX).abs() < 1e-6, "clamp: {}", v.zoom);
+        let pinned = v;
+        for _ in 0..10 {
+            v = v.zoomed_about(pane, at, 2.0);
+        }
+        assert_eq!(
+            v, pinned,
+            "zooming past the ceiling moved the view while the zoom stood still"
+        );
+    }
+
+    /// PROVEN TO FAIL by removing the floor: one scroll down from fit then gives
+    /// a drawing smaller than the pane it was given, which reads as broken
+    /// rather than as zoomed out.
+    #[test]
+    fn the_map_never_shrinks_below_the_pane_it_was_given() {
+        let pane = pane();
+        let mut v = View::default();
+        for _ in 0..20 {
+            v = v.zoomed_about(pane, pane.center(), 0.5);
+        }
+        assert!((v.zoom - View::MIN).abs() < 1e-6, "zoom fell to {}", v.zoom);
+        let drawn = v.rect_in(pane);
+        assert!(
+            drawn.width() >= pane.width() - 1e-3 && drawn.height() >= pane.height() - 1e-3,
+            "the drawing is smaller than its pane: {drawn:?} in {pane:?}"
+        );
+    }
+
+    /// PROVEN TO FAIL by dropping the clamp in `panned`: forty hard drags then
+    /// leave the drawing's centre 12,000 px outside the pane, which is a blank
+    /// panel and no way back except a key nobody has been told about.
+    #[test]
+    fn panning_cannot_push_the_drawing_out_of_the_pane() {
+        let pane = pane();
+        let mut v = View::default().zoomed_about(pane, pane.center(), 3.0);
+        for _ in 0..40 {
+            v = v.panned(pane, egui::vec2(400.0, 400.0));
+        }
+        let drawn = v.rect_in(pane);
+        assert!(
+            drawn.intersects(pane),
+            "the drawing left the pane entirely: {drawn:?} against {pane:?}"
+        );
+        // And the bound is the stated one: half the drawing, each way.
+        let half = pane.size() * v.zoom * 0.5;
+        assert!(v.pan.x <= half.x + 1e-3 && v.pan.y <= half.y + 1e-3);
+    }
+
+    /// At fit, the drawing is exactly the pane — so every geometry test in this
+    /// file that passes a pane straight to `draw_circular` is still testing what
+    /// it thinks it is.
+    #[test]
+    fn the_default_view_is_the_pane_itself() {
+        let pane = pane();
+        assert_eq!(View::default().rect_in(pane), pane);
+    }
+
+    /// A molecule whose features are deliberately OUT of position order in the
+    /// file, so a test that would pass on file order cannot pass by accident.
+    ///
+    /// Starts 900, 100, 500 at indices 0, 1, 2. Position order is 1, 2, 0 — not
+    /// a rotation of the file order, so every assertion below tells the two
+    /// apart, and the tests name features rather than indices for the same
+    /// reason.
+    fn scrambled() -> Molecule {
+        let mut mol = Molecule {
+            seq: vec![b'A'; 2_686],
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        for (name, start) in [("third", 900u64), ("first", 100), ("second", 500)] {
+            let mut f = pl_core::Feature::new(name, "CDS");
+            f.segments.push(pl_core::Segment::new(start, start + 60));
+            mol.features.push(f);
+        }
+        mol
+    }
+
+    fn stepped(mol: &Molecule, at: Option<usize>, fwd: bool, back: bool) -> String {
+        map_step(mol, at, fwd, back, false, false)
+            .map(|i| mol.features[i].name.clone())
+            .unwrap_or_default()
+    }
+
+    /// PROVEN TO FAIL by sorting the order by index rather than by start: the
+    /// first step from `None` then returns index 0, the feature at base 900, and
+    /// the first assertion fires naming "third" where "first" was wanted.
+    #[test]
+    fn the_arrow_keys_step_in_position_order_not_file_order() {
+        let mol = scrambled();
+        let first = map_step(&mol, None, true, false, false, false);
+        assert_eq!(
+            stepped(&mol, None, true, false),
+            "first",
+            "forward from nothing must open at the lowest start, not at file index 0"
+        );
+        let second = map_step(&mol, first, true, false, false, false);
+        assert_eq!(stepped(&mol, first, true, false), "second");
+        assert_eq!(stepped(&mol, second, true, false), "third");
+        assert_eq!(stepped(&mol, second, false, true), "first");
+    }
+
+    /// PROVEN TO FAIL by replacing the modular step with a saturating one: an
+    /// arrow at either end then returns the end it started from, which a user
+    /// cannot tell from a key that is not bound at all.
+    #[test]
+    fn the_arrow_keys_wrap_in_both_directions() {
+        let mol = scrambled();
+        let last = map_step(&mol, None, false, true, false, false);
+        assert_eq!(
+            stepped(&mol, None, false, true),
+            "third",
+            "back from nothing must open at the highest start"
+        );
+        assert_eq!(
+            stepped(&mol, last, true, false),
+            "first",
+            "forward past the last feature must come round to the first"
+        );
+        let first = map_step(&mol, None, true, false, false, false);
+        assert_eq!(
+            stepped(&mol, first, false, true),
+            "third",
+            "back past the first feature must come round to the last"
+        );
+    }
+
+    /// PROVEN TO FAIL by answering `order.first()` for both keys: End then gives
+    /// the first feature and the two keys collapse into one.
+    #[test]
+    fn home_and_end_go_to_the_ends_by_position() {
+        let mol = scrambled();
+        let name = |k: (bool, bool)| {
+            map_step(&mol, Some(0), false, false, k.0, k.1)
+                .map(|i| mol.features[i].name.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(name((true, false)), "first");
+        assert_eq!(name((false, true)), "third");
+    }
+
+    /// PROVEN TO FAIL by dropping the "no key pressed" guard: every frame then
+    /// answers with a feature, so the map re-selects on every paint and the
+    /// selection can never rest where the user put it.
+    #[test]
+    fn a_frame_with_no_navigation_key_moves_nothing() {
+        let mol = scrambled();
+        assert_eq!(map_step(&mol, Some(2), false, false, false, false), None);
+        assert_eq!(map_step(&mol, None, false, false, false, false), None);
+    }
+
+    /// An unannotated molecule answers every navigation key with `None`.
+    ///
+    /// **THIS TEST HAS NO MUTATION PROOF, AND THAT IS THE FINDING.** It was
+    /// written to prove an `if mol.features.is_empty() { return None }` guard,
+    /// on the reasoning that `(cur + n - 1) % n` with `n == 0` divides by zero.
+    /// Removing the guard left this green, and the reasoning was wrong: `cur`
+    /// comes from `position()` over the order, so it is `Some` only when the
+    /// order is non-empty, and the modulo is unreachable at `n == 0`. Every
+    /// other path returns `order.first()` or `order.last()`, which are `None` on
+    /// an empty vector anyway.
+    ///
+    /// The guard was deleted rather than kept as a check that cannot fail. The
+    /// test stays, because the BEHAVIOUR is worth pinning even though nothing
+    /// currently enforces it separately — a later refactor that indexes the
+    /// order directly would reintroduce the panic, and this is what would catch
+    /// it. It is a regression test, not a proof, and saying which is the point.
+    #[test]
+    fn a_molecule_with_no_features_never_moves_and_never_panics() {
+        let mol = Molecule {
+            seq: vec![b'A'; 100],
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        for k in [
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
+        ] {
+            assert_eq!(map_step(&mol, None, k.0, k.1, k.2, k.3), None);
+            assert_eq!(map_step(&mol, Some(0), k.0, k.1, k.2, k.3), None);
+        }
+    }
+
+    /// Tab reaches the map, and the map has something to do with it.
+    ///
+    /// **THIS TEST USED TO ASSERT THE OPPOSITE, AND THE INVERSION IS THE
+    /// CHANGE.** It was `tabbing_does_not_land_on_the_map`, and it was right:
+    /// at f7ad1c6 the ring was allocated with `Sense::click()` — `CLICK |
+    /// FOCUSABLE` — so Tab landed on a widget with no keyboard behaviour, and
+    /// `sequence_keys` stands down for anything focused, so the sequence view
+    /// then refused every printable key with nothing on screen saying why. The
+    /// sense was narrowed to `Sense::CLICK` and this test pinned it there.
+    ///
+    /// The condition that made it right is gone. The map now answers the arrow
+    /// keys, Home, End, Enter and Escape, so the focus it takes is spent rather
+    /// than stranded — and withholding focus from a widget that HAS keyboard
+    /// behaviour is the accessibility gap the WCAG 2.2 AA pass left open, since
+    /// `docs/PLAN.md` scoped *full keyboard operation* and the map was the one
+    /// surface with none.
+    ///
+    /// Renamed rather than edited in place, so the inversion reads in a diff as
+    /// a deletion and an addition rather than as a flipped assertion nobody
+    /// re-reads. Still asserted on egui's own focus state rather than on the
+    /// constant, so it fails if the sense is narrowed again by any route.
+    #[test]
+    fn tabbing_lands_on_the_map_now_that_it_answers_the_keyboard() {
         let mol = forward(&[(400, 1_400)]);
         let ctx = crate::test_ctx();
         let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 700.0));
@@ -3831,9 +4326,11 @@ mod tests {
             ..base.clone()
         });
         assert!(
-            ctx.memory(|m| m.focused()).is_none(),
-            "Tab landed on the map, which has no keyboard behaviour of its own \
-             and whose focus silently stops the sequence view accepting keys"
+            ctx.memory(|m| m.focused()).is_some(),
+            "Tab did not reach the map. It answers the arrow keys, Home, End, \
+             Enter and Escape, and a widget with keyboard behaviour that cannot \
+             be reached from the keyboard is the accessibility gap this change \
+             exists to close"
         );
     }
 
