@@ -121,16 +121,19 @@ name: CI
 #   * `tools/ci.ps1` as a list -- 77 steps, its ledger, and the whole skip
 #     discipline. There is no ARM64 ledger, so `reconcile` says nothing about
 #     this platform.
-#   * 'no C runtime redistributable is needed', the `dumpbin /dependents` step.
-#     THIS IS THE MOST IMPORTANT ABSENCE AND IT IS AN OPEN HOLE, not a shrug:
-#     `.cargo/config.toml` scopes `-C target-feature=+crt-static` to
-#     `[target.x86_64-pc-windows-msvc]` and declares nothing for
-#     `aarch64-pc-windows-msvc`, so ARM64 binaries link the DYNAMIC C runtime
-#     and import VCRUNTIME140.dll -- the exact dependency that config file
-#     exists to remove, on behalf of the persona in docs/PLAN.md:120 who cannot
-#     install a redistributable. Until that block is added, the ARM64 download
-#     does not carry the property the x64 download is checked for, and nothing
-#     in CI reports it.
+#   * THE GUI IS NEVER LAUNCHED. Not on this leg, not on any leg, on any
+#     platform. Everything below builds `polylinker.exe`, packages it, installs
+#     it and uninstalls it, and nothing anywhere starts it and watches it come
+#     up. That gap shipped a release: v0.11.1's ARM64 build cannot open a window
+#     on a Windows-on-ARM machine, because those devices carry no OpenGL driver
+#     and `egui_glow` requires OpenGL 2.0+ -- a first-frame failure that every
+#     build, test, package and install step here passes straight over. It is not
+#     obvious this is fixable on a hosted runner: a GPU-less VM answers a GL
+#     request with the OpenGL 1.1 software renderer, so a naive "launch it and
+#     see" step would fail on windows-latest too and for the same reason, which
+#     is presumably why no such step was ever written. What IS testable, and now
+#     is, is that the failure SAYS something -- see
+#     `startup_failure_message` in bins/pl-gui/src/main.rs and its two tests.
 #   * the PE assertions: the icon and version resource in the built binaries.
 #   * the 8.3 short-name alias case.
 #   * the differential oracles -- SEGUID, zlib, Pillow, fontTools, resvg, the

@@ -171,6 +171,17 @@ mod tests {
     /// are asserted here: the second assertion shows the lexical comparison
     /// really does disagree, so this test is not merely restating what `Ord`
     /// does but pinning the difference between the two.
+    ///
+    /// `!(a > b)` is what the two negated assertions below mean, and clippy
+    /// 1.94's `nonminimal_bool` wants `a <= b` instead. The two are equivalent
+    /// for a total order and are not equivalent as statements of intent: what is
+    /// under test is that `>` does NOT hold — the operator `fetch_and_verify`
+    /// calls, and the one a lexical comparison gets wrong — rather than that
+    /// some other operator does. Rewriting them would leave `>` unasserted at
+    /// exactly the boundary each message names, so the lint is allowed instead.
+    /// (Unrelated to the change this arrived in; it began firing when stable
+    /// moved to 1.94.)
+    #[allow(clippy::nonminimal_bool)]
     #[test]
     fn numeric_ordering_is_not_lexical() {
         let two = Version::parse("0.1.2").unwrap();

@@ -958,7 +958,135 @@ fn window_icon() -> egui::IconData {
 /// The only cheaper fix is a re-layout of the toolbar, which this port is not.
 const MIN_WINDOW: [f32; 2] = [990.0, 560.0];
 
-fn main() -> eframe::Result {
+/// What a user is told when the program cannot start at all.
+///
+/// Pure, and separate from the reporting below, because the wording is the part
+/// that has to be right and the part a test can hold: the Win32 call cannot run
+/// in CI, and `run_native`'s failure cannot be provoked on a machine that has a
+/// working graphics stack.
+///
+/// The OpenGL paragraph is conditional on the error naming it. A generic
+/// "check your graphics driver" under an error about a missing font file would
+/// be the same defect this function exists to remove, one level down: text that
+/// looks like an answer and is not.
+///
+/// The version this reports is not this program's opinion. `egui_glow`'s painter
+/// refuses at `if gl.version().major < 2` (egui_glow-0.35.0/src/painter.rs:161),
+/// and upstream's own comment on the next line names the exact case seen here --
+/// "this checks on desktop that we are not using opengl 1.1 microsoft sw
+/// rendering context". The error is therefore positive evidence that the process
+/// was handed Windows' software renderer and never reached a driver at all,
+/// rather than evidence of a driver that is merely old. That is why the text
+/// below leads with "no OpenGL driver" and not "update your graphics driver".
+fn startup_failure_message(err: &str) -> String {
+    let mut msg = format!("Polylinker could not start.\n\n{err}\n");
+    let graphics = {
+        let e = err.to_ascii_lowercase();
+        e.contains("opengl") || e.contains("glow") || e.contains("glutin")
+    };
+    if graphics {
+        msg.push_str(
+            "\nThis build draws with OpenGL and needs OpenGL 2.0 or newer. A machine \
+             that reports less than that usually has no OpenGL driver at all rather \
+             than a broken one -- Windows then answers with its own software renderer, \
+             which is OpenGL 1.1.\n\
+             \n\
+             What fixes it, depending on where you are:\n\
+             \n\
+             * Windows on ARM: install the \"OpenCL and OpenGL Compatibility Pack\" \
+             from the Microsoft Store. It translates OpenGL to Direct3D 12, so it \
+             needs a working Direct3D 12 device and cannot help a machine that has \
+             none.\n\
+             * A virtual machine: turn on 3D acceleration in its settings if it has \
+             the option. A virtual graphics adapter that stops at Direct3D 11 can run \
+             neither OpenGL nor the compatibility pack, and nothing installed inside \
+             the guest will change that.\n\
+             * A physical machine: install or update the graphics driver.\n\
+             \n\
+             `pl`, the command line installed beside this program, needs no graphics \
+             driver at all. It converts, digests, checksums, designs primers and \
+             writes maps and gels to SVG, PDF and PNG without opening a window.\n",
+        );
+    }
+    msg
+}
+
+/// Say why the program is not starting, somewhere the user will actually see it.
+///
+/// **THIS EXISTS BECAUSE THE PROGRAM USED TO FAIL IN COMPLETE SILENCE.** `main`
+/// was `fn main() -> eframe::Result`, so a startup failure was reported by
+/// Rust's default `Termination` handling, which prints the `Err` to stderr --
+/// and the attribute at the top of this file makes a release build
+/// `windows_subsystem = "windows"`, which has no console. Pressing the icon did
+/// nothing, no dialog appeared, nothing was written anywhere on the machine, and
+/// the exit code was the only evidence that it had run at all.
+///
+/// Measured on a Windows-on-ARM virtual machine, 2026-08-16: the app had
+/// diagnosed itself correctly -- `egui_glow requires opengl 2.0+.` -- and had
+/// nowhere to put the sentence. Recovering it took `Start-Process
+/// -RedirectStandardError` and several rounds of guessing, and no user is going
+/// to do that. A program that knows why it is failing and does not say so is
+/// worse than one that does not know.
+///
+/// stderr first, and unconditionally: a launch from a terminal inherits that
+/// console, and `polylinker.exe 2> log.txt` is how anyone scripting this will
+/// collect it. The dialog is only for the case with nowhere else to write.
+fn report_startup_failure(err: &str) {
+    let msg = startup_failure_message(err);
+    eprintln!("{msg}");
+    #[cfg(windows)]
+    windows_message_box(&msg);
+}
+
+/// The last-resort dialog, for a process with no console attached.
+///
+/// The two functions are declared here rather than taken from a crate.
+/// `windows-sys` is in this workspace's dependency graph only because winit put
+/// it there; two extern declarations are a smaller thing for this binary to own
+/// than a direct dependency on a crate it otherwise never calls, and this is the
+/// only Win32 it needs.
+#[cfg(windows)]
+fn windows_message_box(msg: &str) {
+    use std::ffi::c_void;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(
+            hwnd: *mut c_void,
+            text: *const u16,
+            caption: *const u16,
+            u_type: u32,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleWindow() -> *mut c_void;
+    }
+
+    // A console means the text above has already been delivered, and a second
+    // copy in a modal box would be noise -- and worse, it would block a script.
+    // The dialog is for the double-click, which is the case that had nothing.
+    if !unsafe { GetConsoleWindow() }.is_null() {
+        return;
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    // MB_OK (0x0000_0000) | MB_ICONERROR (0x0000_0010), folded rather than
+    // written as an `|` of two literals: clippy's `identity_op` denies the
+    // `0x0 |` half, and the Windows leg builds with `-D warnings`.
+    const FLAGS: u32 = 0x0000_0010;
+    let text = wide(msg);
+    let caption = wide("Polylinker");
+    // SAFETY: both pointers are to NUL-terminated UTF-16 buffers that outlive
+    // the call, and a null owner window is documented as "no owner".
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), FLAGS);
+    }
+}
+
+fn main() -> std::process::ExitCode {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 840.0])
@@ -967,11 +1095,17 @@ fn main() -> eframe::Result {
             .with_title("Polylinker"),
         ..Default::default()
     };
-    eframe::run_native(
+    match eframe::run_native(
         "Polylinker",
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
-    )
+    ) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            report_startup_failure(&e.to_string());
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 /// A vector format a figure can leave in.
@@ -16486,6 +16620,61 @@ fn poor_single_site_note(name: &str, sites: usize) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// The startup failure that used to be silent names itself and the remedy.
+    ///
+    /// PROVEN TO FAIL before `report_startup_failure` existed, on a
+    /// Windows-on-ARM virtual machine: `main` returned `eframe::Result`, the
+    /// release build is `windows_subsystem = "windows"` and so has no console,
+    /// and the whole of the program's account of itself -- `egui_glow requires
+    /// opengl 2.0+.` -- went to a stderr that does not exist. This asserts the
+    /// three things a stuck user needs out of that sentence: that the error
+    /// itself survives into the message, that the version requirement is stated
+    /// rather than implied, and that the one thing which still works on a
+    /// machine with no OpenGL is named.
+    #[test]
+    fn a_graphics_startup_failure_is_explained_and_names_a_way_forward() {
+        let real = r#"OpenGL(PainterError("egui_glow requires opengl 2.0+. "))"#;
+        let msg = super::startup_failure_message(real);
+
+        assert!(msg.contains(real), "the error itself must survive: {msg}");
+        assert!(msg.contains("could not start"), "{msg}");
+        assert!(
+            msg.contains("OpenGL 2.0"),
+            "the requirement must be stated: {msg}"
+        );
+        assert!(
+            msg.contains("Compatibility Pack"),
+            "the Windows-on-ARM remedy must be named: {msg}"
+        );
+        assert!(
+            msg.contains("Direct3D 12"),
+            "the pack's own precondition must be stated, or it is advice that \
+             wastes a round trip on a machine that cannot use it: {msg}"
+        );
+        assert!(
+            msg.contains("`pl`"),
+            "the GPU-free way to keep working must be named: {msg}"
+        );
+    }
+
+    /// ...and a failure that is NOT about graphics does not get graphics advice.
+    ///
+    /// The counterpart to the test above, and the one that keeps it honest: a
+    /// message that always recites the OpenGL paragraph would be text that looks
+    /// like an answer and is not, which is the defect being fixed rather than a
+    /// smaller version of it.
+    #[test]
+    fn a_startup_failure_that_is_not_about_graphics_gets_no_graphics_advice() {
+        let msg = super::startup_failure_message("Io(Os { code: 2, kind: NotFound })");
+        assert!(msg.contains("could not start"), "{msg}");
+        assert!(msg.contains("code: 2"), "the error must survive: {msg}");
+        assert!(
+            !msg.contains("OpenGL"),
+            "no unfounded graphics advice: {msg}"
+        );
+        assert!(!msg.contains("Compatibility Pack"), "{msg}");
+    }
+
     /// A feature carrying the note `pl_features::annotate::to_feature` writes.
     ///
     /// Built by calling the real annotator rather than by typing the string out,
