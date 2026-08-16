@@ -4569,6 +4569,19 @@ Step 'the release notes still say what an unsigned build costs' {
         'xattr -d com.apple.quarantine',   # the honest macOS remedy, spelled out
         'SmartScreen',                      # named, so the user recognises the dialog
         'glibc',                            # the Linux artifact's real limit
+        # The editor's real limit, and the exact counterpart of the glibc line
+        # above: a floor that is invisible on ordinary hardware and stops the
+        # program dead on a machine that lacks it. It went undocumented through
+        # four releases, and a Windows-on-ARM user found it by pressing an icon
+        # that did nothing. Required here rather than trusted to survive the
+        # next rewrite of the notes.
+        'OpenGL 2.0',
+        # The half that keeps that caveat honest. Naming the compatibility pack
+        # without naming what the pack itself needs sends a Windows-on-ARM
+        # reader to the Store to install something that cannot help them when
+        # their adapter has no Direct3D 12 -- which is the round trip this
+        # project's own bug report actually wasted.
+        'Direct3D 12',
         # The product promise, and it is worth saying what changed on
         # 2026-08-06 and what did not. `pl update` and an off-by-default switch
         # in the app now exist, so the old required phrase -- a bare "no

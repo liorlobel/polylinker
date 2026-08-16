@@ -1060,13 +1060,37 @@ fn windows_message_box(msg: &str) {
     }
     #[link(name = "kernel32")]
     extern "system" {
-        fn GetConsoleWindow() -> *mut c_void;
+        fn GetStdHandle(n_std_handle: u32) -> *mut c_void;
+        fn GetFileType(h_file: *mut c_void) -> u32;
     }
 
-    // A console means the text above has already been delivered, and a second
-    // copy in a modal box would be noise -- and worse, it would block a script.
-    // The dialog is for the double-click, which is the case that had nothing.
-    if !unsafe { GetConsoleWindow() }.is_null() {
+    // THE PREDICATE IS "DID THE TEXT ABOVE LAND ANYWHERE", AND IT IS NOT
+    // `GetConsoleWindow`, WHICH IS WHAT THIS FIRST USED.
+    //
+    // A modal box is the right answer for a double-click and the wrong answer
+    // for everything else: it blocks until someone presses a button, and a
+    // caller who redirected stderr -- `polylinker.exe 2> log.txt`, a
+    // `Start-Process -RedirectStandardError`, a CI step -- has nobody in front
+    // of the screen to press it. That is a hang, not a nuisance.
+    //
+    // `GetConsoleWindow` cannot tell those apart. It reports whether a console
+    // is attached, which says nothing about a redirect to a file or a pipe, and
+    // in a `windows_subsystem = "windows"` image it is NULL for the terminal
+    // launch too. Asking after the stderr handle answers the question directly:
+    // a file, a pipe or a console all mean the message has somewhere to go, and
+    // only an absent or unknowable handle -- the double-click -- means it does
+    // not.
+    //
+    // Note this cannot be done by checking whether the `eprintln!` above
+    // succeeded: `std`'s Windows stderr maps the invalid-handle error to `Ok`
+    // (`handle_ebadf` in library/std/src/io/stdio.rs), so the write reports
+    // success precisely in the case where nothing was written.
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const FILE_TYPE_UNKNOWN: u32 = 0x0000;
+    let h = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    let stderr_lands_somewhere =
+        !h.is_null() && h as isize != -1 && unsafe { GetFileType(h) } != FILE_TYPE_UNKNOWN;
+    if stderr_lands_somewhere {
         return;
     }
 
