@@ -72,12 +72,34 @@ pl-update.workspace = true
 # logic. The correctness crates above still have none, and everything this
 # binary decides about a molecule it asks them.
 #
-# glow (OpenGL): a smaller tree, and it asks least of a lab machine's drivers.
+# glow (OpenGL): a smaller tree, and on an x64 desktop or laptop it asks least
+# of a lab machine's drivers.
+#
+# THAT QUALIFIER WAS NOT THERE UNTIL 2026-08-16, AND THE SENTENCE WAS FALSE
+# WITHOUT IT. Windows-on-ARM devices ship no OpenGL driver at all: the GPU
+# exposes Direct3D and Vulkan, Windows answers a GL request with its own
+# software renderer at OpenGL 1.1, and `egui_glow requires opengl 2.0+.` is
+# where the program stops. OpenGL is the one graphics API that platform does
+# not have, so there this backend asks the MOST of the drivers, not the least.
+# Measured in a Windows-on-ARM guest reporting feature level 11_1 on WDDM 1.2,
+# where Microsoft's OpenGL-on-Direct3D-12 compatibility pack cannot help either:
+# it needs a Direct3D 12 device to translate onto, and that adapter has none.
 #
 # wgpu was tried and measured against this, on the suspicion that the Windows
 # HiDPI sizing defect noted in main.rs was a GL surface problem. It is not —
 # both backends report byte-identical geometry — and wgpu costs 6 MB of binary
 # plus a Vulkan/DX12 driver requirement. Ruled out on evidence, not taste.
+#
+# THAT RULING IS ABOUT HiDPI AND IS NOT A RULING ABOUT ARM64, which it predates.
+# It weighed 6 MB against a defect wgpu did not fix; it never weighed 6 MB
+# against a platform that cannot open a window at all, and on Windows on ARM the
+# "Vulkan/DX12 driver requirement" it counts as a cost is precisely the
+# requirement that platform can meet. Whether to add wgpu as a fallback is open
+# and is not decided here — what this file must stop doing is implying it was
+# already settled against.
+#
+# Until it is settled the failure is at least no longer silent: see
+# `report_startup_failure` in src/main.rs.
 eframe = { version = "0.35", default-features = false, features = [
     "accesskit",      # screen-reader support; not optional in a tool people rely on
     "default_fonts",

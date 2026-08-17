@@ -8,8 +8,8 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 172,529 lines of Rust, 98,328 of it dependency-free (141 `.rs`
-> files under `crates/` and `bins/`), with 2,036 `#[test]` functions and a
+> crates and 172,753 lines of Rust, 98,339 of it dependency-free (141 `.rs`
+> files under `crates/` and `bins/`), with 2,038 `#[test]` functions and a
 > 77-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-10, and recounted on every test run since:
@@ -379,6 +379,34 @@ because it is lossless for everything Polylinker models and SnapGene reads it.
 Where `.dna` write support is imperfect it will say so, in the save dialog, per
 block. A writer that silently drops what it does not understand is the worst
 possible outcome and will never ship here.
+
+### What the editor needs to run, and what needs nothing
+
+`polylinker`, the window, draws with OpenGL and needs **OpenGL 2.0 or newer**.
+Any machine with a graphics driver has far more than that, so on ordinary
+hardware there is nothing to think about. Two cases genuinely lack it:
+
+- **Windows on ARM** ships no OpenGL driver at all — the GPU offers Direct3D and
+  Vulkan, so Windows answers with its own software renderer, which is OpenGL
+  1.1. Microsoft's *OpenCL and OpenGL Compatibility Pack* fixes it on real
+  hardware, by translating OpenGL onto Direct3D 12.
+- **A virtual machine whose adapter has no Direct3D 12** cannot use that pack
+  either, since Direct3D 12 is what it translates onto. Measured in a
+  Windows-on-ARM guest reporting feature level 11_1 on WDDM 1.2: nothing
+  installed inside the guest gives it OpenGL. Turn on 3D acceleration in the VM
+  if it offers it, or run Polylinker on the host.
+
+When the editor cannot start it now says so — a dialog if it was double-clicked,
+and on stderr if it was run from a terminal. It exited **silently** until this
+was fixed, because a Windows GUI build has no console for the message to reach:
+the program had diagnosed itself correctly and had nowhere to put the sentence.
+That is `report_startup_failure` in [`bins/pl-gui/src/main.rs`](bins/pl-gui/src/main.rs),
+and it is the reason this section exists.
+
+**`pl` needs no graphics driver of any kind.** Everything except the window
+works without one — convert, digest, checksum, design, orfs, find, and the SVG,
+PDF and PNG figures — which is the answer on a machine that cannot open the
+editor.
 
 ## Citing this
 

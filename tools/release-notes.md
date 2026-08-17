@@ -164,6 +164,34 @@ it needs Rust 1.92 and nothing exotic, and `pl` and `pl-mcp` need no system
 libraries at all. `README-LINUX.txt` inside the archive lists the shared
 libraries the editor opens at run time.
 
+## The editor needs OpenGL 2.0; the command line needs nothing
+
+`polylinker`, the window, draws with OpenGL and will not start without **OpenGL
+2.0 or newer**. Any machine with a graphics driver has far more than that, so on
+ordinary hardware — every platform in the table above — there is nothing here to
+do. Two cases genuinely lack it, and both report themselves rather than failing
+silently:
+
+- **Windows on ARM** ships no OpenGL driver at all. The GPU offers Direct3D and
+  Vulkan, so Windows answers with its own software renderer, which is OpenGL
+  1.1. Install the **"OpenCL and OpenGL Compatibility Pack"** from the Microsoft
+  Store: it translates OpenGL onto Direct3D 12.
+- **A virtual machine whose adapter has no Direct3D 12** cannot use the
+  compatibility pack either, because Direct3D 12 is what it translates onto.
+  Turn on 3D acceleration in the VM's settings if it offers it, or run
+  Polylinker on the host rather than in the guest. Measured in a Windows-on-ARM
+  guest whose virtual adapter reports feature level 11_1 on WDDM 1.2: nothing
+  installed inside the guest can give it OpenGL.
+
+When the editor cannot start it now says so — a dialog if you double-clicked it,
+and on stderr if you ran it from a terminal (`polylinker.exe 2> gui-error.txt`).
+Before this release it exited silently, because a Windows GUI build has no
+console for the message to reach.
+
+**`pl` needs no graphics driver of any kind**, so a machine that cannot run the
+editor can still convert, digest, checksum, design primers, find ORFs, and write
+maps, gels and traces to SVG, PDF and PNG.
+
 ## No auto-updater, on purpose
 
 Polylinker never checks for a new version on its own. A program that phones a

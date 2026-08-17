@@ -334,6 +334,28 @@ that sentence is longer than the feature.** Read this section before repeating
 anything else in this file, in the README or in the release notes at somebody
 running Windows on ARM.
 
+**The editor may not open there at all, and that is a property of the platform
+rather than of the build.** Windows on ARM ships no OpenGL driver — the GPU
+exposes Direct3D and Vulkan, and a GL request is answered by Windows' own
+software renderer at OpenGL 1.1 — while `bins/pl-gui` draws through `eframe`'s
+`glow` backend, which refuses below OpenGL 2.0. On real hardware Microsoft's
+*OpenCL and OpenGL Compatibility Pack* supplies the missing driver by
+translating onto Direct3D 12; in a virtual machine whose adapter has no Direct3D
+12, nothing installed inside the guest can help, because Direct3D 12 is the
+thing that pack translates onto. Both cases are stated in the release notes and
+in `README-WINDOWS.txt`, and `tools/ci.ps1` requires the phrases `OpenGL 2.0`
+and `Direct3D 12` to survive in the notes so the caveat cannot be quietly
+dropped by a rewrite.
+
+Two things follow for a release. **`pl` is the answer to give a reader whose
+editor will not start** — it needs no graphics driver of any kind and every verb
+except the window works without one. And **nothing in CI launches the GUI, on
+any leg, on any platform**, so this failure mode cannot be caught by the
+pipeline as it stands; what is guaranteed instead is that the program *says* so,
+through `report_startup_failure` in `bins/pl-gui/src/main.rs`. It did not, until
+this was fixed, which is why the first report of it arrived as "I press the icon
+and nothing happens".
+
 **It is built natively, on GitHub's `windows-11-arm` runners, and cross-building
 was rejected rather than merely not chosen.** Those runners are free for public
 repositories, as this one is, so the argument that killed a second macOS runner

@@ -12,6 +12,35 @@ double-click it. The installer below exists so it appears in the Start Menu and
 in Settings -> Apps like anything else, not because anything needs installing.
 
 
+WHAT THE EDITOR NEEDS FROM YOUR GRAPHICS
+----------------------------------------
+
+polylinker.exe draws with OpenGL and needs OpenGL 2.0 or newer. Almost every
+machine with a graphics driver has far more than that and there is nothing here
+to do. Two kinds of machine do not, and on those the editor says so and stops
+rather than opening a blank window:
+
+  * Windows on ARM. These devices ship no OpenGL driver -- the GPU offers
+    Direct3D and Vulkan instead -- so Windows answers with its own software
+    renderer, which is OpenGL 1.1. Installing the "OpenCL and OpenGL
+    Compatibility Pack" from the Microsoft Store fixes it on real hardware: it
+    translates OpenGL onto Direct3D 12.
+
+  * A virtual machine whose graphics adapter has no Direct3D 12. The
+    compatibility pack cannot help there, because Direct3D 12 is the thing it
+    translates onto. Turn on 3D acceleration in the VM's settings if it has the
+    option; otherwise run Polylinker on the host rather than in the guest.
+
+If the editor cannot start it tells you why -- in a dialog when you
+double-click it, and on stderr when you run it from a terminal:
+
+    polylinker.exe 2> gui-error.txt
+
+pl.exe needs no graphics driver of any kind, so everything except the window
+still works on a machine that cannot run the editor: convert, digest, checksum,
+design, orfs, find, and the SVG, PDF and PNG figures.
+
+
 THERE IS ALSO AN .MSI, AND FOR MOST PEOPLE IT IS THE EASIER ONE
 ---------------------------------------------------------------
 
