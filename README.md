@@ -8,8 +8,8 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 172,753 lines of Rust, 98,339 of it dependency-free (141 `.rs`
-> files under `crates/` and `bins/`), with 2,038 `#[test]` functions and a
+> crates and 172,844 lines of Rust, 98,339 of it dependency-free (141 `.rs`
+> files under `crates/` and `bins/`), with 2,039 `#[test]` functions and a
 > 77-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-10, and recounted on every test run since:
@@ -382,31 +382,40 @@ possible outcome and will never ship here.
 
 ### What the editor needs to run, and what needs nothing
 
-`polylinker`, the window, draws with OpenGL and needs **OpenGL 2.0 or newer**.
-Any machine with a graphics driver has far more than that, so on ordinary
-hardware there is nothing to think about. Two cases genuinely lack it:
+`polylinker`, the window, asks for **OpenGL 2.0 or newer**, and when that is
+refused it falls back by itself to **Direct3D 12 or Vulkan** and tries again.
+Any machine with a graphics driver satisfies one of the two.
 
-- **Windows on ARM** ships no OpenGL driver at all — the GPU offers Direct3D and
-  Vulkan, so Windows answers with its own software renderer, which is OpenGL
-  1.1. Microsoft's *OpenCL and OpenGL Compatibility Pack* fixes it on real
-  hardware, by translating OpenGL onto Direct3D 12.
-- **A virtual machine whose adapter has no Direct3D 12** cannot use that pack
-  either, since Direct3D 12 is what it translates onto. Measured in a
-  Windows-on-ARM guest reporting feature level 11_1 on WDDM 1.2: nothing
-  installed inside the guest gives it OpenGL. Turn on 3D acceleration in the VM
-  if it offers it, or run Polylinker on the host.
+The fallback exists for one platform in particular. **Windows on ARM ships no
+OpenGL driver at all** — the GPU offers Direct3D and Vulkan, so Windows answers
+a GL request with its own software renderer, which is OpenGL 1.1, and
+`egui_glow` refuses below 2.0. Those machines do have Direct3D 12 natively, so
+the second attempt is the one built for them and needs nothing installed.
+Microsoft's *OpenCL and OpenGL Compatibility Pack* solves the same problem from
+the other end, by translating OpenGL onto Direct3D 12, and remains a valid
+alternative.
 
-When the editor cannot start it now says so — a dialog if it was double-clicked,
-and on stderr if it was run from a terminal. It exited **silently** until this
-was fixed, because a Windows GUI build has no console for the message to reach:
-the program had diagnosed itself correctly and had nowhere to put the sentence.
-That is `report_startup_failure` in [`bins/pl-gui/src/main.rs`](bins/pl-gui/src/main.rs),
+**A virtual machine with neither** is the case nothing fixes from inside the
+guest — measured in a Windows-on-ARM guest reporting Direct3D feature level 11_1
+on WDDM 1.2: no OpenGL, no Direct3D 12, so neither backend and no pack either.
+Turn on 3D acceleration in the VM, or run Polylinker on the host.
+
+glow is tried first on every platform, because it is the backend every working
+installation has actually exercised and **no CI leg anywhere launches this
+program**. `PL_GUI_RENDERER=wgpu` or `=glow` pins one and disables the fallback,
+which is how to exercise the other on a machine where the first succeeds.
+
+When the editor cannot start it says so — a dialog if it was double-clicked, and
+on stderr if it was run from a terminal. It exited **silently** until this was
+fixed, because a Windows GUI build has no console for the message to reach: the
+program had diagnosed itself correctly and had nowhere to put the sentence. That
+is `report_startup_failure` in [`bins/pl-gui/src/main.rs`](bins/pl-gui/src/main.rs),
 and it is the reason this section exists.
 
 **`pl` needs no graphics driver of any kind.** Everything except the window
 works without one — convert, digest, checksum, design, orfs, find, and the SVG,
-PDF and PNG figures — which is the answer on a machine that cannot open the
-editor.
+PDF and PNG figures — which is the answer on a machine that can run neither
+backend.
 
 ## Citing this
 

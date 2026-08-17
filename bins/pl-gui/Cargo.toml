@@ -85,25 +85,53 @@ pl-update.workspace = true
 # where Microsoft's OpenGL-on-Direct3D-12 compatibility pack cannot help either:
 # it needs a Direct3D 12 device to translate onto, and that adapter has none.
 #
-# wgpu was tried and measured against this, on the suspicion that the Windows
-# HiDPI sizing defect noted in main.rs was a GL surface problem. It is not —
-# both backends report byte-identical geometry — and wgpu costs 6 MB of binary
-# plus a Vulkan/DX12 driver requirement. Ruled out on evidence, not taste.
+# wgpu was tried and measured against this in 2026-08, on the suspicion that the
+# Windows HiDPI sizing defect noted in main.rs was a GL surface problem. It is
+# not — both backends report byte-identical geometry — and wgpu costs 6 MB of
+# binary plus a Vulkan/DX12 driver requirement. Ruled out on evidence, not taste.
 #
-# THAT RULING IS ABOUT HiDPI AND IS NOT A RULING ABOUT ARM64, which it predates.
-# It weighed 6 MB against a defect wgpu did not fix; it never weighed 6 MB
-# against a platform that cannot open a window at all, and on Windows on ARM the
-# "Vulkan/DX12 driver requirement" it counts as a cost is precisely the
-# requirement that platform can meet. Whether to add wgpu as a fallback is open
-# and is not decided here — what this file must stop doing is implying it was
-# already settled against.
+# THAT RULING WAS ABOUT HiDPI, AND IT IS NOT THE RULING THAT APPLIES HERE. It
+# weighed the binary against a defect wgpu did not fix. It never weighed the
+# binary against a platform that cannot open a window at all — and on Windows on
+# ARM the "Vulkan/DX12 driver requirement" it counted as a cost is precisely the
+# requirement that platform *can* meet, while the OpenGL this backend needs is
+# the one graphics API it does not ship.
 #
-# Until it is settled the failure is at least no longer silent: see
-# `report_startup_failure` in src/main.rs.
+# SO WGPU IS NOW COMPILED IN, AS A FALLBACK AND NOT AS A REPLACEMENT. glow is
+# still tried first, on every platform, because it is the backend every working
+# installation and every CI leg has actually exercised; wgpu is tried only when
+# glow fails to start, where the alternative is the program not running. See
+# `start`/`is_backend_failure` in src/main.rs.
+#
+# WHAT IT COSTS, MEASURED. Built twice on x86_64 Linux, release profile, the same
+# tree either side of this one feature:
+#
+#   polylinker  17,197,304 -> 21,873,360 bytes   +4,676,056  (+27.2%)
+#               16.40 MiB  ->     20.86 MiB      +4.46 MiB
+#
+# plus 20 further packages in Cargo.lock. THE WINDOWS FIGURE IS NOT THIS FIGURE
+# and is measured nowhere: nothing in this workspace can link Windows, and there
+# wgpu compiles the DX12 and Vulkan backends where Linux compiles Vulkan and
+# GLES, so expect it larger rather than smaller.
+#
+# Dropping glow and shipping wgpu alone would recover a little of that, and is
+# refused for a reason that is not about bytes: glow is the backend every working
+# installation has exercised, and NO CI LEG ANYWHERE LAUNCHES THIS PROGRAM, so
+# "tested" here means "tested by users". Removing it would move every platform
+# that works today onto a renderer nothing has run, to save a fraction of an
+# installer. The fallback is the cautious change; the replacement would not be.
+#
+# `renderer` MUST be set explicitly in `NativeOptions` now that both are
+# compiled: with both features on, eframe's `Renderer::default()` is `Wgpu`
+# (eframe-0.35.0/src/epi.rs:610-613, "let's pick the better of the two"), so a
+# `..Default::default()` that used to mean glow silently means wgpu. src/main.rs
+# names it on every attempt for that reason.
 eframe = { version = "0.35", default-features = false, features = [
     "accesskit",      # screen-reader support; not optional in a tool people rely on
     "default_fonts",
     "glow",
+    "wgpu",           # fallback only, never the default: see the note above
+
     "wayland",
     "x11",
 ] }

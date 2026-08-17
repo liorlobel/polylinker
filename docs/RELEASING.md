@@ -334,27 +334,36 @@ that sentence is longer than the feature.** Read this section before repeating
 anything else in this file, in the README or in the release notes at somebody
 running Windows on ARM.
 
-**The editor may not open there at all, and that is a property of the platform
-rather than of the build.** Windows on ARM ships no OpenGL driver — the GPU
-exposes Direct3D and Vulkan, and a GL request is answered by Windows' own
-software renderer at OpenGL 1.1 — while `bins/pl-gui` draws through `eframe`'s
-`glow` backend, which refuses below OpenGL 2.0. On real hardware Microsoft's
-*OpenCL and OpenGL Compatibility Pack* supplies the missing driver by
-translating onto Direct3D 12; in a virtual machine whose adapter has no Direct3D
-12, nothing installed inside the guest can help, because Direct3D 12 is the
-thing that pack translates onto. Both cases are stated in the release notes and
-in `README-WINDOWS.txt`, and `tools/ci.ps1` requires the phrases `OpenGL 2.0`
-and `Direct3D 12` to survive in the notes so the caveat cannot be quietly
-dropped by a rewrite.
+**The editor's graphics requirement is the one thing about this platform most
+likely to reach you as a bug report.** Windows on ARM ships no OpenGL driver —
+the GPU exposes Direct3D and Vulkan, and a GL request is answered by Windows'
+own software renderer at OpenGL 1.1 — while `eframe`'s `glow` backend refuses
+below OpenGL 2.0. Until v0.12.1 that was the end of it: the program stopped, and
+said nothing at all, because a `windows_subsystem = "windows"` build has no
+console for the message to reach.
 
-Two things follow for a release. **`pl` is the answer to give a reader whose
-editor will not start** — it needs no graphics driver of any kind and every verb
-except the window works without one. And **nothing in CI launches the GUI, on
-any leg, on any platform**, so this failure mode cannot be caught by the
-pipeline as it stands; what is guaranteed instead is that the program *says* so,
-through `report_startup_failure` in `bins/pl-gui/src/main.rs`. It did not, until
-this was fixed, which is why the first report of it arrived as "I press the icon
-and nothing happens".
+Both halves are now addressed, and they are separate changes worth keeping
+apart. `bins/pl-gui` compiles **wgpu as a fallback**: glow is tried first on
+every platform, and only if it fails to start is Direct3D 12 or Vulkan tried
+instead — which is the path these machines are built for and needs nothing
+installed. And any failure is now *reported*, through `report_startup_failure`.
+Microsoft's *OpenCL and OpenGL Compatibility Pack* remains a valid alternative
+for a user who prefers it; it solves the same problem from the other end.
+
+The case neither fixes is **a virtual machine whose adapter offers neither API**
+— measured in a Windows-on-ARM guest at Direct3D feature level 11_1 on WDDM 1.2.
+Nothing installed inside such a guest can help, and the honest answer there is
+`pl`, which needs no graphics driver of any kind.
+
+Three things follow for a release. The caveat is stated in the release notes and
+in `README-WINDOWS.txt`, and **`tools/ci.ps1` requires the phrases `OpenGL 2.0`
+and `Direct3D 12` to survive in the notes**, so a rewrite cannot quietly drop it.
+**Nothing in CI launches the GUI, on any leg, on any platform**, so neither the
+requirement nor the fallback is exercised by the pipeline — `PL_GUI_RENDERER=wgpu`
+is the only way to make the second backend run, and it has to be done by hand.
+And **the fallback is therefore the least-tested code in the program**: it is
+reached only where the first backend has already failed, which is a machine no
+contributor owns.
 
 **It is built natively, on GitHub's `windows-11-arm` runners, and cross-building
 was rejected rather than merely not chosen.** Those runners are free for public

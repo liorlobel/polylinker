@@ -15,21 +15,28 @@ in Settings -> Apps like anything else, not because anything needs installing.
 WHAT THE EDITOR NEEDS FROM YOUR GRAPHICS
 ----------------------------------------
 
-polylinker.exe draws with OpenGL and needs OpenGL 2.0 or newer. Almost every
-machine with a graphics driver has far more than that and there is nothing here
-to do. Two kinds of machine do not, and on those the editor says so and stops
-rather than opening a blank window:
+polylinker.exe asks for OpenGL 2.0 or newer first, and if that is refused it
+falls back on its own to Direct3D 12 or Vulkan and tries again. Almost every
+machine with a graphics driver satisfies one of the two and there is nothing
+here to do.
 
   * Windows on ARM. These devices ship no OpenGL driver -- the GPU offers
     Direct3D and Vulkan instead -- so Windows answers with its own software
-    renderer, which is OpenGL 1.1. Installing the "OpenCL and OpenGL
-    Compatibility Pack" from the Microsoft Store fixes it on real hardware: it
-    translates OpenGL onto Direct3D 12.
+    renderer, which is OpenGL 1.1. The fallback is the attempt built for these
+    machines: they have Direct3D 12 natively and it needs nothing installed.
+    Microsoft's "OpenCL and OpenGL Compatibility Pack" from the Microsoft Store
+    solves the same problem from the other end, by translating OpenGL onto
+    Direct3D 12, and still works.
 
-  * A virtual machine whose graphics adapter has no Direct3D 12. The
-    compatibility pack cannot help there, because Direct3D 12 is the thing it
-    translates onto. Turn on 3D acceleration in the VM's settings if it has the
-    option; otherwise run Polylinker on the host rather than in the guest.
+  * A virtual machine whose graphics adapter has neither. Nothing installed
+    inside the guest can help: with no Direct3D 12 there is nothing for the
+    compatibility pack to translate onto and nothing for the fallback to use.
+    Turn on 3D acceleration in the VM's settings if it has the option; otherwise
+    run Polylinker on the host rather than in the guest.
+
+Set PL_GUI_RENDERER=wgpu or =glow to pin one backend and switch the fallback
+off. That is the way to watch the other one start on a machine where the first
+already works.
 
 If the editor cannot start it tells you why -- in a dialog when you
 double-click it, and on stderr when you run it from a terminal:
