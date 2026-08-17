@@ -3550,6 +3550,27 @@ Step 'the MSI takes no file type away from a program the reader already uses' {
     $owp = ([regex]::Matches($wxs, 'OpenWithProgids')).Count
     if ($owp -lt 8) { $problems += "only $owp OpenWithProgids entries; the installer associates eight extensions additively" }
 
+    # The install location has to be RECORDED, not merely correct.
+    #
+    # Every release through v0.12.1 wrote an empty InstallLocation into its
+    # Add/Remove Programs entry, because nothing set ARPINSTALLLOCATION, and so
+    # nothing on the machine could answer "where did Polylinker go?". It cost a
+    # user two round trips to find their own install. check-msi.ps1 now asserts
+    # the value is present after a real install -- but that step is Windows-only
+    # and skips on two of the three gate legs, so the authoring is checked here
+    # as well, where the file is just XML and every platform can read it.
+    #
+    # The schedule is part of the assertion. As a plain <Property> the value
+    # would be recorded before costing has resolved APPLICATIONFOLDER, which is
+    # a literal string rather than a path, so the element and its timing are
+    # required together or the property is worse than absent.
+    if ($wxs -notmatch 'Id="ARPINSTALLLOCATION"') {
+        $problems += 'Polylinker.wxs sets no ARPINSTALLLOCATION, so the Add/Remove Programs entry will record an empty InstallLocation and nothing on the machine will be able to say where Polylinker was installed'
+    }
+    elseif ($wxs -notmatch '(?s)<SetProperty[^>]*Id="ARPINSTALLLOCATION"[^>]*After="CostFinalize"') {
+        $problems += 'ARPINSTALLLOCATION is authored, but not as a <SetProperty ... After="CostFinalize">; before costing APPLICATIONFOLDER is unresolved, so the recorded value would be a literal rather than a path'
+    }
+
     # NEGATIVE CONTROL FOR THE BAN, on a doctored copy of the real file rather
     # than on a hand-written string, so that the thing being refused is the thing
     # a careless edit would actually produce. One <File> is planted immediately

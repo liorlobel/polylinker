@@ -306,8 +306,21 @@ try {
         # come from different mechanisms -- ARP is written by Windows Installer,
         # App Paths by a component in this package -- so a disagreement means one
         # of them is lying about the install.
-        if ($arp.InstallLocation -and $prefix -and
-            ($arp.InstallLocation.TrimEnd('\') -ne $prefix.TrimEnd('\'))) {
+        #
+        # THE PRESENCE TEST IS THE POINT OF THE PAIR, AND IT WAS MISSING. This
+        # was one condition beginning `if ($arp.InstallLocation -and ...)`, which
+        # reads as a null guard and behaves as an exemption: an entry with NO
+        # InstallLocation skipped the comparison and passed in silence. That is
+        # exactly what shipped -- every release through v0.12.1 recorded an empty
+        # InstallLocation, because the package set no ARPINSTALLLOCATION, and
+        # this check ran on every Windows leg of every CI run without once
+        # noticing. It cost a user two round trips to find their own install.
+        # The absent case is now the loud one; see the SetProperty in
+        # tools/installer/Polylinker.wxs that gives it something to find.
+        if (-not $arp.InstallLocation) {
+            Bad 'the ARP entry has no InstallLocation, so nothing on the machine can say where Polylinker was installed'
+        }
+        elseif ($prefix -and ($arp.InstallLocation.TrimEnd('\') -ne $prefix.TrimEnd('\'))) {
             Bad "ARP says InstallLocation is '$($arp.InstallLocation)' but the package's own App Paths entry points into '$prefix'"
         }
         if (-not $arp.DisplayVersion) { Bad 'the ARP entry has no DisplayVersion' }

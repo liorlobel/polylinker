@@ -112,6 +112,34 @@
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/liorlobel/polylinker" />
 
     <!--
+      Where the program went, recorded where the operating system keeps it.
+
+      NOT a plain Property, and that is the whole reason this needs a comment.
+      APPLICATIONFOLDER is not resolved until costing has run, so a static value
+      would record the literal text rather than a path. SetProperty schedules a
+      small action after CostFinalize, by which time the directory table holds
+      the real one — which is also what makes one line correct for both scopes,
+      since WixUI_Advanced has by then redirected APPLICATIONFOLDER either to
+      %LOCALAPPDATA%\Apps\Polylinker or to Program Files.
+
+      WHAT ITS ABSENCE COST, because this is not cosmetic. Windows records
+      InstallLocation for every installed program, and it is what Settings, the
+      uninstall entry, and anyone asking "where did this go?" reads. Polylinker's
+      was empty, so nothing on the machine could answer that question. On
+      2026-08-16 a user whose editor would not start had to be walked through the
+      registry, then the Start Menu shortcut's target, then a recursive search of
+      three directories before the binaries could be found at all: two round
+      trips spent locating a path this installer knew all along.
+
+      tools/check-msi.ps1 now asserts the value is present as well as correct. It
+      already compared it against the package's own App Paths entry, but only
+      inside a test that began "if ($arp.InstallLocation and ...)", so an empty
+      one skipped the comparison and reported nothing. A check that cannot fail
+      is the shape of defect this repository keeps finding, and this was another.
+    -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[APPLICATIONFOLDER]" After="CostFinalize" />
+
+    <!--
       Default to a per-user install: "for me" preselected, which is the path
       that needs no administrator and raises no elevation prompt.
       WixUI_Advanced shows the "for me" / "for everyone" choice.
@@ -166,10 +194,21 @@
       mechanism rather than a label.
       WixUI_Advanced's WixSetPerUserFolder and WixSetPerMachineFolder custom
       actions set a property of exactly that name — to
-      [LocalAppDataFolder]Programs\[ApplicationFolderName] when the reader picks
+      [LocalAppDataFolder]Apps\[ApplicationFolderName] when the reader picks
       "for me", and to [ProgramFiles6432Folder][ApplicationFolderName] when they
       pick "for everyone". A directory called anything else is never redirected,
       so the parent below is only the per-machine default.
+
+      THAT FIRST PATH SAID "Programs\" HERE UNTIL 2026-08-16, AND IT IS "Apps\".
+      Read off a real installation rather than corrected from documentation: a
+      v0.11.1 per-user install of this package put polylinker.exe in
+      C:\Users\User\AppData\Local\Apps\Polylinker, which is also what the Start
+      Menu shortcut it created resolved to. The wrong name mattered on the day it
+      was found — it sent a search for a user's install to
+      %LOCALAPPDATA%\Programs\Polylinker, which does not exist, and the binaries
+      had to be located by other means. %LOCALAPPDATA%\Polylinker, with no
+      subdirectory at all, is a third path again and is the app's own state
+      directory: index, layout and recovery, no binaries.
 
       The first draft of this file called it INSTALLFOLDER, which meant the
       DEFAULT per-user install would have tried to write to C:\Program Files and
