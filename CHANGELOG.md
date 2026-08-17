@@ -27,6 +27,76 @@ which.
 
 Nothing yet.
 
+## [0.12.1] - 2026-08-17
+
+Three changes, all of them from one report: the ARM64 build was installed on a
+Windows machine, the icon was pressed, and nothing happened. Nothing on screen,
+nothing in a log, and no way from inside Windows to find out where the installer
+had put the program to try it from a terminal instead.
+
+### Added
+
+- **The editor tries Direct3D 12 or Vulkan when there is no OpenGL.** It asked
+  for OpenGL, was refused, and stopped there. `wgpu` is now built in beside
+  `glow` and the two are tried in order: OpenGL 2.0 first, because it is the
+  thing a lab machine's driver is most likely to have, then wgpu's Direct3D 12
+  and Vulkan backends. Only a *backend* failure retries — `OpenGL`, `Glutin`,
+  `NoGlutinConfigs` or `Wgpu` from eframe. Any other startup error is the
+  program's own fault and is reported rather than run a second time on a
+  different renderer, which would report it twice and fix nothing.
+
+  Windows on ARM ships no OpenGL driver, so on that target this is not a
+  fallback; it is the only path that starts. `PL_GUI_RENDERER=wgpu` or `=glow`
+  pins one backend and disables the retry, which is how to exercise the second
+  one on a machine where the first works.
+
+  The second backend costs **4.46 MiB** of binary — 16.40 MiB to 20.86 MiB,
+  measured on this tree rather than estimated.
+
+  It does not rescue every machine, and the release notes say so: a virtual
+  adapter that offers neither OpenGL nor Direct3D 12 — measured in the reporting
+  VM, feature level 11_1 on WDDM 1.2 — has no backend for either renderer to
+  use, and no compatibility pack changes that from inside the guest. `pl`, which
+  wants no graphics driver of any kind, is what that machine can still run.
+
+### Fixed
+
+- **A desktop app that cannot start now says so.** Release builds carry
+  `windows_subsystem = "windows"` so that no console flashes up behind the
+  window, which also means `eprintln!` has nowhere to arrive. The startup error
+  went to a stderr nobody could be holding, the process exited 1, and the screen
+  stayed empty. The sentence being discarded on the reporting machine was
+  `egui_glow requires opengl 2.0+`.
+
+  A failed start now raises a message box on Windows that names what the
+  graphics stack has to provide and points at `pl` for the machines that cannot
+  provide it. The box appears **only when stderr goes nowhere**, and the test for
+  that is `GetStdHandle` plus `GetFileType` rather than `GetConsoleWindow`: a
+  console window is just as absent for `polylinker.exe 2> log.txt` as for a
+  double-click, and a modal dialog in a redirected or CI run is a hang rather
+  than a diagnostic. The message itself is built by a pure function so that what
+  it says is a test and not a screenshot.
+
+- **The installer records where it put things.** The MSI's Add/Remove Programs
+  entry carried no `InstallLocation`, so nothing on the machine could answer
+  "where is it" — the question the report had to answer by reading a Start-Menu
+  shortcut's target out of the registry. `ARPINSTALLLOCATION` is now set from
+  `APPLICATIONFOLDER` after `CostFinalize`, because that property is not
+  resolved until costing has run and a plain `Property` would have recorded the
+  literal text instead of a path. Scheduling it there is also what makes one
+  line correct for both install scopes, per-user and per-machine.
+
+  `tools/check-msi.ps1` already had a guard for this and the guard could not
+  fail: it read the value and compared it against itself. It now fails on an
+  absent `InstallLocation` and on one that disagrees with the package's own App
+  Paths entry, and the gate asserts the `SetProperty` is in the `.wxs` at all,
+  so removing it breaks CI instead of quietly shipping.
+
+  The comment beside the per-user install path named
+  `[LocalAppDataFolder]Programs\` and WiX uses `[LocalAppDataFolder]Apps\`. That
+  one wrong word is why the first search of the reporting machine came back
+  empty; it now says what the tool does.
+
 ## [0.12.0] - 2026-08-15
 
 Four changes to the desktop app, all of them about letting a user see what the
@@ -3218,7 +3288,8 @@ First public release.
 - **No manifest signature.** `SHA256SUMS.txt` shipped unsigned, so the release
   page proved integrity and not origin. Added in 0.1.2.
 
-[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/liorlobel/polylinker/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.12.1
 [0.12.0]: https://github.com/liorlobel/polylinker/releases/tag/v0.12.0
 [0.11.2]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.2
 [0.11.1]: https://github.com/liorlobel/polylinker/releases/tag/v0.11.1
