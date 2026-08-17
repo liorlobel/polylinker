@@ -982,25 +982,33 @@ fn startup_failure_message(err: &str) -> String {
     let mut msg = format!("Polylinker could not start.\n\n{err}\n");
     let graphics = {
         let e = err.to_ascii_lowercase();
-        e.contains("opengl") || e.contains("glow") || e.contains("glutin")
+        e.contains("opengl")
+            || e.contains("glow")
+            || e.contains("glutin")
+            || e.contains("wgpu")
+            || e.contains("adapter")
     };
     if graphics {
         msg.push_str(
-            "\nThis build draws with OpenGL and needs OpenGL 2.0 or newer. A machine \
-             that reports less than that usually has no OpenGL driver at all rather \
-             than a broken one -- Windows then answers with its own software renderer, \
-             which is OpenGL 1.1.\n\
+            "\nThis is a graphics failure, and it means both of the ways this program \
+             can draw were refused. It asks for OpenGL 2.0 or newer first, and when \
+             that is unavailable it asks for Direct3D 12 or Vulkan instead; the \
+             machine offered neither.\n\
+             \n\
+             That is usually an absence rather than a fault. Windows answers a request \
+             for OpenGL it has no driver for with its own software renderer, which is \
+             OpenGL 1.1, and a virtual graphics adapter often has no Direct3D 12 at \
+             all.\n\
              \n\
              What fixes it, depending on where you are:\n\
              \n\
-             * Windows on ARM: install the \"OpenCL and OpenGL Compatibility Pack\" \
-             from the Microsoft Store. It translates OpenGL to Direct3D 12, so it \
-             needs a working Direct3D 12 device and cannot help a machine that has \
-             none.\n\
              * A virtual machine: turn on 3D acceleration in its settings if it has \
-             the option. A virtual graphics adapter that stops at Direct3D 11 can run \
-             neither OpenGL nor the compatibility pack, and nothing installed inside \
-             the guest will change that.\n\
+             the option, or run Polylinker on the host instead. An adapter that stops \
+             at Direct3D 11 can offer neither of the two backends, and nothing \
+             installed inside the guest will change that.\n\
+             * Windows on ARM: the Direct3D 12 path above is the one your machine is \
+             built for and needs nothing installed. If it was refused too, the \
+             graphics adapter is the thing to look at.\n\
              * A physical machine: install or update the graphics driver.\n\
              \n\
              `pl`, the command line installed beside this program, needs no graphics \
@@ -1009,6 +1017,99 @@ fn startup_failure_message(err: &str) -> String {
         );
     }
     msg
+}
+
+/// The renderer to try first, and whether the other may be tried after it.
+///
+/// `PL_GUI_RENDERER=glow|wgpu` pins one and disables the fallback. It exists
+/// because **nothing else can reach the wgpu path on a machine that works**:
+/// glow is tried first and succeeds everywhere this program has ever run, so
+/// without a way to ask for wgpu by name the fallback would be code that only
+/// executes on hardware no contributor owns. No CI leg launches the GUI either.
+/// A named variable is the difference between a fallback that has been seen to
+/// work and one that has only been reasoned about.
+fn renderer_plan() -> (eframe::Renderer, Option<eframe::Renderer>) {
+    match std::env::var("PL_GUI_RENDERER").as_deref() {
+        Ok("wgpu") => (eframe::Renderer::Wgpu, None),
+        Ok("glow") => (eframe::Renderer::Glow, None),
+        // glow first on every platform, and that order is the conservative one:
+        // it is the backend every working installation and every CI leg has
+        // actually exercised. wgpu is reached only where the alternative is a
+        // program that does not open.
+        _ => (eframe::Renderer::Glow, Some(eframe::Renderer::Wgpu)),
+    }
+}
+
+/// One attempt to open the window.
+///
+/// `renderer` is set explicitly and never left to `Default`: with both backends
+/// compiled in, eframe's `Renderer::default()` is `Wgpu`
+/// (eframe-0.35.0/src/epi.rs:610-613), so `..Default::default()` would quietly
+/// move every platform onto the backend that exists here only as a fallback.
+fn start(renderer: eframe::Renderer) -> eframe::Result {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 840.0])
+            .with_min_inner_size(MIN_WINDOW)
+            .with_icon(window_icon())
+            .with_title("Polylinker"),
+        renderer,
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Polylinker",
+        options,
+        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+    )
+}
+
+/// Did this attempt fail because the graphics backend would not start, as
+/// opposed to something a second backend cannot help with?
+///
+/// A retry is only honest for the first kind. `AppCreation` is this program's
+/// own bug and would fail identically on the other backend; a `Winit` error is
+/// about windowing, which both share.
+fn is_backend_failure(e: &eframe::Error) -> bool {
+    matches!(
+        e,
+        eframe::Error::OpenGL(_)
+            | eframe::Error::Glutin(_)
+            | eframe::Error::NoGlutinConfigs(..)
+            | eframe::Error::Wgpu(_)
+    )
+}
+
+fn main() -> std::process::ExitCode {
+    let (first, fallback) = renderer_plan();
+    let first_err = match start(first) {
+        Ok(()) => return std::process::ExitCode::SUCCESS,
+        Err(e) => e,
+    };
+
+    // Retrying is sound because eframe caches its winit `EventLoop` in a
+    // thread-local and reuses it -- `with_event_loop` in
+    // eframe-0.35.0/src/native/run.rs, "we can support closing and opening an
+    // eframe window multiple times". winit's own once-per-process guard is
+    // therefore never reached by the second call. It also depends on
+    // `run_and_return` staying true (epi.rs:440, the default), or the first
+    // attempt would take the process down rather than return its error.
+    let Some(second) = fallback.filter(|_| is_backend_failure(&first_err)) else {
+        report_startup_failure(&first_err.to_string());
+        return std::process::ExitCode::FAILURE;
+    };
+
+    // Said out loud rather than swallowed: a fallback that is silent is how a
+    // machine ends up quietly running the renderer nobody tested, and the one
+    // thing this file has already been wrong about is failing without saying so.
+    eprintln!("Polylinker: the {first} backend did not start ({first_err}); trying {second}.");
+
+    match start(second) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(second_err) => {
+            report_startup_failure(&format!("{first}: {first_err}\n{second}: {second_err}"));
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 /// Say why the program is not starting, somewhere the user will actually see it.
@@ -1107,28 +1208,6 @@ fn windows_message_box(msg: &str) {
     // the call, and a null owner window is documented as "no owner".
     unsafe {
         MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), FLAGS);
-    }
-}
-
-fn main() -> std::process::ExitCode {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 840.0])
-            .with_min_inner_size(MIN_WINDOW)
-            .with_icon(window_icon())
-            .with_title("Polylinker"),
-        ..Default::default()
-    };
-    match eframe::run_native(
-        "Polylinker",
-        options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
-    ) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(e) => {
-            report_startup_failure(&e.to_string());
-            std::process::ExitCode::FAILURE
-        }
     }
 }
 
@@ -16667,14 +16746,26 @@ mod tests {
             "the requirement must be stated: {msg}"
         );
         assert!(
-            msg.contains("Compatibility Pack"),
-            "the Windows-on-ARM remedy must be named: {msg}"
+            msg.contains("Direct3D 12") && msg.contains("Vulkan"),
+            "the fallback the program actually attempts must be named, or this \
+             text describes a program that no longer exists: {msg}"
         );
         assert!(
-            msg.contains("Direct3D 12"),
-            "the pack's own precondition must be stated, or it is advice that \
-             wastes a round trip on a machine that cannot use it: {msg}"
+            msg.contains("`pl`"),
+            "the GPU-free way to keep working must be named: {msg}"
         );
+    }
+
+    /// A wgpu failure is a graphics failure too.
+    ///
+    /// Adding the fallback made a second error string reachable here, and it
+    /// names neither OpenGL nor glow -- so the first version of the predicate
+    /// above would have sent the one error that means "both backends were
+    /// refused" to the branch that offers no advice at all.
+    #[test]
+    fn a_wgpu_failure_is_recognised_as_a_graphics_failure() {
+        let msg = super::startup_failure_message("Wgpu(NoSuitableAdapterFound)");
+        assert!(msg.contains("Direct3D 12"), "{msg}");
         assert!(
             msg.contains("`pl`"),
             "the GPU-free way to keep working must be named: {msg}"
