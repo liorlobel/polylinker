@@ -1003,9 +1003,10 @@ fn startup_failure_message(err: &str) -> String {
              What fixes it, depending on where you are:\n\
              \n\
              * A virtual machine: turn on 3D acceleration in its settings if it has \
-             the option, or run Polylinker on the host instead. An adapter that stops \
-             at Direct3D 11 can offer neither of the two backends, and nothing \
-             installed inside the guest will change that.\n\
+             the option, or run Polylinker on the host instead. A virtual adapter \
+             that offers no OpenGL often still offers Direct3D 12 or Vulkan, and \
+             this program has already tried those -- so if you are reading this, \
+             that adapter offered none of the three.\n\
              * Windows on ARM: the Direct3D 12 path above is the one your machine is \
              built for and needs nothing installed. If it was refused too, the \
              graphics adapter is the thing to look at.\n\

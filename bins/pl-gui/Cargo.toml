@@ -81,9 +81,13 @@ pl-update.workspace = true
 # software renderer at OpenGL 1.1, and `egui_glow requires opengl 2.0+.` is
 # where the program stops. OpenGL is the one graphics API that platform does
 # not have, so there this backend asks the MOST of the drivers, not the least.
-# Measured in a Windows-on-ARM guest reporting feature level 11_1 on WDDM 1.2,
-# where Microsoft's OpenGL-on-Direct3D-12 compatibility pack cannot help either:
-# it needs a Direct3D 12 device to translate onto, and that adapter has none.
+# Measured in a Windows-on-ARM guest reporting feature level 11_1 on WDDM 1.2:
+# PL_GUI_RENDERER=glow is refused there and PL_GUI_RENDERER=wgpu runs, so that
+# guest has no OpenGL and a working wgpu backend -- it opens a window only
+# because this fallback is compiled in. Until 2026-08-17 these lines also said
+# the adapter had no Direct3D 12 for the compatibility pack to translate onto;
+# that was inferred from the two dxdiag strings, never measured, and the
+# measurement contradicts it.
 #
 # wgpu was tried and measured against this in 2026-08, on the suspicion that the
 # Windows HiDPI sizing defect noted in main.rs was a GL surface problem. It is
