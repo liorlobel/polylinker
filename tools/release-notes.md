@@ -49,8 +49,10 @@ are built, installed, checked and uninstalled there, and since v0.11.1 the scan
 that proves no binary needs the VC++ redistributable runs there too — but
 `tools/ci.ps1`, the gate this project counts the steps of, has three legs and
 none of them is this architecture, so the cross-checks against Biopython, pydna,
-SciPy and the rest are run only on x64. And at the time this release was cut
-**no person had run a Polylinker build on an ARM64 machine at all**.
+SciPy and the rest are run only on x64. Until 2026-08-17 **no person had run a
+Polylinker build on an ARM64 machine at all**; one has now — the ARM64 MSI was
+installed and run on a Windows-on-ARM virtual machine, and the editor opens
+there on the Direct3D 12/Vulkan fallback described below.
 
 **The one difference that could stop the program starting is fixed in this
 release, and it is worth saying what it was.** Every ARM64 binary in v0.11.0
@@ -181,11 +183,13 @@ particular:
   with nothing to install. Microsoft's **"OpenCL and OpenGL Compatibility Pack"**
   from the Microsoft Store remains a valid alternative; it solves the same
   problem from the other end, by translating OpenGL onto Direct3D 12.
-- **A virtual machine whose adapter has neither** is the case nothing can fix
-  from inside the guest. Measured in a Windows-on-ARM guest whose virtual
-  adapter reports Direct3D feature level 11_1 on WDDM 1.2: no OpenGL, no Direct3D
-  12, so neither backend and no compatibility pack. Turn on 3D acceleration in
-  the VM's settings if it has the option, or run Polylinker on the host.
+- **A virtual machine is worth trying.** An adapter that offers no OpenGL may
+  still offer Direct3D 12 or Vulkan, and the fallback finds it. Measured
+  2026-08-17 in a Windows-on-ARM guest whose virtual adapter reports Direct3D
+  feature level 11_1 on WDDM 1.2: `PL_GUI_RENDERER=glow` is refused and raises
+  the error dialog, `PL_GUI_RENDERER=wgpu` starts and works — so that guest runs
+  only because the fallback exists. If both are refused, turn on 3D acceleration
+  in the VM's settings if it has the option, or run Polylinker on the host.
 
 When the editor cannot start it says so — a dialog if you double-clicked it, and
 on stderr if you ran it from a terminal (`polylinker.exe 2> gui-error.txt`).

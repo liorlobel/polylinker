@@ -28,11 +28,14 @@ here to do.
     solves the same problem from the other end, by translating OpenGL onto
     Direct3D 12, and still works.
 
-  * A virtual machine whose graphics adapter has neither. Nothing installed
-    inside the guest can help: with no Direct3D 12 there is nothing for the
-    compatibility pack to translate onto and nothing for the fallback to use.
-    Turn on 3D acceleration in the VM's settings if it has the option; otherwise
-    run Polylinker on the host rather than in the guest.
+  * A virtual machine. Try it. A virtual adapter that offers no OpenGL may
+    still offer Direct3D 12 or Vulkan, and the fallback finds it. Measured on
+    2026-08-17 in a Windows-on-ARM guest whose adapter reports Direct3D feature
+    level 11_1 on WDDM 1.2: PL_GUI_RENDERER=glow is refused and shows the error
+    dialog there, PL_GUI_RENDERER=wgpu starts and works. That guest runs only
+    because the second attempt exists. If both are refused, turn on 3D
+    acceleration in the VM's settings if it has the option; otherwise run
+    Polylinker on the host rather than in the guest.
 
 Set PL_GUI_RENDERER=wgpu or =glow to pin one backend and switch the fallback
 off. That is the way to watch the other one start on a machine where the first

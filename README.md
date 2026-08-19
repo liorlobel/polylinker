@@ -8,7 +8,7 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 172,844 lines of Rust, 98,339 of it dependency-free (141 `.rs`
+> crates and 172,845 lines of Rust, 98,339 of it dependency-free (141 `.rs`
 > files under `crates/` and `bins/`), with 2,039 `#[test]` functions and a
 > 77-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
@@ -395,10 +395,16 @@ Microsoft's *OpenCL and OpenGL Compatibility Pack* solves the same problem from
 the other end, by translating OpenGL onto Direct3D 12, and remains a valid
 alternative.
 
-**A virtual machine with neither** is the case nothing fixes from inside the
-guest — measured in a Windows-on-ARM guest reporting Direct3D feature level 11_1
-on WDDM 1.2: no OpenGL, no Direct3D 12, so neither backend and no pack either.
-Turn on 3D acceleration in the VM, or run Polylinker on the host.
+**A virtual machine may well work, and the fallback is why.** Measured
+2026-08-17 in a Windows-on-ARM guest whose adapter reports Direct3D feature
+level 11_1 on WDDM 1.2: `PL_GUI_RENDERER=glow` is refused and raises the error
+dialog, `PL_GUI_RENDERER=wgpu` starts and works. No OpenGL, a working wgpu
+backend, so that guest runs *only* because the second attempt exists. Until
+2026-08-17 this paragraph said the opposite — no Direct3D 12 either, and nothing
+inside the guest could help — which was inferred from those two dxdiag lines
+rather than measured, and was wrong: feature level and driver model did not
+predict what wgpu would find. If both backends are refused, turn on 3D
+acceleration in the VM, or run Polylinker on the host.
 
 glow is tried first on every platform, because it is the backend every working
 installation has actually exercised and **no CI leg anywhere launches this

@@ -25,7 +25,33 @@ which.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **The documentation said a virtual machine was hopeless. It is not, and one
+  was measured.** Seven places — the startup message box, `README-WINDOWS.txt`
+  inside every Windows zip, the release notes, `README.md`, `docs/RELEASING.md`,
+  `bins/pl-gui/Cargo.toml` and the 0.12.1 entry below — said that a
+  Windows-on-ARM guest reporting Direct3D feature level 11_1 on WDDM 1.2 had no
+  Direct3D 12 either, so neither backend could serve it and nothing installed
+  inside the guest would help.
+
+  Measured on that guest on 2026-08-17, with the switch that exists for this:
+  `PL_GUI_RENDERER=glow` is refused and raises the error dialog,
+  `PL_GUI_RENDERER=wgpu` starts and works. No OpenGL, a working wgpu backend —
+  the guest runs, and it runs *only* because 0.12.1 added the fallback.
+
+  The defect is not in the code, which did the right thing; it is that a claim
+  read off two dxdiag strings was written down as though it had been measured.
+  Feature level and driver model did not predict what wgpu would find, so
+  neither belongs in a sentence about whether this program starts. The
+  replacement text says what was run and what happened, and tells a user with a
+  VM to try it rather than to give up.
+
+  The message box is the one of the seven that needed a different fix: it is
+  only ever shown *after* both backends have been refused, so suggesting wgpu
+  there would suggest something already tried. It now says that this program has
+  tried Direct3D 12 and Vulkan, and that an adapter reaching this text offered
+  none of the three.
 
 ## [0.12.1] - 2026-08-17
 
@@ -53,11 +79,17 @@ had put the program to try it from a terminal instead.
   The second backend costs **4.46 MiB** of binary — 16.40 MiB to 20.86 MiB,
   measured on this tree rather than estimated.
 
-  It does not rescue every machine, and the release notes say so: a virtual
-  adapter that offers neither OpenGL nor Direct3D 12 — measured in the reporting
-  VM, feature level 11_1 on WDDM 1.2 — has no backend for either renderer to
-  use, and no compatibility pack changes that from inside the guest. `pl`, which
-  wants no graphics driver of any kind, is what that machine can still run.
+  It does not rescue every machine: an adapter with no OpenGL, no Direct3D 12
+  and no Vulkan has nothing for either renderer to bind to, and `pl`, which
+  wants no graphics driver of any kind, is what such a machine can still run.
+
+  **CORRECTION (2026-08-17):** this paragraph named the reporting VM — feature
+  level 11_1 on WDDM 1.2 — as exactly that machine. It is not. That guest was
+  measured the day after this release: `PL_GUI_RENDERER=glow` is refused there
+  and `PL_GUI_RENDERER=wgpu` runs. It has no OpenGL and a working wgpu backend,
+  so the fallback shipped here is the reason it opens a window at all. The
+  claim was inferred from two dxdiag strings rather than measured. See
+  [Unreleased].
 
 ### Fixed
 

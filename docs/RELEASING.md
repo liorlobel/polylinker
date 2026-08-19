@@ -350,10 +350,18 @@ installed. And any failure is now *reported*, through `report_startup_failure`.
 Microsoft's *OpenCL and OpenGL Compatibility Pack* remains a valid alternative
 for a user who prefers it; it solves the same problem from the other end.
 
-The case neither fixes is **a virtual machine whose adapter offers neither API**
-— measured in a Windows-on-ARM guest at Direct3D feature level 11_1 on WDDM 1.2.
-Nothing installed inside such a guest can help, and the honest answer there is
-`pl`, which needs no graphics driver of any kind.
+The case neither fixes is an adapter offering **no OpenGL, no Direct3D 12 and no
+Vulkan**, and the honest answer there is `pl`, which needs no graphics driver of
+any kind. **A virtual machine is not automatically that case.** Measured
+2026-08-17 in a Windows-on-ARM guest at Direct3D feature level 11_1 on WDDM 1.2:
+`PL_GUI_RENDERER=glow` is refused, `PL_GUI_RENDERER=wgpu` runs. The fallback is
+precisely what makes that guest work.
+
+Until 2026-08-17 this section said that guest was the hopeless case — no Direct3D
+12, nothing installable inside it — which was read off two dxdiag lines rather
+than measured, and was wrong. Feature level and driver model did not predict what
+wgpu would find, so neither belongs in a claim about whether this program starts.
+Measure with `PL_GUI_RENDERER`; it exists for this.
 
 Three things follow for a release. The caveat is stated in the release notes and
 in `README-WINDOWS.txt`, and **`tools/ci.ps1` requires the phrases `OpenGL 2.0`
