@@ -1099,6 +1099,38 @@ jobs:
   msrv:
     name: rust-version floor
     runs-on: ubuntu-latest
+    # THE CEILING FOR THE THREE SHORT JOBS, ARGUED ONCE HERE AND REPEATED ON
+    # `wasm` AND `oracles`.
+    #
+    # `test` got one on 2026-08-19 after a leg of it sat inside `apt-get update`
+    # for 3h39m; see the comment there. These three had the same six-hour
+    # default and two of them reach the network the same way -- this job runs
+    # the very `apt-get` step that hung, and `oracles` pip-installs Biopython,
+    # pydna and SciPy -- so the exposure was identical and only the blast radius
+    # was smaller.
+    #
+    # Measured, four runs, every leg green:
+    #
+    #   run          date        msrv    wasm    oracles
+    #   31971072259  2026-08-16    53s     48s    1m18s
+    #   31997998145  2026-08-17    48s     43s    1m12s
+    #   32270926926  2026-08-19  2m01s   1m07s    1m20s
+    #   32405229271  2026-08-20    52s     47s    1m13s
+    #
+    # The last of those is the informative one: it ran after stable moved to
+    # 1.98, so every cache keyed on the rustc version missed, and none of the
+    # three exceeded 1m13s even so. The slowest figure anywhere in the table is
+    # this job's 2m01s.
+    #
+    # 20 for all three, and the sameness is deliberate. They are one class of
+    # job -- short, ubuntu-latest, install-from-the-network then build -- and
+    # three separately tuned numbers would claim a precision these measurements
+    # do not support. 20 is roughly ten times the slowest observation and
+    # roughly seventeen times the other two, which is the same generosity
+    # `reconcile` already gets (10 minutes for a job that takes twenty seconds).
+    # As with `test`: not a performance budget, and not to be tightened into
+    # one. It exists so a wedged runner goes red inside the hour.
+    timeout-minutes: 20
     # Deliberate, and the note on the `cargo check` step below already explains
     # it: an old rustc warning about code that stable accepts silently is still
     # something a reader following README-LINUX.txt will meet. Linux, so nothing
@@ -1156,6 +1188,9 @@ jobs:
   wasm:
     name: wasm32 build
     runs-on: ubuntu-latest
+    # 20, for the reasons set out in full on `msrv` above. Slowest observed
+    # here is 1m07s across four runs.
+    timeout-minutes: 20
     env:
       RUSTFLAGS: -D warnings
     steps:
@@ -1176,6 +1211,10 @@ jobs:
   oracles:
     name: differential tests and benchmark
     runs-on: ubuntu-latest
+    # 20, for the reasons set out in full on `msrv` above. Slowest observed
+    # here is 1m20s across four runs, and this is the job that pip-installs the
+    # oracles, so it has the most network to be stuck on.
+    timeout-minutes: 20
     env:
       RUSTFLAGS: -D warnings
     steps:
