@@ -1778,7 +1778,9 @@ mod tests {
         let rev_clean = |dna: &[u8]| -> bool {
             !rev0
                 || iupac::reverse_complement(dna)
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .all(|c| !code.is_stop(c))
         };
         let mut choice = vec![0usize; options.len()];
@@ -1832,7 +1834,7 @@ mod tests {
         // forward frames. The incremental test above is an optimisation and
         // this is the claim.
         for f in 0..3 {
-            for c in dna[f..].chunks_exact(3) {
+            for c in dna[f..].as_chunks::<3>().0 {
                 assert!(
                     !forbidden(c),
                     "the encoding of {peptide} spells {} in frame {f}",
@@ -3774,7 +3776,7 @@ mod tests {
         // the property is a claim this test makes and not one it borrows.
         let padded = format!("{}{dna}{}", FILLER.repeat(2), FILLER.repeat(2));
         for f in 0..3 {
-            for c in padded.as_bytes()[f..].chunks_exact(3) {
+            for c in padded.as_bytes()[f..].as_chunks::<3>().0 {
                 assert!(
                     !code.is_stop(c) && !code.is_start(c),
                     "frame {f} of the padded encoding spells {}",

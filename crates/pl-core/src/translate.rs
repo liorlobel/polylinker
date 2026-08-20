@@ -325,7 +325,11 @@ impl Code {
     /// decides what a stop means, because for auto-annotation an internal stop
     /// is evidence about a *frame*, not a reason to stop reading.
     pub fn translate(&self, seq: &[u8]) -> Vec<u8> {
-        seq.chunks_exact(3).map(|c| self.codon(c)).collect()
+        seq.as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| self.codon(c))
+            .collect()
     }
 
     /// Translate a span that is known to *begin at an initiator*, the way

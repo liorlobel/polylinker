@@ -872,7 +872,9 @@ mod tests {
         let digits: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
         assert_eq!(digits.len() % 2, 0, "an odd number of hex digits");
         digits
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| nibble(p[0]) * 16 + nibble(p[1]))
             .collect()
     }

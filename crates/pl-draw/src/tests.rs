@@ -1816,8 +1816,10 @@ fn the_provenance_rows_record_the_constants_the_code_actually_writes() {
     let ihdr = payload(b"IHDR");
     let gama = u32::from_be_bytes(payload(b"gAMA")[..4].try_into().unwrap());
     let chrm: Vec<u32> = payload(b"cHRM")
-        .chunks_exact(4)
-        .map(|w| u32::from_be_bytes(w.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|w| u32::from_be_bytes(*w))
         .collect();
     // Without this, an empty or short cHRM would join to the empty string, and
     // `contains("")` is true of every file — the needle would stop being able to

@@ -270,10 +270,8 @@ fn compress(h: &mut [u64; 8], block: &[u8; BLOCK]) {
     // The message schedule, §6.4.2. Note the shift and rotation amounts are
     // SHA-512's (1/8/>>7 and 19/61/>>6); SHA-256's are 7/18/>>3 and 17/19/>>10.
     let mut w = [0u64; 80];
-    for (i, chunk) in block.chunks_exact(8).enumerate() {
-        w[i] = u64::from_be_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]);
+    for (i, chunk) in block.as_chunks::<8>().0.iter().enumerate() {
+        w[i] = u64::from_be_bytes(*chunk);
     }
     for i in 16..80 {
         let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
