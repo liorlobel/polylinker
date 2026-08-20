@@ -475,7 +475,7 @@ mod tests {
         let rc = crate::iupac::reverse_complement(run.as_bytes());
         for s in [run.as_bytes(), rc.as_slice()] {
             for f in 0..3 {
-                for c in s[f..].chunks_exact(3) {
+                for c in s[f..].as_chunks::<3>().0 {
                     for code in crate::translate::all_tables() {
                         assert!(
                             !code.is_start(c),

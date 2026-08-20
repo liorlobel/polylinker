@@ -19286,7 +19286,7 @@ mod tests {
 
         let mut opaque = std::collections::BTreeSet::new();
         let mut inked = 0usize;
-        for px in icon.rgba.chunks_exact(4) {
+        for px in icon.rgba.as_chunks::<4>().0 {
             if px[3] > 0 {
                 inked += 1;
             }

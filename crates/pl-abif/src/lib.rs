@@ -428,7 +428,12 @@ fn as_string(t: Option<&Tag>) -> String {
 
 fn as_u16s(t: Option<&Tag>) -> Vec<u16> {
     let Some(t) = t else { return Vec::new() };
-    t.data.chunks_exact(2).map(|c| be_u16(c, 0)).collect()
+    t.data
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| be_u16(c, 0))
+        .collect()
 }
 
 /// Parse a chromatogram.
