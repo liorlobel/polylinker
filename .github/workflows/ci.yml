@@ -598,6 +598,32 @@ jobs:
         # precise presentation -- immediate error or a job that queues until it
         # times out -- is not verified here and the first run will show it.
         os: [ubuntu-latest, macos-latest, windows-11-arm]
+    # ADDED 2026-08-19, AFTER A LEG OF THIS JOB SPENT 3h39m DOING NOTHING.
+    #
+    # `gate` has had a ceiling since it was written and `reconcile` has one;
+    # this job had none, so its ceiling was GitHub's default of six hours. On
+    # 2026-08-19 the ubuntu leg wedged inside `apt-get update` in the step
+    # below, 74 seconds in, on `archive.ubuntu.com noble-security InRelease`.
+    # It never reached cargo. Nothing in the tree was wrong and nothing could
+    # go red: a job with no output and no ceiling is indistinguishable from a
+    # slow one, which is the shape of defect this repository keeps finding
+    # wearing yet another hat. It was still sitting there when a human
+    # cancelled it, and would have sat for two hours more.
+    #
+    # 45 rather than a tighter number, because the honest measurements are of
+    # WARM runs and this must not go red on a cold one. Six complete legs, all
+    # green, across two runs:
+    #
+    #   run 31997998145 (2026-08-17)  ubuntu 8m08s  macos 7m43s  arm 12m44s
+    #   run 32270926926 (2026-08-19)  ubuntu 11m12s macos 8m06s  arm 13m06s
+    #
+    # So 45 is 3.4x the slowest leg ever observed here and half of what `gate`
+    # -- which does strictly more -- is already allowed. A cache miss or a cold
+    # runner has room; a hang does not. The number this replaces was 360.
+    #
+    # This is not a performance budget and must not be tightened into one. Its
+    # only job is to turn a wedged runner into a red check in under an hour.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
