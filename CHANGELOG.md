@@ -25,6 +25,12 @@ which.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-03
+
+One number, and it is the one that decides whether the Linux download runs
+at all: the glibc floor drops from 2.39 to 2.28. Everything else here is CI
+learning to fail when it should.
+
 ### Changed
 
 - **The Linux download reaches the machines it is for.** Its glibc floor was
