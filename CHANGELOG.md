@@ -25,6 +25,23 @@ which.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The two macOS launch checks could not fail.** `gui-smoke`'s Apple OpenGL
+  and Metal steps ran `perl -e 'alarm 180; exec @ARGV' -- target/release/polylinker`,
+  and perl's `exec` RETURNS on failure rather than exiting, so the one-liner
+  fell off the end with status 0. A binary that was missing, not executable, or
+  built for another architecture was reported as "opens a window and exits
+  cleanly" — and those two steps are the only Apple OpenGL and Metal coverage
+  anywhere. They shipped that way in 0.13.0. `tools/check-dmg.sh` has carried
+  the `or die` form since the day it was written, which is how the gap in
+  `ci.yml` was found; both steps now carry it, and a control step runs the same
+  idiom against a path that does not exist and fails the job unless it comes
+  back non-zero. Measured: a missing path gives 2, a non-executable one 13, a
+  real program 0, and the alarm still reaches through the exec at 142. The
+  Linux steps were never affected, because coreutils `timeout` reports 127 for
+  a command it cannot run.
+
 ## [0.13.0] - 2026-09-03
 
 A macOS download that is an application rather than three loose executables,
