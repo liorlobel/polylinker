@@ -1666,19 +1666,41 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Linux only. The same three -dev packages `test` installs, plus a virtual
-      # X server and Mesa's two software renderers: llvmpipe (libgl1-mesa-dri,
-      # via GLX from libglx-mesa0 / EGL from libegl1) for glow, lavapipe
+      # Linux only. Three groups, and the middle one is the group the first run
+      # of this job proved was missing.
+      #
+      # BUILD, as `test` installs them: libgtk-3-dev (for `rfd`), and the
+      # xkbcommon and wayland -dev packages.
+      #
+      # RUN TIME, which building does not need and launching does. The editor
+      # opens its graphics and input libraries BY NAME at run time rather than
+      # linking them, so a missing one is a panic at startup and not a loader
+      # error naming the file -- `tools/readme/README-LINUX.txt` says exactly
+      # this to a user on a minimal image, and lists these eight packages. No
+      # job had ever launched the program, so no job had ever needed them:
+      # `libxkbcommon-dev` brings `libxkbcommon0` and NOT
+      # `libxkbcommon-x11-0`, and the first run of this job died on
+      # `xkbcommon-dl-0.4.2/src/x11.rs:59` with "Library libxkbcommon-x11.so
+      # could not be loaded" (that crate asks for `libxkbcommon-x11.so.0` then
+      # `libxkbcommon-x11.so`, and only that package provides either). This is
+      # the class of defect the job exists to find, found on its own first run.
+      #
+      # SOFTWARE RENDERERS, one per backend: llvmpipe (libgl1-mesa-dri, via GLX
+      # from libglx-mesa0 or EGL from libegl1) for glow, lavapipe
       # (mesa-vulkan-drivers, which pulls libvulkan1) for wgpu. vulkan-tools is
       # only for the `vulkaninfo --summary` line in the log, which is what says
-      # which ICD the wgpu step actually got. macOS ships its own graphics
-      # stack and the runner's logged-in session is the display, so it needs
-      # none of this.
+      # which ICD the wgpu step actually got.
+      #
+      # macOS ships its own graphics stack and the runner's logged-in session is
+      # the display, so it needs none of this.
       - name: Install Linux GUI dependencies, a virtual X server and Mesa's software renderers
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev \
+          sudo apt-get install -y \
+            libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon0 \
+            libxkbcommon-x11-0 libwayland-client0 libgl1 \
             xvfb libgl1-mesa-dri libglx-mesa0 libegl1 mesa-vulkan-drivers vulkan-tools
 
       - name: Build the editor
@@ -1709,11 +1731,29 @@ jobs:
       # and mean some other driver. The path is the x86_64 one; an arm64
       # ubuntu runner would need lvp_icd.aarch64.json. WGPU_BACKEND=vulkan is
       # what keeps wgpu off its GLES-over-EGL backend, which would be a second
-      # llvmpipe run wearing wgpu's name. UNVERIFIED until the first run:
-      # whether eframe's default adapter request accepts a CPU adapter. If it
-      # refuses, `WGPU_BACKEND=gl` (that GLES-over-EGL backend, on llvmpipe) is
-      # the fallback to try, and the sentence before this one becomes the
-      # reason it was not the first choice.
+      # llvmpipe run wearing wgpu's name -- "vulkan" and "vk" are the spellings
+      # `Backends::from_comma_list` accepts (wgpu-types 29.0.4 backend.rs:181),
+      # and `egui-wgpu`'s `WgpuSetupCreateNew` default reads it through
+      # `Backends::from_env()` (setup.rs:241), so the variable does reach the
+      # instance.
+      #
+      # A CPU ADAPTER IS ACCEPTED, which was the open question here until it
+      # was read rather than guessed. `wgpu-core`'s `Instance::request_adapter`
+      # (instance.rs:481) filters adapters only for `force_fallback_adapter`
+      # and for surface incompatibility; `power_preference` merely SORTS, with
+      # `DeviceType::Cpu` ranked last (`get_order`, instance.rs:564-571).
+      # `egui-wgpu` passes `force_fallback_adapter: false` (lib.rs:152), which
+      # means "do not REQUIRE a software rasterizer" and not "reject one". So
+      # lavapipe, as the only Vulkan adapter, is selected. What is still
+      # unverified is whether lavapipe presents to an Xvfb surface at all; if
+      # it cannot, `WGPU_BACKEND=gl` (the GLES-over-EGL backend, on llvmpipe)
+      # is the fallback to try, and the paragraph above becomes the reason it
+      # was not the first choice.
+      #
+      # THE ICD FILE IS ASSERTED, not assumed. A path that does not exist makes
+      # the loader enumerate nothing, and wgpu then reports no adapters -- a
+      # failure that reads like a broken renderer rather than a wrong file
+      # name. Listing the directory says which it was in one line.
       - name: wgpu -- Vulkan on lavapipe -- opens a window and exits cleanly
         if: runner.os == 'Linux'
         env:
@@ -1723,6 +1763,11 @@ jobs:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           XDG_STATE_HOME: ${{ runner.temp }}/pl-state-wgpu
         run: |
+          if [ ! -f "$VK_ICD_FILENAMES" ]; then
+            echo "::error::$VK_ICD_FILENAMES is not there, so the Vulkan loader would find no driver and wgpu would report no adapter. What mesa-vulkan-drivers actually installed:"
+            ls -la /usr/share/vulkan/icd.d/ || echo '  (no /usr/share/vulkan/icd.d at all)'
+            exit 1
+          fi
           vulkaninfo --summary || true
           timeout --signal=KILL 120 \
             xvfb-run -a -s "-screen 0 1600x1000x24" -e "$RUNNER_TEMP/xvfb-wgpu.log" \

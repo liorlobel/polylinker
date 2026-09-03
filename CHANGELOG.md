@@ -56,8 +56,18 @@ which.
   closing it from the first frame) on `ubuntu-latest` under Xvfb on Mesa's
   software OpenGL and Vulkan, and on `macos-latest` on Apple's OpenGL and
   Metal. The macOS launches were measured on the maintainer's Mac on
-  2026-09-03; the Linux leg is reasoned, not measured, until its first run. No
-  Windows leg launches the editor, and no leg runs on a real Linux driver.
+  2026-09-03. No Windows leg launches the editor, and no leg runs on a real
+  Linux driver.
+
+  **It earned its place on its first run**, which is worth recording because
+  the job is otherwise easy to read as ceremony. That run went red: the editor
+  panicked at startup with "Library libxkbcommon-x11.so could not be loaded",
+  because `libxkbcommon-dev` brings `libxkbcommon0` and not
+  `libxkbcommon-x11-0`, and no CI leg had ever launched the program and so none
+  had ever needed the latter. `tools/readme/README-LINUX.txt` had named that
+  package to users on a minimal image since it was written; nothing checked
+  that CI agreed with it. The eight run-time packages that file lists are now
+  installed, and the Linux leg has still not been seen green.
 
 - **`pl licences` prints the fonts `pl` embeds.** `pl export --png` fills glyph
   outlines from two Liberation Sans faces, 825,168 bytes under SIL OFL 1.1,
