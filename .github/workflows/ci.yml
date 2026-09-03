@@ -746,7 +746,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
 
       # `--locked` on every cargo invocation that resolves, from here down.
       #
@@ -1238,7 +1238,7 @@ jobs:
       - name: Install Linux GUI dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
 
       # `check`, and deliberately not `test`. The claim is that this tree
       # COMPILES on the toolchain it tells people to install; whether it also
@@ -1684,8 +1684,13 @@ jobs:
       # Linux only. Three groups, and the middle one is the group the first run
       # of this job proved was missing.
       #
-      # BUILD, as `test` installs them: libgtk-3-dev (for `rfd`), and the
-      # xkbcommon and wayland -dev packages.
+      # BUILD, as `test` installs them: the xkbcommon and wayland -dev
+      # packages. NOT libgtk-3-dev, which every apt line here carried until
+      # 2026-09-03 on the assumption that `rfd` needed it. It does not: there
+      # is no gtk crate in Cargo.lock, rfd's Linux path is the XDG portal, and
+      # the release leg's AlmaLinux 8 container built the whole workspace with
+      # no GTK of any kind installed. That is the measurement docs/RELEASING.md
+      # asked for before anyone removed it.
       #
       # RUN TIME, which building does not need and launching does. The editor
       # opens its graphics and input libraries BY NAME at run time rather than
@@ -1713,7 +1718,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libxkbcommon-dev libwayland-dev \
             libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon0 \
             libxkbcommon-x11-0 libwayland-client0 libgl1 \
             xvfb libgl1-mesa-dri libglx-mesa0 libegl1 mesa-vulkan-drivers vulkan-tools

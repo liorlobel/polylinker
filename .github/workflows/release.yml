@@ -232,20 +232,15 @@ jobs:
         with:
           key: release-${{ matrix.label }}
 
-      # eframe needs these to BUILD on Linux; the other two platforms ship
-      # their own windowing.
-      #
-      # Copied verbatim from ci.yml, INCLUDING libgtk-3-dev, which a read of
-      # Cargo.lock says is not actually needed -- there is no gtk crate anywhere
-      # in the graph, and rfd reaches the file dialog through the XDG portal
-      # over Wayland. Dropping it belongs in ci.yml, where a wrong guess costs a
-      # red build on a pull request. A release workflow is not where to test a
-      # hypothesis: the tag is already pushed by the time this runs.
-      - name: Install Linux GUI build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
+      # THERE IS NO `apt-get` STEP ON THE LINUX LEG ANY MORE, and its absence
+      # is the point. This job installed libgtk-3-dev, libxkbcommon-dev and
+      # libwayland-dev on the HOST so that eframe could build there. Nothing
+      # builds on the host any longer: the step below compiles inside a
+      # container that installs its own dependencies, and `Package (Linux)`
+      # takes `-SkipBuild`. The host step was 27 seconds of installing
+      # libraries nothing then linked against. Removed 2026-09-03, in the
+      # change that also dropped GTK from the two `ci.yml` lines, where it
+      # really is a build dependency of nothing.
 
       # ---------------------------------------------------------------- Linux
       #
@@ -282,11 +277,9 @@ jobs:
       #
       # Root inside the container because dnf needs it, then `chown` back to
       # the runner's uid so the host steps and the cache's post-step can read
-      # what it wrote. `libgtk-3-dev`'s counterpart is deliberately NOT
-      # installed: docs/RELEASING.md records that there is no gtk crate in
-      # Cargo.lock and that rfd reaches the file dialog through the XDG portal,
-      # so this is also the measurement that settles it -- if the build needs
-      # GTK, this step is where it says so.
+      # what it wrote. NO GTK of any kind is installed here, and the workspace
+      # builds -- which is the measurement docs/RELEASING.md asked for, and is
+      # why `libgtk-3-dev` came out of ci.yml's three apt lines on 2026-09-03.
       - name: Build the Linux artifacts against an old glibc
         if: runner.os == 'Linux'
         run: |
