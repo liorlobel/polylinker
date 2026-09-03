@@ -108,6 +108,19 @@ which.
   bound is one such pass, not a few codons; how long such a pass takes at
   4.64 Mb was not measured.
 
+- **The taint hook is executable, so git stops ignoring it.**
+  `features/SOURCING.md` section 0.4 requires two halves for the pLannotate
+  payload: the filename in `.gitignore` **and** a pre-commit hook refusing any
+  staged blob with that digest. `tools/hooks/pre-commit` is that hook, it is
+  correct, and it was committed mode 100644 — so on any clone with
+  `core.hooksPath` set to `tools/hooks`, as the hook's own install line
+  instructs, git skipped it and said so only as a hint nobody reads. It has
+  therefore never run, for anyone, and the hook's header calls itself "the only
+  thing standing between the payload and the history". Now 100755. The
+  mechanism was checked in both directions in a scratch repository before being
+  made live: a blob whose digest is pinned is refused, an innocent one commits.
+  Found because git printed that hint while committing this branch.
+
 - `pl annotate`: the two empty-database messages (under `--db` when nothing is
   shippable, and on a search when the default set is empty) no longer give "no
   human sign-off" as the only explanation; they also name a compiled-in
