@@ -25,6 +25,13 @@ which.
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-09-03
+
+Primers stop falling out of a GenBank save. A `.dna` opened, saved as
+GenBank and reopened kept its primers only as prose in a note; they come
+back as primers now, and the two things GenBank still cannot carry say so
+instead of vanishing.
+
 ### Changed
 
 - **A primer survives a GenBank round trip as a primer.** GenBank has no primer

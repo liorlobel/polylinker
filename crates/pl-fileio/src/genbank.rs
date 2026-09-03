@@ -1976,6 +1976,71 @@ mod tests {
         assert_eq!(again, text, "a round trip changed the bytes");
     }
 
+    /// The whole chain a user walks: a `.dna` opened, saved as GenBank, and
+    /// opened again still has its primers.
+    ///
+    /// The other round-trip test starts from a `Molecule` in memory. This one
+    /// starts from `.dna` BYTES, which is the thing a user actually double
+    /// clicks, and goes through four pieces rather than two:
+    /// `snapgene::from_molecule` -> `snapgene::parse` -> `genbank::write` ->
+    /// `genbank::parse`. It exists because the only test that covered this
+    /// chain on real files is corpus-gated (`tests/corpus.rs`, which skips
+    /// without `PL_CORPUS`), so on any machine without a plasmid collection --
+    /// every CI runner this project has -- nothing exercised it end to end.
+    ///
+    /// PROVEN TO FAIL on 2026-09-03, before `promote_primers`: the last step
+    /// returned a molecule with `primers: []` and two `primer_bind` entries in
+    /// `features`, so the Primers tab of a reopened `.gb` was empty and its
+    /// oligo survived only as the text of a note.
+    #[test]
+    fn a_dna_saved_as_genbank_and_reopened_still_has_its_primers() {
+        let mut mol = Molecule {
+            seq: b"acgt".repeat(250),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.primers.push(Primer {
+            name: "F_colony".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: String::new(),
+            sites: vec![BindingSite {
+                start: 40,
+                end: 56,
+                strand: Strand::Forward,
+                tm: Some(58.1),
+            }],
+        });
+
+        // .dna out, .dna back in -- the format the primer object is native to.
+        let dna = crate::snapgene::from_molecule(&mol);
+        let doc = crate::snapgene::parse(&dna).expect("the .dna we just wrote must parse");
+        assert_eq!(
+            doc.molecule.primers.len(),
+            1,
+            "the .dna leg lost the primer"
+        );
+
+        // GenBank out, GenBank back in -- the format that has no primer object.
+        let (text, report) = write_reporting(&doc.molecule, "p.dna", (27, 6, 2026));
+        assert!(report.is_empty(), "nothing should be lost here: {report:?}");
+        let back = parse(&text);
+
+        assert_eq!(back.primers.len(), 1, "{:?}", back.primers);
+        assert_eq!(back.primers[0].name, "F_colony");
+        assert_eq!(back.primers[0].seq, "GTAAAACGACGGCCAGT");
+        assert_eq!(back.primers[0].sites.len(), 1);
+        assert_eq!(
+            (back.primers[0].sites[0].start, back.primers[0].sites[0].end),
+            (40, 56)
+        );
+        assert_eq!(back.primers[0].sites[0].tm, Some(58.1));
+        assert!(
+            !back.features.iter().any(|f| f.kind == "primer_bind"),
+            "the primer is a primer, not also a feature: {:?}",
+            back.features
+        );
+    }
+
     /// Only the form this writer emits is promoted. Everything else stays a
     /// feature, because reinterpreting it would delete it from the file's own
     /// feature list on open.
