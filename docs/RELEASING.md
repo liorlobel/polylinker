@@ -574,17 +574,24 @@ on somebody's machine.
 
 ### Linux: which machines this actually runs on
 
-`ubuntu-latest` is Ubuntu 24.04, whose glibc is **2.39**. glibc is backward but
-not forward compatible, so that is a floor and not a preference:
+The Linux artifacts are compiled inside an `almalinux:8` container, whose glibc
+is **2.28**. glibc is backward but not forward compatible, so that is a floor
+and not a preference:
 
 | | glibc | Runs |
 |---|---|---|
-| Ubuntu 24.04+, Debian 13+, Fedora 40+, RHEL 10+ | ≥ 2.39 | yes |
-| Ubuntu 22.04 | 2.35 | **no** |
-| Debian 12 | 2.36 | **no** |
-| RHEL 9 / Rocky 9 | 2.34 | **no** |
+| RHEL/Rocky/Alma 8+, Ubuntu 20.04+, Debian 10+, Fedora 29+ | ≥ 2.28 | yes |
+| Ubuntu 18.04 | 2.27 | **no** |
+| RHEL 7 / CentOS 7 | 2.17 | **no** |
 
-The failure is a bare ``version `GLIBC_2.39' not found`` at exec time, which
+**Every row of this table said `no` except the first until 2026-09-03**, when
+the floor was 2.39 and the three that failed were Ubuntu 22.04, Debian 12 and
+RHEL 9 / Rocky 9 — the locked-down university PC and the cluster head node the
+whole project is aimed at. The floor is a property of the machine that
+compiled the binary, and this leg compiled on `ubuntu-latest`, which had become
+24.04.
+
+The failure is a bare ``version `GLIBC_2.28' not found`` at exec time, which
 tells a wet-lab user nothing. So it is stated in three places, and one of them
 is inside the archive: `README-LINUX.txt` travels with the binaries, because a
 release page gets read once and a tarball gets copied onto a cluster by somebody
@@ -592,14 +599,37 @@ who never saw it.
 
 **And it is measured rather than asserted.** The Linux job reads the highest
 `GLIBC_x.y` symbol version the four artifacts actually reference, compares it
-with the number written in `README-LINUX.txt`, and fails the release if the
-binaries need more than the file promises. A runner image upgrade raises that
-floor silently; this turns it into a red build instead of a bug report from
-somebody with an older cluster.
+with the number written in `README-LINUX.txt`, and fails the release if the two
+disagree. A runner image upgrade raises that floor silently; this turns it into
+a red build instead of a bug report from somebody with an older cluster.
 
-Widening the floor means building on an older image — that is the only lever,
-and it is a deliberate change to `runs-on`, not something to discover by
-accident.
+**In BOTH directions, since 2026-09-03.** It compared one way until then — it
+failed when the binaries needed MORE than the file promised, and said nothing
+when they needed less. That second case is not harmless: it is the file turning
+away every user between the real floor and the claimed one. It is also exactly
+what this change produced, and the check is what caught it: the artifacts
+dropped to 2.28 while `README-LINUX.txt` still said 2.39, and the release went
+red with the sentence *"these binaries only need glibc 2.28, and
+README-LINUX.txt claims 2.39 — so the file turns away every user between the
+two"*.
+
+**Widening the floor means building against an older glibc, and the lever is
+now a container rather than `runs-on`.** This paragraph named an older runner
+image as "the only lever" until 2026-09-03. That lever is being taken away:
+[actions/runner-images #14254](https://github.com/actions/runner-images/issues/14254)
+begins deprecating the Ubuntu 22 images on 2026-09-17, with brownouts that
+deliberately fail jobs, and removes them on 2027-04-17 — so pinning
+`ubuntu-22.04` would have bought a few weeks and then failed releases at
+random. The Linux leg instead runs `cargo build --release --workspace --locked`
+inside an `almalinux:8` container, which is glibc 2.28 and supported to 2029,
+and then packages on the host with `-SkipBuild -BinDir target/release` exactly
+as the macOS leg does after `lipo`. A container is not subject to a runner
+label's retirement, and the build command is the one in `tools/release.ps1`
+rather than a second one that could drift from it.
+
+That build is also the measurement that settles the GTK question below: the
+container installs `libxkbcommon-devel` and `wayland-devel` and no GTK at all,
+and the workspace builds.
 
 **Run-time libraries.** `pl` and `pl-mcp` need nothing but libc. The GUI reaches
 X11, xkbcommon, Wayland and EGL/GL through `dlopen` rather than linking them, so

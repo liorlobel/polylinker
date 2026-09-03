@@ -25,6 +25,41 @@ which.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Linux download reaches the machines it is for.** Its glibc floor was
+  2.39, so it would not start on Ubuntu 22.04, Debian 12 or RHEL 9 / Rocky 9 —
+  the locked-down university PC and the cluster head node this whole project is
+  aimed at — and the user got a bare `version 'GLIBC_2.39' not found`. The
+  floor is a property of the machine that compiled the binary, and that machine
+  was `ubuntu-latest`, which had become 24.04. The Linux leg now runs
+  `cargo build --release --workspace --locked` inside an `almalinux:8`
+  container, glibc 2.28, and packages on the host with
+  `-SkipBuild -BinDir target/release` exactly as the macOS leg does after
+  `lipo`. **Measured on the runner: the artifacts require 2.28, the container
+  reports 2.28, and the host is still 2.39.** So the download now runs on
+  RHEL/Rocky/Alma 8+, Ubuntu 20.04+, Debian 10+ and Fedora 29+, where every one
+  of those but the newest was previously refused.
+
+  `docs/RELEASING.md` named an older runner image as "the only lever". It is
+  not, and it is being taken away: actions/runner-images #14254 begins
+  deprecating the Ubuntu 22 images on 2026-09-17 with brownouts that
+  deliberately fail jobs, and removes them on 2027-04-17, so pinning
+  `ubuntu-22.04` would have bought a few weeks and then failed releases at
+  random. A container is not subject to a runner label's retirement. It also
+  settles the open question next to that paragraph: the container installs
+  `libxkbcommon-devel` and `wayland-devel` and no GTK at all, and the workspace
+  builds, so `libgtk-3-dev` is confirmed unnecessary.
+
+- **The glibc check compares in both directions.** It failed when the binaries
+  needed MORE than `README-LINUX.txt` promised and said nothing when they
+  needed less — which is the file turning away every user between the real
+  floor and the claimed one. That is not hypothetical: it is exactly what this
+  change produced, and the strengthened check is what caught it, going red with
+  *"these binaries only need glibc 2.28, and README-LINUX.txt claims 2.39 — so
+  the file turns away every user between the two"*. The floor is now stated in
+  four places and all four are held to one measurement.
+
 ### Fixed
 
 - **The two macOS launch checks could not fail.** `gui-smoke`'s Apple OpenGL
