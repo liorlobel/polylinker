@@ -1795,12 +1795,50 @@ jobs:
             target/release/polylinker \
             || { rc=$?; echo "::error::wgpu smoke exited $rc"; cat "$RUNNER_TEMP/xvfb-wgpu.log"; exit $rc; }
 
+      # THE GUARD ON THE TWO STEPS BELOW, PROVED BEFORE THEY ARE RELIED ON.
+      #
+      # `exec` in perl RETURNS on failure rather than exiting, so
+      # `perl -e 'alarm 180; exec @ARGV' -- <path>` falls off the end with
+      # status 0 when <path> does not exist, is not executable, or is a
+      # Mach-O for another architecture. That is what the two steps below ran
+      # from 2026-09-03 until later the same day: the only Apple OpenGL and
+      # Metal coverage anywhere, green by construction, reporting "opens a
+      # window and exits cleanly" for a binary that never started. The `or
+      # die` is the fix -- perl then prints the errno and exits non-zero --
+      # and `tools/check-dmg.sh` has carried it since the day it was written,
+      # which is how the gap in THIS file was found.
+      #
+      # A CONTROL RATHER THAN A COMMENT, because that is the rule this
+      # repository states everywhere else and did not apply here: the same
+      # idiom, against a path that is not there, failing the job unless it
+      # comes back non-zero. Delete the `or die` from either step below and
+      # this step still passes -- it is not a copy of them -- but it is the
+      # thing a reader is pointed at, and it fails the moment perl's exec
+      # semantics change under us. Measured locally on 2026-09-03: a missing
+      # path gives 2, a non-executable one 13, a real program 0, and the alarm
+      # still reaches through the exec at 142.
+      #
+      # macOS only. The Linux steps above use coreutils `timeout`, which
+      # reports 127 for a command it cannot run, so they were never affected.
+      - name: A failed exec is a failed step  (control for the two launches below)
+        if: runner.os == 'macOS'
+        run: |
+          rc=0
+          perl -e 'alarm 180; exec @ARGV or die "exec $ARGV[0]: $!\n"' \
+            -- /nonexistent/polylinker || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::a perl exec of a path that does not exist came back 0, so the two launch steps below would report success for a binary that never started"
+            exit 1
+          fi
+          echo "a nonexistent binary came back $rc, so the two launch steps below can fail"
+
       # macOS only, and the form measured on the maintainer's Mac (see the job
       # comment). No packages and no X server: the runner's logged-in session
       # is the display. coreutils `timeout` is not promised on the macOS
       # image, so perl's alarm is the per-process ceiling -- it survives the
       # exec, and a window that never closes dies of SIGALRM at 180s, which
-      # the shell reports as 142 and the step as red. HOME is per step for the
+      # the shell reports as 142 and the step as red. `or die` on the exec for
+      # the reason the control above gives. HOME is per step for the
       # reason XDG_STATE_HOME is above: on macOS `state_base`
       # (bins/pl-gui/src/recover.rs) is `$HOME/Library/Application
       # Support/Polylinker` and reads no XDG variable. The `mkdir` is the one
@@ -1813,7 +1851,8 @@ jobs:
           HOME: ${{ runner.temp }}/pl-home-glow
         run: |
           mkdir -p "$HOME"
-          perl -e 'alarm 180; exec @ARGV' -- target/release/polylinker
+          perl -e 'alarm 180; exec @ARGV or die "exec $ARGV[0]: $!\n"' \
+            -- target/release/polylinker
 
       - name: wgpu -- Metal -- opens a window and exits cleanly
         if: runner.os == 'macOS'
@@ -1823,4 +1862,5 @@ jobs:
           HOME: ${{ runner.temp }}/pl-home-wgpu
         run: |
           mkdir -p "$HOME"
-          perl -e 'alarm 180; exec @ARGV' -- target/release/polylinker
+          perl -e 'alarm 180; exec @ARGV or die "exec $ARGV[0]: $!\n"' \
+            -- target/release/polylinker
