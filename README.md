@@ -8,8 +8,8 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 173,776 lines of Rust, 99,043 of it dependency-free (141 `.rs`
-> files under `crates/` and `bins/`), with 2,047 `#[test]` functions and a
+> crates and 174,033 lines of Rust, 99,271 of it dependency-free (141 `.rs`
+> files under `crates/` and `bins/`), with 2,048 `#[test]` functions and a
 > 77-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-10, and recounted on every test run since:
@@ -375,7 +375,14 @@ node prototype/check_page.js "your/**/*.dna" "your/**/*.gbk"       # needs jsdom
 
 Polylinker aims to read SnapGene `.dna` files and to write them for the common
 case. GenBank is the canonical interchange format and the default save format,
-because it is lossless for everything Polylinker models and SnapGene reads it.
+because it is lossless for nearly everything Polylinker models and SnapGene
+reads it. That sentence said "lossless for everything" until 2026-09-03, and
+two exceptions are worth naming: a primer's free-text **description** has
+nowhere to go in GenBank and is dropped, and a primer with **no binding site**
+cannot be expressed at all and is dropped with a warning. Primers themselves
+survive — the reader promotes the `primer_bind` form this writer emits back
+into primers — and until that date they did not, arriving as ordinary
+features.
 
 Where `.dna` write support is imperfect it will say so, in the save dialog, per
 block. A writer that silently drops what it does not understand is the worst

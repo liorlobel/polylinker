@@ -7,7 +7,7 @@
 //! `/ApEinfo_fwdcolor` + `/ApEinfo_revcolor` (ApE, UGENE, SnapGene) and
 //! `/note="color: #rrggbb"` (Benchling and several web viewers).
 
-use pl_core::{Feature, Molecule, Segment, Strand, Topology};
+use pl_core::{BindingSite, Feature, Molecule, Primer, Segment, Strand, Topology};
 
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
@@ -398,7 +398,127 @@ fn parse_record(lines: &[&str]) -> (Molecule, Vec<String>) {
     // file says; sorting is a presentation choice and belongs to whatever is
     // drawing the map. Sorting here also silently breaks round-trip fidelity,
     // because the writer emits in model order.
+    promote_primers(&mut mol);
     (mol, unparsable)
+}
+
+/// Move the `primer_bind` features this writer produced back into
+/// [`Molecule::primers`].
+///
+/// # Why this exists
+///
+/// GenBank has no primer object. The writer spends one `primer_bind` feature
+/// per BINDING SITE, carrying the primer's name in `/label` and its oligo, with
+/// the site's melting temperature, in a `/note`. Until 2026-09-03 nothing ever
+/// read that back, so a `.dna` opened, saved as GenBank and reopened had its
+/// primers as ordinary features: the Primers tab was empty, `pl info` counted
+/// zero primers, and the oligo survived only as prose in a note. The round trip
+/// was stable -- writing that molecule again produced the same bytes -- which is
+/// exactly why nothing ever went red.
+///
+/// # What is promoted, and what deliberately is not
+///
+/// ONLY the exact fixed form this writer emits, and the strictness is the whole
+/// design. A `primer_bind` from another program, or one a user made in the
+/// feature editor, is a FEATURE and must stay one -- reinterpreting it would
+/// silently remove it from the features list on open. So a candidate must have:
+///
+///   * kind `primer_bind`;
+///   * exactly two qualifiers, `label` then `note`, in that order, both with
+///     values -- our writer emits precisely these two and nothing else, so a
+///     third qualifier means the feature came from somewhere else;
+///   * a note of `primer <SEQ>` or `primer <SEQ>; Tm: <number> C`;
+///   * a `<SEQ>` that is non-empty and every byte of which is an IUPAC
+///     nucleotide code. A note of `primer for colony PCR` fails on the space
+///     inside what would be the oligo, which is the case worth being sure of.
+///
+/// The empty-oligo case is refused explicitly rather than by accident: a primer
+/// with an empty `seq` writes `/note="primer "`, and the trailing space survives
+/// the round trip, so without the non-empty test that note would promote to a
+/// primer with no oligo.
+///
+/// # A promoted feature LEAVES `mol.features`
+///
+/// It has to. Kept in both places, the next write would emit it twice -- once
+/// from the FEATURES loop and once from the primer loop -- so every save would
+/// add one `primer_bind` per site, and a file would grow every time it was
+/// opened and saved.
+///
+/// # Sites of one primer are merged
+///
+/// The writer spends one feature per site, so a two-site primer arrives as two
+/// features that agree on name and oligo. They are merged back into one primer
+/// with two sites, in file order. The consequence, stated because it is a real
+/// asymmetry rather than a rounding error: two DISTINCT primers that share a
+/// name and an oligo go out as separate model objects and come back as one.
+/// Nothing in the corpus is known to do that, and it was not measured.
+fn promote_primers(mol: &mut Molecule) {
+    let mut promoted: Vec<Primer> = Vec::new();
+    let mut kept: Vec<Feature> = Vec::with_capacity(mol.features.len());
+
+    for f in std::mem::take(&mut mol.features) {
+        let Some((name, seq, tm)) = written_primer(&f) else {
+            kept.push(f);
+            continue;
+        };
+        // One segment is what `location_parts` produces for a plain site and
+        // two for one crossing the origin; either way the site is the span from
+        // the first segment's start to the last segment's end, which is how the
+        // writer took it apart.
+        let (Some(first), Some(last)) = (f.segments.first(), f.segments.last()) else {
+            kept.push(f);
+            continue;
+        };
+        let site = BindingSite {
+            start: first.start,
+            end: last.end,
+            strand: f.strand,
+            tm,
+        };
+        match promoted.iter_mut().find(|p| p.name == name && p.seq == seq) {
+            Some(p) => p.sites.push(site),
+            None => promoted.push(Primer {
+                name,
+                seq,
+                // GenBank never carried it; see the writer's note on the same
+                // subject.
+                description: String::new(),
+                sites: vec![site],
+            }),
+        }
+    }
+
+    mol.features = kept;
+    // Appended, not assigned: a `.dna` read never reaches here, and a GenBank
+    // read starts with an empty list, but neither is a reason for this function
+    // to be the thing that decides the list was empty.
+    mol.primers.extend(promoted);
+}
+
+/// `Some((name, oligo, tm))` if this feature is one this writer produced for a
+/// primer binding site. See [`promote_primers`] for why the test is this exact.
+fn written_primer(f: &Feature) -> Option<(String, String, Option<f64>)> {
+    if f.kind != "primer_bind" || f.qualifiers.len() != 2 {
+        return None;
+    }
+    let (k0, v0) = (&f.qualifiers[0].0, f.qualifiers[0].1.as_deref()?);
+    let (k1, v1) = (&f.qualifiers[1].0, f.qualifiers[1].1.as_deref()?);
+    if k0 != "label" || k1 != "note" {
+        return None;
+    }
+    let rest = v1.strip_prefix("primer ")?;
+    // `; Tm: <number> C` or nothing at all. Anything else is not ours.
+    let (oligo, tm) = match rest.split_once("; Tm: ") {
+        Some((oligo, tail)) => {
+            let number = tail.strip_suffix(" C")?;
+            (oligo, Some(number.parse::<f64>().ok()?))
+        }
+        None => (rest, None),
+    };
+    if oligo.is_empty() || oligo.bytes().any(|b| pl_core::iupac::code_mask(b) == 0) {
+        return None;
+    }
+    Some((v0.to_string(), oligo.to_string(), tm))
 }
 
 fn unbalanced(s: &str) -> bool {
@@ -1152,17 +1272,20 @@ pub fn write_reporting(
                 p.name, p.seq
             ));
         }
-        // The `.dna` writer keeps this -- `snapgene.rs` writes
-        // `description="..."` on the `<Primer>` element -- so the two formats
-        // disagree about whether a primer's description is part of the
-        // molecule, and only one of them said so.
-        if !p.description.is_empty() {
-            unwritable.push(format!(
-                "primer {:?}: its description was not written; GenBank's primer_bind \
-                 note carries the oligo and its Tm, and nothing else",
-                p.name
-            ));
-        }
+        // A PRIMER'S DESCRIPTION IS STILL LOST SILENTLY, and that is a
+        // deliberate hole rather than an oversight. `snapgene.rs` writes
+        // `description="..."` on the `<Primer>` element, GenBank has nowhere
+        // to put it, and for a few hours on 2026-09-03 this loop reported it
+        // here. That was wrong, because `unwritable` does not mean "was
+        // reduced" -- `crates/pl-wasm/src/lib.rs` turns ANY non-empty vector
+        // into a refusal to write the file at all, so the browser build
+        // stopped exporting a molecule whose primer merely carried a note.
+        //
+        // The two severities need two channels: this vector for a thing that
+        // is ABSENT, and a second one for a thing that is PRESENT BUT
+        // REDUCED, which `faithful` would still consult and the wasm refusal
+        // would not. That is an API change through five call sites and it is
+        // its own reviewed slice, not a rider on this one.
         for s in &p.sites {
             // A site past the end of the molecule is skipped rather than
             // written, because a `primer_bind` at 5000..5100 on a 2686 bp
@@ -1703,18 +1826,25 @@ mod tests {
             "nothing was lost, so nothing to report: {report:?}"
         );
 
+        // THIS HALF USED TO LOOK FOR A FEATURE, and until 2026-09-03 it found
+        // one: the reader kept every `primer_bind` as an ordinary feature, so
+        // the assertions below read `back.features` and the primer itself was
+        // gone. `promote_primers` now puts it back where it started, so the
+        // wrap is asserted on the site that made it rather than on the feature
+        // it was spelled as. The join is still checked above, on the text.
         let back = parse(&text);
-        let pb = back
-            .features
-            .iter()
-            .find(|f| f.kind == "primer_bind")
-            .expect("the primer_bind line was dropped");
-        assert_eq!(pb.name, "M13F");
-        assert_eq!(pb.segments.len(), 2);
-        assert_eq!((pb.segments[0].start, pb.segments[0].end), (2677, 2686));
-        assert_eq!((pb.segments[1].start, pb.segments[1].end), (1, 7));
-        // Seventeen bases, either way round -- the length of the primer.
-        assert_eq!(pb.segments.iter().map(|s| s.len()).sum::<u64>(), 17);
+        assert!(
+            !back.features.iter().any(|f| f.kind == "primer_bind"),
+            "a promoted primer must not also remain a feature: {:?}",
+            back.features
+        );
+        assert_eq!(back.primers.len(), 1, "{:?}", back.primers);
+        let p = &back.primers[0];
+        assert_eq!(p.name, "M13F");
+        assert_eq!(p.seq, "GTAAAACGACGGCCAGT");
+        assert_eq!(p.sites.len(), 1, "{:?}", p.sites);
+        // The wrap survives as the wrap: start past end, on a circle.
+        assert_eq!((p.sites[0].start, p.sites[0].end), (2677, 7));
 
         // A reverse-strand wrap keeps its complement wrapper.
         mol.primers[0].sites[0].strand = Strand::Reverse;
@@ -1788,6 +1918,118 @@ mod tests {
         assert!(report[0].contains("past the end"), "{report:?}");
     }
 
+    /// A primer survives a GenBank round trip as a PRIMER, not as prose.
+    ///
+    /// PROVEN TO FAIL on 2026-09-03: `back.primers` was `[]` and the oligo
+    /// existed only inside `back.features[0].qualifiers[1]`, as the text
+    /// `"primer GTAAAACGACGGCCAGT; Tm: 55.3 C"`. A `.dna` opened, saved as
+    /// GenBank and reopened lost its Primers tab, and `pl info` reported zero
+    /// primers for a file that plainly had two.
+    #[test]
+    fn a_primer_round_trips_through_genbank_as_a_primer() {
+        let mut mol = Molecule {
+            seq: b"a".repeat(500),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.primers.push(Primer {
+            name: "M13F".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: String::new(),
+            sites: vec![
+                BindingSite {
+                    start: 100,
+                    end: 116,
+                    strand: Strand::Forward,
+                    tm: Some(55.3),
+                },
+                BindingSite {
+                    start: 300,
+                    end: 316,
+                    strand: Strand::Reverse,
+                    tm: None,
+                },
+            ],
+        });
+        let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
+        assert!(report.is_empty(), "{report:?}");
+
+        let back = parse(&text);
+        assert_eq!(back.primers.len(), 1, "{:?}", back.primers);
+        let p = &back.primers[0];
+        assert_eq!(p.name, "M13F");
+        assert_eq!(p.seq, "GTAAAACGACGGCCAGT");
+        // TWO SITES, MERGED BACK ONTO ONE PRIMER. The writer spends one
+        // feature per site; both carry the same label and oligo, so they are
+        // one primer again.
+        assert_eq!(p.sites.len(), 2, "{:?}", p.sites);
+        assert_eq!((p.sites[0].start, p.sites[0].end), (100, 116));
+        assert_eq!(p.sites[0].tm, Some(55.3));
+        assert_eq!(p.sites[1].strand, Strand::Reverse);
+        assert_eq!(p.sites[1].tm, None);
+        // And it is not ALSO a feature.
+        assert!(back.features.is_empty(), "{:?}", back.features);
+
+        // THE FILE DOES NOT GROW. Writing the reparsed molecule gives the same
+        // bytes; a promoted feature left in `features` would be emitted twice.
+        let (again, _) = write_reporting(&back, "p.dna", (27, 6, 2026));
+        assert_eq!(again, text, "a round trip changed the bytes");
+    }
+
+    /// Only the form this writer emits is promoted. Everything else stays a
+    /// feature, because reinterpreting it would delete it from the file's own
+    /// feature list on open.
+    ///
+    /// PROVEN TO FAIL against a predicate that matched on the `primer_bind`
+    /// key alone, or on a note merely starting `primer `: each case below then
+    /// disappeared from `features` and became a primer with a nonsense oligo.
+    #[test]
+    fn a_primer_bind_that_is_not_ours_stays_a_feature() {
+        let head = "LOCUS       t   40 bp    DNA     circular UNA 27-JUN-2026\nFEATURES             Location/Qualifiers\n";
+        let tail = "ORIGIN\n        1 acgtacgtac gtacgtacgt acgtacgtac gtacgtacgt\n//\n";
+        // Each of these must survive as a feature, for the reason named.
+        let cases: [(&str, &str); 6] = [
+            (
+                "a third qualifier means it came from somewhere else",
+                "     primer_bind     1..10\n                     /label=\"x\"\n                     /note=\"primer ACGT\"\n                     /gene=\"y\"\n",
+            ),
+            (
+                "prose, not an oligo: the space inside it is the tell",
+                "     primer_bind     1..10\n                     /label=\"x\"\n                     /note=\"primer for colony PCR\"\n",
+            ),
+            (
+                "not an oligo: Q is not an IUPAC nucleotide code",
+                "     primer_bind     1..10\n                     /label=\"x\"\n                     /note=\"primer ACGQ\"\n",
+            ),
+            (
+                "an empty oligo promotes to a primer that is not one",
+                "     primer_bind     1..10\n                     /label=\"x\"\n                     /note=\"primer \"\n",
+            ),
+            (
+                "the qualifiers are the right two in the wrong order",
+                "     primer_bind     1..10\n                     /note=\"primer ACGT\"\n                     /label=\"x\"\n",
+            ),
+            (
+                "a malformed Tm is not our writer's output",
+                "     primer_bind     1..10\n                     /label=\"x\"\n                     /note=\"primer ACGT; Tm: warm C\"\n",
+            ),
+        ];
+        for (why, feat) in cases {
+            let mol = parse(&format!("{head}{feat}{tail}"));
+            assert!(
+                mol.primers.is_empty(),
+                "promoted a primer_bind it should not have -- {why}: {:?}",
+                mol.primers
+            );
+            assert_eq!(
+                mol.features.len(),
+                1,
+                "the feature was lost -- {why}: {:?}",
+                mol.features
+            );
+        }
+    }
+
     /// A primer with no binding site vanishes from a GenBank file, and says so.
     ///
     /// PROVEN TO FAIL on 2026-09-03: `report` was `[]` and
@@ -1819,39 +2061,6 @@ mod tests {
         // The oligo is named too, because the report is the only place it
         // survives at all.
         assert!(report[0].contains("GTAAAACGACGGCCAGT"), "{report:?}");
-    }
-
-    /// A primer's description does not reach GenBank, and that is now said.
-    ///
-    /// PROVEN TO FAIL on 2026-09-03: `report` was `[]` while
-    /// `text.contains("ordered from IDT")` was also `false`. The `.dna` writer
-    /// keeps this field, so the two formats disagreed about whether a
-    /// description is part of the molecule and only one of them admitted it.
-    #[test]
-    fn a_primers_description_is_reported_as_not_carried() {
-        let mut mol = Molecule {
-            seq: b"a".repeat(500),
-            topology: Topology::Circular,
-            ..Default::default()
-        };
-        mol.primers.push(Primer {
-            name: "M13F".into(),
-            seq: "GTAAAACGACGGCCAGT".into(),
-            description: "ordered from IDT".into(),
-            sites: vec![BindingSite {
-                start: 100,
-                end: 116,
-                strand: Strand::Forward,
-                tm: None,
-            }],
-        });
-        let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
-        // The site itself is still written; only the description is lost.
-        assert!(text.contains("primer_bind"), "{text}");
-        assert!(!text.contains("ordered from IDT"), "{text}");
-        assert_eq!(report.len(), 1, "{report:?}");
-        assert!(report[0].contains("M13F"), "{report:?}");
-        assert!(report[0].contains("description"), "{report:?}");
     }
 
     #[test]

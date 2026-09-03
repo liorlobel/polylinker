@@ -476,13 +476,19 @@ pub fn anneal_advice(b: &Binding) -> Vec<(&'static str, String, &'static str)> {
 ///
 /// # What is deliberately not offered
 ///
-/// A `primer_bind` FEATURE is not a primer here. GenBank has no field for the
-/// oligo — `genbank::write` puts the bases in a free-text `/note` as
-/// `primer AGCT...; Tm: 62 C` and the reader keeps that note as prose — so
-/// offering those would mean parsing a sentence to recover a sequence, and
-/// getting it wrong would put an oligo in the box that is not the one in the
-/// file. A binding site with no recorded sequence is already drawn on the map
-/// as a feature; it does not need to be guessed at here.
+/// A `primer_bind` FEATURE is still not a primer here, and the reason is now
+/// narrower than it was. GenBank has no field for the oligo — `genbank::write`
+/// puts the bases in a free-text `/note` as `primer AGCT...; Tm: 62 C` — and
+/// this paragraph said until 2026-09-03 that "the reader keeps that note as
+/// prose", so offering those would have meant parsing a sentence to recover a
+/// sequence. That objection was right and it is what the reader now answers:
+/// `promote_primers` (crates/pl-fileio/src/genbank.rs) promotes ONLY the exact
+/// two-qualifier form this project's own writer emits, with an oligo that is
+/// non-empty and IUPAC throughout, so a note it cannot vouch for stays a
+/// feature and reaches this function as one. What arrives in `mol.primers`
+/// from a `.gb` is therefore a primer this program wrote, not a sentence it
+/// guessed at. A `primer_bind` from anywhere else is still a feature, is still
+/// drawn on the map as one, and is still not offered here.
 ///
 /// Entries with an empty `seq` are dropped for the same reason: the picker
 /// exists to save typing, and an entry that types nothing is a row that does

@@ -190,8 +190,18 @@ fn dna_survives_conversion_to_genbank_and_back() {
         if back.topology != src.topology {
             problems.push("topology".into());
         }
-        // GenBank has no separate primer object: each binding site becomes a
-        // primer_bind feature, so the expected count includes them.
+        // GenBank has no separate primer object, so each binding site is spent
+        // as a `primer_bind` feature on the way out — and, since 2026-09-03,
+        // read back as a primer on the way in (`promote_primers` in
+        // crates/pl-fileio/src/genbank.rs). The comment here said "the expected
+        // count includes them", and the line below read
+        // `src.features.len() + sites`, from the day this test was written
+        // until that date: it encoded the round trip's defect as its
+        // expectation, which is why the defect never went red.
+        //
+        // Both halves are now asserted separately. `features` must come back
+        // as features and NOTHING else, and the primers must come back as
+        // primers with the sites the writer was able to express.
         //
         // This filter mirrors the writer's own rule and is a derived
         // expectation, not a claim about what ought to be written. It used to
@@ -217,14 +227,23 @@ fn dna_survives_conversion_to_genbank_and_back() {
                 s.end <= n
             })
             .count();
-        let want = src.features.len() + sites;
+        let want = src.features.len();
+        // The sites are now expected on the PRIMERS, so a file whose primers
+        // all round-trip contributes nothing to the feature count. A site the
+        // writer could not express is absent from both, and is reported by
+        // `write_reporting` rather than counted here.
+        let back_sites: usize = back.primers.iter().map(|p| p.sites.len()).sum();
+        if back_sites != sites {
+            problems.push(format!(
+                "primer binding sites: {back_sites} came back vs {sites} the writer could express"
+            ));
+        }
         if back.features.len() != want {
             problems.push(format!(
-                "features: {} vs {} ({} + {} primer sites)",
+                "features: {} vs {} (primer sites are now on {} primer(s), not among the features)",
                 back.features.len(),
                 want,
-                src.features.len(),
-                sites
+                back.primers.len()
             ));
         }
         // Coordinates and colours of the original features, in order.

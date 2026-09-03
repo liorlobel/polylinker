@@ -1503,8 +1503,10 @@ fn draft_age(
         // file. The banner used to advertise a 0-edit draft of an untouched
         // 8,117 bp `.dna` as "newer than the file on disk" — true of the two
         // mtimes and false of the two contents — and acting on it costs the
-        // container, the nine typed primers (a draft is GenBank, so they come
-        // back as `primer_bind`) and the methylation flags. The one line that
+        // container, the nine typed primers (a draft is GenBank; until
+        // 2026-09-03 they came back as `primer_bind` features, and now come
+        // back as primers, but a GenBank draft still cannot carry the
+        // container or a primer's description) and the methylation flags. The one line that
         // exists to help the user choose pointed at the worse copy. The same
         // sentence is true of a draft with forty edits in it that were all
         // saved, which is why the number tested here is `unfiled` and not
@@ -2383,8 +2385,8 @@ impl App {
                 // reads nine `primer_bind` features as corruption.
                 ui.label(
                     RichText::new(
-                        "A draft is a GenBank snapshot. A .dna file's primers come back as \
-                         primer_bind features.",
+                        "A draft is a GenBank snapshot. Primers this program wrote come \
+                         back as primers; a primer_bind from another tool stays a feature.",
                     )
                     .color(pal(ui).muted)
                     .size(11.0),
@@ -10167,10 +10169,12 @@ impl App {
         // -- primers the file itself records ------------------------------
         //
         // A `.dna` is usually full of them and retyping one is both work and a
-        // chance to mistype. Absent for every other format, and silently so:
-        // `document_primers` explains why a GenBank `primer_bind` is not
-        // offered here, and a permanent "this format has no primers" line under
-        // every FASTA would be noise about a thing that was never missing.
+        // chance to mistype. Since 2026-09-03 a `.gb` this program wrote
+        // carries them too, because the reader promotes its own `primer_bind`
+        // form back to primers; `document_primers` explains what is still not
+        // offered and why. Absent for FASTA, and silently so: a permanent
+        // "this format has no primers" line under every one would be noise
+        // about a thing that was never missing.
         if !from_file.is_empty() {
             let mut pick: Option<String> = None;
             ui.horizontal_wrapped(|ui| {
@@ -32982,9 +32986,18 @@ ATGAAACGCTAA
     fn plasmid(name: &str) -> pl_core::Molecule {
         let mut mol = pkov();
         let names: Vec<&str> = match name {
-            // The same molecule as `pkov()` read through GenBank: the nine
-            // SnapGene primers arrive as `primer_bind` features, and the
-            // longest of those names is 16 characters.
+            // The same molecule as `pkov()` read through GenBank, AS IT
+            // LOADED UNTIL 2026-09-03: the nine SnapGene primers arrived as
+            // `primer_bind` features, and the longest of those names is 16
+            // characters. The reader now promotes that form back to primers,
+            // so a real pkov.gb presents nine fewer features than this list
+            // has. The list is deliberately NOT trimmed: what it exists to
+            // exercise is the label-column arithmetic for a molecule with
+            // eighteen names of these lengths, which is a property of the
+            // renderer and not of any reader, and shortening it would weaken
+            // the test to make a comment true. It is a fixture, and this note
+            // is what stops it being read as a claim about what pkov.gb
+            // loads.
             "pkov.gb" => vec![
                 "cat promoter",
                 "CmR",

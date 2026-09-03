@@ -1446,6 +1446,16 @@ fn draw_circular(
     // nine primers arrive as `primer_bind` features with `F_his colony PCR` at
     // 16 characters — exports at 211.4. One binary, one input, two radii.
     //
+    // THAT MEASUREMENT WAS TAKEN UNDER THE OLD READER and is left exactly as
+    // it was, because it is a measurement. Since 2026-09-03 those nine primers
+    // are promoted back to primers on load (`promote_primers`), so pkov.gb no
+    // longer presents them as features and its radius will not be 211.4 any
+    // more. What the two numbers are now has NOT been re-measured — there is
+    // no corpus on the machine this note was written on — so nothing here
+    // states one. The point the paragraph exists to make is unaffected: a
+    // feature name can move the exported radius, and that is why screen and
+    // figure diverge.
+    //
     // Screen and figure therefore diverge here on purpose, and the reason is
     // written in `FEATURE_NAME_CAP_CHARS`: the page has no hover and buys the
     // whole name with radius; the screen has a hover, a list beside it and a
