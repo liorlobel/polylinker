@@ -606,9 +606,43 @@ impl<'a> Annotator<'a> {
 
     /// Annotate a molecule.
     pub fn annotate(&self, mol: &Molecule) -> Vec<Annotation> {
+        self.annotate_until(mol, &|| false)
+            .expect("a scan that is never asked to stop always finishes")
+    }
+
+    /// [`Annotator::annotate`], abandonable.
+    ///
+    /// `stop` is polled at every loop boundary the scan has — before each
+    /// strand and each chain of the nucleotide scan, before each frame, each
+    /// unchainable record and each chain of the translated scan, once more
+    /// before the hits are deduplicated, and inside the ORF pass, which polls
+    /// it itself every 4,096 codons through [`pl_core::orf::find_orfs_until`]
+    /// — and the scan returns `None` the first time it answers true. One call
+    /// of `stop` per chain is nothing against the alignment each chain buys.
+    /// What is NOT polled is the inside of any one pass between those
+    /// boundaries: a `reverse_complement` of the doubled text, an
+    /// `Index::seeds` or `Index::chain` pass over one strand of it, a
+    /// `six_frames` translation, or one chain's verification. So the bound on
+    /// a stop is one such pass, not a few codons, and none of those passes was
+    /// timed for this note.
+    ///
+    /// It exists because `bins/pl-gui/src/doc.rs` restarts this scan on every
+    /// committed edit and, until 2026-09-03, could only read its cancel flag
+    /// before the scan and after it — at 4.64 Mb, by that file's own record,
+    /// 4.2 s of a core produced for nobody.
+    ///
+    /// `&dyn Fn() -> bool` and not an `AtomicBool`, matching `find_orfs_until`
+    /// and `pl_sanger::align::semiglobal_within_until`: the flag belongs to
+    /// whatever is coordinating the workers, and this crate stays free of
+    /// `std::sync`.
+    pub fn annotate_until(
+        &self,
+        mol: &Molecule,
+        stop: &dyn Fn() -> bool,
+    ) -> Option<Vec<Annotation>> {
         let len = mol.seq.len();
         if len == 0 {
-            return Vec::new();
+            return Some(Vec::new());
         }
         // §7.7 step 2 — duplicate for circularity so origin-spanning features
         // are contiguous in the text being searched.
@@ -637,7 +671,9 @@ impl<'a> Annotator<'a> {
         // it fails the fusion rule for want of anything to be fused to — a hit
         // silently dropped by an optimisation rather than by a decision.
         let orfs: Vec<Orf> = if self.db.records.iter().any(|r| r.is_designed_peptide()) {
-            orf::find_orfs(
+            // `_until`, threading `stop` through, and `?` on its `None`: this is
+            // the one whole-molecule pass pl-core already knows how to abandon.
+            orf::find_orfs_until(
                 &mol.seq,
                 self.config.code,
                 mol.topology.is_circular(),
@@ -663,24 +699,48 @@ impl<'a> Annotator<'a> {
                     // so nobody reads the suite's silence as coverage.
                     nested: false,
                 },
-            )
+                stop,
+            )?
         } else {
             Vec::new()
         };
 
         let mut hits = Vec::new();
-        self.scan_dna(&doubled, len, &mut hits);
+        self.scan_dna(&doubled, len, &mut hits, stop)?;
         if self.config.protein {
-            self.scan_protein(&doubled, len, &orfs, mol.topology.is_circular(), &mut hits);
+            self.scan_protein(
+                &doubled,
+                len,
+                &orfs,
+                mol.topology.is_circular(),
+                &mut hits,
+                stop,
+            )?;
+        }
+        // Once more before an answer is assembled, so a scan superseded during
+        // the last chain does not hand back a list it was told nobody wants.
+        if stop() {
+            return None;
         }
 
         let hits = dedupe(hits, len as u64);
-        resolve_overlaps(hits, self.config.overlap_trim, len as u64)
+        Some(resolve_overlaps(hits, self.config.overlap_trim, len as u64))
     }
 
-    fn scan_dna(&self, doubled: &[u8], len: usize, out: &mut Vec<Annotation>) {
+    /// `None` means `stop` answered true; `out` is then partial and must not be
+    /// read.
+    fn scan_dna(
+        &self,
+        doubled: &[u8],
+        len: usize,
+        out: &mut Vec<Annotation>,
+        stop: &dyn Fn() -> bool,
+    ) -> Option<()> {
         let rc = iupac::reverse_complement(doubled);
         for reverse in [false, true] {
+            if stop() {
+                return None;
+            }
             let text: &[u8] = if reverse { &rc } else { doubled };
             let seeds = self.dna.seeds(text);
             let slack = 40;
@@ -688,6 +748,9 @@ impl<'a> Annotator<'a> {
                 .dna
                 .chain(&seeds, text.len(), slack, self.config.min_seeds)
             {
+                if stop() {
+                    return None;
+                }
                 let rec = &self.db.records[chain.record as usize];
                 let Some(m) = self.verify(&rec.reference_nt, text, &chain) else {
                     continue;
@@ -723,6 +786,7 @@ impl<'a> Annotator<'a> {
                 }
             }
         }
+        Some(())
     }
 
     /// §7.7 step 5 — six-frame translation, which is what finds a marker whose
@@ -749,6 +813,10 @@ impl<'a> Annotator<'a> {
     /// fusion rule, `min_coverage`, the `min_match_len` floor, [`dedupe`] and
     /// [`resolve_overlaps`] all apply unchanged and nothing downstream learns a
     /// second route exists.
+    ///
+    /// `None` means `stop` answered true; `out` is then partial and must not be
+    /// read.
+    #[allow(clippy::too_many_arguments)]
     fn scan_protein(
         &self,
         doubled: &[u8],
@@ -756,15 +824,21 @@ impl<'a> Annotator<'a> {
         orfs: &[Orf],
         circular: bool,
         out: &mut Vec<Annotation>,
-    ) {
+        stop: &dyn Fn() -> bool,
+    ) -> Option<()> {
         for frame in translate::six_frames(doubled, self.config.code) {
+            if stop() {
+                return None;
+            }
             let strand = if frame.reverse {
                 Strand::Reverse
             } else {
                 Strand::Forward
             };
-            self.scan_protein_exact(&frame, doubled, len, strand, orfs, circular, out);
-            // NOT an early return above this line, and the reachable case is
+            self.scan_protein_exact(&frame, doubled, len, strand, orfs, circular, out, stop)?;
+            // No early return on the SUCCESS path above this line -- the `?`
+            // is the stop path, added 2026-09-03, and it abandons the whole
+            // scan rather than skipping to the seeded one. The reachable case is
             // narrower than the one first written here. It is *not* "a table of
             // only short peptides": `Annotator::new` refuses anything below
             // MIN_PART_AA = K_PROTEIN, so the shortest peptide that gets this
@@ -789,6 +863,9 @@ impl<'a> Annotator<'a> {
                 .protein
                 .chain(&seeds, frame.protein.len(), 12, self.config.min_seeds)
             {
+                if stop() {
+                    return None;
+                }
                 let rec = &self.db.records[chain.record as usize];
                 let Some(aa) = rec.reference_aa.as_deref() else {
                     continue;
@@ -815,6 +892,7 @@ impl<'a> Annotator<'a> {
                 }
             }
         }
+        Some(())
     }
 
     /// The exact-scan half of [`Annotator::scan_protein`], for one frame.
@@ -831,6 +909,9 @@ impl<'a> Annotator<'a> {
     /// seedable word produces no seeds either, so the two together would leave
     /// it unreachable with nothing saying so. That is the defect this whole
     /// route exists to close, one layer up.
+    ///
+    /// `None` means `stop` answered true; `out` is then partial and must not be
+    /// read.
     #[allow(clippy::too_many_arguments)]
     fn scan_protein_exact(
         &self,
@@ -841,8 +922,12 @@ impl<'a> Annotator<'a> {
         orfs: &[Orf],
         circular: bool,
         out: &mut Vec<Annotation>,
-    ) {
+        stop: &dyn Fn() -> bool,
+    ) -> Option<()> {
         for i in self.protein.unchainable(self.config.min_seeds.max(1)) {
+            if stop() {
+                return None;
+            }
             let record = i as usize;
             // Non-empty by construction: `unchainable` only yields records the
             // protein index gave a non-zero length, which is `reference_aa`'s.
@@ -897,6 +982,7 @@ impl<'a> Annotator<'a> {
                 }
             }
         }
+        Some(())
     }
 
     /// Edit distance budget implied by the identity threshold.
@@ -4159,6 +4245,68 @@ mod tests {
             feat.extent(m.len(), true),
             Some((found[0].start, found[0].end)),
             "the feature no longer says where the hit was"
+        );
+    }
+
+    /// The `_until` contract, on `pl_core::orf::find_orfs_until`'s pattern:
+    /// never asked is `annotate` byte for byte, asked at once is `None`, and
+    /// asked on a later poll is still `None` — with the poll count proving the
+    /// polls sit inside the loops and not only at the scan's two ends, which
+    /// is the whole difference between this and the two `flag.load`s
+    /// `bins/pl-gui/src/doc.rs` made do with until 2026-09-03.
+    ///
+    /// Same fixture as `results_are_stable_between_runs`: three nucleotide
+    /// records on a circle, so the nucleotide scan has three chains to poll
+    /// between and the translated scan has six frames.
+    #[test]
+    fn a_scan_that_is_asked_to_stop_stops_and_says_so() {
+        let mut rng = Rng(0xffff_0000_0000_000f);
+        let db = db_of(vec![
+            rec("pf:a", &rng.dna(300), false),
+            rec("pf:b", &rng.dna(200), false),
+            rec("pf:c", &rng.dna(400), false),
+        ]);
+        let ann = Annotator::new(&db, Config::default());
+        let seq: String = db
+            .records
+            .iter()
+            .map(|r| String::from_utf8(r.reference_nt.clone()).unwrap())
+            .collect::<Vec<_>>()
+            .join(&rng.dna(200));
+        let m = mol(&seq, true);
+
+        // Never asked: what `annotate` gives, byte for byte — and not nothing,
+        // or the equality would be trivially true.
+        let plain = ann.annotate(&m);
+        assert_eq!(plain.len(), 3, "the premise: {plain:?}");
+        assert_eq!(ann.annotate_until(&m, &|| false), Some(plain));
+
+        // Asked immediately: no answer, not a partial one.
+        assert_eq!(ann.annotate_until(&m, &|| true), None);
+
+        // Asked on the third poll: still `None`, and exactly three polls were
+        // made, so the scan stopped where it was told to rather than finishing
+        // and then noticing.
+        let polls = std::cell::Cell::new(0usize);
+        let third = || {
+            polls.set(polls.get() + 1);
+            polls.get() == 3
+        };
+        assert_eq!(ann.annotate_until(&m, &third), None);
+        assert_eq!(polls.get(), 3);
+
+        // Never asked, but counted: more than two polls proves they sit inside
+        // the loops and not only at the scan's two ends.
+        let polls = std::cell::Cell::new(0usize);
+        let never = || {
+            polls.set(polls.get() + 1);
+            false
+        };
+        assert_eq!(ann.annotate_until(&m, &never), Some(ann.annotate(&m)));
+        assert!(
+            polls.get() > 2,
+            "polled {} times: only at the ends",
+            polls.get()
         );
     }
 }

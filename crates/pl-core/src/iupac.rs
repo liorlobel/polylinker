@@ -121,12 +121,42 @@ pub const fn matches(pattern: u8, subject: u8) -> bool {
 
 /// Every start where `pattern` matches `subject`, 1-based, ascending.
 ///
-/// The one search loop in the project. It was inside `pl_enzymes::cut_positions`
-/// — the only loop over [`matches`] anywhere in the workspace — where it had
-/// accumulated a Biopython oracle covering 25,400 positions but could not be
-/// called by anything else. Lifting it here means the library's motif search
-/// inherits that oracle instead of needing a second one, and any future scanner
-/// does too.
+/// The only whole-molecule IUPAC-aware search over a byte slice in the
+/// project, and the one that carries the Biopython oracle directly. It was
+/// inside `pl_enzymes::cut_positions`, where it had accumulated that oracle —
+/// 25,400 positions — but could not be called by anything else. Lifting it
+/// here gave every `&[u8]` caller (`cut_sites`, `pl-design`, the GUI's find)
+/// one scan, and gave the library's packed search a reference to be held to
+/// by test rather than a second oracle; the library does not call this
+/// function, see below. Wraparound is by index modulo `n`, never by doubling
+/// the subject — which is what lets the `k > n` guard mean what it says.
+///
+/// This paragraph used to open "The one search loop in the project" and call
+/// the loop below "the only loop over `matches` anywhere in the workspace".
+/// Neither was true on the day it was written (2026-07-27): `pl_clone`'s
+/// exact-match `find_all` was a day older, and `methylation::overlaps` already
+/// looped over [`matches()`]. No test reads this comment, so nothing went red;
+/// corrected 2026-09-03. The other loops, and why each is not a call here:
+///
+/// - `pl_clone::find_all` (private; behind `anneal`, `anneal_last` and `pcr`'s
+///   specificity count): a case-sensitive, exact `str::find` of a literal
+///   primer in an upper-cased template, 0-based, wrapping a circle by
+///   searching `tmpl + tmpl` and dropping starts at or past `n`. A primer is
+///   a literal oligo, not a motif; an IUPAC match would let a primer `N` bind
+///   anywhere.
+/// - `pl_enzymes::methylation::overlaps`: a window of motif starts *relative
+///   to one recognition site*, negative offsets included, wrapped with
+///   `rem_euclid`. It asks whether a methylated base of `GATC`, `CCWGG` or
+///   `CG` lands inside that site, not where the motif occurs — a per-site
+///   window over [`matches()`], not a scan of the molecule.
+/// - `pl_index::scan::Slice::find` (what a library query runs) and its public
+///   twin `pl_index::nibble::find_all_nib`: this contract re-implemented over
+///   the nibble-packed store, which a `&[u8]` scan cannot read; the query one
+///   also keeps a true total past its cap. They inherit the oracle only by
+///   agreeing with this function, in
+///   `agrees_with_the_byte_scan_it_is_a_twin_of` (`nibble.rs`) and
+///   `a_palindromic_site_is_reported_once_and_agrees_with_the_enzyme_scan`
+///   (`scan.rs`).
 ///
 /// **Circular molecules wrap.** `n` starts on a circle against `n - k + 1` on a
 /// line is the whole of the wraparound handling; indices are taken modulo `n`.

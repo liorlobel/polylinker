@@ -73,6 +73,13 @@ Gatekeeper is reacting to, so remove it from the files that were extracted.
 xattr -d com.apple.quarantine polylinker pl pl-mcp polylinker.so
 ```
 
+and, for the `.dmg` (since 2026-09-03), from the bundle dragged out of it — a
+bundle is a directory, hence `-r`:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Polylinker.app
+```
+
 Not right-click → Open, which is the usual advice. It works, but it is one
 gesture that means "I have decided to trust this" applied identically to
 software the user checked and software they did not — the same click-through
@@ -366,12 +373,21 @@ Measure with `PL_GUI_RENDERER`; it exists for this.
 Three things follow for a release. The caveat is stated in the release notes and
 in `README-WINDOWS.txt`, and **`tools/ci.ps1` requires the phrases `OpenGL 2.0`
 and `Direct3D 12` to survive in the notes**, so a rewrite cannot quietly drop it.
-**Nothing in CI launches the GUI, on any leg, on any platform**, so neither the
-requirement nor the fallback is exercised by the pipeline — `PL_GUI_RENDERER=wgpu`
-is the only way to make the second backend run, and it has to be done by hand.
-And **the fallback is therefore the least-tested code in the program**: it is
-reached only where the first backend has already failed, which is a machine no
-contributor owns.
+**Until 2026-09-03 nothing in CI launched the GUI, on any leg, on any platform**,
+so neither the requirement nor the fallback was exercised by the pipeline —
+`PL_GUI_RENDERER=wgpu` was the only way to make the second backend run, and it
+had to be done by hand. Since then `ci.yml`'s `gui-smoke` job launches the editor
+twice per leg with `PL_GUI_SMOKE=1` closing the window from its first frame: on
+`ubuntu-latest` under Xvfb, `PL_GUI_RENDERER=glow` on Mesa's software OpenGL and
+`PL_GUI_RENDERER=wgpu` on its software Vulkan (reasoned from the packages'
+documentation, not yet seen green), and on `macos-latest`, glow on Apple's OpenGL
+and wgpu on Metal (measured exiting 0 on the maintainer's Mac that day, not yet
+on a hosted runner). The macOS leg of the `test` job also launches the editor
+from inside the mounted `.dmg` the same way (`tools/check-dmg.sh --launch`).
+That is a Linux software adapter and an Apple GPU, not a Windows-on-ARM driver,
+so **the fallback is still the least-tested code in the program where it
+matters**: it is reached only where the first backend has already failed, which
+is a machine no contributor owns.
 
 **It is built natively, on GitHub's `windows-11-arm` runners, and cross-building
 was rejected rather than merely not chosen.** Those runners are free for public
@@ -485,8 +501,10 @@ whose stated purpose is deciding whether the other ARM64 sentences are honest
 does not get to be wrong in either direction. `workflow_dispatch` on
 `release.yml` remains the way to rehearse a full release without spending a tag.
 The last row is the one no amount of CI moves: nobody has launched `polylinker.exe` on Windows ARM64, run `pl` there,
-or double-clicked the `.msi`. That is not an ARM64 peculiarity — *no* CI job on
-*any* platform opens the editor's window — but on the other three platforms the
+or double-clicked the `.msi`. That is not an ARM64 peculiarity — until 2026-09-03
+*no* CI job on *any* platform opened the editor's window, and since then only the
+`gui-smoke` job and the `.dmg` check do, on `ubuntu-latest` under Xvfb and on
+`macos-latest`, never on Windows — but on the other three platforms the
 maintainer's own machine stands behind that gap, and on this one nothing does.
 
 **The ARM64 archive is allowed to ship without the Python extension module, and
@@ -605,6 +623,7 @@ these rows, and that was the whole of the truth: nothing ran the file.
 | ≥ 21 files hashed on Windows and ≥ 18 elsewhere, ≥ 8 font licence texts under `licences/`, `NOTICE.txt` / `LICENSE.txt` / `LICENSE-MIT.txt` / `features/NOTICE.txt` by name | `tools/ci.ps1` |
 | The zip is a deterministic function of `dist/` | `tools/ci.ps1` |
 | The **archive** verifies against its own `SHA256SUMS.txt`, licence set included | `tools/check-archive.ps1`, in the gate and on all four release runners |
+| The **`.dmg`** attaches; its root is `Polylinker.app` and an `Applications` link; the bundle's `Info.plist` parses, names the permanent bundle identifier, the icon that is in `Resources/`, and the version the `pl` inside reports; every manifest member is inside with its recorded hash and nothing else is; every Mach-O carries the slices the `platform:` label claims; it detaches | `tools/check-dmg.sh`, in `release.yml`'s macOS job and, with `--launch`, on the macOS leg of `ci.yml`'s `test` job on every push |
 | The tar writer produces something GNU tar or bsdtar will read | `tools/ci.ps1` (forces `-ArchiveFormat tar.gz` on Windows) |
 | `release.yml` parses, carries exactly the four expected runners and the four expected platform labels, publishes only on a tag | `tools/ci.ps1` (PyYAML) |
 | `release.yml` packs no archive of its own, and every `tools/` path it names exists | `tools/ci.ps1` |
@@ -955,9 +974,35 @@ hardened runtime, and the rejection message does not say so clearly.
 bundle or a disk image, so notarisation of bare executables verifies online at
 first launch rather than offline. For a tool whose pitch is that it needs no
 network, that is the argument a signed Polylinker would face for building a
-`.app` bundle and a `.dmg` as well. None of the three exist here, and
-`README-MACOS.txt` tells the reader so rather than letting them discover it:
-what ships on macOS is three bare executables in a tarball.
+`.app` bundle and a `.dmg` as well.
+
+**That paragraph ended "None of the three exist here ... what ships on macOS is
+three bare executables in a tarball" until 2026-09-03.** Two of the three exist
+now, for a reason that has nothing to do with signing: a bare executable on a
+Mac opens a Terminal beside itself and shows its file name in the menu bar,
+and a lab machine's user expects an icon they can drag to Applications.
+`tools/build-dmg.sh` stages `Polylinker.app` from `dist/SHA256SUMS.txt` — the
+same one file list the MSI is generated from, so the bundle has no file list
+of its own — and `hdiutil` wraps it as `polylinker-<v>-macos-universal.dmg`
+beside the tarball. The bundle carries an `Info.plist`, `Polylinker.icns`
+(drawn from the same `polylinker.svg` as the Windows icon, by
+`bins/pl-gui/icon/build-icns.py`, and pinned by sha256 in
+`bins/pl-gui/src/main.rs` like the `.ico`) and every licence text under
+`Contents/Resources`. It carries no `_CodeSignature` and no notarisation
+ticket, so Gatekeeper refuses it exactly as it refuses the bare files, and
+`README-MACOS.txt` and the release notes give the recursive form of the same
+remedy. It registers no document types, and that is measured rather than tidy:
+the editor takes files from argv and drag-and-drop, and neither winit 0.30 nor
+eframe 0.35 delivers the Apple Event a Finder double-click on a document sends
+(checked in their sources, 2026-09-03), so claiming the eight extensions would
+put Polylinker in every "Open With" menu and open it to an empty window — the
+`.plproj` mistake, on every format at once. The tarball still ships, unchanged,
+and is still what `pl update` fetches on macOS: a `.dmg` is neither an
+installer to run nor an archive to unpack, and teaching the updater a third
+kind is a separate change (`crates/pl-update/src/flow.rs` says so at the arm).
+`hdiutil` writes timestamps into the filesystem it makes, so unlike the zip and
+the tarball the image is not reproducible from `dist/`, and no gate step claims
+it is. There is still no Homebrew formula.
 
 ## There is no auto-updater, on purpose
 
@@ -1108,9 +1153,15 @@ The installer inherits this rule and the gate enforces it: `tools/ci.ps1` fails
 if any network or scheduling facility appears anywhere in `tools/installer/`.
 
 Note that `docs/PLAN.md` §5.1 still describes a Tauri stack with a "free,
-signature-mandatory auto-updater", and that §10 risk 9's `bundle > windows >
+signature-mandatory auto-updater", and that §10 risk 10's `bundle > windows >
 signCommand` and the roadmap row at PLAN.md:224 — both written against it — were
-struck through there on 2026-08-06. **The app is not Tauri** — it is
+struck through there on 2026-08-06, and the ADR-1 heading, the v0.1 roadmap
+row, the `npm run dev` hard rule, risk 7, §12 steps 28–30 and the ADR-1 and
+ADR-3 rows of Appendix B on 2026-09-03 — with the §5.2 tree annotated in place
+and the §5.6 table left as written under a dated note, since neither takes a
+strikethrough usefully. (*This
+said "risk 9" from 2026-08-06 to 2026-09-03; `signCommand` is under risk 10,
+"Windows code-signing eligibility".*) **The app is not Tauri** — it is
 eframe/egui with no webview (`bins/pl-gui/Cargo.toml`). This
 document supersedes the updater half of that plan. The paragraphs are left in
 place because PLAN.md is a record of how the architecture was decided, not a

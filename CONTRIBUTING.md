@@ -135,6 +135,14 @@ What is left in `ci.yml` alongside the gate is not a second copy of it:
   gate does not;
 - `msrv` and `wasm` are ubuntu jobs holding the toolchain floor and the wasm
   module driven against a Linux `pl`;
+- `gui-smoke` (since 2026-09-03) is the one job that starts the editor: a
+  two-leg matrix, `ubuntu-latest` under Xvfb and `macos-latest`, once per
+  renderer on each leg — `PL_GUI_RENDERER=glow` on Mesa's software OpenGL and
+  `=wgpu` on its software Vulkan on Linux, Apple's OpenGL and Metal on macOS —
+  with `PL_GUI_SMOKE=1` closing the window from its first frame. The macOS
+  launches were measured on the maintainer's Mac that day, not yet on a hosted
+  runner; the Linux leg is reasoned from the packages' documentation, not
+  measured. No step in the gate opens a window;
 - `oracles` re-runs the differential checks under a different Python and
   rendering stack, and holds four checks with no twin here at all — the
   pLannotate taint gate's *fetching* half, the content sweep behind it, the

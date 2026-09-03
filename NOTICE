@@ -646,11 +646,14 @@ HOW THE OBLIGATION TRAVELS, and what is still owed.
   paragraph above, where a five-line list covering two of six faces looked
   exactly like a five-line list covering all of them.
 
-  STILL OWED: `pl licences` prints the compiled-in feature-database attribution
-  and does not print this font block. That is the whole of the gap now, and it
-  is one clause of the four this paragraph carried until 2026-08-04. The other
-  three each stopped being true on 2026-08-03, in the same pass, and what each
-  one said is described below rather than quoted, because
+  DONE 2026-09-03: `pl licences` prints the font block for the two faces
+  `pl.exe` embeds -- the Liberation pair, byte count and sha256 computed from
+  the bytes linked into the running program rather than copied from here, the
+  copyright notice OFL clause 2 requires each copy to carry (holders and
+  Reserved Font Name), and the OFL text whole from `pl_draw::font::OFL`. That
+  was the last clause of the four this paragraph carried until 2026-08-04, and
+  the only one still true on that date; it stayed true until this one. Each of
+  the four is described below rather than quoted, because
   `the_still_owed_paragraph_owes_only_what_is_still_owed` asserts their wording
   is absent from this file and a verbatim epitaph would be indistinguishable
   from the claim itself to that test and to a skimming reader alike:
@@ -670,13 +673,22 @@ HOW THE OBLIGATION TRAVELS, and what is still owed.
       TRADEMARKS.md and all eight font licence texts whole, each from an
       `include_str!` rather than a summary, so what a user reads is the
       committed bytes and not a restatement of them.
+    - It said `pl licences` printed the feature-database attribution and left
+      this font block out. Discharged 2026-09-03: `font_notice` in
+      `bins/pl/src/main.rs` prints the Liberation pair for the faces `pl`
+      links and no others, with the digests taken from the linked bytes and
+      asserted against this file by
+      `the_font_block_records_the_faces_this_binary_links`.
 
-  So what is left is the CLI, and it is a real gap rather than a tidiness one
-  now that `pl.exe` carries an OFL face: `pl licences` is a licence view that
-  says nothing about fonts. Two more OFL faces made that worse rather than
-  better, and Phosphor makes it worse again: like emoji-icon-font it carries no
-  copyright in its own `name` table, so this file is the only place its MIT
-  notice can travel.
+  UNTIL 2026-09-03 what was left was the CLI, and it was a real gap rather than
+  a tidiness one once `pl.exe` carried an OFL face: `pl licences` was a licence
+  view that said nothing about fonts. Two more OFL faces made that worse rather
+  than better, and Phosphor made it worse again: like emoji-icon-font it
+  carries no copyright in its own `name` table, so this file is the only place
+  its MIT notice can travel. That last sentence is still true, and it is why
+  the CLI names only the faces `pl` links: the app's ten reach a user through
+  `bins/pl-gui/src/help.rs`, not through a verb of a binary that does not
+  carry them. Nothing in this paragraph is owed as of that date.
 
 Considered and NOT shipped
 --------------------------

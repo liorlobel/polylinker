@@ -47,6 +47,13 @@ name: CI
 #     the tree and not of the operating system, so two platforms was enough for
 #     THAT. Its windows-11-arm leg is here for an entirely different reason and
 #     is the subject of the section below.
+#   * `gui-smoke` (added 2026-09-03) is the one job that RUNS the editor: a
+#     two-leg matrix, ubuntu-latest under Xvfb and macos-latest, once per
+#     renderer on each leg, `PL_GUI_SMOKE=1` closing the window from its first
+#     frame. It is not in `gate` because the gate must stay exactly three
+#     ledgers, and not in `test` because an X server or a Mesa package failing
+#     must not read as a lockfile or test failure. Its own comment says which
+#     leg has been measured and where.
 #   * `msrv`, `wasm` and `oracles` stay. Each holds something the gate does not:
 #     the toolchain floor, the wasm module driven against a Linux `pl`, and four
 #     checks with no twin in the gate at all — the taint gate's FETCHING half,
@@ -114,6 +121,11 @@ name: CI
 #     tools/release.ps1 -> tools/check-archive.ps1
 #     tools/build-msi.ps1 -> tools/check-msi.ps1, per-user AND per-machine
 #
+# (The macOS leg of the same job runs, since 2026-09-03, tools/release.ps1 ->
+# tools/build-dmg.sh -> tools/check-dmg.sh --launch instead of the two MSI
+# lines: the disk image, mounted, held to the manifest, and the editor started
+# from inside the mounted bundle.)
+#
 # WHAT IT DOES NOT RUN. Every one of these runs on windows-latest and on NO
 # ARM64 machine anywhere, and a sentence in the README that does not account for
 # them is a false sentence:
@@ -121,19 +133,26 @@ name: CI
 #   * `tools/ci.ps1` as a list -- 77 steps, its ledger, and the whole skip
 #     discipline. There is no ARM64 ledger, so `reconcile` says nothing about
 #     this platform.
-#   * THE GUI IS NEVER LAUNCHED. Not on this leg, not on any leg, on any
-#     platform. Everything below builds `polylinker.exe`, packages it, installs
-#     it and uninstalls it, and nothing anywhere starts it and watches it come
-#     up. That gap shipped a release: v0.11.1's ARM64 build cannot open a window
-#     on a Windows-on-ARM machine, because those devices carry no OpenGL driver
-#     and `egui_glow` requires OpenGL 2.0+ -- a first-frame failure that every
-#     build, test, package and install step here passes straight over. It is not
-#     obvious this is fixable on a hosted runner: a GPU-less VM answers a GL
-#     request with the OpenGL 1.1 software renderer, so a naive "launch it and
-#     see" step would fail on windows-latest too and for the same reason, which
-#     is presumably why no such step was ever written. What IS testable, and now
-#     is, is that the failure SAYS something -- see
-#     `startup_failure_message` in bins/pl-gui/src/main.rs and its two tests.
+#   * THE GUI IS NEVER LAUNCHED ON THIS LEG, and until 2026-09-03 it was never
+#     launched on any leg, on any platform. Everything below builds
+#     `polylinker.exe`, packages it, installs it and uninstalls it, and nothing
+#     here starts it and watches it come up. That gap shipped a release:
+#     v0.11.1's ARM64 build cannot open a window on a Windows-on-ARM machine,
+#     because those devices carry no OpenGL driver and `egui_glow` requires
+#     OpenGL 2.0+ -- a first-frame failure that every build, test, package and
+#     install step here passes straight over. It is not obvious this is fixable
+#     on a hosted WINDOWS runner: a GPU-less VM answers a GL request with the
+#     OpenGL 1.1 software renderer, so a naive "launch it and see" step would
+#     fail on windows-latest too and for the same reason, which is presumably
+#     why no such step was written until the `gui-smoke` job at the bottom of
+#     this file -- ubuntu-latest under Xvfb on Mesa's software OpenGL and
+#     software Vulkan, and macos-latest on Apple's OpenGL and Metal, with
+#     `PL_GUI_SMOKE=1` closing the window from its first frame. So the sentence
+#     today is: the editor is launched on one Linux leg on a software adapter
+#     and on one macOS leg, and on no Windows leg -- not this one, not any.
+#     What was testable before that, and still is, is that the failure SAYS
+#     something -- see `startup_failure_message` in bins/pl-gui/src/main.rs
+#     and its tests.
 #   * the PE assertions: the icon and version resource in the built binaries.
 #   * the 8.3 short-name alias case.
 #   * the differential oracles -- SEGUID, zlib, Pillow, fontTools, resvg, the
@@ -1086,6 +1105,61 @@ jobs:
           ./tools/check-msi.ps1 -Msi $msi[0].FullName -Dist dist
           if ($LASTEXITCODE -ne 0) { throw 'the MSI failed its check in the per-machine scope' }
 
+      # ----------------------------------------------------------------- macOS
+      #
+      # THE DISK IMAGE, REHEARSED ON EVERY PUSH, since 2026-09-03. The MSI
+      # steps above are the precedent: `tools/build-dmg.sh` stages
+      # Polylinker.app from dist/SHA256SUMS.txt and `hdiutil` wraps it, then
+      # `tools/check-dmg.sh` attaches the image and holds the bundle to that
+      # same manifest -- and, with `--launch`, starts the editor from inside
+      # the mounted bundle with PL_GUI_SMOKE=1 and requires exit 0. That last
+      # part is the one the release workflow does not do ("a release workflow
+      # is not where to test a hypothesis"), so it is done here, where a red
+      # step costs a push and not a tag. Whether a hosted macOS runner lets a
+      # window open at all is what the first run of this step and of the
+      # `gui-smoke` job establishes; the bundle itself was launched this way on
+      # the maintainer's Mac on 2026-09-03.
+      #
+      # THE dist/ IT READS IS ASSEMBLED HERE, and that is the whole reason this
+      # is two steps rather than one. The `Package this platform` step above is
+      # `runner.os == 'Windows'`, and the gate's macOS leg builds its dist/
+      # inside a temp directory it deletes -- so nothing on this leg leaves a
+      # dist/ behind. The first version of this change put the assembly step in
+      # `gate` by mistake, where it was useless to a consumer in `test`.
+      #
+      # This leg is Apple Silicon and builds no Intel slice, so the manifest
+      # says `platform: macos-arm64` and the image is an arm64 one: what the
+      # two scripts are held to here is the bundle and the manifest, not the
+      # universal binary, which only release.yml's `lipo` step makes.
+      - name: Assemble dist/, which the .dmg step below reads
+        if: runner.os == 'macOS'
+        shell: pwsh
+        run: |
+          ./tools/release.ps1 -Out dist -Quiet
+          if (-not (Test-Path dist/SHA256SUMS.txt)) {
+            Write-Host '::error::release.ps1 produced no dist/SHA256SUMS.txt, so the .dmg step would have nothing to read'
+            exit 1
+          }
+
+      # `--out dmg`, never `dist/`, for the MSI's reason: everything under dist/
+      # is hashed into the manifest. `dmg/` is gitignored beside `msi/`.
+      - name: Build the .dmg, mount it, check the bundle, launch the editor from it
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          ./tools/build-dmg.sh --dist dist --out dmg
+          n=$(ls dmg/*.dmg | wc -l | tr -d ' ')
+          if [ "$n" != 1 ]; then echo "::error::expected exactly one .dmg, found $n"; exit 1; fi
+          version=$(sed -n 's/^version: *//p' dist/SHA256SUMS.txt | head -1)
+          label=$(sed -n 's/^platform: *//p' dist/SHA256SUMS.txt | head -1)
+          want="polylinker-$version-$label.dmg"
+          got=$(basename dmg/*.dmg)
+          if [ "$got" != "$want" ]; then
+            echo "::error::the image is called $got and this platform packages as $label, so it should be $want"
+            exit 1
+          fi
+          ./tools/check-dmg.sh --dmg "dmg/$got" --dist dist --launch
+
   # The oldest toolchain this workspace claims to build on, actually building it.
   #
   # `rust-version` in the root Cargo.toml read 1.82 for as long as the workspace
@@ -1536,3 +1610,151 @@ jobs:
             exit 1
           fi
           echo "working tree clean, and none of the $n files in it hashes to the pinned blob"
+
+  # THE ONE JOB THAT STARTS THE EDITOR. Added 2026-09-03; until then the header's
+  # sentence "THE GUI IS NEVER LAUNCHED" was true of every leg.
+  #
+  # What it proves: `polylinker` opens a window on each backend in turn, draws a
+  # frame, and exits 0 through `on_exit`. `PL_GUI_RENDERER` is PINNED on every
+  # step so a green wgpu step cannot be a glow success in disguise -- pinning
+  # disables the fallback (`renderer_plan` in bins/pl-gui/src/main.rs).
+  # `PL_GUI_SMOKE=1` is what closes the window (`smoke_test`, same file).
+  #
+  # What it does not prove: anything about a Windows driver, and on the Linux
+  # leg anything about a driver at all -- there both renderers run on Mesa's
+  # software implementations, llvmpipe for OpenGL and lavapipe for Vulkan,
+  # under a virtual X server. The macOS leg is the one on a GPU: Apple's
+  # OpenGL for glow, Metal for wgpu, on whatever the hosted runner virtualises.
+  # A real GPU on Linux, Wayland, and Windows on anything are all still
+  # "tested by users", and the prose in README.md, docs/RELEASING.md and
+  # bins/pl-gui/Cargo.toml says so in those words.
+  #
+  # WHICH LEG IS MEASURED AND WHICH IS REASONED, as of the day this was written.
+  # The macOS leg was measured on 2026-09-03 on the maintainer's Mac (Apple M5,
+  # macOS 26.6.2), not on a hosted runner: `PL_GUI_SMOKE=1 PL_GUI_RENDERER=glow
+  # cargo run -p pl-gui --release` exited 0 in 1.08s and the same with `wgpu`
+  # in 0.90s, and the exact form the steps below use -- the bare release
+  # binary under perl's alarm, HOME pointed at a scratch directory -- exited 0
+  # for both in under a fifth of a second, leaving `layout` and a closed
+  # `session-<pid>` under that HOME, which is `on_exit`'s signature. No hosted
+  # macOS runner has run it yet; the first run is what says whether the
+  # runner's session lets a window open at all. The Linux leg is REASONED, NOT
+  # MEASURED: the package list, the ICD path and the Xvfb screen size come
+  # from the packages' documentation, no run of it has been seen, and the
+  # first run is what tells whether eframe's default adapter request accepts
+  # lavapipe (a CPU adapter); the wgpu step's comment names the fallback if it
+  # does not.
+  #
+  # Its own job rather than a step of `test`: an X server or a Mesa package
+  # failing to install must not turn the lockfile-and-suites leg red, and a
+  # fourth `gate` leg is refused by `tools/reconcile-ledgers.ps1` (see the
+  # header). The editor is built again here (`-p pl-gui` only); with
+  # rust-cache warm that is minutes, and the ceiling below is the same class
+  # as `test`'s -- a hang goes red, a cold cache does not. `fail-fast: false`
+  # so the Linux leg failing on a package does not cancel the macOS leg's
+  # answer, or the other way round.
+  gui-smoke:
+    name: gui-smoke / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Linux only. The same three -dev packages `test` installs, plus a virtual
+      # X server and Mesa's two software renderers: llvmpipe (libgl1-mesa-dri,
+      # via GLX from libglx-mesa0 / EGL from libegl1) for glow, lavapipe
+      # (mesa-vulkan-drivers, which pulls libvulkan1) for wgpu. vulkan-tools is
+      # only for the `vulkaninfo --summary` line in the log, which is what says
+      # which ICD the wgpu step actually got. macOS ships its own graphics
+      # stack and the runner's logged-in session is the display, so it needs
+      # none of this.
+      - name: Install Linux GUI dependencies, a virtual X server and Mesa's software renderers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            xvfb libgl1-mesa-dri libglx-mesa0 libegl1 mesa-vulkan-drivers vulkan-tools
+
+      - name: Build the editor
+        run: cargo build -p pl-gui --release --locked
+
+      # `-s` spelled out even though xvfb-run's default is 1280x1024x24: the
+      # window asks for 1280x840 and refuses below 990x560 (MIN_WINDOW), so
+      # the screen size is a precondition and not a detail. `timeout
+      # --signal=KILL` is the per-process ceiling; a window that opens and
+      # never closes is exactly the failure a smoke test exists to find, and
+      # it must read as red, not as the job's 30 minutes. XDG_STATE_HOME is
+      # per step so the session file the first run writes on exit is not the
+      # one the second run restores. The Xvfb log is printed only on failure.
+      - name: glow -- OpenGL on llvmpipe -- opens a window and exits cleanly
+        if: runner.os == 'Linux'
+        env:
+          PL_GUI_SMOKE: "1"
+          PL_GUI_RENDERER: glow
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          XDG_STATE_HOME: ${{ runner.temp }}/pl-state-glow
+        run: |
+          timeout --signal=KILL 120 \
+            xvfb-run -a -s "-screen 0 1600x1000x24" -e "$RUNNER_TEMP/xvfb-glow.log" \
+            target/release/polylinker \
+            || { rc=$?; echo "::error::glow smoke exited $rc"; cat "$RUNNER_TEMP/xvfb-glow.log"; exit $rc; }
+
+      # The ICD is named rather than discovered so the log cannot say Vulkan
+      # and mean some other driver. The path is the x86_64 one; an arm64
+      # ubuntu runner would need lvp_icd.aarch64.json. WGPU_BACKEND=vulkan is
+      # what keeps wgpu off its GLES-over-EGL backend, which would be a second
+      # llvmpipe run wearing wgpu's name. UNVERIFIED until the first run:
+      # whether eframe's default adapter request accepts a CPU adapter. If it
+      # refuses, `WGPU_BACKEND=gl` (that GLES-over-EGL backend, on llvmpipe) is
+      # the fallback to try, and the sentence before this one becomes the
+      # reason it was not the first choice.
+      - name: wgpu -- Vulkan on lavapipe -- opens a window and exits cleanly
+        if: runner.os == 'Linux'
+        env:
+          PL_GUI_SMOKE: "1"
+          PL_GUI_RENDERER: wgpu
+          WGPU_BACKEND: vulkan
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          XDG_STATE_HOME: ${{ runner.temp }}/pl-state-wgpu
+        run: |
+          vulkaninfo --summary || true
+          timeout --signal=KILL 120 \
+            xvfb-run -a -s "-screen 0 1600x1000x24" -e "$RUNNER_TEMP/xvfb-wgpu.log" \
+            target/release/polylinker \
+            || { rc=$?; echo "::error::wgpu smoke exited $rc"; cat "$RUNNER_TEMP/xvfb-wgpu.log"; exit $rc; }
+
+      # macOS only, and the form measured on the maintainer's Mac (see the job
+      # comment). No packages and no X server: the runner's logged-in session
+      # is the display. coreutils `timeout` is not promised on the macOS
+      # image, so perl's alarm is the per-process ceiling -- it survives the
+      # exec, and a window that never closes dies of SIGALRM at 180s, which
+      # the shell reports as 142 and the step as red. HOME is per step for the
+      # reason XDG_STATE_HOME is above: on macOS `state_base`
+      # (bins/pl-gui/src/recover.rs) is `$HOME/Library/Application
+      # Support/Polylinker` and reads no XDG variable. The `mkdir` is the one
+      # the local measurement did; the binary creates the rest itself.
+      - name: glow -- Apple OpenGL -- opens a window and exits cleanly
+        if: runner.os == 'macOS'
+        env:
+          PL_GUI_SMOKE: "1"
+          PL_GUI_RENDERER: glow
+          HOME: ${{ runner.temp }}/pl-home-glow
+        run: |
+          mkdir -p "$HOME"
+          perl -e 'alarm 180; exec @ARGV' -- target/release/polylinker
+
+      - name: wgpu -- Metal -- opens a window and exits cleanly
+        if: runner.os == 'macOS'
+        env:
+          PL_GUI_SMOKE: "1"
+          PL_GUI_RENDERER: wgpu
+          HOME: ${{ runner.temp }}/pl-home-wgpu
+        run: |
+          mkdir -p "$HOME"
+          perl -e 'alarm 180; exec @ARGV' -- target/release/polylinker

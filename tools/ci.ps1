@@ -1431,7 +1431,12 @@ Step 'chromatograms vs Biopython' {
 # this compares cut *positions* against Biopython on the corpus, and runs the
 # Python transcription alongside the Rust so a divergence says which one moved.
 # It guards `cut_positions`, which is now a thin wrapper over
-# `pl_core::iupac::find_all` shared with the library's motif search.
+# `pl_core::iupac::find_all`, the byte-slice scan every `&[u8]` caller runs.
+# The library's motif search is NOT that code: it is a second implementation
+# over the packed store (`pl_index::scan::Slice::find`), held to `find_all` by
+# the agreement test in crates/pl-index/src/scan.rs. This comment said the two
+# were "shared" from 2026-07-27 to 2026-09-03; the doc on `find_all` records
+# the same correction.
 #
 # Corpus-gated because no `.dna` may live in this repo (see the header) and the
 # script now — correctly — fails rather than passes when it compares nothing.
@@ -4010,7 +4015,14 @@ function Get-PublishedArtifactFixture {
     $closed = $false
     for ($i = $at + 1; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -match '^\s{0,}\}' -and ($lines[$i].Length - $lines[$i].TrimStart().Length) -eq $indent) { $closed = $true; break }
-        foreach ($m in [regex]::Matches($lines[$i], 'polylinker-\{\w+\}-([\w.-]+?)\.(zip|tar\.gz|msi)(?![\w.])')) {
+        # `|dmg` since 2026-09-03. An extension this alternation does not name
+        # is INVISIBLE to the whole step: a `.dmg` line in the fixture and a
+        # `.dmg` name in the workflow would both be dropped here, the two lists
+        # would agree on the six files that remained, and the step would pass
+        # while proving nothing about the seventh -- the check-that-cannot-fail
+        # shape. So the alternation is part of the claim, and a new artifact
+        # type is an edit here as well as in flow.rs and release.yml.
+        foreach ($m in [regex]::Matches($lines[$i], 'polylinker-\{\w+\}-([\w.-]+?)\.(zip|tar\.gz|msi|dmg)(?![\w.])')) {
             $names += ($m.Groups[1].Value + '.' + $m.Groups[2].Value)
         }
     }
@@ -4028,7 +4040,7 @@ function Get-PublishedArtifactFixture {
 # by-name check, and only a name can be compared with a name.
 function Get-WorkflowArtifactNames {
     param([string]$Text)
-    @([regex]::Matches($Text, 'polylinker-\$\{?\w+\}?-([\w.-]+?)\.(zip|tar\.gz|msi)(?![\w.])') |
+    @([regex]::Matches($Text, 'polylinker-\$\{?\w+\}?-([\w.-]+?)\.(zip|tar\.gz|msi|dmg)(?![\w.])') |
       ForEach-Object { $_.Groups[1].Value + '.' + $_.Groups[2].Value } | Sort-Object -Unique)
 }
 

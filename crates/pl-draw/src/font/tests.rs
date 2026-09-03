@@ -30,11 +30,14 @@ fn bold() -> Face<'static> {
 /// nothing joining them could fail if somebody swapped a font and could NOT
 /// fail if somebody mistyped the record of one. The `include_str!` is the join.
 ///
-/// The licence text is in here too. It is not linked into any binary — it
-/// travels beside it — so nothing else in the build would notice if it were
-/// truncated or re-wrapped by an editor, and a licence that has quietly become
-/// the wrong bytes is worse than a missing one because the package still looks
-/// complete.
+/// The licence text is in here too. Until 2026-09-03 it was not linked into
+/// any binary — it travelled beside them — so nothing else in the build would
+/// have noticed if it were truncated or re-wrapped by an editor, and a licence
+/// that has quietly become the wrong bytes is worse than a missing one because
+/// the package still looks complete. It is now [`OFL`], which `pl licences`
+/// prints whole, and the hash below is taken over that constant rather than a
+/// second `include_bytes!` of the same path, so the bytes checked are the
+/// bytes printed.
 #[test]
 fn the_vendored_faces_are_the_files_notice_records() {
     let notice: &str = include_str!("../../../../NOTICE");
@@ -53,7 +56,7 @@ fn the_vendored_faces_are_the_files_notice_records() {
         ),
         (
             "the Liberation OFL text",
-            include_bytes!("../../fonts/Liberation-OFL.txt"),
+            OFL.as_bytes(),
             4_414,
             "93fed46019c38bbe566b479d22148e2e8a1e85ada614accb0211c37b2c61c19b",
         ),

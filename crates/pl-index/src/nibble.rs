@@ -134,8 +134,9 @@ pub fn pattern_masks(pattern: &[u8]) -> Result<Vec<u8>, (usize, u8)> {
 /// nothing when the pattern is longer than the molecule, forward strand only.
 ///
 /// Those are two implementations of one search, and the byte one carries the
-/// Biopython oracle. `agrees_with_the_byte_scan` in the tests is what connects
-/// them; without it the oracle guards code no user query reaches.
+/// Biopython oracle. `agrees_with_the_byte_scan_it_is_a_twin_of` in the tests
+/// is what connects them; without it the oracle guards code no user query
+/// reaches.
 pub fn find_all_nib(pattern_masks: &[u8], packed: &[u8], bases: usize, circular: bool) -> Vec<u64> {
     let (n, k) = (bases, pattern_masks.len());
     if n == 0 || k == 0 || k > n {

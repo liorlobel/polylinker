@@ -22,7 +22,8 @@ fresh installation asks for nothing until you tell it to.
 | Windows 10/11, x64 | `polylinker-{{VERSION}}-windows-x64.zip` | portable: unzip and run, nothing installed. Also contains a readable PowerShell installer |
 | **Windows 11, ARM64** | **`polylinker-{{VERSION}}-windows-arm64.msi`** | **native ARM64 — new, and less proven than the rest of this table.** Read *Which Windows file?* below before taking it |
 | Windows 11, ARM64 | `polylinker-{{VERSION}}-windows-arm64.zip` | the portable form of the same build |
-| macOS 11+, Apple Silicon **and** Intel | `polylinker-{{VERSION}}-macos-universal.tar.gz` | one universal binary for both |
+| **macOS 11+, Apple Silicon and Intel** | **`polylinker-{{VERSION}}-macos-universal.dmg`** | **the disk image — start here.** Open it and drag `Polylinker.app` to Applications. One universal build for both. Unsigned, like everything else here: read *Every one of these is unsigned* below |
+| macOS 11+, Apple Silicon **and** Intel | `polylinker-{{VERSION}}-macos-universal.tar.gz` | the same programs as bare files, for a terminal, a cluster, or a `pl` on your PATH; what `pl update` fetches on macOS |
 | Linux, x64, glibc 2.39 or newer | `polylinker-{{VERSION}}-linux-x64.tar.gz` | see the note below before downloading |
 
 Each archive contains `polylinker` (the editor), `pl` (the command line),
@@ -30,7 +31,10 @@ Each archive contains `polylinker` (the editor), `pl` (the command line),
 `SHA256SUMS.txt` covering every one of them. Verify the archive against the
 checksum table at the bottom of this page before extracting it. The `.msi`
 installs that same set, minus the two installer files it replaces, and is in
-that checksum table too.
+that checksum table too. The `.dmg` carries that same set inside
+`Polylinker.app` — the three programs under `Contents/MacOS`, the Python module
+and every licence text under `Contents/Resources` — minus the `SHA256SUMS.txt`
+that describes the tarball, and is in the checksum table as well.
 
 ### Which Windows file?
 
@@ -105,6 +109,14 @@ from the files you extracted:
 
 ```sh
 xattr -d com.apple.quarantine polylinker pl pl-mcp polylinker.so
+```
+
+For the `.dmg`, the same tag is on the image and on everything copied out of
+it, so clear it from the bundle you dragged to Applications — `-r` because a
+bundle is a folder:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Polylinker.app
 ```
 
 That is a per-file operation. Gatekeeper stays on, System Integrity Protection

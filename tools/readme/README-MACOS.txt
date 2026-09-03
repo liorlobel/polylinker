@@ -7,6 +7,9 @@ its own or checks for a new version by itself: the editor's update check is off
 until you switch it on under Help, and `pl update` is a command you type.
 
 There is nothing to install. The three programs in this folder run as they are.
+This is the bare form; the release page also carries a disk image,
+polylinker-<version>-macos-universal.dmg, with the same programs inside a
+Polylinker.app you drag to Applications. See section 3.
 
 
 WHAT IS IN HERE
@@ -62,6 +65,12 @@ the way it was a minute ago. If the command reports "No such xattr", the files
 were not quarantined in the first place (`tar` extracting from a terminal does
 not always propagate it) and there is nothing to do.
 
+If you took the .dmg instead, the tag is on the image and on everything copied
+out of it. Clear it from the bundle you dragged to Applications, recursively,
+because a bundle is a folder:
+
+    xattr -dr com.apple.quarantine /Applications/Polylinker.app
+
 You may have been told elsewhere to right-click the file and choose Open. That
 works, and it is a worse habit: it is the same click-through for a program you
 checked as for one you did not. The command above says what is being allowed and
@@ -83,12 +92,36 @@ To put `pl` somewhere your shell will find it, move it there yourself:
 
 and make sure ~/.local/bin is on your PATH.
 
-There is no .app bundle, no .dmg and no Homebrew formula. `polylinker` is a bare
-executable, so double-clicking it in Finder opens a Terminal window alongside the
-editor, and the menu bar shows the executable's name rather than a proper
-application name. That is cosmetic and it is honest about what this is: an
-unsigned binary that would be misrepresented by wrapping it in the packaging of
-a signed application.
+This archive is the bare form. `polylinker` here is a bare executable, so
+double-clicking it in Finder opens a Terminal window alongside the editor, and
+the menu bar shows the executable's name rather than a proper application name.
+
+The release page also carries polylinker-<version>-macos-universal.dmg, which
+holds the same three programs and the same Python module inside a
+Polylinker.app bundle -- with an icon and a name Finder shows, and the same
+licence texts under Contents/Resources. Open the image, drag Polylinker.app to
+Applications, clear the quarantine tag as section 2 says, and double-click it.
+Two things the bundle does not do, stated so they are not discovered: it does
+not register itself for .dna, .gb or any other file type, because the editor
+takes files from the command line and from drag-and-drop and nothing in it
+receives the event a Finder double-click on a document sends -- so open a file
+by dropping it on the window, or by running the program inside the bundle,
+
+    /Applications/Polylinker.app/Contents/MacOS/polylinker my.gb
+
+which is the command line, and is the form that was measured. `open -a
+Polylinker my.gb` does NOT open the file: `open` hands it over as the same
+event a double-click sends, which is the one this program does not receive.
+This paragraph recommended that command until 2026-09-03. (`open`'s `--args`
+flag is documented to pass what follows it to argv instead; whether that
+reaches this program was not measured, so it is not recommended here either.)
+And the bundle is not
+signed, so Gatekeeper refuses it exactly as it refuses this tarball and the
+remedy is the recursive form of the same command. Until 2026-09-03 this
+paragraph said there was no .app bundle and no .dmg, and that wrapping an
+unsigned binary in the packaging of a signed application would misrepresent it;
+the bundle is as unsigned as this tarball and says so. There is still no
+Homebrew formula.
 
 The Python extension is loaded from wherever you put it:
 

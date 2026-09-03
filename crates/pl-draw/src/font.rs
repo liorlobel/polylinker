@@ -482,6 +482,18 @@ pub const REGULAR: &[u8] = include_bytes!("../fonts/LiberationSans-Regular.ttf")
 /// matching resolves 600 to 700 when a family offers only 400 and 700, which is
 /// every face in the chain, so all three land on the same weight.
 pub const BOLD: &[u8] = include_bytes!("../fonts/LiberationSans-Bold.ttf");
+/// The licence both faces are under, whole: `fonts/Liberation-OFL.txt`, the
+/// LICENSE at the root of the upstream release archive, unmodified.
+///
+/// Linked in since 2026-09-03 so that `pl licences` can print it. OFL clause 2
+/// permits the faces to be bundled "provided that each copy contains the above
+/// copyright notice and this license", and a user handed the bare `pl`
+/// executable has no `licences/` directory beside it. Until then the text
+/// travelled only beside the binaries, copied by `tools/release.ps1`; the
+/// desktop app had already compiled its own copy in, through `help.rs`. Pinned
+/// by `the_vendored_faces_are_the_files_notice_records`, which hashes this
+/// constant against the digest NOTICE records.
+pub const OFL: &str = include_str!("../fonts/Liberation-OFL.txt");
 
 #[cfg(test)]
 mod tests;

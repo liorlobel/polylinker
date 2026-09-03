@@ -34,6 +34,10 @@ crates/pl-draw/fonts/*.txt -text
 # covered here for the same reason.
 bins/pl-gui/icon/polylinker.ico -text
 bins/pl-gui/icon/*.rgba -text
+# The macOS icon, added 2026-09-03: an ICNS container of PNG frames, pinned by
+# sha256 in bins/pl-gui/src/main.rs the same way, and binary for the same
+# reason.
+bins/pl-gui/icon/polylinker.icns -text
 
 # Rust sources are read by tests that `include_str!` their own file and match
 # on newline literals, so a CRLF checkout changes what those tests see. The

@@ -832,11 +832,19 @@ pub fn cut_sites(seq: &[u8], topology: Topology, enzyme: &Enzyme) -> Vec<CutSite
     if n == 0 || k == 0 || k > n {
         return Vec::new();
     }
-    // The scan itself is `pl_core::iupac::find_all`, so the library's motif
-    // search runs the same code this function's Biopython oracle covers rather
-    // than a second implementation of it. Scanning `n` starts on a circle
-    // against `n - k + 1` on a line — the whole of the wraparound handling —
-    // lives there now.
+    // The scan itself is `pl_core::iupac::find_all`, so this function's
+    // Biopython oracle covers the byte-slice search every `&[u8]` caller runs.
+    // The library's motif search is *not* this code: the `find` method on
+    // `pl_index::scan::Slice` re-implements the contract over the
+    // nibble-packed store and is held to `find_all` by the agreement test in
+    // `pl-index/src/scan.rs`. This comment said the library "runs the same
+    // code ... rather than a second implementation of it" from 2026-07-27.
+    // That was intent, not fact: when the scan was lifted (71784ee)
+    // `pl-index` did not exist yet, the packed store landed later the same
+    // afternoon (11ea58a) with a second implementation, and the library's
+    // motif search was built on that one (e2fd98a); corrected 2026-09-03.
+    // Scanning `n` starts on a circle against `n - k + 1` on a line — the
+    // whole of the wraparound handling — lives there now.
     //
     // The `k > n` guard above stays here as well: it is this function's
     // documented divergence, and a reader looking for it should find it at the

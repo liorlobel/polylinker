@@ -12,6 +12,9 @@ dist/
 # `tools/build-msi.ps1 -GenerateOnly` and the ARM64 test leg both leave one
 # here; it is a build product of dist/, never a source.
 msi/
+# The same for `tools/build-dmg.sh`: the staged Polylinker.app and the disk
+# image are build products of dist/, never sources.
+dmg/
 *.tsbuildinfo
 
 # Rust
