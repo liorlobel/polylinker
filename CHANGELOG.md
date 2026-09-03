@@ -25,6 +25,12 @@ which.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-03
+
+A macOS download that is an application rather than three loose executables,
+the first CI job in this project's history that opens the editor's window, and
+seven claims in the tree that had stopped being true.
+
 ### Added
 
 - **A macOS disk image, beside the tarball.** The release page carries
