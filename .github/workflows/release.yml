@@ -247,6 +247,68 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
 
+      # ---------------------------------------------------------------- Linux
+      #
+      # THE LINUX BINARIES ARE BUILT IN A CONTAINER, AND THE REASON IS THE ONE
+      # NUMBER A USER FEELS: the glibc floor.
+      #
+      # glibc is backward but not forward compatible, so the floor is a
+      # property of the machine that COMPILED the binary, not of the code. This
+      # leg built on `ubuntu-latest`, which became 24.04 and glibc 2.39, and
+      # that put the download out of reach of Ubuntu 22.04 (2.35), Debian 12
+      # (2.36) and RHEL 9 / Rocky 9 (2.34) -- which is to say the locked-down
+      # university PC and the cluster head node that README.md's "Why" section
+      # is about. The user got `version 'GLIBC_2.39' not found` and a
+      # suggestion to install a Rust toolchain.
+      #
+      # WHY NOT `runs-on: ubuntu-22.04`, which docs/RELEASING.md named as the
+      # lever. Because that lever is being taken away: actions/runner-images
+      # #14254 begins deprecating the Ubuntu 22 images on 2026-09-17 -- two
+      # weeks after this was written -- with brownouts that deliberately fail
+      # jobs, and full removal on 2027-04-17. Pinning it would buy a few weeks
+      # and then fail releases at random.
+      #
+      # A container is not subject to a runner label's retirement. AlmaLinux 8
+      # is the RHEL 8 rebuild, glibc 2.28, supported to 2029, and 2.28 is below
+      # every row of the table in docs/RELEASING.md -- so the artifacts reach
+      # RHEL 8+, Ubuntu 20.04+ and Debian 10+ rather than only the newest
+      # releases of each.
+      #
+      # The invocation is `cargo build --release --workspace --locked`, which
+      # is verbatim what `tools/release.ps1` runs at its line 326; the Package
+      # step below then takes `-SkipBuild -BinDir target/release`, exactly as
+      # the macOS leg does after `lipo`. One build command, in one place, run
+      # somewhere else -- not a second build with its own flags to drift.
+      #
+      # Root inside the container because dnf needs it, then `chown` back to
+      # the runner's uid so the host steps and the cache's post-step can read
+      # what it wrote. `libgtk-3-dev`'s counterpart is deliberately NOT
+      # installed: docs/RELEASING.md records that there is no gtk crate in
+      # Cargo.lock and that rfd reaches the file dialog through the XDG portal,
+      # so this is also the measurement that settles it -- if the build needs
+      # GTK, this step is where it says so.
+      - name: Build the Linux artifacts against an old glibc
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD":/w -w /w \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -e CARGO_TERM_COLOR=always \
+            almalinux:8 \
+            bash -eux -c '
+              dnf -y install gcc make pkgconf-pkg-config \
+                             libxkbcommon-devel wayland-devel python39-devel
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain stable
+              . "$HOME/.cargo/env"
+              export PYO3_PYTHON=/usr/bin/python3.9
+              ldd --version | head -1
+              rustc --version
+              cargo build --release --workspace --locked
+              chown -R "$HOST_UID:$HOST_GID" target
+            '
+
       # ---------------------------------------------------------------- macOS
       - name: Build both macOS slices and join them
         if: runner.os == 'macOS'
@@ -282,11 +344,21 @@ jobs:
         run: |
           ./tools/release.ps1 -Out dist -BinDir target/universal -SkipBuild -PlatformLabel macos-universal
 
-      # -------------------------------------------------------- Windows/Linux
+      # -------------------------------------------------------------- Windows
       - name: Package
-        if: runner.os != 'macOS'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: ./tools/release.ps1 -Out dist
+
+      # ---------------------------------------------------------------- Linux
+      # -SkipBuild is safe here for the macOS leg's reason and no other: the
+      # step above built this exact workspace minutes ago, in a container, and
+      # release.ps1 refuses -SkipBuild without an explicit -BinDir precisely so
+      # it cannot be pointed at a stale target/release.
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: ./tools/release.ps1 -Out dist -BinDir target/release -SkipBuild
 
       # ---------------------------------------------------------------- Linux
       #
@@ -322,8 +394,21 @@ jobs:
             echo "::error::found no GLIBC_ version references at all; this check measured nothing"
             exit 1
           fi
-          if [ "$(printf '%s\n%s\n' "$claimed" "$required" | sort -V | tail -1)" != "$claimed" ]; then
-            echo "::error::these binaries need glibc $required but README-LINUX.txt promises they run on $claimed. Update README-LINUX.txt, or pin the runner to an older image."
+          # BOTH DIRECTIONS, since 2026-09-03. This compared one way -- it
+          # failed when the binaries needed MORE than the file promised, and
+          # said nothing when they needed less. That second case is not
+          # harmless: it is the file turning away every user between the real
+          # floor and the claimed one, which is exactly what building in a
+          # container created here (the artifacts dropped to 2.28 while the
+          # file still said 2.39, and nothing would have noticed). The claim is
+          # a floor, so the honest form is equality, and the message says which
+          # way it went.
+          if [ "$claimed" != "$required" ]; then
+            if [ "$(printf '%s\n%s\n' "$claimed" "$required" | sort -V | tail -1)" = "$required" ]; then
+              echo "::error::these binaries need glibc $required but README-LINUX.txt promises they run on $claimed. Update README-LINUX.txt, or build against an older glibc."
+            else
+              echo "::error::these binaries only need glibc $required, and README-LINUX.txt claims $claimed -- so the file turns away every user between the two, and the table in docs/RELEASING.md is wrong with it. Lower the number in README-LINUX.txt to $required."
+            fi
             exit 1
           fi
           {

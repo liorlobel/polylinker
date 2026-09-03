@@ -24,7 +24,7 @@ fresh installation asks for nothing until you tell it to.
 | Windows 11, ARM64 | `polylinker-{{VERSION}}-windows-arm64.zip` | the portable form of the same build |
 | **macOS 11+, Apple Silicon and Intel** | **`polylinker-{{VERSION}}-macos-universal.dmg`** | **the disk image — start here.** Open it and drag `Polylinker.app` to Applications. One universal build for both. Unsigned, like everything else here: read *Every one of these is unsigned* below |
 | macOS 11+, Apple Silicon **and** Intel | `polylinker-{{VERSION}}-macos-universal.tar.gz` | the same programs as bare files, for a terminal, a cluster, or a `pl` on your PATH; what `pl update` fetches on macOS |
-| Linux, x64, glibc 2.39 or newer | `polylinker-{{VERSION}}-linux-x64.tar.gz` | see the note below before downloading |
+| Linux, x64, glibc 2.28 or newer | `polylinker-{{VERSION}}-linux-x64.tar.gz` | see the note below before downloading |
 
 Each archive contains `polylinker` (the editor), `pl` (the command line),
 `pl-mcp` (the MCP server), the Python extension module, the licence texts, and a
@@ -165,13 +165,18 @@ certificate, and there is none.
 
 ## Linux: check your glibc first
 
-The Linux binaries are built on Ubuntu 24.04 and need **glibc 2.39 or newer**.
+The Linux binaries are built against **glibc 2.28** and need that or newer.
 glibc is backward compatible but not forward compatible, so on anything older
 they will not start at all, and the error is a bare
-``version `GLIBC_2.39' not found``. Check with `ldd --version`.
+``version `GLIBC_2.28' not found``. Check with `ldd --version`.
 
-- Fine: Ubuntu 24.04+, Debian 13+, Fedora 40+, RHEL 10+
-- **Will not run**: Ubuntu 22.04 (2.35), Debian 12 (2.36), RHEL 9 (2.34)
+- Fine: RHEL/Rocky/Alma 8+, Ubuntu 20.04+, Debian 10+, Fedora 29+
+- **Will not run**: Ubuntu 18.04 (2.27), RHEL 7 (2.17)
+
+That floor was 2.39 before this release, which put the download out of reach of
+Ubuntu 22.04, Debian 12 and RHEL 9. It is 2.28 because the binaries are now
+compiled in an older container rather than on whatever the CI runner happens to
+be.
 
 There is no build for older distributions. On one of those, build from source —
 it needs Rust 1.92 and nothing exotic, and `pl` and `pl-mcp` need no system

@@ -42,22 +42,32 @@ SHA256SUMS.txt covers every individual file:
 This is the question worth asking before anything else, because the answer is
 not "yes" everywhere.
 
-GLIBC. These binaries are built on Ubuntu 24.04, which has glibc 2.39, and glibc
-is backward compatible but not forward compatible: a binary built against 2.39
-will not start on anything older. Check yours:
+GLIBC. These binaries are built against glibc 2.28, and glibc is backward
+compatible but not forward compatible: a binary built against 2.28 runs on 2.28
+and on everything newer, and on nothing older. Check yours:
 
     ldd --version
 
-  2.39 or newer      Ubuntu 24.04+, Debian 13+, Fedora 40+, RHEL 10+  -- fine
-  older than 2.39    Ubuntu 22.04 (2.35), Debian 12 (2.36), RHEL 9 (2.34)
-                     -- these binaries will not start, and the error will be a
-                     bare "version `GLIBC_2.39' not found"
+  2.28 or newer      RHEL/Rocky/Alma 8+, Ubuntu 20.04+, Debian 10+,
+                     Fedora 29+  -- fine
+  older than 2.28    Ubuntu 18.04 (2.27), RHEL 7 (2.17) -- these binaries will
+                     not start, and the error will be a bare
+                     "version `GLIBC_2.28' not found"
 
-There is no build for older distributions and this file is not going to pretend
-otherwise. On an older machine, build from source -- the toolchain requirement
-is Rust 1.92, the repository is at github.com/liorlobel/polylinker, and the
-README there lists the build dependencies. `pl` and `pl-mcp` are pure Rust and
-build with no system libraries at all.
+That number was 2.39 until 2026-09-03, because this leg built on whatever
+`ubuntu-latest` happened to be and that had become Ubuntu 24.04. It put the
+download out of reach of Ubuntu 22.04, Debian 12 and RHEL 9 -- the machines
+this program is mostly for. The binaries are now compiled inside an AlmaLinux 8
+container, which is the oldest glibc the project is willing to support, and the
+release refuses to publish if this number and the binaries ever disagree in
+EITHER direction.
+
+There is no build for anything older than 2.28 and this file is not going to
+pretend otherwise. On such a machine, build from source -- the toolchain
+requirement is Rust 1.92, the repository is at
+github.com/liorlobel/polylinker, and the README there lists the build
+dependencies. `pl` and `pl-mcp` are pure Rust and build with no system
+libraries at all.
 
 SHARED LIBRARIES. `pl` and `pl-mcp` need nothing but libc. `polylinker` is the
 one with a window, and it opens the graphics and input libraries by name at run
