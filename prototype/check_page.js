@@ -125,7 +125,20 @@ async function main() {
   T("map drawn", doc.getElementById("mapHost").querySelectorAll("path").length >= 8,
     `${doc.getElementById("mapHost").querySelectorAll("path").length} paths`);
   T("no NaN in geometry", !doc.getElementById("mapHost").innerHTML.includes("NaN"));
-  T("features listed", F("CURRENT.features.length") === 10, `${F("CURRENT.features.length")} features`);
+  // 8 features and 2 primers, not 10 features. This read `=== 10` until
+  // 2026-09-03, when the GenBank reader began promoting the `primer_bind`
+  // features this project's own writer emits back into `mol.primers`
+  // (`promote_primers`, crates/pl-fileio/src/genbank.rs). demo-construct.gb
+  // carries exactly two of them, in that literal form, so two of the ten moved
+  // rather than disappeared -- which is what the second assertion is for. The
+  // sum is pinned as well as the split, so a future change that loses one
+  // instead of moving it cannot pass by adjusting one number.
+  T("features listed", F("CURRENT.features.length") === 8, `${F("CURRENT.features.length")} features`);
+  T("primers promoted, not dropped", F("CURRENT.primers.length") === 2,
+    `${F("CURRENT.primers.length")} primers`);
+  T("nothing lost in the move",
+    F("CURRENT.features.length") + F("CURRENT.primers.length") === 10,
+    `${F("CURRENT.features.length")} features + ${F("CURRENT.primers.length")} primers`);
   T("unique cutters found", F("state.digest.filter(e => e.positions.length === 1).length") > 10,
     `${F("state.digest.filter(e => e.positions.length === 1).length")} unique`);
   T("demo is uppercase (no false soft-masking)", F("CURRENT.lowercase") === 0,

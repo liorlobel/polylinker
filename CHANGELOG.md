@@ -25,6 +25,39 @@ which.
 
 ## [Unreleased]
 
+### Changed
+
+- **A primer survives a GenBank round trip as a primer.** GenBank has no primer
+  object, so the writer spends one `primer_bind` feature per binding site,
+  carrying the name in `/label` and the oligo and its melting temperature in a
+  `/note`. Nothing ever read that back. A `.dna` opened, saved as GenBank and
+  reopened had an empty Primers tab, `pl info` counted zero primers, and the
+  oligo survived only as prose. The round trip was *stable* — writing that
+  molecule again gave the same bytes — which is exactly why it never went red.
+  The reader now promotes those features back into primers and removes them
+  from the feature list, so a file cannot grow a duplicate `primer_bind` per
+  save.
+
+  **Only the exact form this writer emits is promoted**, and the strictness is
+  the design rather than caution: kind `primer_bind`, exactly the two
+  qualifiers `label` then `note`, and a note of `primer <OLIGO>` or
+  `primer <OLIGO>; Tm: <n> C` whose oligo is non-empty and IUPAC throughout. A
+  `primer_bind` from another tool, or one made in this program's own feature
+  editor, is a feature and stays one — reinterpreting it would delete it from
+  the file's feature list on open. Six such cases are pinned by test, including
+  a note reading `primer for colony PCR`, which fails on the space where an
+  oligo cannot have one.
+
+  **What a user will notice.** A `.gb` this program wrote reports fewer
+  features and more primers than it did: `prototype/demo-construct.gb` goes
+  from ten features to eight features and two primers, measured. The oligos
+  appear in the Primers tab and the primer picker for the first time. Two
+  distinct primers that share a name and an oligo come back as one primer with
+  two sites; nothing in the corpus is known to do that, and it was not
+  measured. The corpus round-trip test asserted the old shape as its
+  expectation and now asserts both halves separately, but it skips without a
+  corpus and did not run here.
+
 ### Fixed
 
 - **A GenBank save could lose a primer and still be called faithful.** The
