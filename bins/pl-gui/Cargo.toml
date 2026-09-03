@@ -125,10 +125,10 @@ pl-update.workspace = true
 # `gui-smoke` job in .github/workflows/ci.yml opens the window on each backend
 # in turn (PL_GUI_SMOKE=1, PL_GUI_RENDERER pinned): on ubuntu-latest under Xvfb
 # on Mesa's software OpenGL for glow and its software Vulkan for wgpu, and on
-# macos-latest on Apple's OpenGL and Metal. The Linux leg is written from the
-# packages' documentation and has not yet been seen green; the macOS leg's two
-# launches were measured exiting 0 on the maintainer's M5 Mac that day, not yet
-# on a hosted runner. That is one software adapter per backend on Linux and one
+# macos-latest on Apple's OpenGL and Metal. All four are green on hosted
+# runners as of run 33763643129, and the Linux Vulkan one logged
+# DRIVER_ID_MESA_LLVMPIPE, so wgpu really did take the Vulkan path rather than
+# its GLES-over-EGL one. That is one software adapter per backend on Linux and one
 # Apple GPU on macOS, and nobody's Windows driver, so the sentence weakens
 # rather than disappears. Removing glow would still move every platform that
 # works today onto a renderer that only that job and a hand-pinned

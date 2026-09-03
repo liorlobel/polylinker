@@ -379,11 +379,26 @@ so neither the requirement nor the fallback was exercised by the pipeline —
 had to be done by hand. Since then `ci.yml`'s `gui-smoke` job launches the editor
 twice per leg with `PL_GUI_SMOKE=1` closing the window from its first frame: on
 `ubuntu-latest` under Xvfb, `PL_GUI_RENDERER=glow` on Mesa's software OpenGL and
-`PL_GUI_RENDERER=wgpu` on its software Vulkan (reasoned from the packages'
-documentation, not yet seen green), and on `macos-latest`, glow on Apple's OpenGL
-and wgpu on Metal (measured exiting 0 on the maintainer's Mac that day, not yet
-on a hosted runner). The macOS leg of the `test` job also launches the editor
-from inside the mounted `.dmg` the same way (`tools/check-dmg.sh --launch`).
+`PL_GUI_RENDERER=wgpu` on its software Vulkan, and on `macos-latest`, glow on
+Apple's OpenGL and wgpu on Metal. The macOS leg of the `test` job also launches
+the editor from inside the mounted `.dmg` the same way
+(`tools/check-dmg.sh --launch`).
+
+**All five launches are green on hosted runners as of run 33763643129**
+(2026-09-03), and the wgpu one names its driver: `DRIVER_ID_MESA_LLVMPIPE`,
+`deviceName = llvmpipe (LLVM 20.1.2, 256 bits)`, against a Vulkan instance of
+1.3.275 — Mesa's software Vulkan, which is what that step claims to exercise
+rather than its GLES-over-EGL backend. Getting there took two red runs and both
+are worth recording, because each was a real defect rather than a flaky
+runner. The first died at startup on `libxkbcommon-x11.so`: the editor opens
+its graphics and input libraries by name at run time, every leg until then had
+only ever BUILT it, and `libxkbcommon-dev` does not bring
+`libxkbcommon-x11-0`. `README-LINUX.txt` had named that package to users since
+it was written and nothing checked that CI agreed. The second was a file name
+— `lvp_icd.x86_64.json` is the upstream Mesa spelling and Ubuntu ships
+`lvp_icd.json` — caught in one line because that step asserts its driver file
+exists and lists the directory when it does not.
+
 That is a Linux software adapter and an Apple GPU, not a Windows-on-ARM driver,
 so **the fallback is still the least-tested code in the program where it
 matters**: it is reached only where the first backend has already failed, which
@@ -504,8 +519,9 @@ The last row is the one no amount of CI moves: nobody has launched `polylinker.e
 or double-clicked the `.msi`. That is not an ARM64 peculiarity — until 2026-09-03
 *no* CI job on *any* platform opened the editor's window, and since then only the
 `gui-smoke` job and the `.dmg` check do, on `ubuntu-latest` under Xvfb and on
-`macos-latest`, never on Windows — but on the other three platforms the
-maintainer's own machine stands behind that gap, and on this one nothing does.
+`macos-latest` (green since run 33763643129), never on Windows — but on the
+other three platforms the maintainer's own machine stands behind that gap, and
+on this one nothing does.
 
 **The ARM64 archive is allowed to ship without the Python extension module, and
 if it does, it says so.** `crates/pl-py` links against CPython through pyo3, and

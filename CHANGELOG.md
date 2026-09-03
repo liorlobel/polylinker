@@ -55,19 +55,26 @@ which.
   window on each renderer in turn (`PL_GUI_RENDERER` pinned, `PL_GUI_SMOKE=1`
   closing it from the first frame) on `ubuntu-latest` under Xvfb on Mesa's
   software OpenGL and Vulkan, and on `macos-latest` on Apple's OpenGL and
-  Metal. The macOS launches were measured on the maintainer's Mac on
-  2026-09-03. No Windows leg launches the editor, and no leg runs on a real
+  Metal. All four launches are green on hosted runners as of run 33763643129,
+  and the Linux Vulkan one logged `driverID = DRIVER_ID_MESA_LLVMPIPE` rather
+  than falling back to wgpu's GLES backend, so that step exercises what it
+  claims to. No Windows leg launches the editor, and no leg runs on a real
   Linux driver.
 
-  **It earned its place on its first run**, which is worth recording because
-  the job is otherwise easy to read as ceremony. That run went red: the editor
-  panicked at startup with "Library libxkbcommon-x11.so could not be loaded",
-  because `libxkbcommon-dev` brings `libxkbcommon0` and not
-  `libxkbcommon-x11-0`, and no CI leg had ever launched the program and so none
-  had ever needed the latter. `tools/readme/README-LINUX.txt` had named that
-  package to users on a minimal image since it was written; nothing checked
-  that CI agreed with it. The eight run-time packages that file lists are now
-  installed, and the Linux leg has still not been seen green.
+  **It earned its place on its first two runs**, which is worth recording
+  because the job is otherwise easy to read as ceremony. Both went red and
+  neither was flake. The first: the editor panicked at startup with "Library
+  libxkbcommon-x11.so could not be loaded", because `libxkbcommon-dev` brings
+  `libxkbcommon0` and not `libxkbcommon-x11-0`, and no leg had ever launched
+  the program and so none had ever needed the latter — the editor opens its
+  graphics and input libraries by name at run time, so building it proves
+  nothing about them. `tools/readme/README-LINUX.txt` had named that package to
+  users on a minimal image since it was written; nothing checked that CI agreed
+  with the file. The second: `VK_ICD_FILENAMES` named `lvp_icd.x86_64.json`,
+  the upstream Mesa spelling, where Ubuntu ships `lvp_icd.json` — found in one
+  line because that step asserts its driver file exists and lists the directory
+  when it does not, rather than letting the Vulkan loader enumerate nothing and
+  wgpu report a missing adapter.
 
 - **`pl licences` prints the fonts `pl` embeds.** `pl export --png` fills glyph
   outlines from two Liberation Sans faces, 825,168 bytes under SIL OFL 1.1,

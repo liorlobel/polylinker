@@ -1045,10 +1045,10 @@ fn startup_failure_message(err: &str) -> String {
 /// launched the GUI either; since then the `gui-smoke` job in
 /// .github/workflows/ci.yml sets this variable to each value in turn, with
 /// `PL_GUI_SMOKE=1` ([`smoke_test`]) closing the window from its first frame:
-/// on ubuntu-latest under Xvfb on Mesa's software OpenGL and software Vulkan
-/// (written from the packages' documentation, not yet seen green), and on
-/// macos-latest on Apple's OpenGL and Metal (the same two commands measured
-/// exiting 0 on the maintainer's M5 Mac that day, not yet on a hosted runner).
+/// on ubuntu-latest under Xvfb on Mesa's software OpenGL and software Vulkan,
+/// and on macos-latest on Apple's OpenGL and Metal. All four are green on
+/// hosted runners as of run 33763643129, and the Vulkan one logged
+/// `DRIVER_ID_MESA_LLVMPIPE` rather than falling back to wgpu's GLES backend.
 /// That is the first time the wgpu arm has run anywhere but by hand, and on
 /// Linux still not on a driver.
 /// A named variable is the difference between a fallback that has been seen to
