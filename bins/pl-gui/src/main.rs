@@ -813,6 +813,21 @@ fn debug_geometry() -> bool {
     matches!(std::env::var("PL_GUI_DEBUG_GEOMETRY").as_deref(), Ok("1"))
 }
 
+/// Set `PL_GUI_SMOKE=1` to close the window from its first frame.
+///
+/// For a CI leg and nothing else. The process opens a real window on whatever
+/// backend `PL_GUI_RENDERER` names, asks to close from its first frame, is let
+/// out on the second -- eframe decides on the frame AFTER the one that sent
+/// `Close`, which is why two are painted -- and leaves through `on_exit` with
+/// exit code 0. That is the only evidence
+/// short of a person that a backend actually starts, which until 2026-09-03
+/// nothing in CI had. It is read in `ui` and not in `close_request`: the
+/// tests drive `close_request` directly and assert on `close_now` and
+/// `let_it_go`, so that function stays a function of its arguments.
+fn smoke_test() -> bool {
+    matches!(std::env::var("PL_GUI_SMOKE").as_deref(), Ok("1"))
+}
+
 /// The window icon's edge, in pixels, and the size of the `.ico` frame it was
 /// taken from. See [`window_icon`].
 const ICON_PX: u32 = 64;
@@ -1026,7 +1041,16 @@ fn startup_failure_message(err: &str) -> String {
 /// because **nothing else can reach the wgpu path on a machine that works**:
 /// glow is tried first and succeeds everywhere this program has ever run, so
 /// without a way to ask for wgpu by name the fallback would be code that only
-/// executes on hardware no contributor owns. No CI leg launches the GUI either.
+/// executes on hardware no contributor owns. Until 2026-09-03 no CI leg
+/// launched the GUI either; since then the `gui-smoke` job in
+/// .github/workflows/ci.yml sets this variable to each value in turn, with
+/// `PL_GUI_SMOKE=1` ([`smoke_test`]) closing the window from its first frame:
+/// on ubuntu-latest under Xvfb on Mesa's software OpenGL and software Vulkan,
+/// and on macos-latest on Apple's OpenGL and Metal. All four are green on
+/// hosted runners as of run 33763643129, and the Vulkan one logged
+/// `DRIVER_ID_MESA_LLVMPIPE` rather than falling back to wgpu's GLES backend.
+/// That is the first time the wgpu arm has run anywhere but by hand, and on
+/// Linux still not on a driver.
 /// A named variable is the difference between a fallback that has been seen to
 /// work and one that has only been reasoned about.
 fn renderer_plan() -> (eframe::Renderer, Option<eframe::Renderer>) {
@@ -5768,6 +5792,17 @@ impl eframe::App for App {
             }
         }
 
+        // The smoke leg's whole request: one frame, then the exit a clean quit
+        // takes. Both flags, in this order, for the reason `losing` gives at
+        // its `Losing::Close` arm -- `let_it_go` first, so the `Close` event
+        // this raises is let through on the next frame instead of re-arming
+        // the guard. `!self.let_it_go` makes it a latch: once armed, this
+        // block never runs again, and frame two falls through `close_request`
+        // with no `CancelClose`, which is how eframe decides to exit.
+        if smoke_test() && !self.let_it_go {
+            self.let_it_go = true;
+            self.close_now = true;
+        }
         self.close_request(&ctx);
 
         // Close the open typing run before anything else in this frame can
@@ -13576,7 +13611,9 @@ impl App {
     /// `pKoV.gb` — an Addgene download, or anything another tool exported — and
     /// BclI is a clean unique cutter with no strike, no chip, and, before this,
     /// no methylation row anywhere in the File tab to say the question had not
-    /// been asked. `docs/PLAN.md:733` ranks methylation-blocked sites tier 1:
+    /// been asked. `docs/PLAN.md` §7.12.2 (hazard tier 1; this cited a line
+    /// number, `:733`, until 2026-09-03, and the line moved) ranks
+    /// methylation-blocked sites tier 1:
     /// "never display a digest without stating what is filtered out."
     ///
     /// `cpg` is in the array and was not. It is a flag no format carries — see
@@ -19233,6 +19270,126 @@ mod tests {
     /// [`window_icon`] refuses.
     const ICO: &[u8] = include_bytes!("../icon/polylinker.ico");
 
+    /// The `.icns` the macOS bundle gets, read only by the test below.
+    ///
+    /// `#[cfg(test)]` for a stronger reason than the `.ico`'s: the running
+    /// program never reads this file at all. On macOS the Dock icon comes from
+    /// [`ICON_RGBA`] through eframe (see [`window_icon`]), and Finder reads the
+    /// `.icns` out of `Polylinker.app/Contents/Resources`, where
+    /// `tools/build-dmg.sh` copies it from `bins/pl-gui/icon/`. Linking it into
+    /// the executable would be 14 KB nothing could reach.
+    const ICNS: &[u8] = include_bytes!("../icon/polylinker.icns");
+
+    /// The macOS icon is the committed `.icns`, and the `.icns` is what
+    /// `build-icns.py` says it is.
+    ///
+    /// A THIRD artefact from the one master, and the kinship it does NOT claim
+    /// is the point of saying so here: `polylinker.svg` is rasterised by resvg
+    /// for the `.ico` and the window blob, and by `build-icns.py`'s own
+    /// area-coverage rasteriser for this file, so the 64 px frame here is not
+    /// byte-equal to [`ICON_RGBA`] and no test pretends it is. What joins the
+    /// three is the master they are drawn from — `build-icns.py` refuses to run
+    /// against an SVG whose sha256 it does not transcribe — and this digest,
+    /// which pins the bytes `tools/build-dmg.sh` ships.
+    ///
+    /// The container is walked as well, for the reason
+    /// [`the_ico_has_a_native_frame_at_the_window_icons_size`] gives: a digest
+    /// says "these bytes" and nothing about what they mean. An ICNS is `icns`,
+    /// a big-endian total length, then entries of a four-byte type, a
+    /// big-endian length that includes its own eight-byte header, and a
+    /// payload — here always a PNG, whose signature and `IHDR` are plain
+    /// fields. So this reads exactly as far as it can with no inflate: every
+    /// entry is a square PNG of the size its type names, and the eleven types
+    /// macOS asks for are all present.
+    #[test]
+    fn the_macos_icon_is_the_icns_on_disk() {
+        assert_eq!(
+            ICNS.len(),
+            14_267,
+            "polylinker.icns is {} bytes",
+            ICNS.len()
+        );
+        let got = pl_core::sha256::sha256_hex(ICNS);
+        assert_eq!(
+            got, "5c1a2631b43a6b92f0bf7d87f00ff069aaa1c36f6b39a4a85b2096dddf3e9a97",
+            "polylinker.icns hashes to {got}, and this test says otherwise. Run \
+             `python3 bins/pl-gui/icon/build-icns.py` and paste the digest it \
+             prints; do not edit the digest to match a file nobody regenerated."
+        );
+
+        let be32 = |at: usize| u32::from_be_bytes(ICNS[at..at + 4].try_into().unwrap());
+        assert_eq!(&ICNS[..4], b"icns", "not an ICNS container");
+        assert_eq!(
+            be32(4) as usize,
+            ICNS.len(),
+            "the header's total length disagrees with the file"
+        );
+
+        // (type, edge in pixels): 1x at 16..1024, then the four @2x aliases.
+        let want: [(&[u8; 4], u32); 11] = [
+            (b"icp4", 16),
+            (b"icp5", 32),
+            (b"icp6", 64),
+            (b"ic07", 128),
+            (b"ic08", 256),
+            (b"ic09", 512),
+            (b"ic10", 1024),
+            (b"ic11", 32),
+            (b"ic12", 64),
+            (b"ic13", 256),
+            (b"ic14", 512),
+        ];
+        let mut seen = Vec::new();
+        let mut at = 8;
+        while at < ICNS.len() {
+            let kind: [u8; 4] = ICNS[at..at + 4].try_into().unwrap();
+            let len = be32(at + 4) as usize;
+            assert!(
+                len > 8 && at + len <= ICNS.len(),
+                "entry {kind:?} at {at} overruns the file"
+            );
+            let png = &ICNS[at + 8..at + len];
+            assert_eq!(
+                &png[..8],
+                b"\x89PNG\r\n\x1a\n",
+                "entry {} is not a PNG",
+                String::from_utf8_lossy(&kind)
+            );
+            assert_eq!(&png[12..16], b"IHDR");
+            let w = u32::from_be_bytes(png[16..20].try_into().unwrap());
+            let h = u32::from_be_bytes(png[20..24].try_into().unwrap());
+            let (_, edge) = want
+                .iter()
+                .find(|(k, _)| **k == kind)
+                .unwrap_or_else(|| panic!("unexpected entry {}", String::from_utf8_lossy(&kind)));
+            assert_eq!(
+                (w, h),
+                (*edge, *edge),
+                "entry {} is {w}x{h}, and its type names {edge}",
+                String::from_utf8_lossy(&kind)
+            );
+            // 8-bit truecolour with alpha, like the `.ico`'s frames: the Dock
+            // paints its own ground behind a transparent icon.
+            assert_eq!(
+                (png[24], png[25]),
+                (8, 6),
+                "entry {} is not RGBA8",
+                String::from_utf8_lossy(&kind)
+            );
+            seen.push(kind);
+            at += len;
+        }
+        assert_eq!(at, ICNS.len(), "trailing bytes after the last entry");
+        for (k, _) in want {
+            assert!(
+                seen.contains(k),
+                "polylinker.icns has no {} entry",
+                String::from_utf8_lossy(k)
+            );
+        }
+        assert_eq!(seen.len(), want.len(), "an entry appears twice");
+    }
+
     /// `with_icon` gets the master's pixels, at the master's size.
     ///
     /// The app cannot be launched by a test — `run_native` owns the event loop —
@@ -19594,6 +19751,11 @@ mod tests {
     /// clause that survives is asserted positively beside the three that did
     /// not, because a test that only forbids wording cannot tell an update from
     /// a deletion.
+    ///
+    /// Since 2026-09-03 no clause survives: `cmd_licences` in bins/pl prints
+    /// the Liberation block. The positive arm now asserts the record of that
+    /// discharge instead, for the same reason, and the wording of the fourth
+    /// clause joined the three below it.
     #[test]
     fn the_still_owed_paragraph_owes_only_what_is_still_owed() {
         let notice = flat_notice();
@@ -19613,23 +19775,35 @@ mod tests {
                 "bins/pl-gui/src/help.rs is exactly that page and ships in this \
                  binary",
             ),
+            // The fourth clause, and the last to go: in NOTICE and true from
+            // 2026-07-30 (`7ce59c1`), the last of the four still standing from
+            // 2026-08-04, discharged 2026-09-03 when `cmd_licences` in bins/pl
+            // began printing the Liberation block from the bytes it links.
+            // Those first two dates are different facts, and this comment gave
+            // only the second until 2026-09-03.
+            (
+                "and does not print this font block",
+                "bins/pl's `pl licences` has printed the font block for the two \
+                 faces it links since 2026-09-03; see `font_notice` there",
+            ),
         ] {
             assert!(
                 !notice.contains(stale),
                 "NOTICE still says {stale:?}. {why}."
             );
         }
-        // What is genuinely still owed, and the only clause of the four that
-        // was true when it was written and is true now: `cmd_licences` in
-        // bins/pl prints a hand-written attribution block for the feature
-        // database and nothing about fonts.
+        // Nothing is owed, and the paragraph has to SAY so rather than fall
+        // silent: a test that only forbids wording cannot tell an update from
+        // a deletion. Until 2026-09-03 this arm held the one clause that was
+        // still true — `cmd_licences` printed the feature-database block and
+        // nothing about fonts — and it now holds the record of its discharge.
         assert!(
             notice.contains(
-                "STILL OWED: `pl licences` prints the compiled-in feature-database \
-                 attribution"
+                "DONE 2026-09-03: `pl licences` prints the font block for the two faces \
+                 `pl.exe` embeds"
             ),
-            "NOTICE no longer records the one font-attribution obligation that \
-             has not been discharged"
+            "NOTICE no longer records that the CLI's font attribution was discharged, \
+             or records it in other words than this test reads"
         );
     }
 
@@ -33875,10 +34049,12 @@ ATGAAACGCTAA
     ///
     /// PROVEN TO FAIL by making `Document::start_proposals` early-return only
     /// on `Done`, which is precisely the defect `start_orfs`' doc records
-    /// having shipped: 200 spawns instead of 1. It is worse here than there,
-    /// because `Annotator::annotate` takes no cancellation hook, so the
-    /// superseded workers do not stop either — on a 4.64 Mb molecule that is a
-    /// core per frame with no answer ever arriving.
+    /// having shipped: 200 spawns instead of 1. It was worse here than there
+    /// until 2026-09-03, because `Annotator::annotate` took no cancellation
+    /// hook, so the superseded workers did not stop either — on a 4.64 Mb
+    /// molecule that was a core per frame with no answer ever arriving. The
+    /// worker now calls `annotate_until` and does stop; what this test pins is
+    /// that it is never asked to.
     #[test]
     fn the_annotation_scan_is_asked_once_and_not_once_per_frame() {
         let mut app = App::blank();

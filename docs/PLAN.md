@@ -190,7 +190,7 @@ These ship before the app and are separately published, separately licensed, sep
 
 | Feature | Size | Justification |
 |---|---|---|
-| Tauri v2 shell, React 18, project scaffold, CI on 3 platforms | 2 wk | Foundation. React 18 pin is forced by OVE; see ADR-3. |
+| ~~Tauri v2 shell, React 18, project scaffold~~, CI on 3 platforms | ~~2 wk~~ | ~~Foundation. React 18 pin is forced by OVE; see ADR-3.~~ **Struck 2026-09-03.** The shell that shipped is `bins/pl-gui`, eframe/egui with no webview, from `516e1aa` (2026-07-26); see §5.1. CI on three platforms is done: the `gate` job in `.github/workflows/ci.yml` runs on windows-latest, ubuntu-latest and macos-latest. |
 | `.dna`/`.prot` **reader** in Rust (17 block types, passthrough for unknown) | 2 wk | Reading is well-trodden; four independent implementations agree on the layout. |
 | GenBank + FASTA read/write | 1.5 wk | GenBank is the canonical internal interchange format. Multiline qualifiers and `join()` are where the bugs are. |
 | Sequence model + op log + undo/redo | 2 wk | Cannot be retrofitted. See §5.4. |
@@ -246,7 +246,7 @@ These ship before the app and are separately published, separately licensed, sep
 
 ### 5.1 The stack decision
 
-> **ADR-1 — Tauri v2 shell + Vite + React 18 + TypeScript frontend + Rust compute core.**
+> ~~**ADR-1 — Tauri v2 shell + Vite + React 18 + TypeScript frontend + Rust compute core.**~~ **Struck 2026-09-03.** Never built: the desktop app is `bins/pl-gui`, eframe/egui 0.35 with no webview, binary `polylinker`, since `516e1aa` (2026-07-26, the same day this plan was committed as `3564310`). The Rust compute core half stands. The note below has recorded the supersession since 2026-08-05; the rationale is left in place as the record of how the decision was reached.
 
 **Rationale.**
 
@@ -268,6 +268,26 @@ These ship before the app and are separately published, separately licensed, sep
 > person to run. It is reached from `pl update` and from a Help-menu box that
 > ships off. So the row above is wrong about Tauri being the only way to get a
 > mandatory update signature, and right that this project did not take it.
+>
+> **Amended 2026-09-03.** The departure is older than the note above. `516e1aa`
+> (2026-07-26 19:00 +0300, "Add the desktop app: bins/pl-gui, an egui front end
+> over the same core") landed the same afternoon as the plan itself (`3564310`,
+> 12:14), and its message says it "departs from ADR-1" and why: the ADR's own
+> strongest counter-argument below — four rendering engines — is the one egui
+> answers, with one renderer everywhere. What shipped is `bins/pl-gui`: eframe
+> 0.35 (`glow` first on every platform; `wgpu` compiled in as a fallback since
+> `016f9e8`, 2026-08-17; `PL_GUI_RENDERER` pins one), `rfd` for the dialogs,
+> `accesskit` for screen readers, binary `polylinker`. What was genuinely lost
+> is the reuse of OVE/seqviz and contributors who know React but not Rust,
+> which is why ADR-3 and the `npm run dev` hard rule in §5.2 are dead with it.
+> As of today the heading above, the v0.1 roadmap row, the §5.2 hard rule,
+> risk 7, steps 28–30 in §12 and the ADR-1 and ADR-3 rows of Appendix B are
+> struck through; the §5.2 tree is annotated in place, because `~~` does not
+> render inside a fenced block; the §5.6 table carries a dated note above it
+> and is left as written, because what is wrong with it is the premise and not
+> any one row; and ADR-5's "in-Tauri" wording is annotated. Nothing is
+> deleted. (This sentence said all eight were "struck" until later the same
+> day, which was the tidy summary rather than the thing done.)
 
 1. **The UI decision is forced, not chosen.** The only reusable open-source plasmid-editor UI in existence — OVE and seqviz — is React + SVG. Rewriting a virtualized sequence editor, circular map layout and chromatogram rendering in Qt or Swift is multi-person-year work producing nothing a user can see. Qt/PySide6 is licensing-fine and strategically wrong; BeeWare/Toga was still building primitives as of January 2026. Web frontend it is, which reduces the decision to *shell only*.
 2. **Tauri v2 is mature.** `tauri` 2.11.5 (2026-07-01), plugins shipping weekly, MIT/Apache-2.0, Commons Conservancy governance. It gives real filesystem access, OS file associations for `.dna`/`.gb`, native menus, and a **free, signature-mandatory auto-updater** that Electron matches only via third-party tooling — and which works even while Windows builds are still unsigned.
@@ -311,10 +331,12 @@ polylinker/
 │  └─ pl-ffi         PyO3 wheel + wasm-bindgen + C ABI.
 ├─ packages/
 │  ├─ @polylinker/circular-map   Framework-agnostic TS. SVG out. Standalone-published.
-│  ├─ @polylinker/linear-view    Thin wrapper over @teselagen/ove RowView.
-│  └─ @polylinker/app            React 18 + Tauri. The product.
+│  ├─ @polylinker/linear-view    Thin wrapper over @teselagen/ove RowView.   [never built; ADR-3 struck 2026-09-03]
+│  └─ @polylinker/app            React 18 + Tauri. The product.   [never built; the product is bins/pl-gui — 2026-09-03]
 ├─ bins/
 │  ├─ pl              CLI
+│  ├─ pl-gui          Desktop app: eframe/egui, binary `polylinker`. Not in the
+│  │                  2026-07-26 tree; added by 516e1aa the same day. (2026-09-03)
 │  └─ pl-mcp          MCP server over the library
 └─ data/              (separate repos, separate licences)
    ├─ polylinker-features   CC BY 4.0
@@ -324,7 +346,7 @@ polylinker/
 
 **Hard rule:** `pl-core` has no I/O and no dependencies on anything above it. Everything that could ever be wrong about a molecule lives in crates that the CLI can exercise without a GUI. If the app is abandoned, the crates remain useful.
 
-**Hard rule:** the app must build and run with `npm run dev` against a `wasm32` build of the core, with **no Rust toolchain installed**. Contributors must be able to fix a UI bug without learning Rust. Otherwise the contributor pipeline dies, which is the documented cause of death in this field.
+~~**Hard rule:** the app must build and run with `npm run dev` against a `wasm32` build of the core, with **no Rust toolchain installed**. Contributors must be able to fix a UI bug without learning Rust. Otherwise the contributor pipeline dies, which is the documented cause of death in this field.~~ **Struck 2026-09-03.** There is no `npm run dev` app: the product, `bins/pl-gui`, is Rust from top to bottom, so fixing a UI bug means learning Rust, which is the cost `516e1aa` (2026-07-26) named when it departed from ADR-1. The invariant that survives is the hard rule above it — everything that could be wrong about a molecule lives in crates the CLI exercises without a GUI. The `wasm32` build survives too, as `crates/pl-wasm` behind the single-file browser tool `prototype/dna-reader.template.html`, and the TypeScript that survives is `packages/circular-map`, a renderer and not the app.
 
 ### 5.3 Data model for a sequence document
 
@@ -480,6 +502,8 @@ Parsing is **defensive by policy**, because a `.dna` file is untrusted binary th
 - `cargo-fuzz` on the parser as a memory-safety *and* resource-exhaustion target, in CI, from week 3.
 
 ### 5.6 Rendering
+
+**Superseded 2026-09-03 for the on-screen app.** This table describes the web frontend ADR-1 planned. `bins/pl-gui` paints every layer through egui — the map in `src/map.rs`, the sequence rows in `src/main.rs` over the `src/seqedit.rs` model, the chromatograms in `src/reads.rs` — onto OpenGL via `glow`, with `wgpu` as the fallback: the GPU path the last row says "Never". The exported figure is still SVG (and PNG, PDF, EPS) from Rust, in `crates/pl-draw`, which is the half of this table that held. Left as written.
 
 | Layer | Technology | Why |
 |---|---|---|
@@ -1011,8 +1035,8 @@ BLAST+, DIAMOND and Infernal each mean cross-compilation for Windows x64, macOS 
 
 ### 7. Linux WebKitGTK rendering bugs you cannot reproduce
 **Probability: high. Impact: moderate.**
-Tauri ships a dedicated *Linux Graphics Issues* page for blank windows, resize flicker and resize crashes (mostly NVIDIA); WebKitGTK renders fonts bolder and masks the WebGL renderer string.
-**Mitigation:** Figure export goes through `resvg` in Rust, so the *deliverable* is engine-independent. Flathub is the recommended Linux channel (pinned GNOME 46 runtime = pinned WebKitGTK). CI screenshot-diffs on Ubuntu 22.04 and Fedora. Documented pivot to Electron if the first three field bugs are Linux rendering.
+~~Tauri ships a dedicated *Linux Graphics Issues* page for blank windows, resize flicker and resize crashes (mostly NVIDIA); WebKitGTK renders fonts bolder and masks the WebGL renderer string.~~ **Struck 2026-09-03** — there is no webview (§5.1). The rendering risk that replaced it is real and recorded elsewhere: the window needs OpenGL 2.0 or newer, Windows on ARM ships no OpenGL driver at all, and since `016f9e8` (2026-08-17) `wgpu` is compiled in as the fallback (`bins/pl-gui/Cargo.toml`; `README.md`, "OpenGL 2.0 or newer").
+**Mitigation:** Figure export goes through ~~`resvg`~~ `crates/pl-draw` in Rust (its own SVG, PNG, PDF and EPS writers; `resvg` is not in `Cargo.lock`), so the *deliverable* is engine-independent — this half held. ~~Flathub is the recommended Linux channel (pinned GNOME 46 runtime = pinned WebKitGTK). CI screenshot-diffs on Ubuntu 22.04 and Fedora. Documented pivot to Electron if the first three field bugs are Linux rendering.~~ **Struck 2026-09-03**: Flathub was withdrawn on 2026-08-06 (the §4 roadmap row), no CI step screenshot-diffs the window (neither `tools/ci.ps1` nor `.github/workflows/ci.yml` mentions one), and there is no web frontend to port to Electron.
 
 ### 8. Biosecurity and dual-use exposure — **not mentioned once in ~30,000 words of research**
 **Probability: low near-term. Impact: severe and reputational.**
@@ -1053,7 +1077,7 @@ Trademark is the most likely thing to actually generate a letter (Autodesk/ODA).
 
 ### 13. Accessibility and i18n retrofit cost
 **Probability: certain if deferred. Impact: moderate.**
-Retrofitting i18n into a React app *plus* an SVG label-layout engine is brutal. CJK text metrics break naive label collision-avoidance. RTL matters for a Hebrew/Arabic user base and is directly relevant to a Bar-Ilan project. Accessibility is a soft procurement blocker (VPAT / EN 301 549) for the pharma and core-facility deployments in the roadmap.
+Retrofitting i18n into ~~a React app~~ an egui app (*was "a React app" until 2026-09-03; the cost is the same*) *plus* an SVG label-layout engine is brutal. CJK text metrics break naive label collision-avoidance. RTL matters for a Hebrew/Arabic user base and is directly relevant to a Bar-Ilan project. Accessibility is a soft procurement blocker (VPAT / EN 301 549) for the pharma and core-facility deployments in the roadmap.
 **Mitigation:** Externalise strings from commit 1 even though v1 is English-only. Adopt Okabe–Ito with redundant non-colour encoding from the first map. Design keyboard operation of the sequence editor in, not on. Add non-Latin feature names to the `.dna` round-trip test corpus — the XML payloads are UTF-8 and **no existing parser test covers this.**
 
 ### 14. Feature-parity treadmill
@@ -1191,9 +1215,9 @@ The first three days are deliberately not code. Two of them run experiments that
 27. Golden-file rendering tests: render 20 known plasmids, commit the SVG, diff on every CI run.
 
 **Thursday — the shell**
-28. Tauri v2 + Vite + React 18 + TypeScript. Wire `tauri-plugin-fs`, `tauri-plugin-dialog`, `tauri-plugin-store`.
-29. `wasm-bindgen` build of `pl-core` + `pl-fileio` + `pl-enzymes`. **Verify `npm run dev` works with no Rust toolchain installed** — this is the contributor-pipeline invariant and it must be true from day one, not restored later.
-30. Wire: open file → parse → model → circular map. Add a linear/row view using `@teselagen/ove`'s RowView.
+28. ~~Tauri v2 + Vite + React 18 + TypeScript. Wire `tauri-plugin-fs`, `tauri-plugin-dialog`, `tauri-plugin-store`.~~ **Struck 2026-09-03.** Done instead as `bins/pl-gui` from `516e1aa` (2026-07-26): eframe/egui, `rfd` where `tauri-plugin-dialog` would have been, and `settings.rs` (2026-07-29) for what `tauri-plugin-store` would have held — see §5.1.
+29. `wasm-bindgen` build of `pl-core` + `pl-fileio` + `pl-enzymes`. ~~**Verify `npm run dev` works with no Rust toolchain installed** — this is the contributor-pipeline invariant and it must be true from day one, not restored later.~~ **Struck 2026-09-03** — the `wasm32` build exists (`crates/pl-wasm`, with a hand-written ABI and no `wasm-bindgen`, behind the single-file browser tool `prototype/dna-reader.template.html`) but there is no `npm` app for it to serve; the invariant went with ADR-1 (§5.2).
+30. Wire: open file → parse → model → circular map. ~~Add a linear/row view using `@teselagen/ove`'s RowView.~~ **Struck 2026-09-03** — the sequence view is egui, painted in `bins/pl-gui/src/main.rs` over the `src/seqedit.rs` model; no OVE.
 31. `pl-export`: serialize the live SVG DOM → `resvg` (PNG) / `svg2pdf` (PDF) in Rust. **Never `html2canvas`.** Golden-file test the PNG output across all three CI platforms and assert byte-identity.
 
 **Friday — the enzymes panel, and the demo**
@@ -1242,11 +1266,11 @@ That is not a product. It is proof that the hard assumptions hold, that three-pl
 
 | # | Decision | Rationale | Reversal cost |
 |---|---|---|---|
-| **ADR-1** | Tauri v2 + React 18 + Rust core | Web UI is forced by the only reusable components; Tauri gives filesystem, associations, free signed updater; Rust compiles to 4 surfaces | Low — frontend ports to Electron unchanged |
+| **ADR-1** | ~~Tauri v2 + React 18~~ + Rust core. **Struck 2026-09-03** — the app is `bins/pl-gui`, eframe/egui with no webview, since `516e1aa` (2026-07-26); see §5.1, superseded there since 2026-08-05 | ~~Web UI is forced by the only reusable components; Tauri gives filesystem, associations, free signed updater~~; Rust compiles to 4 surfaces — the desktop app, the CLI, the `wasm32` build behind the browser tool and the PyO3 module (`crates/pl-py`), which is the half that held | ~~Low — frontend ports to Electron unchanged~~ n/a — there is no web frontend to port |
 | **ADR-2** | Append-only content-addressed op log; undo/redo and history are the same mechanism | SnapGene's history is its signature feature *and* its documented memory liability | **Very high** — cannot be retrofitted |
-| **ADR-3** | Consume `@teselagen/ove` for the row view; **own** the circular map | Row view = high effort, low differentiation. Circular map = the visible quality signal, must be ours, and is a gift to the ecosystem | Medium |
+| **ADR-3** | ~~Consume `@teselagen/ove` for the row view~~; **own** the circular map. **Struck 2026-09-03** — dead with ADR-1: an egui app cannot host a React component, so the row view is written here (`bins/pl-gui/src/main.rs` over `src/seqedit.rs`), and the circular map is ours three times over — `packages/circular-map` in TypeScript for the browser tool, `bins/pl-gui/src/map.rs` on screen, `crates/pl-draw` for the exported figure | ~~Row view = high effort, low differentiation.~~ Circular map = the visible quality signal, must be ours, and is a gift to the ecosystem | ~~Medium~~ n/a — there is nothing to hand back to OVE |
 | **ADR-4** | Opaque `.dna` blocks are tagged coordinate-dependent; drop-and-report on sequence edits, never preserve-and-stale | Byte passthrough preserves bytes, not meaning. Stale provenance is worse than absent provenance | Low |
-| **ADR-5** | Port pydna's `Dseq` + assembly graph to Rust; pydna becomes the CI oracle | Removes Python-runtime-in-Tauri packaging entirely; keeps one language in the app; the differential harness *is* the correctness strategy | High (8 weeks) |
+| **ADR-5** | Port pydna's `Dseq` + assembly graph to Rust; pydna becomes the CI oracle | Removes Python-runtime-in-Tauri packaging entirely (*read "in the app": the shell changed on 2026-07-26, this reason did not — noted 2026-09-03*); keeps one language in the app; the differential harness *is* the correctness strategy | High (8 weeks) |
 | **ADR-6** | Apache-2.0 code / CC BY 4.0 database / CC0 benchmark / REBASE separately packaged | Patent grant + retaliation + NOTICE; database attribution is the curators' currency; the benchmark must be runnable by literal competitors | High |
 | **ADR-7** | `{start, length}` with `mod L` as the universal coordinate representation | Makes invalid circular intervals unconstructable; rotation invariance becomes a one-liner | **Very high** |
 | **ADR-8** | Tier-1 auto-annotation is k-mer + `edlib` in WASM; the BLAST/DIAMOND/Infernal stack is an opt-in v2 tier | SnapGene's magic is approximate string matching, not homology search. Saves a 4–6 month sidecar-packaging workstream | Low |

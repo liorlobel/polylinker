@@ -2,6 +2,8 @@ name: Release
 
 # Cut a release for Windows, macOS and Linux from one tag. FOUR downloads, not
 # three, because Windows ships x64 and arm64 separately -- see the matrix.
+# Seven files, since 2026-09-03: each Windows leg adds an MSI, and the macOS
+# leg adds a .dmg carrying a Polylinker.app bundle beside its tarball.
 #
 # WHAT THIS FILE DOES NOT CONTAIN, and deliberately: any knowledge of what goes
 # into an archive. Every job below runs `tools/release.ps1`, which `tools/ci.ps1`
@@ -356,6 +358,39 @@ jobs:
           ./tools/check-archive.ps1 -Archive $archive.FullName
           if ($LASTEXITCODE -ne 0) { throw 'the archive failed its check' }
 
+      # ---------------------------------------------------------------- macOS
+      #
+      # THE DISK IMAGE, since 2026-09-03: a Polylinker.app bundle with an icon
+      # and a name Finder shows, beside the tarball rather than instead of it.
+      # `tools/build-dmg.sh` stages the bundle from dist/SHA256SUMS.txt -- the
+      # same one file list the MSI is generated from, so there is still no
+      # second list for a licence text to fall out of -- and `hdiutil` wraps
+      # it. `-out dmg`, never dist/: release.ps1 hashes everything under dist/
+      # into the manifest and the tarball, which is the MSI's trap above, and
+      # would be this one's.
+      #
+      # A shell script and not PowerShell, because hdiutil, plutil and lipo
+      # exist only here; the script's header says so at length. It is named
+      # by path so the gate's "every tools/ path this workflow names exists"
+      # step covers it.
+      - name: Build the .dmg
+        if: runner.os == 'macOS'
+        run: ./tools/build-dmg.sh --dist dist --out dmg
+
+      # Mounted and asserted as a downloader would use it: the root of the
+      # volume, the Info.plist, the version the pl inside reports, every
+      # manifest member with its recorded hash and nothing else, and the slices
+      # each Mach-O carries against the `platform:` label. NOT launched here:
+      # `ci.yml`'s macOS test leg launches the bundled editor on every push, and
+      # a release workflow is not where to test a hypothesis.
+      - name: Mount the .dmg, check the bundle it carries, unmount it
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          n=$(ls dmg/*.dmg | wc -l | tr -d ' ')
+          if [ "$n" != 1 ]; then echo "expected exactly one .dmg, found $n"; exit 1; fi
+          ./tools/check-dmg.sh --dmg dmg/*.dmg --dist dist
+
       - name: Show the manifest
         shell: pwsh
         run: Get-Content dist/SHA256SUMS.txt
@@ -563,6 +598,19 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          # Its own artifact and its own root, for the reason the MSI upload
+          # gives: a second pattern under dist/ in the archive upload above
+          # would move that artifact's root up to the workspace.
+          name: polylinker-${{ matrix.label }}-dmg
+          path: |
+            dmg/*.dmg
+            dmg/*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 30
+
   publish:
     name: publish the release
     needs: build
@@ -716,6 +764,20 @@ jobs:
               if ($actual -ne $recorded) { throw "$msiName does not match its sidecar after transit through the artifact store" }
           }
 
+          # THE DISK IMAGE, by name and with its sidecar, since 2026-09-03.
+          # By name for the header's reason: the globs at the bottom attach
+          # whatever is on disk, so only a name can refuse to publish without
+          # it. What is verified here is that the bytes survived the artifact
+          # store; the macOS job mounted it and asserted the bundle inside.
+          $dmgName = "polylinker-$version-macos-universal.dmg"
+          $dmgPath = Join-Path 'artifacts' $dmgName
+          if (-not (Test-Path -LiteralPath $dmgPath)) { throw "$dmgName was not produced by the macOS job. All platforms publish together or none do." }
+          $dmgSide = "$dmgPath.sha256"
+          if (-not (Test-Path -LiteralPath $dmgSide)) { throw "$dmgName has no .sha256 sidecar" }
+          $recorded = ((Get-Content $dmgSide -Raw) -split '  ')[0].Trim()
+          $actual = (Get-FileHash -LiteralPath $dmgPath -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $recorded) { throw "$dmgName does not match its sidecar after transit through the artifact store" }
+
           # THE TWO INSTALLERS ARE NOT THE SAME BYTES. `merge-multiple: true`
           # flattens every artifact into one directory by filename, so a
           # build-msi.ps1 that produced identically named files on both legs
@@ -751,7 +813,7 @@ jobs:
           # check what they downloaded against it, and the installer is the file
           # most Windows readers will download -- leaving it out would point
           # them at a table that cannot answer the question they have.
-          sha256sum polylinker-*.zip polylinker-*.tar.gz polylinker-*.msi | sort -k2 > SHA256SUMS.txt
+          sha256sum polylinker-*.zip polylinker-*.tar.gz polylinker-*.msi polylinker-*.dmg | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       # ------------------------------------------------------- the signature
@@ -1052,6 +1114,7 @@ jobs:
             artifacts/polylinker-*.zip \
             artifacts/polylinker-*.tar.gz \
             artifacts/polylinker-*.msi \
+            artifacts/polylinker-*.dmg \
             artifacts/polylinker-*.sha256 \
             artifacts/SHA256SUMS.txt \
             artifacts/SHA256SUMS.txt.sig

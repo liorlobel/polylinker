@@ -25,7 +25,145 @@ which.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-03
+
+A macOS download that is an application rather than three loose executables,
+the first CI job in this project's history that opens the editor's window, and
+seven claims in the tree that had stopped being true.
+
+### Added
+
+- **A macOS disk image, beside the tarball.** The release page carries
+  `polylinker-<version>-macos-universal.dmg`: open it and drag `Polylinker.app`
+  to Applications. The bundle holds the same three programs and the Python
+  module, an icon and a name Finder shows, and every licence text under
+  `Contents/Resources`. `tools/build-dmg.sh` stages it from `dist/SHA256SUMS.txt`
+  — the one file list the MSI is generated from, so the bundle has no list of
+  its own to drift — and `tools/check-dmg.sh` mounts the result and holds it to
+  that manifest: root contents, `Info.plist`, the version the `pl` inside
+  reports, every member with its recorded hash and nothing else, the slices each
+  Mach-O carries against the `platform:` label. It runs in `release.yml`'s macOS
+  job and, with the editor launched from the mounted bundle, on the macOS leg of
+  `ci.yml`'s `test` job on every push. The icon, `bins/pl-gui/icon/polylinker.icns`,
+  is drawn from the same `polylinker.svg` as the Windows icon by
+  `bins/pl-gui/icon/build-icns.py` with nothing but the standard library, and is
+  pinned by sha256 in `bins/pl-gui/src/main.rs` like the `.ico`. What the bundle
+  does not do, stated where a user will look: it is unsigned like everything
+  else here (`xattr -dr com.apple.quarantine /Applications/Polylinker.app` is
+  the remedy); it registers no document types, because the editor takes files
+  from argv and drag-and-drop and neither winit 0.30 nor eframe 0.35 delivers the
+  event a Finder double-click on a document sends; and `pl update` still fetches
+  the tarball, because a disk image is neither run nor unpacked. The image is
+  not reproducible from `dist/` (hdiutil writes timestamps), and nothing claims
+  it is.
+
+- **CI launches the editor for the first time.** A `gui-smoke` job opens a
+  window on each renderer in turn (`PL_GUI_RENDERER` pinned, `PL_GUI_SMOKE=1`
+  closing it from the first frame) on `ubuntu-latest` under Xvfb on Mesa's
+  software OpenGL and Vulkan, and on `macos-latest` on Apple's OpenGL and
+  Metal. All four launches are green on hosted runners as of run 33763643129,
+  and the Linux Vulkan one logged `driverID = DRIVER_ID_MESA_LLVMPIPE` rather
+  than falling back to wgpu's GLES backend, so that step exercises what it
+  claims to. No Windows leg launches the editor, and no leg runs on a real
+  Linux driver.
+
+  **It earned its place on its first two runs**, which is worth recording
+  because the job is otherwise easy to read as ceremony. Both went red and
+  neither was flake. The first: the editor panicked at startup with "Library
+  libxkbcommon-x11.so could not be loaded", because `libxkbcommon-dev` brings
+  `libxkbcommon0` and not `libxkbcommon-x11-0`, and no leg had ever launched
+  the program and so none had ever needed the latter — the editor opens its
+  graphics and input libraries by name at run time, so building it proves
+  nothing about them. `tools/readme/README-LINUX.txt` had named that package to
+  users on a minimal image since it was written; nothing checked that CI agreed
+  with the file. The second: `VK_ICD_FILENAMES` named `lvp_icd.x86_64.json`,
+  the upstream Mesa spelling, where Ubuntu ships `lvp_icd.json` — found in one
+  line because that step asserts its driver file exists and lists the directory
+  when it does not, rather than letting the Vulkan loader enumerate nothing and
+  wgpu report a missing adapter.
+
+- **`pl licences` prints the fonts `pl` embeds.** `pl export --png` fills glyph
+  outlines from two Liberation Sans faces, 825,168 bytes under SIL OFL 1.1,
+  and OFL clause 2 asks that each copy carry the copyright notice and the
+  licence. The verb now prints both after the annotation-data block — byte
+  counts and sha256 digests computed from the bytes linked into the running
+  program, the holders and Reserved Font Name, and the OFL text whole — for
+  the two faces `pl` links and no others; the desktop app's faces are on its
+  own Help page. `NOTICE` had carried this as the last clause still owed since
+  2026-08-04.
+
+- `pl --help`: the GLOBAL `--json` entry had read "machine-readable output
+  (info, digest)" since 2026-07-26. It now names every verb that takes the flag
+  — info, digest, find-motif, find, library, tm, goldengate, sanger, orfs,
+  primers, design and trace — and states that every other verb refuses it as an
+  unknown option. A source-reading test,
+  `the_global_json_entry_names_every_verb_that_takes_it`, derives that list
+  from each `cmd_*`'s `parse_args` call and `main`'s dispatch table, and fails
+  if the help entry and the parsers disagree in either direction.
+
+### Changed
+
+- **A superseded annotation scan stops.** The editor re-runs the feature-database
+  search on every committed edit and could cancel the ORF scan and the enzyme
+  digest mid-way, but not this one: `Annotator::annotate` took no hook, so a
+  scan overtaken by the next edit ran the whole molecule — 4.2 s of a core at
+  4.64 Mb — to produce an answer that was then thrown away.
+  `pl_features::annotate::Annotator::annotate_until` now takes the same
+  `&dyn Fn() -> bool` as `pl_core::orf::find_orfs_until` and polls it at every
+  loop boundary the scan has (per strand and per chain of the nucleotide scan,
+  per frame, per unchainable record and per chain of the translated scan, once
+  before the hits are deduplicated, and inside the ORF pass through
+  `find_orfs_until`); the worker in `bins/pl-gui/src/doc.rs` hands it the flag
+  that `ProposalState::cancel` already set. `annotate` is unchanged for
+  `pl annotate` and the MCP tool. What is still not interruptible is one pass
+  between two of those boundaries — a seed or chain pass over one strand of the
+  doubled text, a six-frame translation, one chain's verification — so the
+  bound is one such pass, not a few codons; how long such a pass takes at
+  4.64 Mb was not measured.
+
+- **The taint hook is executable, so git stops ignoring it.**
+  `features/SOURCING.md` section 0.4 requires two halves for the pLannotate
+  payload: the filename in `.gitignore` **and** a pre-commit hook refusing any
+  staged blob with that digest. `tools/hooks/pre-commit` is that hook, it is
+  correct, and it was committed mode 100644 — so on any clone with
+  `core.hooksPath` set to `tools/hooks`, as the hook's own install line
+  instructs, git skipped it and said so only as a hint nobody reads. It has
+  therefore never run, for anyone, and the hook's header calls itself "the only
+  thing standing between the payload and the history". Now 100755. The
+  mechanism was checked in both directions in a scratch repository before being
+  made live: a blob whose digest is pinned is refused, an innocent one commits.
+  Found because git printed that hint while committing this branch.
+
+- `pl annotate`: the two empty-database messages (under `--db` when nothing is
+  shippable, and on a search when the default set is empty) no longer give "no
+  human sign-off" as the only explanation; they also name a compiled-in
+  signature that failed to apply, with the loader's reasons on stderr. A search
+  that already passed `--include-proposed` over a zero-row table is no longer
+  told to pass `--include-proposed`.
+
 ### Fixed
+
+- **Prose that had gone stale, corrected in place and dated 2026-09-03.**
+  `docs/PLAN.md` still presented ADR-1's Tauri v2 + React 18 shell as live
+  architecture in a dozen places — the ADR-1 heading, the v0.1 roadmap row, the
+  §5.2 module tree and its `npm run dev` hard rule, the §5.6 rendering table,
+  risk 7, steps 28–30 and the ADR-1 and ADR-3 rows of Appendix B — although the
+  egui app landed the same day as the plan (`516e1aa`, 2026-07-26) and §5.1 had
+  recorded the supersession since 2026-08-05. Each site now carries the date
+  and the commit and nothing is deleted: most are struck through, the §5.2
+  module tree is annotated in place because a strikethrough does not render
+  inside a fenced block, and the §5.6 rendering table is left as written under
+  a dated note, because what is wrong with it is its premise rather than any
+  one row. The doc on `pl_core::iupac::find_all`
+  called it "the one search loop in the project", which was false on the day it
+  was written: `pl_clone`'s exact-match primer search, `methylation::overlaps`
+  and `pl-index`'s packed scan each exist for a stated reason, and the doc now
+  names them; the matching comments in `pl-enzymes` and `tools/ci.ps1` are
+  corrected the same way. A comment in `cmd_annotate` that said the reviewed set
+  "today means nothing at all" — true for one day in July — is corrected and
+  carries no count. `NOTICE`'s "still owed" clause about `pl licences` is
+  discharged rather than deleted, and the test that pinned it now pins the
+  record of the discharge.
 
 - **The documentation said a virtual machine was hopeless. It is not, and one
   was measured.** Seven places — the startup message box, `README-WINDOWS.txt`

@@ -1017,6 +1017,14 @@ fn anneal_last(tmpl: &str, probe: &str, circular: bool) -> Option<(usize, usize)
 
 /// Every start position of `needle` in `tmpl`, wrapping the origin when the
 /// template is circular. Positions are 0-based and within `tmpl`.
+///
+/// Not `pl_core::iupac::find_all`, on purpose: this is an exact, case-sensitive
+/// `str::find` of a literal primer (`pcr` upper-cases both sides first). A
+/// primer is an oligo, not a motif, and an IUPAC-aware match would let a
+/// primer `N` bind anywhere. The circle is handled by searching `tmpl + tmpl`
+/// and dropping starts at or past `n`; the `needle.len() > tmpl.len()` guard
+/// keeps that from matching a site that would wrap more than once, the same
+/// divergence from Biopython that `find_all` documents.
 fn find_all(tmpl: &str, needle: &str, circular: bool) -> Vec<usize> {
     if needle.is_empty() || needle.len() > tmpl.len() {
         return Vec::new();

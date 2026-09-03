@@ -478,18 +478,26 @@ impl Proposals {
 /// the more expensive: 4.2 s against the 1,712 ms this file records above for
 /// the digest at 4.6 Mb. Either way it is not work a frame may do.
 ///
-/// # The one thing this cannot do that the ORF scan can
+/// # The one thing this could not do that the ORF scan can — until 2026-09-03
 ///
 /// **STOP.** [`pl_core::orf::find_orfs_until`] takes a predicate and checks it
 /// as it goes, so a superseded ORF scan abandons the genome within a few
-/// codons. [`pl_features::annotate::Annotator::annotate`] takes no such hook,
-/// so `cancel` here is checked exactly twice — before the scan starts and
-/// before the answer is sent — and a worker superseded in between runs to
-/// completion. At 4.64 Mb that is 4.2 s of a core produced for nobody. What
-/// bounds it is the same thing that bounds the digest's spawn rate: a run of
+/// codons. From 2026-08-06 to 2026-09-03
+/// [`pl_features::annotate::Annotator::annotate`] took no such hook, so
+/// `cancel` here was checked exactly twice — before the scan started and
+/// before the answer was sent — and a worker superseded in between ran to
+/// completion. At 4.64 Mb that was 4.2 s of a core produced for nobody. What
+/// bounded it was the same thing that bounds the digest's spawn rate: a run of
 /// typing is ONE operation, because `App::settle` coalesces it, so the trigger
-/// is committed edits and not keystrokes. Adding the hook belongs in
-/// `pl-features` beside `find_orfs_until`'s, not here.
+/// is committed edits and not keystrokes. The note here said the hook belonged
+/// in `pl-features` beside `find_orfs_until`'s, not here, and that is where it
+/// went: [`pl_features::annotate::Annotator::annotate_until`] polls the same
+/// kind of predicate at every loop boundary the scan has, and `spawn_proposals`
+/// hands it `cancel`. What it still cannot interrupt is one pass between two of
+/// those boundaries — a seed or chain pass over one strand of the doubled text,
+/// a six-frame translation, one chain's verification — so "within a few
+/// codons" is the ORF scan's promise and not this one's. How long such a pass
+/// takes at 4.64 Mb was not measured for this note.
 ///
 /// `Off` is what a document starts in and what it costs: a user who switches
 /// automatic annotation off never spawns this thread and never pays a
@@ -500,7 +508,7 @@ pub enum ProposalState {
     Running {
         rx: Receiver<Proposals>,
         /// Set when a later edit supersedes this scan. See the note above for
-        /// exactly how much good it does.
+        /// exactly how much good it does, and since when.
         cancel: Arc<AtomicBool>,
     },
     Done(Proposals),
@@ -631,10 +639,12 @@ pub struct Document {
     /// `orf_spawns` counts the same way.
     ///
     /// Test-only, and it exists for `orf_spawns`' reason twice over: the defect
-    /// it pins is invisible to every other observable, and THIS worker cannot
-    /// be stopped mid-scan (see [`ProposalState`]), so the same mistake here
-    /// burns a whole core per frame on a genome rather than a few codons'
-    /// worth.
+    /// it pins is invisible to every other observable, and until 2026-09-03
+    /// THIS worker could not be stopped mid-scan (see [`ProposalState`]), so
+    /// the same mistake here burned a whole core per frame on a genome rather
+    /// than a few codons' worth. It can be stopped now, which makes the count
+    /// no less necessary: a scan cancelled and respawned every frame still
+    /// never finishes, it just does so more cheaply.
     #[cfg(test)]
     pub proposal_spawns: usize,
     /// Records the file held. Only the first is shown, and a viewer that does
@@ -859,10 +869,12 @@ impl Document {
     /// merely against a finished one. `main.rs`'s `refresh_proposals` calls this
     /// on EVERY frame, and a running scan asks for a repaint every 80 ms, so a
     /// version that only early-returned on `Done` would cancel and respawn on
-    /// every frame — and unlike the ORF worker this one cannot be stopped
-    /// mid-scan, so the superseded copies would not exit either. At 4.64 Mb,
-    /// where one scan is 4.2 s, that is a core per frame with no answer ever
-    /// arriving. `Unavailable` and `Failed` are covered by the same predicate:
+    /// every frame — and until 2026-09-03, unlike the ORF worker, this one
+    /// could not be stopped mid-scan, so the superseded copies would not exit
+    /// either. At 4.64 Mb, where one scan is 4.2 s, that was a core per frame
+    /// with no answer ever arriving; with `annotate_until` it is a scan
+    /// abandoned per frame with no answer ever arriving, which is the same
+    /// defect. `Unavailable` and `Failed` are covered by the same predicate:
     /// both are answers, and respawning a worker to be told again that there
     /// are no bases is the same loop with a cheaper body.
     ///
@@ -1087,11 +1099,13 @@ fn spawn_orfs(mol: &Molecule, code_id: u8, min_aa: usize) -> OrfState {
 
 /// `spawn_orfs`' shape, with the ORF search replaced by one annotation pass.
 ///
-/// Copied rather than reinvented, down to the named thread and the "send
-/// failing means the document was replaced; that is fine". Two things differ
-/// and both are written down where they matter: the cancel flag can only be
-/// read at the two ends of the scan ([`ProposalState`]), and the worker builds
-/// a MINIMAL query molecule rather than cloning the document's.
+/// Copied rather than reinvented, down to the named thread, the "send
+/// failing means the document was replaced; that is fine", and — since
+/// 2026-09-03 — the `_until` call with the flag closed over. Until then the
+/// cancel flag could only be read at the two ends of the scan
+/// ([`ProposalState`] records what that cost). The one thing that still
+/// differs is written down where it matters: the worker builds a MINIMAL
+/// query molecule rather than cloning the document's.
 fn spawn_proposals(mol: &Molecule, unreviewed: bool) -> ProposalState {
     if mol.seq.is_empty() {
         return ProposalState::Unavailable(if mol.sequence_absent() {
@@ -1119,7 +1133,9 @@ fn spawn_proposals(mol: &Molecule, unreviewed: bool) -> ProposalState {
     std::thread::Builder::new()
         .name("annotate".into())
         .spawn(move || {
-            // Before the scan, because after it is 4.2 s too late on a genome.
+            // Before the index build as well as inside the scan: a worker
+            // superseded during another worker's 17 ms build has no reason to
+            // pay for one of its own.
             if flag.load(Ordering::Relaxed) {
                 return;
             }
@@ -1127,14 +1143,18 @@ fn spawn_proposals(mol: &Molecule, unreviewed: bool) -> ProposalState {
             // indexes — about 17 ms, measured — and it happens HERE, on a
             // worker, so no frame ever pays it. Every later call is a lookup.
             let annotator = crate::featuredb::annotator(unreviewed);
-            let hits = annotator.annotate(&query);
-            if flag.load(Ordering::Relaxed) {
-                // Superseded while scanning. Dropping the answer rather than
-                // sending it, so a list of coordinates in a molecule that has
-                // since been edited cannot reach a screen with an Accept button
-                // beside it.
+            // `annotate_until`, on `find_orfs_until`'s shape (see `spawn_orfs`
+            // above): the flag is polled at every loop boundary the scan has,
+            // and `None` is "superseded". Dropping the answer rather than
+            // sending it, so a list of coordinates in a molecule that has
+            // since been edited cannot reach a screen with an Accept button
+            // beside it. Until 2026-09-03 this was `annotate` plus a second
+            // `flag.load` after it, and a superseded worker ran the whole
+            // genome first.
+            let Some(hits) = annotator.annotate_until(&query, &|| flag.load(Ordering::Relaxed))
+            else {
                 return;
-            }
+            };
             let unseedable = annotator
                 .unseedable()
                 .iter()

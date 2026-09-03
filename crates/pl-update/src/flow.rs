@@ -165,6 +165,20 @@ const ARTIFACT_PREFIX: &str = "polylinker-";
 /// it is the `windows-11-arm` leg in `.github/workflows/ci.yml`. Until that leg
 /// has run on a commit, the only claim anything has checked about the ARM64
 /// entry is the textual one named above.
+///
+/// # The macOS arm names the tarball, and since 2026-09-03 that is a choice
+///
+/// The release page carries a second macOS file from that date,
+/// `polylinker-<v>-macos-universal.dmg` — a disk image holding the same three
+/// programs and the Python module inside a `Polylinker.app` bundle, built by
+/// `tools/build-dmg.sh` from the same manifest the tarball is. The arm below
+/// still names the tarball. A `.dmg` is neither an installer to run nor an
+/// archive to unpack: it mounts, and the user drags. That is a third [`Kind`]
+/// with its own hand-over sentence, and adding one is a reviewed change to
+/// this crate and to `bins/pl`'s `cmd_update`, not a one-word edit here. What
+/// this change does is list the file in [`published_artifact_names`] so the
+/// gate holds the workflow to publishing it, and say here why the updater
+/// does not fetch it.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const PLATFORM_ARTIFACT: Option<(&str, &str)> = Some(("windows-x64", "msi"));
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
@@ -743,12 +757,15 @@ mod tests {
     /// release page. `tools/ci.ps1` is the only place that reads both, and
     /// holding this list against the workflow belongs to it.
     ///
-    /// Six entries since `windows-arm64`, four before it: the two Windows
-    /// platforms each publish a zip and an MSI, and macOS and Linux publish one
-    /// archive each.
+    /// Seven entries since the macOS disk image (2026-09-03), six since
+    /// `windows-arm64`, four before it: the two Windows platforms each publish
+    /// a zip and an MSI, macOS publishes a tarball and a `.dmg`, and Linux
+    /// publishes one archive. In `sort -k2` order, which is what the publish
+    /// job's manifest uses and what the test below asserts.
     fn published_artifact_names(version: &Version) -> Vec<String> {
         vec![
             format!("polylinker-{version}-linux-x64.tar.gz"),
+            format!("polylinker-{version}-macos-universal.dmg"),
             format!("polylinker-{version}-macos-universal.tar.gz"),
             format!("polylinker-{version}-windows-arm64.msi"),
             format!("polylinker-{version}-windows-arm64.zip"),

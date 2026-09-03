@@ -42,7 +42,7 @@ USAGE:
     pl annotate <file>...                find known features in a plasmid
     pl gel     <file> --cut A --cut B    will the digest be readable?
     pl methods [topic]                   what to write in your methods section
-    pl licences                          who the annotation data belongs to
+    pl licences                          who the annotation data and fonts belong to
     pl update  [--check]                 ask the release page for a newer version
                                          — the one verb here that uses a network
 
@@ -277,7 +277,10 @@ UPDATE OPTIONS:
     running the file is yours to do, and to watch.
 
 GLOBAL:
-    --json                       machine-readable output (info, digest)
+    --json                       machine-readable output. Taken by info, digest,
+                                 find-motif, find, library, tm, goldengate,
+                                 sanger, orfs, primers, design and trace; every
+                                 other verb refuses it as an unknown option
 
 Formats are detected from content, never from the file extension.
 ";
@@ -3604,7 +3607,8 @@ fn cmd_ends(args: &[String]) -> Result<(), String> {
 }
 
 /// Every source behind the compiled-in feature database, and what each one is
-/// licensed under.
+/// licensed under -- and, since 2026-09-03, the two font faces this binary
+/// links, in the block [`font_notice`] appends.
 ///
 /// The (source, licence) → field-count table IS computed, from the provenance
 /// rows the binary carries, so a source that gains rows changes the counts.
@@ -3620,7 +3624,26 @@ fn cmd_ends(args: &[String]) -> Result<(), String> {
 /// The full notice, including the per-family Rfam credit table and the list of
 /// sources deliberately not used, is `features/NOTICE`; this prints the subset
 /// that has to travel inside the executable.
-fn cmd_licences(_args: &[String]) -> Result<(), String> {
+///
+/// # The fonts, since 2026-09-03
+///
+/// `pl export --png` fills glyph outlines from [`pl_draw::font::REGULAR`] and
+/// [`pl_draw::font::BOLD`]: 825,168 bytes of Liberation Sans under SIL OFL 1.1,
+/// and the only font data in this binary. OFL clause 2 lets an Apache-2.0
+/// executable carry the face on condition that "each copy contains the above
+/// copyright notice and this license", and a user handed the bare executable
+/// has neither `NOTICE.txt` nor `licences/` beside it. NOTICE's "HOW THE
+/// OBLIGATION TRAVELS" paragraph carried that as the last clause still owed
+/// from 2026-08-04 until this block was added; see [`font_notice`].
+fn cmd_licences(args: &[String]) -> Result<(), String> {
+    // An empty vocabulary, which is how a verb that takes no options REFUSES
+    // one rather than ignoring it. This function bound `_args` and never
+    // looked until 2026-09-03, so `pl licences --json` printed the licence
+    // text and exited 0 -- while `pl methods --json` and `pl ends --json`,
+    // which do call this, refused. USAGE's GLOBAL entry says every verb not on
+    // its list refuses `--json`; this is one of the two verbs that made that
+    // sentence false.
+    parse_args(args, &[], &[])?;
     let (db, errs) = pl_features::Db::builtin();
     // If the compiled-in table did not load cleanly, say so rather than
     // printing an attribution table computed from a partial parse.
@@ -3628,7 +3651,7 @@ fn cmd_licences(_args: &[String]) -> Result<(), String> {
         eprintln!("warning: {} line {}: {}", e.file, e.line, e.problem);
     }
     println!(
-        "Polylinker {} - annotation data: sources, licences and attribution\n",
+        "Polylinker {} - annotation data and embedded fonts: sources, licences and attribution\n",
         env!("CARGO_PKG_VERSION")
     );
     println!(
@@ -3688,7 +3711,65 @@ SIGN-OFF: {reviewed} of {} record(s) have been reviewed by a named curator.
 `pl annotate` searches only reviewed records unless you pass --include-proposed.",
         db.records.len()
     );
+    print!("{}", font_notice());
     Ok(())
+}
+
+/// The font block of `pl licences`: what NOTICE's "Fonts embedded in the
+/// SHIPPED BINARY" section says about the faces THIS executable links, and no
+/// others. The app's ten are its own Help page's business; `pl` links exactly
+/// the two Liberation faces `pl export --png` fills outlines from, and a block
+/// naming faces a binary does not carry would be NOTICE's "seven faces" error
+/// in the other direction.
+///
+/// Byte counts and digests are computed from [`pl_draw::font::REGULAR`] and
+/// [`pl_draw::font::BOLD`] rather than written out, so what prints is a
+/// property of the bytes in this process: a face swapped without updating
+/// NOTICE prints a digest NOTICE does not contain, and
+/// `the_font_block_records_the_faces_this_binary_links` is the join. The
+/// version, holders and Reserved Font Name are literals, as the attribution
+/// block above is -- the reader in `pl_draw::font` parses no `name` table, and
+/// a parser written for a notice would be a parser nothing else checks.
+fn font_notice() -> String {
+    use pl_draw::font::{BOLD, OFL, REGULAR};
+    let total = pl_draw::commas((REGULAR.len() + BOLD.len()) as u64);
+    let regular_len = pl_draw::commas(REGULAR.len() as u64);
+    let bold_len = pl_draw::commas(BOLD.len() as u64);
+    let regular_sha = pl_core::sha256::sha256_hex(REGULAR);
+    let bold_sha = pl_core::sha256::sha256_hex(BOLD);
+    format!(
+        "
+FONTS EMBEDDED IN THIS PROGRAM
+
+  Two faces, {total} bytes, reached only by `pl export --png`, which fills
+  glyph outlines from them. They are the only font data in this executable.
+
+  Liberation Sans          {regular_len} bytes   typeface 2.1.5
+    sha256  {regular_sha}
+  Liberation Sans Bold     {bold_len} bytes   typeface 2.1.5
+    sha256  {bold_sha}
+    Both digests are computed from the bytes linked into this program. NOTICE
+    (NOTICE.txt beside this program in a release; NOTICE in the source
+    distribution) records the same two, checked against the upstream release
+    liberation-fonts-ttf-2.1.5.tar.gz. If they differ, a face was replaced.
+
+  SIL OPEN FONT LICENSE 1.1. Clause 2 permits the Original Version to be
+  bundled with any software \"provided that each copy contains the above
+  copyright notice and this license\", which is why both follow here, and why
+  the faces are not subsetted: Liberation is a Reserved Font Name, and a
+  subset is a Modified Version that may not carry it.
+    Digitized data copyright (c) 2010 Google Corporation.
+    Copyright (c) 2012 Red Hat, Inc.
+    Reserved Font Name: \"Liberation\" (and Arimo, Tinos, Cousine)
+    Designer: Steve Matteson. Manufacturer: Ascender Corporation.
+    Named in acknowledgement, which OFL clause 4 permits and distinguishes
+    from promotion or endorsement.
+
+  The licence text, whole. It also ships as licences/Liberation-OFL.txt in a
+  release and is crates/pl-draw/fonts/Liberation-OFL.txt in the source.
+
+{OFL}"
+    )
 }
 
 /// `pl update` — ask the release page what the current version is, and, unless
@@ -4134,19 +4215,35 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
         );
         if n_reviewed == 0 {
             println!(
-                "\n  Nothing here has been signed off. Every row was assembled by machine\n  \
-                 from public sources and no human has checked one against its cited\n  \
-                 accession. Writing a gene's name onto a map is an assertion, so the\n  \
-                 default finds nothing until a curator reviews these rows."
+                "\n  Nothing here ships as signed off: either no human has checked a row\n  \
+                 against its cited accession, or a signature compiled into this binary\n  \
+                 failed to apply (the loader said why above) and its row is withheld.\n  \
+                 Writing a gene's name onto a map is an assertion, so the default finds\n  \
+                 nothing until a curator's signature is in force."
             );
         }
         return Ok(());
     }
     a.require_files()?;
 
-    // The default searches only reviewed rows, which today means nothing at
-    // all. Printing "no features found" over an unapproved database would be
-    // true and useless, so the reason is printed instead.
+    // The default searches only reviewed rows. This comment said "which today
+    // means nothing at all" from 2026-07-27 until 2026-09-03, and was true for
+    // one day: features/SIGNOFF.tsv was signed on 2026-07-28, and the shipped
+    // default has searched every signed row since. How many that is belongs to
+    // `pl annotate --db` and `Db::review_counts`, not to a comment -- the
+    // rustdoc on `Db::builtin` and SIGNOFF.tsv's own preamble each record the
+    // same sentence going stale in the same direction, and this was the copy
+    // nobody re-read.
+    //
+    // The empty-set branches (below, and under --db above) are a defence, not
+    // the expected case. The sign-off table is compiled in, and every way a
+    // signature can fail to apply -- a bad header, a lapsed digest, a curator
+    // mismatch -- ends in `proposed`, never in a dropped row; `reviewed()` also
+    // withholds a signed row whose source has not cleared the licence gate, so
+    // `n_reviewed` can sit below the `reviewed` count that --db prints. A
+    // binary built from a broken table therefore searches nothing, and
+    // printing "no features found" over it would be true and useless, so the
+    // reason is printed instead, under the loader's own messages on stderr.
     let proposed = a.has("include-proposed");
     let db = if proposed {
         all.clone()
@@ -4199,11 +4296,22 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
             n_reviewed,
             all.records.len()
         );
-        println!(
-            "  The shipped database is entirely 'proposed' — machine-assembled from\n  \
-             public sources, with no human sign-off. Pass --include-proposed to search\n  \
-             it anyway, and treat anything it finds as a suggestion to check."
-        );
+        if proposed {
+            // Reachable only when the compiled-in table has no rows at all;
+            // telling this user to pass the flag they just passed would be
+            // wrong.
+            println!(
+                "  The features table compiled into this binary has no rows at all, so\n  \
+                 there is nothing to search even with --include-proposed."
+            );
+        } else {
+            println!(
+                "  Every row in the shipped database is withheld from the default: either\n  \
+                 no human has signed it off, or the sign-off compiled into this binary\n  \
+                 failed to apply (the loader said why above). Pass --include-proposed to\n  \
+                 search it anyway, and treat anything it finds as a suggestion to check."
+            );
+        }
         return Ok(());
     }
 
@@ -5647,7 +5755,11 @@ fn cmd_trace(args: &[String]) -> Result<(), String> {
 /// line with every fragment's watson, crick and overhang. All three are
 /// reported because a fragment can have the right length and the wrong end
 /// shape, and only the overhang shows it.
-fn cmd_cut_adapter(_args: &[String]) -> Result<(), String> {
+fn cmd_cut_adapter(args: &[String]) -> Result<(), String> {
+    // See `cmd_licences`: the other verb that accepted any option in silence
+    // until 2026-09-03. Its only caller outside a terminal,
+    // reference/python/tests/xcheck_clone.py, passes no arguments at all.
+    parse_args(args, &[], &[])?;
     let mut input = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map_err(|e| e.to_string())?;
 
@@ -6100,6 +6212,122 @@ mod tests {
         assert_eq!(
             sites, "Which cutters `pl export` puts on the figure.",
             "enum Sites has picked up doc text that is not about cutters"
+        );
+    }
+
+    /// `pl --help`'s GLOBAL entry for `--json` names every verb that takes the
+    /// flag, and no verb that refuses it.
+    ///
+    /// Sibling of [`the_export_rationale_is_attached_to_the_export_verb`], for
+    /// the one option that is documented once for the whole program instead of
+    /// under its verb. There is no INFO OPTIONS block to hang it on, so that
+    /// entry is the only place `pl --help` says which verbs answer `--json`.
+    /// It was written on 2026-07-26 naming info and digest, and was never
+    /// re-read as other verbs came to accept the flag -- each of which either
+    /// answered `--json` or refused it as an unknown option, with the help
+    /// text saying nothing either way. PROVEN TO FAIL on 2026-09-03 against
+    /// the line `--json    machine-readable output (info, digest)`, verbatim:
+    ///
+    /// ```text
+    /// verbs that accept --json and `pl --help`'s GLOBAL entry does not name:
+    /// ["find-motif", "find", "library", "tm", "goldengate", "sanger", "orfs",
+    /// "primers", "design", "trace"]
+    /// ```
+    ///
+    /// Which verbs take the flag is read out of each `cmd_*`'s own
+    /// `parse_args` call, and which verb a `cmd_*` is comes from `main`'s
+    /// dispatch table, rather than either being listed here: a verb that gains
+    /// the flag and not the mention is the defect, and a list in this comment
+    /// would be a third copy to go stale.
+    #[test]
+    fn the_global_json_entry_names_every_verb_that_takes_it() {
+        const SRC: &str = include_str!("main.rs");
+
+        // Every verb, and the subset whose `parse_args` call accepts `json`.
+        // A verb that never calls `parse_args` takes no options at all.
+        let mut verbs: Vec<String> = Vec::new();
+        let mut json: Vec<String> = Vec::new();
+        for line in SRC.lines().filter(|l| l.starts_with("fn cmd_")) {
+            let name = &line["fn ".len()..line.find('(').expect("a fn has a parameter list")];
+            let verb = name["cmd_".len()..].replace('_', "-");
+            // `cmd_find_motif` is `find-motif` because `main` says so, not
+            // because of the underscore rule; pin the mapping to the table.
+            let dispatch = SRC
+                .lines()
+                .find(|l| l.contains(&format!("=> {name}(rest)")))
+                .unwrap_or_else(|| panic!("main() no longer dispatches to {name}"));
+            assert!(
+                dispatch.contains(&format!("\"{verb}\"")),
+                "{name} is not dispatched as `{verb}`: {dispatch:?}"
+            );
+            // EVERY verb parses its arguments, which is what makes the second
+            // half of the GLOBAL sentence -- "every other verb refuses it as
+            // an unknown option" -- a fact rather than a hope. `cmd_licences`
+            // and `cmd_cut_adapter` bound `_args` and looked at nothing until
+            // 2026-09-03, so `pl licences --json` printed the licence text and
+            // exited 0. The check above cannot see that: a verb that never
+            // calls `parse_args` simply reports "no json", which is
+            // indistinguishable here from one that refuses it.
+            let body = body_of(SRC, &format!("fn {name}("));
+            assert!(
+                body.contains("parse_args("),
+                "{name} never calls parse_args, so `pl {verb} --anything` is \
+                 accepted in silence -- and `pl --help`'s GLOBAL entry says \
+                 every verb it does not list refuses --json"
+            );
+            let takes_json = body.split_once("parse_args(").is_some_and(|(_, call)| {
+                let call = &call[..call.find(")?;").expect("parse_args is called with `?`")];
+                call.split('"').skip(1).step_by(2).any(|s| s == "json")
+            });
+            if takes_json {
+                json.push(verb.clone());
+            }
+            verbs.push(verb);
+        }
+        assert!(
+            json.iter().any(|v| v == "info") && verbs.len() > json.len(),
+            "the source scan no longer separates verbs that take --json from \
+             verbs that refuse it, so this test is measuring nothing: {json:?} \
+             of {verbs:?}"
+        );
+
+        // GLOBAL runs from its heading to the next unindented line, like
+        // EXPORT OPTIONS above. Verbs are matched as whole words, so `find`
+        // cannot pass on the strength of `find-motif`.
+        let block: String = USAGE
+            .lines()
+            .skip_while(|l| *l != "GLOBAL:")
+            .skip(1)
+            .take_while(|l| l.starts_with(' '))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            block.contains("--json"),
+            "`pl --help` no longer documents --json under GLOBAL: {block:?}"
+        );
+        let words: Vec<&str> = block
+            .split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '(' | ')'))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let missing: Vec<&str> = json
+            .iter()
+            .map(String::as_str)
+            .filter(|v| !words.contains(v))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "verbs that accept --json and `pl --help`'s GLOBAL entry does not \
+             name: {missing:?}"
+        );
+        let overclaimed: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|w| verbs.iter().any(|v| v == w) && !json.iter().any(|v| v == w))
+            .collect();
+        assert!(
+            overclaimed.is_empty(),
+            "`pl --help`'s GLOBAL entry names verbs that refuse --json as an \
+             unknown option: {overclaimed:?}"
         );
     }
 
@@ -7350,5 +7578,62 @@ Step 'python only in a comment' {
             trace.contains("quality_absence(t.quality_was_dropped())"),
             "pl trace stopped asking the trace"
         );
+    }
+
+    /// `pl licences` prints, for the faces this binary links, the digests
+    /// NOTICE records -- and computes them, so the join is the bytes.
+    ///
+    /// NOTICE carried this as "STILL OWED" from 2026-08-04 to 2026-09-03: the
+    /// executable embedded 825,168 bytes of Liberation Sans under OFL 1.1 and
+    /// its licence view said nothing about fonts. `include_str!` of NOTICE
+    /// rather than a digest literal, for the reason `pl-draw`'s
+    /// `the_vendored_faces_are_the_files_notice_records` gives: a hash in two
+    /// places with nothing joining them could fail if a face were swapped and
+    /// could not fail if the record were mistyped.
+    #[test]
+    fn the_font_block_records_the_faces_this_binary_links() {
+        const NOTICE: &str = include_str!("../../../NOTICE");
+        let block = font_notice();
+        for (what, bytes) in [
+            ("Liberation Sans", pl_draw::font::REGULAR),
+            ("Liberation Sans Bold", pl_draw::font::BOLD),
+        ] {
+            let digest = pl_core::sha256::sha256_hex(bytes);
+            assert!(
+                block.contains(&digest),
+                "{what}: `pl licences` does not print {digest}"
+            );
+            assert!(
+                NOTICE.contains(&digest),
+                "{what}: NOTICE does not record {digest}, which is what this binary links"
+            );
+            let len = pl_draw::commas(bytes.len() as u64);
+            assert!(
+                block.contains(&len),
+                "{what}: the block does not print {len} bytes"
+            );
+        }
+        // OFL clause 2: the copyright notice and the licence, in each copy.
+        for owed in [
+            "Google Corporation",
+            "Red Hat, Inc.",
+            "Reserved Font Name",
+            "SIL OPEN FONT LICENSE Version 1.1",
+        ] {
+            assert!(block.contains(owed), "the block does not carry {owed:?}");
+        }
+        assert!(
+            block.contains(pl_draw::font::OFL),
+            "the licence text is not printed whole"
+        );
+        // And no face this binary does not carry: the app's are its own
+        // page's business, and naming them here would be NOTICE's "seven
+        // faces" miscount in the other direction.
+        for not_here in ["Plex", "Inter", "Phosphor", "Hack", "Ubuntu", "Noto"] {
+            assert!(
+                !block.contains(not_here),
+                "the block names {not_here}, which pl does not link"
+            );
+        }
     }
 }

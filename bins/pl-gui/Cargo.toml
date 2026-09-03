@@ -120,10 +120,20 @@ pl-update.workspace = true
 #
 # Dropping glow and shipping wgpu alone would recover a little of that, and is
 # refused for a reason that is not about bytes: glow is the backend every working
-# installation has exercised, and NO CI LEG ANYWHERE LAUNCHES THIS PROGRAM, so
-# "tested" here means "tested by users". Removing it would move every platform
-# that works today onto a renderer nothing has run, to save a fraction of an
-# installer. The fallback is the cautious change; the replacement would not be.
+# installation has exercised, and UNTIL 2026-09-03 NO CI LEG ANYWHERE LAUNCHED
+# THIS PROGRAM, so "tested" here meant "tested by users". Since then the
+# `gui-smoke` job in .github/workflows/ci.yml opens the window on each backend
+# in turn (PL_GUI_SMOKE=1, PL_GUI_RENDERER pinned): on ubuntu-latest under Xvfb
+# on Mesa's software OpenGL for glow and its software Vulkan for wgpu, and on
+# macos-latest on Apple's OpenGL and Metal. All four are green on hosted
+# runners as of run 33763643129, and the Linux Vulkan one logged
+# DRIVER_ID_MESA_LLVMPIPE, so wgpu really did take the Vulkan path rather than
+# its GLES-over-EGL one. That is one software adapter per backend on Linux and one
+# Apple GPU on macOS, and nobody's Windows driver, so the sentence weakens
+# rather than disappears. Removing glow would still move every platform that
+# works today onto a renderer that only that job and a hand-pinned
+# PL_GUI_RENDERER=wgpu have ever run, to save a fraction of an installer. The
+# fallback is the cautious change; the replacement would not be.
 #
 # `renderer` MUST be set explicitly in `NativeOptions` now that both are
 # compiled: with both features on, eframe's `Renderer::default()` is `Wgpu`

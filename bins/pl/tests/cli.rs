@@ -2440,6 +2440,80 @@ fn only_the_update_verb_can_reach_the_network() {
     }
 }
 
+/// A verb that takes no options refuses one instead of ignoring it, which is
+/// what `pl --help` says of every verb its GLOBAL `--json` entry omits.
+///
+/// PROVEN TO FAIL on 2026-09-03: `pl licences --json` exited 0 and printed the
+/// whole licence text, and `pl cut-adapter --json` exited 0 in silence, while
+/// `pl methods --json` refused with "unknown option '--json'; this command
+/// takes no options". Both functions bound `_args` and never called
+/// `parse_args`.
+#[test]
+fn a_verb_that_takes_no_options_refuses_one_rather_than_ignoring_it() {
+    let dir = scratch("no-options-refused");
+    // The two verbs that did not, until 2026-09-03: both bound `_args` and
+    // never called `parse_args`, so `pl licences --json` printed the whole
+    // licence text and exited 0 while `pl methods --json` refused. `pl
+    // --help`'s GLOBAL entry says every verb it does not list refuses
+    // `--json`; these are the two that made that sentence false. The unit
+    // test `the_global_json_entry_names_every_verb_that_takes_it` now asserts
+    // every `cmd_*` calls `parse_args`; this one asserts what a user sees.
+    for verb in ["licences", "cut-adapter"] {
+        let out = run(&dir, &[verb, "--json"]);
+        assert!(
+            !out.status.success(),
+            "`pl {verb} --json` exited 0; a verb that takes no options must \
+             refuse one, not ignore it"
+        );
+        let err = stderr(&out);
+        assert!(
+            err.contains("unknown option '--json'"),
+            "`pl {verb} --json` failed without naming the option: {err:?}"
+        );
+    }
+    // ...and the verb still works when asked properly. `cut-adapter` reads
+    // stdin, which `run` gives as empty, so only `licences` is exercised here.
+    let out = run(&dir, &["licences"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+/// `pl licences` carries the notice OFL clause 2 attaches to the faces this
+/// binary embeds, to a user who has nothing beside the executable.
+///
+/// NOTICE's "HOW THE OBLIGATION TRAVELS" paragraph carried the absence of this
+/// block as the last clause still owed, from 2026-08-04 to 2026-09-03. Run
+/// through the binary, not the function, because the obligation is on the
+/// copy a user runs.
+#[test]
+fn licences_prints_the_fonts_this_binary_embeds() {
+    let dir = scratch("licences-fonts");
+    let out = run(&dir, &["licences"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    for want in [
+        "FONTS EMBEDDED IN THIS PROGRAM",
+        "Liberation Sans Bold",
+        "Copyright (c) 2012 Red Hat, Inc.",
+        "Reserved Font Name",
+        "SIL OPEN FONT LICENSE Version 1.1",
+    ] {
+        assert!(
+            text.contains(want),
+            "`pl licences` does not print {want:?}:\n{text}"
+        );
+    }
+    // ...and still the data block it has always printed, in front of it.
+    let data = text
+        .find("ATTRIBUTION")
+        .expect("the annotation-data block is gone");
+    let fonts = text.find("FONTS EMBEDDED").expect("the font block is gone");
+    assert!(
+        data < fonts,
+        "the font block moved in front of the data block"
+    );
+    assert!(text.contains("features/NOTICE"), "{text}");
+}
+
 /// A mistyped flag is refused **before** anything is fetched.
 ///
 /// This is not a copy of `a_mistyped_option_stops_the_run_instead_of_changing_the_answer`.
