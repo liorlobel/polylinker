@@ -1728,8 +1728,14 @@ jobs:
             || { rc=$?; echo "::error::glow smoke exited $rc"; cat "$RUNNER_TEMP/xvfb-glow.log"; exit $rc; }
 
       # The ICD is named rather than discovered so the log cannot say Vulkan
-      # and mean some other driver. The path is the x86_64 one; an arm64
-      # ubuntu runner would need lvp_icd.aarch64.json. WGPU_BACKEND=vulkan is
+      # and mean some other driver. THE NAME CARRIES NO ARCHITECTURE on
+      # Ubuntu: this said `lvp_icd.x86_64.json` -- the upstream Mesa spelling,
+      # and what a search suggests -- and the assertion below listed the
+      # directory instead, which on `ubuntu-latest` holds `lvp_icd.json`
+      # alongside `intel_icd.json`, `radeon_icd.json` and five more, all
+      # unsuffixed. Measured on the runner on 2026-09-03; do not reintroduce
+      # the suffix for an arm64 image without listing that image's directory
+      # first. WGPU_BACKEND=vulkan is
       # what keeps wgpu off its GLES-over-EGL backend, which would be a second
       # llvmpipe run wearing wgpu's name -- "vulkan" and "vk" are the spellings
       # `Backends::from_comma_list` accepts (wgpu-types 29.0.4 backend.rs:181),
@@ -1760,7 +1766,7 @@ jobs:
           PL_GUI_SMOKE: "1"
           PL_GUI_RENDERER: wgpu
           WGPU_BACKEND: vulkan
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
           XDG_STATE_HOME: ${{ runner.temp }}/pl-state-wgpu
         run: |
           if [ ! -f "$VK_ICD_FILENAMES" ]; then
