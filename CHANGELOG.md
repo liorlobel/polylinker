@@ -51,6 +51,17 @@ which.
   `libxkbcommon-devel` and `wayland-devel` and no GTK at all, and the workspace
   builds, so `libgtk-3-dev` is confirmed unnecessary.
 
+- **GTK is no longer installed to build a program that does not use it.**
+  `libgtk-3-dev` sat in three apt lines in `ci.yml` and one in `release.yml` on
+  the strength of a read of `Cargo.lock` alone, and `docs/RELEASING.md` recorded
+  that removing it needed a measurement first, on a pull request rather than in
+  a release. The measurement arrived from the other direction: the new
+  `almalinux:8` release container installs `libxkbcommon-devel` and
+  `wayland-devel` and no GTK of any kind, and the whole workspace builds. It is
+  gone from all three `ci.yml` lines. The release leg's host `apt-get` step is
+  gone entirely rather than trimmed, because nothing builds on that host any
+  more — 27 seconds of installing libraries nothing then linked against.
+
 - **The glibc check compares in both directions.** It failed when the binaries
   needed MORE than `README-LINUX.txt` promised and said nothing when they
   needed less — which is the file turning away every user between the real

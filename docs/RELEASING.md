@@ -636,10 +636,13 @@ X11, xkbcommon, Wayland and EGL/GL through `dlopen` rather than linking them, so
 they do not appear in `DT_NEEDED` and a missing one shows up as a failure to
 start. `README-LINUX.txt` lists them, with the Debian/Ubuntu package names.
 Notably **not** GTK: there is no gtk crate anywhere in `Cargo.lock`, and `rfd`'s
-Linux path is the XDG portal over Wayland. (`libgtk-3-dev` is still in the
-apt-install line in both workflows. It is not needed to build either; removing
-it belongs in `ci.yml`, where a wrong guess costs a red pull request instead of
-a red release.)
+Linux path is the XDG portal over Wayland. (`libgtk-3-dev` sat in the
+apt-install line of both workflows until 2026-09-03, on the strength of that
+read of `Cargo.lock` alone. It is now measured rather than reasoned: the
+release leg's `almalinux:8` container installs `libxkbcommon-devel` and
+`wayland-devel` and no GTK at all, and the workspace builds. It is gone from
+`ci.yml`'s three apt lines, and the release leg has no apt line left to remove
+it from — nothing builds on that host any more.)
 
 ### Archive formats
 
