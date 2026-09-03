@@ -198,11 +198,25 @@ pub fn parse_query(mode: Mode, needle: &str, absent: bool) -> Parsed {
             // Never fall through to searching for the literal letters of the
             // name: `BsaI` would become a search for B-s-a-I, which matches
             // nothing and looks like an answer.
+            // The count is computed, and so is the shortest site: a sentence
+            // that tells a user what is missing has to be right about what is
+            // present. This read "There is no BsaI, BsmBI, BbsI or SapI yet"
+            // until 2026-09-03, naming four enzymes that all ship — twelve
+            // lines above a test that asserts `by_name("BsaI").is_some()`,
+            // which is how long a false sentence can sit next to the thing
+            // that disproves it. Corrected rather than deleted, because the
+            // shape of the message was right and only its example was wrong.
             None => Parsed::Rejected(format!(
-                "{needle:?} is not one of the {} enzymes shipped. \
-                 There is no BsaI, BsmBI, BbsI or SapI yet — switch to Sequence \
-                 and type the site.",
-                pl_enzymes::ENZYMES.len()
+                "{needle:?} is not one of the {} enzymes shipped, whose shortest \
+                 recognition site is {} bp — REBASE is what real work wants and \
+                 it is not redistributed here. Switch to Sequence and type the \
+                 site to search for it anyway.",
+                pl_enzymes::ENZYMES.len(),
+                pl_enzymes::ENZYMES
+                    .iter()
+                    .map(|e| e.site.len())
+                    .min()
+                    .unwrap_or(0)
             )),
         },
     }
@@ -242,7 +256,24 @@ mod tests {
         // it would pass while asserting nothing.
         assert!(pl_enzymes::by_name("BsaI").is_some(), "BsaI ships now");
         match parse_query(Mode::Enzyme, "NotAnEnzyme", false) {
-            Parsed::Rejected(e) => assert!(e.contains("NotAnEnzyme"), "{e}"),
+            Parsed::Rejected(e) => {
+                assert!(e.contains("NotAnEnzyme"), "{e}");
+                // AND THE REFUSAL MAY NOT NAME A SHIPPED ENZYME AS ABSENT.
+                //
+                // PROVEN TO FAIL on 2026-09-03 against the shipped sentence
+                // "There is no BsaI, BsmBI, BbsI or SapI yet — switch to
+                // Sequence and type the site", every name in which is in the
+                // table. The assertion above could not see it: it only checks
+                // that the refusal names what the user typed. This one reads
+                // the message back against `by_name`, so a message that
+                // declares any enzyme missing fails unless it really is.
+                for word in e.split(|c: char| !c.is_ascii_alphanumeric()) {
+                    assert!(
+                        pl_enzymes::by_name(word).is_none(),
+                        "the refusal names {word:?} as missing, and it ships: {e}"
+                    );
+                }
+            }
             _ => panic!("an unknown name must not silently become a motif"),
         }
         for known in ["EcoRI", "BsaI", "BsmBI", "SapI"] {

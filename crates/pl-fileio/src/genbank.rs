@@ -1124,6 +1124,45 @@ pub fn write_reporting(
     }
 
     for p in &mol.primers {
+        // TWO LOSSES THAT USED TO BE SILENT, reported here rather than inside
+        // the site loop below, because both are properties of the PRIMER and
+        // neither depends on a site being written.
+        //
+        // The mechanism matters more than the two cases. `unwritable` is what
+        // `faithful` is computed from -- `bins/pl-gui/src/main.rs` sets
+        // `faithful = unwritable.is_empty()` and, when it is true, both clears
+        // the unsaved-changes dot and retargets the document at the file just
+        // written. So anything dropped here without a line in this vector is
+        // dropped from a document the editor then calls saved. Until
+        // 2026-09-03 this loop pushed a line only for a site past the end and
+        // a site with no GenBank form; a primer could lose its description, or
+        // vanish whole, and the save still counted as faithful BY OMISSION.
+        //
+        // Keyed on `p.sites.is_empty()` and not on "no site was written": a
+        // primer whose only site was rejected above is already reported by
+        // that branch, and counting it twice would change the exact
+        // `report.len() == 1` that
+        // `a_primer_binding_site_past_the_end_is_reported_not_silently_skipped`
+        // asserts.
+        if p.sites.is_empty() {
+            unwritable.push(format!(
+                "primer {:?}: has no binding site, and GenBank has no way to carry \
+                 a primer that is not bound to a position, so the oligo {:?} was \
+                 not written at all",
+                p.name, p.seq
+            ));
+        }
+        // The `.dna` writer keeps this -- `snapgene.rs` writes
+        // `description="..."` on the `<Primer>` element -- so the two formats
+        // disagree about whether a primer's description is part of the
+        // molecule, and only one of them said so.
+        if !p.description.is_empty() {
+            unwritable.push(format!(
+                "primer {:?}: its description was not written; GenBank's primer_bind \
+                 note carries the oligo and its Tm, and nothing else",
+                p.name
+            ));
+        }
         for s in &p.sites {
             // A site past the end of the molecule is skipped rather than
             // written, because a `primer_bind` at 5000..5100 on a 2686 bp
@@ -1747,6 +1786,72 @@ mod tests {
         assert_eq!(report.len(), 1, "{report:?}");
         assert!(report[0].contains("ghost"), "{report:?}");
         assert!(report[0].contains("past the end"), "{report:?}");
+    }
+
+    /// A primer with no binding site vanishes from a GenBank file, and says so.
+    ///
+    /// PROVEN TO FAIL on 2026-09-03: `report` was `[]` and
+    /// `text.contains("NoSites")` was `false`. The primer -- its name, its
+    /// oligo and its description -- disappeared without a word, and because
+    /// `faithful` is `unwritable.is_empty()`, the editor then cleared the
+    /// unsaved-changes dot and retargeted the document at the file that had
+    /// just lost it. `.dna` block 5 can hold a `<Primer/>` with no
+    /// `<BindingSite>`, so this is reachable from a real file rather than only
+    /// from a constructed one.
+    #[test]
+    fn a_primer_with_no_binding_site_is_reported_rather_than_vanishing() {
+        let mut mol = Molecule {
+            seq: b"a".repeat(500),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.primers.push(Primer {
+            name: "NoSites".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: String::new(),
+            sites: Vec::new(),
+        });
+        let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
+        assert!(!text.contains("NoSites"), "{text}");
+        assert_eq!(report.len(), 1, "{report:?}");
+        assert!(report[0].contains("NoSites"), "{report:?}");
+        assert!(report[0].contains("no binding site"), "{report:?}");
+        // The oligo is named too, because the report is the only place it
+        // survives at all.
+        assert!(report[0].contains("GTAAAACGACGGCCAGT"), "{report:?}");
+    }
+
+    /// A primer's description does not reach GenBank, and that is now said.
+    ///
+    /// PROVEN TO FAIL on 2026-09-03: `report` was `[]` while
+    /// `text.contains("ordered from IDT")` was also `false`. The `.dna` writer
+    /// keeps this field, so the two formats disagreed about whether a
+    /// description is part of the molecule and only one of them admitted it.
+    #[test]
+    fn a_primers_description_is_reported_as_not_carried() {
+        let mut mol = Molecule {
+            seq: b"a".repeat(500),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.primers.push(Primer {
+            name: "M13F".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: "ordered from IDT".into(),
+            sites: vec![BindingSite {
+                start: 100,
+                end: 116,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+        });
+        let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
+        // The site itself is still written; only the description is lost.
+        assert!(text.contains("primer_bind"), "{text}");
+        assert!(!text.contains("ordered from IDT"), "{text}");
+        assert_eq!(report.len(), 1, "{report:?}");
+        assert!(report[0].contains("M13F"), "{report:?}");
+        assert!(report[0].contains("description"), "{report:?}");
     }
 
     #[test]

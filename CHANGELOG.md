@@ -25,6 +25,41 @@ which.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A GenBank save could lose a primer and still be called faithful.** The
+  writer emits one `primer_bind` per binding SITE, carrying the oligo and its
+  Tm in a note, and it reported a loss only for a site past the end of the
+  molecule or one with no GenBank form. Two other losses went unreported, and
+  `faithful` is computed as `unwritable.is_empty()` — so the editor cleared the
+  unsaved-changes dot and retargeted the document at the file that had just
+  dropped something. A primer's `description` is not written at all, though the
+  `.dna` writer keeps it, so the two formats disagreed about whether it is part
+  of the molecule and only one of them said so. And a primer with **no** binding
+  site vanished entirely: name, oligo and description, without a word, which is
+  reachable from a real file because `.dna` block 5 can hold a `<Primer/>` with
+  no `<BindingSite>`. Both are now reported per primer, so the save stops
+  counting as faithful and the surfaces that already print `unwritable` — the
+  editor's status line and `pl convert` — name what was dropped. Nothing about
+  what is written changed.
+
+  **Not fixed here, and the larger half:** the GenBank reader still does not
+  restore `mol.primers` from the `primer_bind` features the writer produced, so
+  a `.dna` opened, saved as GenBank and reopened has its primers as ordinary
+  features. Repairing that moves feature counts, `pl info` output and library
+  search results for every `.gb` this program has ever written, and it cannot
+  distinguish our own output from a foreign tool's identically shaped one. It
+  is a separate, reviewed change.
+
+- **The Library tab named four shipped enzymes as missing.** Typing an unknown
+  enzyme was refused with *"There is no BsaI, BsmBI, BbsI or SapI yet"* — all
+  four of which are in the table, twelve lines above a test that asserts
+  `by_name("BsaI").is_some()`. The refusal now states the shipped count and the
+  shortest recognition site, both computed, and says plainly that REBASE is what
+  real work wants and is not redistributed here. The test that could not see the
+  false claim now reads every word of the refusal back against `by_name`, so a
+  message declaring any enzyme absent fails unless it really is.
+
 ## [0.13.1] - 2026-09-03
 
 One number, and it is the one that decides whether the Linux download runs
