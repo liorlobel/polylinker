@@ -4070,13 +4070,19 @@ impl App {
     /// Three values because two of them are different KINDS of thing and the
     /// caller must not conflate them:
     ///
-    /// - the `Vec<String>` is `write_reporting`'s own report: a feature whose
-    ///   every segment has no GenBank location and is therefore absent from the
-    ///   file (genbank.rs:1073-1084), a primer binding site past the end
-    ///   (:1148-1153), a control character flattened out of DEFINITION or a
-    ///   qualifier (:908-916, :1108-1116), an ORIGIN character rewritten as `n`
-    ///   (:1210-1227). Every one of those is work that is on screen and not in
-    ///   the file, so it makes the write UNFAITHFUL.
+    /// - the `WriteReport` is `write_reporting`'s own report, and it has two
+    ///   halves of its own. `absent` is work that is not in the file at all: a
+    ///   feature whose every segment has no GenBank location, a primer binding
+    ///   site past the end, a primer with no site to hang it on. `reduced` is
+    ///   work that IS in the file with something taken off it: a control
+    ///   character flattened out of DEFINITION or a qualifier, an ORIGIN
+    ///   character rewritten as `n`, a feature key cut to its fifteen columns,
+    ///   a primer's free-text description. THIS SURFACE CONSULTS BOTH —
+    ///   `faithful` is `report.is_empty()`, which is both halves — because
+    ///   either way the document on screen and the file on disk disagree, and
+    ///   clearing the dot would say they do not. The split exists for
+    ///   `crates/pl-wasm`, which can only refuse or write and must not refuse
+    ///   over a reduction; here there is a status line, so both get said.
     /// - the `Option<String>` is the unoriented-strand note. GenBank has no way
     ///   to say "unoriented", so those features are written as forward, which
     ///   for about half of them is a directional claim the source never made.
@@ -4108,16 +4114,19 @@ impl App {
     /// still calls plain `write` and is a separate, still-open site: a draft
     /// nobody chose to write has no status line to report into.
     ///
-    /// One class stays invisible and it is worth knowing about: a feature key
-    /// longer than fifteen characters is truncated BEFORE the comparison that
-    /// decides whether to report it (genbank.rs:936-952, `key != cut`), so a
-    /// `type=` that only lost its tail is rewritten silently. That is in
-    /// pl-fileio, not here.
+    /// One class used to stay invisible and no longer does: a feature key
+    /// longer than fifteen characters was truncated BEFORE the comparison that
+    /// decides whether to report it (`key != cut`), so a `type=` that only lost
+    /// its tail was rewritten silently. Fixed in pl-fileio on 2026-09-04, and
+    /// it needed the `reduced` half to land in — until there was one, the only
+    /// channel was the one the browser build refuses on, and refusing to export
+    /// a plasmid over a sixteen-character feature key is not a trade worth
+    /// making.
     fn plan_genbank(
         mol: &pl_core::Molecule,
         title: &str,
         date: (u32, usize, i32),
-    ) -> (String, Vec<String>, Option<String>) {
+    ) -> (String, pl_fileio::genbank::WriteReport, Option<String>) {
         let (text, unwritable) = pl_fileio::genbank::write_reporting(mol, title, date);
         let lossy = mol.features_without_expressible_orientation();
         let strand = (!lossy.is_empty()).then(|| {
@@ -4186,23 +4195,39 @@ impl App {
             let text = pl_fileio::fasta::write(m, &d.title, 70);
             (text, note, lost.is_empty())
         } else {
-            let (text, unwritable, strand) = Self::plan_genbank(d.molecule(), &d.title, today());
+            let (text, report, strand) = Self::plan_genbank(d.molecule(), &d.title, today());
             let mut said: Vec<String> = Vec::new();
             // FIRST, because `wrote()` puts the note leftmost and the status bar
             // elides from the right: this is the clause that has to survive
-            // clipping. The strand nuance after it is the one a reader can
-            // afford to lose.
-            if !unwritable.is_empty() {
+            // clipping. The reduction and the strand nuance after it are the
+            // ones a reader can afford to lose, IN THAT ORDER — an annotation
+            // that is missing outranks one that is merely smaller, which
+            // outranks one that is present and whole with a strand it never
+            // claimed.
+            if !report.absent.is_empty() {
                 said.push(format!(
                     "{} thing(s) have no GenBank form and are NOT in this file: {}",
-                    unwritable.len(),
-                    unwritable.join("; ")
+                    report.absent.len(),
+                    report.absent.join("; ")
+                ));
+            }
+            if !report.reduced.is_empty() {
+                said.push(format!(
+                    "{} thing(s) are in this file in a reduced form: {}",
+                    report.reduced.len(),
+                    report.reduced.join("; ")
                 ));
             }
             said.extend(strand);
-            // Only the report makes a write unfaithful. See `plan_genbank` for
-            // why the strand note does not: those features ARE in the file.
-            let faithful = unwritable.is_empty();
+            // BOTH halves make a write unfaithful, and that is this surface's
+            // own judgement rather than the type's: `crates/pl-wasm` refuses on
+            // `absent` alone because its only alternative is to refuse the
+            // whole download. Here the file is written either way and the
+            // question is only whether the document on screen is now the
+            // document on disk — and it is not, if a primer lost its
+            // description. See `plan_genbank` for why the strand note is
+            // different: those features ARE in the file, whole.
+            let faithful = report.is_empty();
             (text, said.join("  ·  "), faithful)
         };
         // `atomic::write`, not `fs::write`: a GenBank export that fails partway
@@ -24183,7 +24208,7 @@ mod tests {
         past_end.features.push(f);
         let (text, unwritable, strand) = App::plan_genbank(&past_end, "past-end", (1, 0, 2026));
         assert!(
-            unwritable.iter().any(|s| s.contains("tet leader")),
+            unwritable.absent.iter().any(|s| s.contains("tet leader")),
             "the feature is not in the file and nothing says so: {unwritable:?}"
         );
         assert!(
@@ -24191,6 +24216,48 @@ mod tests {
             "the premise: it really is absent from what would be written"
         );
         assert_eq!(strand, None, "nothing here is unoriented");
+
+        // -- GenBank, the REDUCED arm ----------------------------------
+        //
+        // A save this app must not call clean either, and the one the browser
+        // build must not refuse.
+        //
+        // A primer with a description: it is in the file with its name, its
+        // oligo and its position, and the sentence a person typed about what
+        // it is FOR is not. `crates/pl-wasm` deliberately does NOT refuse this
+        // export — refusing a whole plasmid over a primer's note is the bug
+        // that made `reduced` a separate channel — but this surface has a
+        // status line, so here it is said AND it holds the dot.
+        let mut described = plain.clone();
+        described.primers.push(pl_core::Primer {
+            name: "M13F".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: "anneals in the linker, use at 58 C".into(),
+            sites: vec![pl_core::BindingSite {
+                start: 2,
+                end: 6,
+                strand: Strand::Forward,
+                tm: None,
+            }],
+        });
+        let (text, report, _) = App::plan_genbank(&described, "described", (1, 0, 2026));
+        assert!(
+            report.absent.is_empty(),
+            "nothing is missing from this file: {report:?}"
+        );
+        assert!(
+            report.reduced.iter().any(|s| s.contains("anneals in the")),
+            "the description went without a word: {report:?}"
+        );
+        assert!(
+            text.contains("primer_bind") && text.contains("M13F"),
+            "the premise: the primer itself IS in the file:\n{text}"
+        );
+        assert!(
+            !report.is_empty(),
+            "`faithful` is `report.is_empty()`, so a reduced save must not \
+             clear the unsaved-changes dot: {report:?}"
+        );
 
         // -- GenBank, the faithful arm, and the nuance that is NOT a loss ----
         let (_, none, _) = App::plan_genbank(&plain, "plain", (1, 0, 2026));
@@ -24238,8 +24305,10 @@ mod tests {
         for needle in [
             "let (text, note, faithful) = if as_fasta {",
             "let lost = Self::fasta_losses(m);",
-            "let (text, unwritable, strand) = Self::plan_genbank(",
-            "let faithful = unwritable.is_empty();",
+            "let (text, report, strand) = Self::plan_genbank(",
+            "if !report.absent.is_empty() {",
+            "if !report.reduced.is_empty() {",
+            "let faithful = report.is_empty();",
         ] {
             assert!(
                 code().any(|l| l.contains(needle)),

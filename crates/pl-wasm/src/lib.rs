@@ -55,14 +55,55 @@ struct State {
     /// Only present for `.dna`, and only so the container can be described.
     container: Option<snapgene::Document>,
     out: Vec<u8>,
+    /// What the last successful call cost, when it cost something short of a
+    /// refusal. See [`pl_warn_ptr`].
+    warn: Vec<u8>,
 }
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
+/// Publish an output buffer and CLEAR the warning buffer.
+///
+/// Clearing is the whole reason this is not two assignments at the call sites.
+/// `warn` outlives one call the way `out` does — the page reads both after the
+/// function returns — so a warning left over from an earlier export would
+/// attach itself to the next one, and the next one might be a file with
+/// nothing wrong with it. Every path that produces output goes through this,
+/// [`set_out_bytes`] or [`set_out_warned`], and only the last of the three
+/// leaves anything in the buffer.
 fn set_out(s: String) {
-    STATE.with(|st| st.borrow_mut().out = s.into_bytes());
+    set_out_bytes(s.into_bytes());
+}
+
+/// The same, for output that is not text: raw bases, a rewritten `.dna`.
+///
+/// It exists so that the sentence above — every path that produces output
+/// clears the warning — is true rather than nearly true. `pl_sequence` and
+/// `pl_to_dna` hand over `Vec<u8>` and so could not call `set_out`; both
+/// assigned `st.out` directly, which left a previous export's notice standing
+/// beside output that had nothing to do with it.
+fn set_out_bytes(bytes: Vec<u8>) {
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.out = bytes;
+        st.warn.clear();
+    });
+}
+
+/// Publish an output buffer together with what producing it cost.
+///
+/// The pair is set in one call so there is no ordering to get wrong. Separate
+/// setters would work only in one order — the output one clears the warning —
+/// and a caller that wrote them the other way round would throw the warning
+/// away silently, which is exactly the failure this channel exists to close.
+fn set_out_warned(s: String, warning: String) {
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.out = s.into_bytes();
+        st.warn = warning.into_bytes();
+    });
 }
 
 fn error_json(msg: &str) -> String {
@@ -126,10 +167,50 @@ pub extern "C" fn pl_out_len() -> usize {
     STATE.with(|st| st.borrow().out.len())
 }
 
+/// Pointer to the warning buffer: what the last successful call COST.
+///
+/// Empty except after a call that produced real output and had something to
+/// say about it. Read it after a zero return code; a non-zero code puts its
+/// reason in the output buffer instead, and clears this.
+///
+/// # Why a second buffer exists at all
+///
+/// [`unwritable_refusal`] below is built on the fact that a download has one
+/// buffer and one return code, so a write cannot both hand over the bytes and
+/// hand over the report — and concludes that a file which would be missing
+/// something must not be written here at all. That is right for a missing
+/// annotation and much too strong for a reduced one: for a few hours on
+/// 2026-09-03 a primer's dropped free-text description was reported through
+/// the same channel, and this build stopped exporting any molecule whose
+/// primer merely carried a note. Reverting it kept the export working and
+/// left the loss silent.
+///
+/// The premise, not the conclusion, was what had to give. There is one buffer
+/// because nobody had written a second one. With this, a reduced export both
+/// downloads and says what it cost — which is what every other surface in the
+/// project already does, and the reason `pl convert` and the desktop editor
+/// never faced this choice.
+#[no_mangle]
+pub extern "C" fn pl_warn_ptr() -> *const u8 {
+    STATE.with(|st| st.borrow().warn.as_ptr())
+}
+
+/// Length of the warning buffer; 0 when the last call cost nothing.
+#[no_mangle]
+pub extern "C" fn pl_warn_len() -> usize {
+    STATE.with(|st| st.borrow().warn.len())
+}
+
 /// ABI version, so a stale inlined module is detected rather than mis-read.
+///
+/// 2 since 2026-09-04: [`pl_warn_ptr`] and [`pl_warn_len`] were added, and a
+/// page built against ABI 1 would download a reduced export without showing
+/// the notice that now exists for it. That is precisely the silence this
+/// version added a channel to end, so it is a version bump and not an
+/// additive-and-therefore-free change.
 #[no_mangle]
 pub extern "C" fn pl_abi_version() -> u32 {
-    1
+    2
 }
 
 // ---------------------------------------------------------------------------
@@ -388,11 +469,11 @@ pub extern "C" fn pl_sequence() -> i32 {
         let seq = st.borrow().molecule.as_ref().map(|m| m.seq.clone());
         match seq {
             Some(s) => {
-                st.borrow_mut().out = s;
+                set_out_bytes(s);
                 0
             }
             None => {
-                st.borrow_mut().out = error_json("no file open").into_bytes();
+                set_out(error_json("no file open"));
                 1
             }
         }
@@ -545,15 +626,27 @@ fn truncation_refusal(report: &LoadReport) -> Option<String> {
 /// [`truncation_refusal`] above exists for, one class down: a download that
 /// looks like the user's plasmid and is not.
 ///
-/// **This buffer is the only channel there is.** The desktop GUI writes the
+/// **This buffer was the only channel there was.** The desktop GUI writes the
 /// file AND says what it cost, because it has a status line to say it in; `pl
-/// convert` does the same through stderr. Here there is one output buffer and
-/// one return code, so a write cannot both hand over the bytes and hand over
-/// the report. Between shipping a lossy file silently and refusing with the
-/// reason in the buffer, this crate has already chosen once — see
+/// convert` does the same through stderr. Here there was one output buffer and
+/// one return code, so a write could not both hand over the bytes and hand
+/// over the report. Between shipping a lossy file silently and refusing with
+/// the reason in the buffer, this crate has already chosen once — see
 /// `truncation_refusal` — and the page reads it the way that choice needs:
 /// `expGb` checks the return code and calls `fail(coreText())` rather than
 /// downloading, so the refusal is shown and nothing is saved.
+///
+/// # 2026-09-04: this takes `absent` only
+///
+/// `write_reporting` used to return one vector and it now returns two — see
+/// `pl_fileio::genbank::WriteReport`. This function takes the ABSENT half: an
+/// annotation that is not in the file. The REDUCED half — an annotation that
+/// IS in the file with something taken off it, a `/note` whose line break
+/// became a space, a primer's description GenBank has nowhere to put — used to
+/// arrive here too, and refusing a whole plasmid over a primer's note is not a
+/// trade worth making. Those go to [`pl_warn_ptr`], which is the second buffer
+/// the paragraph above says did not exist: the file downloads AND the page
+/// says what it cost. Nothing became silent in the move.
 ///
 /// **The consequence, stated plainly:** `pl convert file.gb --to genbank`
 /// writes such a file and prints the report; this returns 1 and writes none. A
@@ -568,6 +661,23 @@ fn unwritable_refusal(unwritable: &[String]) -> Option<String> {
             "GenBank has no form for {} thing(s) in this file, so writing it here would hand back a plausible plasmid with those parts missing and nothing saying so: {}. Nothing was written.",
             unwritable.len(),
             unwritable.join("; ")
+        )
+    })
+}
+
+/// What a written file cost, for the buffer the page shows beside the download.
+///
+/// The sibling of [`unwritable_refusal`] and deliberately the other shape: that
+/// one blocks the write and this one annotates it. The wording has to carry
+/// that difference on its own, because the user meets one of these two
+/// sentences with no idea which function produced it — "Nothing was written"
+/// there, "this file has them" here.
+fn reduction_notice(reduced: &[String]) -> Option<String> {
+    (!reduced.is_empty()).then(|| {
+        format!(
+            "{} thing(s) in this document have no GenBank form and were written in a reduced form; the file is saved and this is what it cost: {}",
+            reduced.len(),
+            reduced.join("; ")
         )
     })
 }
@@ -599,14 +709,19 @@ pub unsafe extern "C" fn pl_to_genbank(
         // the plain wrapper threw away and why this refuses instead of handing
         // back a plasmid with parts of it quietly absent.
         let date = (day, month as usize, year);
-        let (text, unwritable) = genbank::write_reporting(mol, &title, date);
-        if let Some(msg) = unwritable_refusal(&unwritable) {
+        let (text, report) = genbank::write_reporting(mol, &title, date);
+        if let Some(msg) = unwritable_refusal(&report.absent) {
             drop(st_ref);
             set_out(error_json(&msg));
             return 1;
         }
         drop(st_ref);
-        set_out(text);
+        // The reduced half downloads and is SAID, rather than being either
+        // swallowed or promoted into a refusal. See [`pl_warn_ptr`].
+        match reduction_notice(&report.reduced) {
+            Some(msg) => set_out_warned(text, msg),
+            None => set_out(text),
+        }
         0
     })
 }
@@ -661,7 +776,7 @@ pub extern "C" fn pl_to_dna(drop_derived: i32) -> i32 {
         };
         let bytes = snapgene::write(doc, drop_derived != 0);
         drop(st_ref);
-        STATE.with(|s| s.borrow_mut().out = bytes);
+        set_out_bytes(bytes);
         0
     })
 }
@@ -925,10 +1040,10 @@ mod tests {
     /// silently absent — rc 0, empty report, nothing anywhere saying so.
     ///
     /// MUTATION THAT RE-BREAKS IT: in `pl_to_genbank`, replace
-    /// `let (text, unwritable) = genbank::write_reporting(mol, &title, date);`
-    /// with `let (text, unwritable) = (genbank::write(mol, &title, date),
-    /// Vec::<String>::new());`. `unwritable_refusal` then always returns `None`,
-    /// rc is 0 and the buffer holds the lossy file.
+    /// `let (text, report) = genbank::write_reporting(mol, &title, date);`
+    /// with `let (text, report) = (genbank::write(mol, &title, date),
+    /// genbank::WriteReport::default());`. `unwritable_refusal` then always
+    /// returns `None`, rc is 0 and the buffer holds the lossy file.
     #[test]
     fn a_genbank_export_refuses_rather_than_dropping_what_it_cannot_write() {
         // Twelve bases, and a feature at 30..40. `parse_location` accepts that
@@ -973,6 +1088,107 @@ mod tests {
         let out = STATE.with(|st| String::from_utf8(st.borrow().out.clone()).unwrap());
         assert_eq!(rc, 0, "{out}");
         assert!(out.contains("LOCUS"), "{out}");
+        assert_eq!(
+            pl_warn_len(),
+            0,
+            "a clean export must not hand the page a notice to show"
+        );
+    }
+
+    /// A REDUCED export downloads, and says what it cost.
+    ///
+    /// PROVEN TO FAIL on 2026-09-04 with `pl_warn_len()` at 0 and no channel
+    /// to put a value in: before this, `write_reporting` returned one vector
+    /// and both severities went down it, so this molecule met one of two
+    /// outcomes and both were wrong.
+    ///
+    /// - Report the description through `unwritable`, as this crate did for a
+    ///   few hours on 2026-09-03, and `unwritable_refusal` fires: rc 1, no
+    ///   download, and the page tells a user their perfectly ordinary plasmid
+    ///   cannot be exported because one primer carries a note. That is what
+    ///   the revert removed.
+    /// - Leave it out, which is what the revert did, and the file downloads
+    ///   with the description gone and nothing anywhere saying so — the exact
+    ///   shape `unwritable_refusal`'s own doc calls worse than a refusal: "a
+    ///   download that looks like the user's plasmid and is not".
+    ///
+    /// The third outcome needed a second buffer, and the argument that there
+    /// could not be one — one buffer, one return code — was a description of
+    /// the ABI rather than a constraint on it. See [`pl_warn_ptr`].
+    #[test]
+    fn a_reduced_export_downloads_and_says_what_it_cost() {
+        // A `.dna` built the way SnapGene builds one, so the description
+        // reaches the molecule through the real reader rather than being
+        // planted in it: `<Primer description="..."><BindingSite/></Primer>`
+        // is block 5, and `pl convert x.dna --to dna` round-trips it exactly.
+        let mut mol = Molecule {
+            seq: b"GAATTCaaaaaaaaaaGGATCCtttttttttt".to_vec(),
+            topology: pl_core::Topology::Circular,
+            ..Default::default()
+        };
+        mol.primers.push(pl_core::Primer {
+            name: "M13F".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: "anneals in the linker, use at 58 C".into(),
+            sites: vec![pl_core::BindingSite {
+                start: 2,
+                end: 8,
+                strand: Strand::Forward,
+                tm: Some(55.3),
+            }],
+        });
+        let dna = snapgene::from_molecule(&mol);
+        let (rc, json) = open(&dna);
+        assert_eq!(rc, 0, "{json}");
+        assert!(
+            json.contains("anneals in the linker"),
+            "the premise: the page has the description before the export: {json}"
+        );
+
+        let title = "described.dna";
+        let rc = unsafe { pl_to_genbank(title.as_ptr(), title.len(), 4, 8, 2026) };
+        let out = STATE.with(|st| String::from_utf8(st.borrow().out.clone()).unwrap());
+
+        // IT DOWNLOADS. This is the half the 2026-09-03 revert was protecting.
+        assert_eq!(rc, 0, "a reduction is not a reason to refuse a file: {out}");
+        assert!(out.contains("LOCUS"), "{out}");
+        assert!(
+            out.contains("primer_bind") && out.contains("M13F"),
+            "the primer itself is in the file:\n{out}"
+        );
+        assert!(
+            !out.contains("anneals in the linker"),
+            "the premise: GenBank really has nowhere to put it:\n{out}"
+        );
+
+        // AND IT SAYS SO. This is the half the revert cost.
+        let warn = STATE.with(|st| String::from_utf8(st.borrow().warn.clone()).unwrap());
+        assert!(!warn.is_empty(), "the loss is silent again");
+        assert_eq!(warn.len(), pl_warn_len(), "the ABI must expose all of it");
+        assert!(
+            warn.contains("anneals in the linker"),
+            "and it has to name the text, which now exists nowhere else: {warn}"
+        );
+        assert!(
+            warn.contains("saved"),
+            "the wording has to distinguish this from a refusal, because the \
+             user meets one of the two sentences and cannot see which \
+             function wrote it: {warn}"
+        );
+
+        // AND THE NOTICE DOES NOT OUTLIVE ITS EXPORT. `warn` is read after the
+        // call returns, exactly as `out` is, so a stale one would attach
+        // itself to the next file — and the next file may be clean.
+        let (rc, json) = open(&dna_fixture());
+        assert_eq!(rc, 0, "{json}");
+        assert_eq!(pl_warn_len(), 0, "opening a file cleared nothing");
+        let rc = unsafe { pl_to_genbank(title.as_ptr(), title.len(), 4, 8, 2026) };
+        assert_eq!(rc, 0);
+        assert_eq!(
+            pl_warn_len(),
+            0,
+            "the previous export's notice is still on offer"
+        );
     }
 
     #[test]
@@ -1001,7 +1217,7 @@ mod tests {
 
     #[test]
     fn abi_version_is_exposed() {
-        assert_eq!(pl_abi_version(), 1);
+        assert_eq!(pl_abi_version(), 2);
     }
 
     #[test]

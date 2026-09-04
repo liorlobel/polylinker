@@ -99,12 +99,13 @@ const T = (label, cond, extra = "") => {
 };
 
 console.log(`\n=== module ===`);
-T("ABI version is 1", w.pl_abi_version() === 1, String(w.pl_abi_version()));
+T("ABI version is 2", w.pl_abi_version() === 2, String(w.pl_abi_version()));
 T(
   "exports the expected surface",
   ["pl_alloc", "pl_free", "pl_open", "pl_out_ptr", "pl_out_len", "pl_sequence",
    "pl_digest_json", "pl_blocks_json", "pl_to_genbank", "pl_to_fasta",
-   "pl_locus_name", "pl_rotate", "memory"].every(n => n in w)
+   "pl_locus_name", "pl_rotate", "pl_warn_ptr", "pl_warn_len",
+   "memory"].every(n => n in w)
 );
 
 console.log(`\n=== behaviour on hand-made input ===`);
@@ -140,6 +141,11 @@ console.log(`\n=== behaviour on hand-made input ===`);
   // The page throws these return codes away and downloads the buffer, so the
   // refusal has to be *in the buffer* or it is a silent no-op there.
   T("and the refusal is in the output buffer", outText().includes("3 records"), outText().slice(0, 90));
+  // A refusal is not a notice. The page shows the two differently — one
+  // replaces the summary in the failure colour, the other sits above it in
+  // the page's own prose colour beside a file that really did download — so a
+  // refusal that also filled the second buffer would put both on screen.
+  T("and offers no download-notice alongside it", w.pl_warn_len() === 0, `warn=${w.pl_warn_len()}`);
   const rcFa = withStr("multi.fa", (p, n) => w.pl_to_fasta(p, n, 70));
   T("FASTA export refuses too", rcFa === 1 && !outText().includes("GAATTC"), outText().slice(0, 90));
 }
@@ -149,6 +155,11 @@ console.log(`\n=== behaviour on hand-made input ===`);
   T("a single-record file reports one record", outJson().recordsInFile === 1);
   const rc = withStr("solo.fa", (p, n) => w.pl_to_fasta(p, n, 70));
   T("and still exports", rc === 0 && outText().includes("ACGTACGTACGT"), outText().slice(0, 60));
+  const rcGb = withStr("solo.fa", (p, n) => w.pl_to_genbank(p, n, 26, 6, 2026));
+  // The second buffer earns its keep by being EMPTY here. A page that showed a
+  // notice after every export would be a page whose users stop reading them.
+  T("a clean GenBank export offers no notice",
+    rcGb === 0 && w.pl_warn_len() === 0, `rc=${rcGb} warn=${w.pl_warn_len()}`);
 }
 {
   T("rejects rubbish with rc=1", open(new TextEncoder().encode("nonsense")) === 1);
