@@ -8,8 +8,8 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 174,769 lines of Rust, 99,937 of it dependency-free (141 `.rs`
-> files under `crates/` and `bins/`), with 2,053 `#[test]` functions and a
+> crates and 174,985 lines of Rust, 100,153 of it dependency-free (141 `.rs`
+> files under `crates/` and `bins/`), with 2,055 `#[test]` functions and a
 > 77-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-10, and recounted on every test run since:
@@ -80,7 +80,10 @@ sends a sequence anywhere.
 > checks now stand behind that rather than one sentence: the byte scan that
 > asserts the absence of those imports runs on the ARM64 leg, on the staged
 > payload, on every push — it did not run there before, which is why the gap
-> lasted four days — and a gate step refuses any release platform whose triple
+> lasted the fifteen hours it did (this said "four days" until 2026-09-04;
+> 546a288 built the first Windows ARM64 binary at 2026-08-15 00:33:44 +0300 and
+> b092ee4 added the flag at 15:27:49) — and a gate step refuses any release
+> platform whose triple
 > has no `+crt-static` declared, so platform five fails before it builds rather
 > than after it ships. What ARM64 still does not get is stated in full in the
 > row of the table below and in

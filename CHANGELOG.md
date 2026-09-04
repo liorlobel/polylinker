@@ -25,6 +25,64 @@ which.
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-09-04
+
+The report 0.13.3 added, corrected by the first real plasmid it met. Four of
+that file's nine primers held SnapGene's untouched description box, which is an
+HTML document rather than an empty string, so the writer announced seven
+reductions of which four had lost nothing — and hid the three real ones behind
+them.
+
+### Fixed
+
+- **A GenBank save reported losing a primer description that held no text.**
+  0.13.3 gated that report on `!p.description.is_empty()`. SnapGene's
+  description box is a rich-text control and serialises as HTML, so a box
+  nobody has typed into arrives as `<html><body></body></html>`, which is not
+  an empty string. On the first real plasmid this was run against, 4 of 9
+  primers carried exactly that.
+
+  It was worse than one noisy line each. `pl convert` prints the first three
+  items of the list and those four sort first in the file, so the three
+  descriptions a person had actually written — `CAT-R`, `F1ori-F`, `F1ori-R` —
+  were the ones the user never saw. In the editor, `faithful` consults the
+  whole report, so saving that plasmid as `.gb` left the unsaved-changes dot
+  lit over four boxes that held nothing.
+
+  The gate is now "does this carry any text once its markup is off", which also
+  covers the `<br>`, `<p></p>` and `&nbsp;` spellings of the same empty box. A
+  description with words in it is reported exactly as before, and markup is
+  never stripped from anything that is written.
+
+- **An empty description became the DEFINITION line, displacing the name.**
+  The same predicate chose between `mol.description` and the molecule's name,
+  so a `<Description>` holding that untouched box won twice: it beat the name
+  fallback, and then `DEFINITION  <html><body></body></html>.` was written into
+  the file with a completely empty report, because `header_text` reports
+  control characters and has nothing to say about markup. Constructed rather
+  than observed — the 32 block-6 payloads surveyed in `docs/DNA-FORMAT.md` all
+  hold plain text, and the plasmid measured here has no `<Description>` at all
+  — but it is the same program writing the same kind of field, so the two sites
+  now agree about what empty means.
+
+### Changed
+
+- **`docs/RELEASING.md` said the ARM64 build had no static C runtime.** It was
+  closed by b092ee4 on 2026-08-15 and had shipped correct in three releases;
+  the paragraph described the hole as open for the twenty days after it was
+  gone, in the document a releaser reads while deciding whether a tree is fit
+  to publish. It now also names the check it omitted — the text comparison in
+  `tools/ci.ps1` that refuses any release platform whose triple has no
+  `+crt-static` declared, which is the one that could have caught the original
+  defect, since the byte scan can only judge binaries the machine running it
+  can build.
+
+- **"Four days" was nobody's measurement.** Five files said the ARM64 crt-static
+  gap lasted four days. `546a288` built the first Windows-ARM64 binary in this
+  repository at 2026-08-15 00:33:44 +0300 and `b092ee4` added the flag at
+  15:27:49 the same afternoon: fourteen hours and fifty-four minutes, inside
+  one calendar day. Corrected in place and dated in all five.
+
 ## [0.13.3] - 2026-09-04
 
 A GenBank save stops reporting "this is missing" and "this is smaller than it
@@ -603,8 +661,13 @@ program already knows.
 
 **The ARM64 binaries no longer need a DLL the user may not be allowed to
 install.** Everything in this release exists because of one missing line, and
-most of it is about why the line was missing for four days rather than about the
-line.
+most of it is about why the line was missing at all rather than about the line.
+
+**Corrected 2026-09-04.** This said "for four days", a number nobody had
+measured; four other files repeated it. 546a288 first built a Windows ARM64
+binary here at 2026-08-15 00:33:44 +0300 and b092ee4 added the block at
+15:27:49 the same afternoon — fourteen hours and fifty-four minutes, inside one
+calendar day.
 
 ### Fixed
 

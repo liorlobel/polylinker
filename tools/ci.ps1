@@ -4172,8 +4172,11 @@ function Compare-PlatformCoverage {
 # It does nothing at all about the next platform.
 #
 # The scan that reads the bytes, `tools/check-crt.ps1`, can only judge binaries
-# that exist on the machine running it, which is why it missed this for four
-# days: the gate has no ARM64 leg. This step needs no binaries. It compares two
+# that exist on the machine running it, which is why it missed this at all: the
+# gate has no ARM64 leg. (This said "for four days" until 2026-09-04. Measured:
+# 546a288, 2026-08-15 00:33:44 +0300, first built Windows ARM64 here; b092ee4,
+# 2026-08-15 15:27:49 +0300, added the block. Fourteen hours and fifty-four
+# minutes, inside one calendar day.) This step needs no binaries. It compares two
 # text files and therefore runs on every leg, including the ones that could
 # never build the artifact in question, and it fails BEFORE a build rather than
 # after one.

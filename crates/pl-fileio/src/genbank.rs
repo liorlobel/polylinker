@@ -1038,6 +1038,60 @@ fn header_text(raw: &str, field: &str, reduced: &mut Vec<String>) -> String {
     flatten_value(raw)
 }
 
+/// Does this free-text field carry any text at all, once its markup is off?
+///
+/// SnapGene's description boxes are rich-text controls and they serialise as
+/// HTML, so an UNTOUCHED box does not arrive here as an empty string. Block 5
+/// of the 8117 bp lab plasmid this was measured against on 2026-09-04 writes
+/// `description="<html><body></body></html>"` on 4 of its 9 primers, writes no
+/// `description` attribute at all on 2 more, and carries real prose --
+/// "Chloramphenicol resistance gene, reverse primer" -- on the last 3.
+/// `!p.description.is_empty()` counts the first group, so 4 of the 7 `reduced`
+/// lines 0.13.3 printed for that file reported the loss of a string with no
+/// text in it, from a box nobody had typed into. A notice that fires on every
+/// file is a notice nobody reads, and this one fired on the majority of the
+/// primers in the first real file it met.
+///
+/// The test is "is any character outside a tag something other than
+/// whitespace", not a match against that one literal, because the same empty
+/// box is also spelled `<html><body><br></body></html>` and
+/// `<html><body><p></p></body></html>`, and because `&nbsp;` reaches the model
+/// verbatim: [`xml::unescape`](crate::xml::unescape) expands the five XML
+/// entities and numeric references and nothing else, so `&#160;` becomes
+/// U+00A0 -- whitespace, which `trim` removes -- while `&nbsp;` stays six
+/// characters of text. It is replaced here rather than in the reader, which
+/// must keep the bytes the file held.
+///
+/// Deliberately biased towards SPEAKING UP. A `<` that opens no tag -- `5' <-
+/// 3'` is prose somebody could type into that box -- swallows everything after
+/// it, and the text BEFORE it still counts, so the field is still reported.
+/// The failure this cannot cause is a silent loss; the failure it can cause is
+/// one extra line about a description whose entire content was `<...>`, a
+/// shape no observed file has.
+///
+/// **Not a general HTML-to-text renderer, and it does not strip markup from
+/// anything that is written.** It decides whether a field is EMPTY, and that
+/// is all it decides. A description that does carry text reaches the file
+/// exactly as the model holds it, markup and all -- see [`write_reporting`]'s
+/// DEFINITION line, which uses this to choose between the description and the
+/// molecule's name and then writes whichever it chose verbatim. Nothing in
+/// this workspace renders a primer description at all: `pl info` prints it in
+/// neither its text nor its `--json` branch, `bins/pl-gui` has no widget for
+/// it, and the browser prototype puts it in a summary object nothing draws.
+fn carries_text(raw: &str) -> bool {
+    let mut in_tag = false;
+    let mut text = String::new();
+    for c in raw.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    !text.replace("&nbsp;", " ").trim().is_empty()
+}
+
 /// Sanitise a feature key, and say so when it had to be changed.
 ///
 /// A feature key is one token in columns 6-20 and the whole feature table's
@@ -1228,10 +1282,30 @@ pub fn write_reporting(
     let mut out = String::new();
     out.push_str(&locus_line(mol, &name, n, &date_str));
     out.push('\n');
-    let def = if mol.description.is_empty() {
-        name.as_str()
-    } else {
+    // `carries_text`, not `is_empty`, for the same reason the primer loop
+    // below uses it -- and here the cost of the weaker test was not a spurious
+    // report but visible junk in the file. A `<Description>` holding SnapGene's
+    // untouched rich-text box is not empty, so it won two ways: it DISPLACED
+    // the molecule's name, which is what this fallback exists to supply, and
+    // then it was written out as `DEFINITION  <html><body></body></html>.`
+    // with an entirely empty report, because `header_text` reports control
+    // characters and nothing else.
+    //
+    // Constructed rather than observed, and the distinction is worth keeping:
+    // the 32 block-6 payloads surveyed in docs/DNA-FORMAT.md all hold plain
+    // text in `<Description>`, and the plasmid measured on 2026-09-04 has no
+    // `<Description>` at all. The HTML habit is established in block 5's
+    // primer descriptions, which is a different element; this is the same
+    // program writing the same kind of field, so the two agree about what
+    // empty means rather than waiting for a file to prove it.
+    //
+    // Markup is NOT stripped from a description that does carry text. That
+    // would rewrite the DEFINITION line of real files on the strength of a
+    // shape nothing here has seen.
+    let def = if carries_text(&mol.description) {
         mol.description.as_str()
+    } else {
+        name.as_str()
     };
     let def = header_text(def, "DEFINITION", &mut report.reduced);
     out.push_str(&format!("DEFINITION  {def}.\n"));
@@ -1418,7 +1492,21 @@ pub fn write_reporting(
         // Gated on `wrote_a_site`: when nothing was written for this primer
         // the description is not a reduction of anything, it is part of the
         // primer that the branch above has already reported as absent whole.
-        if wrote_a_site && !p.description.is_empty() {
+        //
+        // AND gated on the description carrying TEXT, since 2026-09-04. The
+        // predicate here was `!p.description.is_empty()` in 0.13.3, and it was
+        // wrong on the first real file it met: 4 of the 9 primers in the
+        // 8117 bp plasmid measured that day hold SnapGene's untouched
+        // rich-text box, `<html><body></body></html>`, so `pl convert --to gb`
+        // announced seven reductions of which four had lost nothing. It was
+        // worse than one noisy line each: `bins/pl` prints the first three
+        // entries of this vector, the four empty ones sort first in block 5,
+        // and so the three REAL losses on that file were pushed out of the
+        // report entirely by the four that were not losses at all.
+        //
+        // See `carries_text` for why the check is structural rather than a
+        // comparison against that one literal.
+        if wrote_a_site && carries_text(&p.description) {
             report.reduced.push(format!(
                 "primer {:?}: its description {:?} has no GenBank form -- the primer is in the \
                  file with its name, oligo and position, and the description is not (.dna keeps \
@@ -2321,6 +2409,134 @@ mod tests {
             "the whole primer is missing; the description is not a separate \
              finding: {report:?}"
         );
+    }
+
+    /// An EMPTY description costs nothing, however SnapGene spells "empty".
+    ///
+    /// PROVEN TO FAIL on 2026-09-04 by putting the shipped 0.13.3 predicate
+    /// back -- `wrote_a_site && !p.description.is_empty()`, everything else
+    /// unchanged: `report.reduced.len()` was 2, and the extra line read
+    /// `primer "Untouched": its description "<html><body></body></html>" has
+    /// no GenBank form`.
+    ///
+    /// Corpus-free on purpose, so it runs on every CI leg: the input is the
+    /// SHAPE measured in block 5 of a real `.dna`, not the file itself.
+    ///
+    /// THE CONTROL IS IN THE SAME REPORT. One primer's description is the
+    /// untouched box and must cost nothing; the other's is prose a person
+    /// typed and must still cost a line. A "fix" that degenerated into never
+    /// reporting a description passes the first assertion and fails the
+    /// second, and the two cannot be separated by editing one of them out.
+    #[test]
+    fn a_description_with_no_text_in_it_is_not_reported_as_a_loss() {
+        let site = || BindingSite {
+            start: 100,
+            end: 116,
+            strand: Strand::Forward,
+            tm: None,
+        };
+        let mut mol = Molecule {
+            seq: b"a".repeat(500),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        // SnapGene's untouched description box, as written on 4 of the 9
+        // primers of the plasmid measured on 2026-09-04.
+        mol.primers.push(Primer {
+            name: "Untouched".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: "<html><body></body></html>".into(),
+            sites: vec![site()],
+        });
+        // The control, from the same file: 3 of those 9 carry prose.
+        mol.primers.push(Primer {
+            name: "CAT-R".into(),
+            seq: "GCAACTGACTGAAATGCCTC".into(),
+            description: "Chloramphenicol resistance gene, reverse primer".into(),
+            sites: vec![site()],
+        });
+
+        let (_, report) = write_reporting(&mol, "p.dna", (4, 8, 2026));
+        assert!(report.absent.is_empty(), "{report:?}");
+        assert_eq!(report.reduced.len(), 1, "{report:?}");
+        assert!(
+            report.reduced[0].contains("CAT-R"),
+            "a description a person typed is still a reduction: {report:?}"
+        );
+        assert!(
+            !report.reduced[0].contains("Untouched"),
+            "an untouched rich-text box is not a loss: {report:?}"
+        );
+
+        // The other spellings of the same empty box, each on its own so a
+        // failure names the one that leaked. `&nbsp;` is deliberate: it is an
+        // HTML entity, `xml::unescape` does not expand it, and it arrives in
+        // the model as six characters that are not whitespace.
+        for empty in [
+            "<html><body></body></html>",
+            "<html><body><br></body></html>",
+            "<html><body><p></p></body></html>",
+            "<html><body>&nbsp;</body></html>",
+            "<html><body>\n</body></html>",
+            "   ",
+            "",
+        ] {
+            let mut one = mol.clone();
+            one.primers.truncate(1);
+            one.primers[0].description = empty.to_string();
+            let (_, r) = write_reporting(&one, "p.dna", (4, 8, 2026));
+            assert!(r.is_empty(), "{empty:?} was reported as a loss: {r:?}");
+        }
+
+        // ...and the shapes that DO carry text: bare prose, prose wrapped in
+        // the same markup, and a bare `<` that is prose rather than a tag.
+        for text in [
+            "Chloramphenicol resistance gene, reverse primer",
+            "<html><body><p>anneals in the linker, use at 58 C</p></body></html>",
+            "5' <- 3'",
+        ] {
+            let mut one = mol.clone();
+            one.primers.truncate(1);
+            one.primers[0].description = text.to_string();
+            let (_, r) = write_reporting(&one, "p.dna", (4, 8, 2026));
+            assert_eq!(r.reduced.len(), 1, "{text:?} went unreported: {r:?}");
+        }
+    }
+
+    /// A description with no text in it does not become the DEFINITION line.
+    ///
+    /// PROVEN TO FAIL on 2026-09-04 with `is_empty` in place of `carries_text`
+    /// at that call site: the record read `DEFINITION  <html><body></body></html>.`
+    /// and `report` was completely empty -- `header_text` reports control
+    /// characters and has nothing to say about markup.
+    ///
+    /// Two losses in one line, which is why the fallback and not just the
+    /// report is at issue: the junk is IN the file, and it is there INSTEAD of
+    /// the molecule's name, which is what this fallback exists to supply.
+    #[test]
+    fn a_description_with_no_text_in_it_does_not_displace_the_locus_name() {
+        let mut mol = Molecule {
+            seq: b"acgtacgtacgt".to_vec(),
+            description: "<html><body></body></html>".into(),
+            ..Default::default()
+        };
+        let (text, report) = write_reporting(&mol, "pTest.dna", (4, 8, 2026));
+        assert!(
+            text.contains("DEFINITION  pTest."),
+            "the name is what a record with no description is called:\n{text}"
+        );
+        assert!(!text.contains("<html>"), "markup reached the file:\n{text}");
+        assert!(report.is_empty(), "nothing was lost: {report:?}");
+
+        // THE CONTROL: a description somebody wrote still wins over the name,
+        // and is written exactly as the model holds it.
+        mol.description = "Cloning vector pUC19c, complete sequence".into();
+        let (text, report) = write_reporting(&mol, "pTest.dna", (4, 8, 2026));
+        assert!(
+            text.contains("DEFINITION  Cloning vector pUC19c, complete sequence."),
+            "{text}"
+        );
+        assert!(report.is_empty(), "{report:?}");
     }
 
     #[test]

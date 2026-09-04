@@ -108,14 +108,14 @@ One tag. Everything else follows from it.
 #    -- substitute both; they are written concretely because a placeholder is
 #    the thing people paste by accident, and they are one release behind the
 #    moment a release lands:
-sed -i 's/version = "0.13.2"/version = "0.13.3"/g' Cargo.toml
+sed -i 's/version = "0.13.3"/version = "0.13.4"/g' Cargo.toml
 #    Then check it took, because a typo in the left-hand side is a silent no-op.
 #    BOTH greps, and they used to be one: the old line ran only the NEW-version
 #    count and left "and 0.7.0 must print 0" as a comment, which is the half that
 #    catches a sed that matched nothing. `grep -c` exits 1 when it prints 0, so
 #    run them as two commands rather than chaining them with &&:
-grep -c 'version = "0.13.3"' Cargo.toml   # must print 17
-grep -c 'version = "0.13.2"' Cargo.toml   # must print 0
+grep -c 'version = "0.13.4"' Cargo.toml   # must print 17
+grep -c 'version = "0.13.3"' Cargo.toml   # must print 0
 cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
 #    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
 #    are the two files a tag does not update and nothing checks.
@@ -152,8 +152,8 @@ pwsh -NoProfile -File tools/ci.ps1
 
 # 4. Tag, on main, after the release commit has landed there. This is the only
 #    step that publishes anything.
-git tag -a v0.13.3 -m "Polylinker 0.13.3"
-git push origin v0.13.3
+git tag -a v0.13.4 -m "Polylinker 0.13.4"
+git push origin v0.13.4
 ```
 
 ### Step 2 is no longer the only thing standing between a tag and a red gate
@@ -464,27 +464,51 @@ the same release — an arm naming a file no release carries converts a clean
 refusal into a 404, which is a worse answer than "no update is available for
 this platform" and is much harder to read from the user's end.
 
-**The ARM64 download does not have the static C runtime, and that is an open
-hole rather than a detail.** `.cargo/config.toml` sets
-`-C target-feature=+crt-static` under `[target.x86_64-pc-windows-msvc]`, scoped
-to one triple on purpose — the note in that file explains why `[build]
-rustflags` was wrong. It declares **nothing** for `aarch64-pc-windows-msvc`. So
-the ARM64 binaries link the *dynamic* C runtime and import `VCRUNTIME140.dll`,
-which is not part of Windows and arrives with the Visual C++ redistributable,
-whose installer needs administrator rights — the exact dependency that config
-file exists to remove, on behalf of the user `docs/PLAN.md:120` describes as
-someone who cannot install software requiring them. On x86-64 that property is
-asserted on every push by `tools/ci.ps1`'s step *no C runtime redistributable is
-needed*, a byte scan over the PE import directory of everything in the release
-directory. That step is in the gate, the ARM64 leg does not run the gate, and so
-nothing reports this. **Until a `[target.aarch64-pc-windows-msvc]` block with
-the same flag is added, an ARM64 user on a locked-down machine may get
-`VCRUNTIME140.dll was not found` from a program whose pitch is that it is one
-file you can run.** One thing does guard the *fix*: `ci.yml`'s step *RUSTFLAGS
-is not silently discarding .cargo/config.toml* turns the ARM64 `test` leg red
-the moment such a block appears while that job still sets `RUSTFLAGS`, because
-cargo replaces target rustflags with the environment variable rather than
-merging them. That is a guard on the repair, not on the defect.
+**The ARM64 download links the static C runtime, and this paragraph said it did
+not until 2026-09-04.** `.cargo/config.toml` sets
+`-C target-feature=+crt-static` under `[target.x86_64-pc-windows-msvc]` and,
+since b092ee4 on 2026-08-15, under `[target.aarch64-pc-windows-msvc]` as well —
+scoped per triple on purpose, and the note in that file explains why `[build]
+rustflags` was wrong.
+
+**The hole was real, and it stays written down.** From 546a288 (2026-08-15
+00:33:44 +0300), which put `windows-11-arm` into `ci.yml` and `windows-arm64`
+into `release.yml` and so built the first Windows-ARM64 binary this repository
+ever produced, to b092ee4 (15:27:49 the same afternoon), this file named one
+triple. Every ARM64 binary in v0.11.0 therefore links the *dynamic* C runtime
+and imports `VCRUNTIME140.dll`, which is not part of Windows and arrives with
+the Visual C++ redistributable, whose installer needs administrator rights —
+the exact dependency that config file exists to remove, on behalf of the user
+`docs/PLAN.md:120` describes as someone who cannot install software requiring
+them. What was wrong here was the tense: this paragraph described that hole as
+open for the twenty days after it was closed, in the document a releaser reads
+while deciding whether a tree is fit to publish.
+
+**Two checks stand behind the flag now, and the second is the one this file
+omitted.** The byte scan is `tools/check-crt.ps1`, which reads the PE import
+directories of the bytes that would actually ship: `tools/ci.ps1`'s step *no C
+runtime redistributable is needed* calls it, and so does `ci.yml`'s step *No
+ARM64 binary needs the VC++ redistributable* (`ci.yml:1066`), on the ARM64
+`test` leg, over the staged `dist/`, on every push since v0.11.1. It can only
+judge binaries that exist on the machine running it, which is exactly why no
+gate leg could have caught v0.11.0. The check that needs no binaries at all is
+`tools/ci.ps1`'s step *every Windows platform the release builds has a static
+CRT declared* (`tools/ci.ps1:4228`): it reads the `windows-*` labels out of
+`release.yml`'s matrix and the `[target.<triple>] rustflags` out of
+`.cargo/config.toml`, and fails if a label's triple is missing or its flags do
+not mention `crt-static`. It compares two text files, so it runs on every gate
+leg — including the ones that could never build the artifact in question — and
+it fails *before* a build rather than after one. `README.md` has documented it
+since v0.11.1; this file had not.
+
+One more thing guards the *fix* rather than the defect: `ci.yml`'s step
+*RUSTFLAGS is not silently discarding .cargo/config.toml*, because cargo
+replaces target rustflags with the environment variable rather than merging
+them. **Corrected 2026-09-04:** this used to read "the moment such a block
+appears while that job still sets `RUSTFLAGS`", and that premise is gone —
+`ci.yml:564` now opens the `test` job with "THIS JOB SETS NO `RUSTFLAGS`, and
+that is the whole point of the change that removed it on 2026-08-15." The step
+remains as the guard against it coming back.
 
 **What `windows-arm64` is actually checked by.** This is the paragraph that
 decides whether every other sentence about ARM64 in this repository is honest,
