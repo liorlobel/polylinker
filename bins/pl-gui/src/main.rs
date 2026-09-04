@@ -4081,8 +4081,9 @@ impl App {
     ///   `faithful` is `report.is_empty()`, which is both halves — because
     ///   either way the document on screen and the file on disk disagree, and
     ///   clearing the dot would say they do not. The split exists for
-    ///   `crates/pl-wasm`, which can only refuse or write and must not refuse
-    ///   over a reduction; here there is a status line, so both get said.
+    ///   `crates/pl-wasm`, whose only choice about the FILE is refuse or write
+    ///   and which must not refuse over a reduction; it says the reduction
+    ///   through `pl_warn_ptr` and this surface says it in the status line.
     /// - the `Option<String>` is the unoriented-strand note. GenBank has no way
     ///   to say "unoriented", so those features are written as forward, which
     ///   for about half of them is a directional claim the source never made.

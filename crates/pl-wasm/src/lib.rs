@@ -652,9 +652,13 @@ fn truncation_refusal(report: &LoadReport) -> Option<String> {
 /// writes such a file and prints the report; this returns 1 and writes none. A
 /// byte-for-byte comparison of the two over a corpus (`tests/drive_wasm.mjs`,
 /// which CI runs without a corpus directory) would now differ on any file with
-/// a non-empty report. That divergence is deliberate and it is the honest way
-/// round: the terminal has a second channel for the hedge and the browser does
-/// not, and a hedge that cannot be printed must not be swallowed.
+/// a non-empty `absent` list — a reduced-only file writes the same bytes on
+/// both sides, since that comparison reads `out` and never `warn`. The
+/// divergence is deliberate. It was once justified by the browser having no
+/// second channel for the hedge; since [`pl_warn_ptr`] that premise is gone
+/// and the conclusion is not, because an annotation the file does not contain
+/// is not something a notice beside a download can make true — and a hedge
+/// that cannot be printed must not be swallowed.
 fn unwritable_refusal(unwritable: &[String]) -> Option<String> {
     (!unwritable.is_empty()).then(|| {
         format!(
