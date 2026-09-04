@@ -108,14 +108,14 @@ One tag. Everything else follows from it.
 #    -- substitute both; they are written concretely because a placeholder is
 #    the thing people paste by accident, and they are one release behind the
 #    moment a release lands:
-sed -i 's/version = "0.13.1"/version = "0.13.2"/g' Cargo.toml
+sed -i 's/version = "0.13.2"/version = "0.13.3"/g' Cargo.toml
 #    Then check it took, because a typo in the left-hand side is a silent no-op.
 #    BOTH greps, and they used to be one: the old line ran only the NEW-version
 #    count and left "and 0.7.0 must print 0" as a comment, which is the half that
 #    catches a sed that matched nothing. `grep -c` exits 1 when it prints 0, so
 #    run them as two commands rather than chaining them with &&:
-grep -c 'version = "0.13.2"' Cargo.toml   # must print 17
-grep -c 'version = "0.13.1"' Cargo.toml   # must print 0
+grep -c 'version = "0.13.3"' Cargo.toml   # must print 17
+grep -c 'version = "0.13.2"' Cargo.toml   # must print 0
 cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
 #    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
 #    are the two files a tag does not update and nothing checks.
@@ -127,10 +127,11 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 pwsh -NoProfile -File tools/ci.ps1
 
-# 3. Commit, push, and let CI go green. TEN checks off six job definitions --
-#    `the gate (tools/ci.ps1)` three times, `test` THREE times since the ARM64
-#    port added a windows-11-arm leg to it, and one each of `reconcile`, `msrv`,
-#    `wasm` and `oracles`. It was nine until 2026-08-14. The ones that matter
+# 3. Commit, push, and let CI go green. TWELVE checks off seven job definitions
+#    -- `the gate (tools/ci.ps1)` three times, `test` THREE times since the
+#    ARM64 port added a windows-11-arm leg to it, `gui-smoke` twice since
+#    2026-09-03, and one each of `reconcile`, `msrv`, `wasm` and `oracles`. It
+#    was nine until 2026-08-14 and ten until 2026-09-03. The ones that matter
 #    here are the three gate legs -- which run the whole of step 2 on
 #    windows-latest, ubuntu-latest and macos-latest, with the oracles, node, the
 #    wasm target and (on Windows) WiX installed, and fail if any step skips
@@ -145,14 +146,14 @@ pwsh -NoProfile -File tools/ci.ps1
 #    the subject of the Windows on ARM64 section below, and it is less.
 #
 #    Cutting the release on a branch and opening a pull request is how those
-#    ten are read before anything is tagged; `on: pull_request` runs the same
-#    workflow. Nothing below is reachable from a branch, so nothing is
+#    twelve are read before anything is tagged; `on: pull_request` runs the
+#    same workflow. Nothing below is reachable from a branch, so nothing is
 #    published by getting this wrong.
 
 # 4. Tag, on main, after the release commit has landed there. This is the only
 #    step that publishes anything.
-git tag -a v0.13.2 -m "Polylinker 0.13.2"
-git push origin v0.13.2
+git tag -a v0.13.3 -m "Polylinker 0.13.3"
+git push origin v0.13.3
 ```
 
 ### Step 2 is no longer the only thing standing between a tag and a red gate

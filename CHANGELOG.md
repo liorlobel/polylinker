@@ -25,6 +25,13 @@ which.
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-09-04
+
+A GenBank save stops reporting "this is missing" and "this is smaller than it
+was" down one channel. The browser refuses only on the first and annotates the
+second, and two losses that were silent say so: a primer's description, and a
+feature key cut to the fifteen columns the format gives it.
+
 ### Changed
 
 - **A save can now say "this is smaller than it was" without saying "this is
@@ -33,13 +40,14 @@ which.
   is NOT in the file — a feature no segment of which has a GenBank location, a
   primer with no binding site — and an annotation that IS in the file with
   something taken off it — a `/note` whose line break became a space, a
-  sequence character rewritten as `n`, a feature key cut to the fifteen columns
-  the format gives it. `genbank::write_reporting` now returns a `WriteReport`
-  with those as separate lists, `absent` and `reduced`.
+  sequence character rewritten as `n`, a feature key rewritten because a
+  character in it is not one GenBank allows. `genbank::write_reporting` now
+  returns a `WriteReport` with those as separate lists, `absent` and
+  `reduced`.
 
-  This is not a tidying. The browser build turns the report into a REFUSAL to
-  write the file at all, because a download has one buffer and one return code
-  and cannot hand over both the bytes and the hedge. That is right for the
+  This is not a tidying. The browser build turned the report into a REFUSAL to
+  write the file at all, because a download had one buffer and one return code
+  and could not hand over both the bytes and the hedge. That is right for the
   first kind and much too strong for the second: for a few hours on 2026-09-03
   a primer's dropped description was reported down the one channel there was,
   and the browser stopped exporting any molecule whose primer merely carried a
@@ -136,6 +144,13 @@ instead of vanishing.
   counting as faithful and the surfaces that already print `unwritable` — the
   editor's status line and `pl convert` — name what was dropped. Nothing about
   what is written changed.
+
+  **Corrected 2026-09-04.** "Both" was one. The description half was reverted
+  before 0.13.2 was tagged, because the only channel then in existence was the
+  one the browser build refuses on and reporting a description there stopped
+  the browser exporting the molecule at all. v0.13.2 shipped reporting the
+  primer with no binding site and nothing else; the description is reported
+  from 0.13.3, as a reduction rather than an absence.
 
   **Not fixed here, and the larger half:** the GenBank reader still does not
   restore `mol.primers` from the `primer_bind` features the writer produced, so
