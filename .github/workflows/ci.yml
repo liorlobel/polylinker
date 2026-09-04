@@ -686,10 +686,13 @@ jobs:
       #     job sets RUSTFLAGS -> red, naming the discarded flags.
       #   * edit .cargo/config.toml so the parser below matches nothing -> red,
       #     because a sweep that found no `[target.` block at all has checked
-      #     nothing and must not report clean. There is one such block in the
-      #     file today (x86_64-pc-windows-msvc) and this leg is not that triple,
-      #     which is exactly why the vacuity guard is needed: without it the step
-      #     would pass on a file it had failed to read.
+      #     nothing and must not report clean. This said "There is one such
+      #     block in the file today (x86_64-pc-windows-msvc) and this leg is not
+      #     that triple" until 2026-09-04, and both halves had been false since
+      #     b092ee4 on 2026-08-15: the file carries TWO blocks, and the second
+      #     of them, aarch64-pc-windows-msvc, IS this leg's own triple. The
+      #     vacuity guard is still what stops a parser that has stopped
+      #     matching from reporting clean regardless.
       - name: RUSTFLAGS is not silently discarding .cargo/config.toml
         if: runner.os == 'Windows'
         shell: pwsh
@@ -1042,7 +1045,15 @@ jobs:
       # step of tools/ci.ps1, and the gate runs on windows-latest, ubuntu-latest
       # and macos-latest -- so the single architecture whose flags were missing
       # was the single architecture no caller of that scan could reach. The flag
-      # is a one-line fix; the reason it was needed for four days is this gap.
+      # is a one-line fix; the reason it was needed at all is this gap.
+      #
+      # THIS SAID "for four days" UNTIL 2026-09-04, and nobody had measured it.
+      # 546a288 (2026-08-15 00:33:44 +0300) put `windows-11-arm` into this file
+      # and `windows-arm64` into release.yml -- the first Windows-ARM64 binary
+      # this repository ever built -- and b092ee4 (2026-08-15 15:27:49 +0300)
+      # added `[target.aarch64-pc-windows-msvc]`. Fourteen hours and fifty-four
+      # minutes, inside one calendar day. The same wrong number was in
+      # .cargo/config.toml, tools/ci.ps1, README.md and CHANGELOG.md.
       #
       # It scans `dist/`, the staged payload the archive above was built from,
       # so it reads the bytes that would actually ship rather than a debug build
