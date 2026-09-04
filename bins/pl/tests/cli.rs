@@ -431,6 +431,30 @@ fn dna(notes: &str) -> Vec<u8> {
     out
 }
 
+/// The same container with a primers block (block 5) instead of notes.
+///
+/// Separate from [`dna`] rather than a parameter on it: every existing caller
+/// passes a notes payload, and threading an empty second string through all of
+/// them to reach one test would make the fixture harder to read than the thing
+/// it sets up.
+fn dna_with_primers(primers: &str) -> Vec<u8> {
+    let mut header = b"SnapGene".to_vec();
+    header.extend_from_slice(&1u16.to_be_bytes());
+    header.extend_from_slice(&15u16.to_be_bytes());
+    header.extend_from_slice(&19u16.to_be_bytes());
+    let mut out = Vec::new();
+    for (kind, payload) in [
+        (9u8, header),
+        (0u8, vec![0x01, b'A', b'C', b'G', b'T']),
+        (5u8, primers.as_bytes().to_vec()),
+    ] {
+        out.push(kind);
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(&payload);
+    }
+    out
+}
+
 fn write_bytes(dir: &Path, name: &str, body: &[u8]) -> PathBuf {
     let p = dir.join(name);
     std::fs::write(&p, body).unwrap();
@@ -523,6 +547,56 @@ fn converting_says_what_the_writer_could_not_carry() {
     let text = String::from_utf8_lossy(&written);
     assert!(text.contains("<Type>Synthetic</Type>"), "{text}");
     assert!(!text.contains("5UTC"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two severities, two sentences, and the milder one must not read as the
+/// graver one.
+///
+/// PROVEN TO FAIL on 2026-09-04: stderr was EMPTY. `<Primer description="..."/>`
+/// is block 5 of a real `.dna` and GenBank has nowhere to put the text, so
+/// `pl convert x.dna --to genbank` wrote the primer with its name, its oligo
+/// and its position, dropped the sentence a person typed about what it is FOR,
+/// and exited 0 with nothing said.
+///
+/// The wording is the other half of the test. "Could not carry" is this
+/// program's phrase for an annotation that is NOT in the output, and it is what
+/// stderr said for the `.dna` writer's refusals two tests above. Reusing it
+/// here would tell a user their primer is missing when it is present, and a
+/// user who believes that goes looking for a file that is not lost.
+#[test]
+fn converting_says_separately_what_the_writer_only_reduced() {
+    let dir = scratch("convert-reduced");
+    write_bytes(
+        &dir,
+        "primed.dna",
+        &dna_with_primers(
+            r#"<Primers><Primer recentID="0" name="M13F" sequence="ACG" description="anneals in the linker, use at 58 C"><BindingSite location="0-2" boundStrand="0"/></Primer></Primers>"#,
+        ),
+    );
+
+    let out = run(
+        &dir,
+        &["convert", "primed.dna", "--to", "genbank", "--stdout"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let e = stderr(&out);
+    assert!(
+        e.contains("in a reduced form"),
+        "the description went without a word: {e:?}"
+    );
+    assert!(e.contains("anneals in the linker"), "{e}");
+    assert!(
+        !e.contains("could not carry"),
+        "that phrase means the annotation is absent, and this one is not: {e:?}"
+    );
+
+    // The record is written, and the primer is in it. This is a notice, not a
+    // refusal -- which is the whole reason it needed a channel of its own.
+    let o = stdout(&out);
+    assert!(o.contains("LOCUS"), "{o}");
+    assert!(o.contains("primer_bind") && o.contains("M13F"), "{o}");
+    assert!(!o.contains("anneals in the linker"), "the premise: {o}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

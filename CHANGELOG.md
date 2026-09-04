@@ -25,6 +25,60 @@ which.
 
 ## [Unreleased]
 
+### Changed
+
+- **A save can now say "this is smaller than it was" without saying "this is
+  missing".** The GenBank writer reported everything it could not carry down
+  one channel, and two very different things travelled it: an annotation that
+  is NOT in the file — a feature no segment of which has a GenBank location, a
+  primer with no binding site — and an annotation that IS in the file with
+  something taken off it — a `/note` whose line break became a space, a
+  sequence character rewritten as `n`, a feature key cut to the fifteen columns
+  the format gives it. `genbank::write_reporting` now returns a `WriteReport`
+  with those as separate lists, `absent` and `reduced`.
+
+  This is not a tidying. The browser build turns the report into a REFUSAL to
+  write the file at all, because a download has one buffer and one return code
+  and cannot hand over both the bytes and the hedge. That is right for the
+  first kind and much too strong for the second: for a few hours on 2026-09-03
+  a primer's dropped description was reported down the one channel there was,
+  and the browser stopped exporting any molecule whose primer merely carried a
+  note. Reverting it kept the export working and left the loss silent. Each
+  surface now takes the half it can act on — the browser refuses on `absent`
+  and annotates on `reduced`, `pl convert` prints the two as separate
+  sentences, and the editor's unsaved-changes dot consults both, because either
+  way the document on screen is not the document on disk.
+
+- **The browser build gained a second output buffer (ABI 1 → 2).** `pl_warn_ptr`
+  and `pl_warn_len` carry what a successful export cost, so a reduced file both
+  downloads and says what it lost, above the summary and in the page's own
+  prose colour rather than dressed as an error. The argument that this could
+  not exist — one buffer, one return code — was a description of the ABI and
+  not a constraint on it. A page built against ABI 1 refuses to run against
+  this core rather than silently dropping the notice.
+
+### Fixed
+
+- **A primer's description was dropped from a GenBank export in silence.** The
+  `.dna` writer keeps `description="..."` on the `<Primer>` element and GenBank
+  has nowhere to put it, so the sentence a person typed about what a primer is
+  FOR — which primer pair, what annealing temperature, why it exists — was gone
+  from the converted file with exit 0 and an empty report. It is now reported
+  as a reduction: the primer itself is still in the file with its name, its
+  oligo and its position. Reported only when the primer actually reached the
+  file; a primer with no binding site is absent whole and was already reported
+  as that.
+
+- **A feature key longer than fifteen characters was truncated in silence.**
+  The writer compared its sanitised key against the string it had ALREADY cut
+  to fifteen characters, so a `type=` whose only fault was length passed the
+  comparison and was rewritten with nothing said. `bins/pl-gui/src/main.rs`
+  recorded this hole in a doc comment and left it open on purpose: the only
+  channel then in existence was the one the browser refuses on, and refusing to
+  export a plasmid over a sixteen-character feature key is not a trade worth
+  making. Every key INSDC actually defines fits the column, so no ordinary file
+  pays anything for this.
+
 ## [0.13.2] - 2026-09-03
 
 Primers stop falling out of a GenBank save. A `.dna` opened, saved as

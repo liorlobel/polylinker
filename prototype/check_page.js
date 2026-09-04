@@ -158,6 +158,21 @@ async function main() {
     (svg.match(/var\(--[a-z-]+\)/) || ["none left"])[0]);
   T("locus name sanitised via core", F(`locusName("my plasmid v2.dna")`) === "my_plasmid_v2");
   T(".dna rewrite disabled for a GenBank source", doc.getElementById("dlBtn").disabled);
+  // The second severity has somewhere to land. The core refuses an export that
+  // would leave an annotation OUT of the file, and annotates one that writes
+  // an annotation smaller than it was -- a primer's description, a note whose
+  // line break became a space. The second of those downloads, so if the page
+  // has nowhere to say it, it is silent, which is the state this element and
+  // these three lines exist to end.
+  T("the export notice starts hidden", doc.getElementById("expNote")?.hidden === true);
+  T("the GenBank handler reads the core's cost buffer",
+    src.includes("const cost = coreWarn();") && src.includes("notice(cost);"));
+  T("notice() shows a cost and clears it again", F(`(() => {
+    notice("something was reduced");
+    const shown = !document.getElementById("expNote").hidden;
+    notice("");
+    return shown && document.getElementById("expNote").hidden;
+  })()`));
 
   console.log("\n=== error handling ===");
   const err = await F(`(async () => {

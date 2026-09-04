@@ -656,16 +656,43 @@ fn refuse_without_bases(label: &str, mol: &pl_core::Molecule, what: &str) -> Res
 fn note_output_losses(
     label: &str,
     format_name: &str,
-    unwritable: &[String],
+    absent: &[String],
+    reduced: &[String],
     report: &pl_fileio::LoadReport,
     written: &pl_core::Molecule,
     is_genbank: bool,
 ) {
-    if !unwritable.is_empty() {
+    if !absent.is_empty() {
         eprintln!(
             "pl: {label}: {} item(s) the {format_name} writer could not carry: {}",
-            unwritable.len(),
-            unwritable
+            absent.len(),
+            absent
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    // A SEPARATE SENTENCE, because it is a different claim and a reader who
+    // skims will act on the verb. "Could not carry" above means open the file
+    // and the annotation is gone; this means open the file, find the
+    // annotation, and something about it is smaller than it was. Folding the
+    // two into one line would make the milder one sound like the graver one
+    // and — worse, since this is the direction people actually get hurt — the
+    // graver one sound like the milder.
+    //
+    // The terminal is the surface that can afford two sentences. The browser
+    // build has one output buffer, which is why `crates/pl-wasm` refuses
+    // outright on the first list and annotates the download with the second,
+    // and why for a few hours on 2026-09-03 — when both went down one channel
+    // — it refused to export any molecule whose primer carried a note.
+    if !reduced.is_empty() {
+        eprintln!(
+            "pl: {label}: {} item(s) the {format_name} writer could only write in a reduced \
+             form: {}",
+            reduced.len(),
+            reduced
                 .iter()
                 .take(3)
                 .cloned()
@@ -1176,17 +1203,26 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
         // blunt about which way this goes — "a writer that drops unknown blocks
         // while appearing to succeed is the single worst outcome in this
         // document".
-        let mut unwritable: Vec<String> = Vec::new();
+        // Named for the severity it carries now that there are two. Every
+        // message the `.dna` writer produces ends "not written", so its whole
+        // report belongs here; checked, not assumed — grep the pushes in
+        // `crates/pl-fileio/src/snapgene.rs`.
+        let mut absent: Vec<String> = Vec::new();
+        // The second severity, and empty for every format but GenBank —
+        // nothing in the `.dna` writer is a reduction, so splitting its report
+        // would invent a distinction it does not make.
+        let mut reduced: Vec<String> = Vec::new();
         let bytes: Vec<u8> = match out_fmt {
             Out::GenBank => {
                 let (text, rep) = genbank::write_reporting(&mol, &title, date);
-                unwritable = rep;
+                absent = rep.absent;
+                reduced = rep.reduced;
                 text.into_bytes()
             }
             Out::Fasta => fasta::write(&mol, &title, 70).into_bytes(),
             Out::Dna => {
                 let (b, rep) = pl_fileio::snapgene::from_molecule_reporting(&mol);
-                unwritable = rep;
+                absent = rep;
                 // What the SOURCE container held that this output does not, from
                 // the same computation the GUI's lossiness modal uses. Without
                 // it the two surfaces of one program described one write in two
@@ -1228,7 +1264,8 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
         note_output_losses(
             &path.display().to_string(),
             ext,
-            &unwritable,
+            &absent,
+            &reduced,
             &report,
             &mol,
             is_gb,
@@ -4364,12 +4401,12 @@ fn cmd_annotate(args: &[String]) -> Result<(), String> {
             // exit 0. `pl convert <f> --to genbank --stdout` emits a
             // byte-identical record and reported all four; only this verb was
             // silent.
-            let (text, unwritable) =
-                pl_fileio::genbank::write_reporting(&out, &title_of(path), today());
+            let (text, cost) = pl_fileio::genbank::write_reporting(&out, &title_of(path), today());
             note_output_losses(
                 &path.display().to_string(),
                 "gb",
-                &unwritable,
+                &cost.absent,
+                &cost.reduced,
                 &report,
                 &out,
                 true,

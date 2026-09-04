@@ -855,8 +855,9 @@ fn location_parts(start: u64, end: u64, span: u64) -> Option<Vec<String>> {
         // The feature runs past the last base of the molecule. GenBank has no
         // faithful form for that — a `{start}..{end}` under a shorter LOCUS line
         // is a location longer than the sequence it sits over, which Biopython
-        // will "fix" or mis-extract — so report it through `unwritable` rather
-        // than write it, the same guard the primer writer already applies.
+        // will "fix" or mis-extract — so report it through the report's
+        // `absent` half rather than write it, the same guard the primer writer
+        // already applies.
         return None;
     }
     Some(vec![format!("{start}..{end}")])
@@ -880,12 +881,12 @@ fn join_parts(parts: &[String], reverse: bool) -> String {
 ///
 /// `None` means not one segment survived, so there is no location to write and
 /// the caller must skip the feature — loudly.
-fn format_location(f: &Feature, span: u64, unwritable: &mut Vec<String>) -> Option<String> {
+fn format_location(f: &Feature, span: u64, absent: &mut Vec<String>) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for s in &f.segments {
         match location_parts(s.start, s.end, span) {
             Some(p) => parts.extend(p),
-            None => unwritable.push(format!(
+            None => absent.push(format!(
                 "feature {:?}: segment {}..{} has no GenBank form on a {span} bp molecule and was not written",
                 f.name, s.start, s.end
             )),
@@ -938,9 +939,11 @@ fn qualifier_lines(key: &str, value: &str, out: &mut String) {
 /// emitted with the break intact and column 1 of the next line holding `l`. The
 /// reader then read that as a new record and everything after it was lost —
 /// measured, `/note="line one\nline two"` followed by `/codon_start="1"` came
-/// back as `note = "line one /codon_start="` with `codon_start` GONE, and
-/// `unwritable` was empty. The break is now normalised to a space here and
-/// [`write_reporting`] says so; the qualifier that follows survives.
+/// back as `note = "line one /codon_start="` with `codon_start` GONE, and the
+/// report was empty. The break is now normalised to a space here and
+/// [`write_reporting`] says so — through `reduced`, since the qualifier is in
+/// the file and only that one character changed; the qualifier that follows
+/// survives.
 fn qualifier_lines_opt(key: &str, value: Option<&str>, out: &mut String) {
     const PAD: &str = "                     "; // 21 spaces
     let Some(value) = value else {
@@ -1025,9 +1028,9 @@ fn flatten_value(v: &str) -> String {
 /// the same string exactly (`xml::escape` turns a break into `&#10;`), so a
 /// `.gb` and a `.dna` of one document disagree and nothing else would say
 /// which one changed.
-fn header_text(raw: &str, field: &str, unwritable: &mut Vec<String>) -> String {
+fn header_text(raw: &str, field: &str, reduced: &mut Vec<String>) -> String {
     if raw.chars().any(|c| (c as u32) < 0x20) {
-        unwritable.push(format!(
+        reduced.push(format!(
             "{field} contains a control character, which GenBank cannot hold — column 1 of a \
              line is a keyword — so it was written as a space (.dna keeps it exactly)"
         ));
@@ -1050,7 +1053,7 @@ fn header_text(raw: &str, field: &str, unwritable: &mut Vec<String>) -> String {
 /// alphanumerics, `_`, `-` and `'` — which keeps real keys such as `3'UTR`,
 /// `-10_signal` and `misc_feature` untouched. A key with no alphanumeric left
 /// is not a key at all, so it falls back the way `locus_name` does.
-fn feature_key(kind: &str, name: &str, unwritable: &mut Vec<String>) -> String {
+fn feature_key(kind: &str, name: &str, reduced: &mut Vec<String>) -> String {
     // Truncated by character, not by byte: a key that is not ASCII must not
     // panic here.
     let cut: String = kind.chars().take(15).collect();
@@ -1069,8 +1072,23 @@ fn feature_key(kind: &str, name: &str, unwritable: &mut Vec<String>) -> String {
     } else {
         "misc_feature".to_string()
     };
+    // TRUNCATION IS ITS OWN REPORT, and it was the one loss this function made
+    // in silence. The comparison below is `key != cut` — against the string
+    // ALREADY cut to fifteen characters — so a `type=` that lost nothing but
+    // its tail passed it. `bins/pl-gui/src/main.rs` named that hole in
+    // `plan_genbank`'s doc and could do nothing with it: the only channel was
+    // the one the browser build refuses on, and refusing to export a plasmid
+    // because one feature key is sixteen characters long is not a trade worth
+    // making. The feature is in the file, under a shorter key, which is
+    // exactly what `reduced` is for.
+    if cut.chars().count() < kind.chars().count() {
+        reduced.push(format!(
+            "feature {name:?}: feature key {kind:?} is longer than the fifteen columns GenBank \
+             gives it; it was written as {key:?}"
+        ));
+    }
     if key != cut {
-        unwritable.push(format!(
+        reduced.push(format!(
             "feature {name:?}: {kind:?} is not a GenBank feature key; it was written as {key:?}"
         ));
     }
@@ -1117,6 +1135,62 @@ fn locus_line(mol: &Molecule, name: &str, n: u64, date: &str) -> String {
     )
 }
 
+/// What a GenBank write cost, split by whether the work reached the file.
+///
+/// One vector was one severity, and the two are not the same thing. `absent`
+/// is an annotation that is NOT in the file — a feature no segment of which
+/// has a GenBank location, a primer with no binding site to hang it on. Open
+/// the export and the work is gone. `reduced` is an annotation that IS in the
+/// file, spelled smaller: a `/note` whose line break became a space, a feature
+/// key cut to the fifteen columns GenBank gives it, a primer's free-text
+/// description that the format has nowhere to put. Open the export and the
+/// annotation is there; something about it is not.
+///
+/// # Why this is a type and not a second `Vec` argument
+///
+/// The consumers want different halves of it, and until 2026-09-04 they had no
+/// way to ask:
+///
+/// - `crates/pl-wasm` turns a non-empty report into a REFUSAL to write the
+///   file at all, because a browser download has one buffer and one return
+///   code and cannot hand over both the bytes and the hedge. That is right for
+///   `absent` and much too strong for `reduced`: for a few hours on 2026-09-03
+///   a primer's dropped description was pushed into the one vector there was,
+///   and the browser stopped exporting any molecule whose primer carried a
+///   note. The revert kept the export working and left the loss silent, which
+///   is the other half of the same bug.
+/// - the desktop GUI computes `faithful` from the report and clears the
+///   unsaved-changes dot with it. It consults BOTH: a reduced annotation is
+///   still work that is on screen and not in the file the way the screen has
+///   it, so a save that reduces has not saved the document.
+/// - `pl convert` prints both, in two sentences, because stderr is the one
+///   surface here with room to say two different things.
+///
+/// A `(String, Vec<String>, Vec<String>)` would have carried the same
+/// information and let one call site swap the halves silently; the fields are
+/// named so that cannot happen.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WriteReport {
+    /// Work the file does not contain.
+    pub absent: Vec<String>,
+    /// Work the file contains in a diminished form.
+    pub reduced: Vec<String>,
+}
+
+impl WriteReport {
+    /// Nothing was lost either way — the file carries the whole document.
+    ///
+    /// This is what `faithful` is, and it is deliberately the only aggregate
+    /// offered. A caller that wants a COUNT, a JOINED STRING or a single
+    /// iterator has to reach for `absent` or `reduced` by name, because the
+    /// two get different sentences on every surface that reports them, and a
+    /// convenience that flattened them is how they became one channel in the
+    /// first place.
+    pub fn is_empty(&self) -> bool {
+        self.absent.is_empty() && self.reduced.is_empty()
+    }
+}
+
 /// Render a molecule as GenBank. `date` is `(day, month_index_0_based, year)`;
 /// passing it in keeps this function pure and its output reproducible.
 ///
@@ -1129,17 +1203,23 @@ pub fn write(mol: &Molecule, title: &str, date: (u32, usize, i32)) -> String {
 
 /// Render a molecule as GenBank, and say what the format could not hold.
 ///
-/// The second value is empty for the overwhelming majority of molecules. It is
-/// not empty for the ones that matter: a feature segment or a primer binding
-/// site with no legal GenBank location, which is the class that used to be
-/// skipped by a bare `continue` with the function returning a `String` and so
-/// no channel to say anything at all.
+/// The report is empty for the overwhelming majority of molecules. It is not
+/// empty for the ones that matter: a feature segment or a primer binding site
+/// with no legal GenBank location, which is the class that used to be skipped
+/// by a bare `continue` with the function returning a `String` and so no
+/// channel to say anything at all.
+///
+/// It has two halves because there are two severities — see [`WriteReport`],
+/// which carries the argument. In short: `absent` is work that is not in the
+/// file, `reduced` is work that is in the file with something taken off it,
+/// and a caller that treats the second like the first refuses to export
+/// perfectly usable plasmids.
 pub fn write_reporting(
     mol: &Molecule,
     title: &str,
     date: (u32, usize, i32),
-) -> (String, Vec<String>) {
-    let mut unwritable: Vec<String> = Vec::new();
+) -> (String, WriteReport) {
+    let mut report = WriteReport::default();
     let name = locus_name(title);
     let n = mol.span();
     let (d, m, y) = date;
@@ -1153,7 +1233,7 @@ pub fn write_reporting(
     } else {
         mol.description.as_str()
     };
-    let def = header_text(def, "DEFINITION", &mut unwritable);
+    let def = header_text(def, "DEFINITION", &mut report.reduced);
     out.push_str(&format!("DEFINITION  {def}.\n"));
     out.push_str("ACCESSION   .\nVERSION     .\nKEYWORDS    .\n");
     out.push_str("SOURCE      synthetic DNA construct\n  ORGANISM  synthetic DNA construct\n");
@@ -1161,7 +1241,11 @@ pub fn write_reporting(
     if let Some(uuid) = mol.note("UUID") {
         // Same treatment as DEFINITION and for the same reason: this is a
         // continuation of COMMENT, so a break in it reaches column 1 too.
-        let uuid = header_text(uuid, "the COMMENT source document UUID", &mut unwritable);
+        let uuid = header_text(
+            uuid,
+            "the COMMENT source document UUID",
+            &mut report.reduced,
+        );
         out.push_str(&format!("            Source document UUID: {uuid}\n"));
     }
     out.push_str("FEATURES             Location/Qualifiers\n");
@@ -1189,14 +1273,14 @@ pub fn write_reporting(
         } else {
             &f.kind
         };
-        let key = feature_key(kind, &f.name, &mut unwritable);
-        let Some(loc) = format_location(f, n, &mut unwritable) else {
+        let key = feature_key(kind, &f.name, &mut report.reduced);
+        let Some(loc) = format_location(f, n, &mut report.absent) else {
             // Every segment was unwritable and each one has already been named
             // above. Writing the feature key with an empty location would
             // produce a line no parser can read, so the feature is skipped —
             // and the skip is said out loud, which is the whole difference
             // between this and the `continue` it replaces.
-            unwritable.push(format!(
+            report.absent.push(format!(
                 "feature {:?} was not written: no segment had a GenBank form",
                 f.name
             ));
@@ -1228,7 +1312,7 @@ pub fn write_reporting(
             if v.as_deref()
                 .is_some_and(|s| s.chars().any(|c| (c as u32) < 0x20))
             {
-                unwritable.push(format!(
+                report.reduced.push(format!(
                     "feature {:?}: qualifier /{k} contains a line break, which GenBank cannot \
                      express inside a value; it was written as a space (.dna keeps it exactly)",
                     f.name
@@ -1248,11 +1332,11 @@ pub fn write_reporting(
         // the site loop below, because both are properties of the PRIMER and
         // neither depends on a site being written.
         //
-        // The mechanism matters more than the two cases. `unwritable` is what
+        // The mechanism matters more than the two cases. The report is what
         // `faithful` is computed from -- `bins/pl-gui/src/main.rs` sets
-        // `faithful = unwritable.is_empty()` and, when it is true, both clears
-        // the unsaved-changes dot and retargets the document at the file just
-        // written. So anything dropped here without a line in this vector is
+        // `faithful = report.is_empty()` and, when it is true, both clears the
+        // unsaved-changes dot and retargets the document at the file just
+        // written. So anything dropped here without a line in the report is
         // dropped from a document the editor then calls saved. Until
         // 2026-09-03 this loop pushed a line only for a site past the end and
         // a site with no GenBank form; a primer could lose its description, or
@@ -1261,38 +1345,27 @@ pub fn write_reporting(
         // Keyed on `p.sites.is_empty()` and not on "no site was written": a
         // primer whose only site was rejected above is already reported by
         // that branch, and counting it twice would change the exact
-        // `report.len() == 1` that
+        // `report.absent.len() == 1` that
         // `a_primer_binding_site_past_the_end_is_reported_not_silently_skipped`
         // asserts.
         if p.sites.is_empty() {
-            unwritable.push(format!(
+            report.absent.push(format!(
                 "primer {:?}: has no binding site, and GenBank has no way to carry \
                  a primer that is not bound to a position, so the oligo {:?} was \
                  not written at all",
                 p.name, p.seq
             ));
         }
-        // A PRIMER'S DESCRIPTION IS STILL LOST SILENTLY, and that is a
-        // deliberate hole rather than an oversight. `snapgene.rs` writes
-        // `description="..."` on the `<Primer>` element, GenBank has nowhere
-        // to put it, and for a few hours on 2026-09-03 this loop reported it
-        // here. That was wrong, because `unwritable` does not mean "was
-        // reduced" -- `crates/pl-wasm/src/lib.rs` turns ANY non-empty vector
-        // into a refusal to write the file at all, so the browser build
-        // stopped exporting a molecule whose primer merely carried a note.
-        //
-        // The two severities need two channels: this vector for a thing that
-        // is ABSENT, and a second one for a thing that is PRESENT BUT
-        // REDUCED, which `faithful` would still consult and the wasm refusal
-        // would not. That is an API change through five call sites and it is
-        // its own reviewed slice, not a rider on this one.
+        // Whether this primer reached the file at all, which decides whether
+        // its description is a REDUCTION or part of a loss already reported.
+        let mut wrote_a_site = false;
         for s in &p.sites {
             // A site past the end of the molecule is skipped rather than
             // written, because a `primer_bind` at 5000..5100 on a 2686 bp
             // record claims annealing to bases the file does not contain. It is
             // reported, which is the part that was missing.
             if s.end >= s.start && s.end > n {
-                unwritable.push(format!(
+                report.absent.push(format!(
                     "primer {:?}: binding site {}..{} lies past the end of a {n} bp molecule and was not written",
                     p.name, s.start, s.end
                 ));
@@ -1308,7 +1381,7 @@ pub fn write_reporting(
             // as `join(2677..2686,1..7)` two loops above. Features and primers
             // now agree about what is expressible.
             let Some(parts) = location_parts(s.start, s.end, n) else {
-                unwritable.push(format!(
+                report.absent.push(format!(
                     "primer {:?}: binding site {}..{} has no GenBank form on a {n} bp molecule and was not written",
                     p.name, s.start, s.end
                 ));
@@ -1322,6 +1395,36 @@ pub fn write_reporting(
                 None => format!("primer {}", p.seq),
             };
             qualifier_lines("note", &note, &mut out);
+            wrote_a_site = true;
+        }
+        // THE DESCRIPTION, which used to go without a word.
+        //
+        // `snapgene.rs` writes `description="..."` on the `<Primer>` element
+        // and GenBank has nowhere to put it: the two qualifiers this loop
+        // emits are `/label` (the name) and `/note` (the oligo and its Tm),
+        // and a second `/note` would be read back as part of the primer's
+        // note by our own reader. So the text a person typed about what the
+        // primer is FOR is dropped, and a `.dna` converted to `.gb` lost it
+        // at exit 0 with an empty report.
+        //
+        // For a few hours on 2026-09-03 this was pushed into the one vector
+        // there was, and it was reverted the same day because that vector is
+        // what `crates/pl-wasm` refuses on: the browser build stopped
+        // exporting any molecule whose primer merely carried a note. The
+        // revert kept the export working and left the loss silent. `reduced`
+        // is the channel that was missing -- the primer IS in the file, with
+        // its name, its oligo and its position; only the prose is gone.
+        //
+        // Gated on `wrote_a_site`: when nothing was written for this primer
+        // the description is not a reduction of anything, it is part of the
+        // primer that the branch above has already reported as absent whole.
+        if wrote_a_site && !p.description.is_empty() {
+            report.reduced.push(format!(
+                "primer {:?}: its description {:?} has no GenBank form -- the primer is in the \
+                 file with its name, oligo and position, and the description is not (.dna keeps \
+                 it exactly)",
+                p.name, p.description
+            ));
         }
     }
 
@@ -1382,7 +1485,7 @@ pub fn write_reporting(
         })
         .collect();
     if substituted > 0 {
-        unwritable.push(format!(
+        report.reduced.push(format!(
             "ORIGIN: {substituted} character(s) of the sequence are whitespace or digits, which \
              a GenBank ORIGIN block cannot carry; each was written as `n` (.dna keeps them exactly)"
         ));
@@ -1404,7 +1507,7 @@ pub fn write_reporting(
         out.push('\n');
     }
     out.push_str("//\n");
-    (out, unwritable)
+    (out, report)
 }
 
 #[cfg(test)]
@@ -1511,9 +1614,17 @@ mod tests {
         );
         // Reported, because that space is a real loss and the `.dna` writer
         // does not make it.
+        // Through `reduced` and not `absent`: the qualifier reached the file
+        // and the reader read it back, with one character normalised. Pinned
+        // on the severity as well as the text, because sorting it the other
+        // way is what made the browser build refuse whole plasmids.
         assert!(
-            unwritable.iter().any(|u| u.contains("line break")),
+            unwritable.reduced.iter().any(|u| u.contains("line break")),
             "{unwritable:?}"
+        );
+        assert!(
+            unwritable.absent.is_empty(),
+            "nothing is missing from this file: {unwritable:?}"
         );
     }
 
@@ -1913,9 +2024,10 @@ mod tests {
         });
         let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
         assert!(!text.contains("primer_bind"), "{text}");
-        assert_eq!(report.len(), 1, "{report:?}");
-        assert!(report[0].contains("ghost"), "{report:?}");
-        assert!(report[0].contains("past the end"), "{report:?}");
+        assert_eq!(report.absent.len(), 1, "{report:?}");
+        assert!(report.absent[0].contains("ghost"), "{report:?}");
+        assert!(report.absent[0].contains("past the end"), "{report:?}");
+        assert!(report.reduced.is_empty(), "{report:?}");
     }
 
     /// A primer survives a GenBank round trip as a PRIMER, not as prose.
@@ -2100,7 +2212,7 @@ mod tests {
     /// PROVEN TO FAIL on 2026-09-03: `report` was `[]` and
     /// `text.contains("NoSites")` was `false`. The primer -- its name, its
     /// oligo and its description -- disappeared without a word, and because
-    /// `faithful` is `unwritable.is_empty()`, the editor then cleared the
+    /// `faithful` is `report.is_empty()`, the editor then cleared the
     /// unsaved-changes dot and retargeted the document at the file that had
     /// just lost it. `.dna` block 5 can hold a `<Primer/>` with no
     /// `<BindingSite>`, so this is reachable from a real file rather than only
@@ -2120,12 +2232,95 @@ mod tests {
         });
         let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
         assert!(!text.contains("NoSites"), "{text}");
-        assert_eq!(report.len(), 1, "{report:?}");
-        assert!(report[0].contains("NoSites"), "{report:?}");
-        assert!(report[0].contains("no binding site"), "{report:?}");
+        assert_eq!(report.absent.len(), 1, "{report:?}");
+        assert!(report.absent[0].contains("NoSites"), "{report:?}");
+        assert!(report.absent[0].contains("no binding site"), "{report:?}");
         // The oligo is named too, because the report is the only place it
         // survives at all.
-        assert!(report[0].contains("GTAAAACGACGGCCAGT"), "{report:?}");
+        assert!(report.absent[0].contains("GTAAAACGACGGCCAGT"), "{report:?}");
+        // And not ALSO in `reduced`: the description is empty here, but even a
+        // primer that had one would not be reported twice -- see
+        // `a_primers_description_is_reported_as_a_reduction_not_as_a_refusal`.
+        assert!(report.reduced.is_empty(), "{report:?}");
+    }
+
+    /// A primer's description is lost by GenBank, and the loss is REDUCED.
+    ///
+    /// PROVEN TO FAIL on 2026-09-04 by commenting out the `wrote_a_site &&
+    /// !p.description.is_empty()` push: `report.reduced` was `[]`. A `.dna`
+    /// carrying `<Primer description="anneals in the linker, use at 58 C"/>`
+    /// converted to GenBank at exit 0 with an empty report, and the text a
+    /// person had typed about what the primer was FOR existed nowhere in the
+    /// output.
+    ///
+    /// The severity is the point of the test and not a detail of it. This
+    /// exact line lived in `absent` for a few hours on 2026-09-03 and had to
+    /// be reverted, because `crates/pl-wasm` refuses to write a file at all
+    /// when `absent` is non-empty: the browser build stopped exporting any
+    /// molecule whose primer merely carried a note. The third assertion below
+    /// is what makes that impossible to reintroduce.
+    #[test]
+    fn a_primers_description_is_reported_as_a_reduction_not_as_a_refusal() {
+        let mut mol = Molecule {
+            seq: b"a".repeat(500),
+            topology: Topology::Circular,
+            ..Default::default()
+        };
+        mol.primers.push(Primer {
+            name: "M13F".into(),
+            seq: "GTAAAACGACGGCCAGT".into(),
+            description: "anneals in the linker, use at 58 C".into(),
+            sites: vec![BindingSite {
+                start: 100,
+                end: 116,
+                strand: Strand::Forward,
+                tm: Some(55.3),
+            }],
+        });
+        let (text, report) = write_reporting(&mol, "p.dna", (27, 6, 2026));
+
+        // The primer IS in the file: name, oligo and position all survive, and
+        // it comes back out of the reader as a primer.
+        let back = parse(&text);
+        assert_eq!(back.primers.len(), 1, "{text}");
+        assert_eq!(back.primers[0].name, "M13F");
+        assert_eq!(back.primers[0].seq, "GTAAAACGACGGCCAGT");
+        assert_eq!(back.primers[0].sites.len(), 1, "{text}");
+        // And the description is not.
+        assert_eq!(back.primers[0].description, "", "{text}");
+
+        assert_eq!(report.reduced.len(), 1, "{report:?}");
+        assert!(report.reduced[0].contains("M13F"), "{report:?}");
+        assert!(
+            report.reduced[0].contains("anneals in the linker"),
+            "the text itself has to be named -- the report is now the only \
+             place it exists: {report:?}"
+        );
+        assert!(
+            report.absent.is_empty(),
+            "a description is a reduction, and putting it here is what stopped \
+             the browser build exporting: {report:?}"
+        );
+
+        // THE CONTROL, so this cannot become "report every primer": the same
+        // primer with nothing in its description costs nothing at all.
+        let mut quietmol = mol.clone();
+        quietmol.primers[0].description = String::new();
+        let (_, quiet) = write_reporting(&quietmol, "p.dna", (27, 6, 2026));
+        assert!(quiet.is_empty(), "{quiet:?}");
+
+        // AND THE OTHER CONTROL: a primer that never reached the file is
+        // reported once, as absent, and its description is not a second
+        // finding on top of it.
+        let mut gone = mol.clone();
+        gone.primers[0].sites.clear();
+        let (_, report) = write_reporting(&gone, "p.dna", (27, 6, 2026));
+        assert_eq!(report.absent.len(), 1, "{report:?}");
+        assert!(
+            report.reduced.is_empty(),
+            "the whole primer is missing; the description is not a separate \
+             finding: {report:?}"
+        );
     }
 
     #[test]
@@ -2156,9 +2351,15 @@ mod tests {
             parse(&text).features.is_empty(),
             "one feature in, zero out -- and it must say so"
         );
-        assert_eq!(report.len(), 2, "{report:?}");
-        assert!(report.iter().any(|r| r.contains("150..50")), "{report:?}");
-        assert!(report.iter().any(|r| r.contains("ghost")), "{report:?}");
+        assert_eq!(report.absent.len(), 2, "{report:?}");
+        assert!(
+            report.absent.iter().any(|r| r.contains("150..50")),
+            "{report:?}"
+        );
+        assert!(
+            report.absent.iter().any(|r| r.contains("ghost")),
+            "{report:?}"
+        );
 
         // Control: the same wrap on a molecule long enough to split against is
         // still expanded, and reports nothing.
@@ -2314,7 +2515,7 @@ mod tests {
         let (text, report) = write_reporting(&m, "w.gb", (1, 0, 2026));
         assert!(!text.contains("1..0"), "wrote an illegal range:\n{text}");
         assert!(
-            report.iter().any(|r| r.contains("5..0")),
+            report.absent.iter().any(|r| r.contains("5..0")),
             "the loss has to be named, or it is just a quieter loss: {report:?}"
         );
     }
@@ -2957,15 +3158,22 @@ ORIGIN
             "the description did not survive:\n{text}"
         );
         assert_eq!(
-            report.len(),
+            report.reduced.len(),
             2,
             "the writer's own report channel said nothing: {report:?}"
         );
         assert!(
-            report.iter().any(|r| r.contains("DEFINITION")),
+            report.reduced.iter().any(|r| r.contains("DEFINITION")),
             "{report:?}"
         );
-        assert!(report.iter().any(|r| r.contains("UUID")), "{report:?}");
+        assert!(
+            report.reduced.iter().any(|r| r.contains("UUID")),
+            "{report:?}"
+        );
+        // Both fields are IN the file, carrying their text with one character
+        // normalised, so neither is `absent` -- and the browser build, which
+        // refuses on `absent` alone, still exports this molecule.
+        assert!(report.absent.is_empty(), "{report:?}");
 
         // The ordinary case still reports nothing at all.
         let plain = Molecule {
@@ -3032,8 +3240,12 @@ ORIGIN
         );
         assert_eq!(back[0].features[0].name, "gene of interest");
         assert!(
-            report.iter().any(|r| r.contains("CDS")),
+            report.reduced.iter().any(|r| r.contains("CDS")),
             "the key was changed in silence: {report:?}"
+        );
+        assert!(
+            report.absent.is_empty(),
+            "the feature is in the file: {report:?}"
         );
 
         // A real key with a character the format allows is untouched, and
@@ -3047,6 +3259,64 @@ ORIGIN
         };
         let (t2, quiet) = write_reporting(&m2, "x.gb", (1, 0, 2026));
         assert!(t2.contains("     3'UTR"), "{t2}");
+        assert!(quiet.is_empty(), "{quiet:?}");
+    }
+
+    /// A feature key too long for its column is cut, and now says so.
+    ///
+    /// PROVEN TO FAIL on 2026-09-04 by removing the `cut.chars().count() <
+    /// kind.chars().count()` push: `report` was empty and `back.kind` was
+    /// `"misc_recombinat"` -- fifteen characters of it -- against the
+    /// twenty-three that went in. The test above catches a key with an ILLEGAL
+    /// character because `feature_key` compares its cleaned string against
+    /// `cut`, which is already truncated; a key whose only fault is length
+    /// passed that comparison and was rewritten in silence.
+    ///
+    /// `bins/pl-gui/src/main.rs` recorded this hole in `plan_genbank`'s doc
+    /// and left it open on purpose: the only report channel then in existence
+    /// was the one `crates/pl-wasm` refuses on, and refusing to export a
+    /// plasmid because one feature key is sixteen characters long is not a
+    /// trade worth making. `reduced` is the channel that makes it reportable
+    /// -- the feature is in the file, under a shorter key.
+    #[test]
+    fn a_feature_key_longer_than_its_column_is_reported_rather_than_cut_in_silence() {
+        let mut f = Feature::new("gene of interest", "misc_recombination_site");
+        f.segments.push(Segment::new(1, 12));
+        let mol = Molecule {
+            seq: b"acgtacgtacgt".to_vec(),
+            features: vec![f],
+            ..Default::default()
+        };
+        let (text, report) = write_reporting(&mol, "x.gb", (1, 0, 2026));
+
+        // The feature is in the file, under fifteen characters of its key.
+        let back = parse(&text);
+        assert_eq!(back.features.len(), 1, "{text}");
+        assert_eq!(back.features[0].kind, "misc_recombinat", "{text}");
+        assert_eq!(back.features[0].name, "gene of interest");
+
+        assert_eq!(report.reduced.len(), 1, "{report:?}");
+        assert!(
+            report.reduced[0].contains("misc_recombination_site"),
+            "the key that went in has to be named: {report:?}"
+        );
+        assert!(
+            report.absent.is_empty(),
+            "the feature is in the file: {report:?}"
+        );
+
+        // THE CONTROL: the longest key INSDC actually defines is fifteen
+        // characters, so no real file pays for this. `misc_difference` fits
+        // its column exactly and costs nothing.
+        let mut ok = Feature::new("d", "misc_difference");
+        ok.segments.push(Segment::new(1, 12));
+        let m2 = Molecule {
+            seq: b"acgtacgtacgt".to_vec(),
+            features: vec![ok],
+            ..Default::default()
+        };
+        let (t2, quiet) = write_reporting(&m2, "x.gb", (1, 0, 2026));
+        assert!(t2.contains("     misc_difference "), "{t2}");
         assert!(quiet.is_empty(), "{quiet:?}");
     }
 
@@ -3109,7 +3379,7 @@ ORIGIN
             "the length no longer matches the LOCUS line"
         );
         assert!(
-            report.iter().any(|r| r.contains("ORIGIN")),
+            report.reduced.iter().any(|r| r.contains("ORIGIN")),
             "the substitution went unreported: {report:?}"
         );
 

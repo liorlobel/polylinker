@@ -236,6 +236,15 @@
     color: var(--warn); font-family: var(--mono); font-size: 12.5px;
     padding: 10px 12px; background: var(--sunk); border-radius: 5px;
   }
+  /* Deliberately not `.err`. The file downloaded; this says what it cost, and
+     dressing that in the colour of a failure would teach people to ignore
+     both. `--ink-2` on the sunk panel is the same register as the rest of the
+     page's prose. */
+  .notice {
+    color: var(--ink-2); font-family: var(--mono); font-size: 12.5px;
+    padding: 10px 12px; margin: 0 0 14px; background: var(--sunk);
+    border-left: 3px solid var(--accent); border-radius: 5px;
+  }
 
   footer.foot {
     margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
@@ -261,6 +270,8 @@
     <button class="btn" id="dlBtn" title="A .dna written from scratch by this page, omitting the derived cache blocks — open it in SnapGene to test whether they are optional">Test .dna</button>
     <input type="file" id="fileIn" accept=".dna,.gb,.gbk,.genbank,.ape,.fa,.fasta,.seq" hidden>
   </header>
+
+  <div class="notice" id="expNote" hidden></div>
 
   <div class="summary" id="summary"></div>
 
@@ -365,8 +376,8 @@ const READY = (async () => {
   const module = await WebAssembly.compile(base64ToBytes(WASM_BASE64));
   const instance = await WebAssembly.instantiate(module, {});
   W = instance.exports;
-  if (W.pl_abi_version() !== 1) {
-    throw new Error(`core ABI ${W.pl_abi_version()}, this page expects 1 — rebuild with tools/build-web.ps1`);
+  if (W.pl_abi_version() !== 2) {
+    throw new Error(`core ABI ${W.pl_abi_version()}, this page expects 2 — rebuild with tools/build-web.ps1`);
   }
   W.pl_enzymes_json();
   ENZYMES = coreJson().map(e => [e.name, e.site]);
@@ -394,6 +405,20 @@ function coreOut() {
 }
 const coreText = () => new TextDecoder().decode(coreOut());
 const coreJson = () => JSON.parse(coreText());
+
+/* What the last successful call COST, from the core's second buffer (ABI 2).
+   Empty unless the call both produced output and had something to say about
+   it. The core has two severities and hands them over two ways: an annotation
+   that would be MISSING from the file makes the export refuse, and the reason
+   arrives in the buffer above; an annotation that is in the file with
+   something taken off it — a note whose line break became a space, a primer's
+   free-text description — arrives here, with the file. Reading only the first
+   is how the page used to download a reduced plasmid in silence. */
+const coreWarn = () => {
+  const ptr = W.pl_warn_ptr();
+  const len = W.pl_warn_len();
+  return len === 0 ? "" : new TextDecoder().decode(mem().slice(ptr, ptr + len));
+};
 
 /** Bases as a string, without going through UTF-8. */
 function coreSequence() {
@@ -1369,8 +1394,21 @@ function fail(msg) {
     `<div class="err">Could not read that file — ${esc(msg)}</div>`;
 }
 
+/* The file was written; this is what it cost. Empty string clears it.
+   Its own element rather than `#summary`, which `show()` rewrites on every
+   open: a notice about the export the user just took has to survive until
+   they do something else, and it must not be wiped by a re-render. */
+function notice(msg) {
+  const el = document.getElementById("expNote");
+  el.textContent = msg;
+  el.hidden = msg === "";
+}
+
 async function openBytes(bytes, name) {
   await READY;
+  // A notice describes one export of one document. The moment another file is
+  // open it is a sentence about something that is no longer on screen.
+  notice("");
   show(coreOpen(bytes), name);
 }
 
@@ -1407,15 +1445,24 @@ document.getElementById("expGb").addEventListener("click", () => {
   const d = new Date();
   const rc = withString(state.title, (p, n) =>
     W.pl_to_genbank(p, n, d.getDate(), d.getMonth(), d.getFullYear()));
-  if (rc !== 0) { fail(coreText()); return; }
+  if (rc !== 0) { notice(""); fail(coreText()); return; }
+  // Decoded before the download, so the notice is a JS string by the time
+  // anything else touches the module: `mem()` builds a fresh view on every
+  // call because a `Uint8Array` held across a wasm allocation is detached.
+  const cost = coreWarn();
   download(coreText(), locusName(state.title) + ".gb", "text/plain");
+  notice(cost);
 });
 
 document.getElementById("expFa").addEventListener("click", () => {
   if (!requireDoc()) return;
   const rc = withString(state.title, (p, n) => W.pl_to_fasta(p, n, 70));
-  if (rc !== 0) { fail(coreText()); return; }
+  if (rc !== 0) { notice(""); fail(coreText()); return; }
   download(coreText(), locusName(state.title) + ".fa", "text/plain");
+  // Cleared, not carried: this export said nothing, and leaving a GenBank
+  // export's notice above a FASTA download would attach a true sentence to
+  // the wrong file.
+  notice("");
 });
 
 document.getElementById("expSvg").addEventListener("click", () => {
