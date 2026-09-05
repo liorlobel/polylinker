@@ -5788,9 +5788,32 @@ impl eframe::App for App {
         // make that a lie, which is the one thing this whole guard exists to
         // stop.
         //
+        // AND A TAB THAT IS STILL DIRTY KEEPS ITS SLOT, since 2026-09-05. The
+        // sentence above assumed that reaching this function meant the question
+        // had been asked. It had not always been: macOS's `terminate:` — Dock ▸
+        // Quit, a logout, and until the menu bar took ⌘Q back, ⌘Q itself —
+        // reaches `on_exit` through eframe without ever producing the
+        // `CloseRequested` that `close_request`'s latch reads, so the dialog
+        // never opened, `abandoned_unsaved` was never set, and this loop then
+        // deleted the only copy of work nobody had been asked about. Measured
+        // 2026-09-05, three links: winit's own menu bound to `terminate:`,
+        // `terminate:` reaching `on_exit` with no `close_requested`, and this
+        // loop on a dirty bench.
+        //
+        // A dirty tab here is that path and nothing else. `resolve_guard`
+        // refuses to let a save close the window while any tab is still
+        // unsaved, the discard answer sets `abandoned_unsaved`, the smoke leg
+        // has no document, and a crash never runs `on_exit` at all. So "dirty
+        // with the flag unset" cannot come through the dialog — it is exactly
+        // the quit that skipped it, and for that quit the next launch SHOULD
+        // say "did not close cleanly": it did not. The draft it keeps is the
+        // work.
+        //
         // EVERY tab's slot, not one: the sweep has to be as wide as the walk
         // that wrote them, or a clean quit leaves the background tabs' drafts
-        // behind and the next launch reports a crash that did not happen.
+        // behind and the next launch reports a crash that did not happen. And
+        // per tab, not per bench: a clean tab beside a dirty one has nothing to
+        // recover, and its slot goes as it always did.
         //
         // The reopen stack needs no sweep of its own, and that is an invariant
         // rather than an oversight: `close_tab` clears the slot of a tab it
@@ -5801,12 +5824,12 @@ impl eframe::App for App {
         // the reason this is not written as a belt-and-braces second loop: a tab
         // evicted past `REOPENABLE` keeps its draft on purpose, because that file
         // is the last copy of work the eviction freed.
-        if !self.abandoned_unsaved {
-            for tab in self.bench.each() {
-                if let Some(p) = &tab.recovery {
-                    recover::clear(p);
-                }
+        for tab in self.bench.each() {
+            let Some(p) = &tab.recovery else { continue };
+            if self.abandoned_unsaved || tab.doc.unsaved() {
+                continue;
             }
+            recover::clear(p);
         }
         // The bench, one last time. The frame loop has been writing this all
         // along — a workspace that only survives a polite goodbye is missing on
@@ -20556,6 +20579,25 @@ mod tests {
         assert_eq!(held.len(), 2, "the premise: two drafts on disk");
         assert!(held.iter().all(|p| p.exists()));
 
+        // SAVED, THEN QUIT — which is what a clean quit is, since 2026-09-05.
+        // This fixture used to reach `on_exit` with both documents still
+        // dirty and no flag set, and the sweep cleared their drafts anyway.
+        // That state is not a clean quit: `resolve_guard` never lets a save
+        // close the window while a tab is unsaved, and the discard answer sets
+        // `abandoned_unsaved`, so the only way to arrive dirty and unflagged is
+        // a `terminate:` that skipped the question — and `on_exit` now keeps
+        // exactly those drafts (see
+        // `a_quit_that_skipped_the_question_keeps_the_dirty_tabs_draft`). The
+        // width of the sweep, which is what this test is about, is unchanged;
+        // the fixture just has to describe the quit it is named after.
+        for tab in app.bench.each_mut() {
+            tab.doc.mark_saved();
+        }
+        assert!(
+            !app.bench.any_unsaved(),
+            "the premise: every tab's work reached a file"
+        );
+
         // Through the trait, because that is who calls it: `on_exit` is
         // `eframe::App`'s, and reaching it any other way would be testing a
         // function eframe does not run.
@@ -20570,6 +20612,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A quit that skipped the question keeps the draft of the work it skipped.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 against the unmodified `on_exit` — the
+    /// test written first and run before the fix, which is the order that
+    /// makes the proof mean something:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: kept.fa: still dirty at a quit that
+    /// never asked, and its draft — the only copy — is gone
+    ///   left: false
+    ///  right: true
+    /// ```
+    ///
+    /// The path this models is `terminate:` — Dock ▸ Quit, a logout, and until
+    /// the menu bar took ⌘Q back, ⌘Q itself. It reaches `on_exit` with no
+    /// `CloseRequested` ever produced, so no dialog, so `abandoned_unsaved`
+    /// unset, so the bench arrives here exactly as this fixture leaves it:
+    /// one tab still dirty, one saved since its draft was written. Nothing
+    /// here presses a key or sends a selector — nothing in this suite can —
+    /// so what is driven is the one function every one of those paths ends
+    /// in, in the state every one of them leaves it.
+    ///
+    /// Per tab, not per bench, and the clean tab is the control: its work is
+    /// in a file, so its slot must go as it always did. A fix that kept every
+    /// draft whenever anything was dirty would pass the first assertion and
+    /// fail the second, and the next launch would offer back a draft of work
+    /// the user had already saved — the exact false alarm
+    /// `resolve_guard`'s doc comment was written to stop.
+    #[test]
+    fn a_quit_that_skipped_the_question_keeps_the_dirty_tabs_draft() {
+        let (mut app, first) = app_with_recovery("skipped");
+        let dir = first
+            .parent()
+            .expect("a slot has a directory")
+            .to_path_buf();
+        app.bench.set(edited_doc("kept.fa", "AAAACCCCGGGGTTTTAAGG"));
+        app.bench
+            .set(edited_doc("saved.fa", "GGGGGGGGTTTTTTTTAACC"));
+        // Both dirty when the drafts are written, so both have a slot.
+        app.autosave(false);
+        let slots: Vec<(String, std::path::PathBuf)> = app
+            .bench
+            .each()
+            .map(|t| {
+                (
+                    t.doc.title.clone(),
+                    t.recovery.clone().expect("a dirty tab was given a slot"),
+                )
+            })
+            .collect();
+        assert_eq!(slots.len(), 2, "the premise: two drafts on disk");
+        assert!(slots.iter().all(|(_, p)| p.exists()));
+
+        // Then one of them is saved — its draft stays on disk until the exit
+        // sweeps it — and the other is not.
+        for tab in app.bench.each_mut() {
+            if tab.doc.title == "saved.fa" {
+                tab.doc.mark_saved();
+            }
+        }
+        assert!(!app.abandoned_unsaved, "the premise: no dialog ran");
+        assert_eq!(
+            app.bench.unsaved_count(),
+            1,
+            "the premise: exactly one tab is still dirty"
+        );
+
+        // The `terminate:` shape: straight to the trait method, nothing asked.
+        eframe::App::on_exit(&mut app, None);
+
+        // Decided by WHICH tab, read after the save and the quit — a first
+        // draft of this test snapshotted `unsaved()` before the save and so
+        // expected the saved tab's draft to survive too, which is the very
+        // false alarm the control exists to catch.
+        for (title, path) in &slots {
+            let kept = title == "kept.fa";
+            assert_eq!(
+                path.exists(),
+                kept,
+                "{title}: {}",
+                if kept {
+                    "still dirty at a quit that never asked, and its draft — the only copy \
+                     — is gone"
+                } else {
+                    "saved before the quit, and its draft survived, so the next launch will \
+                     offer back work that is already in a file"
+                }
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     /// The strip advertised a threshold nobody could change.
     ///
     /// PROVEN TO FAIL against ba905e7: `Layout::orf_min_aa` was persisted,
