@@ -493,7 +493,12 @@ pub const MENUS: &[Menu] = &[
             // Quit and a logout send `terminate:` to `NSApplication` directly,
             // not through this menu, and winit's delegate implements no
             // `applicationShouldTerminate:` to veto them. Those two paths still
-            // skip the question.
+            // skip the question. What they no longer do, since the same day,
+            // is destroy anything by skipping it: `App::on_exit` keeps the
+            // draft of any tab that is still dirty when it runs, so the work
+            // comes back on the next launch under "A previous session did not
+            // close cleanly" — which is exactly true of a quit that never
+            // asked.
             item(
                 "Quit Polylinker",
                 A(C::Quit),

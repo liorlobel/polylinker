@@ -78,7 +78,23 @@ which.
   window asks. **Still open, and said so nobody looks for it:** Dock ▸ Quit and
   a logout send `terminate:` to `NSApplication` directly, not through any
   menu, and winit's delegate implements no `applicationShouldTerminate:` to
-  veto them. Those two paths still skip the question.
+  veto them. Those two paths still skip the question — and no longer destroy
+  anything by skipping it; see the next entry.
+
+- **A quit that skipped the unsaved-changes question deleted the drafts it
+  skipped over.** `on_exit` cleared every tab's recovery slot unless the
+  discard answer had set `abandoned_unsaved`, on the assumption that reaching
+  `on_exit` meant the question had been asked. `terminate:` reaches it without
+  asking, so a Dock ▸ Quit over unsaved work deleted the only copy. `on_exit`
+  now keeps the slot of any tab that is still dirty when it runs, and clears
+  the rest as before. That state is reachable no other way — `resolve_guard`
+  never lets a save close the window while a tab is unsaved, the discard
+  answer sets the flag, the smoke leg has no document, and a crash never runs
+  `on_exit` — so the next launch's "A previous session did not close cleanly"
+  is, for that quit, simply true. One test proves the dirty tab's draft
+  survives and the saved tab's does not; the existing sweep test, which used
+  to reach `on_exit` dirty and unflagged, now saves first, because that is
+  what the clean quit it is named after looks like.
 
 - **Four chords lived behind a second, hand-copied copy of the guards.** ⌘W,
   ⌘Tab, ⇧⌘Tab and ⇧⌘T were read inline in `App::ui`, behind their own
