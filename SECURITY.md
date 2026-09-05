@@ -175,10 +175,13 @@ because they are known, documented, and not news:
   Report those to them.
 * **Scanner output with no reachable path.** `pl-core` and the crates behind the
   CLI have no external dependencies at all; the exceptions are `eframe`, `rfd`
-  and `egui-phosphor` in the desktop app, `pyo3` in the Python bindings, and the
-  system `curl`, which is the operating system's and is patched by it. An
-  advisory in one of those five *with an argument for how Polylinker reaches
-  it* is welcome. A `cargo audit` transcript is not.
+  and `egui-phosphor` in the desktop app — joined on macOS only, since 0.13.5
+  (2026-09-05), by `objc2`, `objc2-app-kit` and `objc2-foundation` for its
+  native menu bar, all three already in `Cargo.lock` through eframe and rfd
+  before the app named them — `pyo3` in the Python bindings, and the system
+  `curl`, which is the operating system's and is patched by it. This list said
+  "five" until 2026-09-05. An advisory in one of those *with an argument for
+  how Polylinker reaches it* is welcome. A `cargo audit` transcript is not.
 
 **There is no infrastructure to test.** No server, no hosted service, no
 account, no telemetry endpoint, no login. Nothing is being offered here for
