@@ -177,3 +177,46 @@ rfd = "0.17"
 egui-phosphor = { version = "=0.13.0", default-features = false, features = [
     "bold",
 ] }
+
+# THE NATIVE MACOS MENU BAR, and the first target-specific table this manifest
+# has had. `src/macmenu.rs` is the only reader.
+#
+# NOT winit's objc2. winit 0.30.13 is on objc2 0.5.2 / objc2-app-kit 0.2.2;
+# eframe 0.35.0 itself is on 0.6.4 / 0.3.2 (eframe-0.35.0/Cargo.toml:182-202),
+# and eframe is the crate this binary actually names. Both majors were already
+# in Cargo.lock before this table existed. Mixing them is safe HERE because
+# nothing crosses the boundary: we ask the runtime for the shared NSApplication
+# singleton, which is one Objective-C object reachable identically from both,
+# and we hand winit nothing and take nothing of winit's.
+#
+# WHAT THIS TABLE COSTS, MEASURED 2026-09-05. Every feature below except
+# `NSEvent` was already unified into this build by eframe, rfd and glutin —
+# `cargo tree -p pl-gui -e features -i objc2-app-kit@0.3.2` lists them — so
+# naming them recompiles no dependency at all: `cargo build -p pl-gui` printed
+# "Compiling pl-gui" and nothing else, and Cargo.lock grew by three lines.
+# `NSEvent` is the one exception: it was not on, and turning it on recompiles
+# objc2-app-kit and six crates downstream of it (glutin, arboard, rfd,
+# egui-winit, glutin-winit, eframe), 5.30 s in a debug build. It is here for
+# two things `macmenu.rs` cannot do without it: `NSApplication.currentEvent`,
+# which is how a menu action learns whether it was a keystroke or a click —
+# the distinction `menu::Origin` exists for, and the one that keeps the
+# `typing` guard true on macOS — and `setKeyEquivalentModifierMask`, so ⌥⌘H
+# can be spelled as a modifier and not as a trick of letter case.
+#
+# `default-features = false` on both, so this names exactly what it uses. A
+# feature added here should be measured the way `NSEvent` was before its cost
+# is written down.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+] }

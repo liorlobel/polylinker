@@ -23,7 +23,13 @@ mod find;
 mod gel;
 mod help;
 mod library;
+/// The menu bar, installed. macOS only; everything it installs is `menu`.
+#[cfg(target_os = "macos")]
+mod macmenu;
 mod map;
+/// The menu bar, as data. Compiled and tested on every platform; see the
+/// module header for why.
+mod menu;
 /// File ▸ New: the one door into this program that is not a file. See the
 /// module header for why the bases travel through the file path regardless.
 mod newdoc;
@@ -3189,6 +3195,23 @@ impl App {
         // the advance the sequence grid's column mapping rests on, so a pass
         // that ran with the default chain and then swapped would lay out twice.
         install_fonts(&cc.egui_ctx);
+        // The native menu bar, HERE and not before `run_native`: winit
+        // installs a one-menu default of its own from
+        // `applicationDidFinishLaunching`, which runs after `main` and before
+        // this closure, and a bar installed earlier is gone by the time this
+        // line runs (measured 2026-09-05; `macmenu`'s header has the paths).
+        // `attach` first, so a click has a context to wake before there is
+        // anything to click. Both are idempotent across the two `start()`
+        // attempts `main` may make: `attach` overwrites, `install` replaces.
+        menu::attach(&cc.egui_ctx);
+        #[cfg(target_os = "macos")]
+        {
+            // The return value says only "was this the main thread", which
+            // `App::new` always is; a false here would be a winit that moved
+            // its creator closure, and the editor should still open without a
+            // menu rather than not open at all.
+            let _ = macmenu::install();
+        }
         // Styles are per-theme in egui 0.35, so BOTH are built rather than one
         // being stamped over whichever the user's system asks for. The closure
         // runs once per theme and `style.visuals.dark_mode` says which is being
@@ -5956,21 +5979,20 @@ impl eframe::App for App {
             }
         }
 
-        let keys = self.global_shortcuts(&ctx);
-        if keys.open {
-            self.pick_file();
-        }
-        if keys.new_doc {
-            self.newdoc.show();
-        }
-        if keys.undo {
-            self.do_undo();
-        }
-        if keys.redo {
-            self.do_redo();
-        }
-        if keys.save && self.document().is_some() {
-            self.export(false);
+        let (keys, chordless) = self.commands(&ctx);
+        // ONE LOOP, over `Shortcuts::commands`, so the list the menu is checked
+        // against is the list the application really dispatches. The four find
+        // commands are skipped here and handed to `find_keys` together: it
+        // settles the open typing run once and then steps, and splitting that
+        // across four arms would settle it four times.
+        for c in keys.commands() {
+            match c {
+                menu::Command::Find
+                | menu::Command::FindNext
+                | menu::Command::FindPrev
+                | menu::Command::CloseFind => {}
+                c => self.act(&ctx, c),
+            }
         }
         self.find_keys(&keys);
         // Here, beside `find_keys`, and for its reason: `refresh_primers`
@@ -5980,46 +6002,12 @@ impl eframe::App for App {
         // are read from the result, so it has to be settled before either is
         // painted rather than during.
         self.refresh_primers();
-        if keys.help && self.help.is_none() {
-            self.help = Some(help::Panel::default());
-        }
-
-        // TAB NAVIGATION, behind the same guards as the other accelerators —
-        // `asking()` and `text_edit_focused()` — so Ctrl+W typed into the
-        // Features filter closes a word and not somebody's plasmid.
-        //
-        // Ctrl+W is unguarded on purpose: a closed tab keeps its document and
-        // its undo history and Ctrl+Shift+T brings it back, so closing destroys
-        // nothing. The question belongs at the one place work really goes away,
-        // which is closing the window, and asking it twice is how a guard turns
-        // into a reflex.
-        if !self.asking() && !ctx.text_edit_focused() {
-            let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
-            if cmd && ctx.input(|i| i.key_pressed(egui::Key::W)) && !self.bench.is_empty() {
-                self.close_tab(self.bench.active());
-            }
-            if cmd && ctx.input(|i| i.key_pressed(egui::Key::Tab)) && self.bench.len() > 1 {
-                let n = self.bench.len();
-                let at = self.bench.active();
-                let next = if shift {
-                    (at + n - 1) % n
-                } else {
-                    (at + 1) % n
-                };
-                self.switch_tab(next);
-            }
-            if cmd && shift && ctx.input(|i| i.key_pressed(egui::Key::T)) {
-                if let Some(t) = self.closed.pop() {
-                    self.settle();
-                    let v = self.take_view();
-                    self.bench.store(v);
-                    self.bench.reopen(t);
-                    if let Some(v) = self.bench.take_active_view() {
-                        self.put_view(v);
-                    }
-                    self.doc_generation = self.doc_generation.wrapping_add(1);
-                }
-            }
+        // The menu's chordless commands — Save as .dna, the figure exports,
+        // About — after the chorded ones and in the order they were clicked.
+        // Nothing here can arrive from the keyboard; `menu::drain` is empty on
+        // every platform that installed no menu.
+        for c in chordless {
+            self.act(&ctx, c);
         }
 
         // Third worker, same contract, and it is started HERE rather than in
@@ -6213,6 +6201,97 @@ struct Shortcuts {
     /// safety: egui clears focus on Escape and does not consume the event, so
     /// one press both leaves the box and closes the bar.
     close_find: bool,
+    /// Ctrl+W, Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+Shift+T.
+    ///
+    /// THESE FOUR WERE READ INLINE IN `App::ui` AND ARE HERE NOW, and the move
+    /// is not tidying. They sat behind a hand-copied `!self.asking() &&
+    /// !ctx.text_edit_focused()` — the same two guards this function decides,
+    /// written a second time thirty lines below the first — so there were two
+    /// answers to "may a shortcut fire", and the second one lived in a function
+    /// that takes an `eframe::Frame` and therefore could not be driven from a
+    /// test at all. `find_keys`' doc block states that rule for exactly this
+    /// reason: "a decision written inline there is a decision no test can
+    /// reach".
+    ///
+    /// The menu bar is what forced it. A native File ▸ Close Tab has to name
+    /// the chord the application really binds, and
+    /// `the_menu_and_the_keyboard_agree_about_every_chord` proves it by
+    /// driving this function — which could say nothing at all about a chord
+    /// that was not in here.
+    ///
+    /// The VALUES are unchanged, deliberately: `close_tab` still ignores shift,
+    /// so Ctrl+Shift+W closes a tab exactly as it did before. That is now a
+    /// visible fact rather than an invisible one — `menu.rs` lists W under
+    /// Close Tab and the completeness sweep reads it — and changing it is a
+    /// separate decision from moving it.
+    close_tab: bool,
+    next_tab: bool,
+    prev_tab: bool,
+    reopen_tab: bool,
+}
+
+impl Shortcuts {
+    /// Fold a menu command into this frame's keyboard answer.
+    ///
+    /// Returns false for a command with no chord — those have no field here and
+    /// go straight to `App::act`. THE ONLY PLACE a `Command` becomes a
+    /// `Shortcuts` field, and `commands` below is its inverse; the two are
+    /// checked against each other by `set_and_commands_are_inverses`, so the
+    /// menu path and the keyboard path cannot come to mean different things.
+    fn set(&mut self, c: menu::Command) -> bool {
+        use menu::Command as C;
+        match c {
+            C::Open => self.open = true,
+            C::NewDoc => self.new_doc = true,
+            C::Undo => self.undo = true,
+            C::Redo => self.redo = true,
+            C::Save => self.save = true,
+            C::Find => self.find = true,
+            C::FindNext => self.find_next = true,
+            C::FindPrev => self.find_prev = true,
+            C::CloseFind => self.close_find = true,
+            C::Help => self.help = true,
+            C::CloseTab => self.close_tab = true,
+            C::NextTab => self.next_tab = true,
+            C::PrevTab => self.prev_tab = true,
+            C::ReopenTab => self.reopen_tab = true,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Which commands this frame's keys asked for.
+    ///
+    /// The dispatch loop in `App::ui` reads this, so it is production and not
+    /// test scaffolding — which matters, because
+    /// `the_menu_and_the_keyboard_agree_about_every_chord` uses it as its
+    /// account of what the application really did with a chord. A projection
+    /// only the test used would be a second table wearing a function's clothes.
+    fn commands(self) -> Vec<menu::Command> {
+        use menu::Command as C;
+        let mut out = Vec::new();
+        for (on, c) in [
+            (self.open, C::Open),
+            (self.new_doc, C::NewDoc),
+            (self.undo, C::Undo),
+            (self.redo, C::Redo),
+            (self.save, C::Save),
+            (self.close_tab, C::CloseTab),
+            (self.next_tab, C::NextTab),
+            (self.prev_tab, C::PrevTab),
+            (self.reopen_tab, C::ReopenTab),
+            (self.help, C::Help),
+            (self.find, C::Find),
+            (self.find_next, C::FindNext),
+            (self.find_prev, C::FindPrev),
+            (self.close_find, C::CloseFind),
+        ] {
+            if on {
+                out.push(c);
+            }
+        }
+        out
+    }
 }
 
 impl App {
@@ -6324,8 +6403,177 @@ impl App {
                 find_next,
                 find_prev,
                 close_find,
+                // Byte for byte what the block in `App::ui` used to read. The
+                // `!self.bench.is_empty()` / `len() > 1` preconditions are
+                // deliberately NOT here: those are capability questions, they
+                // belong in `App::can` beside "is there a document", and a
+                // guard that also asked "is there anything to do" could not be
+                // reused by the menu, which has to grey the item out rather
+                // than swallow the click.
+                close_tab: cmd && i.key_pressed(egui::Key::W),
+                next_tab: cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Tab),
+                prev_tab: cmd && i.modifiers.shift && i.key_pressed(egui::Key::Tab),
+                reopen_tab: cmd && i.modifiers.shift && i.key_pressed(egui::Key::T),
             }
         })
+    }
+
+    /// Everything the application has been asked to do this frame — the keys,
+    /// and the native menu, through one gate.
+    ///
+    /// See `menu::Gate` for why the guards are decided in one place, and which
+    /// one of the three does not apply to a click. This is also where the
+    /// menu learns what to grey: the mask is published from the same gate and
+    /// the same `can`, so an item's appearance and its effect are one decision.
+    fn commands(&self, ctx: &egui::Context) -> (Shortcuts, Vec<menu::Command>) {
+        let mut keys = self.global_shortcuts(ctx);
+        let gate = menu::Gate::read(
+            self.asking(),
+            ctx.text_edit_focused(),
+            self.design.is_some() || self.feature_edit.is_some(),
+        );
+        menu::publish_enabled(|c| gate.allows(c, menu::Origin::Click) && self.can(c));
+        let mut chordless = Vec::new();
+        for (c, from) in menu::drain() {
+            if gate.allows(c, from) && !keys.set(c) {
+                chordless.push(c);
+            }
+        }
+        (keys, chordless)
+    }
+
+    /// Run one command.
+    ///
+    /// THE ONE DISPATCHER. The keyboard reaches it through
+    /// `Shortcuts::commands` and the native menu reaches it through
+    /// `App::commands`, and there is no third door — which is the whole reason
+    /// `menu::Command` exists.
+    fn act(&mut self, ctx: &egui::Context, c: menu::Command) {
+        use menu::Command as C;
+        if !self.can(c) {
+            return;
+        }
+        match c {
+            C::Open => self.pick_file(),
+            C::NewDoc => self.newdoc.show(),
+            C::OpenExample => self.open_example(),
+            C::Undo => self.do_undo(),
+            C::Redo => self.do_redo(),
+            C::Save => self.export(false),
+            C::SaveDna => self.save_dna(None),
+            C::SaveFasta => self.export(true),
+            C::SaveProtein => self.export_protein(),
+            C::SaveProject => self.save_project(),
+            C::OpenProject => self.open_project(),
+            C::ExportFigureSvg => self.export_figure(Fmt::Svg),
+            C::ExportFigurePdf => self.export_figure(Fmt::Pdf),
+            C::ExportFigureEps => self.export_figure(Fmt::Eps),
+            C::ExportFigurePng => self.export_figure(Fmt::Png),
+            C::CloseTab => self.close_tab(self.bench.active()),
+            C::ReopenTab => self.reopen_tab(),
+            C::NextTab => self.step_tab(1),
+            C::PrevTab => self.step_tab(-1),
+            // `ViewportCommand::Close` and NOT `terminate:`: it sets
+            // `close_requested` on the next frame, which is the one thing
+            // `close_request`'s unsaved-changes latch reads. See the Quit item
+            // in `menu.rs` for what the AppKit route costs, and what it still
+            // costs from the Dock.
+            C::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            C::Help => {
+                if self.help.is_none() {
+                    self.help = Some(help::Panel::default());
+                }
+            }
+            C::HelpAbout => {
+                self.help = Some(help::Panel {
+                    page: help::Page::About,
+                })
+            }
+            C::HelpTm => {
+                self.help = Some(help::Panel {
+                    page: help::Page::Topic("tm"),
+                })
+            }
+            C::HelpLicences => {
+                self.help = Some(help::Panel {
+                    page: help::Page::Licence(0),
+                })
+            }
+            // `find_keys` owns these four; `App::ui` does not route them here.
+            C::Find | C::FindNext | C::FindPrev | C::CloseFind => {}
+        }
+    }
+
+    /// Whether `c` could do anything at all right now.
+    ///
+    /// The PRECONDITIONS, and nothing about the guards — those are
+    /// `menu::Gate`. Read by `act` before it runs anything, and by
+    /// `App::commands` to publish what the menu greys, so an item's
+    /// appearance and an item's effect are one decision rather than two.
+    ///
+    /// **UNDO AND REDO ARE NOT IN HERE, and that is a refusal.** The obvious
+    /// arm is `self.document().is_some_and(|d| d.log.can_undo())`, which is
+    /// what the toolbar greys on — and it is wrong as an effect gate, because
+    /// `do_undo` opens with `self.settle()`. A run of typing that has not been
+    /// settled yet is not in the log, so `can_undo()` is false while the thing
+    /// the user means to undo is sitting in `SeqEdit`. Gating on it would make
+    /// Ctrl+Z immediately after typing do nothing.
+    fn can(&self, c: menu::Command) -> bool {
+        use menu::Command as C;
+        let doc = self.document().is_some();
+        match c {
+            C::Save
+            | C::SaveDna
+            | C::SaveFasta
+            | C::SaveProtein
+            | C::ExportFigureSvg
+            | C::ExportFigurePdf
+            | C::ExportFigureEps
+            | C::ExportFigurePng
+            | C::Find => doc,
+            C::CloseTab => !self.bench.is_empty(),
+            C::NextTab | C::PrevTab => self.bench.len() > 1,
+            C::ReopenTab => !self.closed.is_empty(),
+            _ => true,
+        }
+    }
+
+    /// Ctrl+Shift+T, lifted out of `App::ui` unchanged.
+    fn reopen_tab(&mut self) {
+        if let Some(t) = self.closed.pop() {
+            self.settle();
+            let v = self.take_view();
+            self.bench.store(v);
+            self.bench.reopen(t);
+            if let Some(v) = self.bench.take_active_view() {
+                self.put_view(v);
+            }
+            self.doc_generation = self.doc_generation.wrapping_add(1);
+        }
+    }
+
+    /// Ctrl+Tab, lifted out of `App::ui` unchanged. `by` is +1 or -1.
+    fn step_tab(&mut self, by: i64) {
+        let n = self.bench.len();
+        let at = self.bench.active();
+        let next = if by < 0 {
+            (at + n - 1) % n
+        } else {
+            (at + 1) % n
+        };
+        self.switch_tab(next);
+    }
+
+    /// One figure export, chosen by what is on screen — the same two-way
+    /// switch the toolbar's `Export figure` menu makes, in one place.
+    fn export_figure(&mut self, fmt: Fmt) {
+        match (self.central_view == CentralView::Gel, fmt) {
+            (true, f) => self.export_gel(f),
+            (false, Fmt::Svg) => self.export_svg(),
+            (false, Fmt::Pdf) => self.export_pdf(),
+            (false, Fmt::Eps) => self.export_map_eps(),
+            (false, Fmt::Png) => self.export_map_png(),
+        }
     }
 
     fn top_bar(&mut self, ui: &mut Ui) {
@@ -38171,6 +38419,652 @@ ATGAAACGCTAA
             ctx.memory(|m| m.focused()),
             None,
             "Escape could not leave the grid"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The menu bar
+    //
+    // Every test here runs on every platform, on purpose. The menu is only
+    // ever INSTALLED on macOS, but "which chord does File ▸ Save advertise, and
+    // is that the chord the application actually binds" is not a macOS
+    // question, and a check that only ran on the macOS leg would be a check
+    // nobody saw fail until the release build.
+    //
+    // What is NOT here, said out loud so nobody looks for it: nothing below
+    // touches AppKit, so nothing below can tell you that `NSMenu` accepted the
+    // table or that the process survived installing it. That is the
+    // `gui-smoke` job's half of the claim — `App::new` installs the menu, and
+    // that job runs `App::new` on a real macOS runner on every push.
+    // -----------------------------------------------------------------------
+
+    /// `Shortcuts::set` and `Shortcuts::commands` are inverses.
+    ///
+    /// They are the two halves of the one projection between a `Command` and a
+    /// `Shortcuts` field — the menu path uses the first and the dispatch loop
+    /// uses the second — and the chord test below reads the second as its
+    /// account of what the application did. If they disagree about a command,
+    /// every assertion downstream is about the wrong field.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 by pointing `set(Command::PrevTab)` at
+    /// `self.next_tab`:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: setting PrevTab and reading the flags
+    /// back gives something else
+    ///   left: [NextTab]
+    ///  right: [PrevTab]
+    /// ```
+    #[test]
+    fn set_and_commands_are_inverses() {
+        for c in menu::Command::ALL {
+            let mut s = Shortcuts::default();
+            let chorded = s.set(*c);
+            if chorded {
+                assert_eq!(
+                    s.commands(),
+                    vec![*c],
+                    "setting {c:?} and reading the flags back gives something else"
+                );
+            } else {
+                assert_eq!(
+                    s,
+                    Shortcuts::default(),
+                    "{c:?} has no `Shortcuts` field but `set` changed one anyway"
+                );
+            }
+        }
+    }
+
+    /// Press the chord the menu prints, and see what the application really
+    /// does with it.
+    ///
+    /// **THIS IS THE TEST THE TABLE EXISTS FOR.** The failure a menu bar
+    /// invites is an item that advertises a chord the program does not bind, or
+    /// binds to something else — File ▸ Save reading ⌘S beside a program where
+    /// ⌘S opens the Library — and a menu is exactly the kind of artefact where
+    /// that is invisible: the label is right, the item is enabled, the keystroke
+    /// goes somewhere else, and the only person who finds out is a user who has
+    /// just overwritten a file.
+    ///
+    /// Comparing `menu::MENUS` against a second table written here would prove
+    /// nothing at all: two hand-written tables agree until somebody edits one,
+    /// and the one they would both be wrong about is the application. So this
+    /// drives THE APPLICATION. For every bind on the board it synthesises the
+    /// frame that chord produces, hands it to `App::global_shortcuts` — the
+    /// real function, with its real guards, called the way `App::ui` calls it —
+    /// and requires the answer to be exactly the item's own command and nothing
+    /// else.
+    ///
+    /// Three kinds of item, and all three are checked:
+    ///
+    /// - an `Action::App(c)` whose command has a `Shortcuts` field must fire
+    ///   exactly `c`;
+    /// - an `Action::App(c)` whose command has none — Quit — must fire nothing,
+    ///   which is how we know ⌘Q does not collide with something of ours;
+    /// - an `Action::System(_)` must fire nothing, same reason: ⌘H, ⌥⌘H and ⌘M
+    ///   belong to AppKit and this application must not be quietly reading them
+    ///   too.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05. `File ▸ Save as GenBank…` was changed from
+    /// `Chord::cmd(Key::S)` to `Chord::cmd(Key::D)` — one letter, the exact
+    /// mistake a menu invites — and:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: File > "Save as GenBank…" advertises
+    /// Chord { key: D, cmd: true, shift: false, alt: false } and the
+    /// application does something else with it
+    ///   left: []
+    ///  right: [Save]
+    /// ```
+    #[test]
+    fn the_menu_and_the_keyboard_agree_about_every_chord() {
+        let ctx = test_ctx();
+        let app = App::blank();
+        // The premise. Every assertion below reads "the application did
+        // nothing" as evidence, and a guard standing up would produce exactly
+        // that for every chord at once.
+        assert!(!app.asking(), "the fixture must not be behind a question");
+        assert!(
+            !ctx.text_edit_focused(),
+            "the fixture must not have a text box holding the keyboard"
+        );
+
+        let mut checked = 0;
+        for (menu, label, action, binds) in menu::items() {
+            for b in binds {
+                let want = match action {
+                    menu::Action::App(c) => {
+                        let mut s = Shortcuts::default();
+                        if s.set(c) {
+                            vec![c]
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    menu::Action::System(_) => Vec::new(),
+                };
+                let mut got = Vec::new();
+                let _ = ctx.run_ui(b.chord.raw_input(), |ui| {
+                    got = app.global_shortcuts(ui.ctx()).commands();
+                });
+                assert_eq!(
+                    got, want,
+                    "{menu} > {label:?} advertises {:?} and the application does \
+                     something else with it",
+                    b.chord
+                );
+                checked += 1;
+            }
+        }
+        // Not vacuous: the loop above proves nothing if the table is empty.
+        assert!(
+            checked >= 15,
+            "only {checked} chords on the board, so this test is not covering the menu"
+        );
+    }
+
+    /// Every modifier combination of every key, swept, and nothing the
+    /// application honours is missing from the board.
+    ///
+    /// The test above is SOUNDNESS — what the menu claims is true. This is
+    /// COMPLETENESS — what is true is claimed. Without it a chord could be
+    /// added to `global_shortcuts` and surfaced nowhere, which is the defect the
+    /// F1 help window and the Ctrl+F find bar were both written to close, in a
+    /// program whose own toolbar comment records that "four of the eight
+    /// toolbar buttons had no shortcut and advertised none".
+    ///
+    /// **IT IS A KEY-LEVEL CLAIM AND NOT A CHORD-LEVEL ONE, deliberately.**
+    /// `global_shortcuts` is loose about modifiers by construction — `help` is
+    /// `i.key_pressed(Key::F1)` with no modifier test at all, so ⇧F1, ⌘F1 and
+    /// ⇧⌘F1 all open Help; `open` is `cmd && Key::O` with no `!shift`, so ⇧⌘O
+    /// opens a file dialog too. A menu item can print one chord. Requiring the
+    /// table to enumerate all four spellings of F1 would be requiring it to
+    /// describe a thing menus cannot show. So what is required is that the KEY
+    /// is on the board, under the command it fires: if ⌘Y does a Redo, some
+    /// Redo bind must name `Key::Y`.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 by dropping the withheld ⌘Y bind from
+    /// `Edit ▸ Redo`:
+    ///
+    /// ```text
+    /// Chord { key: Y, cmd: true, shift: false, alt: false } makes the
+    /// application do [Redo] and no menu item for Redo names Key::Y — so the
+    /// application has a shortcut its menu does not admit to
+    /// ```
+    #[test]
+    fn every_key_the_application_honours_is_on_the_board() {
+        let ctx = test_ctx();
+        let app = App::blank();
+        // Which keys the board names, per command.
+        let mut named: std::collections::HashMap<menu::Command, Vec<egui::Key>> =
+            std::collections::HashMap::new();
+        for (_, _, action, binds) in menu::items() {
+            if let menu::Action::App(c) = action {
+                named
+                    .entry(c)
+                    .or_default()
+                    .extend(binds.iter().map(|b| b.chord.key));
+            }
+        }
+
+        let mut fired = 0;
+        for key in egui::Key::ALL {
+            for cmd in [false, true] {
+                for shift in [false, true] {
+                    for alt in [false, true] {
+                        let chord = menu::Chord {
+                            key: *key,
+                            cmd,
+                            shift,
+                            alt,
+                        };
+                        let mut got = Vec::new();
+                        let _ = ctx.run_ui(chord.raw_input(), |ui| {
+                            got = app.global_shortcuts(ui.ctx()).commands();
+                        });
+                        for c in &got {
+                            assert!(
+                                named.get(c).is_some_and(|ks| ks.contains(key)),
+                                "{chord:?} makes the application do {got:?} and no menu item \
+                                 for {c:?} names {key:?} — so the application has a shortcut \
+                                 its menu does not admit to"
+                            );
+                            fired += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // The control. A sweep that fired nothing would pass every assertion
+        // above and mean nothing at all — which is exactly what would happen if
+        // `App::blank()` ever came up behind a modal.
+        assert!(
+            fired > 20,
+            "the sweep fired only {fired} commands over {} keys, so the fixture is \
+             swallowing everything and this proves nothing",
+            egui::Key::ALL.len()
+        );
+    }
+
+    /// No chord is claimed twice.
+    ///
+    /// Ours against ours, ours against AppKit's, and AppKit's against itself —
+    /// which is why `menu::Standard` is in the same table rather than left to
+    /// the installer. The case this was written for is real and is one line
+    /// away in every macOS menu tutorial: the standard Window menu puts Close
+    /// on ⌘W, and this application has bound ⌘W to "close the active tab" since
+    /// the bench existed. Installing both would repoint the chord at the window
+    /// and take every other open document with it.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 by adding the conventional `Window ▸ Close`
+    /// item on ⌘W:
+    ///
+    /// ```text
+    /// Chord { key: W, cmd: true, shift: false, alt: false } is claimed by
+    /// both File > "Close Tab" and Window > "Close"
+    /// ```
+    #[test]
+    fn no_two_menu_items_claim_the_same_chord() {
+        let mut seen: std::collections::HashMap<menu::Chord, (&str, &str)> =
+            std::collections::HashMap::new();
+        for (m, label, _, binds) in menu::items() {
+            for b in binds {
+                if let Some((pm, pl)) = seen.insert(b.chord, (m, label)) {
+                    panic!(
+                        "{:?} is claimed by both {pm} > {pl:?} and {m} > {label:?}",
+                        b.chord
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every command is on the board, and on it once.
+    ///
+    /// Once, because a command in two menus is two labels to keep in step and
+    /// the second one is the one that goes stale; and at all, because a command
+    /// nothing can reach is a command that does not exist.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 both ways: adding `Open an example plasmid`
+    /// to the File menu as well as the Help menu —
+    /// `OpenExample is on the board twice: File > "Open an example plasmid"
+    /// and Help > "Open an example plasmid"` — and deleting the
+    /// `Save protein FASTA…` item — `SaveProtein is a command no menu item
+    /// offers`.
+    #[test]
+    fn every_command_is_on_the_board_exactly_once() {
+        let mut where_: std::collections::HashMap<menu::Command, (&str, &str)> =
+            std::collections::HashMap::new();
+        for (m, label, action, _) in menu::items() {
+            if let menu::Action::App(c) = action {
+                if let Some((pm, pl)) = where_.insert(c, (m, label)) {
+                    panic!("{c:?} is on the board twice: {pm} > {pl:?} and {m} > {label:?}");
+                }
+            }
+        }
+        for c in menu::Command::ALL {
+            assert!(
+                where_.contains_key(c),
+                "{c:?} is a command no menu item offers"
+            );
+        }
+    }
+
+    /// An item prints at most one chord.
+    ///
+    /// `NSMenuItem` has exactly one `keyEquivalent`, so a second
+    /// `Show::KeyEquivalent` on one item is a bind the installer would have to
+    /// silently drop — and it would drop whichever one came second, which is
+    /// not a decision anybody made.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 by promoting `Edit ▸ Redo`'s withheld ⌘Y
+    /// to `shown` alongside a shown ⇧⌘Z:
+    /// `Edit > "Redo" prints two chords, and an NSMenuItem has one
+    /// keyEquivalent`.
+    #[test]
+    fn an_item_prints_at_most_one_chord() {
+        for (m, label, _, binds) in menu::items() {
+            let shown: Vec<menu::Chord> = binds
+                .iter()
+                .filter(|b| b.show == menu::Show::KeyEquivalent)
+                .map(|b| b.chord)
+                .collect();
+            assert!(
+                shown.len() <= 1,
+                "{m} > {label:?} prints two chords, and an NSMenuItem has one \
+                 keyEquivalent: {shown:?}"
+            );
+        }
+    }
+
+    /// The text-editing chords are never installed as key equivalents.
+    ///
+    /// This is the module header's measurement made into a rule: a key
+    /// equivalent takes the chord before egui sees it, and ⌘Z / ⇧⌘Z belong to
+    /// `TextEdit` for whichever box has the caret. An Undo item printing ⌘Z
+    /// would make ⌘Z dead in every text field in the window. `Show::Withheld`
+    /// is how the table says so; this is what stops the next editor of the
+    /// table promoting it back to `shown` because a Mac Edit menu "should" show
+    /// ⌘Z.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 by changing `Edit ▸ Undo`'s bind from
+    /// `withheld` to `shown`:
+    /// `Edit > "Undo" installs Chord { key: Z, .. } as a key equivalent, and
+    /// that chord belongs to the focused text box`.
+    #[test]
+    fn the_text_editing_chords_are_never_installed_as_key_equivalents() {
+        for (m, label, _, binds) in menu::items() {
+            for b in binds {
+                let text_chord = b.chord.key == egui::Key::Z || b.chord.key == egui::Key::Escape;
+                assert!(
+                    !(text_chord && b.show == menu::Show::KeyEquivalent),
+                    "{m} > {label:?} installs {:?} as a key equivalent, and that chord \
+                     belongs to the focused text box",
+                    b.chord
+                );
+            }
+        }
+    }
+
+    /// The toolbar's ellipsis discipline, on the menu bar.
+    ///
+    /// `App::top_bar` writes the rule down — "'…' means 'this opens a file
+    /// dialog'. The menu buttons do not carry one; the leaf items that reach
+    /// `rfd::FileDialog` do" — and it is a rule about what a click will do to
+    /// the user's screen, not about which widget draws it. A native File ▸ Save
+    /// with no ellipsis beside a toolbar Save… with one would be the same
+    /// program disagreeing with itself in two places at once.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 by dropping the ellipsis from
+    /// `Save as FASTA…` — `File > "Save as FASTA" does not end in an ellipsis
+    /// and opens a file dialog` — and by adding one to `New`, which is where
+    /// the rule bites the other way, because New reaches a modal of this
+    /// application's own and touches no path at all.
+    #[test]
+    fn only_the_items_that_open_a_file_dialog_carry_an_ellipsis() {
+        use menu::Command as C;
+        for (m, label, action, _) in menu::items() {
+            let menu::Action::App(c) = action else {
+                continue;
+            };
+            // Which commands reach `rfd::FileDialog`, read off `App::act`'s
+            // arms one at a time rather than guessed from the label.
+            let dialog = matches!(
+                c,
+                C::Open
+                    | C::Save
+                    | C::SaveDna
+                    | C::SaveFasta
+                    | C::SaveProtein
+                    | C::SaveProject
+                    | C::OpenProject
+                    | C::ExportFigureSvg
+                    | C::ExportFigurePdf
+                    | C::ExportFigureEps
+                    | C::ExportFigurePng
+            );
+            assert_eq!(
+                dialog,
+                label.ends_with('…'),
+                "{m} > {label:?} {} an ellipsis and {}; App::top_bar states the rule",
+                if label.ends_with('…') {
+                    "ends in"
+                } else {
+                    "does not end in"
+                },
+                if dialog {
+                    "opens a file dialog"
+                } else {
+                    "opens none"
+                }
+            );
+        }
+    }
+
+    /// The gate refuses what the guards refuse, and the origin is the only
+    /// thing that moves.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 three ways, each pasted at its assertion.
+    #[test]
+    fn the_menu_gate_stands_down_for_a_question_a_text_box_and_the_design_panel() {
+        use menu::Origin::{Click, KeyEquivalent};
+        let clear = menu::Gate::read(false, false, false);
+        let question = menu::Gate::read(true, false, false);
+        let typing = menu::Gate::read(false, true, false);
+        let panel = menu::Gate::read(false, false, true);
+        for c in menu::Command::ALL {
+            for from in [Click, KeyEquivalent] {
+                // PROVEN TO FAIL by deleting the `asking` arm:
+                //   NewDoc is allowed while a question about the document is on screen
+                assert!(
+                    clear.allows(*c, from),
+                    "{c:?} is refused with nothing in the way"
+                );
+                assert!(
+                    !question.allows(*c, from),
+                    "{c:?} is allowed while a question about the document is on screen"
+                );
+                // PROVEN TO FAIL by deleting the `designing` arm:
+                //   Undo and the design panel: the menu gate and
+                //   `global_shortcuts`' `designing` guard disagree
+                let editing = matches!(c, menu::Command::Undo | menu::Command::Redo);
+                assert_eq!(
+                    panel.allows(*c, from),
+                    !editing,
+                    "{c:?} and the design panel: the menu gate and `global_shortcuts`' \
+                     `designing` guard disagree"
+                );
+            }
+            // THE ORIGIN SPLIT, which is the only asymmetry in the gate. A
+            // click is not a keystroke and a text box is owed nothing by it.
+            assert!(
+                typing.allows(*c, Click),
+                "{c:?} clicked in a menu was refused because a text box somewhere has \
+                 the caret"
+            );
+            // PROVEN TO FAIL by dropping the `typing` arm from `Gate::allows`,
+            // which is what installing the key equivalents does if nobody puts
+            // it back:
+            //   Save typed as a key equivalent while a text box has the
+            //   keyboard: the gate and `global_shortcuts`' `typing` guard disagree
+            assert_eq!(
+                typing.allows(*c, KeyEquivalent),
+                menu::Gate::exempt_from_typing(*c),
+                "{c:?} typed as a key equivalent while a text box has the keyboard: the \
+                 gate and `global_shortcuts`' `typing` guard disagree"
+            );
+        }
+        // And the exemptions are exactly the four they are meant to be: the
+        // find keys, which `global_shortcuts` reads above its own guard, and
+        // Quit, which has never been a text-editing chord. PROVEN TO FAIL by
+        // adding `Command::Save` to `exempt_from_typing`.
+        let exempt: Vec<_> = menu::Command::ALL
+            .iter()
+            .copied()
+            .filter(|c| menu::Gate::exempt_from_typing(*c))
+            .collect();
+        assert_eq!(
+            exempt,
+            vec![
+                menu::Command::Quit,
+                menu::Command::FindNext,
+                menu::Command::FindPrev,
+                menu::Command::CloseFind,
+            ],
+            "something else has been exempted from the typing guard"
+        );
+    }
+
+    /// The gate and the keyboard are ONE policy, driven against the real
+    /// function under the real guard states.
+    ///
+    /// **THIS IS THE TEST THE `Origin` ENUM EXISTS FOR.** Installing a chord as
+    /// an `NSMenuItem` key equivalent takes it away from egui — AppKit's
+    /// `performKeyEquivalent:` runs before the responder chain and winit
+    /// overrides neither — so on macOS every advertised chord stops arriving at
+    /// `App::global_shortcuts` and starts arriving at the menu queue instead.
+    /// Everything `global_shortcuts` refuses, the queue must refuse identically,
+    /// or the menu bar is a way of deleting the guards a keystroke at a time.
+    ///
+    /// So: for every item on the board, in every guard state, press the chord,
+    /// ask the real function what it did, ask `Gate` what it would allow a key
+    /// equivalent to do, and require the two to agree.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 by dropping the `typing` arm from
+    /// `Gate::allows` — the mutation that models simply installing the key
+    /// equivalents and leaving the gate as it was:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: with a text box holding the keyboard,
+    /// File > "Open…" pressed as Chord { key: O, cmd: true, .. } makes the
+    /// application do [] and the menu gate would let Open through
+    ///   left: false
+    ///  right: true
+    /// ```
+    #[test]
+    fn the_menu_gate_and_the_keyboard_guards_are_one_policy() {
+        // A real `TextEdit`, built every frame with the same id, because a bare
+        // focused id has no `TextEditState` behind it and `text_edit_focused`
+        // would answer no — the trap `shortcuts_with`'s doc comment records.
+        fn box_(ui: &mut Ui, on: bool, text: &mut String) {
+            if on {
+                ui.add(egui::TextEdit::singleline(text).id(egui::Id::new("a box")));
+            }
+        }
+        for (name, asking, typing, designing) in [
+            ("nothing in the way", false, false, false),
+            ("a question on screen", true, false, false),
+            ("a text box holding the keyboard", false, true, false),
+            ("the feature editor open", false, false, true),
+        ] {
+            let ctx = test_ctx();
+            let mut text = String::new();
+            let mut app = App::blank();
+            app.bench.set(edited_doc("x.fa", "AAAACCCCGGGGTTTT"));
+            if asking {
+                app.closing = true;
+            }
+            if designing {
+                app.feature_edit = Some(
+                    featedit::Panel::open(Some(0), rich_feature(), 400, false, None)
+                        .expect("a molecule with a span"),
+                );
+            }
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| box_(ui, typing, &mut text));
+            if typing {
+                ctx.memory_mut(|m| m.request_focus(egui::Id::new("a box")));
+            }
+            // The premises, all three, so "the application did nothing" cannot
+            // be true for a reason nobody meant.
+            assert_eq!(
+                app.asking(),
+                asking,
+                "{name}: the `asking` fixture is wrong"
+            );
+            assert_eq!(
+                ctx.text_edit_focused(),
+                typing,
+                "{name}: the `typing` fixture is wrong"
+            );
+            assert_eq!(
+                app.design.is_some() || app.feature_edit.is_some(),
+                designing,
+                "{name}: the `designing` fixture is wrong"
+            );
+
+            let gate = menu::Gate::read(asking, typing, designing);
+            for (m, label, action, binds) in menu::items() {
+                let menu::Action::App(c) = action else {
+                    continue;
+                };
+                let Some(b) = binds.first() else { continue };
+                let mut probe = Shortcuts::default();
+                if !probe.set(c) {
+                    // Quit and the chordless commands: no keyboard binding to
+                    // compare against. `the_menu_and_the_keyboard_agree_about_
+                    // every_chord` is what checks those.
+                    continue;
+                }
+                // THE FIXTURE IS RE-ARMED FOR EVERY ITEM, and that is not
+                // belt and braces — the first version armed it once and went
+                // red on `View ▸ Next Tab`, for a reason worth keeping: the
+                // item before it is `Edit ▸ Hide Find Bar` on Escape, and egui
+                // clears keyboard focus on Escape (`Memory::begin_pass`). So
+                // one press of the chord under test took the premise away from
+                // every item after it, and the loop went on asserting against
+                // a `typing` that was no longer true. The per-item assertion
+                // below is what says the premise still holds at the moment
+                // each chord is pressed.
+                let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    box_(ui, typing, &mut text);
+                });
+                if typing {
+                    ctx.memory_mut(|m| m.request_focus(egui::Id::new("a box")));
+                }
+                assert_eq!(
+                    ctx.text_edit_focused(),
+                    typing,
+                    "{name}: the `typing` premise had gone by {m} > {label:?}"
+                );
+                let mut got = Vec::new();
+                let _ = ctx.run_ui(b.chord.raw_input(), |ui| {
+                    got = app.global_shortcuts(ui.ctx()).commands();
+                    box_(ui, typing, &mut text);
+                });
+                assert_eq!(
+                    got.contains(&c),
+                    gate.allows(c, menu::Origin::KeyEquivalent),
+                    "with {name}, {m} > {label:?} pressed as {:?} makes the application do \
+                     {got:?} and the menu gate would {} {c:?} through",
+                    b.chord,
+                    if gate.allows(c, menu::Origin::KeyEquivalent) {
+                        "let"
+                    } else {
+                        "refuse"
+                    }
+                );
+            }
+        }
+    }
+
+    /// Quit asks; it does not terminate.
+    ///
+    /// The whole reason the menu bar owns ⌘Q: `act(Quit)` must produce the one
+    /// thing `close_request`'s unsaved-changes latch reads, which is a
+    /// `ViewportCommand::Close` in this frame's output, and NOTHING else — no
+    /// `std::process::exit`, no `terminate:`, no direct call into `on_exit`.
+    /// The existing close-path tests take it from there: a `close_requested`
+    /// on the next frame with a dirty bench raises the question and cancels
+    /// the close.
+    ///
+    /// PROVEN TO FAIL on 2026-09-05 by making the `Quit` arm a no-op:
+    /// `Quit produced no ViewportCommand::Close, so nothing would ask about
+    /// unsaved work`.
+    #[test]
+    fn quit_from_the_menu_asks_through_the_close_path() {
+        let ctx = test_ctx();
+        let mut app = App::blank();
+        app.bench.set(edited_doc("x.fa", "AAAACCCCGGGGTTTT"));
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.act(ui.ctx(), menu::Command::Quit);
+        });
+        let root = out
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("the root viewport reports its commands");
+        assert!(
+            root.commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "Quit produced no ViewportCommand::Close, so nothing would ask about unsaved \
+             work: {:?}",
+            root.commands
+        );
+        // And the document is untouched: asking is not answering.
+        assert!(
+            app.bench.any_unsaved(),
+            "Quit discarded or saved the work instead of asking about it"
         );
     }
 }

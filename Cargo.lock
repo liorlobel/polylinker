@@ -2480,6 +2480,9 @@ version = "0.13.4"
 dependencies = [
  "eframe",
  "egui-phosphor",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "pl-abif",
  "pl-clone",
  "pl-core",

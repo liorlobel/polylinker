@@ -25,6 +25,71 @@ which.
 
 ## [Unreleased]
 
+### Added
+
+- **A native macOS menu bar.** Polylinker, File, Edit, View, Window and Help,
+  with every command the toolbar offers — New, Open, the four Save formats,
+  projects, the four figure exports, Close Tab, Reopen Closed Tab, Undo, Redo,
+  Find and its steps, the tabs, the three Help pages and the example plasmid —
+  beside the standard items: About, Services, Hide, Hide Others, Show All,
+  Minimize, Zoom, Bring All to Front, and Quit. Every item is driven from the
+  same list the keyboard reads, and two tests hold the two together on every CI
+  leg, not only the macOS one: one presses every chord the menu prints and
+  asks `App::global_shortcuts` what the application really does with it, and
+  one sweeps every key under every modifier and refuses a shortcut the menu
+  does not admit to.
+
+  Two things a Mac user will notice are missing, and both were measured rather
+  than forgotten. **Undo and Redo print no ⌘Z**, because an `NSMenuItem` key
+  equivalent takes the keystroke before egui sees it — a disabled item too —
+  and ⌘Z belongs to whichever text box has the caret before it belongs to the
+  molecule; claiming it would have made ⌘Z dead in every text field in the
+  window. The items are clickable and the chords stay exactly where they are.
+  **There are no Cut, Copy, Paste or Select All items**, because the standard
+  selectors go to a responder chain that winit's view does not answer: such
+  items are permanently grey, and a grey item still eats its chord, so a
+  conventional Edit menu killed ⌘C and ⌘A in every text box, measured A/B.
+
+  The dependency table this needs is `objc2`, `objc2-app-kit` and
+  `objc2-foundation`, all three already in `Cargo.lock` through eframe and
+  rfd; one feature (`NSEvent`) was not already on and costs a recompile of
+  seven crates, which is written down beside it. Linux and Windows builds are
+  untouched: the table is target-gated and the installer is `cfg(macos)`.
+
+### Fixed
+
+- **⌘Q on a dirty plasmid lost the document and its only crash copy, silently.**
+  Not a defect this menu bar introduced — one it replaces. winit installs a
+  menu bar of its own with Quit bound to `terminate:`, and it has been live in
+  every shipped Polylinker. `terminate:` reaches eframe's `on_exit`, which is
+  wired on purpose, but it never produces a `CloseRequested`, so
+  `App::close_request` — armed by `close_requested()` — never runs; the
+  unsaved-changes question is not asked; and `on_exit` then deletes every
+  recovery draft, because `abandoned_unsaved` is only ever set by the dialog
+  that was skipped. Established in three measured links on 2026-09-05 rather
+  than one end-to-end run, since nothing here can press a real ⌘Q: winit's
+  menu bound to `terminate:` (read off the installed menu), `terminate:`
+  reaching `on_exit` without `close_requested` (a throwaway eframe app, twice,
+  once through a real `NSMenuItem`), and `on_exit` on a dirty bench clearing
+  the drafts (the real `App`, in-tree).
+
+  Quit is now Polylinker's own item and sends `ViewportCommand::Close`, which
+  is the one thing the latch reads, so ⌘Q asks the same question closing the
+  window asks. **Still open, and said so nobody looks for it:** Dock ▸ Quit and
+  a logout send `terminate:` to `NSApplication` directly, not through any
+  menu, and winit's delegate implements no `applicationShouldTerminate:` to
+  veto them. Those two paths still skip the question.
+
+- **Four chords lived behind a second, hand-copied copy of the guards.** ⌘W,
+  ⌘Tab, ⇧⌘Tab and ⇧⌘T were read inline in `App::ui`, behind their own
+  `!asking() && !text_edit_focused()`, in a function no test can drive. They
+  are `Shortcuts` fields now, computed in `global_shortcuts` byte for byte as
+  the inline block read them, so there is one answer to "may a shortcut fire".
+  The menu bar is what forced it: File ▸ Close Tab has to name the chord the
+  application really binds, and the test that proves it drives
+  `global_shortcuts`, which could say nothing about a chord that was not in
+  it.
+
 ## [0.13.4] - 2026-09-04
 
 The report 0.13.3 added, corrected by the first real plasmid it met. Four of
