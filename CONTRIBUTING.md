@@ -219,7 +219,8 @@ pip install biopython seguid pydna pillow fonttools resvg-py numpy scipy pymupdf
 Everything under `crates/` depends on nothing but other members of this
 workspace. **One crate is exempt: `crates/pl-py`**, which is PyO3 bindings and
 cannot exist without `pyo3`. Under `bins/`, **`bins/pl-gui` is the other**, and
-it takes `eframe`, `rfd` and `egui-phosphor`. Both exemptions are the same
+it takes `eframe`, `rfd` and `egui-phosphor` — and, on macOS only, `objc2`,
+`objc2-app-kit` and `objc2-foundation` for its menu bar. Both exemptions are the same
 argument: they face outwards, they are distribution rather than logic, and
 everything either one decides about a molecule it asks a crate that has no
 dependencies. `bins/pl` and `bins/pl-mcp` are inside the rule.

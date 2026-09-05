@@ -19,7 +19,7 @@ sends a sequence anywhere.
 > `Cargo.toml`; **dependency-free** is a property of a crate and not a mood —
 > a member every one of whose dependencies is another member of this
 > workspace. Nineteen of the twenty-one are, and the two that are not are the
-> two that face outwards: `bins/pl-gui` (eframe, rfd, egui-phosphor) and
+> two that face outwards: `bins/pl-gui` (eframe, rfd, egui-phosphor, and on macOS only the objc2 trio for its menu bar) and
 > `crates/pl-py` (pyo3). All six numbers are recomputed from the tree by
 > `the_readme_headline_counts_are_the_counts_in_the_tree` in
 > `bins/pl/src/main.rs`, which fails the gate when this paragraph disagrees

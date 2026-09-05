@@ -6634,7 +6634,7 @@ mod tests {
     /// how much of that one count was never dependency-free at all. It is
     /// taken over `crates/` and `bins/`,
     /// which includes the two members that do take external dependencies:
-    /// `bins/pl-gui` (eframe, rfd, egui-phosphor) and `crates/pl-py` (pyo3),
+    /// `bins/pl-gui` (eframe, rfd, egui-phosphor; objc2 on macOS) and `crates/pl-py` (pyo3),
     /// whose own manifest comment calls it "the first crate here with an
     /// external dependency". README contradicted itself about this 57 lines
     /// further down, where "**Zero external dependencies.**" is scoped to

@@ -25,15 +25,32 @@ which.
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-09-05
+
+A native macOS menu bar, and two quits made honest with it. ⌘Q now asks about
+unsaved work instead of skipping the question, and Dock ▸ Quit and a logout —
+which still skip it — no longer delete the only copy on the way out. Undo and
+Redo print no ⌘Z and there is no Cut, Copy or Paste, because both were measured
+to take those chords away from every text box in the window.
+
 ### Added
 
 - **A native macOS menu bar.** Polylinker, File, Edit, View, Window and Help,
-  with every command the toolbar offers — New, Open, the four Save formats,
-  projects, the four figure exports, Close Tab, Reopen Closed Tab, Undo, Redo,
-  Find and its steps, the tabs, the three Help pages and the example plasmid —
-  beside the standard items: About, Services, Hide, Hide Others, Show All,
-  Minimize, Zoom, Bring All to Front, and Quit. Every item is driven from the
-  same list the keyboard reads, and two tests hold the two together on every CI
+  carrying the file, edit, find, tab and help commands — New, Open, the four
+  Save formats, projects, the four figure exports, Close Tab, Reopen Closed
+  Tab, Undo, Redo, Find and its steps, the tabs, the three Help pages and the
+  example plasmid — beside the seven items AppKit services: Services, Hide,
+  Hide Others, Show All, Minimize, Zoom and Bring All to Front. About and Quit
+  sit where a Mac puts them but are Polylinker's own: About opens this
+  application's About page rather than the standard panel, and Quit is the
+  subject of the first entry under Fixed below. Not everything the toolbar
+  offers is on the bar: the Molecule menu — Make linear or Make circular,
+  Reverse complement, Set origin at selected feature, Add feature…, Edit
+  selected feature…, Cut and religate…, Remove selected feature — and the
+  toolbar's settings (the theme switch and "Follow the desktop's theme",
+  "Reopen these documents next time", "Check for new releases" and "Open the
+  release page…") stay where they were. Every item is driven from the same
+  list the keyboard reads, and two tests hold the two together on every CI
   leg, not only the macOS one: one presses every chord the menu prints and
   asks `App::global_shortcuts` what the application really does with it, and
   one sweeps every key under every modifier and refuses a shortcut the menu
@@ -53,8 +70,12 @@ which.
   The dependency table this needs is `objc2`, `objc2-app-kit` and
   `objc2-foundation`, all three already in `Cargo.lock` through eframe and
   rfd; one feature (`NSEvent`) was not already on and costs a recompile of
-  seven crates, which is written down beside it. Linux and Windows builds are
-  untouched: the table is target-gated and the installer is `cfg(macos)`.
+  seven crates, which is written down beside it. Linux and Windows pull in
+  none of it: the table is target-gated and the installer, `macmenu.rs`, is
+  `#[cfg(target_os = "macos")]`. What they do compile is `menu.rs` itself —
+  the table and its tests, which is what lets the two tests above run on every
+  leg — and the one loop in `App::ui` that the four chords in the last entry
+  below now go through; nothing on those platforms fills the menu's queue.
 
 ### Fixed
 
