@@ -203,6 +203,17 @@ egui-phosphor = { version = "=0.13.0", default-features = false, features = [
 # `typing` guard true on macOS — and `setKeyEquivalentModifierMask`, so ⌥⌘H
 # can be spelled as a modifier and not as a trick of letter case.
 #
+# MEASURED AGAIN 2026-09-06, for `macdock.rs`: `NSImage` on objc2-app-kit and
+# `NSBundle` on objc2-foundation. Both were already on — `NSImage` through
+# eframe, winit and arboard, each of which names it, and `NSBundle` through
+# objc2-app-kit's own `NSImage` feature, which lists
+# `objc2-foundation/NSBundle` (objc2-app-kit-0.3.2/Cargo.toml) — so
+# `cargo build -p pl-gui` after adding the two printed "Compiling pl-gui" and
+# nothing else, 4.80 s, and Cargo.lock did not change. `NSBundle` is for
+# `NSBundle.mainBundle.objectForInfoDictionaryKey:`, which is how the program
+# learns whether its bundle already gives the Dock an icon; `NSImage` is for
+# reading `NSApplication.applicationIconImage` back on the smoke leg.
+#
 # `default-features = false` on both, so this names exactly what it uses. A
 # feature added here should be measured the way `NSEvent` was before its cost
 # is written down.
@@ -212,11 +223,13 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSApplication",
     "NSEvent",
+    "NSImage",
     "NSMenu",
     "NSMenuItem",
     "NSResponder",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "NSBundle",
     "NSString",
 ] }

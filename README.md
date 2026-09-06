@@ -8,8 +8,8 @@ sends a sequence anywhere.
 
 > **Status: pre-release.** The desktop app, the `pl` command line, the browser
 > build, Python bindings and an MCP server all work today, across 21 workspace
-> crates and 177,289 lines of Rust, 100,153 of it dependency-free (143 `.rs`
-> files under `crates/` and `bins/`), with 2,072 `#[test]` functions and a
+> crates and 177,614 lines of Rust, 100,153 of it dependency-free (144 `.rs`
+> files under `crates/` and `bins/`), with 2,075 `#[test]` functions and a
 > 77-step gate (`Step` invocations in `tools/ci.ps1`) that cross-checks the
 > answers against Biopython, pydna, SciPy and the SEGUID reference
 > implementation. Counted 2026-08-10, and recounted on every test run since:
@@ -19,7 +19,7 @@ sends a sequence anywhere.
 > `Cargo.toml`; **dependency-free** is a property of a crate and not a mood —
 > a member every one of whose dependencies is another member of this
 > workspace. Nineteen of the twenty-one are, and the two that are not are the
-> two that face outwards: `bins/pl-gui` (eframe, rfd, egui-phosphor, and on macOS only the objc2 trio for its menu bar) and
+> two that face outwards: `bins/pl-gui` (eframe, rfd, egui-phosphor, and on macOS only the objc2 trio for its menu bar and Dock icon) and
 > `crates/pl-py` (pyo3). All six numbers are recomputed from the tree by
 > `the_readme_headline_counts_are_the_counts_in_the_tree` in
 > `bins/pl/src/main.rs`, which fails the gate when this paragraph disagrees

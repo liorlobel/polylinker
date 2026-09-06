@@ -1,7 +1,8 @@
 //! The native macOS menu bar: [`crate::menu::MENUS`] turned into `NSMenu`
 //! objects, and nothing else.
 //!
-//! This is the only file in this binary with an `objc2` in it, and it is a
+//! This and `macdock.rs` are the two files in this binary with an `objc2` in
+//! them (this one was alone until 2026-09-06), and it is a
 //! LOOP WITH NO POLICY: every label, chord, ordering decision and reason lives
 //! in `menu.rs`, where the Linux and Windows CI legs can read it. What this
 //! file decides is how a `menu::Entry` becomes an `NSMenuItem`, which selector
