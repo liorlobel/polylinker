@@ -108,14 +108,14 @@ One tag. Everything else follows from it.
 #    -- substitute both; they are written concretely because a placeholder is
 #    the thing people paste by accident, and they are one release behind the
 #    moment a release lands:
-sed -i 's/version = "0.13.4"/version = "0.13.5"/g' Cargo.toml
+sed -i 's/version = "0.13.5"/version = "0.13.6"/g' Cargo.toml
 #    Then check it took, because a typo in the left-hand side is a silent no-op.
 #    BOTH greps, and they used to be one: the old line ran only the NEW-version
 #    count and left "and 0.7.0 must print 0" as a comment, which is the half that
 #    catches a sed that matched nothing. `grep -c` exits 1 when it prints 0, so
 #    run them as two commands rather than chaining them with &&:
-grep -c 'version = "0.13.5"' Cargo.toml   # must print 17
-grep -c 'version = "0.13.4"' Cargo.toml   # must print 0
+grep -c 'version = "0.13.6"' Cargo.toml   # must print 17
+grep -c 'version = "0.13.5"' Cargo.toml   # must print 0
 cargo update --workspace   # rewrites Cargo.lock; do not hand-edit it
 #    Then CITATION.cff (version: and date-released:) and CHANGELOG.md, which
 #    are the two files a tag does not update and nothing checks.
@@ -152,8 +152,8 @@ pwsh -NoProfile -File tools/ci.ps1
 
 # 4. Tag, on main, after the release commit has landed there. This is the only
 #    step that publishes anything.
-git tag -a v0.13.5 -m "Polylinker 0.13.5"
-git push origin v0.13.5
+git tag -a v0.13.6 -m "Polylinker 0.13.6"
+git push origin v0.13.6
 ```
 
 ### Step 2 is no longer the only thing standing between a tag and a red gate
