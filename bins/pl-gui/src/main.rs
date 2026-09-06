@@ -23,6 +23,9 @@ mod find;
 mod gel;
 mod help;
 mod library;
+/// The Dock icon, measured. macOS only; the decision it feeds is `startup_icon`.
+#[cfg(target_os = "macos")]
+mod macdock;
 /// The menu bar, installed. macOS only; everything it installs is `menu`.
 #[cfg(target_os = "macos")]
 mod macmenu;
@@ -933,13 +936,19 @@ const ICON_RGBA: &[u8] = include_bytes!("../icon/polylinker-64.rgba");
 ///   directly and sets `NSApplication`'s icon, which is the Dock. It builds it
 ///   from the raw pixels rather than from a PNG on purpose — egui #7155, a
 ///   macOS bug where decoding a PNG for an `NSImage` can load a mismatched
-///   `libpng.dylib` and take the process down with SIGBUS.
+///   `libpng.dylib` and take the process down with SIGBUS. **From a bare
+///   executable only, since 2026-09-06.** Launched from `Polylinker.app` the
+///   Dock already holds `Polylinker.icns` at up to 1024 px, and until then
+///   this 64 px image replaced it one frame after launch — the tile visibly
+///   changed. [`startup_icon`] hands eframe `IconData::default()` there, and
+///   `macdock.rs` is where that is measured.
 /// * **Wayland** — winit lists it as unsupported and there is no compositor
 ///   protocol to carry it; the icon comes from the `.desktop` file instead.
 ///
-/// Three of the four use these bytes, so there is no `cfg` here: a
-/// platform-conditional icon would make three platforms diverge to spare one
-/// a 16 KB `to_vec`.
+/// Three of the four use these bytes, and the fourth does from a bare
+/// executable, so there is no `cfg` here: the one launch that does not want
+/// them is decided at run time by [`startup_icon`] on what the bundle
+/// declares, not at compile time on the platform.
 fn window_icon() -> egui::IconData {
     egui::IconData {
         // `IconData` owns its pixels, so the static slice has to be copied.
@@ -947,6 +956,46 @@ fn window_icon() -> egui::IconData {
         rgba: ICON_RGBA.to_vec(),
         width: ICON_PX,
         height: ICON_PX,
+    }
+}
+
+/// The icon `start` hands `ViewportBuilder::with_icon`: [`window_icon`]'s
+/// pixels, unless this process runs from a bundle that already gives the Dock
+/// a better one.
+///
+/// **UNTIL 2026-09-06 THE DOCK ICON CHANGED ONE FRAME AFTER LAUNCH.** From
+/// `Polylinker.app` the Dock draws `Contents/Resources/Polylinker.icns`, up to
+/// 1024 px; eframe then set `NSApplication`'s icon from these 64 px pixels on
+/// the first frame (see [`window_icon`]'s macOS bullet), and the tile visibly
+/// changed to a scaled-up bitmap. eframe's documented off switch is
+/// `IconData::default()` — `AppTitleIconSetter::new` reads exactly that value
+/// as "no icon" (eframe-0.35.0/src/native/app_icon.rs:17-21) — and leaving the
+/// icon out of `NativeOptions` is NOT the same thing: that is the egui logo.
+/// So a bundle that declares an icon gets the empty value and keeps its own,
+/// and a bare executable, whose Dock tile would otherwise be the generic one,
+/// gets the pixels as before.
+///
+/// A function of one `bool` so that every CI leg can test both arms;
+/// `macdock.rs` answers the `bool` on macOS and measures the result on the
+/// smoke leg.
+fn startup_icon(bundle_declares_icon: bool) -> egui::IconData {
+    if bundle_declares_icon {
+        egui::IconData::default()
+    } else {
+        window_icon()
+    }
+}
+
+/// Whether this process runs from a bundle that names an icon. `false`
+/// wherever there are no bundles.
+fn bundle_has_icon() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macdock::bundle_declares_icon()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 
@@ -1082,7 +1131,7 @@ fn start(renderer: eframe::Renderer) -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size(MIN_WINDOW)
-            .with_icon(window_icon())
+            .with_icon(startup_icon(bundle_has_icon()))
             .with_title("Polylinker"),
         renderer,
         ..Default::default()
@@ -5874,6 +5923,11 @@ impl eframe::App for App {
         // block never runs again, and frame two falls through `close_request`
         // with no `CancelClose`, which is how eframe decides to exit.
         if smoke_test() && !self.let_it_go {
+            // The one macOS fact this frame can check and no unit test can:
+            // `pre_update` has run, so eframe has set the Dock icon or left it
+            // alone, and `macdock` reads back which. Exits 3 on the wrong one.
+            #[cfg(target_os = "macos")]
+            macdock::check_under_smoke(bundle_has_icon(), ICON_PX);
             self.let_it_go = true;
             self.close_now = true;
         }
@@ -19574,11 +19628,14 @@ mod tests {
     /// The `.icns` the macOS bundle gets, read only by the test below.
     ///
     /// `#[cfg(test)]` for a stronger reason than the `.ico`'s: the running
-    /// program never reads this file at all. On macOS the Dock icon comes from
-    /// [`ICON_RGBA`] through eframe (see [`window_icon`]), and Finder reads the
-    /// `.icns` out of `Polylinker.app/Contents/Resources`, where
-    /// `tools/build-dmg.sh` copies it from `bins/pl-gui/icon/`. Linking it into
-    /// the executable would be 14 KB nothing could reach.
+    /// program never reads this file at all. AppKit does: launched from
+    /// `Polylinker.app`, Finder and the Dock draw it out of
+    /// `Contents/Resources`, where `tools/build-dmg.sh` copies it from
+    /// `bins/pl-gui/icon/`, and since 2026-09-06 the Dock keeps drawing it —
+    /// [`startup_icon`] hands eframe no icon there. Only a bare executable's
+    /// Dock tile comes from [`ICON_RGBA`] through eframe (see
+    /// [`window_icon`]). Linking this into the executable would be 14 KB
+    /// nothing could reach.
     const ICNS: &[u8] = include_bytes!("../icon/polylinker.icns");
 
     /// The macOS icon is the committed `.icns`, and the `.icns` is what
@@ -19694,8 +19751,9 @@ mod tests {
     /// `with_icon` gets the master's pixels, at the master's size.
     ///
     /// The app cannot be launched by a test — `run_native` owns the event loop —
-    /// so this asserts the value [`main`] hands to `ViewportBuilder::with_icon`
-    /// rather than a taskbar button. What that value IS, is the whole question:
+    /// so this asserts the value [`start`] hands to `ViewportBuilder::with_icon`
+    /// on a bare launch, `startup_icon(false)` — the other arm is the next
+    /// test's — rather than a taskbar button. What that value IS, is the whole question:
     /// a `Vec<u8>` with a width and a height, and **nothing downstream treats a
     /// disagreement between the three as an error worth stopping for.** On
     /// Windows, `IconData::to_image` is `RgbaImage::from_raw(width, height,
@@ -19719,7 +19777,7 @@ mod tests {
     /// to update when the drawing legitimately changes.
     #[test]
     fn the_window_icon_is_the_pixels_with_icon_is_handed() {
-        let icon = window_icon();
+        let icon = startup_icon(false);
         assert_eq!(
             (icon.width, icon.height),
             (ICON_PX, ICON_PX),
@@ -19764,6 +19822,39 @@ mod tests {
             "{inked} of 4096 pixels carry ink; an icon that is entirely empty or \
              entirely filled is not this drawing"
         );
+    }
+
+    /// In a bundle with an icon of its own, eframe is handed the one value it
+    /// reads as "no icon", so the Dock keeps the `.icns`; see [`startup_icon`].
+    ///
+    /// `IconData::default()` is that value by eframe's own test:
+    /// `AppTitleIconSetter::new` compares against exactly it with `==`
+    /// (eframe-0.35.0/src/native/app_icon.rs:17-21), and egui-winit's
+    /// `to_winit_icon` asks `is_empty()` (egui-winit-0.35.0/src/lib.rs:2165).
+    /// Both are asserted, and so is the other arm: a bare launch gets
+    /// [`ICON_RGBA`] and nothing less.
+    ///
+    /// PROVEN TO FAIL: with `startup_icon` returning `window_icon()` from both
+    /// arms — which is what `start` did until 2026-09-06 — the first assertion
+    /// fails with `left: (64, 64, 16384)`, `right: (0, 0, 0)`.
+    #[test]
+    fn a_bundle_with_its_own_icon_hands_eframe_no_icon() {
+        let handed = startup_icon(true);
+        assert_eq!(
+            (handed.width, handed.height, handed.rgba.len()),
+            (0, 0, 0),
+            "a bundle with an icon must hand eframe an empty IconData, or eframe \
+             replaces the bundle's icon with it on the first frame"
+        );
+        assert!(
+            handed == egui::IconData::default(),
+            "eframe's test is `== IconData::default()`, and this value is not it"
+        );
+        assert!(handed.is_empty(), "egui-winit's test is `is_empty()`");
+
+        let bare = startup_icon(false);
+        assert_eq!((bare.width, bare.height), (ICON_PX, ICON_PX));
+        assert_eq!(bare.rgba, ICON_RGBA, "a bare launch gets the window icon");
     }
 
     /// The window icon and the `.ico` came out of ONE run of `build-icon.py`.

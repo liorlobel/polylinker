@@ -25,6 +25,26 @@ which.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Dock icon no longer changes a frame after launch.** From
+  `Polylinker.app` the Dock drew the bundle's `.icns` — eleven sizes, up to
+  1024 px — and then, on the first frame, eframe replaced it with the 64 px
+  window icon scaled up: eframe's `AppTitleIconSetter` calls
+  `setApplicationIconImage:` with whatever `ViewportBuilder::with_icon` was
+  given, on every platform that has the call. When the bundle's `Info.plist`
+  names an icon, the editor now hands eframe `IconData::default()`, the value
+  eframe documents as "leave the icon alone", and the Dock keeps the `.icns`.
+  A bare `polylinker` run from the tarball still gets the 64 px icon, since
+  the alternative there is the generic executable tile. Measured rather than
+  assumed: on macOS, `PL_GUI_SMOKE=1` now reads back the icon AppKit holds on
+  the first frame — eframe's bitmap is 64 pt, the bundle's `.icns` 128 — and
+  exits 3 if it is the wrong one, so
+  `tools/check-dmg.sh --launch` checks the bundle case and the `gui-smoke`
+  job the bare one, on every push. The dependency table is unchanged;
+  `NSBundle` and `NSImage` are named as features and were already compiled
+  in through eframe.
+
 ## [0.13.5] - 2026-09-05
 
 A native macOS menu bar, and two quits made honest with it. ⌘Q now asks about

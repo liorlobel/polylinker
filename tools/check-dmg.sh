@@ -345,9 +345,11 @@ fi
 # ------------------------------------------------------------ the launch
 # Run from the read-only mount, as a user who double-clicks the image and
 # then the icon would. PL_GUI_SMOKE=1 closes the window from its first frame
-# (bins/pl-gui/src/main.rs); the renderer is left to the program's own
-# glow-then-wgpu plan. The alarm is perl's because coreutils `timeout` is
-# not on macOS.
+# (bins/pl-gui/src/main.rs), and since 2026-09-06 that frame also reads the
+# Dock icon back and exits 3 if eframe replaced the bundle's .icns with its
+# 64 px window icon (bins/pl-gui/src/macdock.rs), so the rc below covers that
+# too; the renderer is left to the program's own glow-then-wgpu plan. The
+# alarm is perl's because coreutils `timeout` is not on macOS.
 if [ "$launch" -eq 1 ]; then
     printf '  launching Contents/MacOS/polylinker with PL_GUI_SMOKE=1\n'
     # HOME, not XDG_STATE_HOME. `state_base` in bins/pl-gui/src/recover.rs

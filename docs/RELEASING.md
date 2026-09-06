@@ -383,7 +383,10 @@ twice per leg with `PL_GUI_SMOKE=1` closing the window from its first frame: on
 `PL_GUI_RENDERER=wgpu` on its software Vulkan, and on `macos-latest`, glow on
 Apple's OpenGL and wgpu on Metal. The macOS leg of the `test` job also launches
 the editor from inside the mounted `.dmg` the same way
-(`tools/check-dmg.sh --launch`).
+(`tools/check-dmg.sh --launch`). Since 2026-09-06 that first frame also reads
+the Dock icon back: from the bundle it must be the `.icns` and not eframe's
+64 px bitmap, from the bare binary the reverse, or the program exits 3
+(`bins/pl-gui/src/macdock.rs`).
 
 **All five launches are green on hosted runners as of run 33763643129**
 (2026-09-03), and the wgpu one names its driver: `DRIVER_ID_MESA_LLVMPIPE`,

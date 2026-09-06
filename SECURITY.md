@@ -177,7 +177,8 @@ because they are known, documented, and not news:
   CLI have no external dependencies at all; the exceptions are `eframe`, `rfd`
   and `egui-phosphor` in the desktop app — joined on macOS only, since 0.13.5
   (2026-09-05), by `objc2`, `objc2-app-kit` and `objc2-foundation` for its
-  native menu bar, all three already in `Cargo.lock` through eframe and rfd
+  native menu bar and, since 2026-09-06, its Dock icon, all three already in
+  `Cargo.lock` through eframe and rfd
   before the app named them — `pyo3` in the Python bindings, and the system
   `curl`, which is the operating system's and is patched by it. This list said
   "five" until 2026-09-05. An advisory in one of those *with an argument for
