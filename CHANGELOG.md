@@ -25,6 +25,14 @@ which.
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-09-06
+
+One fix, on macOS: the Dock icon stays the bundle's. Launched from
+`Polylinker.app`, the Dock drew the `.icns` and then, a frame later, eframe's
+64 px window icon scaled up; the editor now tells eframe to leave the icon
+alone whenever the bundle has one, and the smoke leg reads the Dock icon back
+on every push to keep it that way.
+
 ### Fixed
 
 - **The Dock icon no longer changes a frame after launch.** From
@@ -32,7 +40,7 @@ which.
   1024 px — and then, on the first frame, eframe replaced it with the 64 px
   window icon scaled up: eframe's `AppTitleIconSetter` calls
   `setApplicationIconImage:` with whatever `ViewportBuilder::with_icon` was
-  given, on every platform that has the call. When the bundle's `Info.plist`
+  given. When the bundle's `Info.plist`
   names an icon, the editor now hands eframe `IconData::default()`, the value
   eframe documents as "leave the icon alone", and the Dock keeps the `.icns`.
   A bare `polylinker` run from the tarball still gets the 64 px icon, since
