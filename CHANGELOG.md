@@ -25,6 +25,14 @@ which.
 
 ## [Unreleased]
 
+## [0.13.7] - 2026-09-17
+
+The sequence view, made easier to read: the grid has a size — 13 pt by
+default, up from 11.5, and steppable to 18 — and every residue letter in the
+amino-acid track is coloured by its chemistry, in five Okabe–Ito hues, with a
+legend that names each letter beside its colour. The details panel opens 60 pt
+wider so the default still reaches sixty bases a row.
+
 ### Added
 
 - **The sequence grid has a size, and the residues have colours.** In the
