@@ -134,6 +134,96 @@ pub enum Mark {
     Ambiguous,
 }
 
+/// The chemistry of a residue, which is what its letter is coloured by when
+/// `settings::Layout::aa_colours` is on.
+///
+/// FIVE CLASSES AND NOT CLUSTAL X'S EIGHT, on purpose. Five hues can be told
+/// apart at a glance in a row of sixty cells and eight cannot — and this
+/// project draws in Okabe–Ito, which has eight members of which one is black
+/// and two neighbour each other. The five are the textbook grouping (Lehninger,
+/// *Principles of Biochemistry*, table 3-1) and they answer the questions a
+/// cloner brings to a translation track: a His tag is a run of basic, a
+/// transmembrane stretch a run of nonpolar, a GS linker alternates nonpolar and
+/// polar, an acidic patch is acidic. Every one of the twenty standard letters
+/// is in exactly one class, which `every_standard_residue_is_in_exactly_one_class`
+/// pins; `*`, `X` and any letter this track never produces are in none and
+/// keep the track's ordinary ink.
+///
+/// Where the arguable ones went, so nobody re-argues them without reading
+/// this: histidine is BASIC because the tag it is looked for in is a charge
+/// question at the pH of a nickel column, whatever its pKa says at 7.4;
+/// cysteine is POLAR, with Lehninger and against Clustal, because its thiol
+/// is what makes it matter; proline and glycine are NONPOLAR, with Lehninger,
+/// rather than a class of their own, because a class of two letters would
+/// spend a sixth hue on shape rather than chemistry.
+///
+/// **COLOUR IS NEVER THE ONLY CHANNEL**, and here the letter itself is the
+/// other one: the class is a function of the glyph the reader is already
+/// looking at, and the legend under the track's switches names every letter
+/// beside its colour. Nothing is encoded in the hue that the letter does not
+/// also say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    /// G A V L I M P.
+    Nonpolar,
+    /// F Y W.
+    Aromatic,
+    /// S T C N Q.
+    Polar,
+    /// K R H.
+    Basic,
+    /// D E.
+    Acidic,
+}
+
+impl Class {
+    /// Every class, in the order the legend prints them.
+    pub const ALL: [Class; 5] = [
+        Class::Nonpolar,
+        Class::Aromatic,
+        Class::Polar,
+        Class::Basic,
+        Class::Acidic,
+    ];
+
+    /// The class of a residue letter as `Code::codon` writes it: uppercase.
+    ///
+    /// Exact, with no case folding, because this track never produces a
+    /// lowercase letter and a function that accepted one would be claiming a
+    /// meaning for something that cannot reach it. `*` and `X` are `None`.
+    pub fn of(aa: u8) -> Option<Class> {
+        match aa {
+            b'G' | b'A' | b'V' | b'L' | b'I' | b'M' | b'P' => Some(Class::Nonpolar),
+            b'F' | b'Y' | b'W' => Some(Class::Aromatic),
+            b'S' | b'T' | b'C' | b'N' | b'Q' => Some(Class::Polar),
+            b'K' | b'R' | b'H' => Some(Class::Basic),
+            b'D' | b'E' => Some(Class::Acidic),
+            _ => None,
+        }
+    }
+
+    /// The letters, for the legend, in the order the textbook lists them.
+    pub fn letters(self) -> &'static str {
+        match self {
+            Class::Nonpolar => "GAVLIMP",
+            Class::Aromatic => "FYW",
+            Class::Polar => "STCNQ",
+            Class::Basic => "KRH",
+            Class::Acidic => "DE",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Class::Nonpolar => "nonpolar",
+            Class::Aromatic => "aromatic",
+            Class::Polar => "polar",
+            Class::Basic => "basic",
+            Class::Acidic => "acidic",
+        }
+    }
+}
+
 /// One residue, placed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Residue {
@@ -2092,5 +2182,64 @@ mod tests {
         let back = pl_fileio::fasta::parse(&record);
         assert_eq!(back.name, "decR_his");
         assert_eq!(back.seq, b"MKRGC".to_vec());
+    }
+
+    // -----------------------------------------------------------------------
+    // the residue classes
+    // -----------------------------------------------------------------------
+
+    /// The twenty standard letters partition into the five classes: every one
+    /// is in exactly one, `of` and `letters` agree about which, and nothing
+    /// else — `*`, `X`, the ambiguity letters, a lowercase letter, a base — is
+    /// in any.
+    ///
+    /// PROVEN TO FAIL: moving `b'H'` from the `Basic` arm of `of` to `Polar`
+    /// fails at "'H' is in class Basic by `letters` and Some(Polar) by `of`".
+    #[test]
+    fn every_standard_residue_is_in_exactly_one_class() {
+        const TWENTY: &[u8] = b"ACDEFGHIKLMNPQRSTVWY";
+        let mut seen: std::collections::BTreeMap<u8, Class> = Default::default();
+        for class in Class::ALL {
+            for b in class.letters().bytes() {
+                assert!(
+                    TWENTY.contains(&b),
+                    "{:?} lists {:?}, which is not a standard residue",
+                    class,
+                    b as char
+                );
+                assert!(
+                    seen.insert(b, class).is_none(),
+                    "{:?} is in two classes",
+                    b as char
+                );
+                assert_eq!(
+                    Class::of(b),
+                    Some(class),
+                    "{:?} is in class {class:?} by `letters` and {:?} by `of`",
+                    b as char,
+                    Class::of(b)
+                );
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            20,
+            "the classes cover {} of the twenty",
+            seen.len()
+        );
+        for &b in TWENTY {
+            assert!(Class::of(b).is_some(), "{:?} is in no class", b as char);
+        }
+        for b in b"*XBZJUO-.acgtn ".iter().copied() {
+            assert_eq!(
+                Class::of(b),
+                None,
+                "{:?} is not a standard residue this track writes and must colour as none",
+                b as char
+            );
+        }
+        // Five distinct labels, so the legend cannot print one word twice.
+        let labels: std::collections::BTreeSet<_> = Class::ALL.iter().map(|c| c.label()).collect();
+        assert_eq!(labels.len(), Class::ALL.len());
     }
 }

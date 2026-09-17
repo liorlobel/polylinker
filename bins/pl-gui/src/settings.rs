@@ -220,7 +220,68 @@ pub struct Layout {
     /// is the floor every journal preset in `pl_draw::page` states for line
     /// art, so it is the default that does not need explaining.
     pub figure_dpi: f64,
+
+    /// The point size the sequence grid is drawn at: the bases, the complement
+    /// strand and the residue lanes, which share one face so that a residue
+    /// sits over its codon by construction (see `RowLayout` in `seqedit.rs`).
+    ///
+    /// A VIEW preference like the switches above. It was a constant, 11.5, in
+    /// every release before 2026-09-17, and the module header of `main.rs`
+    /// records why it could not simply be raised in place: the default split
+    /// was calibrated to fit sixty bases at that size and not one point more.
+    /// Raising the size is what moved `App::DEF_PANEL`; making it a setting is
+    /// what lets a user go further at the cost of a shorter row, which the
+    /// ruler shows and the splitter buys back.
+    ///
+    /// A NUMBER and not a name like "large", because the file is hand-editable
+    /// and a person editing it writes a size. Banded by [`SEQ_PT_BAND`] on the
+    /// way in, for `panel_width`'s reason: a `seq_pt: nan` that reached
+    /// `FontId::monospace` would make every cell width NaN and the whole grid
+    /// vanish with nothing on screen saying why.
+    pub seq_pt: f32,
+
+    /// Colour the residue letters of the amino-acid track by chemistry — see
+    /// `aa::Class`. ON by default, since it is the reason the track was asked
+    /// to change (2026-09-17), and a switch because a figure exported from a
+    /// screen is sometimes wanted in one ink.
+    ///
+    /// Parsed `!= "0"`, like `restore_tabs`: the default is ON, nothing is sent
+    /// anywhere and nothing is written to a document either way, so a garbled
+    /// line must land on the default and not silently turn the colours off.
+    pub aa_colours: bool,
 }
+
+/// The grid size every release before 2026-09-17 painted at, offered first so
+/// that a user who preferred it gets exactly the picture they had.
+pub const SEQ_PT_LEGACY: f32 = 11.5;
+
+/// The grid's size out of the box, since 2026-09-17.
+///
+/// 13 and not more, because it is the largest step that still reaches the
+/// sixty-base row at a default split under 560 pt — the widest the details
+/// panel can open at the 1,280 pt default window and leave the map 720. Every
+/// step above it is a shorter default row or a narrower map, which is why the
+/// steps above it are the user's to take.
+pub const SEQ_PT_DEFAULT: f32 = 13.0;
+
+/// The sizes the combo offers.
+///
+/// A short list rather than a spinner, for `ORF_MIN_AA_CHOICES`'s reason: a
+/// `DragValue` takes the keyboard from the grid on a click, and the sizes
+/// people want are a handful of steps, not a continuum. Each step is a
+/// different picture: 11.5 is the old grid, 13 the new default, and 14.5, 16
+/// and 18 progressively trade bases per row for legibility at the default
+/// split — 60, 60, 50, 50, 40 at `App::DEF_PANEL`, measured. Every entry is
+/// inside [`SEQ_PT_BAND`] and the default is one of them, which
+/// `every_offered_grid_size_is_in_the_band_and_the_default_is_offered` pins.
+pub const SEQ_PT_CHOICES: &[f32] = &[SEQ_PT_LEGACY, SEQ_PT_DEFAULT, 14.5, 16.0, 18.0];
+
+/// The sizes a file may name before it is disbelieved.
+///
+/// 8 pt is below anything readable on a display this runs on and 32 is a row
+/// of ten bases in a 380 pt panel; both ends exist to bound a hand-edit, not to
+/// be chosen.
+const SEQ_PT_BAND: std::ops::RangeInclusive<f32> = 8.0..=32.0;
 
 impl Default for Layout {
     fn default() -> Self {
@@ -241,6 +302,8 @@ impl Default for Layout {
             theme: Theme::System,
             figure_mm: None,
             figure_dpi: 300.0,
+            seq_pt: SEQ_PT_DEFAULT,
+            aa_colours: true,
         }
     }
 }
@@ -414,6 +477,16 @@ pub fn parse(text: &str) -> Layout {
                     }
                 }
             }
+            // Banded, for `panel_width`'s reason; see the field.
+            "seq_pt" => {
+                if let Ok(pt) = v.parse::<f32>() {
+                    if pt.is_finite() && SEQ_PT_BAND.contains(&pt) {
+                        out.seq_pt = pt;
+                    }
+                }
+            }
+            // `!= "0"`: the default is ON and a damaged line lands there.
+            "aa_colours" => out.aa_colours = v != "0",
             _ => {}
         }
     }
@@ -472,6 +545,12 @@ pub fn render(l: Layout) -> String {
     // resolution: there is no "unset" for it, only the default, and writing the
     // default is what makes the file say what the app will actually do.
     s.push_str(&format!("figure_dpi: {:.0}\n", l.figure_dpi));
+    // Both always written, including the defaults, for `theme`'s reason: the
+    // grid is drawn at SOME size on every frame and the letters are in colour
+    // or not, so the file should say which rather than leave it to be inferred
+    // from a line's absence.
+    s.push_str(&format!("seq_pt: {:.1}\n", l.seq_pt));
+    s.push_str(&format!("aa_colours: {}\n", u8::from(l.aa_colours)));
     s
 }
 
@@ -528,8 +607,133 @@ mod tests {
             // reached the file would fail here rather than round-trip through
             // its own absence.
             figure_dpi: 600.0,
+            // Both deliberately not the default, for the same reason.
+            seq_pt: 16.0,
+            aa_colours: false,
         };
         assert_eq!(parse(&render(l)), l);
+    }
+
+    /// Every size the combo offers survives a round trip and appears in the
+    /// text by value, and the default is among them.
+    ///
+    /// The default is the weak half on its own — it also round-trips through
+    /// a `render` that never wrote the key — so every choice is asserted, and
+    /// each is required to appear in the text.
+    #[test]
+    fn every_offered_grid_size_is_in_the_band_and_the_default_is_offered() {
+        assert!(
+            SEQ_PT_CHOICES.contains(&SEQ_PT_DEFAULT),
+            "the default {SEQ_PT_DEFAULT} is not one of the offered sizes {SEQ_PT_CHOICES:?}"
+        );
+        assert!(SEQ_PT_CHOICES.contains(&SEQ_PT_LEGACY));
+        for &pt in SEQ_PT_CHOICES {
+            assert!(
+                SEQ_PT_BAND.contains(&pt),
+                "{pt} is offered and would be disbelieved on the way back in"
+            );
+            let l = Layout {
+                seq_pt: pt,
+                ..Default::default()
+            };
+            let text = render(l);
+            assert!(
+                text.contains(&format!("seq_pt: {pt:.1}")),
+                "the file does not record seq_pt={pt}:\n{text}"
+            );
+            assert_eq!(parse(&text), l);
+        }
+        // Ascending, so the combo reads as a scale.
+        assert!(SEQ_PT_CHOICES.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// Nothing a damaged file can hold reaches the painter as a size.
+    ///
+    /// A NaN or a zero here is not a wrong-looking grid, it is no grid: every
+    /// cell width comes from `glyph_width` at this size. So everything outside
+    /// the band lands on the default, and the guard is shown not to be vacuous
+    /// by the one spelling that really does name a size.
+    #[test]
+    fn nothing_a_damaged_file_can_hold_reaches_the_painter_as_a_size() {
+        for bad in [
+            "seq_pt: nan",
+            "seq_pt: inf",
+            "seq_pt: -13",
+            "seq_pt: 0",
+            "seq_pt: 7.9",
+            "seq_pt: 32.1",
+            "seq_pt: 1e9",
+            "seq_pt: big",
+            "seq_pt:",
+            "seq_pt: 13 pt",
+            "Seq_Pt: 16", // keys are matched exactly, not case-folded
+        ] {
+            let l = parse(&format!("{HEADER}\n{bad}\n"));
+            assert_eq!(
+                l.seq_pt, SEQ_PT_DEFAULT,
+                "{bad:?} reached the painter as {}",
+                l.seq_pt
+            );
+        }
+        assert_eq!(parse(&format!("{HEADER}\nseq_pt: 16\n")).seq_pt, 16.0);
+        assert_eq!(parse(&format!("{HEADER}\nseq_pt: 11.5\n")).seq_pt, 11.5);
+    }
+
+    /// The residue colours survive a round trip in **both** directions, and a
+    /// damaged line lands on ON.
+    ///
+    /// `the_update_check_round_trips_in_both_directions`'s argument, read the
+    /// other way round for the direction: the default here is ON, so the
+    /// garbled spellings have to land there, and `0` is the one spelling that
+    /// turns the colours off.
+    #[test]
+    fn the_residue_colours_round_trip_in_both_directions_and_fail_open() {
+        for on in [false, true] {
+            let l = Layout {
+                aa_colours: on,
+                ..Default::default()
+            };
+            let text = render(l);
+            assert!(
+                text.contains(&format!("aa_colours: {}", u8::from(on))),
+                "the file does not record aa_colours={on}:\n{text}"
+            );
+            assert_eq!(parse(&text), l);
+        }
+        for bad in [
+            "aa_colours: yes",
+            "aa_colours: 2",
+            "aa_colours:",
+            "aa_colours: off",
+            "AA_COLOURS: 0",
+        ] {
+            assert!(
+                parse(&format!("{HEADER}\n{bad}\n")).aa_colours,
+                "{bad:?} switched the residue colours off; the default must fail open"
+            );
+        }
+        assert!(!parse(&format!("{HEADER}\naa_colours: 0\n")).aa_colours);
+    }
+
+    /// A layout file written before the grid size and the residue colours
+    /// existed gets the new default size and the colours on.
+    ///
+    /// Said out loud because the size default CHANGED: a file from 0.13.6 and
+    /// earlier names no `seq_pt`, and its owner's grid grows from 11.5 to 13 pt
+    /// on the first run of this version. That is the release's intent, and
+    /// the combo offers 11.5 back to anyone who wants it.
+    #[test]
+    fn a_layout_file_from_before_the_grid_size_setting_gets_the_new_default() {
+        for older in [
+            "polylinker-layout 1\npanel_width: 560\nrestore_tabs: 1\n",
+            "polylinker-layout 1\n",
+            "",
+            "something else entirely\nseq_pt: 18\naa_colours: 0\n",
+        ] {
+            let l = parse(older);
+            assert_eq!(l.seq_pt, SEQ_PT_DEFAULT, "{older:?}");
+            assert!(l.aa_colours, "{older:?} switched the residue colours off");
+        }
     }
 
     /// The update check survives a round trip in **both** directions.

@@ -42,6 +42,9 @@ use crate::doc::{fmt_int, Document};
 /// is a *maximum* rather than a constant because it does not fit: sixty
 /// monospace cells at 11.5 pt plus this molecule's coordinate gutter is 455.0 pt
 /// -- 60 x 6.900 for the cells, 41.0 for the gutter, in IBM Plex Mono at 0.600 em
+/// (that was the grid every release before 2026-09-17 painted; at the 13 pt
+/// default since, and with the size the user's, it is 60 x 7.800 + 45.5 =
+/// 513.5 pt, and at the largest offered size, 18 pt, 60 x 10.800 + 62.0 = 710)
 /// -- and the side panel this view lives in is 380. Read-only that overflow merely
 /// clipped the right-hand bases and the ruler, which is how it survived. With a
 /// caret it is worse than cosmetic — you cannot click a base you cannot see,
@@ -74,8 +77,11 @@ pub fn fit_per_row(bases_width: f32, advance: f32) -> u64 {
 ///
 /// Every number in this paragraph is a function of the monospace advance and all
 /// of them moved when the face did — Hack's 0.602051 em gave 67.6, 41.1, 26.5 and
-/// 486.5. They are recorded to one decimal because that is the resolution the
-/// bisection has (0.25 pt), not because they are exact.
+/// 486.5 — and again when the grid's size did: they are the 11.5 pt figures,
+/// and at the 13 pt default the grid has had since 2026-09-17 the same
+/// molecule's gutter is 45.5 pt and the sixty-base width 543.6. They are
+/// recorded to one decimal because that is the resolution the bisection has
+/// (0.25 pt), not because they are exact.
 /// See [`App::DEF_PANEL`](crate::App).
 pub fn gutter_w(n: u64, gutter_advance: f32) -> f32 {
     // Digits plus the thousands separators `fmt_int` inserts, because the
@@ -92,9 +98,11 @@ pub fn gutter_w(n: u64, gutter_advance: f32) -> f32 {
 ///
 /// Nine monospace cells holds "4,641,652" — the largest coordinate in the
 /// benchmark corpus — plus a little air: 70.1 pt at IBM Plex Mono's 6.900 pt
-/// advance, which is when the right-hand coordinate first appears on an 8,117 bp
-/// molecule at a panel width of about 555 pt. Not asserted for a real face — the
-/// unit tests pass a literal advance — so a face change moves this silently.
+/// advance (the 11.5 pt grid; 78.2 at the 13 pt default since 2026-09-17),
+/// which is when the right-hand coordinate first appears on an 8,117 bp
+/// molecule at a panel width of about 555 pt (about 622 at 13 pt). Not asserted
+/// for a real face — the unit tests pass a literal advance — so a face change
+/// moves this silently.
 fn right_gutter_w(advance: f32) -> f32 {
     9.0 * advance + 8.0
 }

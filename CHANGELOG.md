@@ -25,6 +25,40 @@ which.
 
 ## [Unreleased]
 
+### Added
+
+- **The sequence grid has a size, and the residues have colours.** In the
+  sequence view's Show row, `A−` and `A+` step the bases and the residue lanes
+  — one face, so a residue stays over its codon by construction — through
+  11.5, 13, 14.5, 16 and 18 pt, and the size is remembered (`seq_pt` in the
+  layout file). A bigger letter is a shorter row at the same panel width: the
+  ruler says how many bases fit and the splitter buys more. Beside it, while a
+  residue lane is on, `classes` colours every residue letter by its chemistry
+  in five Okabe–Ito hues — nonpolar `GAVLIMP`, aromatic `FYW`, polar `STCNQ`,
+  basic `KRH`, acidic `DE` — with a legend under the row naming every letter
+  beside its colour, and `*` and `X` in the track's grey. On by default and
+  remembered (`aa_colours`). Colour is never the only channel: the letter is
+  the residue, and the class is a function of it. Every one of the ten inks —
+  five per theme — is measured at 4.5:1 or better on every surface the grid
+  scrolls over, by the same test that holds the rest of the palette to it, and
+  each is asserted to be its Okabe–Ito hue and not a grey.
+
+### Changed
+
+- **The grid is 13 pt by default, up from 11.5**, and the details panel opens
+  at 560 pt instead of 500 so that the default still reaches the GenBank sixty
+  bases a row. What the map pane pays at the default 1,280 pt window is 60 pt
+  of width, which is 30 pt of radius. A panel width kept from an earlier
+  release may now fit 50 a row rather than 60; the ruler says so, and one
+  drag of the splitter restores it. `A−` reaches the old grid exactly, to the
+  point, for anyone who preferred it.
+- **Choosing the size is two buttons, not a menu**, for a reason measured on
+  the way: an egui `ComboBox` at the end of a wrapped row is placed past the
+  row's end rather than on the next line, and the panel then grows on the next
+  frame to fit it — appended to the Show row, a size menu opened every window
+  66 pt wider than asked. A button is allocated where it is measured and wraps
+  like the chips beside it.
+
 ## [0.13.6] - 2026-09-06
 
 One fix, on macOS: the Dock icon stays the bundle's. Launched from

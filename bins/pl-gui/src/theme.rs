@@ -56,6 +56,30 @@ pub struct Palette {
     pub line: Color32,
     pub accent: Color32,
     pub warn: Color32,
+    /// The residue letters of the amino-acid track, by [`crate::aa::Class`],
+    /// when `settings::Layout::aa_colours` is on. TEXT, at the grid's size,
+    /// on the panel — so each is held to the same 4.5:1 `ink2` is, on every
+    /// resting surface, by `every_ink_clears_aa_on_every_chrome_surface_it_is_drawn_on`.
+    ///
+    /// Five of Okabe–Ito's eight hues (`pl_draw::contrast::OKABE_ITO`), the
+    /// set this project draws in wherever a reader has to tell colours apart:
+    /// blue, yellow, bluish green, vermillion and reddish purple. Orange and
+    /// sky blue are left out because each neighbours one of the five, and
+    /// black is not a hue. NONE OF THE EIGHT IS A TEXT COLOUR AS PUBLISHED —
+    /// measured on the light panel, yellow is 1.22:1, orange 2.07, purple
+    /// 2.82, green 3.15 and vermillion 3.56; on the dark panel blue is 2.20 —
+    /// so each theme's five are the hue moved along its own ray until every
+    /// resting surface clears 4.5, which is [`ACCENT_DEEP`]'s method: scale
+    /// R, G and B by ONE factor and the hue stays put. Light: blue as
+    /// published, the rest darkened. Dark: yellow as published, sky blue in
+    /// blue's role (as `pl_draw::trace::Palette::AccessibleDark` does, and for
+    /// its reason), the other three lightened. Nothing outside the set is
+    /// introduced.
+    pub aa_nonpolar: Color32,
+    pub aa_aromatic: Color32,
+    pub aa_polar: Color32,
+    pub aa_basic: Color32,
+    pub aa_acidic: Color32,
 }
 
 impl Palette {
@@ -69,6 +93,16 @@ impl Palette {
                 line: Color32::from_rgb(0x76, 0x84, 0x8b),
                 accent: Color32::from_rgb(0x6f, 0xa8, 0xd0),
                 warn: Color32::from_rgb(0xe0, 0x8a, 0x70),
+                // Okabe–Ito sky blue, as published.
+                aa_nonpolar: Color32::from_rgb(0x56, 0xb4, 0xe9),
+                // Okabe–Ito yellow, as published.
+                aa_aromatic: Color32::from_rgb(0xf0, 0xe4, 0x42),
+                // Bluish green #009e73 x 1.19.
+                aa_polar: Color32::from_rgb(0x00, 0xbc, 0x89),
+                // Vermillion #d55e00 x 1.39, red clipped at 255.
+                aa_basic: Color32::from_rgb(0xff, 0x83, 0x00),
+                // Reddish purple #cc79a7 x 1.12.
+                aa_acidic: Color32::from_rgb(0xe4, 0x88, 0xbb),
             }
         } else {
             Palette {
@@ -83,7 +117,30 @@ impl Palette {
                 line: Color32::from_rgb(0x8d, 0x99, 0xa0),
                 accent: Color32::from_rgb(0x2f, 0x6f, 0x9a),
                 warn: Color32::from_rgb(0xb0, 0x55, 0x3f),
+                // Okabe–Ito blue, as published.
+                aa_nonpolar: Color32::from_rgb(0x00, 0x72, 0xb2),
+                // Yellow #f0e442 x 0.49: an olive, which is what a yellow that
+                // can be read on white has to become.
+                aa_aromatic: Color32::from_rgb(0x76, 0x70, 0x20),
+                // Bluish green #009e73 x 0.80.
+                aa_polar: Color32::from_rgb(0x00, 0x7e, 0x5c),
+                // Vermillion #d55e00 x 0.86.
+                aa_basic: Color32::from_rgb(0xb7, 0x51, 0x00),
+                // Reddish purple #cc79a7 x 0.75.
+                aa_acidic: Color32::from_rgb(0x99, 0x5b, 0x7d),
             }
+        }
+    }
+
+    /// The ink for a residue of `class`; see the five fields above.
+    pub fn residue(&self, class: crate::aa::Class) -> Color32 {
+        use crate::aa::Class;
+        match class {
+            Class::Nonpolar => self.aa_nonpolar,
+            Class::Aromatic => self.aa_aromatic,
+            Class::Polar => self.aa_polar,
+            Class::Basic => self.aa_basic,
+            Class::Acidic => self.aa_acidic,
         }
     }
 
@@ -897,6 +954,15 @@ mod tests {
                 ("ink2", p.ink2, resting.clone()),
                 ("muted", p.muted, resting.clone()),
                 ("warn", p.warn, [&resting[..], &buttons[..]].concat()),
+                // The residue letters, since 2026-09-17: text at the grid's
+                // size, on the panel the grid scrolls in, never on a control.
+                // `resting`, like `ink2`, and asserted at 4.5 like it — these
+                // are letters a reader has to tell apart, not a hairline.
+                ("aa_nonpolar", p.aa_nonpolar, resting.clone()),
+                ("aa_aromatic", p.aa_aromatic, resting.clone()),
+                ("aa_polar", p.aa_polar, resting.clone()),
+                ("aa_basic", p.aa_basic, resting.clone()),
+                ("aa_acidic", p.aa_acidic, resting.clone()),
             ];
 
             for (role, fg, surfaces) in checks {
@@ -911,6 +977,90 @@ mod tests {
                          surface from this role's list and say why, do not lower the number."
                     );
                 }
+            }
+        }
+    }
+
+    /// The five residue inks are five different colours, different again from
+    /// the four text roles they sit among, and each is its class's hue.
+    ///
+    /// Distinctness is the property that makes a colour code a code: two
+    /// classes in one colour would draw a distinction the legend names and the
+    /// track does not. The hue check is what stops the "darken until it clears
+    /// 4.5" step from quietly turning a colour into a grey — the light aromatic
+    /// olive is the case that makes this worth asserting, at 0.49 of the
+    /// published yellow. Hue is read the way [`ACCENT_DEEP`]'s comment reads
+    /// it: the ratios between channels, which scaling by one factor leaves
+    /// alone, so each is asserted to be within a few degrees of its Okabe–Ito
+    /// source. A channel clipped at 255 moves the hue a little — the dark
+    /// basic, vermillion at 1.39, clips its red — and the tolerance is set from
+    /// that measurement rather than at zero.
+    ///
+    /// PROVEN TO FAIL: setting the light `aa_polar` to `ink2` fails the first
+    /// assertion at "aa_polar and ink2 are the same colour in light mode".
+    #[test]
+    fn the_residue_inks_are_five_hues_and_the_hues_are_okabe_itos() {
+        fn hue(c: Color32) -> f32 {
+            let (r, g, b) = (c.r() as f32, c.g() as f32, c.b() as f32);
+            let max = r.max(g).max(b);
+            let min = r.min(g).min(b);
+            let d = max - min;
+            assert!(d > 20.0, "{c:?} is a grey, not a hue");
+            let h = if max == r {
+                ((g - b) / d).rem_euclid(6.0)
+            } else if max == g {
+                (b - r) / d + 2.0
+            } else {
+                (r - g) / d + 4.0
+            };
+            h * 60.0
+        }
+        for dark in [true, false] {
+            let p = Palette::of(dark);
+            let mode = if dark { "dark" } else { "light" };
+            let named = [
+                ("aa_nonpolar", p.aa_nonpolar),
+                ("aa_aromatic", p.aa_aromatic),
+                ("aa_polar", p.aa_polar),
+                ("aa_basic", p.aa_basic),
+                ("aa_acidic", p.aa_acidic),
+                ("ink", p.ink),
+                ("ink2", p.ink2),
+                ("muted", p.muted),
+                ("warn", p.warn),
+            ];
+            for (i, (a, ca)) in named.iter().enumerate() {
+                for (b, cb) in &named[i + 1..] {
+                    assert_ne!(ca, cb, "{a} and {b} are the same colour in {mode} mode");
+                }
+            }
+            // The source hue of each role, from `pl_draw::contrast::OKABE_ITO`.
+            let source = |name: &str| -> Color32 {
+                let hex = pl_draw::contrast::OKABE_ITO
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, h)| *h)
+                    .unwrap_or_else(|| panic!("{name} is not an Okabe-Ito name"));
+                parse_hex(hex).expect("the palette is well-formed hex")
+            };
+            for (role, got, from) in [
+                (
+                    "aa_nonpolar",
+                    p.aa_nonpolar,
+                    if dark { "sky blue" } else { "blue" },
+                ),
+                ("aa_aromatic", p.aa_aromatic, "yellow"),
+                ("aa_polar", p.aa_polar, "bluish green"),
+                ("aa_basic", p.aa_basic, "vermillion"),
+                ("aa_acidic", p.aa_acidic, "reddish purple"),
+            ] {
+                let (h, want) = (hue(got), hue(source(from)));
+                let delta = (h - want).abs().min(360.0 - (h - want).abs());
+                assert!(
+                    delta <= 8.0,
+                    "{role} in {mode} mode is hue {h:.1} deg; Okabe-Ito {from} is {want:.1}, \
+                     {delta:.1} deg away, which is not the same colour made readable"
+                );
             }
         }
     }
