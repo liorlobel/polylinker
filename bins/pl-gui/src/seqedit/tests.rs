@@ -1292,7 +1292,10 @@ fn the_caret_space_is_built_from_the_bases_present_not_the_declared_length() {
 
 #[test]
 fn the_row_width_is_measured_not_assumed() {
-    // Sixty cells at 11.5 pt monospace is about 414 px, and the panel this
+    // Sixty cells at 11.5 pt monospace is about 414 px (the grid every release
+    // before 2026-09-17 painted; 468 at the 13 pt default since, and the
+    // literal advance below is the 11.5 pt one, kept because this test is
+    // about the fit and not the face), and the panel this
     // view lives in offers roughly 380 minus a 62 px coordinate gutter. The
     // read-only view overflowed and egui clipped it, which cost nothing but a
     // truncated ruler; an editor cannot let a base sit outside the panel,

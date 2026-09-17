@@ -85,25 +85,37 @@ use theme::Palette;
 /// Sampled off the running app on the user's own plasmid, a row of sixty
 /// lowercase bases carries 16.8% less ink than it did.
 ///
-/// IT IS ACCEPTED AT 11.5 PT AND THE OBVIOUS COMPENSATION IS BARRED. The advance
-/// band is in em, so a size bump does not move the ratio -- but `per_row` is in
-/// POINTS, and 11.5 -> 12.0 pt widens the cell from 6.900 to 7.200 and loses the
-/// sixtieth base. The whole headroom is 0.60375/0.600 x 11.5 = 11.5719 pt, which
-/// is 0.0719 pt, and the same bound caps any `FontTweak.scale` at 1.00625.
+/// IT WAS ACCEPTED AT 11.5 PT, AND THE OBVIOUS COMPENSATION WAS BARRED — until
+/// 2026-09-17, when the size became the user's (`settings::Layout::seq_pt`,
+/// default `settings::SEQ_PT_DEFAULT` = 13 pt, chosen in the sequence view's
+/// Show row) and `App::DEF_PANEL` moved from 500 to 560 pt to keep the
+/// sixty-base row at the default split. The paragraph that follows is why the
+/// size could not simply be raised in place, and it is still the reason the
+/// lever was the panel and not the number: the advance band is in em, so a
+/// size bump does not move the ratio -- but `per_row` is in POINTS, and at a
+/// 500 pt panel 11.5 -> 12.0 pt widened the cell from 6.900 to 7.200 and lost
+/// the sixtieth base. The whole headroom there was 0.60375/0.600 x 11.5 =
+/// 11.5719 pt, which is 0.0719 pt, and the same bound capped any
+/// `FontTweak.scale` at 1.00625.
 ///
-/// TAKE 0.60375 FROM THE BAND TEST'S OWN OUTPUT AND NOT FROM HERE. It is the
-/// band's measured upper edge FOR THE SHIPPED FACE, and it moved when the face
-/// did: at 0aa0f88, with Hack, the same bisection printed 0.60400 and the chrome
-/// it is measured against was 30.00 pt rather than 30.16. This comment carried
-/// the Hack figures for one review cycle, which put the stated `FontTweak.scale`
-/// cap ABOVE the real edge -- a maintainer who scaled to the number written here
-/// would have lost the sixtieth base and had no test say so. Run
+/// TAKE THE BAND FROM THE BAND TEST'S OWN OUTPUT AND NOT FROM HERE. It is the
+/// band's measured upper edge FOR THE SHIPPED FACE AT THE DEFAULT SIZE AND
+/// SPLIT, and it has moved twice: at 0aa0f88, with Hack at 11.5 pt and 500 pt,
+/// the bisection printed 0.60400 against a chrome of 30.00 pt; with Plex Mono
+/// it printed 0.60375 against 30.16; and since the size and the split moved it
+/// measures at 13 pt and 560 pt. This comment carried the Hack figures for one
+/// review cycle, which put the stated `FontTweak.scale` cap ABOVE the real
+/// edge -- a maintainer who scaled to the number written here would have lost
+/// the sixtieth base and had no test say so. Run
 /// `cargo test -p pl-gui the_advance_band -- --nocapture` and read the line.
 /// It is bisected to +/-0.00025, so treat the edge as a bound to stay under
 /// rather than a value to sit on.
 ///
-/// If the grid ever does need to be larger the lever is `App::DEF_PANEL`, and
-/// moving it re-opens the band calibration and takes width off the map pane.
+/// The grid IS larger now, and `App::DEF_PANEL` was the lever, as this comment
+/// said it would be; its own doc records what the map pane paid. A user who
+/// picks a size above the default at the default split gets 50 or 40 bases a
+/// row and the ruler says so -- the splitter is theirs, and `panel_width` is
+/// remembered.
 ///
 /// CONTRAST IS UNAFFECTED AND THAT WAS CHECKED RATHER THAN ASSUMED. A WCAG ratio
 /// is a function of two luminances and contains no typeface term, so the palette
@@ -840,6 +852,45 @@ fn smoke_test() -> bool {
 /// The window icon's edge, in pixels, and the size of the `.ico` frame it was
 /// taken from. See [`window_icon`].
 const ICON_PX: u32 = 64;
+
+/// The three monospace sizes the sequence grid is drawn in, from the one the
+/// user chose: the bases and residues, the coordinate gutters, the column ruler.
+///
+/// ONE producer of the three, because `RowLayout`'s whole argument is that the
+/// residue lane and the strands share a `FontId` so that a residue sits over
+/// its codon by construction; a second place that built a `FontId` for the
+/// grid would be the drift that comment records. The gutter is half a point
+/// under the grid and the ruler two under, which are the 11.0 and 9.5 the grid
+/// had beside its fixed 11.5 in every release before 2026-09-17 — so a user who
+/// picks 11.5 (`settings::SEQ_PT_LEGACY`) gets exactly the picture every earlier
+/// release painted, to the point, which `the_legacy_size_is_the_old_grid_exactly`
+/// pins.
+fn grid_fonts(pt: f32) -> (egui::FontId, egui::FontId, egui::FontId) {
+    (
+        egui::FontId::monospace(pt),
+        egui::FontId::monospace(gutter_pt(pt)),
+        egui::FontId::monospace(ruler_pt(pt)),
+    )
+}
+
+/// The coordinate gutters' size for a grid of `pt`. See [`grid_fonts`].
+fn gutter_pt(pt: f32) -> f32 {
+    pt - 0.5
+}
+
+/// The column ruler's size for a grid of `pt`. See [`grid_fonts`].
+fn ruler_pt(pt: f32) -> f32 {
+    pt - 2.0
+}
+
+/// `11.5` and `13`, not `11.5` and `13.0`: what the combo prints.
+fn fmt_pt(pt: f32) -> String {
+    if pt.fract() == 0.0 {
+        format!("{pt:.0}")
+    } else {
+        format!("{pt:.1}")
+    }
+}
 
 /// The window icon's pixels: 64 x 64 x 4 = 16,384 bytes of non-premultiplied
 /// RGBA8, top row first, written by `icon/build-icon.py` from
@@ -8025,10 +8076,21 @@ impl App {
     /// **AND THIS IS A REQUEST, NOT A WIDTH.** `Panel::default_size` is a
     /// starting size the panel's own contents can overrule, and since the
     /// design-system port they do: the details panel will not sit between about
-    /// 450 and about 510 pt, so it opens at 518.47. See
+    /// 450 and about 510 pt, so it opened at 518.47 while this was 500. See
     /// `the_split_moves_and_the_row_width_follows_it`, which measures that
     /// rather than asserting a number.
-    const DEF_PANEL: f32 = 500.0;
+    ///
+    /// **560 SINCE 2026-09-17, 500 BEFORE.** The grid's default size went from
+    /// 11.5 pt to 13 (`settings::SEQ_PT_DEFAULT`), the cell from 6.900 pt to
+    /// 7.800, an 8,117 bp molecule's gutter from 41.0 pt to 45.5, and the width
+    /// that first reaches sixty from 485.2 pt to the figure
+    /// `the_advance_band_that_keeps_every_per_row_expectation` prints as
+    /// "sixty at". This is that threshold plus the same order of margin the 500
+    /// carried, and the three-way expectation below it — sixty here, sixty at
+    /// 12 less, fifty at 40 less — is unchanged and re-measured. What the map
+    /// pane paid at the default 1,280 pt window: 60 pt of width, 780 to 720,
+    /// which is 30 pt of radius; still twice `MIN_MAP`.
+    const DEF_PANEL: f32 = 560.0;
 
     fn side_panel(&mut self, ui: &mut Ui) {
         // Recomputed every frame from the live window, which is what makes one
@@ -10951,9 +11013,12 @@ impl App {
         // 60-row viewport, i.e. the user clicks one base and the caret lands
         // 480 bases away. The annotation strips make that trap wider, not
         // narrower, so they are added into this one number and nowhere else.
-        let font = egui::FontId::monospace(11.5);
-        let gutter_font = egui::FontId::monospace(11.0);
-        let ruler_font = egui::FontId::monospace(9.5);
+        //
+        // The size is the user's since 2026-09-17 (`settings::Layout::seq_pt`),
+        // and all three fonts come out of `grid_fonts` so that no second place
+        // decides what a cell is.
+        let pt = self.layout.seq_pt;
+        let (font, gutter_font, ruler_font) = grid_fonts(pt);
         let name_font = egui::FontId::proportional(9.0);
         let (text_h, advance, gutter_advance) = ui.ctx().fonts_mut(|f| {
             (
@@ -11054,6 +11119,7 @@ impl App {
         // double-stranded in fact — and the header says which was assumed.
         let complement = self.layout.complement.unwrap_or(ds != Some(false));
         let aa_on = self.layout.aa_track.is_on();
+        let aa_colours = self.layout.aa_colours;
         // Reserved as soon as the selection mode is on, for the whole document
         // — not when a selection appears. Otherwise making a selection changes
         // the row pitch in the middle of the drag that is making it.
@@ -11301,8 +11367,13 @@ impl App {
                 // off-by-one waiting in it — is never asked of the reader,
                 // because the right gutter gives the row's last coordinate
                 // directly and the hover line names the base under the pointer.
-                let (hrect, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 13.0), Sense::hover());
+                // 13 pt tall at the 11.5 pt grid every earlier release had,
+                // and scaled with the grid since 2026-09-17: the ruler is drawn
+                // bottom-anchored inside this strip and clipped to it, so at a
+                // fixed 13 pt an 18 pt grid's 16 pt ruler lost its top.
+                let hover_h = 13.0 * pt / settings::SEQ_PT_LEGACY;
+                let (hrect, _) = ui
+                    .allocate_exact_size(egui::vec2(ui.available_width(), hover_h), Sense::hover());
                 {
                     let hp = ui.painter_at(hrect);
                     let hx = hrect.left();
@@ -11987,35 +12058,66 @@ impl App {
                                     continue;
                                 }
 
-                                // ONE `painter.text` for the ordinary residues,
-                                // at `cx(0)`, in the SAME `FontId` as the bases.
-                                // Because `layout.advance` is that font's glyph
-                                // width, a residue placed at column c occupies
-                                // exactly `[cx(c), cx(c+1))` and its codon's
-                                // three cells are `[cx(c-1), cx(c+2))`,
-                                // symmetric about it BY CONSTRUCTION. There is
-                                // no second x anywhere in this track and no
-                                // centring arithmetic: measuring the glyph's
-                                // galley and centring on it would be a second
-                                // producer of an x, which is exactly the drift
+                                // ONE `painter.text` PER COLOUR for the
+                                // ordinary residues, at `cx(0)`, in the SAME
+                                // `FontId` as the bases. Because
+                                // `layout.advance` is that font's glyph width,
+                                // a residue placed at column c occupies exactly
+                                // `[cx(c), cx(c+1))` and its codon's three
+                                // cells are `[cx(c-1), cx(c+2))`, symmetric
+                                // about it BY CONSTRUCTION. There is no second
+                                // x anywhere in this track and no centring
+                                // arithmetic: measuring the glyph's galley and
+                                // centring on it would be a second producer of
+                                // an x, which is exactly the drift
                                 // `RowLayout`'s doc comment records.
-                                aa_buf.clear();
-                                aa_buf.resize(per_row as usize, b' ');
-                                for res in residues.iter() {
-                                    let col = (res.mid() - start) as usize;
-                                    if res.mark == aa::Mark::Plain {
-                                        aa_buf[col] = res.aa;
+                                //
+                                // The colours (2026-09-17) keep that shape
+                                // rather than break it: a class is painted as
+                                // the whole row with every other cell a space,
+                                // so each letter still lands at `cx(c)` by the
+                                // monospace advance and nothing here computes
+                                // an x per glyph. One text call per class that
+                                // has a residue on this row, at most six, in
+                                // place of one — measured in the perf test
+                                // beside the others, and under its ratio.
+                                let mut paint_plain = |keep: &dyn Fn(u8) -> bool,
+                                                       colour: egui::Color32| {
+                                    aa_buf.clear();
+                                    aa_buf.resize(per_row as usize, b' ');
+                                    let mut any = false;
+                                    for res in residues.iter() {
+                                        if res.mark == aa::Mark::Plain && keep(res.aa) {
+                                            aa_buf[(res.mid() - start) as usize] = res.aa;
+                                            any = true;
+                                        }
                                     }
+                                    if any {
+                                        painter.text(
+                                            egui::pos2(cx(0), y0),
+                                            egui::Align2::LEFT_TOP,
+                                            // ASCII by construction:
+                                            // `Code::codon` returns an
+                                            // amino-acid letter, `*` or `X`.
+                                            String::from_utf8_lossy(&aa_buf),
+                                            font.clone(),
+                                            colour,
+                                        );
+                                    }
+                                };
+                                if aa_colours {
+                                    for class in aa::Class::ALL {
+                                        paint_plain(
+                                            &|a| aa::Class::of(a) == Some(class),
+                                            p.residue(class),
+                                        );
+                                    }
+                                    // `X`, and anything else in no class, in
+                                    // the ink the whole track used to be.
+                                    paint_plain(&|a| aa::Class::of(a).is_none(), p.ink2);
+                                } else {
+                                    paint_plain(&|_| true, p.ink2);
                                 }
-                                painter.text(
-                                    egui::pos2(cx(0), y0),
-                                    egui::Align2::LEFT_TOP,
-                                    // ASCII by construction: `Code::codon`
-                                    // returns an amino-acid letter, `*` or `X`.
-                                    String::from_utf8_lossy(&aa_buf),
-                                    font.clone(),
-                                    p.ink2,
-                                );
 
                                 for res in residues.iter() {
                                     let col = res.mid() - start;
@@ -12057,9 +12159,16 @@ impl App {
                                         continue;
                                     }
                                     // Colour is never the only channel, so each
-                                    // of these carries a shape as well.
+                                    // of these carries a shape as well. An
+                                    // initiator's `M` takes M's class colour
+                                    // when the classes are on: the LETTER is
+                                    // what is coloured, and the dotted rule
+                                    // below is what says the codon does not
+                                    // spell it.
                                     let colour = match res.mark {
                                         aa::Mark::StopInside => p.warn,
+                                        _ if aa_colours => aa::Class::of(res.aa)
+                                            .map_or(p.ink2, |k| p.residue(k)),
                                         _ => p.ink2,
                                     };
                                     let ub = y0 + text_h - 2.0;
@@ -13164,7 +13273,96 @@ impl App {
                     ui.ctx().request_repaint();
                 }
             }
+            // THE GRID'S SIZE, since 2026-09-17: the current size between a
+            // step down and a step up, through `settings::SEQ_PT_CHOICES`.
+            //
+            // TWO BUTTONS AND NOT A `ComboBox`, for a reason measured rather
+            // than guessed. A `ComboBox` lays its button out in a child `Ui`
+            // cut from the space before the wrap and allocates the result
+            // afterwards, so one that starts near the end of a wrapped line is
+            // placed past the line's end instead of on the next line — and the
+            // side panel then grows on the next pass until it fits. Appended
+            // to this row as a combo, the size control pushed the panel's
+            // "will not sit here" band (`the_split_moves_and_the_row_width_follows_it`)
+            // from 450–518 pt to 450–626, which put `DEF_PANEL` inside it and
+            // opened every window 66 pt wider than asked; on a row of its own
+            // it fitted, and cost the grid a line at every split. A `Button`
+            // is allocated where it is measured and wraps like a chip. Not a
+            // `DragValue` either, for the reason the two combos above give:
+            // it takes the keyboard from the grid on a click. The consequence
+            // is said on hover rather than discovered: a bigger letter is a
+            // shorter row at the same split.
+            let pt = self.layout.seq_pt;
+            let choices = settings::SEQ_PT_CHOICES;
+            let down = choices.iter().rev().copied().find(|&c| c < pt);
+            let up = choices.iter().copied().find(|&c| c > pt);
+            let hover = "The size of the bases and the residues, which share one face. A \
+                         bigger letter is a shorter row at this panel width: the ruler says \
+                         how many bases fit, and the splitter buys more.";
+            if ui
+                .add_enabled(down.is_some(), egui::Button::new("A−").small())
+                .on_hover_text(hover)
+                .clicked()
+            {
+                self.layout.seq_pt = down.unwrap_or(pt);
+            }
+            ui.label(
+                RichText::new(format!("{} pt", fmt_pt(pt)))
+                    .color(pal(ui).muted)
+                    .size(12.0),
+            )
+            .on_hover_text(hover);
+            if ui
+                .add_enabled(up.is_some(), egui::Button::new("A+").small())
+                .on_hover_text(hover)
+                .clicked()
+            {
+                self.layout.seq_pt = up.unwrap_or(pt);
+            }
+            // Only while a residue lane is on, for the reason the ORF threshold
+            // is only shown with its strip: a switch for letters nobody is
+            // looking at is noise in a row that is already dense.
+            if self.layout.aa_track.is_on()
+                && ui
+                    .selectable_label(self.layout.aa_colours, "classes")
+                    .on_hover_text(
+                        "Colour each residue by its chemistry: nonpolar, aromatic, polar, \
+                         basic, acidic. The legend below names every letter beside its \
+                         colour, and `*` and `X` stay grey.",
+                    )
+                    .clicked()
+            {
+                self.layout.aa_colours = !self.layout.aa_colours;
+            }
         });
+
+        // -- the legend for the classes ----------------------------------
+        //
+        // Colour is never the only channel, and this is the other one for the
+        // residue colours: every letter, printed beside the colour it takes, in
+        // that colour. Without it a reader is asked to infer a five-way code
+        // from the letters alone, which is a code with no key.
+        if self.layout.aa_track.is_on() && self.layout.aa_colours {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("residues by class:")
+                        .color(pal(ui).muted)
+                        .size(11.0),
+                );
+                for class in aa::Class::ALL {
+                    ui.label(
+                        RichText::new(format!("{} {}", class.label(), class.letters()))
+                            .color(pal(ui).residue(class))
+                            .size(11.0),
+                    );
+                }
+                ui.label(
+                    RichText::new("· * and X in grey")
+                        .color(pal(ui).muted)
+                        .size(11.0),
+                );
+            });
+        }
 
         // -- what the tracks have to disclose ----------------------------
         let mut say: Vec<String> = Vec::new();
@@ -17497,9 +17695,11 @@ mod tests {
     /// 500 pt default" was previously answerable only by installing the face and
     /// looking. Stated as a band, it is answerable from the face's `hmtx`.
     ///
-    /// The model: `per_row = fit_per_row(P - C - gutter_w(n, 11.0 * ratio),
-    /// 11.5 * ratio)`, where `C` is the chrome, the scrollbar and the gutter's
-    /// own air -- everything with no font in it. `C` is not written down as a
+    /// The model: `per_row = fit_per_row(P - C - gutter_w(n, gutter_pt(D) *
+    /// ratio), D * ratio)`, where `D` is `settings::SEQ_PT_DEFAULT` — 11.5 until
+    /// 2026-09-17, 13 since, and the band moved with it — and `C` is the chrome,
+    /// the scrollbar and the gutter's own air -- everything with no font in
+    /// it. `C` is not written down as a
     /// literal; it is MEASURED from the real painter below and then asserted to
     /// reproduce all three of
     /// `the_default_split_reaches_sixty_and_takes_no_more_than_it_needs`'s cases.
@@ -17526,9 +17726,10 @@ mod tests {
     #[test]
     fn the_advance_band_that_keeps_every_per_row_expectation() {
         const LEN: u64 = 8_117; // `seq_app`'s molecule, so a 5-character gutter
+        const D: f32 = settings::SEQ_PT_DEFAULT;
         let per_row = |p: f32, ratio: f32, c: f32| -> u64 {
-            let g = seqedit::gutter_w(LEN, 11.0 * ratio);
-            seqedit::fit_per_row(p - c - g, 11.5 * ratio)
+            let g = seqedit::gutter_w(LEN, gutter_pt(D) * ratio);
+            seqedit::fit_per_row(p - c - g, D * ratio)
         };
 
         // --- measure C, and the face we have, from the real painter -----------
@@ -17571,7 +17772,7 @@ mod tests {
             }
         }
         let sixty = hi_p;
-        let c = sixty - 60.0 * (11.5 * mono) - seqedit::gutter_w(LEN, 11.0 * mono);
+        let c = sixty - 60.0 * (D * mono) - seqedit::gutter_w(LEN, gutter_pt(D) * mono);
         // A quarter of a point of quantisation from the 0.5 pt search, no more.
         assert!(
             (0.0..64.0).contains(&c),
@@ -17637,7 +17838,8 @@ mod tests {
         eprintln!(
             "advance band: [{lo:.5}, {hi:.5}] em, resolved to +/-{STEP}  |  \
              sixty at {sixty:.2} pt  |  chrome C = {c:.2} pt  |  \
-             face in the binary = {mono:.6} em"
+             face in the binary = {mono:.6} em  |  grid {D} pt, DEF_PANEL {} pt",
+            App::DEF_PANEL
         );
         // Measured with fontTools on this machine, except where marked.
         for (name, ratio, inside) in [
@@ -17813,9 +18015,11 @@ mod tests {
         for b in 0x21u8..=0x7E {
             want.push(((b as char).to_string(), "printable ASCII, via row_text"));
         }
-        // The sizes the app really asks for: 9.0 is the map's ruler, 9.5 the
-        // sequence view's, 10.0 every enzyme site label on the map
-        // (`map::label_font`), 11.0 and 11.5 everything else.
+        // The sizes the app really asks for: 9.0 is the map's ruler, 10.0 every
+        // enzyme site label on the map (`map::label_font`), and every size the
+        // sequence grid can be set to — the grid, its gutters and its ruler at
+        // each of `settings::SEQ_PT_CHOICES`, through `every_grid_size`, which
+        // since 2026-09-17 is where 9.5, 11.0 and 11.5 come from.
         //
         // 10.0 WAS MISSING FROM THIS LIST while the comment above it claimed the
         // list was what the app asks for. Nothing was broken by the omission —
@@ -17823,7 +18027,7 @@ mod tests {
         // `the_sequence_grid_has_one_advance_at_every_size_it_is_drawn` does include
         // 10.0, so the two lists disagreed about the same application, and the one
         // that was wrong was also the one that stated it in prose.
-        for size in [9.0f32, 9.5, 10.0, 11.0, 11.5] {
+        for size in [9.0f32, 10.0].into_iter().chain(every_grid_size()) {
             for (s, why) in &want {
                 for c in s.chars() {
                     assert!(
@@ -18052,7 +18256,7 @@ mod tests {
         };
 
         for (case, text) in [("upper", &row), ("lower", &lower)] {
-            for size in [9.5f32, 11.0, 11.5] {
+            for size in every_grid_size() {
                 check(text, size, egui::FontFamily::Monospace).unwrap_or_else(|e| {
                     panic!(
                         "at {size} pt the {case}case sequence row does not shape to a \
@@ -18083,7 +18287,7 @@ mod tests {
             bases.len() >= 40 && bases.contains("at") && bases.contains("cat"),
             "the base-only twin has to be a real run of lowercase bases: {bases:?}"
         );
-        for size in [9.5f32, 11.0, 11.5] {
+        for size in every_grid_size() {
             let err = check(&bases, size, ICON_FAMILY.clone()).expect_err(
                 "a run of lowercase bases laid out in the ICON family satisfied the grid \
                  properties, which would mean the face this whole design keeps out of the \
@@ -18218,7 +18422,7 @@ mod tests {
         // Fira Code alike, so asking the whole range costs nothing and matches what
         // the function under test can actually emit.
         let ctx = test_ctx();
-        for size in [9.0f32, 9.5, 10.0, 11.0, 11.5] {
+        for size in [9.0f32, 10.0].into_iter().chain(every_grid_size()) {
             let id = egui::FontId::monospace(size);
             let want = ctx.fonts_mut(|f| f.glyph_width(&id, 'A'));
             for c in (0x21u8..=0x7E).map(char::from) {
@@ -28398,9 +28602,12 @@ mod tests {
     /// `App::seq_grid` FOR A COORDINATE USED TO ASSUME IT WAS.** egui learns a
     /// resizable side panel's width from the pass before, so pass 0 lays the
     /// grid out at the panel's default width and pass 1 at the width the panel
-    /// actually keeps. Measured through this helper on `seq_app` at 1280 x 840:
-    /// `x0` is 829.000 on the first pass and 811.000 from the second on, with
-    /// `advance` 6.9000 and `per_row` 60 throughout. The caret and the letters
+    /// actually keeps. Measured through this helper on `seq_app` at 1280 x 840
+    /// (at the 11.5 pt grid and 500 pt split every release before 2026-09-17
+    /// had; the advance is 7.8000 at the 13 pt default since, `x0` moved with
+    /// `DEF_PANEL`, and the two-pass shape is unchanged): `x0` is 829.000 on
+    /// the first pass and 811.000 from the second on, with `advance` 6.9000
+    /// and `per_row` 60 throughout. The caret and the letters
     /// agree with each other on *every* pass — they are both computed from that
     /// pass's own `RowLayout` — so nothing about the application is wrong here.
     /// What is wrong is a test that reads `x0` from pass 0, puts a pointer on
@@ -28436,6 +28643,35 @@ mod tests {
             "the sequence grid never settled: {:?}",
             app.seq_grid.map(|g| g.x0)
         );
+    }
+
+    /// Paint until the grid stops scrolling, and hand back the geometry.
+    ///
+    /// `paint_settled`'s sibling for the OTHER thing one frame is not: egui
+    /// animates a wheel scroll over up to 0.3 s, and a test context advances
+    /// its clock a sixtieth of a second per frame, so a dozen wheel events
+    /// followed by one paint leave the view still moving. Measured on
+    /// 2026-09-17, when the grid grew from 11.5 pt to 13: `first_row` read 107
+    /// on the frame after the last wheel event and 121 four frames later, and
+    /// a click aimed at slot 5 of the first reading landed on slot 6 of the
+    /// last. At 11.5 pt the shorter content clamped the animation a frame
+    /// earlier and the same test read a settled number by luck. `first_row`
+    /// and `top` together, because a scroll of exactly one row moves the first
+    /// and not the second.
+    fn settle_scroll(app: &mut App, ctx: &egui::Context) -> GridGeom {
+        let key = |g: Option<GridGeom>| g.map(|g| (g.first_row, g.top.to_bits()));
+        let mut was = key(app.seq_grid);
+        let mut still = 0;
+        for _ in 0..60 {
+            paint(app, ctx, window());
+            let now = key(app.seq_grid);
+            still = if now == was { still + 1 } else { 0 };
+            if still >= 2 {
+                return app.seq_grid.expect("painted");
+            }
+            was = now;
+        }
+        panic!("the grid never stopped scrolling: {:?}", app.seq_grid);
     }
 
     fn paint_out(app: &mut App, ctx: &egui::Context, input: egui::RawInput) -> egui::FullOutput {
@@ -29335,6 +29571,163 @@ mod tests {
         }
     }
 
+    /// Every text painted in one monospace size, as `(text, colour)`.
+    ///
+    /// `texts_in`'s sibling, keeping the colour instead of the rect: the
+    /// residue-colour test asks WHICH ink a row of letters was painted in, and
+    /// `Painter::text` records that in the galley's one section.
+    fn texts_coloured(shapes: &[egui::Shape], size: f32) -> Vec<(String, egui::Color32)> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => {
+                    let sec = t.galley.job.sections.first()?;
+                    let f = &sec.format.font_id;
+                    ((f.size - size).abs() < 0.01 && f.family == egui::FontFamily::Monospace)
+                        .then(|| (t.galley.text().to_string(), sec.format.color))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The residue lanes are painted in the five class inks and the strands
+    /// are not; with the switch off, the lanes are the one ink they always
+    /// were. Both themes.
+    ///
+    /// Read off the painted shapes rather than off `Palette`: what is asserted
+    /// is that the row of letters a reader sees carries the class of every
+    /// letter in it, which is a fact about `sequence_tab`'s buffers and not
+    /// about the colour table. A strand row is told from a residue row by its
+    /// ink and not by its letters, because `A`, `C`, `G` and `T` are residue
+    /// letters too — and that ambiguity is exactly why the strands must stay
+    /// in `ink`, which the second assertion holds.
+    ///
+    /// PROVEN TO FAIL: with `aa_colours` ignored in the paint (`if false`
+    /// in place of `if aa_colours`), the first theme fails at the first
+    /// residue row it meets, with `a classed letter was painted in ink2:
+    /// " L  R  G  G  I  L  E  L  L  C  N  L  P  T  H  L  S  V  G  T "` —
+    /// the whole lane in one ink, which is exactly the picture the switch
+    /// turns off.
+    #[test]
+    fn the_residues_are_painted_in_their_class_inks_and_the_strands_are_not() {
+        for light in [false, true] {
+            let ctx = if light { test_ctx_light() } else { test_ctx() };
+            // Asked of a real `Ui`, as `test_ctx_light` asks it: the painter
+            // reads `visuals().dark_mode`, and `ctx.theme()` is the preference
+            // rather than the style that took.
+            let mut dark = true;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                dark = ui.visuals().dark_mode;
+            });
+            assert_eq!(dark, !light, "the theme did not take");
+            let p = Palette::of(dark);
+            let mut app = perf_app(8_117, 900);
+            app.layout.aa_track = aa::TrackMode::File;
+            app.layout.complement = Some(true);
+            app.layout.aa_colours = true;
+            let out = paint_settled(&mut app, &ctx, window());
+            let pt = app.layout.seq_pt;
+            let per_row = app.edit.per_row() as usize;
+            let texts = texts_coloured(&flat_shapes(&out.shapes), pt);
+            let rows: Vec<_> = texts.iter().filter(|(t, _)| t.len() == per_row).collect();
+            assert!(
+                rows.len() >= 6,
+                "only {} full rows were painted: {rows:?}",
+                rows.len()
+            );
+
+            let mut classes_seen = std::collections::BTreeSet::new();
+            let mut strands = 0;
+            for (text, colour) in &rows {
+                let letters: Vec<u8> = text.bytes().filter(|b| *b != b' ').collect();
+                if *colour == p.ink {
+                    assert!(
+                        letters.iter().all(|b| b"ACGT".contains(b)) && letters.len() == per_row,
+                        "a row in `ink` that is not a strand: {text:?}"
+                    );
+                    strands += 1;
+                    continue;
+                }
+                let class = aa::Class::ALL.iter().find(|k| p.residue(**k) == *colour);
+                match class {
+                    Some(k) => {
+                        for b in letters {
+                            assert_eq!(
+                                aa::Class::of(b),
+                                Some(*k),
+                                "{:?} was painted in the {:?} ink in {:?}",
+                                b as char,
+                                k,
+                                text
+                            );
+                        }
+                        classes_seen.insert(k.label());
+                    }
+                    None => {
+                        assert_eq!(*colour, p.ink2, "a residue row in an unknown ink: {text:?}");
+                        assert!(
+                            letters.iter().all(|b| aa::Class::of(*b).is_none()),
+                            "a classed letter was painted in ink2: {text:?}"
+                        );
+                    }
+                }
+            }
+            assert!(
+                strands >= 2,
+                "{strands} strand row(s) painted; both strands were on"
+            );
+            assert!(
+                classes_seen.len() >= 4,
+                "4 classes were expected on screen and {} were painted: {classes_seen:?}",
+                classes_seen.len()
+            );
+
+            // Off: every residue row is `ink2`, and no class ink is painted.
+            app.layout.aa_colours = false;
+            let out = paint_settled(&mut app, &ctx, window());
+            let texts = texts_coloured(&flat_shapes(&out.shapes), pt);
+            let mut residue_rows = 0;
+            for (text, colour) in texts.iter().filter(|(t, _)| t.len() == per_row) {
+                assert!(
+                    aa::Class::ALL.iter().all(|k| p.residue(*k) != *colour),
+                    "a class ink survived the switch: {text:?}"
+                );
+                if *colour != p.ink {
+                    assert_eq!(*colour, p.ink2, "{text:?}");
+                    residue_rows += 1;
+                }
+            }
+            assert!(residue_rows >= 2, "the lanes went away with the colours");
+        }
+    }
+
+    /// The three grid sizes at 11.5 are the 11.5, 11.0 and 9.5 every release
+    /// before 2026-09-17 painted, so the legacy choice IS the old grid.
+    #[test]
+    fn the_legacy_size_is_the_old_grid_exactly() {
+        let (g, gutter, ruler) = grid_fonts(settings::SEQ_PT_LEGACY);
+        assert_eq!((g.size, gutter.size, ruler.size), (11.5, 11.0, 9.5));
+        assert!(g.family == egui::FontFamily::Monospace);
+        assert!(gutter.family == egui::FontFamily::Monospace);
+        assert!(ruler.family == egui::FontFamily::Monospace);
+        let (g, gutter, ruler) = grid_fonts(settings::SEQ_PT_DEFAULT);
+        assert_eq!((g.size, gutter.size, ruler.size), (13.0, 12.5, 11.0));
+        // What the combo prints.
+        assert_eq!(fmt_pt(11.5), "11.5");
+        assert_eq!(fmt_pt(13.0), "13");
+        assert_eq!(fmt_pt(14.5), "14.5");
+    }
+
+    /// The grid, its gutters and its ruler at every size the combo offers.
+    fn every_grid_size() -> Vec<f32> {
+        let mut v = Vec::new();
+        for &pt in settings::SEQ_PT_CHOICES {
+            v.extend([pt, gutter_pt(pt), ruler_pt(pt)]);
+        }
+        v
+    }
+
     /// MEASURED, and it can fail: the marginal cost of the whole track — one
     /// residue lane per strand, the complement row and the ORF strip — is
     /// asserted to stay under a millisecond a frame at plasmid scale.
@@ -29598,14 +29991,20 @@ mod tests {
             .iter()
             .find(|(pos, t)| t.len() == 60 && !t.contains(' ') && pos.y > g.top)
             .expect("row 0's bases");
+        // Since 2026-09-17 the lane is one string per residue CLASS at one y
+        // (see `paint_plain` in `sequence_tab`), each `per_row` cells with a
+        // space wherever the class has no residue — so the string wanted is
+        // the one carrying residue 19, at column 58, and every other column of
+        // it is a space or a letter on a codon's middle base.
         let aa_row = ts
             .iter()
             .find(|(_, t)| {
                 t.len() == 60
                     && t.starts_with(' ')
+                    && t.as_bytes()[58] != b' '
                     && t.chars().enumerate().all(|(i, c)| {
                         if i % 3 == 1 {
-                            c.is_ascii_uppercase() || c == '*'
+                            c.is_ascii_uppercase() || c == '*' || c == ' '
                         } else {
                             c == ' '
                         }
@@ -29833,10 +30232,18 @@ mod tests {
     ///
     /// Restoring either clamp turns this red. The invariant is asserted
     /// directly, on the drawing: no two residue strings share a y.
+    ///
+    /// With the residue colours OFF, because since 2026-09-17 a lane with the
+    /// colours on is up to six strings at one y by design — one per class —
+    /// and "no two strings share a y" would then be false of a correct
+    /// drawing. The one-string-per-lane picture is what this invariant was
+    /// written on, and it is still a picture the application draws; the
+    /// coloured picture is held to the same lane count by distinct y below.
     #[test]
     fn the_selection_translation_never_shares_a_lane_with_a_file_translation() {
         let ctx = test_ctx();
         let mut app = seq_app();
+        app.layout.aa_colours = false;
         // Two overlapping forward CDSs, which is what makes the strand need
         // both lanes — a vector plus a tagged variant, or any stretch of
         // MG1655. pKoV does not hit it; that is why nothing caught this.
@@ -29894,6 +30301,57 @@ mod tests {
             "two residue strings were painted at the same y: {before} strings, {} lanes",
             ys.len()
         );
+
+        // And with the colours on, the same three lanes at three distinct y:
+        // more strings, no more lanes.
+        app.layout.aa_colours = true;
+        let out = paint_out(&mut app, &ctx, window());
+        let mut ys: Vec<i32> = texts(&out)
+            .iter()
+            .filter(|(pos, t)| {
+                pos.y >= row_top - 0.5
+                    && pos.y < row_top + g.row_h
+                    && t.len() == 60
+                    && t.contains(' ')
+                    && t.chars().any(|c| c.is_ascii_uppercase())
+            })
+            .map(|(pos, _)| (pos.y * 100.0).round() as i32)
+            .collect();
+        let strings = ys.len();
+        ys.sort_unstable();
+        ys.dedup();
+        assert!(
+            strings > 3,
+            "the premise: the colours split a lane into strings"
+        );
+        assert_eq!(
+            ys.len(),
+            3,
+            "{strings} coloured strings sit on {} distinct y; three lanes were reserved",
+            ys.len()
+        );
+    }
+
+    /// The letters on one residue lane, in column order, whatever the lane was
+    /// painted as: one string with the colours off, or one string per class at
+    /// the same y with them on. Every string of the lane is `len` cells with
+    /// spaces where it has nothing, so the lane is the overlay.
+    fn lane_letters(ts: &[(egui::Pos2, String)], y: f32, len: usize) -> String {
+        let mut cells = vec![' '; len];
+        for (pos, t) in ts {
+            if (pos.y - y).abs() < 0.5 && t.len() == len && t.contains(' ') {
+                for (i, c) in t.chars().enumerate() {
+                    if c != ' ' {
+                        assert_eq!(
+                            cells[i], ' ',
+                            "two strings on one lane put a letter in column {i}"
+                        );
+                        cells[i] = c;
+                    }
+                }
+            }
+        }
+        cells.into_iter().filter(|c| *c != ' ').collect()
     }
 
     /// PROVEN TO FAIL before the fix: `reverse` came from the caret ordering
@@ -29952,7 +30410,9 @@ mod tests {
                     && t.chars().any(|c| c.is_ascii_uppercase() || c == '*')
             })
             .expect("row 0's residues");
-        let letters: String = row0.1.chars().filter(|c| *c != ' ').collect();
+        // The lane's letters, overlaid across the class strings the colours
+        // split it into (2026-09-17); one string, before.
+        let letters = lane_letters(&ts, row0.0.y, 60);
         assert_eq!(
             letters, "RGC",
             "the forward reading, not its reverse complement LATAFH"
@@ -30317,7 +30777,10 @@ mod tests {
             (narrow - App::MIN_PANEL).abs() < 1.0,
             "the drag ran into the 300 pt stop rather than past it: {narrow}"
         );
-        assert_eq!(app.edit.per_row(), 30, "and the row followed it down");
+        // 20 at the 300 pt stop with the 13 pt grid; it was 30 with the 11.5 pt
+        // grid every release before 2026-09-17 had. The band test holds the
+        // model this number comes out of.
+        assert_eq!(app.edit.per_row(), 20, "and the row followed it down");
 
         // And back, so the gesture is not one-way.
         let sep = egui::pos2(1280.0 - narrow, 400.0);
@@ -30542,9 +31005,16 @@ mod tests {
                      sel={sel:?}"
                 );
                 // And the grid above it did not get squeezed out of existence.
+                //
+                // Six rows, and eight until 2026-09-17: at the 13 pt grid a row
+                // with its complement is 36.75 pt, so eight are 294, and the
+                // 300 pt split with the longest readout under it leaves 278 pt
+                // above — the same picture the 11.5 pt grid had at 279, 1.1
+                // rows shorter, and not a squeeze. Six rows is 220 pt, which
+                // still cannot be mistaken for a grid that vanished.
                 let g = app.seq_grid.expect("the grid was painted");
                 assert!(
-                    g.top + 8.0 * g.row_h < r.top(),
+                    g.top + 6.0 * g.row_h < r.top(),
                     "only {:.0} pt of sequence left above the readout at {width}",
                     r.top() - g.top
                 );
@@ -30962,25 +31432,35 @@ mod tests {
                 },
             );
         }
-        paint(&mut app, &ctx, window());
-        let before = app.seq_grid.expect("still painted");
+        // Until the wheel's animation is over: see `settle_scroll`.
+        let before = settle_scroll(&mut app, &ctx);
         let base_at_top = before.first_row * before.per_row;
         assert!(
             base_at_top > 1_000,
             "the premise: scrolled somewhere worth losing, not base {base_at_top}"
         );
 
-        // Now narrow the panel, which takes the row from 60 bases to 30.
+        // Now narrow the panel by 240 pt, which takes the row from 60 bases to
+        // 30 in two reflows — 60, 40, 30. The 320 pt drag this made until
+        // 2026-09-17 ran into the 300 pt stop, and at the 11.5 pt grid of
+        // every release before then that stop was also 30 a row; at the 13 pt
+        // default it is 20, through FOUR reflows, and each reflow rounds the
+        // anchored base down to the start of its new row — 7,260 became 7,250,
+        // 7,240, 7,230, 7,220, two rows of the final width. That drift is a
+        // property of anchoring on a row a step at a time, not of the font,
+        // and this test's "within one row" was written on the two-reflow
+        // gesture; the gesture is kept and the tolerance is not widened to
+        // cover a longer one.
         let sep = egui::pos2(1280.0 - app.layout.panel_w.unwrap(), 400.0);
         paint(&mut app, &ctx, pointer_to(sep));
         paint(&mut app, &ctx, pointer_button(sep, true));
-        for x in [sep.x + 100.0, sep.x + 200.0, sep.x + 320.0] {
+        for x in [sep.x + 100.0, sep.x + 200.0, sep.x + 240.0] {
             paint(&mut app, &ctx, pointer_to(egui::pos2(x, 400.0)));
         }
         paint(
             &mut app,
             &ctx,
-            pointer_button(egui::pos2(sep.x + 320.0, 400.0), false),
+            pointer_button(egui::pos2(sep.x + 240.0, 400.0), false),
         );
         paint(&mut app, &ctx, window());
         paint(&mut app, &ctx, window());
@@ -31038,8 +31518,10 @@ mod tests {
                 },
             );
         }
-        paint(&mut app, &ctx, window());
-        let g = app.seq_grid.expect("painted");
+        // Until the wheel's animation is over: see `settle_scroll`. Read
+        // mid-animation, `g.top` names a row that has moved on by the time the
+        // click lands, and the premise below fails by one slot.
+        let g = settle_scroll(&mut app, &ctx);
         let slot = 5u64;
         let at = egui::pos2(
             g.x0 + 3.5 * g.advance,
