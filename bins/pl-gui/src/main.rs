@@ -30515,51 +30515,98 @@ mod tests {
     /// count the workers. `orf_spawns` and not merely `Done`, because on a fast
     /// molecule the old code could still converge by luck between two frames,
     /// and a test that passes by luck is the thing being fixed.
+    ///
+    /// **THE FIXTURE GROWS UNTIL THE SCAN OUTLIVES TWO FRAMES ON THE MACHINE
+    /// RUNNING IT (2026-09-17).** It was a fixed 400 kb, and the premise "more
+    /// than one further frame was painted while it ran" is a race between the
+    /// worker and the first frame: the scan starts inside frame 1, and a
+    /// machine whose cold first frame outlasts the whole scan paints zero or
+    /// one further frame through no fault of the code under test. Measured on
+    /// the day: on the development Mac, 49 to 84 further frames of about
+    /// 1.5 ms each after a first frame of 106 to 317 ms, the scan done 200 to
+    /// 444 ms after it started, at every grid size — and on the hosted
+    /// `ubuntu-latest` leg of a version-bump PR (#66, no Rust touched) the same
+    /// test failed at exactly that premise TWICE in a row, having passed on
+    /// the identical code an hour earlier and on the macOS and Windows legs
+    /// both times. So the premise is now established rather than assumed:
+    /// when fewer than two further frames were painted, the molecule doubles
+    /// and the whole thing is run again, up to 6.4 Mb, and the counts are
+    /// printed under `--nocapture`. What is asserted is unchanged — one
+    /// spawn, across at least two frames, a real answer, the strip reserved —
+    /// and the regime is the defect's whichever size gets there: bigger is
+    /// only more of it.
+    ///
+    /// The growth path was run, not reasoned about: started at 4,000 bp by
+    /// mutation, it painted ONE further frame at 4, 8, 16, 32, 64 and 128 kb
+    /// (first frames of 116 to 238 ms, the scan done 8 to 15 ms after each)
+    /// and 14 at 256 kb, where it passed. Started at 400 kb as shipped, three
+    /// runs painted 57, 61 and 60 further frames and never grew.
     #[test]
     fn painting_the_tab_every_frame_asks_for_one_orf_scan_and_lets_it_finish() {
-        let ctx = test_ctx();
         // Big enough that the scan outlives a frame by a wide margin — the
         // regime the defect lives in. Below about 0.87 Mb at rest the old code
         // converged anyway, which is exactly why an 8 kb fixture proved nothing.
-        let mut app = perf_app(400_000, 3_000);
-        app.layout.orf_track = true;
-        app.doc_code = pl_core::translate::TABLE11;
+        let mut n = 400_000usize;
+        loop {
+            let ctx = test_ctx();
+            let mut app = perf_app(n, 3_000);
+            app.layout.orf_track = true;
+            app.doc_code = pl_core::translate::TABLE11;
 
-        // Frame 1 is what asks the question.
-        paint(&mut app, &ctx, window());
-        assert!(
-            app.document().unwrap().orfs.is_running(),
-            "the premise: one frame does not finish this scan"
-        );
-        assert_eq!(app.document().unwrap().orf_spawns, 1);
-
-        // Every frame after it, in the production order, until the answer lands.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut frames = 0usize;
-        while app.document().unwrap().orfs.is_running() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the scan never finished under repeated painting — {} worker(s) spawned",
-                app.document().unwrap().orf_spawns
-            );
+            // Frame 1 is what asks the question.
+            let t0 = std::time::Instant::now();
             paint(&mut app, &ctx, window());
-            frames += 1;
+            let first = t0.elapsed();
+            assert_eq!(app.document().unwrap().orf_spawns, 1, "frame 1 asks once");
+
+            // Every frame after it, in the production order, until the answer
+            // lands.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let mut frames = 0usize;
+            while app.document().unwrap().orfs.is_running() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the scan never finished under repeated painting — {} worker(s) spawned",
+                    app.document().unwrap().orf_spawns
+                );
+                paint(&mut app, &ctx, window());
+                frames += 1;
+            }
+            eprintln!(
+                "ORF scan of {} bp: first frame {:.1} ms, {frames} further frame(s), done \
+                 {:.1} ms after it started",
+                fmt_int(n as u64),
+                first.as_secs_f64() * 1e3,
+                t0.elapsed().as_secs_f64() * 1e3
+            );
+            if frames < 2 {
+                // The first frame outran the scan here. Not a verdict on the
+                // code under test, which has not had two frames to be wrong
+                // in — so establish the premise instead of asserting it.
+                assert!(
+                    n < 6_400_000,
+                    "even a {} bp molecule's scan does not outlive two painted frames on \
+                     this machine (first frame {:.1} ms), so the premise cannot be \
+                     established",
+                    fmt_int(n as u64),
+                    first.as_secs_f64() * 1e3
+                );
+                n *= 2;
+                continue;
+            }
+            let d = app.document().unwrap();
+            assert_eq!(
+                d.orf_spawns, 1,
+                "one question, asked once, across {frames} frames"
+            );
+            let got = d.orfs.done().expect("the scan finished");
+            assert_eq!(got.code, 11);
+            assert!(!got.orfs.is_empty(), "and it is a real answer");
+            // And the strip the row height is reserved from now exists, which
+            // is what the user was waiting for.
+            assert!(app.orf_strip);
+            return;
         }
-        assert!(
-            frames >= 2,
-            "the premise: more than one further frame was painted while it ran"
-        );
-        let d = app.document().unwrap();
-        assert_eq!(
-            d.orf_spawns, 1,
-            "one question, asked once, across {frames} frames"
-        );
-        let got = d.orfs.done().expect("the scan finished");
-        assert_eq!(got.code, 11);
-        assert!(!got.orfs.is_empty(), "and it is a real answer");
-        // And the strip the row height is reserved from now exists, which is
-        // what the user was waiting for.
-        assert!(app.orf_strip);
     }
 
     /// Changing the table really does re-ask, so the idempotence above is
